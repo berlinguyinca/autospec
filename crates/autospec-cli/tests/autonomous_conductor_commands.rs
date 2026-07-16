@@ -1,3 +1,5 @@
+use autospec_core::autonomous::no_work::NoWorkTier;
+use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus, WaterfallState};
 use autospec_core::claim::{parse_remote_comments_json, select_run_state, RunStateRecord};
 use autospec_core::coordination::{ConductorOutcome, ConductorPhase, ConductorState};
 use std::fs;
@@ -23,8 +25,11 @@ fn foreground_source_has_no_legacy_shell_authority() {
     for forbidden in [
         "AUTOSPEC_AUTONOMOUS_SCRIPT",
         "AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD",
+        "AUTOSPEC_MAIN_HEALTH_",
         "scripts/autospec-autonomous.sh",
+        "scripts/autonomous-resilience.sh",
         "Command::new(\"bash\")",
+        "Command::new(\"sh\")",
     ] {
         assert!(
             !source.contains(forbidden),
@@ -33,6 +38,185 @@ fn foreground_source_has_no_legacy_shell_authority() {
     }
     assert!(source.contains("executor-result"));
     assert!(source.contains("ExecutorRequest"));
+
+    let coordinator = fs::read_to_string(
+        workspace_root()
+            .join("crates/autospec-cli/src/commands/autonomous/waterfall_coordinator.rs"),
+    )
+    .expect("read native waterfall coordinator source");
+    for forbidden in [
+        "ready_plan_for",
+        "NoWorkState::record",
+        "why-no-work.json",
+        "claim::",
+        "Command",
+        "std::process",
+    ] {
+        assert!(
+            !coordinator.contains(forbidden),
+            "tier-one coordinator retains forbidden authority: {forbidden}"
+        );
+    }
+    assert!(coordinator.contains("ConductorLease"));
+}
+
+#[test]
+fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() {
+    let fixture = ForegroundFixture::new();
+    let first = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run empty foreground queue");
+
+    assert!(
+        first.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    let state = fixture.read_waterfall_state();
+    assert_eq!(state.next_pass_id(), 1);
+    assert_eq!(state.current_tier(), NoWorkTier::Tier1_5);
+    let receipt = fixture.read_tier_one_receipt(1);
+    assert!(matches!(receipt.status(), TierStatus::Exhausted { .. }));
+    let receipt_source =
+        fs::read_to_string(fixture.tier_one_receipt_path(1)).expect("read first sealed receipt");
+    let evidence_source = fs::read_to_string(fixture.tier_one_evidence_path(1, "ready-page"))
+        .expect("read sealed Tier 1 queue evidence");
+    let evidence_digest = sha256_hex(evidence_source.as_bytes());
+    assert!(
+        receipt_source.contains(&format!("\"digest\":\"{evidence_digest}\"")),
+        "the receipt must retain the persisted queue artifact digest"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert_eq!(
+        calls.matches("labels=auto-implement").count(),
+        1,
+        "foreground must reuse its captured ready-queue snapshot"
+    );
+    for forbidden in ["issue\nedit", "issue\ncomment", "executor_deferred"] {
+        assert!(
+            !calls.contains(forbidden),
+            "empty Tier 1 must not invoke remote mutation: {forbidden}"
+        );
+    }
+    assert!(
+        !fixture.operator.join("test_repo/why-no-work.json").exists(),
+        "later waterfall tiers remain pending"
+    );
+
+    fs::remove_file(fixture.waterfall_state_path()).expect("remove cursor after receipt write");
+    let replay = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_QUEUE_FAILURE", "1")
+        .output()
+        .expect("resume from an interrupted Tier 1 receipt despite a changed queue result");
+    assert!(
+        replay.status.success(),
+        "an existing sealed receipt must replay before a new queue failure is recorded; stderr={}",
+        String::from_utf8_lossy(&replay.stderr),
+    );
+    assert_eq!(fixture.read_waterfall_state(), state);
+    assert_eq!(
+        fs::read_to_string(fixture.tier_one_receipt_path(1)).expect("read replayed receipt"),
+        receipt_source
+    );
+
+    let pending = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_QUEUE_FAILURE", "1")
+        .output()
+        .expect("leave later waterfall tiers pending");
+    assert!(
+        pending.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&pending.stderr)
+    );
+    assert_eq!(fixture.read_waterfall_state(), state);
+    assert_eq!(
+        fs::read_to_string(fixture.tier_one_receipt_path(1)).expect("read pending receipt"),
+        receipt_source
+    );
+}
+
+#[test]
+fn foreground_rejects_tampered_tier_one_evidence_during_receipt_replay() {
+    let fixture = ForegroundFixture::new();
+    let first = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("record Tier 1 evidence");
+    assert!(first.status.success());
+    fs::remove_file(fixture.waterfall_state_path()).expect("remove cursor after receipt write");
+    fs::write(
+        fixture.tier_one_evidence_path(1, "ready-page"),
+        "{\"schema\":1,\"tampered\":true}\n",
+    )
+    .expect("tamper Tier 1 evidence");
+
+    let replay = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("resume Tier 1 receipt");
+
+    assert!(!replay.status.success());
+    assert!(String::from_utf8_lossy(&replay.stderr)
+        .contains("early-tier evidence digest does not match its receipt"));
+    assert!(
+        !fixture.waterfall_state_path().exists(),
+        "tampered evidence must not advance the cursor"
+    );
+}
+
+#[test]
+fn foreground_empty_slice_does_not_start_a_repository_waterfall_pass() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .env("AUTOSPEC_RUN_ONLY_ISSUES", "42")
+        .output()
+        .expect("run empty slice foreground queue");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let slice_state = ConductorState::parse_json(
+        &fs::read_to_string(fixture.slice_state_path("42")).expect("read slice state"),
+    )
+    .expect("parse slice state");
+    assert_eq!(slice_state.phase(), ConductorPhase::SliceComplete);
+    assert!(
+        !fixture.waterfall_dir().exists(),
+        "a slice-empty queue must not create repository waterfall state"
+    );
+}
+
+#[test]
+fn foreground_queue_failure_seals_tier_one_without_advancing_later_tiers() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_QUEUE_FAILURE", "1")
+        .output()
+        .expect("run failed foreground queue");
+
+    assert!(!output.status.success());
+    let receipt = fixture.read_tier_one_receipt(1);
+    assert!(matches!(receipt.status(), TierStatus::Failed { .. }));
+    assert!(
+        !fixture.waterfall_state_path().exists(),
+        "failed Tier 1 must not advance to Tier 1.5"
+    );
+    assert!(
+        !fixture.operator.join("test_repo/why-no-work.json").exists(),
+        "failed Tier 1 must not record no-work"
+    );
 }
 
 #[test]
@@ -256,6 +440,264 @@ fn foreground_stops_before_executor_when_main_health_blocks() {
     assert!(!fs::read_to_string(&fixture.calls)
         .expect("read GitHub calls")
         .contains("executor_deferred"));
+}
+
+#[test]
+fn repository_configured_health_branch_precedes_github_default() {
+    let fixture = ForegroundFixture::new();
+    fixture.write_autonomous_config("main_health:\n  branch: master_ai\n");
+
+    let output = fixture
+        .unbranched_foreground_command()
+        .output()
+        .expect("run foreground with configured branch");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert!(calls.contains("repos/test/repo/branches/master_ai"));
+    assert!(
+        !calls.contains("repo\nview"),
+        "config avoids default lookup"
+    );
+    assert!(!calls.contains("repos/test/repo/branches/main"));
+}
+
+#[test]
+fn explicit_health_branch_overrides_repository_configuration() {
+    let fixture = ForegroundFixture::new();
+    fixture.write_autonomous_config("main_health:\n  branch: master_ai\n");
+
+    let output = fixture.command().output().expect("run foreground override");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert!(calls.contains("repos/test/repo/branches/main"));
+    assert!(!calls.contains("repos/test/repo/branches/master_ai"));
+}
+
+#[test]
+fn ignored_failed_check_is_advisory_for_foreground_admission() {
+    let fixture = ForegroundFixture::new();
+    fixture.write_autonomous_config("main_health:\n  ignore_checks:\n    - Unit Tests\n");
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_HEALTH_CASE", "ignored_failure")
+        .output()
+        .expect("run foreground with advisory failure");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fs::read_to_string(&fixture.calls)
+        .expect("read GitHub calls")
+        .contains("executor_deferred"));
+}
+
+#[test]
+fn malformed_repository_config_fails_before_foreground_dispatch() {
+    let fixture = ForegroundFixture::new();
+    fixture.write_autonomous_config("main_health:\n  ignore_checks: Unit Tests\n");
+
+    let output = fixture.command().output().expect("run malformed config");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("autonomous.yml"));
+    assert!(
+        !fixture.operator.exists(),
+        "must fail before lease persistence"
+    );
+    assert!(!fixture.state_path().exists());
+    let calls = fs::read_to_string(&fixture.calls).unwrap_or_default();
+    assert!(!calls.contains("repos/test/repo/branches/"));
+    assert!(!calls.contains("executor_deferred"));
+    assert!(!calls.contains("issue\nedit\n42"));
+    assert!(!calls.contains("issue\ncomment\n42"));
+}
+
+#[test]
+fn unreadable_repository_config_fails_before_foreground_dispatch() {
+    let fixture = ForegroundFixture::new();
+    let config_dir = fixture.repo_dir.join(".autospec");
+    fs::create_dir_all(config_dir.join("autonomous.yml")).expect("create config directory");
+
+    let output = fixture.command().output().expect("run unreadable config");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("cannot read autonomous repository config"));
+    assert!(
+        !fixture.operator.exists(),
+        "must fail before lease persistence"
+    );
+    assert!(!fixture.state_path().exists());
+    let calls = fs::read_to_string(&fixture.calls).unwrap_or_default();
+    assert!(!calls.contains("repos/test/repo/branches/"));
+    assert!(!calls.contains("issue\nedit\n42"));
+    assert!(!calls.contains("issue\ncomment\n42"));
+    assert!(!calls.contains("executor_deferred"));
+}
+
+#[test]
+fn detached_start_rejects_invalid_config_before_lifecycle_mutation() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.write_autonomous_config("main_health:\n  ignore_checks: Unit Tests\n");
+
+    let output = fixture
+        .detached_command("start")
+        .output()
+        .expect("start with malformed config");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!fixture.operator.exists());
+    assert!(!fixture.state_path().exists());
+    assert!(!fixture.calls.exists());
+}
+
+#[test]
+fn detached_restart_rejects_invalid_config_before_lifecycle_mutation() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.write_autonomous_config("main_health:\n  ignore_checks: Unit Tests\n");
+
+    let output = fixture
+        .detached_command("restart")
+        .output()
+        .expect("restart with malformed config");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!fixture.operator.exists());
+    assert!(!fixture.state_path().exists());
+    assert!(!fixture.calls.exists());
+}
+
+#[test]
+fn detached_launches_reject_unreadable_config_before_lifecycle_mutation() {
+    for subcommand in ["start", "restart"] {
+        let fixture = ForegroundFixture::new();
+        fixture.initialize_git_remote();
+        let config_dir = fixture.repo_dir.join(".autospec");
+        fs::create_dir_all(config_dir.join("autonomous.yml")).expect("create config directory");
+
+        let output = fixture
+            .detached_command(subcommand)
+            .output()
+            .expect("launch with unreadable config");
+
+        assert_eq!(output.status.code(), Some(2), "{subcommand}");
+        assert!(!fixture.operator.exists(), "{subcommand}");
+        assert!(!fixture.state_path().exists(), "{subcommand}");
+        assert!(!fixture.calls.exists(), "{subcommand}");
+    }
+}
+
+#[test]
+fn autonomous_health_config_is_isolated_to_its_repository() {
+    let configured = ForegroundFixture::new();
+    configured.write_autonomous_config("main_health:\n  branch: master_ai\n");
+    let defaulted = ForegroundFixture::new();
+
+    let configured_output = configured
+        .unbranched_foreground_command()
+        .output()
+        .expect("run configured repository");
+    let defaulted_output = defaulted
+        .unbranched_foreground_command()
+        .output()
+        .expect("run default repository");
+
+    assert!(configured_output.status.success());
+    assert!(defaulted_output.status.success());
+    assert!(fs::read_to_string(&configured.calls)
+        .expect("read configured calls")
+        .contains("repos/test/repo/branches/master_ai"));
+    let defaulted_calls = fs::read_to_string(&defaulted.calls).expect("read default calls");
+    assert!(defaulted_calls.contains("repos/test/repo/branches/main"));
+    assert!(!defaulted_calls.contains("repos/test/repo/branches/master_ai"));
+}
+
+#[test]
+fn main_health_reads_the_same_repository_config_as_foreground_admission() {
+    let fixture = ForegroundFixture::new();
+    fixture.write_autonomous_config("main_health:\n  branch: master_ai\n");
+
+    let output = fixture
+        .unbranched_main_health_command()
+        .output()
+        .expect("run main-health with repository configuration");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"branch\":\"master_ai\""));
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert!(calls.contains("repos/test/repo/branches/master_ai"));
+    assert!(!calls.contains("repo\nview"));
+}
+
+#[test]
+fn invalid_configured_branch_does_not_fall_back_to_github_default() {
+    let fixture = ForegroundFixture::new();
+    fixture.write_autonomous_config("main_health:\n  branch: missing\n");
+
+    let output = fixture
+        .unbranched_main_health_command()
+        .output()
+        .expect("run main-health with missing configured branch");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("branch-not-found"));
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert!(calls.contains("repos/test/repo/branches/missing"));
+    assert!(!calls.contains("repo\nview"));
+    assert!(!calls.contains("repos/test/repo/branches/main"));
+}
+
+#[test]
+fn repository_root_config_is_used_when_repo_dir_is_a_subdirectory() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.write_autonomous_config("main_health:\n  branch: master_ai\n");
+    let subdirectory = fixture.repo_dir.join("nested/work");
+    fs::create_dir_all(&subdirectory).expect("create checkout subdirectory");
+    let mut command = fixture.configured_command();
+    command.current_dir(&subdirectory).args([
+        "autonomous",
+        "main-health",
+        "--repo",
+        "test/repo",
+        "--repo-dir",
+        subdirectory.to_str().expect("subdirectory path"),
+        "--json",
+    ]);
+
+    let output = command
+        .output()
+        .expect("run health from checkout subdirectory");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"branch\":\"master_ai\""));
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert!(calls.contains("repos/test/repo/branches/master_ai"));
+    assert!(!calls.contains("repo\nview"));
 }
 
 #[test]
@@ -761,15 +1203,27 @@ if [ "$1" = api ] && [ "$2" = graphql ]; then
   printf '%s\n' '{"items":[],"page_info":{"has_next_page":false,"end_cursor":null}}'
   exit 0
 fi
+if [ "$1" = repo ] && [ "$2" = view ]; then
+  printf '%s\n' main
+  exit 0
+fi
 if [ "$1" = api ] && [ "$2" = repos/test/repo/branches/main ]; then
+  printf '%s\n' '{}'
+  exit 0
+fi
+if [ "$1" = api ] && [ "$2" = repos/test/repo/branches/master_ai ]; then
   printf '%s\n' '{}'
   exit 0
 fi
 if [ "$1" = api ] && [ "$2" = repos/test/repo/branches/missing ]; then
   exit 1
 fi
-if [ "$1" = api ] && [ "$2" = repos/test/repo/commits/main/status ]; then
-  printf '%s\n' '{"state":"success","total_count":1,"statuses":[{"context":"ci","state":"success"}]}'
+if [ "$1" = api ] && { [ "$2" = repos/test/repo/commits/main/status ] || [ "$2" = repos/test/repo/commits/master_ai/status ]; }; then
+  if [ "${AUTOSPEC_FOREGROUND_HEALTH_CASE:-success}" = ignored_failure ]; then
+    printf '%s\n' '{"state":"failure","total_count":1,"statuses":[{"context":"Unit Tests","state":"failure"}]}'
+  else
+    printf '%s\n' '{"state":"success","total_count":1,"statuses":[{"context":"ci","state":"success"}]}'
+  fi
   exit 0
 fi
 if [ "$1" = api ]; then
@@ -779,7 +1233,14 @@ if [ "$1" = api ]; then
     repos/test/repo/issues\?*)
       case "$endpoint" in
         *labels=in-progress-by-bot*) printf '%s\n' '{"raw_count":0,"items":[]}' ;;
-        *) printf '%s' '{"raw_count":1,"items":['; issue; printf '%s\n' ']}' ;;
+        *labels=auto-implement*)
+          if [ "${AUTOSPEC_FOREGROUND_QUEUE_FAILURE:-0}" = 1 ]; then exit 1; fi
+          if [ "${AUTOSPEC_FOREGROUND_EMPTY_QUEUE:-0}" = 1 ]; then
+            printf '%s\n' '{"raw_count":0,"items":[]}'
+          else
+            printf '%s' '{"raw_count":1,"items":['; issue; printf '%s\n' ']}'
+          fi ;;
+        *) printf '%s\n' '{"raw_count":0,"items":[]}' ;;
       esac
       exit 0 ;;
     repos/test/repo/issues/42/comments)
@@ -881,6 +1342,53 @@ exit 1
             .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
             .env("AUTOSPEC_CONFIG_FILE", self.root.join("missing.yml"));
         command
+    }
+
+    fn unbranched_foreground_command(&self) -> Command {
+        let mut command = self.configured_command();
+        command.args([
+            "autonomous",
+            "run-foreground",
+            "--repo",
+            "test/repo",
+            "--repo-dir",
+            self.repo_dir.to_str().expect("repo path"),
+        ]);
+        command
+    }
+
+    fn unbranched_main_health_command(&self) -> Command {
+        let mut command = self.configured_command();
+        command.args([
+            "autonomous",
+            "main-health",
+            "--repo",
+            "test/repo",
+            "--repo-dir",
+            self.repo_dir.to_str().expect("repo path"),
+            "--json",
+        ]);
+        command
+    }
+
+    fn detached_command(&self, subcommand: &str) -> Command {
+        let mut command = self.configured_command();
+        command.args([
+            "autonomous",
+            subcommand,
+            "--repo",
+            "test/repo",
+            "--repo-dir",
+            self.repo_dir.to_str().expect("repo path"),
+            "--json",
+        ]);
+        command
+    }
+
+    fn write_autonomous_config(&self, source: &str) {
+        let config_dir = self.repo_dir.join(".autospec");
+        fs::create_dir_all(&config_dir).expect("create autonomous config directory");
+        fs::write(config_dir.join("autonomous.yml"), source).expect("write autonomous config");
     }
 
     fn initialize_git_remote(&self) {
@@ -1030,6 +1538,36 @@ exit 1
     fn read_state(&self) -> ConductorState {
         let source = fs::read_to_string(self.state_path()).expect("read foreground state");
         ConductorState::parse_json(&source).expect("parse foreground state")
+    }
+
+    fn waterfall_dir(&self) -> PathBuf {
+        self.operator.join("test_repo/waterfall")
+    }
+
+    fn waterfall_state_path(&self) -> PathBuf {
+        self.waterfall_dir().join("waterfall-state.json")
+    }
+
+    fn read_waterfall_state(&self) -> WaterfallState {
+        let source = fs::read_to_string(self.waterfall_state_path()).expect("read waterfall state");
+        WaterfallState::parse_json(&source, "test/repo").expect("parse waterfall state")
+    }
+
+    fn tier_one_receipt_path(&self, pass_id: u64) -> PathBuf {
+        self.waterfall_dir()
+            .join(format!("waterfall/{pass_id}/tier1.json"))
+    }
+
+    fn tier_one_evidence_path(&self, pass_id: u64, artifact: &str) -> PathBuf {
+        self.waterfall_dir()
+            .join(format!("waterfall/{pass_id}/tier1/{artifact}.json"))
+    }
+
+    fn read_tier_one_receipt(&self, pass_id: u64) -> TierReceipt {
+        let source = fs::read_to_string(self.tier_one_receipt_path(pass_id))
+            .expect("read Tier 1 waterfall receipt");
+        TierReceipt::parse_json(&source, "test/repo", pass_id, NoWorkTier::Tier1)
+            .expect("parse Tier 1 waterfall receipt")
     }
 }
 

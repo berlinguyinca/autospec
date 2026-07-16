@@ -673,6 +673,47 @@ fn autonomous_foreground_releases_an_adopted_lease_when_the_stop_record_is_inval
 }
 
 #[test]
+fn autonomous_foreground_releases_an_inherited_lease_when_config_turns_invalid() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_state(
+        "owner__repo",
+        token_state(
+            "claimed",
+            Some(now_secs()),
+            Some(42),
+            Some("autospec-test-host"),
+            Some(now_secs()),
+            Some("parent-lease-token"),
+            Some(1),
+        ),
+    );
+    let config_dir = fixture.repo_dir.join(".autospec");
+    fs::create_dir_all(&config_dir).expect("create config directory");
+    fs::write(
+        config_dir.join("autonomous.yml"),
+        "main_health:\n  ignore_checks: Unit Tests\n",
+    )
+    .expect("write malformed autonomous config");
+
+    let output = fixture
+        .command()
+        .args(["run-foreground", "--repo", "owner/repo", "--repo-dir"])
+        .arg(&fixture.repo_dir)
+        .env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", "parent-lease-token")
+        .output()
+        .expect("run foreground child with malformed config after parent preflight");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stdout(&output).is_empty());
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read released conductor lease")
+            .contains("\"status\":\"released\""),
+        "a config diagnostic must release the inherited lease token"
+    );
+}
+
+#[test]
 fn autonomous_foreground_releases_an_adopted_lease_after_admission_diagnostic() {
     let fixture = ResilienceFixture::new();
     fixture.write_state(

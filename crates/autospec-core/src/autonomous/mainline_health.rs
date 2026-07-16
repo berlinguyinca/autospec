@@ -1,16 +1,18 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::state::json::{JsonParser, JsonValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HealthBranchInput {
     pub explicit_branch: Option<String>,
+    pub configured_branch: Option<String>,
     pub default_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HealthBranchSource {
     Explicit,
+    Configured,
     Default,
 }
 
@@ -18,6 +20,7 @@ impl HealthBranchSource {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Explicit => "explicit",
+            Self::Configured => "configured",
             Self::Default => "default",
         }
     }
@@ -156,6 +159,12 @@ pub fn resolve_health_branch(
             source: HealthBranchSource::Explicit,
         });
     }
+    if let Some(branch) = non_empty(input.configured_branch.as_deref()) {
+        return Ok(ResolvedHealthBranch {
+            branch: branch.to_string(),
+            source: HealthBranchSource::Configured,
+        });
+    }
     if let Some(branch) = non_empty(input.default_branch.as_deref()) {
         return Ok(ResolvedHealthBranch {
             branch: branch.to_string(),
@@ -163,6 +172,25 @@ pub fn resolve_health_branch(
         });
     }
     Err(MainlineHealthDiagnostic::DefaultBranchMissing)
+}
+
+pub fn apply_ignored_checks(
+    evidence: Vec<CheckEvidence>,
+    ignored_check_names: &BTreeSet<String>,
+) -> Vec<CheckEvidence> {
+    evidence
+        .into_iter()
+        .map(|check| {
+            if ignored_check_names.contains(&check.name) {
+                CheckEvidence {
+                    required: false,
+                    ..check
+                }
+            } else {
+                check
+            }
+        })
+        .collect()
 }
 
 pub fn evaluate_health(

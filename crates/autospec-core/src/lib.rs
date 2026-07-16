@@ -1,7 +1,15 @@
 pub mod agent;
 pub mod autonomous {
     pub mod audit;
+    pub mod config;
+    pub mod drain;
     pub mod mainline_health;
+    pub mod no_work;
+    pub mod tier15;
+    pub mod tier2;
+    pub mod tier3;
+    pub mod tier4;
+    pub mod waterfall;
 }
 pub mod autonomous_lifecycle;
 pub mod claim;

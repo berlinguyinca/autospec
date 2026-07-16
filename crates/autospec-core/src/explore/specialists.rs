@@ -2,11 +2,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 mod cache;
+mod lexicon;
 mod model;
 mod roster_json;
 mod scan;
+mod strict;
 
 pub use model::{DetectedDomain, FileLineEvidence, SpecialistRoster, SuggestedSpecialist};
+pub use strict::{
+    collect_strict_domains, StrictCollectorError, StrictCollectorErrorCode,
+    StrictCollectorEvidence, StrictCollectorOptions,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScanOptions {

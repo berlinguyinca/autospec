@@ -30,6 +30,12 @@
     "justification": "This test supplies malformed CLI argument matrices; its repeated fixture rows are data, not production dispatch logic."
   },
   {
+    "file": "crates/autospec-cli/tests/autonomous_drain_commands.rs",
+    "function": "workspace_root",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This integration test reads Rust source and asserts command output; std::time plus substring assertions trigger the file-scoped heuristic without encoding domain logic."
+  },
+  {
     "file": "crates/autospec-cli/tests/autonomous_resilience_commands.rs",
     "function": "resilience_help_names_the_canonical_write_slug",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
@@ -46,5 +52,11 @@
     "function": "run",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "The structural validator scans static skill text for required contract vocabulary; it does not encode runtime domain meaning from free-form names."
+  },
+  {
+    "file": "crates/autospec-core/tests/explore_specialists.rs",
+    "function": "trading_manifest_records_file_line_evidence_and_ranked_specialist",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test asserts typed specialist evidence; std::time plus substring assertions trigger the file-scoped heuristic without implementing domain logic."
   }
 ]

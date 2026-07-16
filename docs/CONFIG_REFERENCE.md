@@ -51,6 +51,36 @@ For a larger workstation or cluster, set `max_concurrent_repo_workers` explicitl
 | `autonomous.drain.stall_secs` | `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` | No-output timeout for one drain run. |
 | `autonomous.drain.poll_secs` | `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` | Drain output poll interval. |
 
+### Repository-local Rust mainline health
+
+Rust autonomous health admission reads a separate, repository-owned file at
+`<checkout-root>/.autospec/autonomous.yml` on every `main-health` or
+`run-foreground` invocation. When `--repo-dir` names a subdirectory of a Git
+checkout, Rust resolves its checkout root first; outside Git it uses
+`<repo-dir>` literally. This is deliberately not `.autospec/autospec.yml`, and
+it is a strict supported subset rather than a general YAML policy file:
+
+```yaml
+main_health:
+  branch: master_ai
+  ignore_checks:
+    - "Unit Tests"
+```
+
+`main_health.branch` is optional and nonempty. The Rust CLI resolves a branch
+in this order: explicit `--branch`, then `main_health.branch`, then the GitHub
+default branch. `ignore_checks` is an optional list of nonempty, exact,
+case-sensitive check names. A matching health observation remains persisted as
+evidence but is marked advisory; it no longer blocks mainline health. Unmatched
+failed or pending checks remain required and block admission.
+
+A missing file preserves existing behavior. An unreadable file or malformed,
+duplicate, unknown, incorrectly indented, or wrongly typed field inside
+`main_health` fails closed with a diagnostic before foreground lease, queue,
+claim, state, or executor mutation. Rust does not read or export
+`AUTOSPEC_MAIN_HEALTH_*`; this setting does not relax premerge, safety, claims,
+or merge policy.
+
 ### Self-originated integration branch
 
 Config contract for the autonomous self-originated integration-branch design
@@ -123,7 +153,7 @@ dedicated config keys.
 |---|---|---|
 | `AUTOSPEC_NO_AUTOMERGE_SPEC` | `0` | Set to `1` to skip admin auto-merge for spec PRs; the skill pauses for a manual merge before continuing. |
 | `AUTOSPEC_NO_SELF_UPDATE` | `0` | Set to `1` to skip the once-per-24h startup self-update preflight for multi-harness skills. |
-| `AUTOSPEC_PR_ADVISORY_CHECKS` | `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS` or `^$` | Regex for PR check names/contexts treated as advisory during auto-merge; matching checks may be pending or failing once local validation is green. |
+| `AUTOSPEC_PR_ADVISORY_CHECKS` | `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS` or `^$` | Regex for PR check names/contexts treated as advisory during auto-merge; matching checks may be pending or failing once local validation is green. It is not consumed by Rust mainline health; `main_health.ignore_checks` does not alter premerge or auto-merge behavior. |
 
 ## Testing & QA
 | Var | Default | Effect |

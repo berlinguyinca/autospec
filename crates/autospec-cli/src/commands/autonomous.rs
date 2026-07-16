@@ -4,10 +4,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use autospec_core::autonomous::config::AutonomousConfig;
 use autospec_core::autonomous::mainline_health::{
-    check_run_evidence, evaluate_health, legacy_status_evidence, resolve_health_branch,
-    CheckEvidence, HealthBranchInput, MainlineHealth, MainlineHealthDiagnostic,
-    MainlineHealthOutcome,
+    apply_ignored_checks, check_run_evidence, evaluate_health, legacy_status_evidence,
+    resolve_health_branch, CheckEvidence, HealthBranchInput, MainlineHealth,
+    MainlineHealthDiagnostic, MainlineHealthOutcome,
 };
 use autospec_core::autonomous_lifecycle::{
     decide as decide_lifecycle, Budget as LifecycleBudget, CapacityDecision, ClaimBranch,
@@ -24,7 +25,53 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{claim, queue, CommandFailure};
 
+pub(crate) mod drain;
 mod resilience;
+// Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
+#[allow(dead_code)]
+mod tier15;
+// Task 2 persists sealed observations but has no foreground caller by design.
+#[allow(dead_code)]
+mod tier15_receipts;
+// Task 3 adds a private Tier 2 persistence seam without foreground wiring.
+#[allow(dead_code)]
+mod tier2;
+#[allow(dead_code)]
+mod tier2_receipts;
+// Tier 3 remains disabled in production until a typed metadata package exists.
+#[cfg(test)]
+mod tier2_receipts_failure_prefix_tests;
+#[cfg(test)]
+mod tier2_receipts_recovery_tests;
+#[cfg(test)]
+mod tier2_receipts_tests;
+#[allow(dead_code)]
+mod tier3;
+#[allow(dead_code)]
+mod tier3_receipts;
+// Tier 4 remains a sealed receipt boundary without foreground wiring.
+#[cfg(test)]
+mod tier3_receipts_failure_prefix_tests;
+#[cfg(test)]
+mod tier3_receipts_recovery_tests;
+#[cfg(test)]
+mod tier3_receipts_tests;
+#[allow(dead_code)]
+mod tier4;
+#[allow(dead_code)]
+mod tier4_receipts;
+#[cfg(test)]
+mod tier4_receipts_failure_prefix_tests;
+#[cfg(test)]
+mod tier4_receipts_recovery_tests;
+#[cfg(test)]
+mod tier4_receipts_state_tests;
+#[cfg(test)]
+mod tier4_receipts_tests;
+mod waterfall;
+mod waterfall_coordinator;
+#[cfg(test)]
+mod waterfall_tests;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const DEFERRED_EXECUTOR_REASON: &str = "awaiting_typed_implementation_executor";
@@ -38,6 +85,8 @@ struct Options {
     repo_dir: String,
     pid: String,
     interval_sec: u64,
+    drain_stall_secs: u64,
+    drain_poll_secs: u64,
     lines: usize,
     iterations: u64,
     all: bool,
@@ -65,6 +114,8 @@ impl Default for Options {
             repo_dir: ".".to_string(),
             pid: String::new(),
             interval_sec: 300,
+            drain_stall_secs: 1_800,
+            drain_poll_secs: 15,
             lines: 50,
             iterations: 0,
             all: false,
@@ -133,6 +184,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "timeline" => timeline(options).map_err(CommandFailure::diagnostic),
         "cleanup" => cleanup(options).map_err(CommandFailure::diagnostic),
         "main-health" => main_health(options).map_err(CommandFailure::diagnostic),
+        "drain" => drain::run(options),
         other => Err(CommandFailure::diagnostic(format!(
             "unknown autospec autonomous subcommand: {other}"
         ))),
@@ -192,6 +244,20 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 options.interval_sec = raw
                     .parse::<u64>()
                     .map_err(|_| format!("invalid --poll-interval-sec value: {raw}"))?;
+            }
+            "--stall-secs" => {
+                index += 1;
+                let raw = args
+                    .get(index)
+                    .ok_or_else(|| "--stall-secs requires a value".to_string())?;
+                options.drain_stall_secs = parse_positive_duration(raw, "--stall-secs")?;
+            }
+            "--poll-secs" => {
+                index += 1;
+                let raw = args
+                    .get(index)
+                    .ok_or_else(|| "--poll-secs requires a value".to_string())?;
+                options.drain_poll_secs = parse_positive_duration(raw, "--poll-secs")?;
             }
             "--max-cycles" => {
                 index += 1;
@@ -280,6 +346,14 @@ fn parse_lifetime_budget(value: &str, flag: &str) -> Result<u64, String> {
     value
         .parse::<u64>()
         .map_err(|_| format!("{flag} must be a non-negative integer"))
+}
+
+fn parse_positive_duration(value: &str, flag: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("{flag} must be a positive integer"))
 }
 
 fn lifecycle(args: &[String]) -> Result<(), CommandFailure> {
@@ -554,6 +628,7 @@ fn start(options: Options) -> Result<(), CommandFailure> {
     }
 
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
+    let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
     let (lifecycle, lease) =
@@ -788,6 +863,7 @@ fn stop(options: Options) -> Result<(), String> {
 
 fn restart(options: Options) -> Result<(), CommandFailure> {
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
+    let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
     let stop_options = options.clone();
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
@@ -987,8 +1063,9 @@ fn cleanup(options: Options) -> Result<(), String> {
 }
 
 fn main_health(options: Options) -> Result<(), String> {
+    let config = load_autonomous_config(&options.repo_dir)?;
     let layout = RunLayout::new(&options)?;
-    let health = load_main_health(&layout, &options)?;
+    let health = load_main_health(&layout, &options, &config)?;
     persist_main_health(&layout, &health)?;
     print_main_health(&layout.repo, &health, options.json);
     if health.outcome == MainlineHealthOutcome::Halt {
@@ -1000,15 +1077,40 @@ fn main_health(options: Options) -> Result<(), String> {
     Ok(())
 }
 
-fn load_main_health(layout: &RunLayout, options: &Options) -> Result<MainlineHealth, String> {
+fn load_autonomous_config(repo_dir: &str) -> Result<AutonomousConfig, String> {
+    let path = repository_config_path(repo_dir);
+    match fs::read_to_string(&path) {
+        Ok(source) => AutonomousConfig::parse(&source),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(AutonomousConfig::default()),
+        Err(error) => Err(format!(
+            "cannot read autonomous repository config {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn repository_config_path(repo_dir: &str) -> PathBuf {
+    git_top_level(repo_dir)
+        .unwrap_or_else(|| PathBuf::from(repo_dir))
+        .join(".autospec/autonomous.yml")
+}
+
+fn load_main_health(
+    layout: &RunLayout,
+    options: &Options,
+    config: &AutonomousConfig,
+) -> Result<MainlineHealth, String> {
     let explicit_branch = options.health_branch.clone();
-    let default_branch = if explicit_branch.is_some() {
-        None
-    } else {
-        gh_default_branch(&layout.repo)?
-    };
+    let configured_branch = config.main_health.branch.clone();
+    let default_branch =
+        if has_non_empty_branch(&explicit_branch) || has_non_empty_branch(&configured_branch) {
+            None
+        } else {
+            gh_default_branch(&layout.repo)?
+        };
     let branch = match resolve_health_branch(&HealthBranchInput {
         explicit_branch,
+        configured_branch,
         default_branch,
     }) {
         Ok(branch) => branch,
@@ -1054,7 +1156,17 @@ fn load_main_health(layout: &RunLayout, options: &Options) -> Result<MainlineHea
         legacy
     };
 
-    Ok(evaluate_health(&branch.branch, true, evidence))
+    Ok(evaluate_health(
+        &branch.branch,
+        true,
+        apply_ignored_checks(evidence, &config.main_health.ignore_checks),
+    ))
+}
+
+fn has_non_empty_branch(branch: &Option<String>) -> bool {
+    branch
+        .as_deref()
+        .is_some_and(|branch| !branch.trim().is_empty())
 }
 
 fn should_read_check_runs(state: &str, has_total_count: bool, legacy: &[CheckEvidence]) -> bool {
@@ -1164,6 +1276,17 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
     let inherited_lease = inherited_foreground_lease(&layout.repo)?;
+    let config = match load_autonomous_config(&options.repo_dir) {
+        Ok(config) => config,
+        Err(error) => {
+            return match inherited_lease.as_ref() {
+                Some(lease) => finish_with_launch_lease(&layout.repo, lease, || {
+                    Err(CommandFailure::diagnostic(error))
+                }),
+                None => Err(CommandFailure::diagnostic(error)),
+            };
+        }
+    };
     let stored_stop = match persisted_stop_mode(&layout) {
         Ok(mode) => mode,
         Err(error) => {
@@ -1197,7 +1320,7 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
 
     let (lease, admission) =
         acquire_foreground_lease(&layout, &options, scope.clone(), inherited_lease)?;
-    let result = run_foreground_with_lease(&layout, &options, scope, &lease, admission);
+    let result = run_foreground_with_lease(&layout, &options, &config, scope, &lease, admission);
     finish_foreground_with_lease(&layout.repo, &lease, result)
 }
 
@@ -1267,6 +1390,7 @@ fn acquire_foreground_lease(
 fn run_foreground_with_lease(
     layout: &RunLayout,
     options: &Options,
+    config: &AutonomousConfig,
     scope: RepositoryScope,
     lease: &resilience::ConductorLease,
     admission: resilience::ResilienceAdmission,
@@ -1280,7 +1404,7 @@ fn run_foreground_with_lease(
         persist_lifecycle_decision(layout, &preflight).map_err(CommandFailure::diagnostic)?;
         return Ok(ForegroundCompletion::Lifecycle(preflight));
     }
-    let health = load_main_health(layout, options).map_err(CommandFailure::diagnostic)?;
+    let health = load_main_health(layout, options, config).map_err(CommandFailure::diagnostic)?;
     input = input.with_health(lifecycle_health(health.outcome.clone()));
     let mut lifecycle = decide_lifecycle(&input);
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
@@ -1294,8 +1418,13 @@ fn run_foreground_with_lease(
         persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
         return Ok(ForegroundCompletion::Lifecycle(lifecycle));
     }
+    let initial_plan = queue::ready_plan_for(&layout.repo, 1).map_err(command_error);
     if options.issue.is_none() {
-        if let Some(issue) = preview_foreground_issue(layout)? {
+        if let Some(issue) = initial_plan
+            .as_ref()
+            .ok()
+            .and_then(|plan| plan.batch.first().map(|issue| issue.issue.number))
+        {
             let admission =
                 resilience_admission_for_issue(layout, options, Some(issue), Some(lease))?;
             input = foreground_lifecycle_input_with_resilience(
@@ -1327,7 +1456,8 @@ fn run_foreground_with_lease(
         .into());
     }
 
-    let (state, found_work) = scan_foreground(layout, state).map_err(CommandFailure::diagnostic)?;
+    let (state, found_work) =
+        scan_foreground(layout, lease, state, initial_plan).map_err(CommandFailure::diagnostic)?;
     if !found_work {
         persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
@@ -1416,10 +1546,41 @@ enum ForegroundDispatchResult {
 
 fn scan_foreground(
     layout: &RunLayout,
+    lease: &resilience::ConductorLease,
     state: ConductorState,
+    initial_plan: Result<autospec_core::coordination::ReadyQueuePlan, String>,
 ) -> Result<(ConductorState, bool), String> {
-    let initial_plan = queue::ready_plan_for(&layout.repo, 1).map_err(command_error)?;
+    let initial_plan = match initial_plan {
+        Ok(plan) => plan,
+        Err(reason) => {
+            return match state.scope() {
+                ConductorScope::Repository => match waterfall_coordinator::record_tier_one(
+                    &layout.state_dir,
+                    &layout.repo,
+                    lease,
+                    waterfall_coordinator::Tier1QueueEvidence::Failed(&reason),
+                )? {
+                    waterfall_coordinator::Tier1Progress::Failed(reason) => Err(reason),
+                    waterfall_coordinator::Tier1Progress::Pending
+                    | waterfall_coordinator::Tier1Progress::Advanced => Ok((state, false)),
+                },
+                ConductorScope::Slice => Err(reason),
+            };
+        }
+    };
     if initial_plan.gate_counts.candidate == 0 {
+        if state.scope() == ConductorScope::Repository {
+            match waterfall_coordinator::record_tier_one(
+                &layout.state_dir,
+                &layout.repo,
+                lease,
+                waterfall_coordinator::Tier1QueueEvidence::EmptyPage(&initial_plan),
+            )? {
+                waterfall_coordinator::Tier1Progress::Advanced
+                | waterfall_coordinator::Tier1Progress::Pending => return Ok((state, false)),
+                waterfall_coordinator::Tier1Progress::Failed(reason) => return Err(reason),
+            }
+        }
         let state = state
             .transition(ConductorEvent::ScanEmpty)
             .map_err(|error| format!("cannot record empty foreground scan: {error}"))?;
@@ -1429,13 +1590,6 @@ fn scan_foreground(
         .transition(ConductorEvent::ScanFoundWork)
         .map_err(|error| format!("cannot record foreground scan: {error}"))?;
     Ok((state, true))
-}
-
-fn preview_foreground_issue(layout: &RunLayout) -> Result<Option<u64>, CommandFailure> {
-    let ready = queue::ready_plan_for(&layout.repo, 1)
-        .map_err(command_error)
-        .map_err(CommandFailure::diagnostic)?;
-    Ok(ready.batch.first().map(|issue| issue.issue.number))
 }
 
 fn review_foreground(layout: &RunLayout, state: ConductorState) -> Result<ConductorState, String> {
