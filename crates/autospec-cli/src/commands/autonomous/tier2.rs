@@ -126,6 +126,12 @@ mod tests {
         let gh_cli = ["\"", "g", "h "].concat();
         for forbidden in [
             "std::env",
+            "std::fs",
+            "fs::",
+            "std::io",
+            "io::",
+            "OpenOptions",
+            "File::",
             "std::process",
             "std::net",
             "Command",
