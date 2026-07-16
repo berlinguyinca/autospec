@@ -199,6 +199,7 @@ fn configured_tier4_rollover_replays_before_next_tier_one_scan() {
         .expect("next-pass Tier 1 receipt")
         .is_some());
 
+    drop(store);
     let before_repeat = snapshot(&root);
     assert_eq!(
         record_tier_one_unfenced_for_test(
