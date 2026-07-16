@@ -326,7 +326,7 @@ impl NoWorkState {
             if self
                 .dry_pass_history
                 .windows(2)
-                .any(|window| window[1].pass_id != window[0].pass_id + 1)
+                .any(|window| window[0].pass_id.checked_add(1) != Some(window[1].pass_id))
             {
                 return Err(
                     "no-work dry-pass history must contain consecutive pass IDs".to_string()

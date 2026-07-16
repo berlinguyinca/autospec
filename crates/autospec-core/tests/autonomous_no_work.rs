@@ -307,6 +307,24 @@ fn json_round_trip_rejects_unknown_schema_and_fields() {
 }
 
 #[test]
+fn parse_json_rejects_overflowed_non_contiguous_retained_dry_history() {
+    let first = NoWorkState::record(None, complete_dry(u64::MAX - 1)).expect("first pass");
+    let second = NoWorkState::record(Some(&first), complete_dry(u64::MAX)).expect("second pass");
+    let overflowed_history = second
+        .to_json()
+        .replace(
+            &format!("\"pass_id\":{}", u64::MAX - 1),
+            &format!("\"pass_id\":{}", u64::MAX),
+        )
+        .replace(
+            &format!("waterfall/{}/", u64::MAX - 1),
+            &format!("waterfall/{}/", u64::MAX),
+        );
+
+    assert!(NoWorkState::parse_json(&overflowed_history).is_err());
+}
+
+#[test]
 fn request_projection_has_exact_six_questions_and_planning_only_authority() {
     let first = NoWorkState::record(None, complete_dry(1)).expect("first pass");
     let second = NoWorkState::record(Some(&first), complete_dry(2)).expect("second pass");
