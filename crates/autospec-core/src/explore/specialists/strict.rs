@@ -1,19 +1,16 @@
+use super::lexicon;
+use super::{DetectedDomain, FileLineEvidence};
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-
-use super::lexicon;
-use super::{DetectedDomain, FileLineEvidence};
-
 const STRICT_DEPTH: usize = 3;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrictCollectorOptions {
     pub repo_dir: PathBuf,
     pub max_depth: usize,
 }
-
 impl StrictCollectorOptions {
     pub fn new(repo_dir: impl AsRef<Path>) -> Self {
         Self {
@@ -22,7 +19,6 @@ impl StrictCollectorOptions {
         }
     }
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrictCollectorEvidence {
     pub schema_version: u64,
@@ -30,7 +26,6 @@ pub struct StrictCollectorEvidence {
     pub canonical_repo_scope: String,
     pub domains: Vec<DetectedDomain>,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StrictCollectorErrorCode {
     InvalidRoot,
@@ -40,13 +35,14 @@ pub enum StrictCollectorErrorCode {
     ReadFile,
     InvalidUtf8,
 }
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrictCollectorError {
     pub code: StrictCollectorErrorCode,
     pub detail: String,
 }
 
+/// Collects deterministic local evidence; callers must keep the repository tree stable for the scan snapshot.
+/// Paths are revalidated after reads, but this is not atomic no-follow protection.
 pub fn collect_strict_domains(
     options: &StrictCollectorOptions,
 ) -> Result<StrictCollectorEvidence, StrictCollectorError> {
@@ -56,7 +52,6 @@ pub fn collect_strict_domains(
             format!("max_depth must equal {STRICT_DEPTH}"),
         ));
     }
-
     let root = canonical_root(&options.repo_dir)?;
     let mut hits = lexicon::empty_hits();
     let mut selected_files = root_signal_files(&root)?;
@@ -67,7 +62,6 @@ pub fn collect_strict_domains(
     for file in selected_files {
         scan_file(&root, &file, &mut hits)?;
     }
-
     let repo_name = root
         .file_name()
         .and_then(|name| name.to_str())
@@ -122,6 +116,12 @@ fn canonical_root(repo_dir: &Path) -> Result<PathBuf, StrictCollectorError> {
             format!("cannot canonicalize {}: {source}", repo_dir.display()),
         )
     })?;
+    if root.to_str().is_none() {
+        return Err(error(
+            StrictCollectorErrorCode::InvalidRoot,
+            "canonical root is not UTF-8",
+        ));
+    }
     if !metadata.is_dir() {
         return Err(error(
             StrictCollectorErrorCode::InvalidRoot,
@@ -260,6 +260,7 @@ fn scan_file(
             format!("cannot read {}: {source}", file.display()),
         )
     })?;
+    revalidate_read_file(root, file, file)?;
     let document = String::from_utf8(bytes).map_err(|source| {
         error(
             StrictCollectorErrorCode::InvalidUtf8,
@@ -286,14 +287,15 @@ fn canonical_path(
     path: &Path,
     expect_directory: bool,
 ) -> Result<PathBuf, StrictCollectorError> {
-    reject_symlink_components(root, path)?;
+    let read_code = if expect_directory {
+        StrictCollectorErrorCode::ReadDirectory
+    } else {
+        StrictCollectorErrorCode::ReadFile
+    };
+    reject_symlink_components(root, path, read_code)?;
     let canonical = fs::canonicalize(path).map_err(|source| {
         error(
-            if expect_directory {
-                StrictCollectorErrorCode::ReadDirectory
-            } else {
-                StrictCollectorErrorCode::ReadFile
-            },
+            read_code,
             format!("cannot canonicalize {}: {source}", path.display()),
         )
     })?;
@@ -305,28 +307,29 @@ fn canonical_path(
     }
     let metadata = fs::metadata(&canonical).map_err(|source| {
         error(
-            if expect_directory {
-                StrictCollectorErrorCode::ReadDirectory
-            } else {
-                StrictCollectorErrorCode::ReadFile
-            },
+            read_code,
             format!("cannot inspect {}: {source}", canonical.display()),
         )
     })?;
-    if metadata.is_dir() != expect_directory {
+    let expected_type = if expect_directory {
+        metadata.is_dir()
+    } else {
+        metadata.is_file()
+    };
+    if !expected_type {
         return Err(error(
-            if expect_directory {
-                StrictCollectorErrorCode::ReadDirectory
-            } else {
-                StrictCollectorErrorCode::ReadFile
-            },
+            read_code,
             format!("unexpected file type: {}", canonical.display()),
         ));
     }
     Ok(canonical)
 }
 
-fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), StrictCollectorError> {
+fn reject_symlink_components(
+    root: &Path,
+    path: &Path,
+    read_code: StrictCollectorErrorCode,
+) -> Result<(), StrictCollectorError> {
     let relative = path.strip_prefix(root).map_err(|_| {
         error(
             StrictCollectorErrorCode::PathEscapesRoot,
@@ -338,7 +341,7 @@ fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), StrictColle
         current.push(component.as_os_str());
         let metadata = fs::symlink_metadata(&current).map_err(|source| {
             error(
-                StrictCollectorErrorCode::ReadFile,
+                read_code,
                 format!("cannot inspect {}: {source}", current.display()),
             )
         })?;
@@ -348,6 +351,21 @@ fn reject_symlink_components(root: &Path, path: &Path) -> Result<(), StrictColle
                 format!("symlink is not permitted: {}", current.display()),
             ));
         }
+    }
+    Ok(())
+}
+
+fn revalidate_read_file(
+    root: &Path,
+    file: &Path,
+    expected: &Path,
+) -> Result<(), StrictCollectorError> {
+    let current = canonical_file(root, file)?;
+    if current != expected {
+        return Err(error(
+            StrictCollectorErrorCode::PathEscapesRoot,
+            format!("selected file changed after read: {}", file.display()),
+        ));
     }
     Ok(())
 }
@@ -374,5 +392,58 @@ fn error(code: StrictCollectorErrorCode, detail: impl Into<String>) -> StrictCol
     StrictCollectorError {
         code,
         detail: detail.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::{canonical_file, revalidate_read_file, StrictCollectorErrorCode};
+
+    fn temporary_directory(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let path = PathBuf::from(format!("/tmp/autospec-strict-{name}-{nanos}"));
+        fs::create_dir_all(&path).expect("create directory");
+        fs::canonicalize(path).expect("canonical directory")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_file_rejects_a_nonregular_unix_socket() {
+        use std::os::unix::net::UnixDatagram;
+
+        let root = temporary_directory("socket");
+        let socket = root.join("requirements.txt");
+        let _listener = UnixDatagram::bind(&socket).expect("bind socket");
+
+        let error = canonical_file(&root, &socket).expect_err("socket must fail");
+
+        assert_eq!(error.code, StrictCollectorErrorCode::ReadFile);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_read_validation_rejects_a_swapped_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let root = temporary_directory("post-read");
+        let file = root.join("requirements.txt");
+        let outside = temporary_directory("outside").join("requirements.txt");
+        fs::write(&file, "ccxt\n").expect("write selected file");
+        fs::write(&outside, "stripe\n").expect("write outside file");
+        let expected = canonical_file(&root, &file).expect("canonical selected file");
+        fs::remove_file(&file).expect("remove selected file");
+        symlink(&outside, &file).expect("swap to symlink");
+
+        let error =
+            revalidate_read_file(&root, &file, &expected).expect_err("post-read symlink must fail");
+
+        assert_eq!(error.code, StrictCollectorErrorCode::PathEscapesRoot);
     }
 }

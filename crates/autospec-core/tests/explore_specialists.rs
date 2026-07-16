@@ -234,6 +234,43 @@ fn strict_collector_rejects_a_root_escaping_symlink() {
     assert!(error.detail.contains("requirements.txt"));
 }
 
+#[cfg(unix)]
+#[test]
+fn strict_collector_rejects_a_non_utf8_canonical_root_scope() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let parent = temp_repo("strict-non-utf8");
+    let repo = parent
+        .join(OsString::from_vec(b"scope-\xff".to_vec()))
+        .join("repo");
+    if fs::create_dir_all(&repo).is_err() {
+        return;
+    }
+
+    let error = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap_err();
+
+    assert_eq!(error.code, StrictCollectorErrorCode::InvalidRoot);
+    assert!(error.detail.contains("UTF-8"));
+}
+
+#[cfg(unix)]
+#[test]
+fn strict_collector_rejects_a_fifo_selected_input_without_reading_it() {
+    let repo = temp_repo("strict-fifo");
+    let fifo = repo.join("requirements.txt");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("create fifo");
+    assert!(status.success(), "mkfifo status: {status}");
+
+    let error = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap_err();
+
+    assert_eq!(error.code, StrictCollectorErrorCode::ReadFile);
+    assert!(error.detail.contains("requirements.txt"));
+}
+
 #[test]
 fn strict_collector_caps_evidence_at_eight_rows_per_domain() {
     let repo = temp_repo("strict-evidence-cap");
@@ -273,12 +310,16 @@ fn strict_collector_ignores_legacy_cache_without_writing_or_environment_authorit
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/explore/specialists/strict.rs"),
     )
     .unwrap();
+    let strict_production = strict_source
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production strict collector source");
 
     assert!(evidence.domains.is_empty(), "{evidence:?}");
     assert_eq!(fs::read_to_string(cache).unwrap(), cached);
-    assert!(!strict_source.contains("std::env"));
-    assert!(!strict_source.contains("AUTOSPEC_SPECIALIST_LLM_STUB_OUTPUT"));
-    assert!(!strict_source.contains("fs::write"));
+    assert!(!strict_production.contains("std::env"));
+    assert!(!strict_production.contains("AUTOSPEC_SPECIALIST_LLM_STUB_OUTPUT"));
+    assert!(!strict_production.contains("fs::write"));
 }
 
 fn temp_repo(name: &str) -> std::path::PathBuf {
