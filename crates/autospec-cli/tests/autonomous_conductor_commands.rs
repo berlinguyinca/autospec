@@ -717,6 +717,7 @@ struct ForegroundFixture {
     pull_requests: PathBuf,
     calls: PathBuf,
     operator: PathBuf,
+    state: PathBuf,
     health: PathBuf,
     heartbeats: PathBuf,
 }
@@ -731,6 +732,7 @@ impl ForegroundFixture {
         let pull_requests = root.join("pull-requests.json");
         let calls = root.join("gh.log");
         let operator = root.join("operator");
+        let state = root.join("state");
         let health = root.join("health");
         let heartbeats = root.join("heartbeats");
         fs::create_dir_all(&repo_dir).expect("create repo directory");
@@ -840,6 +842,7 @@ exit 1
             pull_requests,
             calls,
             operator,
+            state,
             health,
             heartbeats,
         }
@@ -870,6 +873,7 @@ exit 1
             .env("AUTOSPEC_FOREGROUND_PULL_REQUESTS", &self.pull_requests)
             .env("AUTOSPEC_FOREGROUND_CALLS", &self.calls)
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator)
+            .env("AUTOSPEC_STATE_DIR", &self.state)
             .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &self.health)
             .env("AUTOSPEC_HEARTBEAT_DIR", &self.heartbeats)
             .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
