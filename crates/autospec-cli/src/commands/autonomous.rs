@@ -27,6 +27,11 @@ use super::{claim, queue, CommandFailure};
 
 mod drain;
 mod resilience;
+// Task 3 invokes this persistence boundary from the foreground coordinator.
+#[allow(dead_code)]
+mod waterfall;
+#[cfg(test)]
+mod waterfall_tests;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const DEFERRED_EXECUTOR_REASON: &str = "awaiting_typed_implementation_executor";

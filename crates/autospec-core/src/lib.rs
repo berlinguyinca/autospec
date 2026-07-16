@@ -5,6 +5,7 @@ pub mod autonomous {
     pub mod drain;
     pub mod mainline_health;
     pub mod no_work;
+    pub mod waterfall;
 }
 pub mod autonomous_lifecycle;
 pub mod claim;
