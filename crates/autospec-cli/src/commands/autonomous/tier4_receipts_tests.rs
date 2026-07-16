@@ -1,6 +1,6 @@
 use std::fs;
 
-use autospec_core::autonomous::config::Tier4SourceDescriptor;
+use autospec_core::autonomous::config::{AutonomousConfig, Tier4SourceDescriptor};
 use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
 use autospec_core::autonomous::tier3::DISABLED_REASON as TIER3_DISABLED_REASON;
 use autospec_core::autonomous::tier4::{
@@ -264,10 +264,19 @@ fn fully_sealed_alternate_policy_dry_evidence_is_rejected_by_trusted_policy() {
 fn tier4_disabled_policy_seals_only_checked_in_policy_and_retains_cursor() {
     let root = TempRoot::new();
     seed_tier_four_cursor(&root);
+    let config = AutonomousConfig::parse(
+        "tier4:\n  sources:\n    - id: release-feed\n      host: api.example.test\n      path: /v1/releases\n      max_bytes: 65536\n      deadline_millis: 5000\n",
+    )
+    .expect("nonempty Tier 4 configuration parses");
+    assert_eq!(config.tier4.sources.len(), 1);
 
     assert_eq!(
-        record_tier4(root.path(), REPO, disabled_by_checked_in_policy())
-            .expect("disabled Tier 4 receipt"),
+        record_tier4(
+            root.path(),
+            REPO,
+            disabled_by_checked_in_policy(&config.tier4),
+        )
+        .expect("disabled Tier 4 receipt"),
         Tier4Progress::NotRun(DISABLED_REASON.to_string())
     );
     let store = store(&root);

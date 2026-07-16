@@ -18,39 +18,39 @@ integration proof.
 - [x] Strict schema-1 codec, sealed derived evidence references, threshold-two request.
 - [x] Fail-closed persisted-history overflow regression.
 
-## Task 2: Typed waterfall receipt and locked persistence
+## Task 2: Typed waterfall receipt and locked persistence — foundation complete
 
 **Files:** Add `crates/autospec-core/src/autonomous/waterfall.rs` and its
 private codec; add core tests; add CLI persistence module and integration tests.
 
-- [ ] Write RED tests for exact receipt scope/tier/pass validation, digest/path
+- [x] Write RED tests for exact receipt scope/tier/pass validation, digest/path
   tampering, concurrent cursor ownership, atomic replacement, and failed/
   not-run preservation.
-- [ ] Implement pure `TierReceipt`, `TierStatus`, funnel counts, sealed
+- [x] Implement pure `TierReceipt`, `TierStatus`, funnel counts, sealed
   evidence references, and strict schema-1 parsing.
-- [ ] Implement the CLI-scoped lock and atomic `waterfall-state.json`/
+- [x] Implement the CLI-scoped lock and atomic `waterfall-state.json`/
   receipt persistence; lock contention must return a typed held result.
-- [ ] Verify focused core and CLI tests, then commit with Lore trailers.
+- [x] Verify focused core and CLI tests, then commit with Lore trailers.
 
-## Task 3: Run Tier 1 through the native coordinator
+## Task 3: Run Tier 1 through the native coordinator — foundation complete
 
 **Files:** Add waterfall coordinator module; modify foreground dispatch and
 conductor tests.
 
-- [ ] Start a pass only after the current Rust ready queue is empty and a
+- [x] Start a pass only after the current Rust ready queue is empty and a
   conductor lease is held.
-- [ ] Intercept the repository-scope empty queue at `scan_foreground` before
+- [x] Intercept the repository-scope empty queue at `scan_foreground` before
   `ConductorEvent::ScanEmpty`; retain `Scan` rather than terminal `AllDone`.
   Slice-empty, active-claim, and worker-cap-empty observations must not start
   a repository pass.
-- [ ] Persist a Tier-1 receipt from typed queue evidence. Queue read errors are
+- [x] Persist a Tier-1 receipt from typed queue evidence. Queue read errors are
   `failed`; an empty page is the appropriate exhausted observation.
-- [ ] Persist the receipt before cursor advance. A replayed receipt advances
+- [x] Persist the receipt before cursor advance. A replayed receipt advances
   the existing pass idempotently; a cursor at `tier1_5` returns pending and
   does not start another pass. Never invoke `NoWorkState::record` here.
-- [ ] Resume deterministically after an interrupted pass; never run a second
+- [x] Resume deterministically after an interrupted pass; never run a second
   independent loop or change claim ownership.
-- [ ] Prove foreground performs no shell waterfall invocation, issue edit, or
+- [x] Prove foreground performs no shell waterfall invocation, issue edit, or
   comment, and never writes `why-no-work.json` while Tier 1.5–4 are pending.
 
 ## Task 4: Port Tier 1.5 native promotion/grooming observation
@@ -123,13 +123,30 @@ gated. This foundation does not permit legacy deletion.
   configuration contract are available; no shell self-improvement loop is a
   fallback.
 
-## Task 7: Port Tier 4 explicit external-source producer
+## Task 7: Port Tier 4 explicit external-source producer — foundation complete
 
-- [ ] Extend typed config with source allowlists and limits; parse it strictly.
+- [x] Extend typed config with source allowlists and limits; parse it strictly.
 - [ ] Implement direct, bounded source retrieval with byte/time caps and
   untrusted evidence storage; no shell or branch/issue mutation.
-- [ ] Run the same typed funnel as Tier 2; disabled policy is `not_run`, a
+- [x] Run the same typed funnel as Tier 2; disabled policy is `not_run`, a
   source error is `failed`, and an exhausted configured source is dry.
+- [ ] Activate a trusted typed source policy only after Tier 1 becomes
+  policy-aware, then wire Tier 4 into the foreground waterfall.
+
+### Tier 4 cutover state
+
+Tier 4 typed source policy, pure typed funnel, sealed receipt replay, and
+checked-in disabled policy are complete. A nonempty parsed source configuration
+is data, not activation. It produces the exact disabled `NotRun` receipt, seals
+no source evidence, and retains the Tier 4 cursor.
+
+Activation requires a trusted typed source policy and policy-aware Tier 1.
+Production remains disabled-only until both gates are implemented and tested;
+the existing enabled evaluator and replay fixtures do not authorize retrieval.
+
+This foundation is not a full Rust cutover. Live retrieval, source activation,
+foreground wiring, Task 8 ideation, executor/premerge parity,
+validation/installer migration, and legacy deletion remain unchecked.
 
 ## Task 8: Complete pass recording and local ideation
 
@@ -144,6 +161,10 @@ gated. This foundation does not permit legacy deletion.
 
 ## Task 9: Final authority audit and legacy deletion handoff
 
+- [ ] Complete native executor and premerge parity against the remaining legacy
+  behavior.
+- [ ] Migrate validation and installer ownership before removing their legacy
+  shell entry points.
 - [ ] Run workspace formatting, clippy, tests, fast validation, and
   no-shell/no-legacy source scans.
 - [ ] Compare every legacy waterfall tier and failure branch to a native

@@ -1,3 +1,4 @@
+use autospec_core::autonomous::config::Tier4Config;
 use autospec_core::autonomous::tier4::{
     evaluate_tier4, Tier4Evaluation, Tier4Failure, Tier4Input, Tier4Observation,
 };
@@ -9,7 +10,7 @@ pub(super) enum Tier4Scan {
     Failed(Tier4Failure),
 }
 
-pub(super) fn disabled_by_checked_in_policy() -> Tier4Scan {
+pub(super) fn disabled_by_checked_in_policy(_config: &Tier4Config) -> Tier4Scan {
     match evaluate_tier4(Tier4Input::DisabledByCheckedInPolicy) {
         Ok(Tier4Evaluation::NotRun(_)) => Tier4Scan::NotRun,
         Ok(Tier4Evaluation::Complete(_)) => {
@@ -21,6 +22,8 @@ pub(super) fn disabled_by_checked_in_policy() -> Tier4Scan {
 
 #[cfg(test)]
 mod tests {
+    use autospec_core::autonomous::config::Tier4Config;
+
     use super::disabled_by_checked_in_policy;
 
     #[test]
@@ -68,7 +71,7 @@ mod tests {
             );
         }
         assert!(matches!(
-            disabled_by_checked_in_policy(),
+            disabled_by_checked_in_policy(&Tier4Config::default()),
             super::Tier4Scan::NotRun
         ));
     }
