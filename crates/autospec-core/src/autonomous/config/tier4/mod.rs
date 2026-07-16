@@ -234,11 +234,22 @@ impl DescriptorBuilder {
                 "duplicate tier4 source field `deadline_millis`",
             )),
             "host" => {
-                self.host = Some(parse_scalar(value, line, "host")?);
+                let host = parse_scalar(value, line, "host")?;
+                if !valid_host(&host) {
+                    return Err(error(
+                        line,
+                        "tier4 source host must be a lowercase DNS name",
+                    ));
+                }
+                self.host = Some(host);
                 Ok(())
             }
             "path" => {
-                self.path = Some(parse_scalar(value, line, "path")?);
+                let path = parse_scalar(value, line, "path")?;
+                if !valid_path(&path) {
+                    return Err(error(line, "tier4 source path is not a safe absolute path"));
+                }
+                self.path = Some(path);
                 Ok(())
             }
             "max_bytes" => {
@@ -275,21 +286,9 @@ impl DescriptorBuilder {
         let host = self
             .host
             .ok_or_else(|| error(self.line, "tier4 source is missing host"))?;
-        if !valid_host(&host) {
-            return Err(error(
-                self.line,
-                "tier4 source host must be a lowercase DNS name",
-            ));
-        }
         let path = self
             .path
             .ok_or_else(|| error(self.line, "tier4 source is missing path"))?;
-        if !valid_path(&path) {
-            return Err(error(
-                self.line,
-                "tier4 source path is not a safe absolute path",
-            ));
-        }
 
         Ok(Tier4SourceDescriptor {
             id: self.id,

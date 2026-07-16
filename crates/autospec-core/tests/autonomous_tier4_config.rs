@@ -152,6 +152,8 @@ fn rejects_invalid_source_identifiers_hosts_paths_and_limits() {
     for host in [
         "API.example.test",
         "127.0.0.1",
+        "0x7f.0x0.0x0.0x1",
+        "0177.0.0.1",
         "https://api.example.test",
         "api.example.test:443",
         "user@api.example.test",
@@ -199,6 +201,28 @@ fn rejects_invalid_source_identifiers_hosts_paths_and_limits() {
     }
 
     assert_all_rejected(cases);
+}
+
+#[test]
+fn reports_the_offending_host_and_path_line() {
+    for (name, source, line) in [
+        (
+            "host",
+            "tier4:\n  sources:\n    - id: release-feed\n      host: API.example.test\n      path: /v1/releases\n      max_bytes: 65536\n      deadline_millis: 5000\n",
+            4,
+        ),
+        (
+            "path",
+            "tier4:\n  sources:\n    - id: release-feed\n      host: api.example.test\n      path: /v1?q=1\n      max_bytes: 65536\n      deadline_millis: 5000\n",
+            5,
+        ),
+    ] {
+        let error = AutonomousConfig::parse(source).expect_err(name);
+        assert!(
+            error.starts_with(&format!("invalid .autospec/autonomous.yml at line {line}:")),
+            "{name} must report its field line: {error}"
+        );
+    }
 }
 
 fn source(id: &str, host: &str) -> String {

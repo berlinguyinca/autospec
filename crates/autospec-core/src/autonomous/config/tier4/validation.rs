@@ -14,8 +14,8 @@ pub(super) fn valid_host(value: &str) -> bool {
     if value.is_empty()
         || value.len() > 253
         || !value.is_ascii()
-        || value.parse::<std::net::IpAddr>().is_ok()
         || !value.contains('.')
+        || ipv4_like_host(value)
     {
         return false;
     }
@@ -147,6 +147,18 @@ fn valid_dns_label(label: &str) -> bool {
         && label
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+fn ipv4_like_host(value: &str) -> bool {
+    let parts = value.split('.').collect::<Vec<_>>();
+    (1..=4).contains(&parts.len()) && parts.iter().all(|part| ipv4_number(part))
+}
+
+fn ipv4_number(value: &str) -> bool {
+    if let Some(hex) = value.strip_prefix("0x") {
+        return !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn has_unquoted_mapping_delimiter(value: &str) -> bool {
