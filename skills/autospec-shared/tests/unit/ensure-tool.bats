@@ -48,6 +48,27 @@ SHIM
   chmod +x "$BIN/$name"
 }
 
+# Control the privilege branch without invoking the host's real identity or
+# sudo command. The package-manager implementation remains real shell code;
+# only its process boundary is replaced.
+mk_id() {
+  local uid="$1"
+  cat > "$BIN/id" <<SHIM
+#!/usr/bin/env bash
+[ "\${1:-}" = "-u" ] && printf '%s\n' '$uid'
+SHIM
+  chmod +x "$BIN/id"
+}
+
+mk_sudo() {
+  cat > "$BIN/sudo" <<SHIM
+#!/usr/bin/env bash
+echo "sudo \$*" >> "$LOG"
+exec "\$@"
+SHIM
+  chmod +x "$BIN/sudo"
+}
+
 # Create a stub of the target tool so command -v finds it.
 mk_tool() {
   local name="$1"
@@ -142,6 +163,25 @@ run_ensure_isolated() {
   run_ensure_isolated bats
   [ "$status" -eq 0 ]
   grep -q "apt-get .*bats" "$LOG"
+}
+
+@test "cargo absent + apt + non-root uses sudo to install cargo and rustc" {
+  mk_id 1000
+  mk_sudo
+  mk_installer apt-get
+  run_ensure_isolated cargo
+  [ "$status" -eq 0 ]
+  grep -q "sudo apt-get install -y cargo rustc" "$LOG"
+  grep -q "apt-get install -y cargo rustc" "$LOG"
+}
+
+@test "cargo absent + apt + root installs without sudo" {
+  mk_id 0
+  mk_installer apt-get
+  run_ensure_isolated cargo
+  [ "$status" -eq 0 ]
+  grep -q "apt-get install -y cargo rustc" "$LOG"
+  ! grep -q '^sudo ' "$LOG"
 }
 
 @test "yq absent + brew available → installs via brew" {
