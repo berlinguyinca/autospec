@@ -55,10 +55,14 @@ The pure input consists of:
   collector-contained evidence, closed severity/complexity, and bounded integer
   confidence;
 - exactly one typed `Survived` or `Refuted` verdict for every deduplicated key;
-- a small closed policy including the maximum five ranked candidates.
+- a small typed policy containing the maximum five ranked candidates and the
+  permitted closed source set. The checked-in V1 policy permits
+  `strict_local_specialist`; an explicitly empty set is a valid policy-driven
+  `RoiFiltered` test/receipt outcome, not a heuristic rejection.
 
-`evaluate_tier2` validates the complete input, rejects conflicting duplicates
-and incomplete verdict coverage, then produces a canonical observation with
+`evaluate_tier2` validates stage completion in collector/generator/verifier
+order, rejects conflicting duplicates and incomplete verdict coverage, then
+produces a canonical observation with
 candidate, deduplication, verification, ROI, and rank decisions. It uses only
 integer score ordering: severity ascending, `confidence / complexity_units`
 descending (`1`, `2`, or `4`), then stable key ascending. It does not create

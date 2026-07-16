@@ -77,7 +77,7 @@ pub fn collect_strict_domains(
 ) -> Result<StrictCollectorEvidence, StrictCollectorError>;
 ```
 
-Canonicalize the root, require a directory, reject symlinks, canonicalize selected files/directories before use, retain only root-relative evidence paths, and map read/UTF-8/containment failures to closed collector codes. Use depth three, the existing eight-evidence and 120-character caps, and score-descending/name-ascending sorting. Do not derive `SuggestedSpecialist`.
+Canonicalize the root, require a directory, reject symlinks, canonicalize selected files/directories before use, retain only root-relative evidence paths, and map read/UTF-8/containment failures to closed collector codes. Use depth three, the existing eight-evidence and 120-character caps; domains sort `(score DESC, name ASC)` and each strict-domain evidence list sorts `(file ASC, line ASC, match ASC)`. Do not derive `SuggestedSpecialist` or change legacy scanner ordering.
 
 - [ ] **Step 5: Run the focused collector proof**
 
@@ -134,7 +134,7 @@ Expected: FAIL because the Tier 2 module does not exist.
 
 - [ ] **Step 3: Define closed core types**
 
-Add `pub mod tier2;` to the inline autonomous module in `lib.rs`. In `model.rs`, re-export `StrictCollectorEvidence` as the Tier 2 collector input, then define `Tier2Input`, `Tier2StageResult`, generated/verifier records, proposal/source/severity/complexity, verification, closed stage/failure code, observation, deduplication, ranked proposal, and evaluation.
+Add `pub mod tier2;` to the inline autonomous module in `lib.rs`. In `model.rs`, re-export `StrictCollectorEvidence` as the Tier 2 collector input, then define `Tier2Input`, `Tier2StageResult`, `Tier2RoiPolicy`, generated/verifier records, proposal/source/severity/complexity, verification, closed stage/failure code, observation, deduplication, ranked proposal, and evaluation. `Tier2Input::Enabled` carries `collector`, `generator`, `verifier`, and `roi_policy`. `Tier2StageResult` has `Complete`, `Failed`, and `Missing`; evaluation converts `Missing` to the matching stage's closed `MissingStageResult` failure after checking collector, generator, then verifier. A failed verifier therefore wins over a completed empty generator.
 
 ```rust
 pub const TIER2_SCHEMA: u64 = 1;
@@ -146,14 +146,14 @@ Validate nonempty bounded text, `confidence_millis <= 1000`, closed enum mapping
 
 - [ ] **Step 4: Implement deterministic evaluation and renderers**
 
-Use a `BTreeMap`, reject conflicting candidate payloads, select higher integer score then lower severity rank then lower stable key, require one verdict per winner, and rank by severity ascending, score descending, stable key ascending.
+Use a `BTreeMap`, reject conflicting candidate payloads, select higher integer score then lower severity rank then lower stable key, require one verdict per winner, and rank by severity ascending, score descending, stable key ascending. Proposal evidence is required sorted and unique by `(file, line, match)` before grouping. `Tier2Deduplication` exposes ordered group records with `key`, `candidate_keys`, `winner_key`, `suppressed_keys`, and score quotients; `Tier2RankedProposal` exposes the immutable proposal, integer score inputs, severity rank, stable key, and one-based rank. `Tier2Evaluation::observation()` returns `Option<&Tier2Observation>` so the disabled case is non-panicking.
 
 ```rust
 let group_key = format!("{}\\0{}", proposal.source.as_str(), normalize_title(&proposal.title));
 let score_quotient = proposal.confidence_millis as u64 / proposal.complexity.units();
 ```
 
-`DisabledByCheckedInPolicy` returns only the exact `NotRun` reason. A stage failure stays typed; never replace it with an empty proposal list. Render schema-one one-line JSON from typed validated data only.
+`DisabledByCheckedInPolicy` returns only the exact `NotRun` reason. A stage failure stays typed; never replace it with an empty proposal list. `Tier2RoiPolicy` contains the permitted closed source set; the checked-in V1 value permits `StrictLocalSpecialist`, while an empty injected policy proves the non-heuristic `RoiFiltered` path. Render schema-one one-line JSON from typed validated data only.
 
 - [ ] **Step 5: Run the pure funnel proof**
 
