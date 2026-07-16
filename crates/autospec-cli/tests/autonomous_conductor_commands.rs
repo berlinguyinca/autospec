@@ -1,3 +1,5 @@
+use autospec_core::autonomous::no_work::NoWorkTier;
+use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus, WaterfallState};
 use autospec_core::claim::{parse_remote_comments_json, select_run_state, RunStateRecord};
 use autospec_core::coordination::{ConductorOutcome, ConductorPhase, ConductorState};
 use std::fs;
@@ -36,6 +38,185 @@ fn foreground_source_has_no_legacy_shell_authority() {
     }
     assert!(source.contains("executor-result"));
     assert!(source.contains("ExecutorRequest"));
+
+    let coordinator = fs::read_to_string(
+        workspace_root()
+            .join("crates/autospec-cli/src/commands/autonomous/waterfall_coordinator.rs"),
+    )
+    .expect("read native waterfall coordinator source");
+    for forbidden in [
+        "ready_plan_for",
+        "NoWorkState::record",
+        "why-no-work.json",
+        "claim::",
+        "Command",
+        "std::process",
+    ] {
+        assert!(
+            !coordinator.contains(forbidden),
+            "tier-one coordinator retains forbidden authority: {forbidden}"
+        );
+    }
+    assert!(coordinator.contains("ConductorLease"));
+}
+
+#[test]
+fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() {
+    let fixture = ForegroundFixture::new();
+    let first = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run empty foreground queue");
+
+    assert!(
+        first.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    let state = fixture.read_waterfall_state();
+    assert_eq!(state.next_pass_id(), 1);
+    assert_eq!(state.current_tier(), NoWorkTier::Tier1_5);
+    let receipt = fixture.read_tier_one_receipt(1);
+    assert!(matches!(receipt.status(), TierStatus::Exhausted { .. }));
+    let receipt_source =
+        fs::read_to_string(fixture.tier_one_receipt_path(1)).expect("read first sealed receipt");
+    let evidence_source = fs::read_to_string(fixture.tier_one_evidence_path(1, "ready-page"))
+        .expect("read sealed Tier 1 queue evidence");
+    let evidence_digest = sha256_hex(evidence_source.as_bytes());
+    assert!(
+        receipt_source.contains(&format!("\"digest\":\"{evidence_digest}\"")),
+        "the receipt must retain the persisted queue artifact digest"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert_eq!(
+        calls.matches("labels=auto-implement").count(),
+        1,
+        "foreground must reuse its captured ready-queue snapshot"
+    );
+    for forbidden in ["issue\nedit", "issue\ncomment", "executor_deferred"] {
+        assert!(
+            !calls.contains(forbidden),
+            "empty Tier 1 must not invoke remote mutation: {forbidden}"
+        );
+    }
+    assert!(
+        !fixture.operator.join("test_repo/why-no-work.json").exists(),
+        "later waterfall tiers remain pending"
+    );
+
+    fs::remove_file(fixture.waterfall_state_path()).expect("remove cursor after receipt write");
+    let replay = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_QUEUE_FAILURE", "1")
+        .output()
+        .expect("resume from an interrupted Tier 1 receipt despite a changed queue result");
+    assert!(
+        replay.status.success(),
+        "an existing sealed receipt must replay before a new queue failure is recorded; stderr={}",
+        String::from_utf8_lossy(&replay.stderr),
+    );
+    assert_eq!(fixture.read_waterfall_state(), state);
+    assert_eq!(
+        fs::read_to_string(fixture.tier_one_receipt_path(1)).expect("read replayed receipt"),
+        receipt_source
+    );
+
+    let pending = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_QUEUE_FAILURE", "1")
+        .output()
+        .expect("leave later waterfall tiers pending");
+    assert!(
+        pending.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&pending.stderr)
+    );
+    assert_eq!(fixture.read_waterfall_state(), state);
+    assert_eq!(
+        fs::read_to_string(fixture.tier_one_receipt_path(1)).expect("read pending receipt"),
+        receipt_source
+    );
+}
+
+#[test]
+fn foreground_rejects_tampered_tier_one_evidence_during_receipt_replay() {
+    let fixture = ForegroundFixture::new();
+    let first = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("record Tier 1 evidence");
+    assert!(first.status.success());
+    fs::remove_file(fixture.waterfall_state_path()).expect("remove cursor after receipt write");
+    fs::write(
+        fixture.tier_one_evidence_path(1, "ready-page"),
+        "{\"schema\":1,\"tampered\":true}\n",
+    )
+    .expect("tamper Tier 1 evidence");
+
+    let replay = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("resume Tier 1 receipt");
+
+    assert!(!replay.status.success());
+    assert!(String::from_utf8_lossy(&replay.stderr)
+        .contains("sealed waterfall evidence does not match receipt"));
+    assert!(
+        !fixture.waterfall_state_path().exists(),
+        "tampered evidence must not advance the cursor"
+    );
+}
+
+#[test]
+fn foreground_empty_slice_does_not_start_a_repository_waterfall_pass() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .env("AUTOSPEC_RUN_ONLY_ISSUES", "42")
+        .output()
+        .expect("run empty slice foreground queue");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let slice_state = ConductorState::parse_json(
+        &fs::read_to_string(fixture.slice_state_path("42")).expect("read slice state"),
+    )
+    .expect("parse slice state");
+    assert_eq!(slice_state.phase(), ConductorPhase::SliceComplete);
+    assert!(
+        !fixture.waterfall_dir().exists(),
+        "a slice-empty queue must not create repository waterfall state"
+    );
+}
+
+#[test]
+fn foreground_queue_failure_seals_tier_one_without_advancing_later_tiers() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_FOREGROUND_QUEUE_FAILURE", "1")
+        .output()
+        .expect("run failed foreground queue");
+
+    assert!(!output.status.success());
+    let receipt = fixture.read_tier_one_receipt(1);
+    assert!(matches!(receipt.status(), TierStatus::Failed { .. }));
+    assert!(
+        !fixture.waterfall_state_path().exists(),
+        "failed Tier 1 must not advance to Tier 1.5"
+    );
+    assert!(
+        !fixture.operator.join("test_repo/why-no-work.json").exists(),
+        "failed Tier 1 must not record no-work"
+    );
 }
 
 #[test]
@@ -1052,7 +1233,14 @@ if [ "$1" = api ]; then
     repos/test/repo/issues\?*)
       case "$endpoint" in
         *labels=in-progress-by-bot*) printf '%s\n' '{"raw_count":0,"items":[]}' ;;
-        *) printf '%s' '{"raw_count":1,"items":['; issue; printf '%s\n' ']}' ;;
+        *labels=auto-implement*)
+          if [ "${AUTOSPEC_FOREGROUND_QUEUE_FAILURE:-0}" = 1 ]; then exit 1; fi
+          if [ "${AUTOSPEC_FOREGROUND_EMPTY_QUEUE:-0}" = 1 ]; then
+            printf '%s\n' '{"raw_count":0,"items":[]}'
+          else
+            printf '%s' '{"raw_count":1,"items":['; issue; printf '%s\n' ']}'
+          fi ;;
+        *) printf '%s\n' '{"raw_count":0,"items":[]}' ;;
       esac
       exit 0 ;;
     repos/test/repo/issues/42/comments)
@@ -1350,6 +1538,36 @@ exit 1
     fn read_state(&self) -> ConductorState {
         let source = fs::read_to_string(self.state_path()).expect("read foreground state");
         ConductorState::parse_json(&source).expect("parse foreground state")
+    }
+
+    fn waterfall_dir(&self) -> PathBuf {
+        self.operator.join("test_repo/waterfall")
+    }
+
+    fn waterfall_state_path(&self) -> PathBuf {
+        self.waterfall_dir().join("waterfall-state.json")
+    }
+
+    fn read_waterfall_state(&self) -> WaterfallState {
+        let source = fs::read_to_string(self.waterfall_state_path()).expect("read waterfall state");
+        WaterfallState::parse_json(&source, "test/repo").expect("parse waterfall state")
+    }
+
+    fn tier_one_receipt_path(&self, pass_id: u64) -> PathBuf {
+        self.waterfall_dir()
+            .join(format!("waterfall/{pass_id}/tier1.json"))
+    }
+
+    fn tier_one_evidence_path(&self, pass_id: u64, artifact: &str) -> PathBuf {
+        self.waterfall_dir()
+            .join(format!("waterfall/{pass_id}/tier1/{artifact}.json"))
+    }
+
+    fn read_tier_one_receipt(&self, pass_id: u64) -> TierReceipt {
+        let source = fs::read_to_string(self.tier_one_receipt_path(pass_id))
+            .expect("read Tier 1 waterfall receipt");
+        TierReceipt::parse_json(&source, "test/repo", pass_id, NoWorkTier::Tier1)
+            .expect("parse Tier 1 waterfall receipt")
     }
 }
 

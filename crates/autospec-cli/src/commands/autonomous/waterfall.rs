@@ -4,13 +4,30 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use autospec_core::autonomous::no_work::NoWorkTier;
-use autospec_core::autonomous::waterfall::{receipt_reference, TierReceipt, WaterfallState};
+use autospec_core::autonomous::waterfall::{
+    receipt_reference, sha256_hex, SealedEvidence, TierReceipt, TierStatus, WaterfallState,
+};
 
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) enum StoreAcquisition {
     Acquired(WaterfallStore),
     Held,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Tier1EvidenceArtifact {
+    ReadyPage,
+    ReadFailure,
+}
+
+impl Tier1EvidenceArtifact {
+    fn file_name(self) -> &'static str {
+        match self {
+            Self::ReadyPage => "ready-page.json",
+            Self::ReadFailure => "read-failure.json",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -77,6 +94,59 @@ impl WaterfallStore {
         }
         let path = self.receipt_path(receipt)?;
         atomic_write(&path, &format!("{}\n", receipt.to_json()))
+    }
+
+    pub(super) fn persist_tier1_evidence(
+        &self,
+        pass_id: u64,
+        artifact: Tier1EvidenceArtifact,
+        contents: &str,
+    ) -> Result<SealedEvidence, WaterfallStoreError> {
+        let reference = tier1_evidence_reference(pass_id, artifact)?;
+        let evidence = SealedEvidence::new(&reference, sha256_hex(contents.as_bytes()))
+            .map_err(WaterfallStoreError::InvalidReceipt)?;
+        let path = self.root.join(&reference);
+        match fs::read_to_string(&path) {
+            Ok(existing) if existing == contents => Ok(evidence),
+            Ok(_) => Err(WaterfallStoreError::InvalidReceipt(
+                "conflicting sealed waterfall evidence".to_string(),
+            )),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                atomic_write(&path, contents)?;
+                Ok(evidence)
+            }
+            Err(error) => Err(WaterfallStoreError::Diagnostic(format!(
+                "cannot read waterfall evidence {}: {error}",
+                path.display()
+            ))),
+        }
+    }
+
+    pub(super) fn verify_tier1_evidence(
+        &self,
+        pass_id: u64,
+        artifact: Tier1EvidenceArtifact,
+        receipt: &TierReceipt,
+    ) -> Result<(), WaterfallStoreError> {
+        let reference = tier1_evidence_reference(pass_id, artifact)?;
+        let path = self.root.join(&reference);
+        let contents = fs::read_to_string(&path).map_err(|error| {
+            let message = if error.kind() == io::ErrorKind::NotFound {
+                format!("missing sealed waterfall evidence {reference}")
+            } else {
+                format!("cannot read waterfall evidence {}: {error}", path.display())
+            };
+            WaterfallStoreError::InvalidReceipt(message)
+        })?;
+        let digest = sha256_hex(contents.as_bytes());
+        let marker = format!("\"reference\":\"{reference}\",\"digest\":\"{digest}\"");
+        if receipt.to_json().contains(&marker) {
+            Ok(())
+        } else {
+            Err(WaterfallStoreError::InvalidReceipt(
+                "sealed waterfall evidence does not match receipt".to_string(),
+            ))
+        }
     }
 
     pub(super) fn load_receipt(
@@ -150,9 +220,45 @@ impl WaterfallStore {
                     completed.reference
                 )));
             }
+            if completed.tier == NoWorkTier::Tier1 {
+                self.verify_tier1_evidence(
+                    state.next_pass_id(),
+                    tier1_artifact_for_receipt(&receipt)?,
+                    &receipt,
+                )
+                .map_err(state_receipt_error)?;
+            }
         }
         Ok(())
     }
+}
+
+fn tier1_artifact_for_receipt(
+    receipt: &TierReceipt,
+) -> Result<Tier1EvidenceArtifact, WaterfallStoreError> {
+    match receipt.status() {
+        TierStatus::Exhausted { .. } => Ok(Tier1EvidenceArtifact::ReadyPage),
+        TierStatus::Failed { .. } => Ok(Tier1EvidenceArtifact::ReadFailure),
+        status => Err(WaterfallStoreError::InvalidState(format!(
+            "Tier 1 receipt has unexpected {} status",
+            status.as_str()
+        ))),
+    }
+}
+
+fn tier1_evidence_reference(
+    pass_id: u64,
+    artifact: Tier1EvidenceArtifact,
+) -> Result<String, WaterfallStoreError> {
+    if pass_id == 0 {
+        return Err(WaterfallStoreError::InvalidReceipt(
+            "waterfall Tier 1 evidence pass id must be positive".to_string(),
+        ));
+    }
+    Ok(format!(
+        "waterfall/{pass_id}/tier1/{}",
+        artifact.file_name()
+    ))
 }
 
 fn state_receipt_error(error: WaterfallStoreError) -> WaterfallStoreError {

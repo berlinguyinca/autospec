@@ -27,9 +27,8 @@ use super::{claim, queue, CommandFailure};
 
 mod drain;
 mod resilience;
-// Task 3 invokes this persistence boundary from the foreground coordinator.
-#[allow(dead_code)]
 mod waterfall;
+mod waterfall_coordinator;
 #[cfg(test)]
 mod waterfall_tests;
 
@@ -1378,8 +1377,13 @@ fn run_foreground_with_lease(
         persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
         return Ok(ForegroundCompletion::Lifecycle(lifecycle));
     }
+    let initial_plan = queue::ready_plan_for(&layout.repo, 1).map_err(command_error);
     if options.issue.is_none() {
-        if let Some(issue) = preview_foreground_issue(layout)? {
+        if let Some(issue) = initial_plan
+            .as_ref()
+            .ok()
+            .and_then(|plan| plan.batch.first().map(|issue| issue.issue.number))
+        {
             let admission =
                 resilience_admission_for_issue(layout, options, Some(issue), Some(lease))?;
             input = foreground_lifecycle_input_with_resilience(
@@ -1411,7 +1415,8 @@ fn run_foreground_with_lease(
         .into());
     }
 
-    let (state, found_work) = scan_foreground(layout, state).map_err(CommandFailure::diagnostic)?;
+    let (state, found_work) =
+        scan_foreground(layout, lease, state, initial_plan).map_err(CommandFailure::diagnostic)?;
     if !found_work {
         persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
@@ -1500,10 +1505,41 @@ enum ForegroundDispatchResult {
 
 fn scan_foreground(
     layout: &RunLayout,
+    lease: &resilience::ConductorLease,
     state: ConductorState,
+    initial_plan: Result<autospec_core::coordination::ReadyQueuePlan, String>,
 ) -> Result<(ConductorState, bool), String> {
-    let initial_plan = queue::ready_plan_for(&layout.repo, 1).map_err(command_error)?;
+    let initial_plan = match initial_plan {
+        Ok(plan) => plan,
+        Err(reason) => {
+            return match state.scope() {
+                ConductorScope::Repository => match waterfall_coordinator::record_tier_one(
+                    &layout.state_dir,
+                    &layout.repo,
+                    lease,
+                    waterfall_coordinator::Tier1QueueEvidence::Failed(&reason),
+                )? {
+                    waterfall_coordinator::Tier1Progress::Failed(reason) => Err(reason),
+                    waterfall_coordinator::Tier1Progress::Pending
+                    | waterfall_coordinator::Tier1Progress::Advanced => Ok((state, false)),
+                },
+                ConductorScope::Slice => Err(reason),
+            };
+        }
+    };
     if initial_plan.gate_counts.candidate == 0 {
+        if state.scope() == ConductorScope::Repository {
+            match waterfall_coordinator::record_tier_one(
+                &layout.state_dir,
+                &layout.repo,
+                lease,
+                waterfall_coordinator::Tier1QueueEvidence::EmptyPage(&initial_plan),
+            )? {
+                waterfall_coordinator::Tier1Progress::Advanced
+                | waterfall_coordinator::Tier1Progress::Pending => return Ok((state, false)),
+                waterfall_coordinator::Tier1Progress::Failed(reason) => return Err(reason),
+            }
+        }
         let state = state
             .transition(ConductorEvent::ScanEmpty)
             .map_err(|error| format!("cannot record empty foreground scan: {error}"))?;
@@ -1513,13 +1549,6 @@ fn scan_foreground(
         .transition(ConductorEvent::ScanFoundWork)
         .map_err(|error| format!("cannot record foreground scan: {error}"))?;
     Ok((state, true))
-}
-
-fn preview_foreground_issue(layout: &RunLayout) -> Result<Option<u64>, CommandFailure> {
-    let ready = queue::ready_plan_for(&layout.repo, 1)
-        .map_err(command_error)
-        .map_err(CommandFailure::diagnostic)?;
-    Ok(ready.batch.first().map(|issue| issue.issue.number))
 }
 
 fn review_foreground(layout: &RunLayout, state: ConductorState) -> Result<ConductorState, String> {

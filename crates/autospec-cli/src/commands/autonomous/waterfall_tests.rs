@@ -8,7 +8,7 @@ use autospec_core::autonomous::waterfall::{
     FunnelCounts, SealedEvidence, TierReceipt, TierStatus, WaterfallState,
 };
 
-use super::waterfall::{StoreAcquisition, WaterfallStore};
+use super::waterfall::{StoreAcquisition, Tier1EvidenceArtifact, WaterfallStore};
 
 static ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -59,6 +59,21 @@ fn receipt(status: TierStatus) -> TierReceipt {
     .expect("receipt")
 }
 
+fn receipt_with_evidence(status: TierStatus, evidence: SealedEvidence) -> TierReceipt {
+    TierReceipt::new(
+        "owner/repo",
+        4,
+        NoWorkTier::Tier1,
+        "queue-v1",
+        10,
+        11,
+        status,
+        FunnelCounts::new(0, 0, 0, 0, 0).expect("funnel counts"),
+        vec![evidence],
+    )
+    .expect("receipt")
+}
+
 fn tier_one_point_five_receipt(status: TierStatus) -> TierReceipt {
     TierReceipt::new(
         "owner/repo",
@@ -103,9 +118,18 @@ fn store_atomically_replaces_state_without_overwriting_sealed_receipts() {
     let exhausted = receipt(TierStatus::Exhausted {
         reason: DryReason::NoProposalsGenerated,
     });
-    let failed = receipt(TierStatus::Failed {
-        reason: "queue unavailable".to_string(),
-    });
+    let failed = receipt_with_evidence(
+        TierStatus::Failed {
+            reason: "queue unavailable".to_string(),
+        },
+        store
+            .persist_tier1_evidence(
+                4,
+                Tier1EvidenceArtifact::ReadFailure,
+                "{\"schema\":1,\"kind\":\"read_failure\"}\n",
+            )
+            .expect("persist Tier 1 failure evidence"),
+    );
 
     let not_run = tier_one_point_five_receipt(TierStatus::NotRun {
         reason: "policy disabled".to_string(),
@@ -164,4 +188,40 @@ fn store_atomically_replaces_state_without_overwriting_sealed_receipts() {
 
     fs::write(store.state_path(), "{\"schema\":1,\"repo\":\"other/repo\"}").expect("tamper state");
     assert!(store.load_state().is_err(), "hostile state fails closed");
+}
+
+#[test]
+fn store_rejects_a_cursor_when_its_tier_one_evidence_artifact_is_tampered() {
+    let root = TempRoot::new();
+    let store = acquire(&root);
+    let evidence = store
+        .persist_tier1_evidence(
+            4,
+            Tier1EvidenceArtifact::ReadyPage,
+            "{\"schema\":1,\"kind\":\"ready_page\"}\n",
+        )
+        .expect("persist Tier 1 evidence");
+    let receipt = receipt_with_evidence(
+        TierStatus::Exhausted {
+            reason: DryReason::NoProposalsGenerated,
+        },
+        evidence,
+    );
+    store.persist_receipt(&receipt).expect("persist receipt");
+    let state = WaterfallState::new("owner/repo", 4, NoWorkTier::Tier1)
+        .expect("state")
+        .record_receipt(&receipt)
+        .expect("advance cursor");
+    store.persist_state(&state).expect("persist cursor");
+
+    fs::write(
+        root.path().join("waterfall/4/tier1/ready-page.json"),
+        "{\"schema\":1,\"kind\":\"tampered\"}\n",
+    )
+    .expect("tamper Tier 1 evidence");
+
+    assert!(
+        store.load_state().is_err(),
+        "a cursor must not trust a receipt whose sealed evidence bytes changed"
+    );
 }

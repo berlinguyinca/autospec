@@ -6,6 +6,10 @@ use super::no_work::{is_sealed_digest, DryReason, NoWorkTier};
 pub const WATERFALL_RECEIPT_SCHEMA: u64 = 1;
 pub const WATERFALL_STATE_SCHEMA: u64 = 1;
 
+pub fn sha256_hex(input: &[u8]) -> String {
+    sha256::hex(input)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunnelCounts {
     pub observed: u64,
