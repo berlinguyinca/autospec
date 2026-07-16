@@ -431,7 +431,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_scan_seals_reason_and_retains_tier_one_point_five_cursor() {
+    fn failed_receipt_replays_its_sealed_reason_and_rejects_tampered_evidence() {
         let root = TempRoot::new();
         seed_tier_one_point_five_cursor(&root);
 
@@ -442,6 +442,10 @@ mod tests {
                 Tier15Scan::Failed("later closed page failed".to_string())
             )
             .expect("record failed scan"),
+            Tier15Progress::Failed("later closed page failed".to_string())
+        );
+        assert_eq!(
+            record_tier15(root.path(), REPO, produced_scan()).expect("replay failed receipt"),
             Tier15Progress::Failed("later closed page failed".to_string())
         );
         let store = store(&root);
@@ -461,24 +465,52 @@ mod tests {
         store
             .verify_tier15_evidence(1, Tier15EvidenceArtifact::ReadFailure, &receipt)
             .expect("failure evidence");
+        drop(store);
+
+        fs::write(
+            root.path()
+                .join("waterfall/waterfall/1/tier1_5/read-failure.json"),
+            "{\"schema\":1,\"kind\":\"tampered\"}\n",
+        )
+        .expect("tamper failure evidence");
+        assert!(
+            record_tier15(root.path(), REPO, produced_scan()).is_err(),
+            "failed replay must reject tampered read-failure evidence"
+        );
     }
 
     #[test]
     fn receipt_coordinator_has_no_promotion_or_write_authority() {
-        let source = include_str!("tier15_receipts.rs");
+        let source = include_str!("tier15_receipts.rs")
+            .split("\n#[cfg(test)]")
+            .next()
+            .expect("production source before module tests");
         let forbidden = [
-            ["queue", "::"].concat(),
-            ["claim", "::"].concat(),
-            ["std", "::process"].concat(),
-            ["run_", "foreground"].concat(),
-            ["why", "-no-work"].concat(),
-            ["gh ", "issue"].concat(),
-            ["--method ", "POST"].concat(),
-            ["--method ", "PATCH"].concat(),
+            "queue",
+            "claim",
+            "legacy",
+            "promote-eligibility",
+            "promoter",
+            "classifier",
+            "std::process",
+            "Command",
+            "run_foreground",
+            "why-no-work",
+            "gh issue",
+            "issue edit",
+            "issue comment",
+            "label",
+            "body=",
+            "comments",
+            "POST",
+            "PATCH",
+            "PUT",
+            "DELETE",
+            "graphql",
         ];
         for authority in forbidden {
             assert!(
-                !source.contains(&authority),
+                !source.contains(authority),
                 "Tier 1.5 receipt coordinator must not own {authority} authority"
             );
         }
