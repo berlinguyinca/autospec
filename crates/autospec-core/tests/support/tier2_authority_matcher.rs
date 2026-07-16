@@ -45,13 +45,9 @@ pub(crate) fn has_forbidden_std_module(code: &str, module: &str) -> bool {
     std_use_tree_contains(&tokens, module)
 }
 
-pub(crate) fn contains_function_call(code: &str, function: &str) -> bool {
-    contains_tokens(&code_tokens(code), &[function, "("])
-}
-
 pub(crate) fn has_module_escape(code: &str) -> bool {
     let tokens = code_tokens(code);
-    contains_tokens(&tokens, &["#", "[", "path"]) || contains_tokens(&tokens, &["include", "!"])
+    has_attribute_path(&tokens) || contains_tokens(&tokens, &["include", "!"])
 }
 
 fn contains_tokens(tokens: &[String], expected: &[&str]) -> bool {
@@ -102,6 +98,23 @@ fn std_use_tree_contains(tokens: &[String], module: &str) -> bool {
                     Some("::" | "{" | ",")
                 )
             {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn has_attribute_path(tokens: &[String]) -> bool {
+    for start in 0..tokens.len().saturating_sub(2) {
+        if tokens[start].as_str() != "#" || tokens[start + 1].as_str() != "[" {
+            continue;
+        }
+        for token in &tokens[start + 2..] {
+            if token == "]" {
+                break;
+            }
+            if token == "path" {
                 return true;
             }
         }

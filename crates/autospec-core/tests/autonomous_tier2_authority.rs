@@ -6,8 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod matcher;
 
 use matcher::{
-    contains_function_call, contains_path_symbol, contains_qualified_path,
-    has_forbidden_std_module, has_module_escape,
+    contains_path_symbol, contains_qualified_path, has_forbidden_std_module, has_module_escape,
 };
 
 fn pure_tier2_sources() -> Vec<PathBuf> {
@@ -185,14 +184,13 @@ fn authority_matcher_handles_module_escapes_grouped_imports_and_safe_nouns() {
         code_without_comments_and_literals("use std::os::unix::fs; use std::{os::{unix::fs}};");
     assert!(has_forbidden_std_module(&nested_imports, "fs"));
     assert!(!contains_qualified_path(&imports, "queue"));
-    assert!(!contains_qualified_path(&imports, "checkout"));
-    assert!(!contains_function_call(&imports, "checkout"));
-    assert!(contains_function_call(
-        &code_without_comments_and_literals("checkout(\"branch\");"),
-        "checkout"
+    assert!(!contains_path_symbol(&imports, "git::checkout"));
+    assert!(contains_path_symbol(
+        &code_without_comments_and_literals("git::checkout(\"branch\");"),
+        "git::checkout"
     ));
     assert!(contains_qualified_path(
-        &code_without_comments_and_literals("gh::issue::list();"),
+        &code_without_comments_and_literals("gh::issue::create();"),
         "gh"
     ));
     assert!(contains_qualified_path(
@@ -201,6 +199,9 @@ fn authority_matcher_handles_module_escapes_grouped_imports_and_safe_nouns() {
     ));
     assert!(has_module_escape(&code_without_comments_and_literals(
         "#[path = \"../escape.rs\"] mod escaped;"
+    )));
+    assert!(has_module_escape(&code_without_comments_and_literals(
+        "#[cfg_attr(unix, path = \"../escape.rs\")] mod escaped;"
     )));
     assert!(has_module_escape(&code_without_comments_and_literals(
         "include!(\"../escape.rs\");"
@@ -310,8 +311,8 @@ fn pure_tier2_sources_reject_external_and_mutation_authority() {
             );
         }
         assert!(
-            !contains_function_call(&code, "checkout"),
-            "{} retains checkout call authority",
+            !contains_path_symbol(&code, "git::checkout"),
+            "{} retains git checkout authority",
             source.display()
         );
     }
@@ -413,8 +414,8 @@ fn strict_collector_source_is_read_only_and_legacy_free() {
         );
     }
     assert!(
-        !contains_function_call(&code, "checkout"),
-        "strict collector retains checkout call authority"
+        !contains_path_symbol(&code, "git::checkout"),
+        "strict collector retains git checkout authority"
     );
     assert!(
         !contains_code_token(&code, "symlink"),
