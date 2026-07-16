@@ -69,6 +69,13 @@ Tier 3 uses `verified == roi_approved == deduplicated`, while `ranked` may be
 smaller only because of the fixed cap. It has no model verifier or ROI
 inference.
 
+`Exhausted` uses the closed, Tier 3-specific
+`DryReason::NoMetadataFindings` variant. It means all three typed metadata
+adapters completed successfully and the sealed ranked set is empty. It is not
+interchangeable with `NoProposalsGenerated`, which belongs to proposal
+generation; its addition updates the no-work reason codec and its exact-key
+state-count tests together with the Tier 3 core.
+
 `Tier3Failure` carries only validated predecessor evidence: no predecessor for
 architecture; architecture before coverage; architecture and coverage before
 debt; and all three before the closed `Ranking` stage. An opaque, evaluator-derived

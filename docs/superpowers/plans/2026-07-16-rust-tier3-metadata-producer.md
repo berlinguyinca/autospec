@@ -19,6 +19,9 @@
   reason `tier3_metadata_disabled_by_checked_in_policy`.
 - Persist evidence before a receipt and a receipt before the cursor; only
   `Exhausted(NoMetadataFindings)` advances Tier 3 to Tier 4.
+- `NoMetadataFindings` is a new closed `DryReason` variant; update the
+  no-work codec's fixed reason-count shape and exact-key tests with the core
+  contract rather than aliasing it to a proposal-stage dry reason.
 - Produced evidence is planning-only and never mutates GitHub or dispatches work.
 
 ---
@@ -28,11 +31,14 @@
 **Files:**
 
 - Modify: `crates/autospec-core/src/lib.rs`
+- Modify: `crates/autospec-core/src/autonomous/no_work.rs`
+- Modify: `crates/autospec-core/src/autonomous/no_work/codec.rs`
 - Create: `crates/autospec-core/src/autonomous/tier3.rs`
 - Create: `crates/autospec-core/src/autonomous/tier3/model.rs`
 - Create: `crates/autospec-core/src/autonomous/tier3/evaluate.rs`
 - Create: `crates/autospec-core/src/autonomous/tier3/evidence.rs`
 - Create: `crates/autospec-core/tests/autonomous_tier3.rs`
+- Modify: `crates/autospec-core/tests/autonomous_no_work.rs`
 
 **Consumes:** `FunnelCounts` and strict JSON conventions.
 
@@ -77,6 +83,11 @@ pub const DISABLED_REASON: &str = "tier3_metadata_disabled_by_checked_in_policy"
 pub const TIER3_RANK_LIMIT: u64 = 10;
 ```
 
+Extend the closed no-work `DryReason` set with
+`NoMetadataFindings` / `"no_metadata_findings"`, including codec count arrays,
+strict exact-key parsing, and its focused state round-trip test. This is the
+only dry outcome a complete empty Tier 3 metadata scan may produce.
+
 - [ ] **Step 4: Render opaque canonical documents**
 
 Expose documents only from an evaluated observation or sealed failure. Render
@@ -93,9 +104,12 @@ Expected: PASS.
 
 ```bash
 git add crates/autospec-core/src/lib.rs \
+  crates/autospec-core/src/autonomous/no_work.rs \
+  crates/autospec-core/src/autonomous/no_work/codec.rs \
   crates/autospec-core/src/autonomous/tier3.rs \
   crates/autospec-core/src/autonomous/tier3 \
-  crates/autospec-core/tests/autonomous_tier3.rs
+  crates/autospec-core/tests/autonomous_tier3.rs \
+  crates/autospec-core/tests/autonomous_no_work.rs
 git commit -m "feat: model native Tier 3 metadata evidence"
 ```
 
