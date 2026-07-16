@@ -16,6 +16,7 @@
 - A disabled runner is exactly `NotRun { reason: "tier2_local_discovery_disabled_by_policy" }`; only a sealed `Exhausted` receipt advances the cursor.
 - Persist every Tier 2 artifact before its receipt, persist the receipt before the cursor, and re-verify every reference during replay.
 - A produced candidate is planning evidence only: no issue, label, queue, claim, branch, PR, or implementation action.
+- Strict collection requires a stable local repository snapshot; it rejects symlinks/special files and revalidates selected files after reads before accepting evidence. A detected change is a typed failure, not partial evidence.
 
 ---
 

@@ -83,6 +83,12 @@ that evidence one-way. This prevents a collector-to-autonomous dependency cycle
 while keeping its read-only API reusable. It must not call the `explore` CLI,
 legacy scripts, or a proposal generator/verifier.
 
+V1 requires a stable local repository snapshot while collection runs. With no
+new descriptor-capability dependency, it cannot make a cross-platform atomic
+no-follow open guarantee; it therefore rejects symlinks/special files and
+revalidates selected files after every read before accepting evidence. A
+detected path change is a typed failure, never a partial observation.
+
 ### CLI evidence and state boundary
 
 The CLI owns filesystem persistence and the waterfall lock only. It persists
