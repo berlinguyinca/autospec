@@ -388,9 +388,10 @@ Exit: always 0 (best-effort; never blocks the caller).
 Best-effort idempotent installer for autospec's required and recommended CLI
 deps via a platform fallback chain (brew / apt/dnf/yum/pacman/apk /
 winget/choco/scoop / npm / pipx / uv / pip). Baked-in tool table: `ajv`,
-`bash`, `bats`, `bun`, `claude`, `codex`, `curl`, `gh`, `git`, `jq`,
-`mempalace`, `node`, `npm`, `omc`, `omx`, `oh-my-opencode`, `opencode`,
-`pipx`, `python3`, `uv`, `yq`.
+`bash`, `bats`, `bun`, `cargo`, `claude`, `codex`, `curl`, `gh`, `git`,
+`gitleaks`, `jq`, `license-checker`, `mempalace`, `node`, `npm`, `omc`,
+`omx`, `oh-my-opencode`, `opencode`, `pipx`, `python3`, `rustc`, `semgrep`,
+`trivy`, `uv`, `yq`.
 
 ```
 Usage: bash ensure-tool.sh <tool>

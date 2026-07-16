@@ -143,17 +143,14 @@ Rust CLI command surface.
 
 ## Getting Started Quickstart
 
-Prerequisites:
+The installer ensures the core local commands AutoSpec needs: Bash, Git, curl,
+Cargo/Rust, Python 3, GitHub CLI (`gh`), and `jq`. It also requires at least one
+supported AI coding harness: Claude Code, Codex CLI, or OpenCode. The curl
+one-liner below naturally requires curl in order to fetch the bootstrap script;
+the bootstrap can install Git before cloning AutoSpec.
 
-- Git
-- Bash
-- GitHub CLI (`gh`)
-- `jq`
-- Python 3
-- One supported AI coding harness: Claude Code, Codex CLI, or OpenCode
-
-Optional but useful: `bats`, `ajv`, `yq`, and browser automation tools for deeper
-validation.
+Optional tools such as `bats`, `ajv`, `yq`, Bun, and browser automation remain
+best-effort capabilities. Their absence does not fail the core installation.
 
 Install the latest `main` version on macOS/Linux:
 
@@ -203,6 +200,34 @@ irm https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.ps1 
 ```
 
 From a local checkout:
+
+```bash
+bash install.sh --skill all --harness all
+```
+
+On Linux, missing system packages are installed as root or through `sudo` for
+a non-root user, so installation may request your sudo credentials. macOS uses
+Homebrew when available; Windows bootstrap uses winget, Chocolatey, or Scoop.
+AutoSpec verifies required commands after every install attempt and reports all
+remaining requirements together before exiting non-zero.
+
+To prevent automatic package-manager changes, set
+`AUTOSPEC_SKIP_SYSTEM_TOOLS=1`. This skips installation attempts but still
+verifies required commands:
+
+```bash
+AUTOSPEC_SKIP_SYSTEM_TOOLS=1 bash install.sh --skill all --harness all
+```
+
+To preview bootstrap and installation without writes, package installation, or
+privilege prompts, pass `--dry-run`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh \
+  | bash -s -- --dry-run
+```
+
+After manually installing anything named in the error report, rerun:
 
 ```bash
 bash install.sh --skill all --harness all

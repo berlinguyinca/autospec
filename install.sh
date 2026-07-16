@@ -25,7 +25,7 @@
 #   AUTOSPEC_NO_STAR_PROMPT=1  skip the optional GitHub star prompt.
 #   AUTOSPEC_NO_DB_PROMPT=1  skip the optional autospec-db prompt.
 #   AUTOSPEC_INSTALL_DB=1|0  force install/update or skip the optional autospec-db module.
-#   AUTOSPEC_SKIP_SYSTEM_TOOLS=1  skip best-effort CLI dependency installs.
+#   AUTOSPEC_SKIP_SYSTEM_TOOLS=1  skip CLI dependency install attempts (verification still runs).
 #   AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1  skip peer ecosystem bootstrap.
 #   AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1  skip claude/codex/opencode runtime aliases.
 #
@@ -49,10 +49,16 @@ SUPERPOWERS_REMOTE="${SUPERPOWERS_REMOTE:-https://github.com/obra/superpowers.gi
 SUPERPOWERS_CODEX_SKILLS_DIR="${SUPERPOWERS_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
 SUPERPOWERS_OPENCODE_PLUGIN="${SUPERPOWERS_OPENCODE_PLUGIN:-superpowers@git+https://github.com/obra/superpowers.git}"
 OPENCODE_CONFIG_ROOT="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
-AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-git bash curl jq yq gh node npm bun bats codex claude opencode omx omc oh-my-opencode mempalace ajv}"
+AUTOSPEC_REQUIRED_SYSTEM_TOOLS="${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-git bash curl cargo python3 gh jq}"
+AUTOSPEC_HARNESS_TOOLS="${AUTOSPEC_HARNESS_TOOLS:-codex claude opencode}"
+AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-yq node npm bun bats omx omc oh-my-opencode mempalace ajv}"
 OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"
 OH_MY_OPENCODE_PACKAGE="${OH_MY_OPENCODE_PACKAGE:-oh-my-opencode}"
 OH_MY_CLAUDE_PACKAGE="${OH_MY_CLAUDE_PACKAGE:-oh-my-claude-sisyphus}"
+ENSURE_TOOL_SCRIPT="$REPO_ROOT/skills/autospec-shared/scripts/ensure-tool.sh"
+DEPENDENCIES_PRESENT=""
+DEPENDENCIES_INSTALLED=""
+DEPENDENCIES_OPTIONAL_MISSING=""
 
 # Auto-discover skills from the repo by walking skills/*/install.sh. Earlier
 # this was a hardcoded list, which silently dropped any new skill that didn't
@@ -252,13 +258,14 @@ install_autonomous_operator_commands() {
 }
 
 install_autospec_runtime_binary() {
-    runtime_source="$REPO_ROOT/target/release/autospec"
+    cargo_target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+    runtime_source="$cargo_target_dir/release/autospec"
     runtime_target="$HOME/.autospec/bin/autospec"
     autospec_bin_dir="$HOME/.autospec/bin"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] install_autospec_runtime_binary: cargo build --release -p autospec-cli (from $REPO_ROOT)"
-        info "[dry-run] install_autospec_runtime_binary: install $REPO_ROOT/target/release/autospec -> $HOME/.autospec/bin/autospec"
+        info "[dry-run] install_autospec_runtime_binary: install $runtime_source -> $HOME/.autospec/bin/autospec"
         return 0
     fi
 
@@ -536,23 +543,194 @@ check_codex() {
     return 0
 }
 
-ensure_system_tools() {
-    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" = "1" ]; then
-        info "ensure_system_tools: skipped by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
-        return 0
-    fi
-    ensure_tool="$REPO_ROOT/skills/autospec-shared/scripts/ensure-tool.sh"
-    if [ ! -f "$ensure_tool" ]; then
-        warn "ensure_system_tools: $ensure_tool missing; skipping"
-        return 0
-    fi
-    for tool in $AUTOSPEC_SYSTEM_TOOLS; do
-        if [ "$DRY_RUN" -eq 1 ]; then
-            info "[dry-run] ensure_system_tools: would ensure $tool"
-        else
-            bash "$ensure_tool" "$tool" || true
+record_dependency() {
+    dependency_bucket="$1"
+    dependency_name="$2"
+    case "$dependency_bucket" in
+        DEPENDENCIES_PRESENT) dependency_values="$DEPENDENCIES_PRESENT" ;;
+        DEPENDENCIES_INSTALLED) dependency_values="$DEPENDENCIES_INSTALLED" ;;
+        DEPENDENCIES_OPTIONAL_MISSING) dependency_values="$DEPENDENCIES_OPTIONAL_MISSING" ;;
+        *) err "unknown dependency result bucket: $dependency_bucket"; return 1 ;;
+    esac
+    case " $dependency_values " in
+        *" $dependency_name "*) return 0 ;;
+    esac
+    dependency_values="${dependency_values:+$dependency_values }$dependency_name"
+    case "$dependency_bucket" in
+        DEPENDENCIES_PRESENT) DEPENDENCIES_PRESENT="$dependency_values" ;;
+        DEPENDENCIES_INSTALLED) DEPENDENCIES_INSTALLED="$dependency_values" ;;
+        DEPENDENCIES_OPTIONAL_MISSING) DEPENDENCIES_OPTIONAL_MISSING="$dependency_values" ;;
+    esac
+}
+
+refresh_dependency_path() {
+    windows_path=""
+    windows_shell=""
+    for windows_shell_candidate in powershell.exe pwsh.exe; do
+        if command_present "$windows_shell_candidate"; then
+            windows_shell="$windows_shell_candidate"
+            break
         fi
     done
+    if [ -n "$windows_shell" ] && command_present cygpath; then
+        windows_path="$($windows_shell -NoProfile -NonInteractive -Command \
+            '$machine = [Environment]::GetEnvironmentVariable("Path", "Machine"); $user = [Environment]::GetEnvironmentVariable("Path", "User"); @($machine, $user) -join ";"' \
+            2>/dev/null | tr -d '\r' || true)"
+        if [ -n "$windows_path" ]; then
+            windows_unix_path="$(cygpath --unix --path "$windows_path" 2>/dev/null || true)"
+            if [ -n "$windows_unix_path" ]; then
+                PATH="$PATH:$windows_unix_path"
+            fi
+        fi
+    fi
+    for dependency_bin in "$HOME/.cargo/bin" "$HOME/.autospec/bin"; do
+        [ -d "$dependency_bin" ] || continue
+        case ":$PATH:" in
+            *":$dependency_bin:"*) ;;
+            *) PATH="$dependency_bin:$PATH" ;;
+        esac
+    done
+    export PATH
+    hash -r 2>/dev/null || true
+}
+
+ensure_python3_alias() {
+    command_present python3 && return 0
+    command_present python || return 0
+    python -c 'import sys; raise SystemExit(sys.version_info.major != 3)' >/dev/null 2>&1 || return 0
+
+    python3_alias_dir="$HOME/.autospec/bin"
+    python3_alias="$python3_alias_dir/python3"
+    mkdir -p "$python3_alias_dir"
+    python3_alias_tmp="$(mktemp "$python3_alias_dir/.python3.XXXXXX")"
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'exec python "$@"'
+    } > "$python3_alias_tmp"
+    chmod +x "$python3_alias_tmp"
+    mv "$python3_alias_tmp" "$python3_alias"
+    refresh_dependency_path
+}
+
+attempt_tool_install() {
+    tool="$1"
+    missing_bucket="$2"
+
+    if command_present "$tool"; then
+        record_dependency DEPENDENCIES_PRESENT "$tool"
+        return 0
+    fi
+    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" != "1" ] && [ -f "$ENSURE_TOOL_SCRIPT" ]; then
+        bash "$ENSURE_TOOL_SCRIPT" "$tool" || true
+        refresh_dependency_path
+        if [ "$tool" = "python3" ]; then
+            ensure_python3_alias
+        fi
+    fi
+    if command_present "$tool"; then
+        record_dependency DEPENDENCIES_INSTALLED "$tool"
+    elif [ -n "$missing_bucket" ]; then
+        record_dependency "$missing_bucket" "$tool"
+    fi
+}
+
+report_dependency_install_context() {
+    package_manager=""
+    for candidate in brew apt-get dnf yum pacman apk winget choco scoop; do
+        if command_present "$candidate"; then
+            package_manager="$candidate"
+            break
+        fi
+    done
+    if [ -z "$package_manager" ]; then
+        err "no supported package manager was available (brew/apt-get/dnf/yum/pacman/apk/winget/choco/scoop)"
+        return 0
+    fi
+
+    case "$package_manager" in
+        apt-get|dnf|yum|pacman|apk)
+            if [ "$(id -u 2>/dev/null || printf '1')" != "0" ] && ! command_present sudo; then
+                err "$package_manager needs root privileges, but sudo is unavailable"
+                return 0
+            fi
+            ;;
+    esac
+    err "automatic installation through $package_manager finished, but required commands are still unavailable"
+    err "check package repositories, network access, and privilege prompts above"
+}
+
+verify_required_system_tools() {
+    missing_required=""
+    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
+        if ! command_present "$tool"; then
+            missing_required="${missing_required:+$missing_required }$tool"
+        fi
+    done
+    if [ -z "$missing_required" ]; then
+        return 0
+    fi
+
+    err "required missing: $missing_required"
+    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" = "1" ]; then
+        err "automatic installation was disabled by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
+    elif [ ! -f "$ENSURE_TOOL_SCRIPT" ]; then
+        err "dependency installer is missing: $ENSURE_TOOL_SCRIPT"
+    else
+        report_dependency_install_context
+    fi
+    err "install the missing commands and rerun: bash install.sh --skill $SKILL_ARG --harness $HARNESS_ARG"
+    return 1
+}
+
+ensure_required_system_tools() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] ensure_required_system_tools: would ensure and verify $AUTOSPEC_REQUIRED_SYSTEM_TOOLS"
+        return 0
+    fi
+    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
+        attempt_tool_install "$tool" ""
+    done
+    verify_required_system_tools
+}
+
+ensure_system_tools() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        for tool in $AUTOSPEC_SYSTEM_TOOLS $AUTOSPEC_HARNESS_TOOLS; do
+            info "[dry-run] ensure_system_tools: would ensure $tool"
+        done
+        return 0
+    fi
+    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" = "1" ]; then
+        info "ensure_system_tools: install attempts skipped by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
+    elif [ ! -f "$ENSURE_TOOL_SCRIPT" ]; then
+        warn "ensure_system_tools: $ENSURE_TOOL_SCRIPT missing; recording unavailable optional tools"
+    fi
+    for tool in $AUTOSPEC_SYSTEM_TOOLS $AUTOSPEC_HARNESS_TOOLS; do
+        attempt_tool_install "$tool" DEPENDENCIES_OPTIONAL_MISSING
+    done
+}
+
+verify_harness_tools() {
+    [ "$DRY_RUN" -eq 1 ] && return 0
+    for tool in $AUTOSPEC_HARNESS_TOOLS; do
+        command_present "$tool" && return 0
+    done
+    err "required harness missing: $AUTOSPEC_HARNESS_TOOLS"
+    err "install at least one supported harness and rerun: bash install.sh --skill $SKILL_ARG --harness $HARNESS_ARG"
+    return 1
+}
+
+print_dependency_summary() {
+    info ""
+    info "Dependency summary:"
+    info "  present:          ${DEPENDENCIES_PRESENT:-none}"
+    info "  installed:        ${DEPENDENCIES_INSTALLED:-none}"
+    info "  optional missing: ${DEPENDENCIES_OPTIONAL_MISSING:-none}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "  required missing: not verified (dry-run)"
+    else
+        info "  required missing: none"
+    fi
 }
 
 install_npm_ecosystem_package() {
@@ -1625,12 +1803,14 @@ copy_runtime_subdirs
 copy_runtime_skill_scripts
 copy_schemas
 ensure_autospec_bin_path
+ensure_required_system_tools
 install_autonomous_operator_commands
 install_autospec_runtime_binary
 install_agent_env_commands
 install_agent_env_aliases
 install_scanner_shims
 ensure_system_tools
+verify_harness_tools
 bootstrap_peer_ecosystems
 bootstrap_turbo
 check_codex
@@ -1732,6 +1912,7 @@ $_skill_src_dir/codex/prompt.md|$_codex_dir/prompts/$skill.md"
 done
 
 succeeded=$((total - failures))
+print_dependency_summary
 info ""
 info "Suite install summary: $succeeded/$total pairs OK ($failures failed)"
 
