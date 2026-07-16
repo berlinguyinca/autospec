@@ -19,9 +19,9 @@ pub struct MainHealthConfig {
 impl AutonomousConfig {
     /// Parses the intentionally small repository-owned autonomous schema.
     ///
-    /// This is not a generic YAML parser: only the `main_health` block is
-    /// interpreted. Unrelated top-level policy is ignored so future, separate
-    /// Rust migrations do not make the health admission path reject it.
+    /// This is not a generic YAML parser: only the `main_health` and `tier4`
+    /// blocks are interpreted. Unrelated top-level policy is ignored so future,
+    /// separate Rust migrations do not make either typed policy reject it.
     pub fn parse(source: &str) -> Result<Self, String> {
         let mut config = Self::default();
         let mut in_main_health = false;

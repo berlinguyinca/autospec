@@ -225,6 +225,19 @@ fn reports_the_offending_host_and_path_line() {
     }
 }
 
+#[test]
+fn reports_duplicate_host_at_its_host_field_line() {
+    let error = AutonomousConfig::parse(
+        "tier4:\n  sources:\n    - id: release-feed\n      host: api.example.test\n      path: /v1/releases\n      max_bytes: 65536\n      deadline_millis: 5000\n    - id: docs-index\n      host: api.example.test\n      path: /guide/index\n      max_bytes: 65536\n      deadline_millis: 5000\n",
+    )
+    .expect_err("duplicate source host must fail");
+
+    assert!(
+        error.starts_with("invalid .autospec/autonomous.yml at line 9:"),
+        "duplicate host must report its host line: {error}"
+    );
+}
+
 fn source(id: &str, host: &str) -> String {
     format!(
         "    - id: {id}\n      host: {host}\n      path: /v1/releases\n      max_bytes: 65536\n      deadline_millis: 5000\n"

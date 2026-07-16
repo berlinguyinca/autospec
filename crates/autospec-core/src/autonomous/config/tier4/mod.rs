@@ -179,6 +179,7 @@ fn finalize(
         return Ok(());
     };
     let line = builder.line;
+    let host_line = builder.host_line.unwrap_or(line);
     let descriptor = builder.finish()?;
     if !ids.insert(descriptor.id.clone()) {
         return Err(error(
@@ -188,7 +189,7 @@ fn finalize(
     }
     if !hosts.insert(descriptor.host.clone()) {
         return Err(error(
-            line,
+            host_line,
             &format!("duplicate tier4 source host `{}`", descriptor.host),
         ));
     }
@@ -199,6 +200,7 @@ fn finalize(
 struct DescriptorBuilder {
     id: String,
     host: Option<String>,
+    host_line: Option<usize>,
     path: Option<String>,
     max_bytes: Option<u32>,
     deadline_millis: Option<u32>,
@@ -210,6 +212,7 @@ impl DescriptorBuilder {
         Self {
             id,
             host: None,
+            host_line: None,
             path: None,
             max_bytes: None,
             deadline_millis: None,
@@ -242,6 +245,7 @@ impl DescriptorBuilder {
                     ));
                 }
                 self.host = Some(host);
+                self.host_line = Some(line);
                 Ok(())
             }
             "path" => {
