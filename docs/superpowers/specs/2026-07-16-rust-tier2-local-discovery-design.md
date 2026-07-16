@@ -73,8 +73,11 @@ never reads `AUTOSPEC_SPECIALIST_LLM_STUB_OUTPUT`, and returns selected-root,
 containment, directory, and signal-file failures explicitly. The existing
 cache-backed `scan_specialists` API remains unchanged for compatibility.
 
-The collector records only local observations. It must not call the `explore`
-CLI or legacy scripts and must not import a proposal generator/verifier.
+The collector owns its own `StrictCollectorEvidence` and
+`StrictCollectorError` types in `explore::specialists`; the Tier 2 core consumes
+that evidence one-way. This prevents a collector-to-autonomous dependency cycle
+while keeping its read-only API reusable. It must not call the `explore` CLI,
+legacy scripts, or a proposal generator/verifier.
 
 ### CLI evidence and state boundary
 

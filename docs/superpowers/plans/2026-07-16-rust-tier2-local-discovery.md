@@ -31,7 +31,7 @@
 
 **Consumes:** existing `DetectedDomain` and `FileLineEvidence`.
 
-**Produces:** a public, read-only `collect_strict_domains` API with deterministic local evidence or a typed Tier 2 collector failure. Cache-backed `ScanOptions` and `scan_specialists` retain their current behavior.
+**Produces:** a public, read-only `collect_strict_domains` API with deterministic local evidence or a collector-local typed failure. Cache-backed `ScanOptions` and `scan_specialists` retain their current behavior.
 
 - [ ] **Step 1: Write failing strict-collector tests**
 
@@ -65,9 +65,16 @@ Expose this exact API from `specialists.rs`:
 
 ```rust
 pub struct StrictCollectorOptions { pub repo_dir: PathBuf, pub max_depth: usize }
+pub struct StrictCollectorEvidence {
+    pub schema_version: u64,
+    pub collector_version: String,
+    pub canonical_repo_scope: String,
+    pub domains: Vec<DetectedDomain>,
+}
+pub struct StrictCollectorError { pub code: StrictCollectorErrorCode, pub detail: String }
 pub fn collect_strict_domains(
     options: &StrictCollectorOptions,
-) -> Result<Tier2CollectorEvidence, Tier2Failure>;
+) -> Result<StrictCollectorEvidence, StrictCollectorError>;
 ```
 
 Canonicalize the root, require a directory, reject symlinks, canonicalize selected files/directories before use, retain only root-relative evidence paths, and map read/UTF-8/containment failures to closed collector codes. Use depth three, the existing eight-evidence and 120-character caps, and score-descending/name-ascending sorting. Do not derive `SuggestedSpecialist`.
@@ -102,7 +109,7 @@ Use Lore trailers recording the no-cache/no-environment constraint and focused t
 - Create: `crates/autospec-core/src/autonomous/tier2/evidence.rs`
 - Create: `crates/autospec-core/tests/autonomous_tier2.rs`
 
-**Consumes:** strict collector evidence, `FunnelCounts`, and `IDEATION_CANDIDATE_LIMIT`.
+**Consumes:** `StrictCollectorEvidence`, `FunnelCounts`, and `IDEATION_CANDIDATE_LIMIT`.
 
 **Produces:** `evaluate_tier2(Tier2Input) -> Result<Tier2Evaluation, Tier2Failure>` and canonical in-memory documents.
 
@@ -127,7 +134,7 @@ Expected: FAIL because the Tier 2 module does not exist.
 
 - [ ] **Step 3: Define closed core types**
 
-Add `pub mod tier2;` to the inline autonomous module in `lib.rs`. In `model.rs`, define `Tier2Input`, `Tier2StageResult`, collector/generated/verifier records, proposal/source/severity/complexity, verification, closed stage/failure code, observation, deduplication, ranked proposal, and evaluation.
+Add `pub mod tier2;` to the inline autonomous module in `lib.rs`. In `model.rs`, re-export `StrictCollectorEvidence` as the Tier 2 collector input, then define `Tier2Input`, `Tier2StageResult`, generated/verifier records, proposal/source/severity/complexity, verification, closed stage/failure code, observation, deduplication, ranked proposal, and evaluation.
 
 ```rust
 pub const TIER2_SCHEMA: u64 = 1;
