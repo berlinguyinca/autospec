@@ -1,9 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[path = "support/tier3_authority_guard.rs"]
+mod guard;
 #[path = "support/tier2_authority_matcher.rs"]
 mod matcher;
 
+use guard::assert_no_execution_authority;
 use matcher::{
     code_tokens, contains_path_symbol, contains_qualified_path, has_forbidden_std_module,
     has_module_escape,
@@ -194,6 +197,9 @@ fn authority_matcher_rejects_evasions_but_allows_inert_names() {
     for fixture in [
         "WaterfallStore::acquire(); reqwest::Client::new();",
         "WaterfallStore::acquire(); OtherStore::save();",
+        "WaterfallStore::acquire(); reqwest::get(\"https://example.test\");",
+        "WaterfallStore::acquire(); ureq::get(\"https://example.test\");",
+        "WaterfallStore::acquire(); MetadataRepository::save();",
     ] {
         let fixture = code_without_comments_and_literals(fixture);
         assert!(std::panic::catch_unwind(|| assert_no_execution_authority(
@@ -330,102 +336,6 @@ fn tier3_receipt_verifier_is_read_only_and_keeps_shared_helpers() {
             "Tier 3 receipt verifier retains file mutation authority: {mutation}"
         );
     }
-}
-
-fn assert_no_execution_authority(code: &str, scope: &str, allows_waterfall_store: bool) {
-    for path in [
-        "queue",
-        "claim",
-        "github",
-        "gh",
-        "branch",
-        "worktree",
-        "issue",
-        "label",
-        "pull_request",
-    ] {
-        assert!(
-            !contains_qualified_path(code, path),
-            "{scope} retains {path} module authority"
-        );
-    }
-    for mutation in [
-        "Method::POST",
-        "Method::PATCH",
-        "Method::PUT",
-        "Method::DELETE",
-    ] {
-        assert!(
-            !contains_path_symbol(code, mutation),
-            "{scope} retains HTTP mutation authority: {mutation}"
-        );
-    }
-    for forbidden in [
-        "Command",
-        "bash",
-        "zsh",
-        "run_shell",
-        "curl",
-        "legacy",
-        "ModelClient",
-        "ModelRequest",
-        "run_model",
-        "remote",
-        "foreground",
-        "executor",
-        "mutation",
-        "RemoteIssue",
-        "PullRequest",
-        "ExecutorRequest",
-        "ConductorEvent",
-        "run_foreground",
-        "scan_foreground",
-        "add_label",
-        "remove_label",
-        "create_issue",
-        "edit_issue",
-        "comment_issue",
-        "create_branch",
-    ] {
-        assert!(
-            !contains_code_token(code, forbidden),
-            "{scope} retains prohibited authority: {forbidden}"
-        );
-    }
-    assert!(
-        !contains_path_symbol(code, "git::checkout"),
-        "{scope} retains git checkout authority"
-    );
-    for client in [
-        "reqwest::Client",
-        "ureq::Agent",
-        "hyper::Client",
-        "surf::Client",
-        "isahc::HttpClient",
-        "awc::Client",
-    ] {
-        assert!(
-            !contains_path_symbol(code, client),
-            "{scope} retains external remote-client authority: {client}"
-        );
-    }
-    for facade in ["sqlx::Pool", "sled::Db", "rusqlite::Connection"] {
-        assert!(
-            !contains_path_symbol(code, facade),
-            "{scope} retains external persistence authority: {facade}"
-        );
-    }
-    for token in code_tokens(code) {
-        assert!(
-            token == "WaterfallStore" || !(token.ends_with("Client") || token.ends_with("Store")),
-            "{scope} retains external client or second persistence facade: {token}"
-        );
-    }
-    assert_eq!(
-        contains_code_token(code, "WaterfallStore"),
-        allows_waterfall_store,
-        "{scope} has an invalid WaterfallStore boundary"
-    );
 }
 
 #[test]
