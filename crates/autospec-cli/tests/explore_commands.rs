@@ -225,6 +225,6 @@ fn explore_specialists_empty_proposal_suppresses_fallback() {
 
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json["domains"].as_array().unwrap().len() > 0);
+    assert!(!json["domains"].as_array().unwrap().is_empty());
     assert!(json["suggested_specialists"].as_array().unwrap().is_empty());
 }

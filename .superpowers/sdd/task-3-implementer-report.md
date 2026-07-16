@@ -75,4 +75,4 @@ Passed:
 - `cargo clippy -p autospec-cli --bin autospec -- -D warnings`
 - `git diff --check`
 
-The root checkout does not contain `scripts/validate.sh`; Rust tests, formatting, lint, and diff checks are the available verification surface for this change.
+The root checkout has no legacy validation shell entrypoint; Rust tests, formatting, lint, and diff checks are the available verification surface for this change.
