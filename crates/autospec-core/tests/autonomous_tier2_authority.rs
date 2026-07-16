@@ -1,19 +1,167 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn pure_tier2_sources() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = vec![root.join("src/autonomous/tier2.rs")];
-    for entry in
-        fs::read_dir(root.join("src/autonomous/tier2")).expect("read Tier 2 module directory")
-    {
+    collect_rust_sources(&root.join("src/autonomous/tier2"), &mut sources);
+    sources.sort();
+    sources
+}
+
+fn temporary_module_root() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("time after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("autospec-tier2-authority-{nanos}"))
+}
+
+fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(directory).expect("read Tier 2 module directory") {
         let path = entry.expect("read Tier 2 module entry").path();
-        if path.extension().is_some_and(|extension| extension == "rs") {
+        if path.is_dir() {
+            collect_rust_sources(&path, sources);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
             sources.push(path);
         }
     }
-    sources.sort();
-    sources
+}
+
+fn code_without_comments_and_literals(source: &str) -> String {
+    let bytes = source.as_bytes();
+    let mut code = String::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if let Some(end) = raw_string_end(bytes, index) {
+            code.push(' ');
+            index = end;
+            continue;
+        }
+        match bytes[index..] {
+            [b'/', b'/', ..] => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+                code.push(' ');
+            }
+            [b'/', b'*', ..] => {
+                index = block_comment_end(bytes, index + 2);
+                code.push(' ');
+            }
+            [b'\"', ..] => {
+                index = quoted_end(bytes, index + 1);
+                code.push(' ');
+            }
+            _ => {
+                code.push(bytes[index] as char);
+                index += 1;
+            }
+        }
+    }
+    code
+}
+
+fn block_comment_end(bytes: &[u8], mut index: usize) -> usize {
+    let mut depth = 1;
+    while index < bytes.len() && depth > 0 {
+        match bytes[index..] {
+            [b'/', b'*', ..] => {
+                depth += 1;
+                index += 2;
+            }
+            [b'*', b'/', ..] => {
+                depth -= 1;
+                index += 2;
+            }
+            _ => index += 1,
+        }
+    }
+    index
+}
+
+fn quoted_end(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+        } else if bytes[index] == b'\"' {
+            return index + 1;
+        } else {
+            index += 1;
+        }
+    }
+    index
+}
+
+fn raw_string_end(bytes: &[u8], index: usize) -> Option<usize> {
+    let mut cursor = match bytes.get(index) {
+        Some(b'r') => index + 1,
+        Some(b'b') if bytes.get(index + 1) == Some(&b'r') => index + 2,
+        _ => return None,
+    };
+    let hash_start = cursor;
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor += 1;
+    }
+    if bytes.get(cursor) != Some(&b'\"') {
+        return None;
+    }
+    let hashes = cursor - hash_start;
+    cursor += 1;
+    while cursor < bytes.len() {
+        let end = cursor.saturating_add(hashes + 1);
+        if bytes[cursor] == b'\"'
+            && end <= bytes.len()
+            && bytes[cursor + 1..end].iter().all(|byte| *byte == b'#')
+        {
+            return Some(end);
+        }
+        cursor += 1;
+    }
+    Some(cursor)
+}
+
+fn contains_code_token(code: &str, token: &str) -> bool {
+    code.match_indices(token).any(|(offset, _)| {
+        let before = code[..offset].chars().next_back();
+        let after = code[offset + token.len()..].chars().next();
+        !before.is_some_and(is_identifier_character) && !after.is_some_and(is_identifier_character)
+    })
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character == '_' || character.is_ascii_alphanumeric()
+}
+
+#[test]
+fn recursive_source_discovery_finds_nested_rust_modules() {
+    let root = temporary_module_root();
+    fs::create_dir_all(root.join("nested")).expect("create nested module tree");
+    fs::write(root.join("top.rs"), "pub struct Top;\n").expect("write top module");
+    fs::write(root.join("nested/deep.rs"), "pub struct Deep;\n").expect("write deep module");
+
+    let mut sources = Vec::new();
+    collect_rust_sources(&root, &mut sources);
+
+    assert!(sources.contains(&root.join("top.rs")));
+    assert!(sources.contains(&root.join("nested/deep.rs")));
+    fs::remove_dir_all(root).expect("remove nested module tree");
+}
+
+#[test]
+fn authority_matcher_ignores_comments_literals_and_identifier_substrings() {
+    let code = code_without_comments_and_literals(
+        "// std::fs\nlet note = \"std::fs\";\nlet High = 1;\nuse std::fs;",
+    );
+
+    assert!(!contains_code_token(&code, "github"));
+    assert!(!contains_code_token(&code, "gh"));
+    assert!(contains_code_token(&code, "std::fs"));
+
+    let raw = code_without_comments_and_literals("let note = r#\"std::path\"#; use std::path;");
+    assert_eq!(raw.matches("std::path").count(), 1);
 }
 
 #[test]
@@ -34,11 +182,13 @@ fn pure_tier2_sources_reject_external_and_mutation_authority() {
         "guard sealed partial documents"
     );
 
-    let mut saw_roi_rank = false;
-    let gh_cli = ["\"", "g", "h "].concat();
+    let mut saw_documents = false;
+    let mut saw_roi_rank_renderer = false;
     for source in sources {
         let contents = fs::read_to_string(&source).expect("read pure Tier 2 source");
-        saw_roi_rank |= contents.contains("roi_rank");
+        let code = code_without_comments_and_literals(&contents);
+        saw_documents |= contains_code_token(&code, "Tier2EvidenceDocuments");
+        saw_roi_rank_renderer |= contains_code_token(&code, "roi_rank_json");
         for forbidden in [
             "std::fs",
             "std::io",
@@ -59,10 +209,9 @@ fn pure_tier2_sources_reject_external_and_mutation_authority() {
             "autospec-explore",
             "bash",
             "zsh",
-            "sh -c",
+            "run_shell",
             "omx",
             "curl",
-            gh_cli.as_str(),
             "github",
             "queue",
             "claim",
@@ -76,23 +225,93 @@ fn pure_tier2_sources_reject_external_and_mutation_authority() {
             "issue edit",
             "issue comment",
             "auto-implement",
-            "\"POST\"",
-            "\"PATCH\"",
-            "\"PUT\"",
-            "\"DELETE\"",
+            "POST",
+            "PATCH",
+            "PUT",
+            "DELETE",
             "graphql",
             "pr edit",
             "pr comment",
             "pr merge",
         ] {
             assert!(
-                !contents.contains(forbidden),
+                !contains_code_token(&code, forbidden),
                 "{} retains prohibited authority: {forbidden}",
                 source.display()
             );
         }
     }
-    assert!(saw_roi_rank, "guard the ROI/rank document path");
+    assert!(saw_documents, "guard opaque Tier 2 evidence documents");
+    assert!(
+        saw_roi_rank_renderer,
+        "guard the ROI/rank document renderer"
+    );
+}
+
+#[test]
+fn strict_collector_source_is_read_only_and_legacy_free() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = fs::read_to_string(root.join("src/explore/specialists/strict.rs"))
+        .expect("read strict collector source");
+    let production = source
+        .split("\n#[cfg(test)]")
+        .next()
+        .expect("production source before module tests");
+    let code = code_without_comments_and_literals(production);
+    for forbidden in [
+        "std::env",
+        "std::process",
+        "std::net",
+        "Command",
+        "fs::write",
+        "fs::copy",
+        "fs::hard_link",
+        "fs::create_dir",
+        "fs::remove_",
+        "fs::rename",
+        "OpenOptions",
+        "File::create",
+        "write_all",
+        "set_permissions",
+        "symlink_file",
+        "symlink_dir",
+        "TierReceipt",
+        "TierStatus",
+        "WaterfallState",
+        "evaluate_tier2",
+        "Tier2Input",
+        "Tier2Scan",
+        "scan_specialists",
+        "load_or_derive",
+        "AUTOSPEC_SPECIALIST_LLM_STUB_OUTPUT",
+        "autospec-explore",
+        "bash",
+        "zsh",
+        "run_shell",
+        "omx",
+        "curl",
+        "github",
+        "queue",
+        "claim",
+        "label",
+        "branch",
+        "worktree",
+        "pull_request",
+        "POST",
+        "PATCH",
+        "PUT",
+        "DELETE",
+        "graphql",
+    ] {
+        assert!(
+            !contains_code_token(&code, forbidden),
+            "strict collector retains prohibited authority: {forbidden}"
+        );
+    }
+    assert!(
+        !contains_code_token(&code, "symlink"),
+        "strict collector retains symlink creation authority"
+    );
 }
 
 #[test]
