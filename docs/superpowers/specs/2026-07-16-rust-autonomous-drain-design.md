@@ -51,10 +51,11 @@ external-only progress yields `WarnExternalProgress`; a completed child yields
 
 `autospec-cli` owns the adapters. It starts the fixed `omx` integration with
 `Command`, drains child stdout/stderr on reader threads, samples the same
-repository-scoped heartbeat layouts already used by `timeline`, and snapshots
-GitHub only when a local timeout would otherwise occur. A changed snapshot
-resets the timer and emits a warning. Before termination it performs a final
-`try_wait`; a completed child returns its real exit status without a kill.
+repository-scoped heartbeat layouts already used by `timeline`, and records one
+GitHub baseline before polling. It re-snapshots GitHub only when a local timeout
+would otherwise occur. A changed snapshot resets the timer and emits a warning.
+Before termination it performs a final `try_wait`; a completed child returns its
+real exit status without a kill.
 
 The command writes `drain-observation.json` under the repository's existing
 autonomous operator directory. The record contains schema version, timestamp,

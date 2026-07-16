@@ -1,0 +1,346 @@
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root")
+}
+
+#[test]
+fn rust_drain_source_does_not_restore_shell_or_legacy_drain_authority() {
+    let source = fs::read_to_string(
+        workspace_root().join("crates/autospec-cli/src/commands/autonomous/drain.rs"),
+    )
+    .expect("read drain command source");
+
+    for forbidden in [
+        "Command::new(\"sh\")",
+        "Command::new(\"bash\")",
+        "autospec-autonomous-run-drain.sh",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "drain command retains legacy authority: {forbidden}"
+        );
+    }
+}
+
+#[test]
+fn quiet_child_with_heartbeat_progress_completes_without_termination() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+heartbeat_dir="$AUTOSPEC_PROCESS_HEARTBEAT_DIR/owner__repo"
+mkdir -p "$heartbeat_dir"
+sleep 1
+printf '{"step":"validation"}\n' > "$heartbeat_dir/42.json"
+sleep 1
+printf '{"step":"merge"}\n' > "$heartbeat_dir/42.json"
+sleep 1
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture.run(&bin, &["--stall-secs", "1", "--poll-secs", "1", "--json"]);
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(stdout(&output).contains("quiet_stdout_external_progress"));
+    assert!(fixture.drain_observation_path().exists());
+    assert!(fs::read_to_string(fixture.drain_observation_path())
+        .expect("read drain observation")
+        .contains("heartbeat"));
+}
+
+#[test]
+fn json_drain_keeps_child_output_out_of_structured_stdout() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(&bin.join("omx"), "#!/bin/sh\nprintf 'agent output\\n'\n");
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture.run(&bin, &["--json"]);
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(!stdout(&output).contains("agent output"));
+    assert!(stderr(&output).contains("agent output"));
+    assert!(stdout(&output).contains("\"decision\":\"complete\""));
+}
+
+#[test]
+fn quiet_child_with_github_progress_warns_and_completes() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let gh_counter = fixture.root.join("gh-counter");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(&bin.join("omx"), "#!/bin/sh\nsleep 3\n");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+if [ -f "$AUTOSPEC_TEST_GH_COUNTER" ]; then
+  printf '[{"number":42,"updatedAt":"2026-07-16T00:00:01Z"}]\n'
+else
+  : > "$AUTOSPEC_TEST_GH_COUNTER"
+  printf '[{"number":42,"updatedAt":"2026-07-16T00:00:00Z"}]\n'
+fi
+"#,
+    );
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "2", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_GH_COUNTER", gh_counter)
+        .output()
+        .expect("run drain with github progress");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(stdout(&output).contains("quiet_stdout_external_progress"));
+    assert!(fs::read_to_string(fixture.drain_observation_path())
+        .expect("read drain observation")
+        .contains("github"));
+}
+
+#[test]
+fn recovered_github_baseline_is_not_false_progress() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let gh_counter = fixture.root.join("gh-counter");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(&bin.join("omx"), "#!/bin/sh\nexec sleep 30\n");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+counter="$AUTOSPEC_TEST_GH_COUNTER"
+count=0
+if [ -f "$counter" ]; then
+  count=$(cat "$counter")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter"
+if [ "$count" -eq 1 ]; then
+  exit 1
+fi
+printf '[]\n'
+"#,
+    );
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_GH_COUNTER", gh_counter)
+        .output()
+        .expect("run drain after a failed github baseline");
+
+    assert_eq!(
+        output.status.code(),
+        Some(124),
+        "stderr={}",
+        stderr(&output)
+    );
+    assert!(!stdout(&output).contains("quiet_stdout_external_progress"));
+    assert!(stdout(&output).contains("terminate_stalled"));
+}
+
+#[test]
+fn silent_live_child_is_terminated_after_the_stall_window() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let child_pid = fixture.root.join("child-pid");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+printf '%s\n' "$$" > "$AUTOSPEC_TEST_CHILD_PID"
+exec sleep 30
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_CHILD_PID", &child_pid)
+        .output()
+        .expect("run stalled drain");
+
+    assert_eq!(
+        output.status.code(),
+        Some(124),
+        "stderr={}",
+        stderr(&output)
+    );
+    let pid = fs::read_to_string(&child_pid).expect("read stalled child pid");
+    assert!(
+        !Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("inspect stalled child")
+            .success(),
+        "the stalled child must no longer be alive"
+    );
+    assert!(stdout(&output).contains("terminate_stalled"));
+}
+
+#[test]
+fn child_exit_during_final_reconciliation_wins_over_termination() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let gh_counter = fixture.root.join("gh-counter");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(&bin.join("omx"), "#!/bin/sh\nsleep 2\n");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+counter="$AUTOSPEC_TEST_GH_COUNTER"
+count=0
+if [ -f "$counter" ]; then
+  count=$(cat "$counter")
+fi
+count=$((count + 1))
+printf '%s\n' "$count" > "$counter"
+if [ "$count" -gt 2 ]; then
+  sleep 1
+fi
+printf '[]\n'
+"#,
+    );
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_GH_COUNTER", gh_counter)
+        .output()
+        .expect("run drain with child exit during reconciliation");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(stdout(&output).contains("\"decision\":\"complete\""));
+}
+
+struct DrainFixture {
+    root: PathBuf,
+    repo_dir: PathBuf,
+    operator_root: PathBuf,
+    heartbeat_root: PathBuf,
+}
+
+impl DrainFixture {
+    fn new() -> Self {
+        let sequence = FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "autospec-drain-test-{}-{}-{}",
+            std::process::id(),
+            now_millis(),
+            sequence
+        ));
+        let repo_dir = root.join("repo");
+        fs::create_dir_all(&repo_dir).expect("create fixture repository");
+        let fixture = Self {
+            operator_root: root.join("operator"),
+            heartbeat_root: root.join("heartbeats"),
+            root,
+            repo_dir,
+        };
+        fixture.initialize_git_remote();
+        fixture
+    }
+
+    fn command(&self, bin: &Path) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_autospec"));
+        command
+            .args(["autonomous", "drain", "--repo", "owner/repo", "--repo-dir"])
+            .arg(&self.repo_dir)
+            .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator_root)
+            .env("AUTOSPEC_PROCESS_HEARTBEAT_DIR", &self.heartbeat_root)
+            .env("HOME", &self.root)
+            .env("PATH", path_with(bin));
+        command
+    }
+
+    fn run(&self, bin: &Path, args: &[&str]) -> Output {
+        self.command(bin)
+            .args(args)
+            .output()
+            .expect("run autonomous drain")
+    }
+
+    fn drain_observation_path(&self) -> PathBuf {
+        self.operator_root
+            .join("owner_repo")
+            .join("drain-observation.json")
+    }
+
+    fn initialize_git_remote(&self) {
+        let init = Command::new("git")
+            .args([
+                "init",
+                "-q",
+                self.repo_dir.to_str().expect("repo directory"),
+            ])
+            .output()
+            .expect("initialize fixture repository");
+        assert!(init.status.success());
+        let remote = Command::new("git")
+            .args([
+                "-C",
+                self.repo_dir.to_str().expect("repo directory"),
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owner/repo.git",
+            ])
+            .output()
+            .expect("set fixture remote");
+        assert!(remote.status.success());
+    }
+}
+
+impl Drop for DrainFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn now_millis() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("current time")
+        .as_millis()
+}
+
+fn write_executable(path: &Path, contents: &str) {
+    fs::write(path, contents).expect("write fake executable");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("make fake executable");
+}
+
+fn path_with(bin: &Path) -> String {
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").expect("PATH is set")
+    )
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}

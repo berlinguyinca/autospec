@@ -24,6 +24,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{claim, queue, CommandFailure};
 
+mod drain;
 mod resilience;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
@@ -38,6 +39,8 @@ struct Options {
     repo_dir: String,
     pid: String,
     interval_sec: u64,
+    drain_stall_secs: u64,
+    drain_poll_secs: u64,
     lines: usize,
     iterations: u64,
     all: bool,
@@ -65,6 +68,8 @@ impl Default for Options {
             repo_dir: ".".to_string(),
             pid: String::new(),
             interval_sec: 300,
+            drain_stall_secs: 1_800,
+            drain_poll_secs: 15,
             lines: 50,
             iterations: 0,
             all: false,
@@ -133,6 +138,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         "timeline" => timeline(options).map_err(CommandFailure::diagnostic),
         "cleanup" => cleanup(options).map_err(CommandFailure::diagnostic),
         "main-health" => main_health(options).map_err(CommandFailure::diagnostic),
+        "drain" => drain::run(options),
         other => Err(CommandFailure::diagnostic(format!(
             "unknown autospec autonomous subcommand: {other}"
         ))),
@@ -192,6 +198,20 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 options.interval_sec = raw
                     .parse::<u64>()
                     .map_err(|_| format!("invalid --poll-interval-sec value: {raw}"))?;
+            }
+            "--stall-secs" => {
+                index += 1;
+                let raw = args
+                    .get(index)
+                    .ok_or_else(|| "--stall-secs requires a value".to_string())?;
+                options.drain_stall_secs = parse_positive_duration(raw, "--stall-secs")?;
+            }
+            "--poll-secs" => {
+                index += 1;
+                let raw = args
+                    .get(index)
+                    .ok_or_else(|| "--poll-secs requires a value".to_string())?;
+                options.drain_poll_secs = parse_positive_duration(raw, "--poll-secs")?;
             }
             "--max-cycles" => {
                 index += 1;
@@ -280,6 +300,14 @@ fn parse_lifetime_budget(value: &str, flag: &str) -> Result<u64, String> {
     value
         .parse::<u64>()
         .map_err(|_| format!("{flag} must be a non-negative integer"))
+}
+
+fn parse_positive_duration(value: &str, flag: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .ok_or_else(|| format!("{flag} must be a positive integer"))
 }
 
 fn lifecycle(args: &[String]) -> Result<(), CommandFailure> {

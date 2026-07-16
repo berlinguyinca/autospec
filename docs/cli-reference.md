@@ -26,6 +26,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
 | `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
 | `autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]` | yes | reads resilient admission state without migration; atomic lifecycle ownership writes only canonical `owner__repo` state and starts no shell process |
+| `autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]` | yes | directly supervises the fixed `omx exec ... $autospec-run` child, preserving local/external progress and terminating only a genuinely stalled live child |
 | `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR` | no | adopts its fenced native-child token or atomically acquires one before lifecycle, health, queue, claim, or foreground mutation; it launches no implementation agent |
 | `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `omx` effects |
 | `autospec autonomous executor-result --repo OWNER/REPO --issue N [--worker-id ID --branch NAME --outcome succeeded\|blocked\|retryable ...]` | yes | records either the exact legacy deferred receipt or one strictly validated executor outcome; it never launches work, releases a claim, or merges a PR |
@@ -100,6 +101,18 @@ mutation. Explicit executor-result ingestion is described below. Neither form la
 implementation agent, invokes a shell, script, `omx`, or `/autospec-run`, releases a claim, or
 merges a PR. Detached `autonomous start` and `restart` likewise launch this foreground command as
 a direct Rust child; monitor and supervisor are separate compatibility companions.
+
+`autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]
+[--json]` is the Rust Tier-1 watchdog for the fixed direct `omx exec ... $autospec-run` child.
+It forwards child output, resets the stall window when output, progress artifacts, scoped
+heartbeats, or the timeout-boundary GitHub snapshot advances, and returns the child’s actual exit
+status if it completes. External-only progress emits one
+`quiet_stdout_external_progress` warning; a genuinely silent, live child emits a
+`terminate_stalled` decision and exits `124`. Each decision is atomically recorded as
+`drain-observation.json` in the repository’s autonomous-operator scope, without raw output or
+lease tokens. The command uses direct `omx`, `gh`, and process arguments—never a shell or a
+legacy drain fallback. Existing shell launcher wiring is intentionally a separate #2076 deletion
+child; it must redirect to this command rather than reimplement this watchdog.
 
 `autospec autonomous resilience --help` describes the one supported action and its canonical
 write slug, `owner__repo`. `resilience decide` reads state, per-issue failure, and spend records
