@@ -545,11 +545,21 @@ check_codex() {
 record_dependency() {
     dependency_bucket="$1"
     dependency_name="$2"
-    eval "dependency_values=\${$dependency_bucket:-}"
+    case "$dependency_bucket" in
+        DEPENDENCIES_PRESENT) dependency_values="$DEPENDENCIES_PRESENT" ;;
+        DEPENDENCIES_INSTALLED) dependency_values="$DEPENDENCIES_INSTALLED" ;;
+        DEPENDENCIES_OPTIONAL_MISSING) dependency_values="$DEPENDENCIES_OPTIONAL_MISSING" ;;
+        *) err "unknown dependency result bucket: $dependency_bucket"; return 1 ;;
+    esac
     case " $dependency_values " in
         *" $dependency_name "*) return 0 ;;
     esac
-    eval "$dependency_bucket=\"\${dependency_values:+\$dependency_values }$dependency_name\""
+    dependency_values="${dependency_values:+$dependency_values }$dependency_name"
+    case "$dependency_bucket" in
+        DEPENDENCIES_PRESENT) DEPENDENCIES_PRESENT="$dependency_values" ;;
+        DEPENDENCIES_INSTALLED) DEPENDENCIES_INSTALLED="$dependency_values" ;;
+        DEPENDENCIES_OPTIONAL_MISSING) DEPENDENCIES_OPTIONAL_MISSING="$dependency_values" ;;
+    esac
 }
 
 refresh_dependency_path() {
@@ -583,6 +593,31 @@ attempt_tool_install() {
     fi
 }
 
+report_dependency_install_context() {
+    package_manager=""
+    for candidate in brew apt-get dnf yum pacman apk winget choco scoop; do
+        if command_present "$candidate"; then
+            package_manager="$candidate"
+            break
+        fi
+    done
+    if [ -z "$package_manager" ]; then
+        err "no supported package manager was available (brew/apt-get/dnf/yum/pacman/apk/winget/choco/scoop)"
+        return 0
+    fi
+
+    case "$package_manager" in
+        apt-get|dnf|yum|pacman|apk)
+            if [ "$(id -u 2>/dev/null || printf '1')" != "0" ] && ! command_present sudo; then
+                err "$package_manager needs root privileges, but sudo is unavailable"
+                return 0
+            fi
+            ;;
+    esac
+    err "automatic installation through $package_manager finished, but required commands are still unavailable"
+    err "check package repositories, network access, and privilege prompts above"
+}
+
 verify_required_system_tools() {
     missing_required=""
     for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
@@ -599,6 +634,8 @@ verify_required_system_tools() {
         err "automatic installation was disabled by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
     elif [ ! -f "$ENSURE_TOOL_SCRIPT" ]; then
         err "dependency installer is missing: $ENSURE_TOOL_SCRIPT"
+    else
+        report_dependency_install_context
     fi
     err "install the missing commands and rerun: bash install.sh --skill $SKILL_ARG --harness $HARNESS_ARG"
     return 1
@@ -617,7 +654,7 @@ ensure_required_system_tools() {
 
 ensure_system_tools() {
     if [ "$DRY_RUN" -eq 1 ]; then
-        for tool in $AUTOSPEC_HARNESS_TOOLS $AUTOSPEC_SYSTEM_TOOLS; do
+        for tool in $AUTOSPEC_SYSTEM_TOOLS $AUTOSPEC_HARNESS_TOOLS; do
             info "[dry-run] ensure_system_tools: would ensure $tool"
         done
         return 0
@@ -627,7 +664,7 @@ ensure_system_tools() {
     elif [ ! -f "$ENSURE_TOOL_SCRIPT" ]; then
         warn "ensure_system_tools: $ENSURE_TOOL_SCRIPT missing; recording unavailable optional tools"
     fi
-    for tool in $AUTOSPEC_HARNESS_TOOLS $AUTOSPEC_SYSTEM_TOOLS; do
+    for tool in $AUTOSPEC_SYSTEM_TOOLS $AUTOSPEC_HARNESS_TOOLS; do
         attempt_tool_install "$tool" DEPENDENCIES_OPTIONAL_MISSING
     done
 }
@@ -648,7 +685,11 @@ print_dependency_summary() {
     info "  present:          ${DEPENDENCIES_PRESENT:-none}"
     info "  installed:        ${DEPENDENCIES_INSTALLED:-none}"
     info "  optional missing: ${DEPENDENCIES_OPTIONAL_MISSING:-none}"
-    info "  required missing: none"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "  required missing: not verified (dry-run)"
+    else
+        info "  required missing: none"
+    fi
 }
 
 install_npm_ecosystem_package() {

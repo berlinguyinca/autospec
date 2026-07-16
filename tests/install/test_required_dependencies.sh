@@ -10,6 +10,11 @@ ORIGINAL_PATH="$PATH"
 failures=0
 
 cleanup() {
+    if [ -f "$TMP_DIR/runtime-backup" ]; then
+        cp "$TMP_DIR/runtime-backup" "$ROOT/target/release/autospec"
+    elif [ "${CREATED_RUNTIME:-0}" = "1" ]; then
+        rm -f "$ROOT/target/release/autospec"
+    fi
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT INT TERM
@@ -30,7 +35,7 @@ for command_dir in $ORIGINAL_PATH; do
         [ -e "$command_path" ] || continue
         command_name="$(basename "$command_path")"
         case "$command_name" in
-            git|curl|cargo|python3|gh|jq|codex|claude|opencode) continue ;;
+            git|curl|cargo|python3|gh|jq|codex|claude|opencode|brew|apt-get|dnf|yum|pacman|apk|winget|choco|scoop|sudo) continue ;;
         esac
         [ -e "$ISOLATED_BIN/$command_name" ] && continue
         ln -s "$command_path" "$ISOLATED_BIN/$command_name" 2>/dev/null || true
@@ -45,6 +50,15 @@ build_line=$(printf '%s\n' "$dry_output" | grep -n 'install_autospec_runtime_bin
 if [ -z "$required_line" ] || [ -z "$build_line" ] || [ "$required_line" -ge "$build_line" ]; then
     fail "required tools were not ensured before cargo build"
 fi
+node_line=$(printf '%s\n' "$dry_output" | grep -n 'ensure_system_tools: would ensure node' | head -1 | cut -d: -f1 || true)
+codex_line=$(printf '%s\n' "$dry_output" | grep -n 'ensure_system_tools: would ensure codex' | head -1 | cut -d: -f1 || true)
+if [ -z "$node_line" ] || [ -z "$codex_line" ] || [ "$node_line" -ge "$codex_line" ]; then
+    fail "Node/npm were not ensured before npm-based harness CLIs"
+fi
+case "$dry_output" in
+    *"required missing: not verified (dry-run)"*) ;;
+    *) fail "dry-run reported an unverified required-dependency success" ;;
+esac
 
 set +e
 missing_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
@@ -74,6 +88,46 @@ case "$missing_output" in
     *"install_autospec_runtime_binary: building"*) fail "cargo build ran after required verification failed" ;;
 esac
 
+set +e
+no_manager_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
+    AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
+    AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1 \
+    AUTOSPEC_NO_DB_PROMPT=1 \
+    AUTOSPEC_NO_STAR_PROMPT=1 \
+    bash "$ROOT/install.sh" --skill autospec --harness codex 2>&1)
+no_manager_status=$?
+set -e
+if [ "$no_manager_status" -eq 0 ]; then
+    fail "installation succeeded without required tools or a package manager"
+fi
+case "$no_manager_output" in
+    *"no supported package manager was available"*) ;;
+    *) fail "required failure did not explain the missing package-manager path" ;;
+esac
+
+cat > "$ISOLATED_BIN/apt-get" <<'SHIM'
+#!/usr/bin/env bash
+exit 1
+SHIM
+chmod +x "$ISOLATED_BIN/apt-get"
+set +e
+no_sudo_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
+    AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
+    AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1 \
+    AUTOSPEC_NO_DB_PROMPT=1 \
+    AUTOSPEC_NO_STAR_PROMPT=1 \
+    bash "$ROOT/install.sh" --skill autospec --harness codex 2>&1)
+no_sudo_status=$?
+set -e
+rm -f "$ISOLATED_BIN/apt-get"
+if [ "$no_sudo_status" -eq 0 ]; then
+    fail "installation succeeded when system packages needed unavailable sudo"
+fi
+case "$no_sudo_output" in
+    *"apt-get needs root privileges, but sudo is unavailable"*) ;;
+    *) fail "required failure did not explain the unavailable sudo path" ;;
+esac
+
 # Make every core command available while keeping all harnesses absent. Real
 # Cargo exercises the actual build boundary; all network-facing commands are
 # inert local shims.
@@ -81,13 +135,26 @@ for tool in git curl python3 gh jq; do
     printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/$tool"
     chmod +x "$ISOLATED_BIN/$tool"
 done
-ln -s "$(command -v cargo)" "$ISOLATED_BIN/cargo"
+if [ -f "$ROOT/target/release/autospec" ]; then
+    cp "$ROOT/target/release/autospec" "$TMP_DIR/runtime-backup"
+else
+    CREATED_RUNTIME=1
+fi
+cat > "$ISOLATED_BIN/cargo" <<SHIM
+#!/usr/bin/env bash
+mkdir -p "$ROOT/target/release"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ROOT/target/release/autospec"
+chmod +x "$ROOT/target/release/autospec"
+exit 0
+SHIM
+chmod +x "$ISOLATED_BIN/cargo"
+EVAL_MARKER="$TMP_DIR/eval-marker"
+MALICIOUS_TOOL="\$(touch\${IFS}$EVAL_MARKER)"
 
 set +e
 harness_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
-    CARGO_HOME="${CARGO_HOME:-$ORIGINAL_HOME/.cargo}" \
-    RUSTUP_HOME="${RUSTUP_HOME:-$ORIGINAL_HOME/.rustup}" \
     AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
+    AUTOSPEC_SYSTEM_TOOLS="$MALICIOUS_TOOL" \
     AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
     AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1 \
     AUTOSPEC_NO_DB_PROMPT=1 \
@@ -102,6 +169,33 @@ fi
 case "$harness_output" in
     *"required harness missing: codex claude opencode"*) ;;
     *) fail "harness failure did not list the required harness alternatives" ;;
+esac
+if [ -e "$EVAL_MARKER" ]; then
+    fail "dependency names from environment overrides were evaluated as shell code"
+fi
+
+cat > "$ISOLATED_BIN/codex" <<'SHIM'
+#!/usr/bin/env bash
+exit 0
+SHIM
+chmod +x "$ISOLATED_BIN/codex"
+set +e
+success_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
+    AUTOSPEC_SKIP_SYSTEM_TOOLS=1 \
+    AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
+    AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1 \
+    AUTOSPEC_NO_DB_PROMPT=1 \
+    AUTOSPEC_NO_STAR_PROMPT=1 \
+    TURBO_REPO_DIR="$TMP_DIR/turbo" \
+    bash "$ROOT/install.sh" --skill autospec --harness codex 2>&1)
+success_status=$?
+set -e
+if [ "$success_status" -ne 0 ]; then
+    fail "installation failed with all core commands and Codex available"
+fi
+case "$success_output" in
+    *"required missing: none"*) ;;
+    *) fail "successful install omitted the verified dependency summary" ;;
 esac
 
 if [ "$failures" -ne 0 ]; then

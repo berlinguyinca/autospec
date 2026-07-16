@@ -184,6 +184,29 @@ run_ensure_isolated() {
   ! grep -q '^sudo ' "$LOG"
 }
 
+@test "cargo absent + winget installs Rustup" {
+  mk_installer winget
+  run_ensure_isolated cargo
+  [ "$status" -eq 0 ]
+  grep -q "winget install --id Rustlang.Rustup" "$LOG"
+}
+
+@test "python3 absent + winget installs Python" {
+  mk_installer winget
+  run_ensure_isolated python3
+  [ "$status" -eq 0 ]
+  grep -q "winget install --id Python.Python.3.12" "$LOG"
+}
+
+@test "cargo absent + apt + non-root without sudo leaves failure to strict verifier" {
+  mk_id 1000
+  mk_installer apt-get 1
+  run_ensure_isolated cargo
+  [ "$status" -eq 0 ]
+  grep -q "apt-get install -y cargo rustc" "$LOG"
+  ! grep -q '^sudo ' "$LOG"
+}
+
 @test "yq absent + brew available → installs via brew" {
   mk_installer brew
   run_ensure_isolated yq

@@ -59,7 +59,7 @@ chmod +x "$BIN/id" "$BIN/sudo" "$BIN/apt-get" "$AUTOSPEC_HOME/repo/install.sh"
 
 set +e
 output=$(HOME="$TEST_HOME" PATH="$BIN:$CORE" AUTOSPEC_HOME="$AUTOSPEC_HOME" \
-    bash "$ROOT/bootstrap.sh" --dry-run 2>&1)
+    bash "$ROOT/bootstrap.sh" --update 2>&1)
 status=$?
 set -e
 
@@ -72,12 +72,53 @@ if [ ! -f "$LOG" ]; then
 else
     grep -q '^sudo apt-get install -y git$' "$LOG" \
         || fail "bootstrap did not install Git through sudo and APT"
-    grep -q '^install --dry-run$' "$LOG" \
+    grep -q '^install --update$' "$LOG" \
         || fail "bootstrap did not forward installer arguments"
 fi
 case "$output" in
     *"git not found; attempting installation"*) ;;
     *) fail "bootstrap did not report the Git installation attempt" ;;
+esac
+
+rm -f "$BIN/git" "$LOG"
+set +e
+dry_output=$(HOME="$TEST_HOME" PATH="$BIN:$CORE" AUTOSPEC_HOME="$AUTOSPEC_HOME" \
+    bash "$ROOT/bootstrap.sh" --dry-run 2>&1)
+dry_status=$?
+set -e
+if [ "$dry_status" -ne 0 ]; then
+    fail "bootstrap dry-run failed without Git"
+fi
+case "$dry_output" in
+    *"[dry-run] would install git via apt-get using sudo"*) ;;
+    *) fail "bootstrap dry-run did not report the planned sudo installation" ;;
+esac
+if [ ! -f "$LOG" ]; then
+    fail "bootstrap dry-run did not invoke the existing checkout installer"
+else
+    grep -q '^install --dry-run$' "$LOG" \
+        || fail "bootstrap dry-run did not forward to the existing installer"
+    if grep -Eq '^(sudo|apt-get|git) ' "$LOG"; then
+        fail "bootstrap dry-run invoked a package manager, sudo, or Git mutation"
+    fi
+fi
+
+EMPTY_HOME="$TEST_HOME/empty-autospec"
+rm -f "$LOG"
+set +e
+empty_output=$(HOME="$TEST_HOME" PATH="$BIN:$CORE" AUTOSPEC_HOME="$EMPTY_HOME" \
+    bash "$ROOT/bootstrap.sh" --dry-run 2>&1)
+empty_status=$?
+set -e
+if [ "$empty_status" -ne 0 ]; then
+    fail "bootstrap dry-run failed without an existing checkout"
+fi
+if [ -e "$EMPTY_HOME" ] || [ -e "$LOG" ]; then
+    fail "bootstrap dry-run wrote state without an existing checkout"
+fi
+case "$empty_output" in
+    *"[dry-run] would clone"*"[dry-run] would run"*) ;;
+    *) fail "bootstrap dry-run did not report clone and install intent" ;;
 esac
 
 if [ "$failures" -ne 0 ]; then

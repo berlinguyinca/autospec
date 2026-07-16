@@ -26,6 +26,10 @@ AUTOSPEC_HOME="${AUTOSPEC_HOME:-$HOME/.autospec}"
 AUTOSPEC_REF="${AUTOSPEC_REF:-main}"
 AUTOSPEC_REPO_URL="${AUTOSPEC_REPO_URL:-https://github.com/berlinguyinca/autospec.git}"
 REPO_DIR="$AUTOSPEC_HOME/repo"
+BOOTSTRAP_DRY_RUN=0
+for bootstrap_arg in "$@"; do
+    [ "$bootstrap_arg" = "--dry-run" ] && BOOTSTRAP_DRY_RUN=1
+done
 
 err()  { printf 'bootstrap: error: %s\n' "$*" >&2; }
 info() { printf 'bootstrap: %s\n' "$*"; }
@@ -39,8 +43,44 @@ require() {
 
 require bash
 
+detect_bootstrap_git_manager() {
+    for candidate in brew apt-get dnf yum pacman apk; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+bootstrap_git_install_plan() {
+    manager="$(detect_bootstrap_git_manager 2>/dev/null || true)"
+    if [ -z "$manager" ]; then
+        info "[dry-run] git is missing and no supported package manager is available"
+        return 0
+    fi
+    elevation=""
+    case "$manager" in
+        apt-get|dnf|yum|pacman|apk)
+            if [ "$(id -u 2>/dev/null || printf '1')" != "0" ]; then
+                if command -v sudo >/dev/null 2>&1; then
+                    elevation=" using sudo"
+                else
+                    elevation=" (sudo unavailable)"
+                fi
+            fi
+            ;;
+    esac
+    info "[dry-run] would install git via $manager$elevation"
+}
+
 install_bootstrap_git() {
-    if command -v brew >/dev/null 2>&1; then
+    manager="$(detect_bootstrap_git_manager 2>/dev/null || true)"
+    if [ -z "$manager" ]; then
+        err "no supported package manager found for Git (brew/apt-get/dnf/yum/pacman/apk)"
+        return 1
+    fi
+    if [ "$manager" = "brew" ]; then
         info "installing git via brew"
         brew install git
         return $?
@@ -56,26 +96,32 @@ install_bootstrap_git() {
         fi
     fi
 
-    if command -v apt-get >/dev/null 2>&1; then
-        info "installing git via apt-get"
-        $bootstrap_sudo apt-get install -y git
-    elif command -v dnf >/dev/null 2>&1; then
-        info "installing git via dnf"
-        $bootstrap_sudo dnf install -y git
-    elif command -v yum >/dev/null 2>&1; then
-        info "installing git via yum"
-        $bootstrap_sudo yum install -y git
-    elif command -v pacman >/dev/null 2>&1; then
-        info "installing git via pacman"
-        $bootstrap_sudo pacman -Sy --noconfirm git
-    elif command -v apk >/dev/null 2>&1; then
-        info "installing git via apk"
-        $bootstrap_sudo apk add --no-cache git
-    else
-        err "no supported package manager found for Git (brew/apt-get/dnf/yum/pacman/apk)"
-        return 1
-    fi
+    info "installing git via $manager"
+    case "$manager" in
+        apt-get) $bootstrap_sudo apt-get install -y git ;;
+        dnf) $bootstrap_sudo dnf install -y git ;;
+        yum) $bootstrap_sudo yum install -y git ;;
+        pacman) $bootstrap_sudo pacman -Sy --noconfirm git ;;
+        apk) $bootstrap_sudo apk add --no-cache git ;;
+    esac
 }
+
+if [ "$BOOTSTRAP_DRY_RUN" -eq 1 ]; then
+    command -v git >/dev/null 2>&1 || bootstrap_git_install_plan
+    if [ -d "$REPO_DIR/.git" ]; then
+        info "[dry-run] using existing checkout at $REPO_DIR without fetch, checkout, or merge"
+        info "running $REPO_DIR/install.sh $*"
+        cd "$REPO_DIR"
+        exec bash ./install.sh "$@"
+    fi
+    if [ -e "$REPO_DIR" ]; then
+        err "$REPO_DIR exists but is not a git checkout"
+        exit 1
+    fi
+    info "[dry-run] would clone $AUTOSPEC_REPO_URL to $REPO_DIR (ref: $AUTOSPEC_REF)"
+    info "[dry-run] would run $REPO_DIR/install.sh $*"
+    exit 0
+fi
 
 if ! command -v git >/dev/null 2>&1; then
     info "git not found; attempting installation"

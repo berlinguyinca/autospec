@@ -1,6 +1,7 @@
 # Automatic Dependency Installation Design
 
-**Issue:** #2099  
+**Issue:** #2099
+
 **Status:** approved by the user on 2026-07-16
 
 ## Goal

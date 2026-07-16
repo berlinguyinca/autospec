@@ -219,6 +219,14 @@ verifies required commands:
 AUTOSPEC_SKIP_SYSTEM_TOOLS=1 bash install.sh --skill all --harness all
 ```
 
+To preview bootstrap and installation without writes, package installation, or
+privilege prompts, pass `--dry-run`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh \
+  | bash -s -- --dry-run
+```
+
 After manually installing anything named in the error report, rerun:
 
 ```bash
