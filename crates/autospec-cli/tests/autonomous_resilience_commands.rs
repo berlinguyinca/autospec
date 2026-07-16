@@ -821,7 +821,8 @@ exit 1
 }
 
 #[test]
-fn autonomous_foreground_does_not_persist_when_final_selection_hits_failure_cap() {
+fn autonomous_foreground_persists_terminal_lifecycle_before_releasing_lease_when_final_selection_hits_failure_cap(
+) {
     let fixture = ResilienceFixture::new();
     fixture.write_failures("owner__repo", 43, 3);
 
@@ -837,8 +838,20 @@ fn autonomous_foreground_does_not_persist_when_final_selection_hits_failure_cap(
         stdout(&output),
         "{\"decision\":\"reject\",\"reason\":\"failure_cap\"}\n"
     );
-    assert!(!fixture.operator_lifecycle_path().exists());
-    assert!(!fixture.foreground_state_path().exists());
+    assert_eq!(
+        fs::read_to_string(fixture.operator_lifecycle_path()).expect("read terminal lifecycle"),
+        "{\"version\":1,\"repo\":\"owner/repo\",\"result\":{\"decision\":\"reject\",\"reason\":\"failure_cap\"}}\n"
+    );
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read released conductor lease")
+            .contains("\"status\":\"released\""),
+        "the owned lease must release only after terminal lifecycle persistence"
+    );
+    assert!(
+        !fixture.foreground_state_path().exists(),
+        "final-selection rejection must not claim or dispatch the issue"
+    );
 }
 
 #[test]

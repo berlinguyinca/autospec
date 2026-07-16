@@ -1401,6 +1401,7 @@ fn select_foreground(
     )?;
     let lifecycle = decide_lifecycle(&input);
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
+        persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
         return Err(lifecycle_non_run(&lifecycle));
     }
     let state = state
