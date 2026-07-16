@@ -1,6 +1,6 @@
 # Rust Tier 2 Local Discovery Design
 
-**Parent design:** `docs/superpowers/specs/2026-07-16-rust-autonomous-waterfall-design.md`  
+**Parent design:** `docs/superpowers/specs/2026-07-16-rust-autonomous-waterfall-design.md`
 **Scope:** #1872 native Tier 2 only
 
 ## Goal
