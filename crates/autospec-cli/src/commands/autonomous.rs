@@ -70,6 +70,9 @@ mod tier4_receipts_state_tests;
 mod tier4_receipts_tests;
 mod waterfall;
 mod waterfall_coordinator;
+mod waterfall_policy;
+#[cfg(test)]
+mod waterfall_policy_tests;
 #[cfg(test)]
 mod waterfall_tests;
 
@@ -1456,8 +1459,11 @@ fn run_foreground_with_lease(
         .into());
     }
 
+    let waterfall_policy = waterfall_policy::WaterfallPolicy::from_config(config)
+        .map_err(CommandFailure::diagnostic)?;
     let (state, found_work) =
-        scan_foreground(layout, lease, state, initial_plan).map_err(CommandFailure::diagnostic)?;
+        scan_foreground(layout, lease, &waterfall_policy, state, initial_plan)
+            .map_err(CommandFailure::diagnostic)?;
     if !found_work {
         persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
@@ -1547,6 +1553,7 @@ enum ForegroundDispatchResult {
 fn scan_foreground(
     layout: &RunLayout,
     lease: &resilience::ConductorLease,
+    policy: &waterfall_policy::WaterfallPolicy,
     state: ConductorState,
     initial_plan: Result<autospec_core::coordination::ReadyQueuePlan, String>,
 ) -> Result<(ConductorState, bool), String> {
@@ -1558,6 +1565,7 @@ fn scan_foreground(
                     &layout.state_dir,
                     &layout.repo,
                     lease,
+                    policy,
                     waterfall_coordinator::Tier1QueueEvidence::Failed(&reason),
                 )? {
                     waterfall_coordinator::Tier1Progress::Failed(reason) => Err(reason),
@@ -1574,6 +1582,7 @@ fn scan_foreground(
                 &layout.state_dir,
                 &layout.repo,
                 lease,
+                policy,
                 waterfall_coordinator::Tier1QueueEvidence::EmptyPage(&initial_plan),
             )? {
                 waterfall_coordinator::Tier1Progress::Advanced

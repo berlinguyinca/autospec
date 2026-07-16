@@ -610,6 +610,39 @@ pub(super) fn with_current_lifecycle_lease<T>(
     operation()
 }
 
+#[cfg(test)]
+pub(super) fn acquire_test_lifecycle(root: &Path, repo: &str) -> Result<ConductorLease, String> {
+    let store = ResilienceStore {
+        scope: RepositoryScope::try_from(repo).map_err(|error| error.to_string())?,
+        state_root: root.join("state").join("autonomous"),
+        spend_root: root.join("spend"),
+        host: "autospec-test-host".to_string(),
+    };
+    store
+        .acquire(None, 1, 1)
+        .map(|(_, lease)| lease)
+        .map_err(|_| "cannot acquire test lifecycle lease".to_string())
+}
+
+#[cfg(test)]
+pub(super) fn replace_test_lifecycle_generation(lease: &ConductorLease) -> Result<(), String> {
+    let raw = fs::read_to_string(&lease.state_path)
+        .map_err(|error| format!("cannot read test lifecycle state: {error}"))?;
+    let mut state = ResilienceState::parse(&raw)
+        .map_err(|_| "test lifecycle state is malformed".to_string())?;
+    state.lease_generation = Some(
+        state
+            .lease_generation
+            .unwrap_or_default()
+            .checked_add(1)
+            .ok_or_else(|| "test lifecycle generation overflow".to_string())?,
+    );
+    state.lease_token = Some("replacement-test-lifecycle-token".to_string());
+    let scope =
+        RepositoryScope::try_from(lease.repo.as_str()).map_err(|error| error.to_string())?;
+    super::atomic_write(&lease.state_path, &state.to_json(&scope.as_str()))
+}
+
 pub(super) fn status(repo: &str) -> Result<Option<ResilienceStatus>, LifecycleAdmissionError> {
     let store = ResilienceStore::from_env(repo).map_err(LifecycleAdmissionError::Diagnostic)?;
     store.read_status().map_err(store_error_to_lifecycle_error)
@@ -1066,10 +1099,15 @@ mod tests {
             gate_counts: QueueGateCounts::default(),
         };
         let waterfall_root = root.join("operator");
+        let policy = super::super::waterfall_policy::WaterfallPolicy::from_config(
+            &autospec_core::autonomous::config::AutonomousConfig::default(),
+        )
+        .expect("default waterfall policy");
         let result = super::super::waterfall_coordinator::record_tier_one(
             &waterfall_root,
             "owner/repo",
             &stale_lease,
+            &policy,
             super::super::waterfall_coordinator::Tier1QueueEvidence::EmptyPage(&plan),
         );
 

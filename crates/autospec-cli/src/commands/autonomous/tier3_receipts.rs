@@ -9,6 +9,7 @@ use autospec_core::autonomous::waterfall::{
     FunnelCounts, SealedEvidence, TierReceipt, TierStatus, WaterfallState,
 };
 
+use super::resilience::{with_current_lifecycle_lease, ConductorLease};
 use super::tier3::Tier3Scan;
 use super::waterfall::{
     StoreAcquisition, Tier3EvidenceArtifact, WaterfallStore, WaterfallStoreError,
@@ -26,7 +27,25 @@ pub(super) enum Tier3Progress {
     NotRun(String),
 }
 
+pub(super) fn record_tier3_with_lease(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+    scan: Tier3Scan,
+) -> Result<Tier3Progress, String> {
+    with_current_lifecycle_lease(lease, || record_tier3_fenced(state_root, repo, scan))
+}
+
+#[cfg(test)]
 pub(super) fn record_tier3(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier3Scan,
+) -> Result<Tier3Progress, String> {
+    record_tier3_fenced(state_root, repo, scan)
+}
+
+fn record_tier3_fenced(
     state_root: &Path,
     repo: &str,
     scan: Tier3Scan,

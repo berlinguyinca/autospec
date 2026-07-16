@@ -12,6 +12,7 @@ use autospec_core::autonomous::waterfall::{
 mod evidence;
 mod tier_evidence;
 
+use super::waterfall_policy::WaterfallPolicy;
 use evidence::WaterfallEvidenceArtifact;
 pub(super) use evidence::{
     Tier15EvidenceArtifact, Tier1EvidenceArtifact, Tier2EvidenceArtifact, Tier3EvidenceArtifact,
@@ -48,6 +49,15 @@ impl WaterfallStore {
         Self::acquire_with_optional_tier4_source_policy(root, repo, None)
     }
 
+    pub(super) fn acquire_with_policy(
+        root: impl AsRef<Path>,
+        repo: impl Into<String>,
+        policy: &WaterfallPolicy,
+    ) -> Result<StoreAcquisition, WaterfallStoreError> {
+        Self::acquire_with_optional_tier4_source_policy(root, repo, policy.tier4_source().cloned())
+    }
+
+    #[cfg(test)]
     pub(in crate::commands::autonomous) fn acquire_with_tier4_source_policy(
         root: impl AsRef<Path>,
         repo: impl Into<String>,
@@ -295,11 +305,14 @@ fn is_advancing_completed_status(tier: NoWorkTier, status: &TierStatus) -> bool 
 }
 
 fn state_receipt_error(error: WaterfallStoreError) -> WaterfallStoreError {
-    let detail = match error {
+    let mut detail = match error {
         WaterfallStoreError::Diagnostic(detail)
         | WaterfallStoreError::InvalidReceipt(detail)
         | WaterfallStoreError::InvalidState(detail) => detail,
     };
+    if detail == "Tier 4 source policy does not match the trusted checked-in policy" {
+        detail = "Tier 4 evidence does not match the trusted source policy".to_string();
+    }
     WaterfallStoreError::InvalidState(format!("cannot validate state receipt: {detail}"))
 }
 

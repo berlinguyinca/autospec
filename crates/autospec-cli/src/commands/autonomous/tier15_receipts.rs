@@ -5,6 +5,7 @@ use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
 use autospec_core::autonomous::tier15::Tier15Observation;
 use autospec_core::autonomous::waterfall::{FunnelCounts, SealedEvidence, TierReceipt, TierStatus};
 
+use super::resilience::{with_current_lifecycle_lease, ConductorLease};
 use super::tier15::Tier15Scan;
 use super::waterfall::{
     StoreAcquisition, Tier15EvidenceArtifact, WaterfallStore, WaterfallStoreError,
@@ -20,7 +21,25 @@ pub(super) enum Tier15Progress {
     Failed(String),
 }
 
+pub(super) fn record_tier15_with_lease(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+    scan: Tier15Scan,
+) -> Result<Tier15Progress, String> {
+    with_current_lifecycle_lease(lease, || record_tier15_fenced(state_root, repo, scan))
+}
+
+#[cfg(test)]
 pub(super) fn record_tier15(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier15Scan,
+) -> Result<Tier15Progress, String> {
+    record_tier15_fenced(state_root, repo, scan)
+}
+
+fn record_tier15_fenced(
     state_root: &Path,
     repo: &str,
     scan: Tier15Scan,

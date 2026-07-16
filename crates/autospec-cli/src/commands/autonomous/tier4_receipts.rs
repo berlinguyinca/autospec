@@ -3,16 +3,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
 use autospec_core::autonomous::tier4::{
-    Tier4EvidenceDocuments, Tier4Failure, Tier4Observation, Tier4SourcePolicy, DISABLED_REASON,
+    Tier4EvidenceDocuments, Tier4Failure, Tier4Observation, DISABLED_REASON,
 };
 use autospec_core::autonomous::waterfall::{
     FunnelCounts, SealedEvidence, TierReceipt, TierStatus, WaterfallState,
 };
 
+use super::resilience::{with_current_lifecycle_lease, ConductorLease};
 use super::tier4::Tier4Scan;
 use super::waterfall::{
     StoreAcquisition, Tier4EvidenceArtifact, WaterfallStore, WaterfallStoreError,
 };
+use super::waterfall_policy::WaterfallPolicy;
 
 const DISABLED_PRODUCER_VERSION: &str = "rust-tier4-disabled-policy-v1";
 const PRODUCER_VERSION: &str = "rust-tier4-external-discovery-receipts-v1";
@@ -26,42 +28,54 @@ pub(super) enum Tier4Progress {
     NotRun(String),
 }
 
+pub(super) fn record_tier4_with_lease(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+    policy: &WaterfallPolicy,
+    scan: Tier4Scan,
+) -> Result<Tier4Progress, String> {
+    with_current_lifecycle_lease(lease, || {
+        record_tier4_fenced(state_root, repo, scan, policy)
+    })
+}
+
+#[cfg(test)]
 pub(super) fn record_tier4(
     state_root: &Path,
     repo: &str,
     scan: Tier4Scan,
 ) -> Result<Tier4Progress, String> {
-    record_tier4_with_optional_source_policy(state_root, repo, scan, None)
+    let policy = WaterfallPolicy::from_config(
+        &autospec_core::autonomous::config::AutonomousConfig::default(),
+    )?;
+    record_tier4_fenced(state_root, repo, scan, &policy)
 }
 
+#[cfg(test)]
 pub(super) fn record_tier4_with_source_policy(
     state_root: &Path,
     repo: &str,
     scan: Tier4Scan,
-    expected_source_policy: Tier4SourcePolicy,
+    expected_source_policy: autospec_core::autonomous::tier4::Tier4SourcePolicy,
 ) -> Result<Tier4Progress, String> {
-    record_tier4_with_optional_source_policy(state_root, repo, scan, Some(expected_source_policy))
+    let policy = WaterfallPolicy::from_tier4_source_for_test(expected_source_policy);
+    record_tier4_fenced(state_root, repo, scan, &policy)
 }
 
-fn record_tier4_with_optional_source_policy(
+fn record_tier4_fenced(
     state_root: &Path,
     repo: &str,
     scan: Tier4Scan,
-    expected_source_policy: Option<Tier4SourcePolicy>,
+    policy: &WaterfallPolicy,
 ) -> Result<Tier4Progress, String> {
-    let store = match expected_source_policy {
-        Some(policy) => WaterfallStore::acquire_with_tier4_source_policy(
-            state_root.join("waterfall"),
-            repo,
-            policy,
-        )
-        .map_err(store_error)?,
-        None => WaterfallStore::acquire(state_root.join("waterfall"), repo).map_err(store_error)?,
-    };
-    let store = match store {
-        StoreAcquisition::Acquired(store) => store,
-        StoreAcquisition::Held => return Ok(Tier4Progress::Pending),
-    };
+    let store =
+        match WaterfallStore::acquire_with_policy(state_root.join("waterfall"), repo, policy)
+            .map_err(store_error)?
+        {
+            StoreAcquisition::Acquired(store) => store,
+            StoreAcquisition::Held => return Ok(Tier4Progress::Pending),
+        };
     let Some(state) = store.load_state().map_err(store_error)? else {
         return Ok(Tier4Progress::Pending);
     };
