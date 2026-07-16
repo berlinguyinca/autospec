@@ -9,10 +9,12 @@ use autospec_core::autonomous::waterfall::{
 };
 
 mod evidence;
+mod tier_evidence;
 
 use evidence::WaterfallEvidenceArtifact;
 pub(super) use evidence::{
     Tier15EvidenceArtifact, Tier1EvidenceArtifact, Tier2EvidenceArtifact, Tier3EvidenceArtifact,
+    Tier4EvidenceArtifact,
 };
 
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -144,50 +146,6 @@ impl WaterfallStore {
         )
     }
 
-    pub(super) fn persist_tier2_evidence(
-        &self,
-        pass_id: u64,
-        artifact: Tier2EvidenceArtifact,
-        contents: &str,
-    ) -> Result<SealedEvidence, WaterfallStoreError> {
-        evidence::persist(
-            &self.root,
-            pass_id,
-            WaterfallEvidenceArtifact::Tier2(artifact),
-            contents,
-        )
-    }
-
-    pub(super) fn verify_tier2_evidence(
-        &self,
-        pass_id: u64,
-        receipt: &TierReceipt,
-    ) -> Result<(), WaterfallStoreError> {
-        evidence::verify_tier2(&self.root, pass_id, receipt)
-    }
-
-    pub(super) fn persist_tier3_evidence(
-        &self,
-        pass_id: u64,
-        artifact: Tier3EvidenceArtifact,
-        contents: &str,
-    ) -> Result<SealedEvidence, WaterfallStoreError> {
-        evidence::persist(
-            &self.root,
-            pass_id,
-            WaterfallEvidenceArtifact::Tier3(artifact),
-            contents,
-        )
-    }
-
-    pub(super) fn verify_tier3_evidence(
-        &self,
-        pass_id: u64,
-        receipt: &TierReceipt,
-    ) -> Result<(), WaterfallStoreError> {
-        evidence::verify_tier3(&self.root, pass_id, receipt)
-    }
-
     pub(super) fn load_receipt(
         &self,
         pass_id: u64,
@@ -243,9 +201,17 @@ impl WaterfallStore {
     }
 
     fn verify_state_receipts(&self, state: &WaterfallState) -> Result<(), WaterfallStoreError> {
+        let receipt_pass_id = if state.current_tier() == NoWorkTier::Tier1
+            && state.next_pass_id() > 1
+            && !state.completed_receipts().is_empty()
+        {
+            state.next_pass_id() - 1
+        } else {
+            state.next_pass_id()
+        };
         for completed in state.completed_receipts() {
             let receipt = self
-                .load_receipt(state.next_pass_id(), completed.tier)
+                .load_receipt(receipt_pass_id, completed.tier)
                 .map_err(state_receipt_error)?
                 .ok_or_else(|| {
                     WaterfallStoreError::InvalidState(format!(
@@ -263,14 +229,14 @@ impl WaterfallStore {
                 NoWorkTier::Tier1 | NoWorkTier::Tier1_5 => {
                     evidence::verify(
                         &self.root,
-                        state.next_pass_id(),
+                        receipt_pass_id,
                         evidence::artifact_for_receipt(&receipt)?,
                         &receipt,
                     )
                     .map_err(state_receipt_error)?;
                 }
                 NoWorkTier::Tier2 => self
-                    .verify_tier2_evidence(state.next_pass_id(), &receipt)
+                    .verify_tier2_evidence(receipt_pass_id, &receipt)
                     .map_err(state_receipt_error)?,
                 NoWorkTier::Tier3 => {
                     if !matches!(
@@ -285,10 +251,27 @@ impl WaterfallStore {
                                 .to_string(),
                         ));
                     }
-                    self.verify_tier3_evidence(state.next_pass_id(), &receipt)
+                    self.verify_tier3_evidence(receipt_pass_id, &receipt)
                         .map_err(state_receipt_error)?;
                 }
-                NoWorkTier::Tier4 => {}
+                NoWorkTier::Tier4 => {
+                    if !matches!(
+                        receipt.status(),
+                        autospec_core::autonomous::waterfall::TierStatus::Exhausted {
+                            reason:
+                                autospec_core::autonomous::no_work::DryReason::NoProposalsGenerated
+                                    | autospec_core::autonomous::no_work::DryReason::VerificationRejected
+                                    | autospec_core::autonomous::no_work::DryReason::RoiFiltered
+                        }
+                    ) {
+                        return Err(WaterfallStoreError::InvalidState(
+                            "completed Tier 4 receipt must be an allowed exhausted result"
+                                .to_string(),
+                        ));
+                    }
+                    self.verify_tier4_evidence(receipt_pass_id, &receipt)
+                        .map_err(state_receipt_error)?;
+                }
             }
         }
         Ok(())

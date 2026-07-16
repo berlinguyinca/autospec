@@ -297,6 +297,12 @@ impl WaterfallState {
         if receipt.tier != self.current_tier {
             return Err("waterfall receipt tier does not match state cursor".to_string());
         }
+        if receipt.tier == NoWorkTier::Tier4 && !tier4_rollover_receipt(receipt) {
+            return Err("Tier 4 receipt cannot advance the waterfall cursor".to_string());
+        }
+        if self.current_tier == NoWorkTier::Tier1 && !self.completed_receipts.is_empty() {
+            self.completed_receipts.clear();
+        }
         self.completed_receipts.push(CompletedReceipt {
             tier: receipt.tier,
             digest: receipt.digest.clone(),
@@ -310,7 +316,6 @@ impl WaterfallState {
                     .checked_add(1)
                     .ok_or_else(|| "waterfall pass counter overflow".to_string())?;
                 self.current_tier = NoWorkTier::Tier1;
-                self.completed_receipts.clear();
             }
         }
         self.validate()?;
@@ -330,10 +335,22 @@ impl WaterfallState {
         if self.next_pass_id == 0 {
             return Err("waterfall state next pass id must be positive".to_string());
         }
-        let current_index = tier_index(self.current_tier);
-        if self.completed_receipts.len() != current_index {
+        let retained_prior_pass = self.current_tier == NoWorkTier::Tier1
+            && self.next_pass_id > 1
+            && !self.completed_receipts.is_empty();
+        let expected_completed = if retained_prior_pass {
+            NoWorkTier::ALL.len()
+        } else {
+            tier_index(self.current_tier)
+        };
+        if self.completed_receipts.len() != expected_completed {
             return Err("waterfall state completed receipts do not match current tier".to_string());
         }
+        let receipt_pass_id = if retained_prior_pass {
+            self.next_pass_id - 1
+        } else {
+            self.next_pass_id
+        };
         for (index, receipt) in self.completed_receipts.iter().enumerate() {
             let tier = NoWorkTier::ALL[index];
             if receipt.tier != tier {
@@ -342,12 +359,23 @@ impl WaterfallState {
             if !is_sealed_digest(&receipt.digest) {
                 return Err("waterfall state completed receipt digest is not sealed".to_string());
             }
-            if receipt.reference != receipt_reference(self.next_pass_id, tier) {
+            if receipt.reference != receipt_reference(receipt_pass_id, tier) {
                 return Err("waterfall state receipt reference is not derived".to_string());
             }
         }
         Ok(())
     }
+}
+
+fn tier4_rollover_receipt(receipt: &TierReceipt) -> bool {
+    matches!(
+        receipt.status(),
+        TierStatus::Exhausted {
+            reason: DryReason::NoProposalsGenerated
+                | DryReason::VerificationRejected
+                | DryReason::RoiFiltered,
+        }
+    )
 }
 
 pub fn receipt_reference(pass_id: u64, tier: NoWorkTier) -> String {

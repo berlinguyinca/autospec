@@ -12,6 +12,9 @@ mod tier2;
 mod tier3;
 mod tier3_consistency;
 mod tier3_shape;
+mod tier4;
+mod tier4_consistency;
+mod tier4_shape;
 
 pub(super) fn verify_tier2(
     root: &Path,
@@ -27,6 +30,14 @@ pub(super) fn verify_tier3(
     receipt: &TierReceipt,
 ) -> Result<(), WaterfallStoreError> {
     tier3::verify_tier3(root, pass_id, receipt)
+}
+
+pub(super) fn verify_tier4(
+    root: &Path,
+    pass_id: u64,
+    receipt: &TierReceipt,
+) -> Result<(), WaterfallStoreError> {
+    tier4::verify_tier4(root, pass_id, receipt)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,12 +73,25 @@ pub(in crate::commands::autonomous) enum Tier3EvidenceArtifact {
     Failure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::commands::autonomous) enum Tier4EvidenceArtifact {
+    Policy,
+    SourcePolicy,
+    Sources,
+    Generated,
+    Dedup,
+    Verification,
+    RoiRank,
+    Failure,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(super) enum WaterfallEvidenceArtifact {
     Tier1(Tier1EvidenceArtifact),
     Tier15(Tier15EvidenceArtifact),
     Tier2(Tier2EvidenceArtifact),
     Tier3(Tier3EvidenceArtifact),
+    Tier4(Tier4EvidenceArtifact),
 }
 
 impl WaterfallEvidenceArtifact {
@@ -77,6 +101,7 @@ impl WaterfallEvidenceArtifact {
             Self::Tier15(_) => NoWorkTier::Tier1_5,
             Self::Tier2(_) => NoWorkTier::Tier2,
             Self::Tier3(_) => NoWorkTier::Tier3,
+            Self::Tier4(_) => NoWorkTier::Tier4,
         }
     }
 
@@ -99,6 +124,14 @@ impl WaterfallEvidenceArtifact {
             Self::Tier3(Tier3EvidenceArtifact::Debt) => "debt.json",
             Self::Tier3(Tier3EvidenceArtifact::Findings) => "findings.json",
             Self::Tier3(Tier3EvidenceArtifact::Failure) => "failure.json",
+            Self::Tier4(Tier4EvidenceArtifact::Policy) => "policy.json",
+            Self::Tier4(Tier4EvidenceArtifact::SourcePolicy) => "source_policy.json",
+            Self::Tier4(Tier4EvidenceArtifact::Sources) => "sources.json",
+            Self::Tier4(Tier4EvidenceArtifact::Generated) => "generated.json",
+            Self::Tier4(Tier4EvidenceArtifact::Dedup) => "dedup.json",
+            Self::Tier4(Tier4EvidenceArtifact::Verification) => "verification.json",
+            Self::Tier4(Tier4EvidenceArtifact::RoiRank) => "roi_rank.json",
+            Self::Tier4(Tier4EvidenceArtifact::Failure) => "failure.json",
         }
     }
 

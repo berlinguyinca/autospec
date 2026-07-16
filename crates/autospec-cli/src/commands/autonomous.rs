@@ -49,12 +49,25 @@ mod tier2_receipts_tests;
 mod tier3;
 #[allow(dead_code)]
 mod tier3_receipts;
+// Tier 4 remains a sealed receipt boundary without foreground wiring.
 #[cfg(test)]
 mod tier3_receipts_failure_prefix_tests;
 #[cfg(test)]
 mod tier3_receipts_recovery_tests;
 #[cfg(test)]
 mod tier3_receipts_tests;
+#[allow(dead_code)]
+mod tier4;
+#[allow(dead_code)]
+mod tier4_receipts;
+#[cfg(test)]
+mod tier4_receipts_failure_prefix_tests;
+#[cfg(test)]
+mod tier4_receipts_recovery_tests;
+#[cfg(test)]
+mod tier4_receipts_state_tests;
+#[cfg(test)]
+mod tier4_receipts_tests;
 mod waterfall;
 mod waterfall_coordinator;
 #[cfg(test)]
