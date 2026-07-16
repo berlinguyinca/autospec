@@ -7,16 +7,16 @@ mod guard;
 mod matcher;
 #[path = "support/tier4_authority_scanner.rs"]
 mod scanner;
+#[path = "support/tier4_cli_authority.rs"]
+mod tier4_cli;
 
 use guard::assert_no_execution_authority;
-use matcher::{
-    code_tokens, contains_path_symbol, contains_qualified_path, has_forbidden_std_module,
-    has_module_escape,
-};
+use matcher::{code_tokens, contains_qualified_path, has_forbidden_std_module, has_module_escape};
 use scanner::{
     code_without_comments_and_literals, collect_rust_sources, collect_tier4_verifier_sources,
     production_code,
 };
+use tier4_cli::{assert_local_io, assert_no_direct_file_mutation, authority_sources, LocalIo};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -139,111 +139,6 @@ fn production_source(relative: &str) -> String {
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LocalIo {
-    None,
-    ReplayRead,
-    EvidenceDelegation,
-}
-
-fn tier4_cli_authority_sources() -> Vec<(String, bool, LocalIo)> {
-    let root = workspace_root();
-    let evidence_root = root.join("crates/autospec-cli/src/commands/autonomous/waterfall/evidence");
-    let mut helpers = Vec::new();
-    collect_tier4_verifier_sources(&evidence_root, &mut helpers);
-    let mut sources = vec![
-        (
-            "crates/autospec-cli/src/commands/autonomous/tier4_receipts.rs".to_string(),
-            true,
-            LocalIo::None,
-        ),
-        (
-            "crates/autospec-cli/src/commands/autonomous/waterfall/evidence.rs".to_string(),
-            false,
-            LocalIo::EvidenceDelegation,
-        ),
-    ];
-    for path in helpers {
-        let relative = path
-            .strip_prefix(&root)
-            .expect("Tier 4 helper in workspace");
-        let file = path.file_name().and_then(|name| name.to_str());
-        let io = if matches!(file, Some("tier4.rs" | "tier4_consistency.rs")) {
-            LocalIo::ReplayRead
-        } else {
-            LocalIo::None
-        };
-        sources.push((relative.to_string_lossy().into_owned(), false, io));
-    }
-    sources.sort_by(|left, right| left.0.cmp(&right.0));
-    sources
-}
-
-fn assert_local_io(code: &str, scope: &str, io: LocalIo) {
-    assert_eq!(
-        contains_path_symbol(code, "fs::read_to_string"),
-        io != LocalIo::None,
-        "{scope} has an invalid replay-read boundary"
-    );
-    let delegation = io == LocalIo::EvidenceDelegation;
-    if delegation {
-        assert!(contains_code_token(code, "atomic_write"));
-        assert!(contains_path_symbol(code, "fs::remove_file"));
-        let tokens = code_tokens(code);
-        for (index, token) in tokens.iter().enumerate() {
-            if token == "remove_file" {
-                assert_eq!(
-                    tokens.get(index.wrapping_sub(1)).map(String::as_str),
-                    Some("::"),
-                    "{scope} aliases its approved local remove operation"
-                );
-            }
-        }
-    }
-    assert_no_direct_file_mutation(code, scope, delegation);
-}
-
-fn assert_no_direct_file_mutation(code: &str, scope: &str, allows_remove_file: bool) {
-    for leaf in [
-        "write",
-        "copy",
-        "hard_link",
-        "create_dir",
-        "remove_dir",
-        "remove_file",
-        "rename",
-    ] {
-        if leaf == "remove_file" && allows_remove_file {
-            continue;
-        }
-        assert!(
-            !contains_code_token(code, leaf),
-            "{scope} retains direct or aliased file mutation authority: {leaf}"
-        );
-    }
-    for mutation in [
-        "fs::write",
-        "fs::copy",
-        "fs::hard_link",
-        "fs::create_dir",
-        "fs::remove_dir",
-        "fs::remove_file",
-        "fs::rename",
-        "File::create",
-        "OpenOptions",
-        "write_all",
-        "set_permissions",
-    ] {
-        if mutation == "fs::remove_file" && allows_remove_file {
-            continue;
-        }
-        assert!(
-            !contains_path_symbol(code, mutation) && !contains_code_token(code, mutation),
-            "{scope} retains file mutation authority: {mutation}"
-        );
-    }
-}
-
 #[test]
 fn tier4_core_recursively_rejects_all_external_and_mutation_authority() {
     let sources = pure_tier4_sources();
@@ -338,6 +233,16 @@ fn authority_guard_rejects_transport_model_facades_and_raw_byte_wrappers() {
             .is_err(),
         "Tier 4 guard missed nested file-mutation alias"
     );
+    let removal_alias = code_without_comments_and_literals(
+        "use std::fs; use std::fs::remove_file as erase; fs::read_to_string(path); atomic_write(path); fs::remove_file(first); fs::remove_file(second); erase(third);",
+    );
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_local_io(&removal_alias, "fixture", LocalIo::EvidenceDelegation)
+        })
+        .is_err(),
+        "Tier 4 guard allowed an alias for approved local removal"
+    );
 }
 
 #[test]
@@ -394,10 +299,11 @@ fn tier4_cli_boundary_allows_only_disabled_policy_and_local_receipt_replay() {
     }
     assert_tier4_purity(&adapter, "Tier 4 adapter", false);
 
-    let sources = tier4_cli_authority_sources();
+    let sources = authority_sources(&workspace_root());
     for required in [
         "tier4_receipts.rs",
         "waterfall/evidence.rs",
+        "waterfall/tier_evidence.rs",
         "waterfall/evidence/tier4.rs",
         "tier4_consistency.rs",
         "tier4_shape.rs",
