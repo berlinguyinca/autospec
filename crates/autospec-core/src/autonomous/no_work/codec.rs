@@ -55,7 +55,7 @@ pub(super) fn parse_state(input: &str) -> Result<NoWorkState, String> {
     )?;
     let schema = take_required(&mut object, "schema", "no-work state")?
         .into_number("no-work state.schema")?;
-    if schema != NO_WORK_SCHEMA {
+    if schema != 1 && schema != NO_WORK_SCHEMA {
         return Err(format!("unsupported no-work schema: {schema}"));
     }
     let repo =
@@ -84,11 +84,10 @@ pub(super) fn parse_state(input: &str) -> Result<NoWorkState, String> {
         &take_required(&mut object, "decision", "no-work state")?
             .into_string("no-work state.decision")?,
     )?;
-    let reason_counts = parse_reason_counts(take_required(
-        &mut object,
-        "reason_counts",
-        "no-work state",
-    )?)?;
+    let reason_counts = parse_reason_counts(
+        take_required(&mut object, "reason_counts", "no-work state")?,
+        schema,
+    )?;
     let ideation_request = take_required(&mut object, "ideation_request", "no-work state")?;
 
     let state = NoWorkState {
@@ -165,8 +164,8 @@ fn outcome_json(outcome: &TierOutcome) -> String {
     }
 }
 
-fn reason_counts_for(tiers: &[(NoWorkTier, TierOutcome)]) -> [(DryReason, u64); 5] {
-    let mut counts = [(DryReason::NoProposalsGenerated, 0); 5];
+fn reason_counts_for(tiers: &[(NoWorkTier, TierOutcome)]) -> [(DryReason, u64); 6] {
+    let mut counts = [(DryReason::NoProposalsGenerated, 0); 6];
     for (index, reason) in DryReason::ALL.into_iter().enumerate() {
         counts[index].0 = reason;
     }
@@ -352,17 +351,27 @@ fn parse_outcome(value: JsonValue, parent: &str) -> Result<TierOutcome, String> 
     }
 }
 
-fn parse_reason_counts(value: JsonValue) -> Result<[(DryReason, u64); 5], String> {
+fn parse_reason_counts(value: JsonValue, schema: u64) -> Result<[(DryReason, u64); 6], String> {
     let context = "no-work state.reason_counts";
     let mut object = value.into_object(context)?;
-    require_only_keys(&object, &DryReason::ALL.map(DryReason::as_str), context)?;
-    let mut counts = [(DryReason::NoProposalsGenerated, 0); 5];
+    let reason_count = if schema == 1 { 5 } else { DryReason::ALL.len() };
+    let keys = DryReason::ALL[..reason_count]
+        .iter()
+        .map(|reason| reason.as_str())
+        .collect::<Vec<_>>();
+    require_only_keys(&object, &keys, context)?;
+    let mut counts = [(DryReason::NoProposalsGenerated, 0); 6];
     for (index, reason) in DryReason::ALL.into_iter().enumerate() {
         let name = reason.as_str();
-        counts[index] = (
-            reason,
-            take_required(&mut object, name, context)?.into_number(&format!("{context}.{name}"))?,
-        );
+        counts[index] = if index < reason_count {
+            (
+                reason,
+                take_required(&mut object, name, context)?
+                    .into_number(&format!("{context}.{name}"))?,
+            )
+        } else {
+            (reason, 0)
+        };
     }
     Ok(counts)
 }

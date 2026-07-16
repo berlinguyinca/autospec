@@ -1,6 +1,6 @@
 mod codec;
 
-pub const NO_WORK_SCHEMA: u64 = 1;
+pub const NO_WORK_SCHEMA: u64 = 2;
 pub const IDEATION_DRY_PASS_THRESHOLD: u64 = 2;
 pub const IDEATION_CANDIDATE_LIMIT: u64 = 5;
 pub const EVIDENCE_DIGEST_HEX_LENGTH: usize = 64;
@@ -61,15 +61,17 @@ pub enum DryReason {
     VerificationRejected,
     RoiFiltered,
     AlreadyImplemented,
+    NoMetadataFindings,
 }
 
 impl DryReason {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::NoProposalsGenerated,
         Self::Deduplicated,
         Self::VerificationRejected,
         Self::RoiFiltered,
         Self::AlreadyImplemented,
+        Self::NoMetadataFindings,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -79,6 +81,7 @@ impl DryReason {
             Self::VerificationRejected => "verification_rejected",
             Self::RoiFiltered => "roi_filtered",
             Self::AlreadyImplemented => "already_implemented",
+            Self::NoMetadataFindings => "no_metadata_findings",
         }
     }
 
@@ -89,6 +92,7 @@ impl DryReason {
             "verification_rejected" => Ok(Self::VerificationRejected),
             "roi_filtered" => Ok(Self::RoiFiltered),
             "already_implemented" => Ok(Self::AlreadyImplemented),
+            "no_metadata_findings" => Ok(Self::NoMetadataFindings),
             _ => Err(format!("unknown no-work dry reason: {value}")),
         }
     }

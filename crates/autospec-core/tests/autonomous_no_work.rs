@@ -30,7 +30,7 @@ fn complete_dry(pass_id: u64) -> NoWorkObservation {
             (
                 NoWorkTier::Tier3,
                 TierOutcome::Dry {
-                    reason: DryReason::RoiFiltered,
+                    reason: DryReason::NoMetadataFindings,
                 },
             ),
             (
@@ -109,6 +109,7 @@ fn each_exact_dry_reason_is_closed_and_preserved() {
         (DryReason::VerificationRejected, "verification_rejected"),
         (DryReason::RoiFiltered, "roi_filtered"),
         (DryReason::AlreadyImplemented, "already_implemented"),
+        (DryReason::NoMetadataFindings, "no_metadata_findings"),
     ];
 
     for (reason, name) in expected {
@@ -120,8 +121,22 @@ fn each_exact_dry_reason_is_closed_and_preserved() {
     }
     assert!(DryReason::parse("made_up_reason").is_err());
 
-    let state = NoWorkState::record(None, complete_dry(1)).expect("all reasons are valid");
-    for (_, name) in expected {
+    for (reason, name) in expected {
+        let tiers = NoWorkTier::ALL
+            .into_iter()
+            .map(|tier| {
+                let outcome = if tier == NoWorkTier::Tier3 {
+                    TierOutcome::Dry { reason }
+                } else {
+                    TierOutcome::NotRun {
+                        reason: "independent dry-reason round trip".to_string(),
+                    }
+                };
+                (tier, outcome)
+            })
+            .collect();
+        let state = NoWorkState::record(None, observation(1, tiers))
+            .expect("each closed reason is valid independently");
         assert!(state.to_json().contains(&format!("\"{name}\":1")));
     }
 }
@@ -295,7 +310,7 @@ fn json_round_trip_rejects_unknown_schema_and_fields() {
         second
     );
     assert!(
-        NoWorkState::parse_json(&json.replace("\"schema\":1", "\"schema\":2"))
+        NoWorkState::parse_json(&json.replace("\"schema\":2", "\"schema\":3"))
             .expect_err("unknown schema is rejected")
             .contains("unsupported no-work schema")
     );
@@ -304,6 +319,66 @@ fn json_round_trip_rejects_unknown_schema_and_fields() {
             .expect_err("unknown field is rejected")
             .contains("unexpected no-work state field")
     );
+}
+
+#[test]
+fn schema_one_reason_counts_migrate_to_schema_two_without_metadata_findings() {
+    let legacy_state = NoWorkState::record(
+        None,
+        with_replacement(
+            1,
+            NoWorkTier::Tier3,
+            TierOutcome::Dry {
+                reason: DryReason::RoiFiltered,
+            },
+        ),
+    )
+    .expect("legacy-compatible state");
+    let legacy_json = legacy_state
+        .to_json()
+        .replace(",\"no_metadata_findings\":0", "")
+        .replace("\"schema\":2", "\"schema\":1");
+
+    let migrated = NoWorkState::parse_json(&legacy_json).expect("schema one parses");
+    let reemitted = migrated.to_json();
+    assert!(reemitted.starts_with("{\"schema\":2,"));
+    assert!(reemitted.contains("\"no_metadata_findings\":0"));
+    assert_eq!(
+        NoWorkState::parse_json(&reemitted).expect("schema two parses"),
+        migrated
+    );
+}
+
+#[test]
+fn schema_one_rejects_unknown_reason_counts_and_schema_two_requires_metadata_key() {
+    let legacy_state = NoWorkState::record(
+        None,
+        with_replacement(
+            1,
+            NoWorkTier::Tier3,
+            TierOutcome::Dry {
+                reason: DryReason::RoiFiltered,
+            },
+        ),
+    )
+    .expect("legacy-compatible state");
+    let legacy_json = legacy_state
+        .to_json()
+        .replace(",\"no_metadata_findings\":0", "")
+        .replace("\"schema\":2", "\"schema\":1");
+    let malformed_v1 = legacy_json.replace("\"roi_filtered\":1", "\"unexpected\":1");
+    assert!(NoWorkState::parse_json(&malformed_v1)
+        .expect_err("schema one rejects unknown reason key")
+        .contains("unexpected no-work state.reason_counts field"));
+
+    let v2 = complete_dry(1);
+    let v2 = NoWorkState::record(None, v2)
+        .expect("schema two state")
+        .to_json();
+    let missing_metadata = v2.replace(",\"no_metadata_findings\":1", "");
+    assert!(NoWorkState::parse_json(&missing_metadata)
+        .expect_err("schema two requires the metadata reason count")
+        .contains("missing no-work state.reason_counts field: no_metadata_findings"));
 }
 
 #[test]

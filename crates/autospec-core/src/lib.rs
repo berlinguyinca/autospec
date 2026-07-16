@@ -7,6 +7,7 @@ pub mod autonomous {
     pub mod no_work;
     pub mod tier15;
     pub mod tier2;
+    pub mod tier3;
     pub mod waterfall;
 }
 pub mod autonomous_lifecycle;
