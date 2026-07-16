@@ -278,6 +278,7 @@ fn strict_collector_source_is_read_only_and_legacy_free() {
         "TierReceipt",
         "TierStatus",
         "WaterfallState",
+        "WaterfallStore",
         "evaluate_tier2",
         "Tier2Input",
         "Tier2Scan",
