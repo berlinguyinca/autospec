@@ -1625,7 +1625,7 @@ fn autonomous_status_json_reports_state_heartbeat_and_spend_metadata() {
     std::fs::write(scope.join("conductor.pid"), "999999\n").expect("pid");
     std::fs::write(
         state_scope.join("state.json"),
-        "{\"status\":\"parked:usage-limit\",\"heartbeat_at\":1783526400,\"cycle\":42}\n",
+        "{\"repo\":\"berlinguyinca/autospec\",\"status\":\"parked:usage-limit\",\"heartbeat_at\":1783526400,\"cycle\":42}\n",
     )
     .expect("state");
     std::fs::write(
