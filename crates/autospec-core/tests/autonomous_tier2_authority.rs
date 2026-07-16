@@ -2,6 +2,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[path = "support/tier2_authority_matcher.rs"]
+mod matcher;
+
+use matcher::{
+    contains_path_symbol, contains_qualified_path, has_forbidden_std_module, has_module_escape,
+};
+
 fn pure_tier2_sources() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut sources = vec![root.join("src/autonomous/tier2.rs")];
@@ -165,6 +172,27 @@ fn authority_matcher_ignores_comments_literals_and_identifier_substrings() {
 }
 
 #[test]
+fn authority_matcher_handles_module_escapes_grouped_imports_and_safe_nouns() {
+    let imports = code_without_comments_and_literals(
+        "use std::{fs, env}; use std :: process; let queue = Vec::new();",
+    );
+    assert!(has_forbidden_std_module(&imports, "fs"));
+    assert!(has_forbidden_std_module(&imports, "env"));
+    assert!(has_forbidden_std_module(&imports, "process"));
+    assert!(!contains_qualified_path(&imports, "queue"));
+    assert!(contains_qualified_path(
+        &code_without_comments_and_literals("queue::read();"),
+        "queue"
+    ));
+    assert!(has_module_escape(&code_without_comments_and_literals(
+        "#[path = \"../escape.rs\"] mod escaped;"
+    )));
+    assert!(has_module_escape(&code_without_comments_and_literals(
+        "include!(\"../escape.rs\");"
+    )));
+}
+
+#[test]
 fn pure_tier2_sources_reject_external_and_mutation_authority() {
     let sources = pure_tier2_sources();
     let names = sources
@@ -187,15 +215,49 @@ fn pure_tier2_sources_reject_external_and_mutation_authority() {
     for source in sources {
         let contents = fs::read_to_string(&source).expect("read pure Tier 2 source");
         let code = code_without_comments_and_literals(&contents);
+        assert!(
+            !has_module_escape(&code),
+            "{} escapes the guarded Tier 2 module tree",
+            source.display()
+        );
         saw_documents |= contains_code_token(&code, "Tier2EvidenceDocuments");
         saw_roi_rank_renderer |= contains_code_token(&code, "roi_rank_json");
+        for module in ["fs", "io", "path", "env", "process", "net"] {
+            assert!(
+                !has_forbidden_std_module(&code, module),
+                "{} retains std::{module} authority",
+                source.display()
+            );
+        }
+        for path in [
+            "queue",
+            "claim",
+            "github",
+            "branch",
+            "worktree",
+            "issue",
+            "label",
+            "pull_request",
+        ] {
+            assert!(
+                !contains_qualified_path(&code, path),
+                "{} retains {path} module authority",
+                source.display()
+            );
+        }
+        for call in [
+            "Method::POST",
+            "Method::PATCH",
+            "Method::PUT",
+            "Method::DELETE",
+        ] {
+            assert!(
+                !contains_path_symbol(&code, call),
+                "{} retains HTTP mutation authority: {call}",
+                source.display()
+            );
+        }
         for forbidden in [
-            "std::fs",
-            "std::io",
-            "std::path",
-            "std::env",
-            "std::process",
-            "std::net",
             "Command",
             "WaterfallStore",
             "TierReceipt",
@@ -212,27 +274,19 @@ fn pure_tier2_sources_reject_external_and_mutation_authority() {
             "run_shell",
             "omx",
             "curl",
-            "github",
-            "queue",
-            "claim",
-            "label",
-            "branch",
-            "worktree",
-            "pull_request",
-            "pull request",
-            "pr create",
-            "issue create",
-            "issue edit",
-            "issue comment",
-            "auto-implement",
-            "POST",
-            "PATCH",
-            "PUT",
-            "DELETE",
-            "graphql",
-            "pr edit",
-            "pr comment",
-            "pr merge",
+            "RemoteIssue",
+            "PullRequest",
+            "ExecutorRequest",
+            "ConductorEvent",
+            "run_foreground",
+            "scan_foreground",
+            "add_label",
+            "remove_label",
+            "create_issue",
+            "edit_issue",
+            "comment_issue",
+            "create_branch",
+            "checkout",
         ] {
             assert!(
                 !contains_code_token(&code, forbidden),
@@ -258,17 +312,45 @@ fn strict_collector_source_is_read_only_and_legacy_free() {
         .next()
         .expect("production source before module tests");
     let code = code_without_comments_and_literals(production);
-    for forbidden in [
-        "std::env",
-        "std::process",
-        "std::net",
-        "Command",
+    for module in ["env", "process", "net"] {
+        assert!(
+            !has_forbidden_std_module(&code, module),
+            "strict collector retains std::{module} authority"
+        );
+    }
+    for path in [
+        "queue",
+        "claim",
+        "github",
+        "branch",
+        "worktree",
+        "issue",
+        "label",
+        "pull_request",
+    ] {
+        assert!(
+            !contains_qualified_path(&code, path),
+            "strict collector retains {path} module authority"
+        );
+    }
+    for mutation in [
         "fs::write",
         "fs::copy",
         "fs::hard_link",
         "fs::create_dir",
         "fs::remove_",
         "fs::rename",
+        "std::os::unix::fs::symlink",
+        "std::os::windows::fs::symlink_file",
+        "std::os::windows::fs::symlink_dir",
+    ] {
+        assert!(
+            !contains_path_symbol(&code, mutation),
+            "strict collector retains filesystem mutation authority: {mutation}"
+        );
+    }
+    for forbidden in [
+        "Command",
         "OpenOptions",
         "File::create",
         "write_all",
@@ -291,18 +373,19 @@ fn strict_collector_source_is_read_only_and_legacy_free() {
         "run_shell",
         "omx",
         "curl",
-        "github",
-        "queue",
-        "claim",
-        "label",
-        "branch",
-        "worktree",
-        "pull_request",
-        "POST",
-        "PATCH",
-        "PUT",
-        "DELETE",
-        "graphql",
+        "RemoteIssue",
+        "PullRequest",
+        "ExecutorRequest",
+        "ConductorEvent",
+        "run_foreground",
+        "scan_foreground",
+        "add_label",
+        "remove_label",
+        "create_issue",
+        "edit_issue",
+        "comment_issue",
+        "create_branch",
+        "checkout",
     ] {
         assert!(
             !contains_code_token(&code, forbidden),
