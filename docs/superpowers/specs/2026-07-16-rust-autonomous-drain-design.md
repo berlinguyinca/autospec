@@ -55,7 +55,10 @@ repository-scoped heartbeat layouts already used by `timeline`, and records one
 GitHub baseline before polling. It re-snapshots GitHub only when a local timeout
 would otherwise occur. A changed snapshot resets the timer and emits a warning.
 Before termination it performs a final `try_wait`; a completed child returns its
-real exit status without a kill.
+real exit status without a kill. Child and GitHub observer processes each run in
+their own process group so a timeout or abandoned observation cannot leave a
+descendant holding the drain pipes. GitHub reads are bounded and continuously
+reconcile the supervised child, so a hung API command cannot hide completion.
 
 The command writes `drain-observation.json` under the repository's existing
 autonomous operator directory. The record contains schema version, timestamp,
@@ -66,9 +69,9 @@ It contains no lease token or raw child output.
 
 - Invalid timeout/poll values and malformed repository scope are diagnostics
   with exit `2` and no JSON decision.
-- Failure to inspect GitHub is non-progress, not evidence that GitHub is
-  unchanged; the command can still wait on local progress or terminate only
-  after the normal timeout.
+- Failure or timeout while inspecting GitHub is non-progress, not evidence that
+  GitHub is unchanged; the command can still wait on local progress or
+  terminate only after the normal timeout.
 - A child exit is returned as that child's code. It is never recast as a
   watchdog stall.
 - Process termination is attempted only after the pure policy decision and a

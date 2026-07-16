@@ -3,7 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -34,6 +34,29 @@ fn rust_drain_source_does_not_restore_shell_or_legacy_drain_authority() {
 }
 
 #[test]
+fn malformed_repo_is_rejected_before_state_or_child_creation() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let launched = fixture.root.join("launched");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        "#!/bin/sh\nprintf launched > \"$AUTOSPEC_TEST_DRAIN_LAUNCHED\"\n",
+    );
+
+    let output = fixture
+        .command(&bin)
+        .args(["--repo", "malformed"])
+        .env("AUTOSPEC_TEST_DRAIN_LAUNCHED", &launched)
+        .output()
+        .expect("run drain with malformed repo");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!launched.exists());
+    assert!(!fixture.operator_root.exists());
+}
+
+#[test]
 fn quiet_child_with_heartbeat_progress_completes_without_termination() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
@@ -48,12 +71,12 @@ sleep 1
 printf '{"step":"validation"}\n' > "$heartbeat_dir/42.json"
 sleep 1
 printf '{"step":"merge"}\n' > "$heartbeat_dir/42.json"
-sleep 1
+sleep 3
 "#,
     );
     write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
 
-    let output = fixture.run(&bin, &["--stall-secs", "1", "--poll-secs", "1", "--json"]);
+    let output = fixture.run(&bin, &["--stall-secs", "3", "--poll-secs", "1", "--json"]);
 
     assert!(output.status.success(), "stderr={}", stderr(&output));
     assert!(stdout(&output).contains("quiet_stdout_external_progress"));
@@ -61,6 +84,103 @@ sleep 1
     assert!(fs::read_to_string(fixture.drain_observation_path())
         .expect("read drain observation")
         .contains("heartbeat"));
+}
+
+#[test]
+fn quiet_child_with_claim_heartbeat_progress_completes_without_termination() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+heartbeat_dir="$AUTOSPEC_HEARTBEAT_DIR/owner__repo"
+mkdir -p "$heartbeat_dir"
+sleep 1
+printf '{"step":"claimed"}\n' > "$heartbeat_dir/42.json"
+sleep 1
+printf '{"step":"validated"}\n' > "$heartbeat_dir/42.json"
+sleep 3
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "3", "--poll-secs", "1", "--json"])
+        .env_remove("AUTOSPEC_PROCESS_HEARTBEAT_DIR")
+        .env("AUTOSPEC_HEARTBEAT_DIR", &fixture.heartbeat_root)
+        .output()
+        .expect("run drain with claim heartbeat progress");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(stdout(&output).contains("quiet_stdout_external_progress"));
+}
+
+#[test]
+fn claim_heartbeat_wins_when_process_root_conflicts() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let claim_root = fixture.root.join("claim-heartbeats");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+heartbeat_dir="$AUTOSPEC_HEARTBEAT_DIR/owner__repo"
+mkdir -p "$heartbeat_dir"
+sleep 1
+printf '{"step":"claimed"}\n' > "$heartbeat_dir/42.json"
+sleep 1
+printf '{"step":"validated"}\n' > "$heartbeat_dir/42.json"
+sleep 3
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "3", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_HEARTBEAT_DIR", &claim_root)
+        .output()
+        .expect("run drain with conflicting heartbeat roots");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(stdout(&output).contains("quiet_stdout_external_progress"));
+}
+
+#[test]
+fn quiet_child_with_watchdog_heartbeat_progress_completes_without_termination() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let watchdog_root = fixture.root.join("watchdog");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+heartbeat_dir="$AUTOSPEC_WATCHDOG_DIR/process-heartbeats/owner__repo"
+mkdir -p "$heartbeat_dir"
+sleep 1
+printf '{"step":"claimed"}\n' > "$heartbeat_dir/42.json"
+sleep 1
+printf '{"step":"validated"}\n' > "$heartbeat_dir/42.json"
+sleep 3
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "3", "--poll-secs", "1", "--json"])
+        .env_remove("AUTOSPEC_PROCESS_HEARTBEAT_DIR")
+        .env("AUTOSPEC_WATCHDOG_DIR", &watchdog_root)
+        .output()
+        .expect("run drain with watchdog heartbeat progress");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(stdout(&output).contains("quiet_stdout_external_progress"));
 }
 
 #[test]
@@ -195,6 +315,119 @@ exec sleep 30
         "the stalled child must no longer be alive"
     );
     assert!(stdout(&output).contains("terminate_stalled"));
+}
+
+#[test]
+fn child_exit_while_termination_is_attempted_is_reported_as_complete() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(&bin.join("omx"), "#!/bin/sh\nexec sleep 2\n");
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+    write_executable(&bin.join("kill"), "#!/bin/sh\nsleep 2\nexit 1\n");
+
+    let output = fixture.run(&bin, &["--stall-secs", "1", "--poll-secs", "1", "--json"]);
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(!stdout(&output).contains("terminate_stalled"));
+    assert!(stdout(&output).contains("\"decision\":\"complete\""));
+}
+
+#[test]
+fn stalled_drain_terminates_the_wrapper_and_its_descendant() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let wrapper_pid = fixture.root.join("wrapper-pid");
+    let descendant_pid = fixture.root.join("descendant-pid");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+printf '%s\n' "$$" > "$AUTOSPEC_TEST_WRAPPER_PID"
+sleep 30 &
+printf '%s\n' "$!" > "$AUTOSPEC_TEST_DESCENDANT_PID"
+wait
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_WRAPPER_PID", &wrapper_pid)
+        .env("AUTOSPEC_TEST_DESCENDANT_PID", &descendant_pid)
+        .output()
+        .expect("run stalled drain with descendant");
+
+    assert_eq!(
+        output.status.code(),
+        Some(124),
+        "stderr={}",
+        stderr(&output)
+    );
+    assert_process_is_gone(&wrapper_pid);
+    assert_process_is_gone(&descendant_pid);
+}
+
+#[test]
+fn stalled_drain_kills_a_term_ignoring_descendant_before_joining_readers() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let descendant_pid = fixture.root.join("descendant-pid");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+trap 'exit 0' TERM
+(
+  trap '' TERM
+  exec sleep 12
+) &
+printf '%s\n' "$!" > "$AUTOSPEC_TEST_DESCENDANT_PID"
+wait
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let started = Instant::now();
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_DESCENDANT_PID", &descendant_pid)
+        .output()
+        .expect("run stalled drain with a term-ignoring descendant");
+
+    assert_eq!(
+        output.status.code(),
+        Some(124),
+        "stderr={}",
+        stderr(&output)
+    );
+    assert!(
+        started.elapsed().as_secs() < 7,
+        "drain waited for a surviving descendant for {:?}",
+        started.elapsed()
+    );
+    assert_process_is_gone(&descendant_pid);
+}
+
+#[test]
+fn child_exit_is_not_blocked_by_a_hung_github_snapshot() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(&bin.join("omx"), "#!/bin/sh\nexec sleep 1\n");
+    write_executable(&bin.join("gh"), "#!/bin/sh\nsleep 8\nprintf '[]\\n'\n");
+
+    let started = Instant::now();
+    let output = fixture.run(&bin, &["--json"]);
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(
+        started.elapsed().as_secs() < 5,
+        "hung GitHub observation delayed completed child for {:?}",
+        started.elapsed()
+    );
 }
 
 #[test]
@@ -335,6 +568,21 @@ fn path_with(bin: &Path) -> String {
         bin.display(),
         std::env::var("PATH").expect("PATH is set")
     )
+}
+
+fn assert_process_is_gone(pid_path: &Path) {
+    let pid = fs::read_to_string(pid_path).expect("read child pid");
+    assert!(
+        !Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("inspect child")
+            .success(),
+        "process {} must no longer be alive",
+        pid.trim()
+    );
 }
 
 fn stdout(output: &Output) -> String {

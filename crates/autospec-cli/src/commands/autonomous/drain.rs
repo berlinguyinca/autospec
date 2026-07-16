@@ -1,5 +1,6 @@
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,13 +9,36 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use autospec_core::autonomous::drain::{decide, DrainDecision, DrainObservation, DrainProgress};
+use autospec_core::autonomous_lifecycle::RepositoryScope;
 
 use super::{json_escape, Command, CommandFailure, Options, RunLayout};
 
 const DRAIN_RUN_PROMPT: &str = "$autospec-run";
+const GITHUB_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
+const OBSERVER_POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+enum ChildTermination {
+    Exited(ExitStatus),
+    Terminated,
+}
+
+enum GithubSnapshot {
+    Available(String),
+    ChildExited(ExitStatus),
+    Unavailable,
+}
+
+enum GithubOutput {
+    Available(String),
+    ChildExited(ExitStatus),
+    Unavailable,
+}
 
 pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
+    RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
+        CommandFailure::diagnostic(format!("autonomous drain invalid repo: {reason}"))
+    })?;
     fs::create_dir_all(&layout.state_dir).map_err(|error| {
         CommandFailure::diagnostic(format!(
             "cannot create {}: {error}",
@@ -30,7 +54,13 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
     let mut warning_emitted = false;
     let mut heartbeat = heartbeat_signature(&layout.repo);
     let mut artifact = artifact_signature(&options.repo_dir);
-    let mut github = github_snapshot(&layout.repo).ok();
+    let mut github = match github_snapshot(&layout.repo, &mut child)? {
+        GithubSnapshot::Available(snapshot) => Some(snapshot),
+        GithubSnapshot::ChildExited(status) => {
+            return complete(&layout, &options, status, last_progress, readers)
+        }
+        GithubSnapshot::Unavailable => None,
+    };
 
     loop {
         if let Some(status) = child.try_wait().map_err(child_status_error)? {
@@ -73,10 +103,11 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
         if elapsed_secs < options.drain_stall_secs {
             continue;
         }
-        if let Ok(next_github) = github_snapshot(&layout.repo) {
-            if github
-                .as_ref()
-                .is_some_and(|previous| previous != &next_github)
+        match github_snapshot(&layout.repo, &mut child)? {
+            GithubSnapshot::Available(next_github)
+                if github
+                    .as_ref()
+                    .is_some_and(|previous| previous != &next_github) =>
             {
                 github = Some(next_github);
                 last_activity = Instant::now();
@@ -87,6 +118,10 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                 }
                 continue;
             }
+            GithubSnapshot::ChildExited(status) => {
+                return complete(&layout, &options, status, last_progress, readers)
+            }
+            GithubSnapshot::Available(_) | GithubSnapshot::Unavailable => {}
         }
         if let Some(status) = child.try_wait().map_err(child_status_error)? {
             return complete(&layout, &options, status, last_progress, readers);
@@ -95,16 +130,22 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
         let observation =
             DrainObservation::live(elapsed_secs, options.drain_stall_secs, DrainProgress::None);
         debug_assert_eq!(decide(&observation), DrainDecision::TerminateStalled);
-        persist_observation(
-            &layout,
-            DrainDecision::TerminateStalled,
-            last_progress,
-            false,
-        )?;
-        emit_termination(&layout, &options, elapsed_secs);
-        terminate_child(&mut child)?;
-        join_readers(readers);
-        return Err(CommandFailure::status(String::new(), 124));
+        match terminate_child(&mut child)? {
+            ChildTermination::Exited(status) => {
+                return complete(&layout, &options, status, last_progress, readers)
+            }
+            ChildTermination::Terminated => {
+                persist_observation(
+                    &layout,
+                    DrainDecision::TerminateStalled,
+                    last_progress,
+                    false,
+                )?;
+                emit_termination(&layout, &options, elapsed_secs);
+                join_readers(readers);
+                return Err(CommandFailure::status(String::new(), 124));
+            }
+        }
     }
 }
 
@@ -118,6 +159,7 @@ fn spawn_child(options: &Options) -> Result<Child, CommandFailure> {
             DRAIN_RUN_PROMPT,
         ])
         .current_dir(&options.repo_dir)
+        .process_group(0)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -236,30 +278,71 @@ fn emit_termination(layout: &RunLayout, options: &Options, elapsed_secs: u64) {
     }
 }
 
-fn terminate_child(child: &mut Child) -> Result<(), CommandFailure> {
-    let pid = child.id().to_string();
+fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure> {
+    if let Some(status) = child.try_wait().map_err(child_status_error)? {
+        return Ok(ChildTermination::Exited(status));
+    }
+    let pid = child.id();
+    let process_group = format!("-{pid}");
     let status = Command::new("kill")
-        .args(["-TERM", &pid])
+        .args(["-TERM", "--", &process_group])
         .status()
         .map_err(|error| {
             CommandFailure::diagnostic(format!("cannot terminate drain child: {error}"))
         })?;
     if !status.success() {
+        if let Some(status) = child.try_wait().map_err(child_status_error)? {
+            return Ok(ChildTermination::Exited(status));
+        }
         return Err(CommandFailure::diagnostic(
             "cannot terminate drain child".to_string(),
         ));
     }
-    for _ in 0..20 {
-        if child.try_wait().map_err(child_status_error)?.is_some() {
-            return Ok(());
-        }
-        thread::sleep(Duration::from_millis(25));
+    if wait_for_process_group_exit(&process_group)? {
+        child.wait().map_err(child_status_error)?;
+        return Ok(ChildTermination::Terminated);
     }
-    child
-        .kill()
+    let status = Command::new("kill")
+        .args(["-KILL", "--", &process_group])
+        .status()
         .map_err(|error| CommandFailure::diagnostic(format!("cannot kill drain child: {error}")))?;
+    if !status.success() {
+        if let Some(status) = child.try_wait().map_err(child_status_error)? {
+            return Ok(ChildTermination::Exited(status));
+        }
+        return Err(CommandFailure::diagnostic(
+            "cannot kill drain child".to_string(),
+        ));
+    }
+    if !wait_for_process_group_exit(&process_group)? {
+        return Err(CommandFailure::diagnostic(
+            "drain child process group did not exit".to_string(),
+        ));
+    }
     child.wait().map_err(child_status_error)?;
-    Ok(())
+    Ok(ChildTermination::Terminated)
+}
+
+fn wait_for_process_group_exit(process_group: &str) -> Result<bool, CommandFailure> {
+    for _ in 0..20 {
+        if !process_group_is_alive(process_group)? {
+            return Ok(true);
+        }
+        thread::sleep(OBSERVER_POLL_INTERVAL);
+    }
+    Ok(false)
+}
+
+fn process_group_is_alive(process_group: &str) -> Result<bool, CommandFailure> {
+    Command::new("kill")
+        .args(["-0", "--", process_group])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("cannot inspect drain process group: {error}"))
+        })
 }
 
 fn join_readers(readers: Vec<JoinHandle<()>>) {
@@ -286,17 +369,26 @@ fn heartbeat_signature(repo: &str) -> String {
 }
 
 fn heartbeat_dirs(repo: &str) -> Vec<PathBuf> {
-    let base = std::env::var_os("AUTOSPEC_PROCESS_HEARTBEAT_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
-            PathBuf::from(home).join(".autospec/process-heartbeats")
-        });
-    vec![
-        base.join(repo.replace(['/', ':'], "_")),
-        base.join(repo.replace(['/', ':'], "__")),
-        base.join(repo.replace(['/', ':'], "-")),
-    ]
+    let mut roots = Vec::new();
+    if let Ok(root) = super::super::claim::heartbeat_root() {
+        roots.push(root);
+    }
+    if let Some(root) = std::env::var_os("AUTOSPEC_PROCESS_HEARTBEAT_DIR").map(PathBuf::from) {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    if roots.is_empty() {
+        roots.push(PathBuf::from(".autospec/process-heartbeats"));
+    }
+    roots
+        .into_iter()
+        .flat_map(|root| {
+            ["_", "__", "-"]
+                .into_iter()
+                .map(move |separator| root.join(repo.replace(['/', ':'], separator)))
+        })
+        .collect()
 }
 
 fn artifact_signature(repo_dir: &str) -> String {
@@ -330,45 +422,109 @@ fn file_signature(path: &Path) -> String {
     format!("{}:{}:{modified}", path.display(), metadata.len())
 }
 
-fn github_snapshot(repo: &str) -> Result<String, CommandFailure> {
-    let issues = gh_output([
-        "issue",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "open",
-        "--label",
-        "in-progress-by-bot",
-        "--json",
-        "number,updatedAt",
-    ])?;
-    let pull_requests = gh_output([
-        "pr",
-        "list",
-        "--repo",
-        repo,
-        "--state",
-        "all",
-        "--json",
-        "number,state,updatedAt",
-    ])?;
-    Ok(format!("{issues}\n{pull_requests}"))
+fn github_snapshot(
+    repo: &str,
+    watched_child: &mut Child,
+) -> Result<GithubSnapshot, CommandFailure> {
+    let issues = match gh_output(
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--label",
+            "in-progress-by-bot",
+            "--json",
+            "number,updatedAt",
+        ],
+        watched_child,
+    )? {
+        GithubOutput::Available(output) => output,
+        GithubOutput::ChildExited(status) => return Ok(GithubSnapshot::ChildExited(status)),
+        GithubOutput::Unavailable => return Ok(GithubSnapshot::Unavailable),
+    };
+    let pull_requests = match gh_output(
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "all",
+            "--json",
+            "number,state,updatedAt",
+        ],
+        watched_child,
+    )? {
+        GithubOutput::Available(output) => output,
+        GithubOutput::ChildExited(status) => return Ok(GithubSnapshot::ChildExited(status)),
+        GithubOutput::Unavailable => return Ok(GithubSnapshot::Unavailable),
+    };
+    Ok(GithubSnapshot::Available(format!(
+        "{issues}\n{pull_requests}"
+    )))
 }
 
-fn gh_output<const N: usize>(arguments: [&str; N]) -> Result<String, CommandFailure> {
-    let output = Command::new("gh")
+fn gh_output<const N: usize>(
+    arguments: [&str; N],
+    watched_child: &mut Child,
+) -> Result<GithubOutput, CommandFailure> {
+    let mut observer = match Command::new("gh")
         .args(arguments)
-        .output()
-        .map_err(|error| {
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Ok(GithubOutput::Unavailable),
+    };
+    let mut stdout = observer
+        .stdout
+        .take()
+        .ok_or_else(|| CommandFailure::diagnostic("cannot capture drain GitHub output"))?;
+    let reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        stdout.read_to_end(&mut output).map(|_| output)
+    });
+    let started = Instant::now();
+    loop {
+        if let Some(status) = watched_child.try_wait().map_err(child_status_error)? {
+            stop_observer(&mut observer);
+            let _ = reader.join();
+            return Ok(GithubOutput::ChildExited(status));
+        }
+        if let Some(status) = observer.try_wait().map_err(|error| {
             CommandFailure::diagnostic(format!("cannot inspect drain progress: {error}"))
-        })?;
-    if !output.status.success() {
-        return Err(CommandFailure::diagnostic(
-            "cannot inspect drain progress".to_string(),
-        ));
+        })? {
+            let output = reader
+                .join()
+                .ok()
+                .and_then(Result::ok)
+                .map(|output| String::from_utf8_lossy(&output).to_string());
+            return Ok(match (status.success(), output) {
+                (true, Some(output)) => GithubOutput::Available(output),
+                _ => GithubOutput::Unavailable,
+            });
+        }
+        if started.elapsed() >= GITHUB_SNAPSHOT_TIMEOUT {
+            stop_observer(&mut observer);
+            let _ = reader.join();
+            return Ok(GithubOutput::Unavailable);
+        }
+        thread::sleep(OBSERVER_POLL_INTERVAL);
     }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn stop_observer(observer: &mut Child) {
+    let process_group = format!("-{}", observer.id());
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &process_group])
+        .status();
+    let _ = observer.kill();
+    let _ = observer.wait();
 }
 
 fn persist_observation(

@@ -1686,7 +1686,7 @@ fn cleanup_startup_heartbeat(repo: &str, issue: u64) {
     );
 }
 
-fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
+pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
     if let Ok(value) = std::env::var("AUTOSPEC_HEARTBEAT_DIR") {
         if !value.is_empty() {
             return Ok(value.into());
