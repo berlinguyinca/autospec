@@ -11,8 +11,10 @@ use autospec_core::runtime_env::{RuntimeContext, RuntimeManifest, RuntimeState};
 
 use crate::commands::CommandFailure;
 
+mod isolation;
 mod state;
 
+use isolation::{bypass_without_planning, invocation_isolation, whole_environment_disabled};
 use state::{read_runtime_state, write_runtime_state, EnvironmentLease};
 
 const STATE_ENVIRONMENT_KEYS: [&str; 9] = [
@@ -361,14 +363,21 @@ fn init(options: InitOptions) -> Result<(), CommandFailure> {
 }
 
 fn up(options: Options) -> Result<(), CommandFailure> {
-    let context = context(&options)?;
-    let state = provision(&context)?;
-    print_protocol(&context, &state);
+    let repo = canonical_repo(&options.repo)?;
+    let invocation = invocation_isolation(&repo, &options.mode)?;
+    if invocation.whole_environment_disabled {
+        println!("AUTOSPEC_ISOLATION_BYPASSED=1");
+        return Ok(());
+    }
+    let context = context_from_repo(&repo, &options.mode)?;
+    let state = provision(&context, invocation.bypassed)?;
+    print_protocol(&context, &state, invocation.bypassed);
     Ok(())
 }
 
 fn status(options: Options) -> Result<(), CommandFailure> {
-    let context = context(&options)?;
+    let repo = canonical_repo(&options.repo)?;
+    let context = context_from_repo(&repo, &options.mode)?;
     if !context.env_file.is_file() {
         return Err(CommandFailure::status(
             format!(
@@ -380,7 +389,11 @@ fn status(options: Options) -> Result<(), CommandFailure> {
         ));
     }
     let state = read_state(&context)?;
-    print_protocol(&context, &state);
+    print_protocol(
+        &context,
+        &state,
+        bypass_without_planning(whole_environment_disabled()?)?,
+    );
     Ok(())
 }
 
@@ -395,7 +408,9 @@ fn down(options: Options) -> Result<(), CommandFailure> {
 }
 
 fn teardown(context: &RuntimeContext, state: Option<&RuntimeState>) -> Result<(), CommandFailure> {
-    run_mode_command(context.mode.down(), context, state)?;
+    if let Some(state) = state {
+        run_mode_command(context.mode.down(), context, Some(state), false)?;
+    }
     match fs::remove_dir_all(&context.environment_dir) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -407,27 +422,47 @@ fn teardown(context: &RuntimeContext, state: Option<&RuntimeState>) -> Result<()
 }
 
 fn exec(options: ExecOptions) -> Result<(), CommandFailure> {
-    let context = context(&options.options)?;
-    let state = provision(&context)?;
-    run_direct_command(&options.command, &context.repo, Some((&context, &state)))
+    let repo = canonical_repo(&options.options.repo)?;
+    let invocation = invocation_isolation(&repo, &options.options.mode)?;
+    if invocation.whole_environment_disabled {
+        return run_direct_command(&options.command, &repo, None, true);
+    }
+    let context = context_from_repo(&repo, &options.options.mode)?;
+    let state = provision(&context, invocation.bypassed)?;
+    run_direct_command(
+        &options.command,
+        &context.repo,
+        Some((&context, &state)),
+        invocation.bypassed,
+    )
 }
 
 fn session(options: SessionOptions) -> Result<(), CommandFailure> {
     let repo = canonical_repo(&options.options.repo)?;
-    if environment_flag("AUTOSPEC_ENV_DISABLE") {
-        return run_direct_command(&options.command, &repo, None);
+    let whole_environment_disabled = whole_environment_disabled()?;
+    if whole_environment_disabled {
+        bypass_without_planning(true)?;
+        return run_direct_command(&options.command, &repo, None, true);
     }
     if selected_manifest(&repo).is_none() {
         if environment_flag("AUTOSPEC_ENV_AUTO_INIT") {
             init_manifest(&repo, ManifestKind::Agent, false)?;
         } else {
-            return run_direct_command(&options.command, &repo, None);
+            let bypassed = bypass_without_planning(false)?;
+            return run_direct_command(&options.command, &repo, None, bypassed);
         }
     }
+    let invocation = invocation_isolation(&repo, &options.options.mode)?;
     let context = context_from_repo(&repo, &options.options.mode)?;
-    let state = provision(&context)?;
+    let state = provision(&context, invocation.bypassed)?;
     let keep_alive = options.keep_alive || environment_flag("AUTOSPEC_ENV_KEEP_ALIVE");
-    run_session_command(&options.command, &context, &state, keep_alive)
+    run_session_command(
+        &options.command,
+        &context,
+        &state,
+        keep_alive,
+        invocation.bypassed,
+    )
 }
 
 fn context(options: &Options) -> Result<RuntimeContext, CommandFailure> {
@@ -604,7 +639,7 @@ fn replace_state_value(
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))
 }
 
-fn provision(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
+fn provision(context: &RuntimeContext, bypassed: bool) -> Result<RuntimeState, CommandFailure> {
     if context.env_file.is_file() {
         return read_state(context);
     }
@@ -630,7 +665,7 @@ fn provision(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
                 1,
             )
         })?;
-    run_mode_command(Some(command), context, Some(&state))?;
+    run_mode_command(Some(command), context, Some(&state), bypassed)?;
     Ok(state)
 }
 
@@ -662,8 +697,9 @@ fn run_direct_command(
     command: &[String],
     repo: &Path,
     runtime: Option<(&RuntimeContext, &RuntimeState)>,
+    bypassed: bool,
 ) -> Result<(), CommandFailure> {
-    let mut child = spawn_direct_command(command, repo, runtime)?;
+    let mut child = spawn_direct_command(command, repo, runtime, bypassed)?;
     let status = child.wait().map_err(|error| {
         CommandFailure::diagnostic(format!("could not wait for runtime child command: {error}"))
     })?;
@@ -674,6 +710,7 @@ fn spawn_direct_command(
     command: &[String],
     repo: &Path,
     runtime: Option<(&RuntimeContext, &RuntimeState)>,
+    bypassed: bool,
 ) -> Result<Child, CommandFailure> {
     let (program, arguments) = command.split_first().ok_or_else(|| {
         CommandFailure::diagnostic("autospec runtime env requires a child command")
@@ -681,7 +718,9 @@ fn spawn_direct_command(
     let mut child = Command::new(program);
     child.args(arguments).current_dir(repo);
     if let Some((context, state)) = runtime {
-        configure_runtime_environment(&mut child, context, state);
+        configure_runtime_environment(&mut child, context, state, bypassed);
+    } else if bypassed {
+        child.env("AUTOSPEC_ISOLATION_BYPASSED", "1");
     }
     child.spawn().map_err(|error| {
         CommandFailure::diagnostic(format!(
@@ -695,6 +734,7 @@ fn run_session_command(
     context: &RuntimeContext,
     state: &RuntimeState,
     keep_alive: bool,
+    bypassed: bool,
 ) -> Result<(), CommandFailure> {
     #[cfg(unix)]
     install_signal_handlers();
@@ -706,13 +746,14 @@ fn run_session_command(
             return Err(error);
         }
     };
-    let mut child = match spawn_direct_command(command, &context.repo, Some((context, state))) {
-        Ok(child) => child,
-        Err(error) => {
-            let _ = cleanup_session(context, state, &session_file, true);
-            return Err(error);
-        }
-    };
+    let mut child =
+        match spawn_direct_command(command, &context.repo, Some((context, state)), bypassed) {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = cleanup_session(context, state, &session_file, true);
+                return Err(error);
+            }
+        };
     let result = wait_for_session_child(&mut child);
     let should_teardown = matches!(&result, Ok(SessionWait::Interrupted(_))) || !keep_alive;
     let cleanup = cleanup_session(context, state, &session_file, should_teardown);
@@ -833,6 +874,7 @@ fn run_mode_command(
     command: Option<&str>,
     context: &RuntimeContext,
     state: Option<&RuntimeState>,
+    bypassed: bool,
 ) -> Result<(), CommandFailure> {
     let Some(command) = command else {
         return Ok(());
@@ -840,7 +882,7 @@ fn run_mode_command(
     let mut process = Command::new("sh");
     process.args(["-c", command]).current_dir(&context.repo);
     if let Some(state) = state {
-        configure_runtime_environment(&mut process, context, state);
+        configure_runtime_environment(&mut process, context, state, bypassed);
     }
     let status = process.status().map_err(|error| {
         CommandFailure::diagnostic(format!("could not run runtime manifest command: {error}"))
@@ -852,6 +894,7 @@ fn configure_runtime_environment(
     process: &mut Command,
     context: &RuntimeContext,
     state: &RuntimeState,
+    bypassed: bool,
 ) {
     for key in STATE_ENVIRONMENT_KEYS {
         if let Some(value) = state.value(key) {
@@ -862,6 +905,9 @@ fn configure_runtime_environment(
         if let Some(value) = state.value(key) {
             process.env(key, value);
         }
+    }
+    if bypassed {
+        process.env("AUTOSPEC_ISOLATION_BYPASSED", "1");
     }
 }
 
@@ -876,7 +922,7 @@ fn child_status(status: std::process::ExitStatus) -> Result<(), CommandFailure> 
     }
 }
 
-fn print_protocol(context: &RuntimeContext, state: &RuntimeState) {
+fn print_protocol(context: &RuntimeContext, state: &RuntimeState, bypassed: bool) {
     print_state_value(state, "AGENT_ENV_ID");
     print_state_value(state, "AGENT_ENV_MODE");
     print_state_value(state, "AGENT_ENV_REPO");
@@ -888,6 +934,9 @@ fn print_protocol(context: &RuntimeContext, state: &RuntimeState) {
     print_state_value(state, "COMPOSE_PROJECT_NAME");
     for (key, _) in context.mode.env() {
         print_state_value(state, key);
+    }
+    if bypassed {
+        println!("AUTOSPEC_ISOLATION_BYPASSED=1");
     }
 }
 

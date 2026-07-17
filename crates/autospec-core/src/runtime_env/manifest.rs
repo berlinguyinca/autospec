@@ -1,7 +1,9 @@
+use super::{
+    is_valid_environment_name, EnvironmentIdentity, ResourcePlan, RuntimeResources,
+    BROKER_OWNED_ENVIRONMENT_KEYS,
+};
 use std::fmt;
 use std::path::{Path, PathBuf};
-
-use super::{is_valid_environment_name, BROKER_OWNED_ENVIRONMENT_KEYS};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeEnvError {
@@ -26,10 +28,10 @@ impl std::error::Error for RuntimeEnvError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeMode {
-    name: String,
-    command: Option<String>,
-    down: Option<String>,
-    env: Vec<(String, String)>,
+    pub(super) name: String,
+    pub(super) command: Option<String>,
+    pub(super) down: Option<String>,
+    pub(super) env: Vec<(String, String)>,
 }
 
 impl RuntimeMode {
@@ -54,8 +56,10 @@ impl RuntimeMode {
 pub struct RuntimeManifest {
     pub(crate) path: PathBuf,
     pub(crate) name: Option<String>,
-    default_mode: Option<String>,
-    modes: Vec<RuntimeMode>,
+    pub(super) version: u32,
+    pub(super) default_mode: Option<String>,
+    pub(super) modes: Vec<RuntimeMode>,
+    pub(super) resources: RuntimeResources,
 }
 
 #[derive(Default)]
@@ -114,41 +118,14 @@ impl RuntimeManifest {
     }
 
     pub fn parse(source: &str) -> Result<Self, RuntimeEnvError> {
-        let mut state = ManifestParseState::default();
-        let mut modes = Vec::new();
-
-        for (index, raw_line) in source.lines().enumerate() {
-            let line_number = index + 1;
-            if raw_line.trim().is_empty() || raw_line.trim_start().starts_with('#') {
-                continue;
-            }
-            let indent = raw_line.len() - raw_line.trim_start_matches(' ').len();
-            let content = raw_line.trim();
-
-            if indent == 0 {
-                state.parse_top_level(content);
-                continue;
-            }
-
-            if !state.in_modes {
-                continue;
-            }
-
-            if let Some(mode_index) = add_mode(content, indent, line_number, &mut modes)? {
-                state.current_mode = Some(mode_index);
-                state.in_env = false;
-                continue;
-            }
-
-            let Some(mode_index) = state.current_mode else {
-                continue;
-            };
-            if set_mode_field(content, indent, &mut modes[mode_index], &mut state.in_env) {
-                continue;
-            }
-            add_environment_entry(content, indent, state.in_env, &mut modes[mode_index])?;
+        if super::manifest_v2::is_v2(source) || manifest_version(source).as_deref() == Some("2") {
+            return Self::parse_v2(source);
         }
+        Self::parse_v1(source)
+    }
 
+    fn parse_v1(source: &str) -> Result<Self, RuntimeEnvError> {
+        let (state, modes) = parse_legacy_fields(source)?;
         validate_version(state.version.as_deref())?;
         if modes.is_empty() {
             return Err(RuntimeEnvError::new("runtime manifest has no modes"));
@@ -158,13 +135,55 @@ impl RuntimeManifest {
         Ok(Self {
             path: PathBuf::new(),
             name: state.name,
+            version: 1,
             default_mode: state.default_mode,
             modes,
+            resources: RuntimeResources::default(),
+        })
+    }
+
+    fn parse_v2(source: &str) -> Result<Self, RuntimeEnvError> {
+        let parsed = super::manifest_v2::parse(source)?;
+        validate_default_mode(parsed.default_mode.as_deref(), &parsed.modes)?;
+        Ok(Self {
+            path: PathBuf::new(),
+            name: parsed.name,
+            version: 2,
+            default_mode: parsed.default_mode,
+            modes: parsed.modes,
+            resources: parsed.resources,
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn resources(&self) -> &RuntimeResources {
+        &self.resources
+    }
+
+    pub fn resource_plan_for_repo(
+        repo: &Path,
+        identity: &EnvironmentIdentity,
+    ) -> Result<ResourcePlan, RuntimeEnvError> {
+        super::resource_plan::for_repo(repo, identity)
+    }
+
+    pub fn resource_plan_for_repo_with_overrides(
+        repo: &Path,
+        identity: &EnvironmentIdentity,
+        maven: Option<&str>,
+        compose: Option<&str>,
+        whole_environment_disabled: bool,
+    ) -> Result<(ResourcePlan, bool), RuntimeEnvError> {
+        super::resource_plan::for_repo_with_overrides(
+            repo,
+            identity,
+            maven,
+            compose,
+            whole_environment_disabled,
+        )
     }
 
     pub fn selected_mode(&self, requested_mode: &str) -> Result<&RuntimeMode, RuntimeEnvError> {
@@ -194,6 +213,62 @@ impl RuntimeManifest {
                 .to_string()
         })
     }
+}
+
+fn manifest_version(source: &str) -> Option<String> {
+    source.lines().find_map(|raw_line| {
+        let line = raw_line.trim();
+        if raw_line.len() != raw_line.trim_start_matches(' ').len() || line.starts_with('#') {
+            return None;
+        }
+        let (key, value) = split_mapping(line)?;
+        (unquote(key) == "version").then(|| tolerant_scalar(value))
+    })
+}
+
+fn tolerant_scalar(value: &str) -> String {
+    let value = value.trim();
+    let quoted = value
+        .chars()
+        .next()
+        .filter(|quote| matches!(quote, '\'' | '"'))
+        .and_then(|quote| value[1..].find(quote).map(|end| &value[..=end + 1]));
+    unquote(quoted.unwrap_or_else(|| value.split_whitespace().next().unwrap_or(value)))
+}
+
+fn parse_legacy_fields(
+    source: &str,
+) -> Result<(ManifestParseState, Vec<RuntimeMode>), RuntimeEnvError> {
+    let mut state = ManifestParseState::default();
+    let mut modes = Vec::new();
+    let logical_lines = super::shell_command::join_line_continuations(source);
+    for (index, raw_line) in logical_lines.iter().enumerate() {
+        if raw_line.trim().is_empty() || raw_line.trim_start().starts_with('#') {
+            continue;
+        }
+        let indent = raw_line.len() - raw_line.trim_start_matches(' ').len();
+        let content = raw_line.trim();
+        if indent == 0 {
+            state.parse_top_level(content);
+            continue;
+        }
+        if !state.in_modes {
+            continue;
+        }
+        if let Some(mode_index) = add_mode(content, indent, index + 1, &mut modes)? {
+            state.current_mode = Some(mode_index);
+            state.in_env = false;
+            continue;
+        }
+        let Some(mode_index) = state.current_mode else {
+            continue;
+        };
+        if set_mode_field(content, indent, &mut modes[mode_index], &mut state.in_env) {
+            continue;
+        }
+        add_environment_entry(content, indent, state.in_env, &mut modes[mode_index])?;
+    }
+    Ok((state, modes))
 }
 
 fn add_mode(

@@ -3,8 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use getrandom::fill;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{EnvironmentIdentity, RuntimeEnvError};
@@ -32,23 +31,108 @@ impl ResourcePlan {
         maven: Option<MavenPlan>,
         compose: Option<ComposePlan>,
     ) -> Result<Self, RuntimeEnvError> {
+        let mut plan = Self {
+            schema_version: 1,
+            digest: String::new(),
+            identity,
+            maven,
+            compose,
+        };
+        plan.refresh_digest()?;
+        Ok(plan)
+    }
+
+    fn refresh_digest(&mut self) -> Result<(), RuntimeEnvError> {
         let content = ResourcePlanContent {
             schema_version: 1,
-            identity: &identity,
-            maven: &maven,
-            compose: &compose,
+            identity: &self.identity,
+            maven: &self.maven,
+            compose: &self.compose,
         };
         let encoded = serde_json::to_vec(&content).map_err(|error| {
             RuntimeEnvError::new(format!("could not encode runtime resource plan: {error}"))
         })?;
-        Ok(Self {
-            schema_version: 1,
-            digest: hex_digest(Sha256::digest(encoded).as_slice()),
-            identity,
-            maven,
-            compose,
-        })
+        self.digest = hex_digest(Sha256::digest(encoded).as_slice());
+        Ok(())
     }
+
+    pub fn apply_invocation_overrides(
+        &mut self,
+        maven_value: Option<&str>,
+        compose_value: Option<&str>,
+        whole_environment_disabled: bool,
+    ) -> Result<bool, RuntimeEnvError> {
+        Self::validate_invocation_override_values(maven_value, compose_value)?;
+
+        if whole_environment_disabled || maven_value == Some("off") {
+            if let Some(maven) = &mut self.maven {
+                maven.isolation = MavenIsolation::Off;
+            }
+        }
+        if whole_environment_disabled || compose_value == Some("off") {
+            if let Some(compose) = &mut self.compose {
+                compose.isolation = ComposeIsolation::Off;
+            }
+        }
+
+        self.refresh_digest()?;
+
+        Ok(whole_environment_disabled || maven_value.is_some() || compose_value.is_some())
+    }
+
+    pub fn validate_invocation_override_values(
+        maven_value: Option<&str>,
+        compose_value: Option<&str>,
+    ) -> Result<(), RuntimeEnvError> {
+        validate_off_override("AUTOSPEC_MAVEN_ISOLATION", maven_value)?;
+        validate_off_override("AUTOSPEC_COMPOSE_ISOLATION", compose_value)
+    }
+}
+
+fn validate_off_override(key: &str, value: Option<&str>) -> Result<(), RuntimeEnvError> {
+    match value {
+        None | Some("off") => Ok(()),
+        Some(_) => Err(RuntimeEnvError::new(format!("{key} must be 'off'"))),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeResources {
+    pub maven: MavenResourceConfig,
+    pub compose: ComposeResourceConfig,
+}
+
+impl Default for RuntimeResources {
+    fn default() -> Self {
+        Self {
+            maven: MavenResourceConfig {
+                isolation: MavenIsolation::SplitLocal,
+            },
+            compose: ComposeResourceConfig {
+                isolation: ComposeIsolation::Managed,
+                files: Vec::new(),
+                exports: Vec::new(),
+                preserve_volumes: Vec::new(),
+                shared_networks: Vec::new(),
+                shared_volumes: Vec::new(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MavenResourceConfig {
+    pub isolation: MavenIsolation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComposeResourceConfig {
+    pub isolation: ComposeIsolation,
+    pub files: Vec<PathBuf>,
+    pub exports: Vec<ComposeExport>,
+    pub preserve_volumes: Vec<String>,
+    pub shared_networks: Vec<String>,
+    pub shared_volumes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -77,6 +161,20 @@ pub enum ExportProtocol {
     Udp,
 }
 
+impl ExportProtocol {
+    pub(super) fn parse(value: &str) -> Result<Self, RuntimeEnvError> {
+        match value {
+            "http" => Ok(Self::Http),
+            "https" => Ok(Self::Https),
+            "tcp" => Ok(Self::Tcp),
+            "udp" => Ok(Self::Udp),
+            value => Err(RuntimeEnvError::new(format!(
+                "unsupported Compose export protocol: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum ExportValue {
     Url,
@@ -100,6 +198,43 @@ pub struct ComposePlan {
     pub project_name: String,
     pub exports: Vec<ComposeExport>,
     pub preserve_volumes: Vec<String>,
+    #[serde(default)]
+    pub shared_networks: Vec<String>,
+    #[serde(default)]
+    pub shared_volumes: Vec<String>,
+}
+
+pub(super) fn validate_logical_keys(
+    values: &[String],
+    message: &str,
+) -> Result<(), RuntimeEnvError> {
+    let valid = |value: &String| {
+        !value.is_empty()
+            && value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "_.-".contains(character))
+            && value
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphanumeric())
+    };
+    if values.iter().all(valid) {
+        Ok(())
+    } else {
+        Err(RuntimeEnvError::new(message))
+    }
+}
+
+pub(super) fn reject_duplicates<T: Eq + std::hash::Hash>(
+    values: &[T],
+    message: &str,
+) -> Result<(), RuntimeEnvError> {
+    let mut seen = std::collections::HashSet::new();
+    if values.iter().any(|value| !seen.insert(value)) {
+        Err(RuntimeEnvError::new(message))
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

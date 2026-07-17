@@ -6,15 +6,19 @@ use std::process::{Command, Stdio};
 mod diagnostic;
 mod identity;
 mod manifest;
+mod manifest_v2;
+mod resource_plan;
 mod resources;
+mod shell_command;
 
 pub use diagnostic::IsolationDiagnostic;
 pub use identity::{load_generation_token, EnvironmentIdentity};
 pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
 pub use resources::{
     read_json, write_json_atomic, ComposeExport, ComposeIsolation, ComposePlan,
-    EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue, MavenIsolation, MavenPlan,
-    OwnedVolume, ResolvedExport, ResourceInventory, ResourcePlan, SessionRecord,
+    ComposeResourceConfig, EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue,
+    MavenIsolation, MavenPlan, MavenResourceConfig, OwnedVolume, ResolvedExport, ResourceInventory,
+    ResourcePlan, RuntimeResources, SessionRecord,
 };
 
 const BROKER_OWNED_ENVIRONMENT_KEYS: [&str; 9] = [
