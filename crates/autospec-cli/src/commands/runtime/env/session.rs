@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ExitStatus};
+use std::process::{Child, Command, ExitStatus};
 use std::time::{Duration, Instant};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -28,6 +28,7 @@ extern "C" fn record_signal(signal: i32) {
 #[cfg(unix)]
 extern "C" {
     fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+    fn kill(pid: i32, signal: i32) -> i32;
 }
 
 enum SessionWait {
@@ -100,7 +101,7 @@ pub(super) fn run_session_command(
     keep_alive: bool,
     bypassed: bool,
 ) -> Result<(), CommandFailure> {
-    let mut child =
+    let child =
         match super::spawn_direct_command(command, &context.repo, Some((context, state)), bypassed)
         {
             Ok(child) => child,
@@ -109,10 +110,65 @@ pub(super) fn run_session_command(
                 return Err(error);
             }
         };
-    let result = wait_for_session_child(&mut child, &mut session_lease);
+    let mut child = ChildGuard::new(child);
+    let result = wait_for_session_child(child.child(), &mut session_lease);
+    match &result {
+        Ok(_) => child.disarm(),
+        Err(_) => child.terminate(),
+    }
     let should_teardown = matches!(&result, Ok(SessionWait::Interrupted(_))) || !keep_alive;
     let cleanup = cleanup_session(context, state, session_lease, should_teardown);
     session_result(result, cleanup)
+}
+
+pub(super) fn run_session_supervisor(command: &mut Command) -> Result<(), CommandFailure> {
+    prepare_signal_handlers();
+    let mut worker =
+        ChildGuard::new(command.spawn().map_err(|error| {
+            diagnostic(format!("could not start runtime session worker: {error}"))
+        })?);
+    loop {
+        #[cfg(unix)]
+        {
+            let received = RECEIVED_SIGNAL.load(Ordering::Relaxed);
+            if received == 2 || received == 15 {
+                // SAFETY: the worker PID belongs to this process and the signal is fixed.
+                unsafe { kill(worker.child().id() as i32, received) };
+            }
+        }
+        if let Some(status) = worker.child().try_wait().map_err(wait_error)? {
+            worker.disarm();
+            return super::child_status(status);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+    fn child(&mut self) -> &mut Child {
+        self.0.as_mut().expect("child is armed")
+    }
+    fn disarm(&mut self) {
+        self.0.take();
+    }
+    fn terminate(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        self.disarm();
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        self.terminate();
+    }
 }
 
 pub(super) fn prepare_signal_handlers() {
@@ -159,7 +215,7 @@ fn cleanup_session(
     session_lease.release()?;
     let decision = sessions.release(&session_id);
     if should_teardown && decision == ReleaseDecision::TearDown {
-        super::teardown_locked(context, Some(state))?;
+        super::lifecycle::teardown_locked(context, Some(state))?;
     }
     Ok(())
 }

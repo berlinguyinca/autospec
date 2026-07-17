@@ -11,16 +11,24 @@ use autospec_core::runtime_env::{
 use crate::commands::CommandFailure;
 
 mod isolation;
+mod lifecycle;
 mod session;
 mod state;
 
 use isolation::{
     bypass_without_planning, invocation_isolation, planning_identity, whole_environment_disabled,
 };
-use session::{live_sessions, prepare_signal_handlers, run_session_command, SessionLease};
+use lifecycle::{
+    partial_state, provision_locked, teardown_locked, validate_authoritative,
+    validate_teardown_lifecycle,
+};
+use session::{
+    live_sessions, prepare_signal_handlers, run_session_command, run_session_supervisor,
+    SessionLease,
+};
 use state::{
-    initialize_authoritative_state, layout_for_context, read_authoritative_state,
-    read_runtime_state, write_lifecycle, write_runtime_state, EnvironmentLease, StateLayout,
+    layout_for_context, read_authoritative_state, read_runtime_state, write_runtime_state,
+    EnvironmentLease, StateLayout,
 };
 
 const STATE_ENVIRONMENT_KEYS: [&str; 9] = [
@@ -366,16 +374,29 @@ fn up(options: Options) -> Result<(), CommandFailure> {
 
 fn status(options: Options) -> Result<(), CommandFailure> {
     let repo = canonical_repo(&options.repo)?;
-    let context = context_from_repo(&repo, &options.mode)?;
+    let identity = planning_identity(&repo, &options.mode)?;
+    let context = context_from_identity(&repo, &options.mode, &identity)?;
+    if !context.environment_dir.exists() {
+        return inactive(&context);
+    }
+    let _lease = EnvironmentLease::acquire(&context.environment_dir)?;
+    let layout = layout_for_context(&context);
+    let authoritative = match read_authoritative_state(&layout)? {
+        Some(state) => state,
+        None if !context.env_file.is_file() => return inactive(&context),
+        None => return Err(partial_state(&layout)),
+    };
+    let invocation = invocation_isolation(&repo, &options.mode)?;
+    let plan = required_plan(invocation.plan)?;
+    validate_authoritative(&authoritative, &plan)?;
+    if authoritative.owner.lifecycle != EnvironmentLifecycle::Active {
+        return Err(CommandFailure::diagnostic(format!(
+            "RUNTIME_LIFECYCLE_MISMATCH: environment is {:?}",
+            authoritative.owner.lifecycle
+        )));
+    }
     if !context.env_file.is_file() {
-        return Err(CommandFailure::status(
-            format!(
-                "agent-env: no active environment for {} mode {}",
-                context.repo.display(),
-                context.mode.name()
-            ),
-            3,
-        ));
+        return Err(partial_state(&layout));
     }
     let state = read_state(&context)?;
     print_protocol(
@@ -387,11 +408,23 @@ fn status(options: Options) -> Result<(), CommandFailure> {
 }
 
 fn down(options: Options) -> Result<(), CommandFailure> {
-    let context = context(&options)?;
+    let repo = canonical_repo(&options.repo)?;
+    let identity = planning_identity(&repo, &options.mode)?;
+    let context = context_from_identity(&repo, &options.mode, &identity)?;
     if !context.environment_dir.exists() {
         return Ok(());
     }
     let _lease = EnvironmentLease::acquire(&context.environment_dir)?;
+    let layout = layout_for_context(&context);
+    let authoritative = match read_authoritative_state(&layout)? {
+        Some(state) => state,
+        None if !context.env_file.is_file() => return Ok(()),
+        None => return Err(partial_state(&layout)),
+    };
+    let invocation = invocation_isolation(&repo, &options.mode)?;
+    let plan = required_plan(invocation.plan)?;
+    validate_authoritative(&authoritative, &plan)?;
+    validate_teardown_lifecycle(&authoritative.owner.lifecycle)?;
     let live = live_sessions(&context.environment_dir)?;
     if !live.is_empty() {
         return Err(CommandFailure::diagnostic(format!(
@@ -405,33 +438,6 @@ fn down(options: Options) -> Result<(), CommandFailure> {
         None
     };
     teardown_locked(&context, state.as_ref())
-}
-
-fn teardown_locked(
-    context: &RuntimeContext,
-    state: Option<&RuntimeState>,
-) -> Result<(), CommandFailure> {
-    let layout = layout_for_context(context);
-    let mut owner = read_authoritative_state(&layout)?.map(|state| state.owner);
-    if let Some(owner) = &mut owner {
-        write_lifecycle(&layout, owner, EnvironmentLifecycle::TearingDown)?;
-    }
-    if let Some(state) = state {
-        if let Err(error) = run_mode_command(context.mode.down(), context, Some(state), false) {
-            if let Some(owner) = &mut owner {
-                write_lifecycle(&layout, owner, EnvironmentLifecycle::CleanupFailed)?;
-            }
-            return Err(error);
-        }
-    }
-    match fs::remove_dir_all(&context.environment_dir) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(CommandFailure::diagnostic(format!(
-            "could not remove runtime environment {}: {error}",
-            context.environment_dir.display()
-        ))),
-    }
 }
 
 fn exec(options: ExecOptions) -> Result<(), CommandFailure> {
@@ -468,8 +474,10 @@ fn session(options: SessionOptions) -> Result<(), CommandFailure> {
             return run_direct_command(&options.command, &repo, None, bypassed);
         }
     }
+    if !environment_flag("AUTOSPEC_RUNTIME_SESSION_WORKER") {
+        return supervise_session_worker(&options, &repo);
+    }
     let invocation = invocation_isolation(&repo, &options.options.mode)?;
-    prepare_signal_handlers();
     let plan = invocation
         .plan
         .expect("enabled runtime invocation has a plan");
@@ -480,6 +488,7 @@ fn session(options: SessionOptions) -> Result<(), CommandFailure> {
         .command
         .first()
         .expect("session command is not empty");
+    prepare_signal_handlers();
     let session_lease = SessionLease::register(&context.environment_dir, harness)?;
     drop(lease);
     let keep_alive = options.keep_alive || environment_flag("AUTOSPEC_ENV_KEEP_ALIVE");
@@ -493,14 +502,23 @@ fn session(options: SessionOptions) -> Result<(), CommandFailure> {
     )
 }
 
-fn context(options: &Options) -> Result<RuntimeContext, CommandFailure> {
-    let repo = canonical_repo(&options.repo)?;
-    context_from_repo(&repo, &options.mode)
-}
-
-fn context_from_repo(repo: &Path, mode: &str) -> Result<RuntimeContext, CommandFailure> {
-    let identity = planning_identity(repo, mode)?;
-    context_from_identity(repo, mode, &identity)
+fn supervise_session_worker(options: &SessionOptions, repo: &Path) -> Result<(), CommandFailure> {
+    let executable = std::env::current_exe().map_err(|error| {
+        CommandFailure::diagnostic(format!("could not locate runtime session worker: {error}"))
+    })?;
+    let mut worker = Command::new(executable);
+    worker
+        .args(["runtime", "env", "session", "--repo"])
+        .arg(repo)
+        .args(["--mode", &options.options.mode]);
+    if options.keep_alive {
+        worker.arg("--keep-alive");
+    }
+    worker
+        .arg("--")
+        .args(&options.command)
+        .env("AUTOSPEC_RUNTIME_SESSION_WORKER", "1");
+    run_session_supervisor(&mut worker)
 }
 
 fn context_from_plan(
@@ -631,7 +649,7 @@ fn free_port() -> Result<u16, CommandFailure> {
         })
 }
 
-fn state_from_context(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
+pub(super) fn state_from_context(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
     let frontend_override = caller_override("AGENT_FRONTEND_PORT");
     let backend_override = caller_override("AGENT_BACKEND_PORT");
     let mut state = RuntimeState::from_context(
@@ -697,85 +715,26 @@ fn provision(
     provision_locked(context, plan, bypassed)
 }
 
-fn provision_locked(
-    context: &RuntimeContext,
-    plan: &ResourcePlan,
-    bypassed: bool,
-) -> Result<RuntimeState, CommandFailure> {
-    let layout = layout_for_context(context);
-    if let Some(authoritative) = read_authoritative_state(&layout)? {
-        if active_state_matches(&authoritative, plan, context) {
-            return read_state(context);
-        }
-        reconcile_partial(context, &layout, authoritative.owner)?;
-    } else if context.env_file.is_file() {
-        let owner = initialize_authoritative_state(&layout, plan)?;
-        reconcile_partial(context, &layout, owner)?;
-    }
-    provision_fresh(context, &layout, plan, bypassed)
+fn inactive(context: &RuntimeContext) -> Result<(), CommandFailure> {
+    Err(CommandFailure::status(
+        format!(
+            "agent-env: no active environment for {} mode {}",
+            context.repo.display(),
+            context.mode.name()
+        ),
+        3,
+    ))
 }
 
-fn active_state_matches(
-    state: &state::AuthoritativeState,
-    plan: &ResourcePlan,
-    context: &RuntimeContext,
-) -> bool {
-    state.owner.lifecycle == EnvironmentLifecycle::Active
-        && state.owner.identity == plan.identity
-        && state.owner.manifest_digest == plan.digest
-        && state.plan.digest == plan.digest
-        && state.inventory.environment_id == plan.identity.environment_id
-        && context.env_file.is_file()
+fn required_plan(plan: Option<ResourcePlan>) -> Result<ResourcePlan, CommandFailure> {
+    plan.ok_or_else(|| {
+        CommandFailure::diagnostic(
+            "RUNTIME_PLAN_MISMATCH: disabled runtime cannot authenticate persisted state",
+        )
+    })
 }
 
-fn reconcile_partial(
-    context: &RuntimeContext,
-    layout: &StateLayout,
-    mut owner: autospec_core::runtime_env::EnvironmentOwner,
-) -> Result<(), CommandFailure> {
-    if !live_sessions(&context.environment_dir)?.is_empty() {
-        return Err(CommandFailure::diagnostic(
-            "RUNTIME_LIVE_SESSIONS: cannot reconcile partial state with live sessions",
-        ));
-    }
-    let state = context
-        .env_file
-        .is_file()
-        .then(|| read_state(context))
-        .transpose()?;
-    write_lifecycle(layout, &mut owner, EnvironmentLifecycle::TearingDown)?;
-    if let Some(state) = &state {
-        if let Err(error) = run_mode_command(context.mode.down(), context, Some(state), false) {
-            write_lifecycle(layout, &mut owner, EnvironmentLifecycle::CleanupFailed)?;
-            return Err(error);
-        }
-    }
-    remove_file_if_present(&context.env_file)
-}
-
-fn provision_fresh(
-    context: &RuntimeContext,
-    layout: &StateLayout,
-    plan: &ResourcePlan,
-    bypassed: bool,
-) -> Result<RuntimeState, CommandFailure> {
-    let mut owner = initialize_authoritative_state(layout, plan)?;
-    let state = state_from_context(context)?;
-    write_state(context, &state)?;
-    let command = context
-        .mode
-        .command()
-        .filter(|command| !command.trim().is_empty());
-    if command.is_none() && plan.maven.is_none() && plan.compose.is_none() {
-        return Err(missing_mode_command(context));
-    }
-    write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Provisioning)?;
-    run_mode_command(command, context, Some(&state), bypassed)?;
-    write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Active)?;
-    Ok(state)
-}
-
-fn missing_mode_command(context: &RuntimeContext) -> CommandFailure {
+pub(super) fn missing_mode_command(context: &RuntimeContext) -> CommandFailure {
     CommandFailure::status(
         format!(
             "agent-env: mode '{}' has no command in {}",
@@ -786,22 +745,14 @@ fn missing_mode_command(context: &RuntimeContext) -> CommandFailure {
     )
 }
 
-fn remove_file_if_present(path: &Path) -> Result<(), CommandFailure> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(CommandFailure::diagnostic(format!(
-            "could not remove runtime state {}: {error}",
-            path.display()
-        ))),
-    }
-}
-
-fn write_state(context: &RuntimeContext, state: &RuntimeState) -> Result<(), CommandFailure> {
+pub(super) fn write_state(
+    context: &RuntimeContext,
+    state: &RuntimeState,
+) -> Result<(), CommandFailure> {
     write_runtime_state(context, state)
 }
 
-fn read_state(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
+pub(super) fn read_state(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
     read_runtime_state(context)
 }
 
@@ -861,7 +812,7 @@ fn environment_flag(key: &str) -> bool {
     matches!(std::env::var(key).as_deref(), Ok("1"))
 }
 
-fn run_mode_command(
+pub(super) fn run_mode_command(
     command: Option<&str>,
     context: &RuntimeContext,
     state: Option<&RuntimeState>,
@@ -906,10 +857,17 @@ fn child_status(status: std::process::ExitStatus) -> Result<(), CommandFailure> 
     if status.success() {
         Ok(())
     } else {
-        Err(CommandFailure::status(
-            String::new(),
-            status.code().unwrap_or(1),
-        ))
+        #[cfg(unix)]
+        let code = {
+            use std::os::unix::process::ExitStatusExt;
+            status
+                .code()
+                .or_else(|| status.signal().map(|signal| 128 + signal))
+                .unwrap_or(1)
+        };
+        #[cfg(not(unix))]
+        let code = status.code().unwrap_or(1);
+        Err(CommandFailure::status(String::new(), code))
     }
 }
 

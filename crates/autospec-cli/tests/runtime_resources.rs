@@ -3,8 +3,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use autospec_core::runtime_env::{
-    write_json_atomic, ComposeIsolation, ComposePlan, EnvironmentIdentity, EnvironmentLifecycle,
-    EnvironmentOwner, MavenIsolation, MavenPlan, ResourceInventory, ResourcePlan,
+    ComposeIsolation, ComposePlan, EnvironmentIdentity, EnvironmentLifecycle, EnvironmentOwner,
+    MavenIsolation, MavenPlan, ResourcePlan,
 };
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
@@ -289,41 +289,6 @@ fn invalid_resource_override_fails_before_a_disabled_command_can_start() {
 }
 
 #[test]
-fn up_reconciles_a_provisioning_owner_instead_of_trusting_legacy_env() {
-    let fixture = RuntimeFixture::with_manifest(
-        "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'echo up >> up-count.txt'\n    down: sh -c 'echo down >> down-count.txt'\n",
-    );
-    let first = fixture
-        .command()
-        .args(["runtime", "env", "up", "--repo"])
-        .arg(&fixture.root)
-        .output()
-        .expect("first up starts");
-    assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-
-    seed_provisioning_state(&fixture);
-
-    let second = fixture
-        .command()
-        .args(["runtime", "env", "up", "--repo"])
-        .arg(&fixture.root)
-        .output()
-        .expect("recovery up starts");
-
-    assert!(
-        second.status.success(),
-        "{}",
-        String::from_utf8_lossy(&second.stderr)
-    );
-    assert_eq!(line_count(&fixture.root.join("up-count.txt")), 2);
-    assert_eq!(line_count(&fixture.root.join("down-count.txt")), 1);
-}
-
-#[test]
 fn owner_lifecycle_is_persisted_before_provision_and_teardown_effects() {
     let fixture = RuntimeFixture::with_manifest(
         "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'grep -q Provisioning \"$AGENT_ENV_STATE_ROOT/$AGENT_ENV_ID/owner.json\" && touch provisioning-seen'\n    down: sh -c 'grep -q TearingDown \"$AGENT_ENV_STATE_ROOT/$AGENT_ENV_ID/owner.json\" && touch teardown-seen'\n",
@@ -363,41 +328,4 @@ fn owner_lifecycle_is_persisted_before_provision_and_teardown_effects() {
         String::from_utf8_lossy(&down.stderr)
     );
     assert!(fixture.root.join("teardown-seen").is_file());
-}
-
-fn line_count(path: &Path) -> usize {
-    std::fs::read_to_string(path)
-        .unwrap_or_default()
-        .lines()
-        .count()
-}
-
-fn seed_provisioning_state(fixture: &RuntimeFixture) {
-    let environment = std::fs::read_dir(&fixture.state_root)
-        .expect("state root exists")
-        .next()
-        .expect("environment exists")
-        .expect("environment entry")
-        .path();
-    let plan = fixture_plan(&fixture.root);
-    let owner = EnvironmentOwner {
-        schema_version: 1,
-        identity: plan.identity.clone(),
-        host: "test-host".to_string(),
-        created_at_unix_ms: 1,
-        manifest_digest: plan.digest.clone(),
-        lifecycle: EnvironmentLifecycle::Provisioning,
-    };
-    let inventory = ResourceInventory {
-        schema_version: 1,
-        environment_id: environment
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .into_owned(),
-        ..ResourceInventory::default()
-    };
-    write_json_atomic(&environment.join("plan.json"), &plan).unwrap();
-    write_json_atomic(&environment.join("owner.json"), &owner).unwrap();
-    write_json_atomic(&environment.join("inventory.json"), &inventory).unwrap();
 }

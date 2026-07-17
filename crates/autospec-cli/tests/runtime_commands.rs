@@ -316,6 +316,23 @@ impl RuntimeFixture {
                     .any(|record| record.is_ok())
             })
     }
+
+    fn has_only_lease_tombstone(&self) -> bool {
+        let Ok(mut environments) = std::fs::read_dir(&self.state_root) else {
+            return false;
+        };
+        let Some(Ok(environment)) = environments.next() else {
+            return false;
+        };
+        if environments.next().is_some() {
+            return false;
+        }
+        let Ok(mut entries) = std::fs::read_dir(environment.path()) else {
+            return false;
+        };
+        matches!(entries.next(), Some(Ok(entry)) if entry.file_name() == "lease.lock")
+            && entries.next().is_none()
+    }
 }
 
 impl Drop for RuntimeFixture {
@@ -668,9 +685,7 @@ fn runtime_env_session_cleans_up_when_its_child_cannot_start() {
 
     assert_eq!(output.status.code(), Some(2));
     assert!(!fixture.has_session_record());
-    assert!(std::fs::read_dir(&fixture.state_root)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(true));
+    assert!(fixture.has_only_lease_tombstone());
     assert_eq!(
         std::fs::read_to_string(fixture.root.join("down.txt")).expect("teardown ran"),
         "down"
@@ -825,9 +840,7 @@ fn runtime_env_session_tears_down_after_sigterm() {
 
     assert_eq!(output.status.code(), Some(143));
     assert!(!fixture.has_session_record());
-    assert!(std::fs::read_dir(&fixture.state_root)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(true));
+    assert!(fixture.has_only_lease_tombstone());
     assert_eq!(
         std::fs::read_to_string(fixture.root.join("down.txt")).expect("teardown ran"),
         "down"
@@ -1121,9 +1134,7 @@ fn runtime_env_down_is_idempotent_after_state_cleanup() {
         std::fs::read_to_string(fixture.root.join("down.txt")).unwrap(),
         "down"
     );
-    assert!(std::fs::read_dir(&fixture.state_root)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(true));
+    assert!(fixture.has_only_lease_tombstone());
 }
 
 #[test]

@@ -11,7 +11,6 @@ struct RuntimeFixture {
     root: PathBuf,
     state_root: PathBuf,
 }
-
 impl RuntimeFixture {
     fn new() -> Self {
         let suffix = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
@@ -47,7 +46,7 @@ impl RuntimeFixture {
                 "--",
                 "sh",
                 "-c",
-                &format!("touch {ready}; while test ! -f {release}; do sleep 0.02; done"),
+                &format!("echo $$ > {name}.pid; touch {ready}; while test ! -f {release}; do sleep 0.02; done"),
             ])
             .spawn()
             .expect("session starts");
@@ -57,7 +56,6 @@ impl RuntimeFixture {
         }
     }
 }
-
 impl Drop for RuntimeFixture {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
@@ -68,8 +66,11 @@ struct ChildGuard {
     child: Option<Child>,
     release: PathBuf,
 }
-
 impl ChildGuard {
+    fn pid(&self) -> u32 {
+        self.child.as_ref().expect("child present").id()
+    }
+
     fn wait(mut self) -> std::process::Output {
         self.child
             .take()
@@ -78,11 +79,10 @@ impl ChildGuard {
             .expect("session exits")
     }
 }
-
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        let _ = std::fs::write(&self.release, "release\n");
         if let Some(child) = &mut self.child {
+            let _ = std::fs::write(&self.release, "release\n");
             let deadline = Instant::now() + Duration::from_secs(2);
             while child.try_wait().ok().flatten().is_none() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(10));
@@ -135,8 +135,7 @@ fn live_lock_blocks_down_and_heartbeat_updates_schema_one_record() {
     assert_eq!(first.schema_version, 1);
     assert!(record_path.with_extension("lock").is_file());
 
-    std::thread::sleep(Duration::from_millis(1_100));
-    let second: SessionRecord = read_record(&record_path);
+    let second = wait_for_heartbeat(&record_path, first.heartbeat_at_unix_ms);
     assert!(second.heartbeat_at_unix_ms > first.heartbeat_at_unix_ms);
     std::fs::write(fixture.root.join("live.release"), "release\n").unwrap();
     assert!(session.wait().status.success());
@@ -171,7 +170,69 @@ fn keep_alive_releases_all_records_and_down_prunes_an_unlocked_stale_record() {
         String::from_utf8_lossy(&down.stderr)
     );
     assert_eq!(line_count(&fixture.root.join("down-count.txt")), 1);
-    assert!(!environment.exists());
+    assert_eq!(directory_names(&environment), ["lease.lock"]);
+}
+
+#[test]
+fn teardown_retains_one_stable_environment_lease_inode() {
+    let fixture = RuntimeFixture::new();
+    let up = runtime_up(&fixture);
+    assert!(up.status.success());
+    let environment = environment_dir(&fixture);
+    let lease = environment.join("lease.lock");
+    #[cfg(unix)]
+    let original_inode = inode(&lease);
+
+    let down = runtime_down(&fixture);
+
+    assert!(
+        down.status.success(),
+        "{}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+    assert_eq!(directory_names(&environment), ["lease.lock"]);
+    #[cfg(unix)]
+    assert_eq!(inode(&lease), original_inode);
+    assert_probes_serialize(&fixture, &environment);
+}
+
+#[cfg(unix)]
+#[test]
+fn killing_outer_session_keeps_teardown_blocked_while_harness_lives() {
+    let fixture = RuntimeFixture::new();
+    let outer = fixture.session("orphan");
+    wait_for(&fixture.root.join("orphan.ready"));
+    let harness_pid = child_pid(&fixture, "orphan");
+    send_signal(outer.pid(), 9);
+    let outer_output = outer.wait();
+    assert_eq!(outer_output.status.code(), None);
+
+    let down = runtime_down(&fixture);
+    let child_alive = process_alive(harness_pid);
+    let teardown_count = line_count(&fixture.root.join("down-count.txt"));
+    std::fs::write(fixture.root.join("orphan.release"), "release\n").unwrap();
+    wait_for_process_exit(harness_pid);
+    wait_for(&fixture.root.join("down-count.txt"));
+
+    assert!(child_alive, "orphan_child_alive=0");
+    assert_eq!(down.status.code(), Some(2), "teardown_ran=1");
+    assert!(String::from_utf8_lossy(&down.stderr).contains("RUNTIME_LIVE_SESSIONS"));
+    assert_eq!(teardown_count, 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn session_preserves_direct_child_sigterm_exit_code() {
+    let fixture = RuntimeFixture::new();
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "session", "--repo"])
+        .arg(&fixture.root)
+        .args(["--", "sh", "-c", "kill -TERM $$"])
+        .output()
+        .expect("signal session starts");
+
+    assert_eq!(output.status.code(), Some(143));
 }
 
 fn wait_for(path: &Path) {
@@ -180,6 +241,18 @@ fn wait_for(path: &Path) {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert!(path.exists(), "timed out waiting for {}", path.display());
+}
+
+fn wait_for_heartbeat(path: &Path, initial: u64) -> SessionRecord {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let record = read_record(path);
+        if record.heartbeat_at_unix_ms > initial {
+            return record;
+        }
+        assert!(Instant::now() < deadline, "heartbeat did not advance");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 fn line_count(path: &Path) -> usize {
@@ -205,6 +278,15 @@ fn runtime_down(fixture: &RuntimeFixture) -> std::process::Output {
         .arg(&fixture.root)
         .output()
         .expect("down starts")
+}
+
+fn runtime_up(fixture: &RuntimeFixture) -> std::process::Output {
+    fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("up starts")
 }
 
 fn environment_dir(fixture: &RuntimeFixture) -> PathBuf {
@@ -233,4 +315,85 @@ fn session_records(sessions: &Path) -> impl Iterator<Item = PathBuf> {
 fn read_record(path: &Path) -> SessionRecord {
     serde_json::from_slice(&std::fs::read(path).expect("read session record"))
         .expect("parse session record")
+}
+
+fn directory_names(path: &Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(path)
+        .expect("environment tombstone exists")
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+fn assert_probes_serialize(fixture: &RuntimeFixture, environment: &Path) {
+    let first = lease_probe(fixture, environment, "first-probe");
+    wait_for(&fixture.root.join("first-probe.ready"));
+    let second = lease_probe(fixture, environment, "second-probe");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(!fixture.root.join("second-probe.ready").exists());
+    std::fs::write(fixture.root.join("first-probe.release"), "release\n").unwrap();
+    assert!(first.wait().status.success());
+    wait_for(&fixture.root.join("second-probe.ready"));
+    std::fs::write(fixture.root.join("second-probe.release"), "release\n").unwrap();
+    assert!(second.wait().status.success());
+}
+
+fn lease_probe(fixture: &RuntimeFixture, environment: &Path, name: &str) -> ChildGuard {
+    let ready = fixture.root.join(format!("{name}.ready"));
+    let release = fixture.root.join(format!("{name}.release"));
+    let child = fixture
+        .command()
+        .args(["runtime", "env", "lease-probe"])
+        .arg(environment)
+        .arg(&ready)
+        .arg(&release)
+        .spawn()
+        .expect("lease probe starts");
+    ChildGuard {
+        child: Some(child),
+        release,
+    }
+}
+
+#[cfg(unix)]
+fn inode(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).unwrap().ino()
+}
+
+#[cfg(unix)]
+fn send_signal(pid: u32, signal: i32) {
+    assert!(Command::new("kill")
+        .arg(format!("-{signal}"))
+        .arg(pid.to_string())
+        .status()
+        .unwrap()
+        .success());
+}
+
+#[cfg(unix)]
+fn child_pid(fixture: &RuntimeFixture, name: &str) -> u32 {
+    std::fs::read_to_string(fixture.root.join(format!("{name}.pid")))
+        .expect("harness pid exists")
+        .trim()
+        .parse()
+        .unwrap()
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> bool {
+    Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[cfg(unix)]
+fn wait_for_process_exit(pid: u32) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!process_alive(pid), "process {pid} did not exit");
 }

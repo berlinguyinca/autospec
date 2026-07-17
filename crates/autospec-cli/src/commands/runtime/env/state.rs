@@ -55,8 +55,19 @@ pub(super) fn layout_for_context(context: &RuntimeContext) -> StateLayout {
 pub(super) fn read_authoritative_state(
     layout: &StateLayout,
 ) -> Result<Option<AuthoritativeState>, CommandFailure> {
-    if !layout.owner.is_file() || !layout.plan.is_file() || !layout.inventory.is_file() {
+    let present = [
+        layout.owner.is_file(),
+        layout.plan.is_file(),
+        layout.inventory.is_file(),
+    ];
+    if present.iter().all(|value| !value) {
         return Ok(None);
+    }
+    if !present.iter().all(|value| *value) {
+        return Err(CommandFailure::diagnostic(format!(
+            "RUNTIME_PARTIAL_STATE: owner.json, plan.json, and inventory.json must all exist under {}",
+            layout.environment_dir.display()
+        )));
     }
     Ok(Some(AuthoritativeState {
         owner: read_json(&layout.owner).map_err(runtime_error)?,
