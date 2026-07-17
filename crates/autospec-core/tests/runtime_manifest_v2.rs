@@ -82,3 +82,29 @@ fn export_protocol_and_value_combinations_are_constrained() {
         ExportValue::HostPort
     );
 }
+
+#[test]
+fn compose_exports_reject_reserved_child_environment_names() {
+    for reserved in [
+        "AGENT_ENV_ID",
+        "AGENT_PUBLIC_URL",
+        "COMPOSE_PROJECT_NAME",
+        "MAVEN_ARGS",
+    ] {
+        let source = format!(
+            "version: 2\nresources:\n  compose:\n    exports:\n      - service: web\n        target: 80\n        protocol: http\n        env: {reserved}\n"
+        );
+        let error = RuntimeManifest::parse(&source).expect_err("reserved export is rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("reserved Compose export environment name"),
+            "{reserved}: {error:?}"
+        );
+    }
+
+    RuntimeManifest::parse(
+        "version: 2\nresources:\n  compose:\n    exports:\n      - service: web\n        target: 80\n        protocol: http\n        env: AUTOSPEC_PUBLIC_URL\n",
+    )
+    .expect("the explicit canonical URL export remains valid");
+}

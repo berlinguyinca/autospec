@@ -204,6 +204,50 @@ pub struct ComposePlan {
     pub shared_volumes: Vec<String>,
 }
 
+impl ComposePlan {
+    pub fn canonical_url_export_index(&self) -> Result<Option<usize>, RuntimeEnvError> {
+        let explicit = self
+            .exports
+            .iter()
+            .enumerate()
+            .filter(|(_, export)| export.env == "AUTOSPEC_PUBLIC_URL")
+            .collect::<Vec<_>>();
+        if let [(index, export)] = explicit.as_slice() {
+            if matches!(
+                export.protocol,
+                ExportProtocol::Http | ExportProtocol::Https
+            ) && export.value == ExportValue::Url
+            {
+                return Ok(Some(*index));
+            }
+        }
+        if !explicit.is_empty() {
+            return Err(RuntimeEnvError::new(
+                "COMPOSE_CANONICAL_URL_INVALID: AUTOSPEC_PUBLIC_URL must be one URL-valued HTTP(S) export",
+            ));
+        }
+        let candidates = self
+            .exports
+            .iter()
+            .enumerate()
+            .filter(|(_, export)| {
+                matches!(
+                    export.protocol,
+                    ExportProtocol::Http | ExportProtocol::Https
+                )
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        match candidates.as_slice() {
+            [] => Ok(None),
+            [index] => Ok(Some(*index)),
+            _ => Err(RuntimeEnvError::new(
+                "COMPOSE_CANONICAL_URL_AMBIGUOUS: declare exactly one HTTP(S) export or AUTOSPEC_PUBLIC_URL",
+            )),
+        }
+    }
+}
+
 pub(super) fn validate_logical_keys(
     values: &[String],
     message: &str,
@@ -250,6 +294,46 @@ pub struct ResolvedExport {
     pub port: u16,
 }
 
+impl ResolvedExport {
+    pub fn render(&self, declaration: &ComposeExport) -> Result<String, RuntimeEnvError> {
+        if self.env != declaration.env || self.host != "127.0.0.1" || self.port == 0 {
+            return Err(RuntimeEnvError::new(
+                "resolved Compose export does not match its validated declaration",
+            ));
+        }
+        match (&declaration.protocol, &declaration.value) {
+            (ExportProtocol::Http, ExportValue::Url) => {
+                Ok(format!("http://{}:{}", self.host, self.port))
+            }
+            (ExportProtocol::Https, ExportValue::Url) => {
+                Ok(format!("https://{}:{}", self.host, self.port))
+            }
+            (ExportProtocol::Tcp | ExportProtocol::Udp, ExportValue::Port) => {
+                Ok(self.port.to_string())
+            }
+            (_, ExportValue::HostPort) => Ok(format!("{}:{}", self.host, self.port)),
+            _ => Err(RuntimeEnvError::new(
+                "resolved Compose export has an incompatible value type",
+            )),
+        }
+    }
+
+    pub fn canonical_url(&self, declaration: &ComposeExport) -> Result<String, RuntimeEnvError> {
+        if self.env != declaration.env || self.host != "127.0.0.1" || self.port == 0 {
+            return Err(RuntimeEnvError::new(
+                "resolved Compose export does not match its validated declaration",
+            ));
+        }
+        match declaration.protocol {
+            ExportProtocol::Http => Ok(format!("http://{}:{}", self.host, self.port)),
+            ExportProtocol::Https => Ok(format!("https://{}:{}", self.host, self.port)),
+            ExportProtocol::Tcp | ExportProtocol::Udp => Err(RuntimeEnvError::new(
+                "resolved Compose export cannot provide a canonical HTTP(S) URL",
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResourceInventory {
     pub schema_version: u32,
@@ -259,7 +343,30 @@ pub struct ResourceInventory {
     pub networks: Vec<String>,
     pub volumes: Vec<OwnedVolume>,
     pub exports: Vec<ResolvedExport>,
+    #[serde(default)]
+    pub frontend_port: Option<u16>,
+    #[serde(default)]
+    pub backend_port: Option<u16>,
+    #[serde(default)]
+    pub maven_arguments: Option<String>,
+    #[serde(default)]
+    pub initial_overrides: Vec<(String, String)>,
     pub maven_local_prefix: Option<PathBuf>,
+}
+
+impl ResourceInventory {
+    pub fn deletable_volumes(&self, preserved: &[String]) -> Vec<String> {
+        self.volumes
+            .iter()
+            .filter(|volume| {
+                volume
+                    .logical_key
+                    .as_ref()
+                    .is_none_or(|key| !preserved.contains(key))
+            })
+            .map(|volume| volume.id.clone())
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -297,6 +404,16 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
     path: &Path,
     value: &T,
 ) -> Result<(), RuntimeEnvError> {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "could not encode runtime state {}: {error}",
+            path.display()
+        ))
+    })?;
+    write_file_atomic(path, &encoded)
+}
+
+pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvError> {
     let parent = path.parent().ok_or_else(|| {
         RuntimeEnvError::new(format!(
             "runtime state path has no parent: {}",
@@ -307,12 +424,6 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
         RuntimeEnvError::new(format!(
             "could not create runtime state directory {}: {error}",
             parent.display()
-        ))
-    })?;
-    let encoded = serde_json::to_vec(value).map_err(|error| {
-        RuntimeEnvError::new(format!(
-            "could not encode runtime state {}: {error}",
-            path.display()
         ))
     })?;
     let temporary = create_temporary_path(path)?;
@@ -327,7 +438,7 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
                     temporary.display()
                 ))
             })?;
-        file.write_all(&encoded)
+        file.write_all(encoded)
             .and_then(|()| file.sync_all())
             .map_err(|error| {
                 RuntimeEnvError::new(format!(

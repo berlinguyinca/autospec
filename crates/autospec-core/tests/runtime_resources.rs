@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use autospec_core::runtime_env::{
     load_generation_token, read_json, write_json_atomic, ComposeExport, ComposeIsolation,
-    ComposePlan, ComposePolicy, EnvironmentIdentity, EnvironmentLifecycle, EnvironmentOwner,
-    ExportProtocol, ExportValue, IsolationDiagnostic, OwnedVolume, ResolvedExport,
-    ResourceInventory, RuntimeContext, RuntimeManifest, SessionRecord,
+    ComposeOverride, ComposeOwnership, ComposePlan, ComposePolicy, EnvironmentIdentity,
+    EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue, IsolationDiagnostic,
+    OwnedVolume, ResolvedExport, ResourceInventory, RuntimeContext, RuntimeManifest, SessionRecord,
 };
 
 static NEXT_TEMP_REPO: AtomicUsize = AtomicUsize::new(0);
@@ -108,6 +108,10 @@ fn inventory_json_preserves_resource_ids_and_ports() {
             host: "127.0.0.1".to_string(),
             port: 49152,
         }],
+        frontend_port: Some(49152),
+        backend_port: Some(49153),
+        maven_arguments: Some("-T 2".to_string()),
+        initial_overrides: vec![("AGENT_FRONTEND_PORT".to_string(), "49152".to_string())],
         maven_local_prefix: Some(PathBuf::from("autospec/env-a")),
     };
 
@@ -134,6 +138,145 @@ fn legacy_compose_plan_json_defaults_new_shared_resource_fields() {
 
     assert!(plan.shared_networks.is_empty());
     assert!(plan.shared_volumes.is_empty());
+}
+
+#[test]
+fn compose_override_publishes_only_declared_loopback_targets_with_ownership() {
+    let repo = TempRepo::with_files(&[("compose.yaml", "services: {}\n")]);
+    let plan = compose_policy_plan(repo.path());
+    let model = serde_json::json!({
+        "services": {"web": {"image": "example.invalid/web"}},
+        "networks": {"private": {}},
+        "volumes": {"cache": {}}
+    });
+    let ownership = ComposeOwnership {
+        environment_id: "env-a".to_string(),
+        owner_key: "owner-a".to_string(),
+        plan_digest: "digest-a".to_string(),
+    };
+
+    let rendered = ComposeOverride::render(&plan, &model, &ownership).unwrap();
+
+    assert_eq!(
+        rendered,
+        "services:\n  web:\n    labels:\n      com.autospec.environment-id: 'env-a'\n      com.autospec.owner-key: 'owner-a'\n      com.autospec.plan-digest: 'digest-a'\n    ports:\n      - target: 8080\n        published: '0'\n        host_ip: '127.0.0.1'\n        protocol: tcp\nnetworks:\n  private:\n    labels:\n      com.autospec.environment-id: 'env-a'\n      com.autospec.owner-key: 'owner-a'\n      com.autospec.plan-digest: 'digest-a'\nvolumes:\n  cache:\n    labels:\n      com.autospec.environment-id: 'env-a'\n      com.autospec.owner-key: 'owner-a'\n      com.autospec.plan-digest: 'digest-a'\n"
+    );
+}
+
+#[test]
+fn compose_inventory_excludes_preserved_logical_volumes_from_deletion() {
+    let inventory = ResourceInventory {
+        volumes: vec![
+            OwnedVolume {
+                logical_key: Some("db-data".to_string()),
+                id: "volume-db".to_string(),
+            },
+            OwnedVolume {
+                logical_key: Some("cache-data".to_string()),
+                id: "volume-cache".to_string(),
+            },
+            OwnedVolume {
+                logical_key: None,
+                id: "volume-anonymous".to_string(),
+            },
+        ],
+        ..ResourceInventory::default()
+    };
+
+    assert_eq!(
+        inventory.deletable_volumes(&["db-data".to_string()]),
+        vec!["volume-cache".to_string(), "volume-anonymous".to_string()]
+    );
+}
+
+#[test]
+fn resolved_compose_exports_render_by_declared_value_type() {
+    let resolved = ResolvedExport {
+        env: "SERVICE".to_string(),
+        host: "127.0.0.1".to_string(),
+        port: 49152,
+    };
+
+    for (protocol, value, expected) in [
+        (
+            ExportProtocol::Http,
+            ExportValue::Url,
+            "http://127.0.0.1:49152",
+        ),
+        (
+            ExportProtocol::Https,
+            ExportValue::Url,
+            "https://127.0.0.1:49152",
+        ),
+        (ExportProtocol::Tcp, ExportValue::Port, "49152"),
+        (ExportProtocol::Udp, ExportValue::Port, "49152"),
+        (
+            ExportProtocol::Tcp,
+            ExportValue::HostPort,
+            "127.0.0.1:49152",
+        ),
+    ] {
+        let export = ComposeExport {
+            service: "web".to_string(),
+            target: 8080,
+            protocol,
+            env: "SERVICE".to_string(),
+            value,
+        };
+        assert_eq!(resolved.render(&export).unwrap(), expected);
+    }
+}
+
+#[test]
+fn compose_canonical_url_requires_explicit_or_unique_http_export() {
+    let mut plan = compose_policy_plan(Path::new("/repo"));
+    assert_eq!(plan.canonical_url_export_index().unwrap(), None);
+
+    plan.exports = vec![ComposeExport {
+        service: "web".to_string(),
+        target: 8080,
+        protocol: ExportProtocol::Http,
+        env: "WEB_URL".to_string(),
+        value: ExportValue::Url,
+    }];
+    assert_eq!(plan.canonical_url_export_index().unwrap(), Some(0));
+
+    plan.exports.push(ComposeExport {
+        service: "admin".to_string(),
+        target: 8081,
+        protocol: ExportProtocol::Https,
+        env: "ADMIN_URL".to_string(),
+        value: ExportValue::Url,
+    });
+    assert!(plan.canonical_url_export_index().is_err());
+
+    plan.exports[1].env = "AUTOSPEC_PUBLIC_URL".to_string();
+    assert_eq!(plan.canonical_url_export_index().unwrap(), Some(1));
+
+    plan.exports[1].value = ExportValue::HostPort;
+    assert!(plan.canonical_url_export_index().is_err());
+}
+
+#[test]
+fn http_host_port_keeps_its_export_shape_but_has_a_canonical_url() {
+    let declaration = ComposeExport {
+        service: "web".to_string(),
+        target: 8080,
+        protocol: ExportProtocol::Http,
+        env: "WEB_HOST".to_string(),
+        value: ExportValue::HostPort,
+    };
+    let resolved = ResolvedExport {
+        env: declaration.env.clone(),
+        host: "127.0.0.1".to_string(),
+        port: 49152,
+    };
+
+    assert_eq!(resolved.render(&declaration).unwrap(), "127.0.0.1:49152");
+    assert_eq!(
+        resolved.canonical_url(&declaration).unwrap(),
+        "http://127.0.0.1:49152"
+    );
 }
 
 #[test]

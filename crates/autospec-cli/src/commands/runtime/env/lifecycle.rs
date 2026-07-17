@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use autospec_core::runtime_env::{
-    EnvironmentLifecycle, EnvironmentOwner, ResourceInventory, ResourcePlan, RuntimeContext,
-    RuntimeState,
+    ComposeIsolation, EnvironmentLifecycle, EnvironmentOwner, MavenIsolation, MavenPlan,
+    ResourceInventory, ResourcePlan, RuntimeContext, RuntimeState,
 };
 
 use crate::commands::CommandFailure;
@@ -16,16 +16,26 @@ use super::state::{
     StateLayout,
 };
 
+const INITIAL_OVERRIDE_KEYS: [&str; 5] = [
+    "AGENT_FRONTEND_PORT",
+    "AGENT_BACKEND_PORT",
+    "AGENT_PUBLIC_URL",
+    "AUTOSPEC_PUBLIC_URL",
+    "COMPOSE_PROJECT_NAME",
+];
+
 pub(super) fn provision_locked(
     context: &RuntimeContext,
     plan: &ResourcePlan,
     bypassed: bool,
 ) -> Result<RuntimeState, CommandFailure> {
     let layout = layout_for_context(context);
+    ComposeAdapter::reject_caller_project_name(plan.compose.as_ref())?;
     if let Some(authoritative) = read_authoritative_state(&layout)? {
         validate_authoritative(&authoritative, plan)?;
         if active_state_matches(&authoritative, context) {
-            return super::read_state(context);
+            let cached = super::read_state(context)?;
+            return validate_cached_state(context, plan, &authoritative.inventory, &cached);
         }
         reconcile_provisioning(context, &layout, authoritative)?;
     } else if context.env_file.is_file() {
@@ -44,7 +54,11 @@ pub(super) fn teardown_locked(
     validate_authoritative(&authoritative, desired)?;
     validate_teardown_lifecycle(&authoritative.owner.lifecycle)?;
     let mut owner = authoritative.owner;
-    if inventory_has_teardown_blockers(&authoritative.inventory) {
+    let managed_compose = desired
+        .compose
+        .as_ref()
+        .is_some_and(|compose| compose.isolation == ComposeIsolation::Managed);
+    if inventory_has_teardown_blockers(&authoritative.inventory) && !managed_compose {
         write_lifecycle(&layout, &mut owner, EnvironmentLifecycle::CleanupFailed)?;
         return Err(CommandFailure::diagnostic(
             "RUNTIME_INVENTORY_NOT_EMPTY: refusing cleanup of recorded resources",
@@ -57,6 +71,11 @@ pub(super) fn teardown_locked(
         {
             return cleanup_failed(&layout, Some(&mut owner), error);
         }
+    }
+    if let Err(error) =
+        ComposeAdapter::down_owned(desired.compose.as_ref(), desired, context, &layout)
+    {
+        return cleanup_failed(&layout, Some(&mut owner), error);
     }
     let retained_inventory: ResourceInventory = match super::state::read_json(&layout.inventory) {
         Ok(inventory) => inventory,
@@ -113,6 +132,38 @@ pub(super) fn validate_authoritative(
     Ok(())
 }
 
+pub(super) fn validate_cached_state(
+    context: &RuntimeContext,
+    plan: &ResourcePlan,
+    inventory: &ResourceInventory,
+    cached: &RuntimeState,
+) -> Result<RuntimeState, CommandFailure> {
+    cached
+        .validate_child_environment(context)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    let frontend = required_inventory_port(inventory.frontend_port, "AGENT_FRONTEND_PORT")?;
+    let backend = required_inventory_port(inventory.backend_port, "AGENT_BACKEND_PORT")?;
+    let mut expected = RuntimeState::from_context(context, frontend, backend);
+    restore_initial_overrides(inventory, &mut expected)?;
+    restore_maven_state(plan, inventory, context, &mut expected)?;
+    restore_compose_state(plan, inventory, &mut expected)?;
+    for (key, expected_value) in expected.values() {
+        if cached.value(key) != Some(expected_value) {
+            return Err(CommandFailure::diagnostic(format!(
+                "RUNTIME_CHILD_ENV_VALUE_MISMATCH: {key}"
+            )));
+        }
+    }
+    for (key, cached_value) in cached.values() {
+        if expected.value(key) != Some(cached_value) {
+            return Err(CommandFailure::diagnostic(format!(
+                "RUNTIME_CHILD_ENV_VALUE_MISMATCH: {key}"
+            )));
+        }
+    }
+    Ok(expected)
+}
+
 pub(super) fn partial_state(layout: &StateLayout) -> CommandFailure {
     CommandFailure::diagnostic(format!(
         "RUNTIME_PARTIAL_STATE: incomplete runtime state under {}",
@@ -125,6 +176,7 @@ pub(super) fn validate_teardown_lifecycle(
 ) -> Result<(), CommandFailure> {
     match lifecycle {
         EnvironmentLifecycle::Active
+        | EnvironmentLifecycle::Provisioning
         | EnvironmentLifecycle::TearingDown
         | EnvironmentLifecycle::CleanupFailed => Ok(()),
         other => Err(CommandFailure::diagnostic(format!(
@@ -181,6 +233,7 @@ fn provision_fresh(
 ) -> Result<RuntimeState, CommandFailure> {
     let mut owner = initialize_authoritative_state(layout, plan)?;
     let mut state = super::state_from_context(context)?;
+    record_allocated_ports(layout, &state)?;
     let command = context
         .mode
         .command()
@@ -189,8 +242,22 @@ fn provision_fresh(
         return Err(super::missing_mode_command(context));
     }
     write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Provisioning)?;
-    ComposeAdapter::validate_resolved_model(plan.compose.as_ref(), context)?;
+    ComposeAdapter::validate_canonical_export(plan.compose.as_ref())?;
+    let resolved_compose = ComposeAdapter::validate_resolved_model(plan.compose.as_ref(), context)?;
     if let Err(error) = MavenAdapter::configure(plan.maven.as_ref(), context, &mut state, layout) {
+        return cleanup_failed(layout, Some(&mut owner), error);
+    }
+    if let Err(error) = record_maven_arguments(layout, plan, &state) {
+        return cleanup_failed(layout, Some(&mut owner), error);
+    }
+    if let Err(error) = ComposeAdapter::up(
+        plan.compose.as_ref(),
+        plan,
+        resolved_compose.as_deref(),
+        context,
+        &mut state,
+        layout,
+    ) {
         return cleanup_failed(layout, Some(&mut owner), error);
     }
     if let Err(error) = super::write_state(context, &state) {
@@ -201,6 +268,206 @@ fn provision_fresh(
     }
     write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Active)?;
     Ok(state)
+}
+
+fn required_inventory_port(value: Option<u16>, key: &str) -> Result<u16, CommandFailure> {
+    value
+        .filter(|port| *port > 0)
+        .ok_or_else(|| CommandFailure::diagnostic(format!("RUNTIME_INVENTORY_MISSING: {key}")))
+}
+
+fn restore_maven_state(
+    plan: &ResourcePlan,
+    inventory: &ResourceInventory,
+    context: &RuntimeContext,
+    state: &mut RuntimeState,
+) -> Result<(), CommandFailure> {
+    if !plan
+        .maven
+        .as_ref()
+        .is_some_and(|plan| plan.isolation == MavenIsolation::SplitLocal)
+    {
+        return Ok(());
+    }
+    let stored = inventory
+        .maven_arguments
+        .as_deref()
+        .ok_or_else(|| CommandFailure::diagnostic("RUNTIME_INVENTORY_MISSING: MAVEN_ARGS"))?;
+    let canonical = MavenPlan::arguments(stored, &context.environment_id)
+        .map_err(|error| CommandFailure::diagnostic(format!("{}: {}", error.code, error.evidence)))?
+        .render()
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("{}: {}", error.code, error.evidence))
+        })?;
+    if canonical != stored {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_INVENTORY_MISMATCH: MAVEN_ARGS is not canonical",
+        ));
+    }
+    state
+        .set_value("MAVEN_ARGS", canonical)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
+fn restore_compose_state(
+    plan: &ResourcePlan,
+    inventory: &ResourceInventory,
+    state: &mut RuntimeState,
+) -> Result<(), CommandFailure> {
+    let Some(compose) = plan
+        .compose
+        .as_ref()
+        .filter(|plan| plan.isolation == ComposeIsolation::Managed)
+    else {
+        return Ok(());
+    };
+    if inventory.compose_project.as_deref() != Some(compose.project_name.as_str()) {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_INVENTORY_MISMATCH: COMPOSE_PROJECT_NAME",
+        ));
+    }
+    if inventory.exports.len() != compose.exports.len() {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_INVENTORY_MISMATCH: Compose exports",
+        ));
+    }
+    restore_declared_exports(compose, inventory, state)?;
+    restore_canonical_url(compose, inventory, state)
+}
+
+fn restore_declared_exports(
+    compose: &autospec_core::runtime_env::ComposePlan,
+    inventory: &ResourceInventory,
+    state: &mut RuntimeState,
+) -> Result<(), CommandFailure> {
+    for declaration in &compose.exports {
+        let resolved = resolved_export(inventory, &declaration.env)?;
+        let value = resolved
+            .render(declaration)
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        state
+            .set_value(&declaration.env, value)
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn restore_canonical_url(
+    compose: &autospec_core::runtime_env::ComposePlan,
+    inventory: &ResourceInventory,
+    state: &mut RuntimeState,
+) -> Result<(), CommandFailure> {
+    let Some(index) = compose
+        .canonical_url_export_index()
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    let declaration = &compose.exports[index];
+    let value = resolved_export(inventory, &declaration.env)?
+        .canonical_url(declaration)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    state
+        .set_value("AUTOSPEC_PUBLIC_URL", value.clone())
+        .and_then(|_| state.set_value("AGENT_PUBLIC_URL", value))
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
+fn resolved_export<'a>(
+    inventory: &'a ResourceInventory,
+    env: &str,
+) -> Result<&'a autospec_core::runtime_env::ResolvedExport, CommandFailure> {
+    let matches = inventory
+        .exports
+        .iter()
+        .filter(|resolved| resolved.env == env)
+        .collect::<Vec<_>>();
+    let [resolved] = matches.as_slice() else {
+        return Err(CommandFailure::diagnostic(format!(
+            "RUNTIME_INVENTORY_MISMATCH: {env}"
+        )));
+    };
+    Ok(resolved)
+}
+
+fn record_allocated_ports(
+    layout: &StateLayout,
+    state: &RuntimeState,
+) -> Result<(), CommandFailure> {
+    let mut inventory: ResourceInventory = super::state::read_json(&layout.inventory)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    inventory.frontend_port = Some(parse_state_port(state, "AGENT_FRONTEND_PORT")?);
+    inventory.backend_port = Some(parse_state_port(state, "AGENT_BACKEND_PORT")?);
+    inventory.initial_overrides = captured_initial_overrides(state)?;
+    super::state::write_json_atomic(&layout.inventory, &inventory)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
+fn captured_initial_overrides(
+    state: &RuntimeState,
+) -> Result<Vec<(String, String)>, CommandFailure> {
+    let caller_set = |key: &str| std::env::var(key).is_ok_and(|value| !value.is_empty());
+    let public_override = caller_set("AGENT_PUBLIC_URL") || caller_set("AUTOSPEC_PUBLIC_URL");
+    INITIAL_OVERRIDE_KEYS
+        .into_iter()
+        .filter(|key| caller_set(key) || (*key == "AUTOSPEC_PUBLIC_URL" && public_override))
+        .map(|key| {
+            state
+                .value(key)
+                .map(|value| (key.to_string(), value.to_string()))
+                .ok_or_else(|| CommandFailure::diagnostic(format!("RUNTIME_STATE_INVALID: {key}")))
+        })
+        .collect()
+}
+
+fn restore_initial_overrides(
+    inventory: &ResourceInventory,
+    state: &mut RuntimeState,
+) -> Result<(), CommandFailure> {
+    let mut seen = std::collections::BTreeSet::new();
+    for (key, value) in &inventory.initial_overrides {
+        if !INITIAL_OVERRIDE_KEYS.contains(&key.as_str()) || !seen.insert(key) {
+            return Err(CommandFailure::diagnostic(format!(
+                "RUNTIME_INVENTORY_MISMATCH: initial override {key}"
+            )));
+        }
+        state
+            .replace_existing_value(key, value.clone())
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn record_maven_arguments(
+    layout: &StateLayout,
+    plan: &ResourcePlan,
+    state: &RuntimeState,
+) -> Result<(), CommandFailure> {
+    if !plan
+        .maven
+        .as_ref()
+        .is_some_and(|plan| plan.isolation == MavenIsolation::SplitLocal)
+    {
+        return Ok(());
+    }
+    let mut inventory: ResourceInventory = super::state::read_json(&layout.inventory)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    inventory.maven_arguments = Some(
+        state
+            .value("MAVEN_ARGS")
+            .ok_or_else(|| CommandFailure::diagnostic("RUNTIME_STATE_INVALID: MAVEN_ARGS"))?
+            .to_string(),
+    );
+    super::state::write_json_atomic(&layout.inventory, &inventory)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
+fn parse_state_port(state: &RuntimeState, key: &str) -> Result<u16, CommandFailure> {
+    state
+        .value(key)
+        .and_then(|value| value.parse::<u16>().ok())
+        .filter(|port| *port > 0)
+        .ok_or_else(|| CommandFailure::diagnostic(format!("RUNTIME_STATE_INVALID: {key}")))
 }
 
 fn inventory_has_teardown_blockers(inventory: &ResourceInventory) -> bool {
