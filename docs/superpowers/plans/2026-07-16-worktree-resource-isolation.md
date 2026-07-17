@@ -418,7 +418,11 @@ Construct `RuntimeContext` and `StateLayout` from `ResourcePlan.identity.environ
 
 Preserve `session --keep-alive`: final release records zero live sessions but suppresses automatic teardown, allowing an explicit later `down`. Without `--keep-alive`, final release tears down ephemeral resources while retaining the Maven installed-artifact prefix.
 
+Run harnesses under a supervised internal session worker. The worker, not the outer CLI process, owns the session lock and heartbeat; if the outer process is killed, the worker keeps the environment live until the harness exits. Monitoring failures terminate and reap the harness before releasing the session lock.
+
 Persist owner lifecycle before each external side effect. On `up`, compare the plan digest and inventory: finish an idempotent recorded step or enter `TearingDown` and remove recorded partial resources before retrying. Never treat the presence of `env` as proof that provisioning completed.
+
+Treat any subset of `owner.json`, `plan.json`, and `inventory.json` as partial authoritative state and fail closed. Until the Maven/Compose adapters exist, preserve nonempty or mismatched inventory instead of running the current manifest's cleanup against unverified ownership. Teardown removes owner last, records every failure as `CleanupFailed`, and retains the directory plus `lease.lock` as a stable lock tombstone.
 
 - [ ] **Step 4: Run session, signal, and state regressions**
 
