@@ -299,6 +299,105 @@ fn normalize_existing_equal_http_export_is_one_canonical_candidate() {
 }
 
 #[test]
+fn normalize_duplicate_equal_exports_across_layers_edits_both_sources_once() {
+    let base = "services:\n  web:\n    image: nginx\n    ports:\n      - target: 8080\n        published: 18080\n        protocol: tcp\n";
+    let override_file = "services:\n  web:\n    ports:\n      - target: 8080\n        published: 18080\n        protocol: tcp\n";
+    let manifest = "version: 2\nresources:\n  compose:\n    files: [base.yaml, override.yaml]\n";
+    let fixture = TempRepo::with_files(&[
+        ("base.yaml", base),
+        ("override.yaml", override_file),
+        (".autospec/runtime.yml", manifest),
+    ]);
+
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+
+    assert!(plan.remaining_diagnostics.is_empty());
+    assert_eq!(
+        plan.edits
+            .iter()
+            .filter(|edit| matches!(
+                edit,
+                autospec_core::runtime_env::NormalizationEdit::RemovePublishedPort { .. }
+            ))
+            .count(),
+        2
+    );
+    let rendered_manifest = plan
+        .rendered_file(&fixture.path().join(".autospec/runtime.yml"))
+        .unwrap();
+    let parsed = RuntimeManifest::parse(&rendered_manifest).unwrap();
+    assert_eq!(
+        parsed
+            .resources()
+            .compose
+            .exports
+            .iter()
+            .filter(|export| export.env == "AUTOSPEC_COMPOSE_WEB_8080_TCP")
+            .count(),
+        1
+    );
+    for source in ["base.yaml", "override.yaml"] {
+        assert!(!plan
+            .rendered_file(&fixture.path().join(source))
+            .unwrap()
+            .contains("published:"));
+    }
+
+    ComposeNormalizer::apply(&plan, &plan.fingerprint).unwrap();
+    let after = ["base.yaml", "override.yaml", ".autospec/runtime.yml"]
+        .map(|path| std::fs::read(fixture.path().join(path)).unwrap());
+    let second = ComposeNormalizer::plan(fixture.path()).unwrap();
+    assert_eq!(second.changed_files(), 0);
+    ComposeNormalizer::apply(&second, &second.fingerprint).unwrap();
+    for (index, path) in ["base.yaml", "override.yaml", ".autospec/runtime.yml"]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            std::fs::read(fixture.path().join(path)).unwrap(),
+            after[index]
+        );
+    }
+}
+
+#[test]
+fn normalize_flow_mapping_manifest_fails_closed_with_stable_diagnostic() {
+    let compose = "services:\n  web:\n    image: nginx\n    ports:\n      - \"18080:8080\"\n";
+    let manifest = "{version: 2, resources: {compose: {files: [compose.yaml]}}}\n";
+    let fixture = TempRepo::with_files(&[
+        ("compose.yaml", compose),
+        (".autospec/runtime.yml", manifest),
+    ]);
+    let before = ["compose.yaml", ".autospec/runtime.yml"]
+        .map(|path| std::fs::read(fixture.path().join(path)).unwrap());
+
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+
+    assert_eq!(plan.remaining_diagnostics.len(), 1);
+    assert_eq!(
+        plan.remaining_diagnostics[0].code,
+        "NORMALIZE_FLOW_MANIFEST_UNSUPPORTED"
+    );
+    assert_eq!(plan.changed_files(), 0);
+    for (index, path) in ["compose.yaml", ".autospec/runtime.yml"].iter().enumerate() {
+        assert_eq!(
+            plan.rendered_bytes(&fixture.path().join(path)).unwrap(),
+            before[index]
+        );
+    }
+    let error = ComposeNormalizer::apply(&plan, &plan.fingerprint).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("NORMALIZE_UNRESOLVED_DIAGNOSTICS"));
+    for (index, path) in ["compose.yaml", ".autospec/runtime.yml"].iter().enumerate() {
+        assert_eq!(
+            std::fs::read(fixture.path().join(path)).unwrap(),
+            before[index]
+        );
+    }
+}
+
+#[test]
 fn normalize_only_rejects_aliases_that_affect_an_edit() {
     let unrelated = normalize_fixture("anchors");
     let unrelated_plan = ComposeNormalizer::plan(unrelated.path()).unwrap();

@@ -1,16 +1,16 @@
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
 use super::{
     ComposeExport, ComposePlan, EnvironmentIdentity, IsolationDiagnostic, RuntimeEnvError,
-    RuntimeManifest, COMPOSE_POLICY_VERSION,
+    RuntimeManifest,
 };
 
 mod edit;
 mod fingerprint;
 mod manifest;
+mod plan;
 mod resolved;
 mod transaction;
 
@@ -85,7 +85,7 @@ impl ComposeNormalizer {
             RuntimeEnvError::new("NORMALIZE_COMPOSE_NOT_FOUND: no Compose file was detected")
         })?;
         let model = resolved::load(&repo, &compose)?;
-        plan_resolved(&repo, manifest, compose, &identity.environment_id, model)
+        plan::build(&repo, manifest, compose, &identity.environment_id, model)
     }
 
     pub fn apply(plan: &NormalizationPlan, expected: &str) -> Result<(), RuntimeEnvError> {
@@ -94,102 +94,6 @@ impl ComposeNormalizer {
 
     pub fn verify(plan: &NormalizationPlan) -> Result<(), RuntimeEnvError> {
         transaction::verify(plan)
-    }
-}
-
-fn plan_resolved(
-    repo: &Path,
-    manifest: RuntimeManifest,
-    compose: ComposePlan,
-    environment_id: &str,
-    model: resolved::ResolvedModel,
-) -> Result<NormalizationPlan, RuntimeEnvError> {
-    let manifest_path = std::fs::canonicalize(manifest.path()).map_err(|error| {
-        RuntimeEnvError::new(format!("could not canonicalize runtime manifest: {error}"))
-    })?;
-    let mut files = fingerprint::read_inputs(repo, &compose.files, &manifest_path)?;
-    let compose_indices = files
-        .iter()
-        .enumerate()
-        .filter(|(_, file)| file.path != manifest_path)
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    let inspected = compose_indices
-        .iter()
-        .map(|index| edit::inspect(&files[*index].original))
-        .collect::<Result<Vec<_>, _>>()?;
-    let candidates = inspected
-        .iter()
-        .map(|source| source.candidates.clone())
-        .collect::<Vec<_>>();
-    let decision = resolved::decide(
-        repo,
-        environment_id,
-        &compose,
-        &manifest,
-        &model.value,
-        &candidates,
-    );
-    let mut reported_exports = manifest.resources().compose.exports.clone();
-    for export in &decision.exports {
-        if !reported_exports.contains(export) {
-            reported_exports.push(export.clone());
-        }
-    }
-    if decision.diagnostics.is_empty() {
-        render_approved(&mut files, &compose_indices, &inspected, &decision.approved);
-        manifest::render(
-            &mut files,
-            &manifest_path,
-            &manifest,
-            repo,
-            &compose.files,
-            &decision.exports,
-        )?;
-    }
-    let mut edits = decision.edits;
-    if files
-        .iter()
-        .any(|file| file.path == manifest_path && file.original != file.rendered)
-    {
-        edits.push(NormalizationEdit::UpsertRuntimeResources {
-            resources: RuntimeResourcesReport {
-                compose_files: compose.files.clone(),
-                exports: reported_exports,
-            },
-        });
-    }
-    let fingerprint = fingerprint::digest(
-        &files,
-        &model.bytes,
-        NORMALIZATION_SCHEMA_VERSION,
-        COMPOSE_POLICY_VERSION,
-    )?;
-    Ok(NormalizationPlan {
-        schema_version: NORMALIZATION_SCHEMA_VERSION,
-        fingerprint,
-        edits,
-        remaining_diagnostics: decision.diagnostics,
-        repo: repo.to_path_buf(),
-        files,
-        environment_id: environment_id.to_string(),
-        compose,
-    })
-}
-
-fn render_approved(
-    files: &mut [PlannedFile],
-    compose_indices: &[usize],
-    inspected: &[edit::InspectedCompose],
-    approved: &HashSet<(usize, usize)>,
-) {
-    for (source_index, file_index) in compose_indices.iter().enumerate() {
-        let local = approved
-            .iter()
-            .filter(|(file, _)| *file == source_index)
-            .map(|(_, index)| *index)
-            .collect::<HashSet<_>>();
-        files[*file_index].rendered = inspected[source_index].render(&local);
     }
 }
 
@@ -239,22 +143,9 @@ fn normalization_edit(
     }
 }
 
-fn sort_diagnostics(diagnostics: &mut Vec<IsolationDiagnostic>) {
-    diagnostics.sort_by(|left, right| {
-        left.resource
-            .cmp(&right.resource)
-            .then_with(|| left.code.cmp(&right.code))
-            .then_with(|| left.evidence.cmp(&right.evidence))
-    });
-    diagnostics.dedup();
-}
-
-fn escape_pointer(value: &str) -> String {
-    value.replace('~', "~0").replace('/', "~1")
-}
-
 #[cfg(test)]
 mod transaction_tests {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::transaction::{commit_files, rollback_result, Faults};
@@ -333,6 +224,30 @@ mod transaction_tests {
         transaction::assert_error(&error, "rollback[0]");
         transaction::assert_error(&error, "rollback[1]");
         assert_eq!(std::fs::read(&fixture.files[2].path).unwrap(), b"old-2");
+    }
+
+    #[test]
+    fn restore_rename_failure_cleans_staged_bytes_and_continues_rollback() {
+        let fixture = TransactionFixture::new(3);
+        let renamed = commit_files(&fixture.files, &Faults::default()).unwrap();
+
+        let error = rollback_result::<()>(
+            RuntimeEnvError::new("NORMALIZE_POLICY_FAILED: injected verification failure"),
+            &renamed,
+            &Faults {
+                fail_restore_rename_at: HashSet::from([0]),
+                ..Faults::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        transaction::assert_error(&error, "NORMALIZE_POLICY_FAILED");
+        transaction::assert_error(&error, "rollback[0]");
+        assert_eq!(std::fs::read(&fixture.files[0].path).unwrap(), b"new-0");
+        assert_eq!(std::fs::read(&fixture.files[1].path).unwrap(), b"old-1");
+        assert_eq!(std::fs::read(&fixture.files[2].path).unwrap(), b"old-2");
+        fixture.assert_no_temporaries();
     }
 
     struct TransactionFixture {

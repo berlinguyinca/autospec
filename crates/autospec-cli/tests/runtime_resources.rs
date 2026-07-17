@@ -150,6 +150,54 @@ fn normalize_unsafe_check_is_json_and_apply_refuses_without_writes() {
 }
 
 #[test]
+#[cfg(unix)]
+fn normalize_flow_manifest_check_and_apply_preserve_golden_bytes() {
+    let fixture = RuntimeFixture::empty();
+    std::fs::create_dir_all(fixture.root.join(".autospec")).unwrap();
+    let compose = fixture.root.join("compose.yaml");
+    let manifest = fixture.root.join(".autospec/runtime.yml");
+    let compose_bytes =
+        b"services:\n  web:\n    image: nginx\n    ports:\n      - \"18080:8080\"\n";
+    let manifest_bytes = b"{version: 2, resources: {compose: {files: [compose.yaml]}}}\n";
+    std::fs::write(&compose, compose_bytes).unwrap();
+    std::fs::write(&manifest, manifest_bytes).unwrap();
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({
+        "services":{"web":{"image":"nginx","ports":[{"target":8080,"published":"18080","protocol":"tcp"}]}}
+    }));
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .unwrap();
+    let log = fixture.root.join("docker.log");
+
+    let check = normalize_command(&fixture, "--check")
+        .env("PATH", &path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .env("FAKE_DOCKER_MODEL", &model)
+        .output()
+        .unwrap();
+    assert!(check.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(
+        report["remaining_diagnostics"][0]["code"],
+        "NORMALIZE_FLOW_MANIFEST_UNSUPPORTED"
+    );
+    assert_eq!(std::fs::read(&compose).unwrap(), compose_bytes);
+    assert_eq!(std::fs::read(&manifest).unwrap(), manifest_bytes);
+
+    let apply = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", report["fingerprint"].as_str().unwrap()])
+        .env("PATH", &path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .env("FAKE_DOCKER_MODEL", &model)
+        .output()
+        .unwrap();
+    assert_eq!(apply.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&apply.stderr).contains("NORMALIZE_UNRESOLVED_DIAGNOSTICS"));
+    assert_eq!(std::fs::read(compose).unwrap(), compose_bytes);
+    assert_eq!(std::fs::read(manifest).unwrap(), manifest_bytes);
+}
+
+#[test]
 fn normalize_apply_rejects_a_stale_fingerprint_before_writes() {
     let fixture = normalize_cli_fixture("fixed-port");
     let manifest = fixture.root.join(".autospec/runtime.yml");

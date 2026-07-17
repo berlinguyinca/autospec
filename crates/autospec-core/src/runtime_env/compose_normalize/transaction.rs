@@ -1,16 +1,14 @@
 use std::collections::HashSet;
+use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{fingerprint, resolved, ComposeNormalizer, PlannedFile, NORMALIZATION_SCHEMA_VERSION};
 use crate::runtime_env::{
     ComposePolicy, EnvironmentIdentity, RuntimeEnvError, RuntimeManifest, COMPOSE_POLICY_VERSION,
 };
-
-static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
+use getrandom::fill;
 
 #[derive(Default)]
 pub(super) struct Faults {
@@ -18,6 +16,7 @@ pub(super) struct Faults {
     pub(super) mutate_before_recheck: Option<usize>,
     pub(super) fail_rename_at: Option<usize>,
     pub(super) fail_restore_at: HashSet<usize>,
+    pub(super) fail_restore_rename_at: HashSet<usize>,
     pub(super) fail_parent_sync: bool,
 }
 
@@ -144,7 +143,7 @@ fn stage<'a>(file: &'a PlannedFile) -> Result<Staged<'a>, RuntimeEnvError> {
         .parent()
         .ok_or_else(|| RuntimeEnvError::new("normalization path has no parent"))?;
     for _ in 0..32 {
-        let temporary = parent.join(temporary_name(&file.path));
+        let temporary = parent.join(temporary_name(&file.path)?);
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -238,7 +237,7 @@ fn restore_all(files: &[&PlannedFile], faults: &Faults) -> Vec<String> {
             ));
             continue;
         }
-        if let Err(error) = restore(file) {
+        if let Err(error) = restore(file, faults.fail_restore_rename_at.contains(&index)) {
             errors.push(format!(
                 "rollback[{index}] {}: {error}",
                 file.path.display()
@@ -248,10 +247,22 @@ fn restore_all(files: &[&PlannedFile], faults: &Faults) -> Vec<String> {
     errors
 }
 
-fn restore(file: &PlannedFile) -> Result<(), RuntimeEnvError> {
+fn restore(file: &PlannedFile, fail_rename: bool) -> Result<(), RuntimeEnvError> {
     let staged = stage_original(file)?;
-    std::fs::rename(&staged, &file.path)
-        .map_err(|error| RuntimeEnvError::new(format!("could not restore destination: {error}")))?;
+    let result = if fail_rename {
+        Err(std::io::Error::other("injected restore rename failure"))
+    } else {
+        std::fs::rename(&staged, &file.path)
+    };
+    if let Err(error) = result {
+        let cleanup = std::fs::remove_file(&staged)
+            .err()
+            .map(|cleanup| format!("; could not clean staged rollback: {cleanup}"))
+            .unwrap_or_default();
+        return Err(RuntimeEnvError::new(format!(
+            "could not restore destination: {error}{cleanup}"
+        )));
+    }
     sync_parent(&file.path)
 }
 
@@ -303,23 +314,51 @@ fn cleanup_temporaries(staged: &[Staged<'_>]) {
     }
 }
 
-fn temporary_name(path: &Path) -> String {
+fn temporary_name(path: &Path) -> Result<String, RuntimeEnvError> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("file");
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let sequence = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
-    format!(
-        ".{name}.autospec-{}-{time}-{sequence}.tmp",
-        std::process::id()
-    )
+    let mut random = [0_u8; 32];
+    fill(&mut random).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "NORMALIZE_STAGE_FAILED: could not generate nonce: {error}"
+        ))
+    })?;
+    let mut token = String::with_capacity(64);
+    for byte in random {
+        write!(&mut token, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(format!(".{name}.autospec-{token}.tmp"))
 }
 
 #[cfg(test)]
 pub(super) fn assert_error(message: &str, expected: &str) {
     assert!(message.contains(expected), "{message}");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::temporary_name;
+
+    #[test]
+    fn temporary_names_use_fixed_width_cryptographic_tokens() {
+        let prefix = ".compose.yaml.autospec-";
+        let suffix = ".tmp";
+        let names = (0..32)
+            .map(|_| temporary_name(Path::new("compose.yaml")).unwrap())
+            .collect::<std::collections::HashSet<_>>();
+
+        assert_eq!(names.len(), 32);
+        for name in names {
+            let token = name
+                .strip_prefix(prefix)
+                .and_then(|value| value.strip_suffix(suffix))
+                .unwrap();
+            assert_eq!(token.len(), 64);
+            assert!(token.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
+    }
 }

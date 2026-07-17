@@ -9,6 +9,12 @@ use crate::runtime_env::{
     ComposeExport, ExportProtocol, ExportValue, RuntimeEnvError, RuntimeManifest,
 };
 
+pub(super) fn canonical_path(manifest: &RuntimeManifest) -> Result<PathBuf, RuntimeEnvError> {
+    std::fs::canonicalize(manifest.path()).map_err(|error| {
+        RuntimeEnvError::new(format!("could not canonicalize runtime manifest: {error}"))
+    })
+}
+
 pub(super) fn render(
     files: &mut [PlannedFile],
     manifest_path: &Path,
@@ -30,13 +36,42 @@ pub(super) fn render(
         .filter(|export| !manifest.resources().compose.exports.contains(export))
         .collect::<Vec<_>>();
     if missing_files.is_empty() && missing_exports.is_empty() {
-        return Ok(());
+        return validate_rendered(file);
     }
     file.rendered = apply_byte_edits(
         text,
         manifest_edits(text, &root, &missing_files, &missing_exports)?,
     );
-    Ok(())
+    validate_rendered(file)
+}
+
+fn validate_rendered(file: &PlannedFile) -> Result<(), RuntimeEnvError> {
+    let text = std::str::from_utf8(&file.rendered)
+        .map_err(|_| RuntimeEnvError::new("rendered runtime manifest must be UTF-8"))?;
+    RuntimeManifest::parse(text).map(|_| ())
+}
+
+pub(super) fn flow_mapping_unsupported(text: &str) -> Result<bool, RuntimeEnvError> {
+    let root = parse_v2_root(text)?;
+    if mapping_is_flow(text, &root) {
+        return Ok(true);
+    }
+    let Some(resources) = root.get_mapping("resources") else {
+        return Ok(false);
+    };
+    if mapping_is_flow(text, &resources) {
+        return Ok(true);
+    }
+    Ok(resources
+        .get_mapping("compose")
+        .is_some_and(|compose| mapping_is_flow(text, &compose)))
+}
+
+fn mapping_is_flow(source: &str, mapping: &Mapping) -> bool {
+    let range = mapping.byte_range();
+    source[range.start as usize..range.end as usize]
+        .trim_start()
+        .starts_with('{')
 }
 
 fn parse_v2_root(text: &str) -> Result<Mapping, RuntimeEnvError> {

@@ -4,12 +4,16 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use super::edit::{candidate_export, Candidate, CandidateKind};
-use super::{diagnostic, escape_pointer, normalization_edit, sort_diagnostics, NormalizationEdit};
+use super::edit::Candidate;
+use super::{
+    diagnostic, normalization_edit, NormalizationEdit, PlannedFile, RuntimeResourcesReport,
+};
 use crate::runtime_env::{
     ComposeExport, ComposeIsolation, ComposePlan, ComposePolicy, ExportProtocol, ExportValue,
     IsolationDiagnostic, RuntimeEnvError, RuntimeManifest,
 };
+
+mod candidates;
 
 pub(super) struct ResolvedModel {
     pub bytes: Vec<u8>,
@@ -69,43 +73,24 @@ pub(super) fn decide(
     candidates: &[Vec<Candidate>],
 ) -> Decision {
     let policy = ComposePolicy::evaluate_in_context(model, plan, environment_id, repo);
-    let mut diagnostics = Vec::new();
-    let flat = flatten(candidates);
-    reject_unsafe_references(repo, environment_id, &flat, &mut diagnostics);
-    reject_container_references(repo, environment_id, model, &flat, &mut diagnostics);
-    let approved_keys = eligible_candidates(&policy, plan, model, &flat);
-    let proposed = proposed_exports(&flat)
+    let flat = candidates::flatten(candidates);
+    let approved_keys = candidates::eligible(&policy, plan, model, &flat);
+    let proposed = candidates::proposed_exports(&flat)
         .into_iter()
         .filter(|(key, _)| approved_keys.contains(key))
         .collect::<Vec<_>>();
-    reject_export_conflicts(
+    let diagnostics = collect_diagnostics(
         repo,
         environment_id,
-        &manifest.resources().compose.exports,
+        manifest,
+        model,
+        &flat,
+        &approved_keys,
         &proposed,
-        &mut diagnostics,
+        policy,
     );
-    reject_http_ambiguity(
-        repo,
-        environment_id,
-        &manifest.resources().compose.exports,
-        &proposed,
-        &mut diagnostics,
-    );
-    let eligible = eligible_diagnostics(&flat, &approved_keys);
-    diagnostics.extend(
-        policy
-            .into_iter()
-            .filter(|item| !eligible.contains(&(item.code.clone(), item.resource.clone()))),
-    );
-    sort_diagnostics(&mut diagnostics);
     if !diagnostics.is_empty() {
-        return Decision {
-            approved: HashSet::new(),
-            edits: Vec::new(),
-            exports: Vec::new(),
-            diagnostics,
-        };
+        return unresolved(diagnostics);
     }
     approve(
         flat.into_iter()
@@ -116,98 +101,80 @@ pub(super) fn decide(
     )
 }
 
-fn flatten(candidates: &[Vec<Candidate>]) -> Vec<(usize, usize, &Candidate)> {
-    candidates
-        .iter()
-        .enumerate()
-        .flat_map(|(file, items)| {
-            items
-                .iter()
-                .enumerate()
-                .map(move |(index, item)| (file, index, item))
-        })
-        .collect()
-}
-
-fn proposed_exports(flat: &[(usize, usize, &Candidate)]) -> Vec<((usize, usize), ComposeExport)> {
-    flat.iter()
-        .filter_map(|(file, index, candidate)| {
-            candidate_export(candidate).map(|export| ((*file, *index), export))
-        })
-        .collect()
-}
-
-fn reject_unsafe_references(
+#[allow(clippy::too_many_arguments)]
+fn collect_diagnostics(
     repo: &Path,
     environment_id: &str,
-    flat: &[(usize, usize, &Candidate)],
-    diagnostics: &mut Vec<IsolationDiagnostic>,
-) {
-    diagnostics.extend(
-        flat.iter()
-            .filter(|(_, _, item)| item.unsafe_reference)
-            .map(|(_, _, item)| {
-                diagnostic(
-                    environment_id,
-                    repo,
-                    "COMPOSE_UNSAFE_YAML_REFERENCE",
-                    &item.resource,
-                    &item.evidence,
-                )
-            }),
-    );
-}
-
-fn reject_container_references(
-    repo: &Path,
-    environment_id: &str,
+    manifest: &RuntimeManifest,
     model: &Value,
     flat: &[(usize, usize, &Candidate)],
-    diagnostics: &mut Vec<IsolationDiagnostic>,
-) {
-    for (_, _, candidate) in flat {
-        let CandidateKind::ContainerName { service } = &candidate.kind else {
-            continue;
-        };
-        let resolved = model
-            .pointer(&format!(
-                "/services/{}/container_name",
-                escape_pointer(service)
-            ))
-            .and_then(Value::as_str);
-        if resolved != Some(service) || value_references(model, service, &candidate.resource) {
-            diagnostics.push(diagnostic(
-                environment_id,
-                repo,
-                "COMPOSE_CONTAINER_NAME_REFERENCE",
-                &candidate.resource,
-                resolved.unwrap_or(&candidate.evidence),
-            ));
-        }
+    approved_keys: &HashSet<(usize, usize)>,
+    proposed: &[((usize, usize), ComposeExport)],
+    policy: Vec<IsolationDiagnostic>,
+) -> Vec<IsolationDiagnostic> {
+    let mut diagnostics = Vec::new();
+    candidates::reject_unsafe_references(repo, environment_id, flat, &mut diagnostics);
+    candidates::reject_container_references(repo, environment_id, model, flat, &mut diagnostics);
+    reject_export_conflicts(
+        repo,
+        environment_id,
+        &manifest.resources().compose.exports,
+        proposed,
+        &mut diagnostics,
+    );
+    reject_http_ambiguity(
+        repo,
+        environment_id,
+        &manifest.resources().compose.exports,
+        proposed,
+        &mut diagnostics,
+    );
+    let eligible = candidates::eligible_diagnostics(flat, approved_keys);
+    diagnostics.extend(
+        policy
+            .into_iter()
+            .filter(|item| !eligible.contains(&(item.code.clone(), item.resource.clone()))),
+    );
+    sort_diagnostics(&mut diagnostics);
+    diagnostics
+}
+
+pub(super) fn unresolved(diagnostics: Vec<IsolationDiagnostic>) -> Decision {
+    Decision {
+        approved: HashSet::new(),
+        edits: Vec::new(),
+        exports: Vec::new(),
+        diagnostics,
     }
 }
 
-fn value_references(value: &Value, identity: &str, own_path: &str) -> bool {
-    fn visit(value: &Value, path: &str, identity: &str, own_path: &str) -> bool {
-        match value {
-            Value::Object(values) => values.iter().any(|(key, value)| {
-                let next = if path.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{path}.{key}")
-                };
-                visit(value, &next, identity, own_path)
-            }),
-            Value::Array(values) => values.iter().enumerate().any(|(index, value)| {
-                visit(value, &format!("{path}[{index}]"), identity, own_path)
-            }),
-            Value::String(value) if path != own_path => {
-                value == identity || value.contains(&format!("container:{identity}"))
+pub(super) fn collect_edits(
+    runtime_manifest: &RuntimeManifest,
+    manifest_path: &Path,
+    compose: &ComposePlan,
+    files: &[PlannedFile],
+    mut decision: Decision,
+) -> Vec<NormalizationEdit> {
+    let changed = files
+        .iter()
+        .any(|file| file.path == manifest_path && file.original != file.rendered);
+    if changed {
+        let mut exports = runtime_manifest.resources().compose.exports.clone();
+        for export in &decision.exports {
+            if !exports.contains(export) {
+                exports.push(export.clone());
             }
-            _ => false,
         }
+        decision
+            .edits
+            .push(NormalizationEdit::UpsertRuntimeResources {
+                resources: RuntimeResourcesReport {
+                    compose_files: compose.files.clone(),
+                    exports,
+                },
+            });
     }
-    visit(value, "", identity, own_path)
+    decision.edits
 }
 
 fn reject_export_conflicts(
@@ -260,72 +227,17 @@ fn reject_http_ambiguity(
     }
 }
 
-fn eligible_candidates(
-    policy: &[IsolationDiagnostic],
-    plan: &ComposePlan,
-    model: &Value,
-    flat: &[(usize, usize, &Candidate)],
-) -> HashSet<(usize, usize)> {
-    let mut eligible = HashSet::new();
-    for (file, index, candidate) in flat {
-        let code = match &candidate.kind {
-            CandidateKind::Port { .. } => Some("COMPOSE_FIXED_PORT"),
-            CandidateKind::ContainerName { service } if resolved_container_is(model, service) => {
-                Some("COMPOSE_CONTAINER_NAME")
-            }
-            CandidateKind::ResourceName { logical_key, .. }
-                if super::edit::resolved_resource_matches(model, plan, candidate, logical_key) =>
-            {
-                eligible.insert((*file, *index));
-                None
-            }
-            _ => None,
-        };
-        if code.is_some_and(|code| {
-            policy
-                .iter()
-                .any(|item| item.code == code && item.resource == candidate.resource)
-        }) {
-            eligible.insert((*file, *index));
-        }
-    }
-    eligible
-}
-
-fn eligible_diagnostics(
-    flat: &[(usize, usize, &Candidate)],
-    approved: &HashSet<(usize, usize)>,
-) -> HashSet<(String, String)> {
-    let mut eligible = HashSet::new();
-    for (file, index, candidate) in flat {
-        if !approved.contains(&(*file, *index)) {
-            continue;
-        }
-        let code = match candidate.kind {
-            CandidateKind::Port { .. } => "COMPOSE_FIXED_PORT",
-            CandidateKind::ContainerName { .. } => "COMPOSE_CONTAINER_NAME",
-            CandidateKind::ResourceName { .. } => "COMPOSE_GLOBAL_NAME",
-        };
-        eligible.insert((code.to_string(), candidate.resource.clone()));
-        if let CandidateKind::Port { .. } = candidate.kind {
-            if let Some(target) = &candidate.target_resource {
-                eligible.insert(("COMPOSE_UNDECLARED_PORT".to_string(), target.clone()));
-            }
-        }
-    }
-    eligible
-}
-
 fn approve(
     flat: Vec<(usize, usize, &Candidate)>,
     existing: &[ComposeExport],
     proposed: Vec<((usize, usize), ComposeExport)>,
 ) -> Decision {
-    let mut exports = proposed
-        .iter()
-        .map(|(_, export)| export.clone())
-        .filter(|export| !existing.contains(export))
-        .collect::<Vec<_>>();
+    let mut exports = Vec::new();
+    for (_, export) in &proposed {
+        if !existing.contains(export) && !exports.contains(export) {
+            exports.push(export.clone());
+        }
+    }
     let http = unique_http_exports(existing, &proposed);
     if !existing
         .iter()
@@ -376,12 +288,12 @@ fn unique_http_exports<'a>(
     unique
 }
 
-fn resolved_container_is(model: &Value, service: &str) -> bool {
-    model
-        .pointer(&format!(
-            "/services/{}/container_name",
-            escape_pointer(service)
-        ))
-        .and_then(Value::as_str)
-        == Some(service)
+fn sort_diagnostics(diagnostics: &mut Vec<IsolationDiagnostic>) {
+    diagnostics.sort_by(|left, right| {
+        left.resource
+            .cmp(&right.resource)
+            .then_with(|| left.code.cmp(&right.code))
+            .then_with(|| left.evidence.cmp(&right.evidence))
+    });
+    diagnostics.dedup();
 }
