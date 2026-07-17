@@ -862,6 +862,129 @@ fn compose_lifecycle_rejects_tampered_authoritative_values_before_spawn() {
 
 #[test]
 #[cfg(unix)]
+fn status_rejects_tampered_allowed_value_without_printing_it() {
+    let fixture = RuntimeFixture::with_manifest(&compose_manifest("sh -c 'true'"));
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
+    let bin = fixture.install_lifecycle_fake_docker();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let log = fixture.root.join("status-docker.log");
+    let up = fixture
+        .command()
+        .env("PATH", &path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    assert!(up.status.success());
+    let identity = EnvironmentIdentity::resolve(&fixture.root, "local", None).unwrap();
+    let tampered = "http://tampered.invalid:1";
+    replace_exported_value(
+        &fixture.state_root.join(identity.environment_id).join("env"),
+        "WEB_URL",
+        tampered,
+    );
+
+    let status = fixture
+        .command()
+        .env("PATH", path)
+        .env("FAKE_DOCKER_LOG", log)
+        .args(["runtime", "env", "status", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert_eq!(status.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&status.stderr)
+        .contains("RUNTIME_CHILD_ENV_VALUE_MISMATCH: WEB_URL"));
+    assert!(!String::from_utf8_lossy(&status.stdout).contains(tampered));
+}
+
+#[test]
+fn supported_initial_overrides_survive_reuse_exec_and_session_without_caller_env() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\n",
+    );
+    let overrides = [
+        ("AGENT_FRONTEND_PORT", "45101"),
+        ("AGENT_BACKEND_PORT", "45102"),
+        ("AGENT_PUBLIC_URL", "http://agent.override.test"),
+        ("AUTOSPEC_PUBLIC_URL", "https://autospec.override.test"),
+        ("COMPOSE_PROJECT_NAME", "caller_compose"),
+    ];
+    let mut first = fixture.command();
+    for (key, value) in overrides {
+        first.env(key, value);
+    }
+    first.env("UNDECLARED_OVERRIDE", "must-not-persist");
+    let first = first
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let identity = EnvironmentIdentity::resolve(&fixture.root, "local", None).unwrap();
+    let inventory: ResourceInventory = read_json(
+        &fixture
+            .state_root
+            .join(identity.environment_id)
+            .join("inventory.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        inventory.initial_overrides,
+        overrides.map(|(key, value)| (key.to_string(), value.to_string()))
+    );
+
+    let reused = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    assert!(
+        reused.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reused.stderr)
+    );
+    let protocol = String::from_utf8_lossy(&reused.stdout);
+    for (key, value) in overrides {
+        assert!(
+            protocol.contains(&format!("{key}={value}")),
+            "{key}: {protocol}"
+        );
+    }
+
+    for (operation, marker) in [("exec", "exec-overrides"), ("session", "session-overrides")] {
+        let output = fixture
+            .command()
+            .args(["runtime", "env", operation, "--repo"])
+            .arg(&fixture.root)
+            .args(["--", "sh", "-c"])
+            .arg(format!(
+                "printf '%s|%s|%s|%s|%s' \"$AGENT_FRONTEND_PORT\" \"$AGENT_BACKEND_PORT\" \"$AGENT_PUBLIC_URL\" \"$AUTOSPEC_PUBLIC_URL\" \"$COMPOSE_PROJECT_NAME\" > {marker}"
+            ))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{operation}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.root.join(marker)).unwrap(),
+            "45101|45102|http://agent.override.test|https://autospec.override.test|caller_compose"
+        );
+    }
+}
+
+#[test]
+#[cfg(unix)]
 fn maven_lifecycle_rejects_tampered_repository_argument_before_spawn() {
     let fixture = RuntimeFixture::with_manifest(
         "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\n",
@@ -926,10 +1049,17 @@ fn compose_canonical_ambiguity_fails_before_any_docker_side_effect() {
 
 #[test]
 #[cfg(unix)]
-fn compose_without_http_exports_provisions_and_http_host_port_sets_scheme_url() {
-    for exports in [
-        "",
-        "    exports:\n      - { service: web, target: 8080, protocol: tcp, env: WEB_PORT, value: port }\n",
+fn compose_without_http_exports_provisions_tcp_udp_and_http_host_port() {
+    for (exports, protocol) in [
+        ("", "tcp"),
+        (
+            "    exports:\n      - { service: web, target: 8080, protocol: tcp, env: WEB_PORT, value: port }\n",
+            "tcp",
+        ),
+        (
+            "    exports:\n      - { service: web, target: 8080, protocol: udp, env: WEB_UDP_PORT, value: port }\n",
+            "udp",
+        ),
     ] {
         let manifest = format!("version: 2\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\nresources:\n  compose:\n    files: [compose.yaml]\n{exports}");
         let fixture = RuntimeFixture::with_manifest(&manifest);
@@ -937,7 +1067,7 @@ fn compose_without_http_exports_provisions_and_http_host_port_sets_scheme_url() 
         let model = if exports.is_empty() {
             serde_json::json!({"services":{"web":{"image":"nginx"}}})
         } else {
-            serde_json::json!({"services":{"web":{"ports":[{"target":8080,"protocol":"tcp"}]}}})
+            serde_json::json!({"services":{"web":{"ports":[{"target":8080,"protocol":protocol}]}}})
         };
         let (bin, model) = fixture.install_fake_docker(&model);
         let output = compose_command(&fixture, &bin, &model)

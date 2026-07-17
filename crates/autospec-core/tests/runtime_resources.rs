@@ -111,6 +111,7 @@ fn inventory_json_preserves_resource_ids_and_ports() {
         frontend_port: Some(49152),
         backend_port: Some(49153),
         maven_arguments: Some("-T 2".to_string()),
+        initial_overrides: vec![("AGENT_FRONTEND_PORT".to_string(), "49152".to_string())],
         maven_local_prefix: Some(PathBuf::from("autospec/env-a")),
     };
 

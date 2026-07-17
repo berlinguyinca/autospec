@@ -349,6 +349,8 @@ pub struct ResourceInventory {
     pub backend_port: Option<u16>,
     #[serde(default)]
     pub maven_arguments: Option<String>,
+    #[serde(default)]
+    pub initial_overrides: Vec<(String, String)>,
     pub maven_local_prefix: Option<PathBuf>,
 }
 

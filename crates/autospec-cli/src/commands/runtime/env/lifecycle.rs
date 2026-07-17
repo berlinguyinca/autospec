@@ -16,6 +16,14 @@ use super::state::{
     StateLayout,
 };
 
+const INITIAL_OVERRIDE_KEYS: [&str; 5] = [
+    "AGENT_FRONTEND_PORT",
+    "AGENT_BACKEND_PORT",
+    "AGENT_PUBLIC_URL",
+    "AUTOSPEC_PUBLIC_URL",
+    "COMPOSE_PROJECT_NAME",
+];
+
 pub(super) fn provision_locked(
     context: &RuntimeContext,
     plan: &ResourcePlan,
@@ -136,6 +144,7 @@ pub(super) fn validate_cached_state(
     let frontend = required_inventory_port(inventory.frontend_port, "AGENT_FRONTEND_PORT")?;
     let backend = required_inventory_port(inventory.backend_port, "AGENT_BACKEND_PORT")?;
     let mut expected = RuntimeState::from_context(context, frontend, backend);
+    restore_initial_overrides(inventory, &mut expected)?;
     restore_maven_state(plan, inventory, context, &mut expected)?;
     restore_compose_state(plan, inventory, &mut expected)?;
     for (key, expected_value) in expected.values() {
@@ -389,8 +398,44 @@ fn record_allocated_ports(
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
     inventory.frontend_port = Some(parse_state_port(state, "AGENT_FRONTEND_PORT")?);
     inventory.backend_port = Some(parse_state_port(state, "AGENT_BACKEND_PORT")?);
+    inventory.initial_overrides = captured_initial_overrides(state)?;
     super::state::write_json_atomic(&layout.inventory, &inventory)
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
+fn captured_initial_overrides(
+    state: &RuntimeState,
+) -> Result<Vec<(String, String)>, CommandFailure> {
+    let caller_set = |key: &str| std::env::var(key).is_ok_and(|value| !value.is_empty());
+    let public_override = caller_set("AGENT_PUBLIC_URL") || caller_set("AUTOSPEC_PUBLIC_URL");
+    INITIAL_OVERRIDE_KEYS
+        .into_iter()
+        .filter(|key| caller_set(key) || (*key == "AUTOSPEC_PUBLIC_URL" && public_override))
+        .map(|key| {
+            state
+                .value(key)
+                .map(|value| (key.to_string(), value.to_string()))
+                .ok_or_else(|| CommandFailure::diagnostic(format!("RUNTIME_STATE_INVALID: {key}")))
+        })
+        .collect()
+}
+
+fn restore_initial_overrides(
+    inventory: &ResourceInventory,
+    state: &mut RuntimeState,
+) -> Result<(), CommandFailure> {
+    let mut seen = std::collections::BTreeSet::new();
+    for (key, value) in &inventory.initial_overrides {
+        if !INITIAL_OVERRIDE_KEYS.contains(&key.as_str()) || !seen.insert(key) {
+            return Err(CommandFailure::diagnostic(format!(
+                "RUNTIME_INVENTORY_MISMATCH: initial override {key}"
+            )));
+        }
+        state
+            .replace_existing_value(key, value.clone())
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    }
+    Ok(())
 }
 
 fn record_maven_arguments(

@@ -430,7 +430,8 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     if !context.env_file.is_file() {
         return Err(partial_state(&layout));
     }
-    let state = read_state(&context)?;
+    let cached = read_state(&context)?;
+    let state = validate_cached_state(&context, &plan, &authoritative.inventory, &cached)?;
     print_protocol(
         &context,
         &state,
