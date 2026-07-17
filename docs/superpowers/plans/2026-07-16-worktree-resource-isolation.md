@@ -252,11 +252,15 @@ git commit -m "feat: make runtime resource ownership generation-aware"
 - Modify: `crates/autospec-core/src/runtime_env/manifest.rs`
 - Create: `crates/autospec-core/src/runtime_env/manifest_v2.rs`
 - Create: `crates/autospec-core/src/runtime_env/resource_plan.rs`
+- Create: `crates/autospec-core/src/runtime_env/shell_command.rs`
 - Modify: `crates/autospec-core/src/runtime_env/resources.rs`
 - Modify: `crates/autospec-core/tests/runtime_env.rs`
 - Modify: `crates/autospec-core/tests/runtime_resources.rs`
 - Create: `crates/autospec-core/tests/runtime_resource_plan.rs`
+- Create: `crates/autospec-core/tests/runtime_manifest_v2.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
+- Create: `crates/autospec-cli/src/commands/runtime/env/isolation.rs`
+- Modify: `crates/autospec-cli/tests/runtime_commands.rs`
 - Modify: `crates/autospec-cli/tests/runtime_resources.rs`
 - Create: `tests/fixtures/runtime-resources/manifest-v2.yml`
 - Create: `tests/fixtures/runtime-resources/compose.yaml`
@@ -351,7 +355,7 @@ Expected: v1 and v2 tests pass, no unresolved advisory is reported, and Autospec
 - [ ] **Step 5: Commit manifest v2 and detection**
 
 ```bash
-git add Cargo.lock crates/autospec-core/Cargo.toml crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/manifest.rs crates/autospec-core/src/runtime_env/manifest_v2.rs crates/autospec-core/src/runtime_env/resource_plan.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/tests/runtime_env.rs crates/autospec-core/tests/runtime_resource_plan.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/isolation.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources
+git add Cargo.lock crates/autospec-core/Cargo.toml crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/manifest.rs crates/autospec-core/src/runtime_env/manifest_v2.rs crates/autospec-core/src/runtime_env/resource_plan.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/src/runtime_env/shell_command.rs crates/autospec-core/tests/runtime_env.rs crates/autospec-core/tests/runtime_manifest_v2.rs crates/autospec-core/tests/runtime_resource_plan.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/isolation.rs crates/autospec-cli/tests/runtime_commands.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources
 git commit -m "feat: plan Maven and Compose resources from runtime v2"
 ```
 
