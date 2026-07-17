@@ -461,7 +461,7 @@ git commit -m "feat: reference-count shared worktree runtime sessions"
 - Produces: `MavenPlan::arguments(existing: &str, environment_id: &str) -> Result<MavenArgs, IsolationDiagnostic>`.
 - Produces: `MavenArgs::parse`, `append_property`, and `render` so quoted caller arguments round-trip into `MAVEN_ARGS`.
 - Produces: `MavenPurgeTarget::new`, plus `MavenAdapter::probe`, `effective_local_repository`, `configure`, and `purge_owned_prefix`.
-- Adds: `down --purge-maven` while ordinary `down` retains the installed-artifact prefix.
+- Adds: `down --purge-maven` while ordinary `down` retains the installed-artifact prefix plus authoritative owner/plan/inventory so a later purge needs no intervening `up`.
 
 - [ ] **Step 1: Add failing property-merge, conflict, version, and purge-boundary tests**
 
