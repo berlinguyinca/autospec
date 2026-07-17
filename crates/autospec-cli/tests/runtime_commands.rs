@@ -12,6 +12,76 @@ fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
 }
 
+#[test]
+fn runtime_env_lease_blocks_a_second_process_until_release() {
+    use std::time::{Duration, Instant};
+
+    let fixture = RuntimeFixture::empty();
+    let environment = fixture.state_root.join("lease-environment");
+    let first_ready = fixture.root.join("first.ready");
+    let first_release = fixture.root.join("first.release");
+    let second_ready = fixture.root.join("second.ready");
+    let second_release = fixture.root.join("second.release");
+
+    let first = lease_probe(&environment, &first_ready, &first_release);
+    wait_for_file(&first_ready, Duration::from_secs(5));
+    let second = lease_probe(&environment, &second_ready, &second_release);
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        !second_ready.exists(),
+        "second lease acquired while first was held"
+    );
+
+    std::fs::write(&first_release, "release\n").expect("release first probe");
+    assert!(first.wait().expect("first probe exits").success());
+    wait_for_file(&second_ready, Duration::from_secs(5));
+    std::fs::write(&second_release, "release\n").expect("release second probe");
+    assert!(second.wait().expect("second probe exits").success());
+
+    fn lease_probe(
+        environment: &std::path::Path,
+        ready: &std::path::Path,
+        release: &std::path::Path,
+    ) -> ChildGuard {
+        let mut command = autospec();
+        command
+            .args(["runtime", "env", "lease-probe"])
+            .arg(environment)
+            .arg(ready)
+            .arg(release);
+        ChildGuard::spawn(&mut command)
+    }
+
+    fn wait_for_file(path: &std::path::Path, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while !path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(path.exists(), "timed out waiting for {}", path.display());
+    }
+}
+
+struct ChildGuard(Option<std::process::Child>);
+
+impl ChildGuard {
+    fn spawn(command: &mut Command) -> Self {
+        Self(Some(command.spawn().expect("lease probe starts")))
+    }
+
+    fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.0.take().expect("lease probe child is present").wait()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 fn audit_fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/runtime-audit")
 }

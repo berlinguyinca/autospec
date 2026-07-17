@@ -2,15 +2,18 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
-#[cfg(unix)]
-use std::time::Duration;
 
 use autospec_core::runtime_env::{RuntimeContext, RuntimeManifest, RuntimeState};
 
 use crate::commands::CommandFailure;
+
+mod state;
+
+use state::{read_runtime_state, write_runtime_state, EnvironmentLease};
 
 const STATE_ENVIRONMENT_KEYS: [&str; 9] = [
     "AGENT_ENV_ID",
@@ -89,6 +92,7 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
         "down" => down(parse_options(options)?),
         "exec" => exec(parse_exec_options(options)?),
         "session" => session(parse_session_options(options)?),
+        "lease-probe" => lease_probe(options),
         "-h" | "--help" | "help" => {
             print_help();
             Ok(())
@@ -631,32 +635,27 @@ fn provision(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
 }
 
 fn write_state(context: &RuntimeContext, state: &RuntimeState) -> Result<(), CommandFailure> {
-    let temporary = context
-        .env_file
-        .with_extension(format!("tmp-{}", std::process::id()));
-    fs::write(&temporary, state.render_env_file()).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not write runtime environment {}: {error}",
-            temporary.display()
-        ))
-    })?;
-    fs::rename(&temporary, &context.env_file).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not finalize runtime environment {}: {error}",
-            context.env_file.display()
-        ))
-    })
+    write_runtime_state(context, state)
 }
 
 fn read_state(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
-    let source = fs::read_to_string(&context.env_file).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not read runtime environment {}: {error}",
-            context.env_file.display()
-        ))
+    read_runtime_state(context)
+}
+
+fn lease_probe(args: &[String]) -> Result<(), CommandFailure> {
+    let [environment_dir, ready_path, release_path] = args else {
+        return Err(CommandFailure::diagnostic(
+            "autospec runtime env lease-probe requires ENVIRONMENT READY RELEASE",
+        ));
+    };
+    let _lease = EnvironmentLease::acquire(Path::new(environment_dir))?;
+    fs::write(ready_path, "ready\n").map_err(|error| {
+        CommandFailure::diagnostic(format!("could not mark runtime lease probe ready: {error}"))
     })?;
-    RuntimeState::from_env_file(&source)
-        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+    while !Path::new(release_path).exists() {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    Ok(())
 }
 
 fn run_direct_command(
