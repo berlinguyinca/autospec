@@ -6,13 +6,27 @@ use yaml_edit::{Document, Mapping};
 
 use super::PlannedFile;
 use crate::runtime_env::{
-    ComposeExport, ExportProtocol, ExportValue, RuntimeEnvError, RuntimeManifest,
+    ComposeExport, ExportProtocol, ExportValue, RuntimeEnvError, RuntimeManifest, RuntimeResources,
 };
 
-pub(super) fn canonical_path(manifest: &RuntimeManifest) -> Result<PathBuf, RuntimeEnvError> {
-    std::fs::canonicalize(manifest.path()).map_err(|error| {
-        RuntimeEnvError::new(format!("could not canonicalize runtime manifest: {error}"))
+pub(super) fn load_or_default(repo: &Path) -> Result<RuntimeManifest, RuntimeEnvError> {
+    let autospec = repo.join(".autospec/runtime.yml");
+    let agent = repo.join(".agent-runtime.yml");
+    if std::fs::symlink_metadata(&autospec).is_ok() || std::fs::symlink_metadata(&agent).is_ok() {
+        return RuntimeManifest::read_from_repo(repo);
+    }
+    Ok(RuntimeManifest {
+        path: autospec,
+        name: None,
+        version: 2,
+        default_mode: None,
+        modes: Vec::new(),
+        resources: RuntimeResources::default(),
     })
+}
+
+pub(super) fn canonical_path(manifest: &RuntimeManifest) -> Result<PathBuf, RuntimeEnvError> {
+    Ok(manifest.path().to_path_buf())
 }
 
 pub(super) fn render(
@@ -27,6 +41,9 @@ pub(super) fn render(
         .iter_mut()
         .find(|file| file.path == manifest_path)
         .ok_or_else(|| RuntimeEnvError::new("runtime manifest was not planned"))?;
+    if file.identity.is_none() {
+        return render_new(file, repo, compose_files, exports);
+    }
     let text = std::str::from_utf8(&file.original)
         .map_err(|_| RuntimeEnvError::new("runtime manifest must be UTF-8"))?;
     let root = parse_v2_root(text)?;
@@ -42,6 +59,25 @@ pub(super) fn render(
         text,
         manifest_edits(text, &root, &missing_files, &missing_exports)?,
     );
+    validate_rendered(file)
+}
+
+fn render_new(
+    file: &mut PlannedFile,
+    repo: &Path,
+    compose_files: &[PathBuf],
+    exports: &[ComposeExport],
+) -> Result<(), RuntimeEnvError> {
+    let files = compose_files
+        .iter()
+        .map(|path| path.strip_prefix(repo).unwrap_or(path).to_path_buf())
+        .collect::<Vec<_>>();
+    let exports = exports.iter().collect::<Vec<_>>();
+    file.rendered = format!(
+        "version: 2\nresources:\n{}",
+        compose_block(2, &files, &exports)
+    )
+    .into_bytes();
     validate_rendered(file)
 }
 

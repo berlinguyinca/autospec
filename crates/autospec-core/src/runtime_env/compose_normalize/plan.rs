@@ -99,6 +99,16 @@ fn decide_or_reject_flow(input: DecisionInput<'_>) -> Result<resolved::Decision,
         .iter()
         .find(|file| file.path == input.manifest_path)
         .ok_or_else(|| RuntimeEnvError::new("runtime manifest was not planned"))?;
+    if source.identity.is_none() {
+        return Ok(resolved::decide(
+            input.repo,
+            input.environment_id,
+            input.compose,
+            input.runtime_manifest,
+            &input.model.value,
+            input.candidates,
+        ));
+    }
     let text = std::str::from_utf8(&source.original)
         .map_err(|_| RuntimeEnvError::new("runtime manifest must be UTF-8"))?;
     if manifest::flow_mapping_unsupported(text)? {
@@ -160,15 +170,44 @@ fn finish(
         NORMALIZATION_SCHEMA_VERSION,
         COMPOSE_POLICY_VERSION,
     )?;
+    let input_paths = relative_paths(repo, files.iter().map(|file| file.path.as_path()))?;
+    let manifest_path = files
+        .iter()
+        .find(|file| !compose.files.contains(&file.path))
+        .map(|file| file.path.as_path())
+        .ok_or_else(|| RuntimeEnvError::new("runtime manifest was not planned"))?;
+    let manifest_path = relative_path(repo, manifest_path)?;
     Ok(NormalizationPlan {
         schema_version: NORMALIZATION_SCHEMA_VERSION,
         fingerprint,
+        input_paths,
+        manifest_path,
         edits,
         remaining_diagnostics: diagnostics,
         repo: repo.to_path_buf(),
         files,
         environment_id: environment_id.to_string(),
         compose,
+    })
+}
+
+fn relative_paths<'a>(
+    repo: &Path,
+    paths: impl Iterator<Item = &'a Path>,
+) -> Result<Vec<std::path::PathBuf>, RuntimeEnvError> {
+    let mut paths = paths
+        .map(|path| relative_path(repo, path))
+        .collect::<Result<Vec<_>, _>>()?;
+    paths.sort();
+    Ok(paths)
+}
+
+fn relative_path(repo: &Path, path: &Path) -> Result<std::path::PathBuf, RuntimeEnvError> {
+    path.strip_prefix(repo).map(Path::to_path_buf).map_err(|_| {
+        RuntimeEnvError::new(format!(
+            "normalization input is outside repository: {}",
+            path.display()
+        ))
     })
 }
 

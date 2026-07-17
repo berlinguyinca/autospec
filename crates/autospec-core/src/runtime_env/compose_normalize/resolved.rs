@@ -53,15 +53,72 @@ pub(super) fn load(repo: &Path, plan: &ComposePlan) -> Result<ResolvedModel, Run
             String::from_utf8_lossy(&output.stderr).trim_end()
         )));
     }
-    let value = serde_json::from_slice(&output.stdout).map_err(|error| {
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         RuntimeEnvError::new(format!(
             "COMPOSE_CONFIG_INVALID_JSON: could not parse resolved Compose model: {error}"
         ))
     })?;
-    Ok(ResolvedModel {
-        bytes: output.stdout,
-        value,
+    let bytes = fingerprint_bytes(repo, plan, &value)?;
+    Ok(ResolvedModel { bytes, value })
+}
+
+fn fingerprint_bytes(
+    repo: &Path,
+    plan: &ComposePlan,
+    model: &Value,
+) -> Result<Vec<u8>, RuntimeEnvError> {
+    let mut stable = model.clone();
+    normalize_generated_names(&mut stable, &plan.project_name);
+    normalize_repo_paths(&mut stable, repo);
+    serde_json::to_vec(&stable).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "COMPOSE_CONFIG_INVALID_JSON: could not stabilize resolved model: {error}"
+        ))
     })
+}
+
+fn normalize_generated_names(model: &mut Value, project_name: &str) {
+    if model.get("name").and_then(Value::as_str) == Some(project_name) {
+        model["name"] = Value::String("${AUTOSPEC_PROJECT}".to_string());
+    }
+    for kind in ["networks", "volumes"] {
+        let Some(resources) = model.get_mut(kind).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for (logical, settings) in resources {
+            let generated = format!("{project_name}_{logical}");
+            if settings.get("name").and_then(Value::as_str) == Some(&generated) {
+                settings["name"] = Value::String(format!("${{AUTOSPEC_PROJECT}}_{logical}"));
+            }
+        }
+    }
+}
+
+fn normalize_repo_paths(model: &mut Value, repo: &Path) {
+    let Some(services) = model.get_mut("services").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for service in services.values_mut() {
+        let Some(volumes) = service.get_mut("volumes").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        for volume in volumes {
+            let Some(source) = volume.get_mut("source") else {
+                continue;
+            };
+            normalize_repo_path(source, repo);
+        }
+    }
+}
+
+fn normalize_repo_path(value: &mut Value, repo: &Path) {
+    let Some(path) = value.as_str().map(Path::new) else {
+        return;
+    };
+    let Ok(relative) = path.strip_prefix(repo) else {
+        return;
+    };
+    *value = Value::String(format!("${{AUTOSPEC_REPO}}/{}", relative.display()));
 }
 
 pub(super) fn decide(
