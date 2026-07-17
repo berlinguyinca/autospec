@@ -445,6 +445,7 @@ git commit -m "feat: reference-count shared worktree runtime sessions"
 
 **Files:**
 - Create: `crates/autospec-core/src/runtime_env/maven.rs`
+- Create: `crates/autospec-core/src/runtime_env/maven/arguments.rs`
 - Modify: `crates/autospec-core/src/runtime_env.rs`
 - Create: `crates/autospec-core/tests/runtime_maven.rs`
 - Create: `crates/autospec-cli/src/commands/runtime/env/maven.rs`
