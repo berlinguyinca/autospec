@@ -449,6 +449,7 @@ git commit -m "feat: reference-count shared worktree runtime sessions"
 - Modify: `crates/autospec-core/tests/runtime_resources.rs`
 - Create: `crates/autospec-cli/src/commands/runtime/env/maven.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
+- Modify: `crates/autospec-cli/src/commands/runtime/env/lifecycle.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env/worker.rs`
 - Create: `crates/autospec-cli/tests/runtime_maven.rs`
 - Create: `tests/integration/runtime-maven-isolation.bats`
@@ -511,7 +512,7 @@ Expected: two real Maven 4 worktrees install different bytes at one GAV, each co
 - [ ] **Step 5: Commit Maven isolation**
 
 ```bash
-git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/maven.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/maven.rs crates/autospec-cli/src/commands/runtime/env/worker.rs crates/autospec-cli/tests/runtime_maven.rs tests/fixtures/runtime-resources/maven tests/integration/runtime-maven-isolation.bats
+git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/maven.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/lifecycle.rs crates/autospec-cli/src/commands/runtime/env/maven.rs crates/autospec-cli/src/commands/runtime/env/worker.rs crates/autospec-cli/tests/runtime_maven.rs tests/fixtures/runtime-resources/maven tests/integration/runtime-maven-isolation.bats
 git commit -m "feat: isolate Maven 4 installs per worktree"
 ```
 
