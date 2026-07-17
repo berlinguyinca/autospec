@@ -22,6 +22,7 @@ pub(super) fn provision_locked(
     bypassed: bool,
 ) -> Result<RuntimeState, CommandFailure> {
     let layout = layout_for_context(context);
+    ComposeAdapter::reject_caller_project_name(plan.compose.as_ref())?;
     if let Some(authoritative) = read_authoritative_state(&layout)? {
         validate_authoritative(&authoritative, plan)?;
         if active_state_matches(&authoritative, context) {
@@ -134,6 +135,7 @@ pub(super) fn validate_teardown_lifecycle(
 ) -> Result<(), CommandFailure> {
     match lifecycle {
         EnvironmentLifecycle::Active
+        | EnvironmentLifecycle::Provisioning
         | EnvironmentLifecycle::TearingDown
         | EnvironmentLifecycle::CleanupFailed => Ok(()),
         other => Err(CommandFailure::diagnostic(format!(
@@ -188,7 +190,6 @@ fn provision_fresh(
     plan: &ResourcePlan,
     bypassed: bool,
 ) -> Result<RuntimeState, CommandFailure> {
-    ComposeAdapter::reject_caller_project_name(plan.compose.as_ref())?;
     let mut owner = initialize_authoritative_state(layout, plan)?;
     let mut state = super::state_from_context(context)?;
     let command = context

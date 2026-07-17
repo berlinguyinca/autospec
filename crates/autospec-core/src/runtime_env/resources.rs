@@ -204,6 +204,48 @@ pub struct ComposePlan {
     pub shared_volumes: Vec<String>,
 }
 
+impl ComposePlan {
+    pub fn canonical_url_export_index(&self) -> Result<usize, RuntimeEnvError> {
+        let explicit = self
+            .exports
+            .iter()
+            .enumerate()
+            .filter(|(_, export)| export.env == "AUTOSPEC_PUBLIC_URL")
+            .collect::<Vec<_>>();
+        if let [(index, export)] = explicit.as_slice() {
+            if matches!(
+                export.protocol,
+                ExportProtocol::Http | ExportProtocol::Https
+            ) {
+                return Ok(*index);
+            }
+        }
+        if !explicit.is_empty() {
+            return Err(RuntimeEnvError::new(
+                "COMPOSE_CANONICAL_URL_INVALID: AUTOSPEC_PUBLIC_URL must be one HTTP(S) export",
+            ));
+        }
+        let candidates = self
+            .exports
+            .iter()
+            .enumerate()
+            .filter(|(_, export)| {
+                matches!(
+                    export.protocol,
+                    ExportProtocol::Http | ExportProtocol::Https
+                )
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        match candidates.as_slice() {
+            [index] => Ok(*index),
+            _ => Err(RuntimeEnvError::new(
+                "COMPOSE_CANONICAL_URL_AMBIGUOUS: declare exactly one HTTP(S) export or AUTOSPEC_PUBLIC_URL",
+            )),
+        }
+    }
+}
+
 pub(super) fn validate_logical_keys(
     values: &[String],
     message: &str,
@@ -337,6 +379,16 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
     path: &Path,
     value: &T,
 ) -> Result<(), RuntimeEnvError> {
+    let encoded = serde_json::to_vec(value).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "could not encode runtime state {}: {error}",
+            path.display()
+        ))
+    })?;
+    write_file_atomic(path, &encoded)
+}
+
+pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvError> {
     let parent = path.parent().ok_or_else(|| {
         RuntimeEnvError::new(format!(
             "runtime state path has no parent: {}",
@@ -347,12 +399,6 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
         RuntimeEnvError::new(format!(
             "could not create runtime state directory {}: {error}",
             parent.display()
-        ))
-    })?;
-    let encoded = serde_json::to_vec(value).map_err(|error| {
-        RuntimeEnvError::new(format!(
-            "could not encode runtime state {}: {error}",
-            path.display()
         ))
     })?;
     let temporary = create_temporary_path(path)?;
@@ -367,7 +413,7 @@ pub fn write_json_atomic<T: Serialize + ?Sized>(
                     temporary.display()
                 ))
             })?;
-        file.write_all(&encoded)
+        file.write_all(encoded)
             .and_then(|()| file.sync_all())
             .map_err(|error| {
                 RuntimeEnvError::new(format!(

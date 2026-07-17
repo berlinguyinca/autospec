@@ -830,7 +830,7 @@ pub(super) fn run_mode_command(
     process.args(["-c", command]).current_dir(&context.repo);
     worker::scrub_external_environment(&mut process);
     if let Some(state) = state {
-        worker::configure_runtime_environment(&mut process, context, state, bypassed);
+        worker::configure_runtime_environment(&mut process, context, state, bypassed)?;
     }
     let status = process.status().map_err(|error| {
         CommandFailure::diagnostic(format!("could not run runtime manifest command: {error}"))

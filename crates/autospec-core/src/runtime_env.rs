@@ -20,7 +20,7 @@ pub use identity::{load_generation_token, EnvironmentIdentity};
 pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
 pub use maven::{MavenArgPlatform, MavenArgs, MavenPurgeTarget};
 pub use resources::{
-    read_json, write_json_atomic, ComposeExport, ComposeIsolation, ComposePlan,
+    read_json, write_file_atomic, write_json_atomic, ComposeExport, ComposeIsolation, ComposePlan,
     ComposeResourceConfig, EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue,
     MavenIsolation, MavenPlan, MavenResourceConfig, OwnedVolume, ResolvedExport, ResourceInventory,
     ResourcePlan, RuntimeResources, SessionRecord,
@@ -213,6 +213,33 @@ impl RuntimeState {
             .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 
+    pub fn validate_child_environment(
+        &self,
+        context: &RuntimeContext,
+    ) -> Result<(), RuntimeEnvError> {
+        let mut allowed = BROKER_OWNED_ENVIRONMENT_KEYS
+            .into_iter()
+            .chain(["MAVEN_ARGS"])
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        allowed.extend(context.mode.env().iter().map(|(key, _)| key.clone()));
+        allowed.extend(
+            context
+                .manifest
+                .resources()
+                .compose
+                .exports
+                .iter()
+                .map(|export| export.env.clone()),
+        );
+        if let Some((key, _)) = self.values.iter().find(|(key, _)| !allowed.contains(key)) {
+            return Err(RuntimeEnvError::new(format!(
+                "RUNTIME_CHILD_ENV_UNDECLARED: {key}"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn replace_existing_value(
         &mut self,
         key: &str,
@@ -334,7 +361,7 @@ fn cksum(value: &str) -> Result<u32, RuntimeEnvError> {
         .map_err(|error| RuntimeEnvError::new(format!("invalid cksum output: {error}")))
 }
 
-fn shell_quote(value: &str) -> String {
+pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

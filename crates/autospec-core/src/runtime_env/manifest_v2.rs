@@ -276,6 +276,14 @@ fn parse_export(mapping: &Mapping) -> Result<ComposeExport, RuntimeEnvError> {
             "invalid Compose export environment name: {env}"
         )));
     }
+    if env == "MAVEN_ARGS"
+        || env != "AUTOSPEC_PUBLIC_URL"
+            && super::BROKER_OWNED_ENVIRONMENT_KEYS.contains(&env.as_str())
+    {
+        return Err(RuntimeEnvError::new(format!(
+            "reserved Compose export environment name: {env}"
+        )));
+    }
     let value = parse_export_value(mapping, &protocol)?;
     Ok(ComposeExport {
         service,

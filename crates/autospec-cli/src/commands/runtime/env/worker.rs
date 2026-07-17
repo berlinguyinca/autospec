@@ -109,7 +109,7 @@ pub(super) fn spawn_direct_command(
     child.args(arguments).current_dir(repo);
     scrub_external_environment(&mut child);
     if let Some((context, state)) = runtime {
-        configure_runtime_environment(&mut child, context, state, bypassed);
+        configure_runtime_environment(&mut child, context, state, bypassed)?;
     } else if bypassed {
         child.env("AUTOSPEC_ISOLATION_BYPASSED", "1");
     }
@@ -127,16 +127,20 @@ pub(super) fn spawn_direct_command(
 
 pub(super) fn configure_runtime_environment(
     process: &mut Command,
-    _context: &RuntimeContext,
+    context: &RuntimeContext,
     state: &RuntimeState,
     bypassed: bool,
-) {
+) -> Result<(), CommandFailure> {
+    state
+        .validate_child_environment(context)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
     for (key, value) in state.values() {
         process.env(key, value);
     }
     if bypassed {
         process.env("AUTOSPEC_ISOLATION_BYPASSED", "1");
     }
+    Ok(())
 }
 
 pub(super) fn scrub_external_environment(command: &mut Command) {

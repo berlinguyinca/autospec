@@ -224,6 +224,33 @@ fn resolved_compose_exports_render_by_declared_value_type() {
 }
 
 #[test]
+fn compose_canonical_url_requires_explicit_or_unique_http_export() {
+    let mut plan = compose_policy_plan(Path::new("/repo"));
+    assert!(plan.canonical_url_export_index().is_err());
+
+    plan.exports = vec![ComposeExport {
+        service: "web".to_string(),
+        target: 8080,
+        protocol: ExportProtocol::Http,
+        env: "WEB_URL".to_string(),
+        value: ExportValue::Url,
+    }];
+    assert_eq!(plan.canonical_url_export_index().unwrap(), 0);
+
+    plan.exports.push(ComposeExport {
+        service: "admin".to_string(),
+        target: 8081,
+        protocol: ExportProtocol::Https,
+        env: "ADMIN_URL".to_string(),
+        value: ExportValue::Url,
+    });
+    assert!(plan.canonical_url_export_index().is_err());
+
+    plan.exports[1].env = "AUTOSPEC_PUBLIC_URL".to_string();
+    assert_eq!(plan.canonical_url_export_index().unwrap(), 1);
+}
+
+#[test]
 fn atomic_json_state_round_trips_without_evaluating_shell_text() {
     let repo = TempRepo::with_files(&[]);
     let marker = repo.path().join("shell-evaluated");

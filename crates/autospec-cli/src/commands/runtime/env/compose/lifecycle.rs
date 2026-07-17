@@ -2,22 +2,19 @@ use std::path::Path;
 
 use autospec_core::runtime_env::{
     write_json_atomic, ComposeIsolation, ComposeOverride, ComposeOwnership, ComposePlan,
-    EnvironmentIdentity, ExportProtocol, OwnedVolume, ResolvedExport, ResourceInventory,
-    ResourcePlan, RuntimeContext, RuntimeState,
+    EnvironmentIdentity, ExportProtocol, ResolvedExport, ResourceInventory, ResourcePlan,
+    RuntimeContext, RuntimeState,
 };
 
 use crate::commands::CommandFailure;
 
 use super::super::state::{read_json, StateLayout};
-use super::{
-    compose_command, docker_command, output_lines, require_success, run, write_override_atomic,
-};
+use super::ownership;
+use super::{compose_command, require_success, run, write_override_atomic};
 
 const OVERRIDE_FILE: &str = "compose.autospec.override.yaml";
 const REMOVE_ORPHANS_FLAG: &str = concat!("-", "-remove-orphans");
 const PROTOCOL_FLAG: &str = concat!("-", "-protocol");
-const FILTER_FLAG: &str = concat!("-", "-filter");
-const FORMAT_FLAG: &str = concat!("-", "-format");
 
 pub(super) fn reject_caller_project_name(
     compose: Option<&ComposePlan>,
@@ -43,6 +40,9 @@ pub(super) fn up(
     };
     let model = resolved_model.ok_or_else(|| failure("COMPOSE_MODEL_MISSING"))?;
     let ownership = ownership(&resource_plan.identity, &resource_plan.digest);
+    let mut inventory = inventory(layout)?;
+    inventory.compose_project = Some(plan.project_name.clone());
+    persist(layout, &inventory)?;
     let rendered = ComposeOverride::render_json(plan, model, &ownership)
         .map_err(|error| failure(error.to_string()))?;
     let override_path = layout.environment_dir.join(OVERRIDE_FILE);
@@ -53,18 +53,13 @@ pub(super) fn up(
         &override_path,
         &["up", "-d", REMOVE_ORPHANS_FLAG],
     ))?;
-    require_success(output, "COMPOSE_UP_FAILED")?;
-    let mut inventory = inventory(layout)?;
-    inventory.compose_project = Some(plan.project_name.clone());
-    persist(layout, &inventory)?;
-    discover_inventory(
-        plan,
-        context,
-        &override_path,
-        &ownership,
-        layout,
-        &mut inventory,
-    )?;
+    if !output.status.success() {
+        let original = require_success(output, "COMPOSE_UP_FAILED")
+            .expect_err("nonzero Compose up is an error");
+        let _ = ownership::reconcile(plan, &ownership, layout, &mut inventory, context);
+        return Err(original);
+    }
+    ownership::reconcile(plan, &ownership, layout, &mut inventory, context)?;
     resolve_exports(plan, context, &override_path, layout, state, &mut inventory)?;
     Ok(())
 }
@@ -80,69 +75,19 @@ pub(super) fn down_owned(
     };
     let mut inventory = inventory(layout)?;
     if inventory.compose_project.as_deref() != Some(plan.project_name.as_str()) {
-        return Err(recovery(context, "COMPOSE_PROJECT_OWNERSHIP_MISMATCH"));
+        return Err(ownership::recovery(
+            context,
+            "COMPOSE_PROJECT_OWNERSHIP_MISMATCH",
+        ));
     }
     let ownership = ownership(&resource_plan.identity, &resource_plan.digest);
-    verify_inventory_ownership(&inventory, &ownership, context)?;
-    let override_path = layout.environment_dir.join(OVERRIDE_FILE);
-    let output = run(compose_command(
-        plan,
-        context,
-        &override_path,
-        &["down", REMOVE_ORPHANS_FLAG],
-    ))?;
-    require_success(output, "COMPOSE_DOWN_FAILED")?;
-    for volume in inventory.deletable_volumes(&plan.preserve_volumes) {
-        require_success(
-            run(docker_command(&["volume", "rm", &volume]))?,
-            "COMPOSE_VOLUME_DELETE_FAILED",
-        )?;
-    }
-    verify_absent(&inventory, &plan.preserve_volumes, context)?;
+    ownership::remove_exact_owned(plan, &ownership, layout, &mut inventory, context)?;
     inventory.compose_project = None;
     inventory.containers.clear();
     inventory.networks.clear();
     inventory.volumes.clear();
     inventory.exports.clear();
     persist(layout, &inventory)
-}
-
-fn discover_inventory(
-    plan: &ComposePlan,
-    context: &RuntimeContext,
-    override_path: &Path,
-    ownership: &ComposeOwnership,
-    layout: &StateLayout,
-    inventory: &mut ResourceInventory,
-) -> Result<(), CommandFailure> {
-    inventory.containers = list_owned(&["ps", "-aq"], ownership)?;
-    persist(layout, inventory)?;
-    inventory.volumes.clear();
-    for container in &inventory.containers.clone() {
-        for id in container_mounts(container)? {
-            if !inventory.volumes.iter().any(|volume| volume.id == id) {
-                inventory.volumes.push(OwnedVolume {
-                    logical_key: None,
-                    id,
-                });
-                persist(layout, inventory)?;
-            }
-        }
-    }
-    inventory.networks = list_owned(&["network", "ls", "-q"], ownership)?;
-    persist(layout, inventory)?;
-    let volumes = list_owned(&["volume", "ls", "-q"], ownership)?;
-    for id in volumes {
-        let logical_key = volume_logical_key(&id)?;
-        if let Some(volume) = inventory.volumes.iter_mut().find(|volume| volume.id == id) {
-            volume.logical_key = logical_key;
-        } else {
-            inventory.volumes.push(OwnedVolume { logical_key, id });
-        }
-        persist(layout, inventory)?;
-    }
-    let _ = (plan, context, override_path);
-    Ok(())
 }
 
 fn resolve_exports(
@@ -194,156 +139,19 @@ fn set_canonical_url(
     inventory: &ResourceInventory,
     state: &mut RuntimeState,
 ) -> Result<(), CommandFailure> {
-    let candidates = plan
-        .exports
-        .iter()
-        .enumerate()
-        .filter(|(_, export)| {
-            matches!(
-                export.protocol,
-                ExportProtocol::Http | ExportProtocol::Https
-            )
-        })
-        .collect::<Vec<_>>();
-    if let [(index, declaration)] = candidates.as_slice() {
-        let value = inventory.exports[*index]
-            .render(declaration)
-            .map_err(|error| failure(error.to_string()))?;
-        state
-            .set_value("AUTOSPEC_PUBLIC_URL", value.clone())
-            .map_err(|error| failure(error.to_string()))?;
-        state
-            .set_value("AGENT_PUBLIC_URL", value)
-            .map_err(|error| failure(error.to_string()))?;
-    }
-    Ok(())
-}
-
-fn list_owned(
-    prefix: &[&str],
-    ownership: &ComposeOwnership,
-) -> Result<Vec<String>, CommandFailure> {
-    let mut command = docker_command(prefix);
-    for filter in ownership.label_filters() {
-        command.args([FILTER_FLAG, &format!("label={filter}")]);
-    }
-    let output = require_success(run(command)?, "COMPOSE_INVENTORY_FAILED")?;
-    output_lines(&output.stdout)
-}
-
-fn volume_logical_key(id: &str) -> Result<Option<String>, CommandFailure> {
-    let output = require_success(
-        run(docker_command(&[
-            "volume",
-            "inspect",
-            FORMAT_FLAG,
-            "{{ index .Labels \"com.docker.compose.volume\" }}",
-            id,
-        ]))?,
-        "COMPOSE_INVENTORY_FAILED",
-    )?;
-    let value =
-        String::from_utf8(output.stdout).map_err(|_| failure("COMPOSE_OUTPUT_INVALID_UTF8"))?;
-    Ok((!value.trim().is_empty()).then(|| value.trim().to_string()))
-}
-
-fn container_mounts(id: &str) -> Result<Vec<String>, CommandFailure> {
-    let output = require_success(
-        run(docker_command(&[
-            "inspect",
-            FORMAT_FLAG,
-            "{{range .Mounts}}{{if eq .Type \"volume\"}}{{println .Name}}{{end}}{{end}}",
-            id,
-        ]))?,
-        "COMPOSE_INVENTORY_FAILED",
-    )?;
-    output_lines(&output.stdout)
-}
-
-fn verify_inventory_ownership(
-    inventory: &ResourceInventory,
-    ownership: &ComposeOwnership,
-    context: &RuntimeContext,
-) -> Result<(), CommandFailure> {
-    let mut mounted_volumes = Vec::new();
-    for id in &inventory.containers {
-        verify_labels(
-            &["inspect", FORMAT_FLAG, "{{json .Config.Labels}}", id],
-            ownership,
-            context,
-        )?;
-        mounted_volumes.extend(container_mounts(id)?);
-    }
-    for id in &inventory.networks {
-        verify_labels(
-            &["network", "inspect", FORMAT_FLAG, "{{json .Labels}}", id],
-            ownership,
-            context,
-        )?;
-    }
-    for volume in &inventory.volumes {
-        let output = require_success(
-            run(docker_command(&[
-                "volume",
-                "inspect",
-                FORMAT_FLAG,
-                "{{json .Labels}}",
-                &volume.id,
-            ]))?,
-            "COMPOSE_OWNERSHIP_CHECK_FAILED",
-        )?;
-        let labeled = ownership.matches_json(&output.stdout).unwrap_or(false);
-        let attached_anonymous =
-            volume.logical_key.is_none() && mounted_volumes.contains(&volume.id);
-        if !labeled && !attached_anonymous {
-            return Err(recovery(context, "COMPOSE_OWNERSHIP_MISMATCH"));
-        }
-    }
-    Ok(())
-}
-
-fn verify_labels(
-    args: &[&str],
-    ownership: &ComposeOwnership,
-    context: &RuntimeContext,
-) -> Result<(), CommandFailure> {
-    let output = require_success(run(docker_command(args))?, "COMPOSE_OWNERSHIP_CHECK_FAILED")?;
-    let matches = ownership
-        .matches_json(&output.stdout)
-        .map_err(|_| recovery(context, "COMPOSE_OWNERSHIP_EVIDENCE_INVALID"))?;
-    if matches {
-        Ok(())
-    } else {
-        Err(recovery(context, "COMPOSE_OWNERSHIP_MISMATCH"))
-    }
-}
-
-fn verify_absent(
-    inventory: &ResourceInventory,
-    preserved: &[String],
-    context: &RuntimeContext,
-) -> Result<(), CommandFailure> {
-    for (kind, id) in inventory
-        .containers
-        .iter()
-        .map(|id| ("container", id.as_str()))
-        .chain(inventory.networks.iter().map(|id| ("network", id.as_str())))
-        .chain(
-            inventory
-                .deletable_volumes(preserved)
-                .iter()
-                .map(|id| ("volume", id.as_str())),
-        )
-    {
-        let args = if kind == "container" {
-            vec!["inspect", id]
-        } else {
-            vec![kind, "inspect", id]
-        };
-        if run(docker_command(&args))?.status.success() {
-            return Err(recovery(context, "COMPOSE_RESOURCE_STILL_PRESENT"));
-        }
-    }
+    let index = plan
+        .canonical_url_export_index()
+        .map_err(|error| failure(error.to_string()))?;
+    let declaration = &plan.exports[index];
+    let value = inventory.exports[index]
+        .render(declaration)
+        .map_err(|error| failure(error.to_string()))?;
+    state
+        .set_value("AUTOSPEC_PUBLIC_URL", value.clone())
+        .map_err(|error| failure(error.to_string()))?;
+    state
+        .set_value("AGENT_PUBLIC_URL", value)
+        .map_err(|error| failure(error.to_string()))?;
     Ok(())
 }
 
@@ -389,16 +197,31 @@ fn ownership(identity: &EnvironmentIdentity, digest: &str) -> ComposeOwnership {
     }
 }
 
-fn recovery(context: &RuntimeContext, code: &str) -> CommandFailure {
-    failure(format!(
-        "{code}: recovery: autospec runtime env down {}repo '{}' {}mode {}",
-        concat!("-", "-"),
-        context.repo.display(),
-        concat!("-", "-"),
-        context.mode.name()
-    ))
-}
-
 fn failure(message: impl Into<String>) -> CommandFailure {
     CommandFailure::diagnostic(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_port;
+
+    #[test]
+    fn compose_port_parser_fails_closed_on_noncanonical_output() {
+        for value in [
+            "0.0.0.0:49152\n",
+            "[::]:49152\n",
+            "[::1]:49152\n",
+            "127.0.0.1:49152\n127.0.0.1:49153\n",
+            "0.0.0.0:49152\n[::]:49152\n",
+        ] {
+            assert!(
+                parse_port("WEB_URL", value.as_bytes()).is_err(),
+                "{value:?}"
+            );
+        }
+        assert_eq!(
+            parse_port("WEB_URL", b"127.0.0.1:49152\n").unwrap().port,
+            49152
+        );
+    }
 }

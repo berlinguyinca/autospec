@@ -1,15 +1,15 @@
 use std::path::Path;
 use std::process::{Command, Output};
-use std::{fs, io::Write};
 
 use autospec_core::runtime_env::{
-    ComposeIsolation, ComposePlan, ComposePolicy, IsolationDiagnostic, ResourcePlan,
-    RuntimeContext, RuntimeState,
+    write_file_atomic, ComposeIsolation, ComposePlan, ComposePolicy, IsolationDiagnostic,
+    ResourcePlan, RuntimeContext, RuntimeState,
 };
 
 use crate::commands::CommandFailure;
 
 mod lifecycle;
+mod ownership;
 
 use super::state::StateLayout;
 
@@ -178,22 +178,63 @@ fn output_lines(source: &[u8]) -> Result<Vec<String>, CommandFailure> {
 }
 
 fn write_override_atomic(path: &Path, value: &str) -> Result<(), CommandFailure> {
-    let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    let result = (|| {
-        let mut file = fs::File::create(&temporary).map_err(|error| {
-            CommandFailure::diagnostic(format!("could not create Compose override: {error}"))
-        })?;
-        file.write_all(value.as_bytes())
-            .and_then(|()| file.sync_all())
-            .map_err(|error| {
-                CommandFailure::diagnostic(format!("could not write Compose override: {error}"))
-            })?;
-        fs::rename(&temporary, path).map_err(|error| {
-            CommandFailure::diagnostic(format!("could not finalize Compose override: {error}"))
-        })
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(temporary);
+    write_file_atomic(path, value.as_bytes()).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not write Compose override: {error}"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::write_override_atomic;
+
+    #[test]
+    fn override_atomic_writes_use_independent_create_new_temporaries() {
+        let root =
+            std::env::temp_dir().join(format!("autospec-compose-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("override.yaml");
+        let barrier = Arc::new(Barrier::new(8));
+        let writers = (0..8)
+            .map(|index| {
+                let target = target.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    write_override_atomic(&target, &format!("writer: {index}\n"))
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for writer in writers {
+            writer.join().unwrap().expect("each atomic write succeeds");
+        }
+        let value = std::fs::read_to_string(&target).unwrap();
+        assert!(value.starts_with("writer: "));
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
-    result
+
+    #[cfg(unix)]
+    #[test]
+    fn override_atomic_write_replaces_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let root =
+            std::env::temp_dir().join(format!("autospec-compose-symlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = root.join("outside");
+        let target = root.join("override.yaml");
+        std::fs::write(&outside, "untouched\n").unwrap();
+        symlink(&outside, &target).unwrap();
+
+        write_override_atomic(&target, "services: {}\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(outside).unwrap(), "untouched\n");
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "services: {}\n");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
