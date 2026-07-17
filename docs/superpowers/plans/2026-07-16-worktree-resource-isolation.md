@@ -671,9 +671,10 @@ git commit -m "feat: own isolated Compose stacks and dynamic exports"
 
 **Files:**
 - Create: `crates/autospec-core/src/runtime_env/compose_normalize.rs`
+- Create: `crates/autospec-core/src/runtime_env/compose_normalize/edit.rs`
 - Modify: `crates/autospec-core/src/runtime_env.rs`
 - Modify: `crates/autospec-core/tests/runtime_resources.rs`
-- Modify: `crates/autospec-cli/src/commands/runtime/env/options.rs`
+- Create: `crates/autospec-cli/src/commands/runtime/env/options.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
 - Modify: `crates/autospec-cli/tests/runtime_resources.rs`
 - Create: `tests/fixtures/compose-normalize/fixed-port/`
@@ -743,7 +744,7 @@ Expected: eligible fixtures transform once and validate; the second run is byte-
 - [ ] **Step 5: Commit the shared normalizer**
 
 ```bash
-git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/compose_normalize.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/options.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/compose-normalize
+git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/compose_normalize.rs crates/autospec-core/src/runtime_env/compose_normalize/edit.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/options.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/compose-normalize
 git commit -m "feat: normalize safe Compose isolation changes deterministically"
 ```
 
