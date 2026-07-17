@@ -7,6 +7,7 @@ mod diagnostic;
 mod identity;
 mod manifest;
 mod manifest_v2;
+mod maven;
 mod resource_plan;
 mod resources;
 mod session;
@@ -15,6 +16,7 @@ mod shell_command;
 pub use diagnostic::IsolationDiagnostic;
 pub use identity::{load_generation_token, EnvironmentIdentity};
 pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
+pub use maven::{MavenArgPlatform, MavenArgs, MavenPurgeTarget};
 pub use resources::{
     read_json, write_json_atomic, ComposeExport, ComposeIsolation, ComposePlan,
     ComposeResourceConfig, EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue,
@@ -218,6 +220,29 @@ impl RuntimeState {
             )));
         };
         *existing_value = value.into();
+        Ok(())
+    }
+
+    pub fn set_value(
+        &mut self,
+        key: &str,
+        value: impl Into<String>,
+    ) -> Result<(), RuntimeEnvError> {
+        if !is_valid_environment_name(key) {
+            return Err(RuntimeEnvError::new(format!(
+                "invalid runtime environment name: {key}"
+            )));
+        }
+        let value = value.into();
+        if let Some((_, existing)) = self
+            .values
+            .iter_mut()
+            .find(|(candidate, _)| candidate == key)
+        {
+            *existing = value;
+        } else {
+            self.values.push((key.to_string(), value));
+        }
         Ok(())
     }
 }

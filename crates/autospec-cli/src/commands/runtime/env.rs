@@ -15,6 +15,7 @@ use crate::commands::CommandFailure;
 
 mod isolation;
 mod lifecycle;
+mod maven;
 mod session;
 mod state;
 mod worker;
@@ -26,6 +27,7 @@ use lifecycle::{
     partial_state, provision_locked, teardown_locked, validate_authoritative,
     validate_teardown_lifecycle,
 };
+use maven::MavenAdapter;
 use session::{live_sessions, run_session_command, SessionLease};
 use state::{
     layout_for_context, read_authoritative_state, read_runtime_state, write_runtime_state,
@@ -78,6 +80,12 @@ struct SessionOptions {
     keep_alive: bool,
 }
 
+#[derive(Debug, Clone)]
+struct DownOptions {
+    options: Options,
+    purge_maven: bool,
+}
+
 pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
     let Some((operation, options)) = args.split_first() else {
         return Err(CommandFailure::diagnostic(
@@ -88,7 +96,7 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
         "init" => init(parse_init_options(options)?),
         "up" => up(parse_options(options)?),
         "status" => status(parse_options(options)?),
-        "down" => down(parse_options(options)?),
+        "down" => down(parse_down_options(options)?),
         "exec" => exec(parse_exec_options(options)?),
         "session" => session(parse_session_options(options)?),
         "lease-probe" => lease_probe(options),
@@ -165,6 +173,26 @@ fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
         }
     }
     Ok(Options { repo, mode })
+}
+
+fn parse_down_options(args: &[String]) -> Result<DownOptions, CommandFailure> {
+    let mut purge_maven = false;
+    let options = args
+        .iter()
+        .filter(|argument| {
+            if argument.as_str() == "--purge-maven" {
+                purge_maven = true;
+                false
+            } else {
+                true
+            }
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    Ok(DownOptions {
+        options: parse_options(&options)?,
+        purge_maven,
+    })
 }
 
 fn parse_init_options(args: &[String]) -> Result<InitOptions, CommandFailure> {
@@ -410,10 +438,10 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     Ok(())
 }
 
-fn down(options: Options) -> Result<(), CommandFailure> {
-    let repo = canonical_repo(&options.repo)?;
-    let identity = planning_identity(&repo, &options.mode)?;
-    let context = context_from_identity(&repo, &options.mode, &identity)?;
+fn down(options: DownOptions) -> Result<(), CommandFailure> {
+    let repo = canonical_repo(&options.options.repo)?;
+    let identity = planning_identity(&repo, &options.options.mode)?;
+    let context = context_from_identity(&repo, &options.options.mode, &identity)?;
     if !context.environment_dir.exists() {
         return Ok(());
     }
@@ -424,7 +452,7 @@ fn down(options: Options) -> Result<(), CommandFailure> {
         None if !context.env_file.is_file() => return Ok(()),
         None => return Err(partial_state(&layout)),
     };
-    let invocation = invocation_isolation(&repo, &options.mode)?;
+    let invocation = invocation_isolation(&repo, &options.options.mode)?;
     let plan = required_plan(invocation.plan)?;
     validate_authoritative(&authoritative, &plan)?;
     validate_teardown_lifecycle(&authoritative.owner.lifecycle)?;
@@ -440,6 +468,15 @@ fn down(options: Options) -> Result<(), CommandFailure> {
     } else {
         None
     };
+    if options.purge_maven {
+        MavenAdapter::purge_owned_prefix(
+            plan.maven.as_ref(),
+            &context,
+            state.as_ref().ok_or_else(|| partial_state(&layout))?,
+            &layout,
+            &authoritative.inventory,
+        )?;
+    }
     teardown_locked(&context, state.as_ref(), &plan)
 }
 
@@ -866,6 +903,6 @@ fn print_state_value(state: &RuntimeState, key: &str) {
 
 fn print_help() {
     println!(
-        "autospec runtime env\n\nUSAGE:\n    autospec runtime env init [--repo PATH] [--manifest agent|autospec] [--force]\n    autospec runtime env up [--repo PATH] [--mode MODE]\n    autospec runtime env status [--repo PATH] [--mode MODE]\n    autospec runtime env down [--repo PATH] [--mode MODE]\n    autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]\n    autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]"
+        "autospec runtime env\n\nUSAGE:\n    autospec runtime env init [--repo PATH] [--manifest agent|autospec] [--force]\n    autospec runtime env up [--repo PATH] [--mode MODE]\n    autospec runtime env status [--repo PATH] [--mode MODE]\n    autospec runtime env down [--repo PATH] [--mode MODE] [--purge-maven]\n    autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]\n    autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]"
     );
 }

@@ -13,7 +13,7 @@ const LEGACY_SESSION_WORKER_ENV: &str = "AUTOSPEC_RUNTIME_SESSION_WORKER";
 const SESSION_HANDOFF_ENV: &str = "AUTOSPEC_RUNTIME_SESSION_HANDOFF";
 const SESSION_TOKEN_ENV: &str = "AUTOSPEC_RUNTIME_SESSION_TOKEN";
 const SESSION_HANDOFF_PREFIX: &str = "autospec-runtime-session-handoff-";
-const STATE_ENVIRONMENT_KEYS: [&str; 9] = [
+const STATE_ENVIRONMENT_KEYS: [&str; 10] = [
     "AGENT_ENV_ID",
     "AGENT_ENV_MODE",
     "AGENT_ENV_REPO",
@@ -23,6 +23,7 @@ const STATE_ENVIRONMENT_KEYS: [&str; 9] = [
     "AGENT_PUBLIC_URL",
     "AUTOSPEC_PUBLIC_URL",
     "COMPOSE_PROJECT_NAME",
+    "MAVEN_ARGS",
 ];
 
 struct SessionWorkerHandoff {

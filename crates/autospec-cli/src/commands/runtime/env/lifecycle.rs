@@ -8,6 +8,7 @@ use autospec_core::runtime_env::{
 
 use crate::commands::CommandFailure;
 
+use super::maven::MavenAdapter;
 use super::session::live_sessions;
 use super::state::{
     initialize_authoritative_state, layout_for_context, read_authoritative_state, write_lifecycle,
@@ -42,7 +43,7 @@ pub(super) fn teardown_locked(
     validate_authoritative(&authoritative, desired)?;
     validate_teardown_lifecycle(&authoritative.owner.lifecycle)?;
     let mut owner = authoritative.owner;
-    if !inventory_is_empty(&authoritative.inventory) {
+    if inventory_has_teardown_blockers(&authoritative.inventory) {
         write_lifecycle(&layout, &mut owner, EnvironmentLifecycle::CleanupFailed)?;
         return Err(CommandFailure::diagnostic(
             "RUNTIME_INVENTORY_NOT_EMPTY: refusing cleanup of recorded resources",
@@ -55,6 +56,20 @@ pub(super) fn teardown_locked(
         {
             return cleanup_failed(&layout, Some(&mut owner), error);
         }
+    }
+    let retained_inventory: ResourceInventory = match super::state::read_json(&layout.inventory) {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            return cleanup_failed(
+                &layout,
+                Some(&mut owner),
+                CommandFailure::diagnostic(error.to_string()),
+            )
+        }
+    };
+    if retained_inventory.maven_local_prefix.is_some() {
+        write_lifecycle(&layout, &mut owner, EnvironmentLifecycle::Active)?;
+        return Ok(());
     }
     for path in [&layout.env, &layout.inventory, &layout.plan] {
         if let Err(error) = remove_file_if_present(path) {
@@ -164,8 +179,7 @@ fn provision_fresh(
     bypassed: bool,
 ) -> Result<RuntimeState, CommandFailure> {
     let mut owner = initialize_authoritative_state(layout, plan)?;
-    let state = super::state_from_context(context)?;
-    super::write_state(context, &state)?;
+    let mut state = super::state_from_context(context)?;
     let command = context
         .mode
         .command()
@@ -174,25 +188,36 @@ fn provision_fresh(
         return Err(super::missing_mode_command(context));
     }
     write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Provisioning)?;
-    super::run_mode_command(command, context, Some(&state), bypassed)?;
+    if let Err(error) = MavenAdapter::configure(plan.maven.as_ref(), context, &mut state, layout) {
+        return cleanup_failed(layout, Some(&mut owner), error);
+    }
+    if let Err(error) = super::write_state(context, &state) {
+        return cleanup_failed(layout, Some(&mut owner), error);
+    }
+    if let Err(error) = super::run_mode_command(command, context, Some(&state), bypassed) {
+        return cleanup_failed(layout, Some(&mut owner), error);
+    }
     write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Active)?;
     Ok(state)
 }
 
-fn inventory_is_empty(inventory: &ResourceInventory) -> bool {
-    inventory.compose_project.is_none()
-        && inventory.containers.is_empty()
-        && inventory.networks.is_empty()
-        && inventory.volumes.is_empty()
-        && inventory.exports.is_empty()
-        && inventory.maven_local_prefix.is_none()
+fn inventory_has_teardown_blockers(inventory: &ResourceInventory) -> bool {
+    inventory.compose_project.is_some()
+        || !inventory.containers.is_empty()
+        || !inventory.networks.is_empty()
+        || !inventory.volumes.is_empty()
+        || !inventory.exports.is_empty()
 }
 
-fn cleanup_failed(
+fn inventory_is_empty(inventory: &ResourceInventory) -> bool {
+    !inventory_has_teardown_blockers(inventory) && inventory.maven_local_prefix.is_none()
+}
+
+fn cleanup_failed<T>(
     layout: &StateLayout,
     owner: Option<&mut EnvironmentOwner>,
     error: CommandFailure,
-) -> Result<(), CommandFailure> {
+) -> Result<T, CommandFailure> {
     if let Some(owner) = owner {
         write_lifecycle(layout, owner, EnvironmentLifecycle::CleanupFailed)?;
     }
