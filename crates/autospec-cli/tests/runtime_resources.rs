@@ -305,33 +305,7 @@ fn up_reconciles_a_provisioning_owner_instead_of_trusting_legacy_env() {
         String::from_utf8_lossy(&first.stderr)
     );
 
-    let environment_dir = std::fs::read_dir(&fixture.state_root)
-        .expect("state root exists")
-        .next()
-        .expect("environment exists")
-        .expect("environment entry")
-        .path();
-    let plan = fixture_plan(&fixture.root);
-    let owner = EnvironmentOwner {
-        schema_version: 1,
-        identity: plan.identity.clone(),
-        host: "test-host".to_string(),
-        created_at_unix_ms: 1,
-        manifest_digest: plan.digest.clone(),
-        lifecycle: EnvironmentLifecycle::Provisioning,
-    };
-    let inventory = ResourceInventory {
-        schema_version: 1,
-        environment_id: environment_dir
-            .file_name()
-            .expect("environment id")
-            .to_string_lossy()
-            .into_owned(),
-        ..ResourceInventory::default()
-    };
-    write_json_atomic(&environment_dir.join("plan.json"), &plan).unwrap();
-    write_json_atomic(&environment_dir.join("owner.json"), &owner).unwrap();
-    write_json_atomic(&environment_dir.join("inventory.json"), &inventory).unwrap();
+    seed_provisioning_state(&fixture);
 
     let second = fixture
         .command()
@@ -396,4 +370,34 @@ fn line_count(path: &Path) -> usize {
         .unwrap_or_default()
         .lines()
         .count()
+}
+
+fn seed_provisioning_state(fixture: &RuntimeFixture) {
+    let environment = std::fs::read_dir(&fixture.state_root)
+        .expect("state root exists")
+        .next()
+        .expect("environment exists")
+        .expect("environment entry")
+        .path();
+    let plan = fixture_plan(&fixture.root);
+    let owner = EnvironmentOwner {
+        schema_version: 1,
+        identity: plan.identity.clone(),
+        host: "test-host".to_string(),
+        created_at_unix_ms: 1,
+        manifest_digest: plan.digest.clone(),
+        lifecycle: EnvironmentLifecycle::Provisioning,
+    };
+    let inventory = ResourceInventory {
+        schema_version: 1,
+        environment_id: environment
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        ..ResourceInventory::default()
+    };
+    write_json_atomic(&environment.join("plan.json"), &plan).unwrap();
+    write_json_atomic(&environment.join("owner.json"), &owner).unwrap();
+    write_json_atomic(&environment.join("inventory.json"), &inventory).unwrap();
 }
