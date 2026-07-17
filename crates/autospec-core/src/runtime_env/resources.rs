@@ -49,6 +49,77 @@ impl ResourcePlan {
             compose,
         })
     }
+
+    pub fn apply_invocation_overrides(
+        &mut self,
+        maven_value: Option<&str>,
+        compose_value: Option<&str>,
+        whole_environment_disabled: bool,
+    ) -> Result<bool, RuntimeEnvError> {
+        validate_off_override("AUTOSPEC_MAVEN_ISOLATION", maven_value)?;
+        validate_off_override("AUTOSPEC_COMPOSE_ISOLATION", compose_value)?;
+
+        if whole_environment_disabled || maven_value == Some("off") {
+            if let Some(maven) = &mut self.maven {
+                maven.isolation = MavenIsolation::Off;
+            }
+        }
+        if whole_environment_disabled || compose_value == Some("off") {
+            if let Some(compose) = &mut self.compose {
+                compose.isolation = ComposeIsolation::Off;
+            }
+        }
+
+        Ok(whole_environment_disabled || maven_value.is_some() || compose_value.is_some())
+    }
+}
+
+fn validate_off_override(key: &str, value: Option<&str>) -> Result<(), RuntimeEnvError> {
+    match value {
+        None | Some("off") => Ok(()),
+        Some(value) => Err(RuntimeEnvError::new(format!(
+            "unsupported {key} value: {value:?}; expected 'off'"
+        ))),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeResources {
+    pub maven: MavenResourceConfig,
+    pub compose: ComposeResourceConfig,
+}
+
+impl Default for RuntimeResources {
+    fn default() -> Self {
+        Self {
+            maven: MavenResourceConfig {
+                isolation: MavenIsolation::SplitLocal,
+            },
+            compose: ComposeResourceConfig {
+                isolation: ComposeIsolation::Managed,
+                files: Vec::new(),
+                exports: Vec::new(),
+                preserve_volumes: Vec::new(),
+                shared_networks: Vec::new(),
+                shared_volumes: Vec::new(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MavenResourceConfig {
+    pub isolation: MavenIsolation,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComposeResourceConfig {
+    pub isolation: ComposeIsolation,
+    pub files: Vec<PathBuf>,
+    pub exports: Vec<ComposeExport>,
+    pub preserve_volumes: Vec<String>,
+    pub shared_networks: Vec<String>,
+    pub shared_volumes: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

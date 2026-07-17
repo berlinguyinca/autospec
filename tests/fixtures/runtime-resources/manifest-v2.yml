@@ -1,0 +1,26 @@
+version: 2
+name: resource-fixture
+default_mode: local
+resources:
+  maven:
+    isolation: split-local
+  compose:
+    files:
+      - compose.yaml
+    exports:
+      - service: web
+        target: 8080
+        protocol: http
+        env: AUTOSPEC_PUBLIC_URL
+        value: url
+    preserve_volumes:
+      - postgres-data
+    shared_resources:
+      networks:
+        - developer-proxy
+      volumes:
+        - maven-cache
+modes:
+  local:
+    command: ./dev-start.sh
+    down: ./dev-stop.sh

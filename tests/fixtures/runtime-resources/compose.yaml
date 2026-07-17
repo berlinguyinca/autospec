@@ -1,0 +1,7 @@
+services:
+  web:
+    image: autospec/runtime-resource-fixture
+    expose:
+      - "8080"
+volumes:
+  postgres-data:
