@@ -412,6 +412,8 @@ Expected: core symbols are missing and the CLI teardown counter records one tear
 
 Use a random `process_start` token and hold an exclusive lock on `sessions/<session-id>.lock` for the process lifetime. Store PID plus that token in JSON; a nonblocking lock attempt is the cross-platform liveness authority, so PID reuse cannot revive the record. Prune a record only when its lock is acquirable. `down` returns a stable `RUNTIME_LIVE_SESSIONS` diagnostic while any record remains live.
 
+Construct `RuntimeContext` and `StateLayout` from `ResourcePlan.identity.environment_id`; owner, plan, inventory, env, lease, and sessions must share that generation-aware directory rather than the legacy path hash.
+
 Preserve `session --keep-alive`: final release records zero live sessions but suppresses automatic teardown, allowing an explicit later `down`. Without `--keep-alive`, final release tears down ephemeral resources while retaining the Maven installed-artifact prefix.
 
 Persist owner lifecycle before each external side effect. On `up`, compare the plan digest and inventory: finish an idempotent recorded step or enter `TearingDown` and remove recorded partial resources before retrying. Never treat the presence of `env` as proof that provisioning completed.
