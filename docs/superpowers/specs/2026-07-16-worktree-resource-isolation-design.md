@@ -101,6 +101,8 @@ ${AGENT_ENV_STATE_ROOT:-$HOME/.autospec/envs}/<environment-id>/
 
 Every mutating lifecycle operation holds `lease.lock`. Two simultaneous `up` calls for the same environment cannot double-provision resources.
 
+Teardown removes authoritative owner, plan, environment, inventory, and session records but retains the empty environment directory plus `lease.lock` as a stable lock tombstone. Unlinking a held lock would let a concurrent caller create a second inode and enter the same environment. The tombstone contains no ownership claim; all commands treat a missing `owner.json` as inactive.
+
 ## Maven 4 isolation
 
 Autospec preserves the effective local repository root selected by the user's Maven settings. It does not set `maven.repo.local` and does not create a second repository tree.
