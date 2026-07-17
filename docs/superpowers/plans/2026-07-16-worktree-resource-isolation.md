@@ -61,7 +61,7 @@
 - Modify: `install.sh`, `tests/agent-env-install.bats` — one generated harness alias table.
 - Create: `scripts/autospec-runtime-worktree-cleanup.sh` and `tests/runtime-worktree-cleanup.bats` — broker GC adapter composed before confirmed Git cleanup; `worktree-guard.sh` remains Git-only.
 - Modify: `docs/runbooks/agent-runtime-manifest.md`, `docs/runbooks/agent-runtime-companion-stacks.md`, `docs/cli-reference.md` — v2 resources, operations, and recovery.
-- Modify: `scripts/validate.sh` and generated validation fixtures/goldens selected by `autospec validate` — new skill presence and trio lockstep.
+- Modify: Rust validation catalog checks and generated fixtures/goldens selected by `autospec validate` — new skill presence and trio lockstep.
 
 ## Task 1: Establish generation-aware, locked resource state
 
@@ -746,7 +746,7 @@ git commit -m "feat: normalize safe Compose isolation changes deterministically"
 - Modify: `skills/autospec-run/SKILL.md`, `skills/autospec-run/codex/prompt.md`, `skills/autospec-run/opencode/agent.md`
 - Modify: `skills/autospec/SKILL.md`, `skills/autospec/codex/prompt.md`, `skills/autospec/opencode/agent.md`
 - Modify: `tests/autospec-run-agent-env-contract.bats`
-- Modify: `scripts/validate.sh`
+- Modify: `crates/autospec-core/src/validation/external.rs`
 - Create: `tests/fixtures/skill-goldens/autospec-compose-normalize.SKILL.md.sha256`
 - Create: `tests/fixtures/skill-goldens/autospec-compose-normalize.codex.prompt.md.sha256`
 - Create: `tests/fixtures/skill-goldens/autospec-compose-normalize.opencode.agent.md.sha256`
@@ -793,7 +793,7 @@ Expected: all three skill bodies are lock-step, generated goldens match, both Ph
 - [ ] **Step 5: Commit the transparent migration skill**
 
 ```bash
-git add skills/autospec-compose-normalize skills/autospec-run skills/autospec templates/skill-blocks/runtime-resource-preflight.md tests/unit/test_autospec_compose_normalize_skill.bats tests/autospec-run-agent-env-contract.bats tests/fixtures/skill-goldens scripts/validate.sh
+git add skills/autospec-compose-normalize skills/autospec-run skills/autospec templates/skill-blocks/runtime-resource-preflight.md tests/unit/test_autospec_compose_normalize_skill.bats tests/autospec-run-agent-env-contract.bats tests/fixtures/skill-goldens crates/autospec-core/src/validation/external.rs
 git commit -m "feat: migrate Compose isolation prerequisites transparently"
 ```
 
@@ -906,7 +906,7 @@ git commit -m "feat: keep every harness inside owned runtime resources"
 - Create: `docs/memory/feedback_worktree_resource_isolation.md`
 - Modify: `docs/memory/MEMORY.md`
 - Modify: `tests/smoke/test_install_all_skills.bats`
-- Modify: `scripts/validate.sh`
+- Modify: `crates/autospec-core/src/validation/external.rs`
 
 **Interfaces:**
 - Consumes: every broker, skill, alias, and cleanup contract from Tasks 1–9.
@@ -949,7 +949,7 @@ Expected: all Rust, Bats, lock-step, generated, Maven 4, Docker Compose, 40-stac
 - [ ] **Step 5: Commit final proof and documentation**
 
 ```bash
-git add tests/integration/runtime-compose-40-stack.bats tests/fixtures/runtime-resources/forty-stack docs README.md AGENTS.md tests/smoke/test_install_all_skills.bats scripts/validate.sh reports/runtime-isolation
+git add tests/integration/runtime-compose-40-stack.bats tests/fixtures/runtime-resources/forty-stack docs README.md AGENTS.md tests/smoke/test_install_all_skills.bats crates/autospec-core/src/validation/external.rs reports/runtime-isolation
 git commit -m "test: prove forty isolated worktree runtime stacks"
 ```
 
