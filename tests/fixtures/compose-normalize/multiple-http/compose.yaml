@@ -1,0 +1,12 @@
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - target: 8080
+        published: 18080
+        protocol: tcp
+        app_protocol: http
+      - target: 8443
+        published: 18443
+        protocol: tcp
+        app_protocol: https

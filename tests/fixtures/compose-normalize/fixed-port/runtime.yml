@@ -1,0 +1,5 @@
+version: 2
+name: normalize-fixture
+resources:
+  compose:
+    files: [compose.yaml]

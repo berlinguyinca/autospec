@@ -8,7 +8,8 @@ use std::time::Duration;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use autospec_core::runtime_env::{
-    EnvironmentLifecycle, ResourcePlan, RuntimeContext, RuntimeManifest, RuntimeState,
+    ComposeNormalizer, EnvironmentLifecycle, ResourcePlan, RuntimeContext, RuntimeManifest,
+    RuntimeState,
 };
 
 use crate::commands::CommandFailure;
@@ -17,6 +18,7 @@ mod compose;
 mod isolation;
 mod lifecycle;
 mod maven;
+mod options;
 mod session;
 mod state;
 mod worker;
@@ -29,6 +31,7 @@ use lifecycle::{
     validate_cached_state, validate_teardown_lifecycle,
 };
 use maven::MavenAdapter;
+use options::{parse_normalize_options, NormalizeMode, NormalizeOptions};
 use session::{live_sessions, run_session_command, SessionLease};
 use state::{
     layout_for_context, read_authoritative_state, read_runtime_state, write_runtime_state,
@@ -100,6 +103,7 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
         "down" => down(parse_down_options(options)?),
         "exec" => exec(parse_exec_options(options)?),
         "session" => session(parse_session_options(options)?),
+        "normalize-compose" => normalize_compose(parse_normalize_options(options)?),
         "lease-probe" => lease_probe(options),
         "-h" | "--help" | "help" => {
             print_help();
@@ -109,6 +113,29 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
             "unknown autospec runtime env command: {operation}"
         ))),
     }
+}
+
+fn normalize_compose(options: NormalizeOptions) -> Result<(), CommandFailure> {
+    let repo = canonical_repo(&options.repo)?;
+    let plan = ComposeNormalizer::plan(&repo)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    match options.mode {
+        NormalizeMode::Check => {}
+        NormalizeMode::Apply => ComposeNormalizer::apply(
+            &plan,
+            options
+                .fingerprint
+                .as_deref()
+                .expect("apply options require a fingerprint"),
+        )
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?,
+    }
+    println!(
+        "{}",
+        plan.to_json()
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?
+    );
+    Ok(())
 }
 
 fn parse_options(args: &[String]) -> Result<Options, CommandFailure> {
