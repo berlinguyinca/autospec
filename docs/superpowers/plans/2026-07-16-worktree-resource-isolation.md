@@ -247,6 +247,7 @@ git commit -m "feat: make runtime resource ownership generation-aware"
 **Files:**
 - Modify: `crates/autospec-core/Cargo.toml`
 - Modify: `Cargo.lock`
+- Modify: `crates/autospec-core/src/runtime_env.rs`
 - Modify: `crates/autospec-core/src/runtime_env/manifest.rs`
 - Modify: `crates/autospec-core/src/runtime_env/resources.rs`
 - Modify: `crates/autospec-core/tests/runtime_env.rs`
@@ -346,7 +347,7 @@ Expected: v1 and v2 tests pass, no unresolved advisory is reported, and Autospec
 - [ ] **Step 5: Commit manifest v2 and detection**
 
 ```bash
-git add Cargo.lock crates/autospec-core/Cargo.toml crates/autospec-core/src/runtime_env/manifest.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/tests/runtime_env.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources
+git add Cargo.lock crates/autospec-core/Cargo.toml crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/manifest.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/tests/runtime_env.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources
 git commit -m "feat: plan Maven and Compose resources from runtime v2"
 ```
 
