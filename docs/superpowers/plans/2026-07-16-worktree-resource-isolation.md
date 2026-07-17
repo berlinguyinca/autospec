@@ -761,7 +761,6 @@ git commit -m "feat: normalize safe Compose isolation changes deterministically"
 - Create: `skills/autospec-compose-normalize/SKILL.md`
 - Create: `skills/autospec-compose-normalize/codex/prompt.md`
 - Create: `skills/autospec-compose-normalize/opencode/agent.md`
-- Create: `skills/autospec-compose-normalize/README.md`
 - Create: `skills/autospec-compose-normalize/install.sh`
 - Create: `skills/autospec-compose-normalize/uninstall.sh`
 - Create: `tests/unit/test_autospec_compose_normalize_skill.bats`
@@ -799,7 +798,8 @@ Expected: the normalizer skill is missing and the existing preflight still conta
 
 - [ ] **Step 3: Land the complete skill and shared prerequisite workflow atomically**
 
-The skill sequence is fixed:
+The skill sequence is fixed. Keep install and usage guidance in `SKILL.md` and
+the installer; do not add a duplicate per-skill README:
 
 ```text
 check -> read fingerprint -> find matching open/merged migration -> claim files -> create/lint/classify one issue -> create worktree -> apply -> verify -> commit -> PR -> CI/review -> merge -> release claim
