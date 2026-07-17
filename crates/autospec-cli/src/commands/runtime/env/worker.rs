@@ -231,7 +231,6 @@ impl ChildGuard {
             #[cfg(not(unix))]
             let _ = child.kill();
             if !reap_child_bounded(child)? {
-                self.disarm();
                 return Err(diagnostic("runtime child did not exit after termination"));
             }
         }
@@ -252,12 +251,7 @@ impl ChildGuard {
         }
         #[cfg(unix)]
         if self.process_group {
-            loop {
-                match process_group_is_alive(process_group) {
-                    Ok(false) => break,
-                    Ok(true) | Err(_) => std::thread::sleep(Duration::from_millis(10)),
-                }
-            }
+            wait_for_process_group_exit(process_group);
         }
         self.disarm();
     }
@@ -298,13 +292,49 @@ fn signal_process_group(pid: u32, signal: i32) -> Result<(), CommandFailure> {
 #[cfg(unix)]
 fn process_group_is_alive(pid: u32) -> Result<bool, CommandFailure> {
     let process_group = process_group_argument(pid)?;
-    Command::new("/bin/kill")
+    let output = Command::new("kill")
         .args(["-0", "--", &process_group])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .map_err(|error| diagnostic(format!("could not inspect runtime process group: {error}")))
+        .env("LC_ALL", "C")
+        .output()
+        .map_err(|error| diagnostic(format!("could not inspect runtime process group: {error}")))?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.lines().any(|line| line.ends_with("No such process")) {
+        return Ok(false);
+    }
+    Err(diagnostic(format!(
+        "RUNTIME_PROCESS_GROUP_PROBE_FAILED: kill -0 exited with {}: {}",
+        output.status,
+        stderr.trim()
+    )))
+}
+
+#[cfg(unix)]
+fn wait_for_process_group_exit(process_group: u32) {
+    let mut diagnostic_emitted = false;
+    loop {
+        let alive = match process_group_is_alive(process_group) {
+            Ok(alive) => alive,
+            Err(error) => {
+                emit_probe_diagnostic_once(&mut diagnostic_emitted, &error);
+                true
+            }
+        };
+        if !alive {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+fn emit_probe_diagnostic_once(emitted: &mut bool, error: &CommandFailure) {
+    if !*emitted {
+        eprintln!("{error}");
+        *emitted = true;
+    }
 }
 
 #[cfg(unix)]

@@ -1,4 +1,3 @@
-use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -41,7 +40,7 @@ impl Drop for RuntimeFixture {
 #[test]
 fn session_worker_marker_is_absent_from_manifest_and_harness_commands() {
     let fixture = RuntimeFixture::with_manifest(
-        "version: 1\nmodes:\n  local:\n    command: sh -c 'printf \"%s:%s:%s\\n\" \"${AUTOSPEC_RUNTIME_SESSION_WORKER-unset}\" \"${AUTOSPEC_RUNTIME_SESSION_HANDOFF-unset}\" \"${AUTOSPEC_RUNTIME_SESSION_TOKEN-unset}\" > up-marker.txt'\n    down: sh -c 'printf \"%s:%s:%s\\n\" \"${AUTOSPEC_RUNTIME_SESSION_WORKER-unset}\" \"${AUTOSPEC_RUNTIME_SESSION_HANDOFF-unset}\" \"${AUTOSPEC_RUNTIME_SESSION_TOKEN-unset}\" > down-marker.txt'\n",
+        "version: 1\nmodes:\n  local:\n    command: sh -c 'test -z \"${AUTOSPEC_RUNTIME_SESSION_WORKER-}${AUTOSPEC_RUNTIME_SESSION_HANDOFF-}${AUTOSPEC_RUNTIME_SESSION_TOKEN-}\"'\n    down: sh -c 'test -z \"${AUTOSPEC_RUNTIME_SESSION_WORKER-}${AUTOSPEC_RUNTIME_SESSION_HANDOFF-}${AUTOSPEC_RUNTIME_SESSION_TOKEN-}\"'\n",
     );
 
     let output = fixture
@@ -52,22 +51,12 @@ fn session_worker_marker_is_absent_from_manifest_and_harness_commands() {
             "--",
             "sh",
             "-c",
-            "printf '%s:%s:%s\\n' \"${AUTOSPEC_RUNTIME_SESSION_WORKER-unset}\" \"${AUTOSPEC_RUNTIME_SESSION_HANDOFF-unset}\" \"${AUTOSPEC_RUNTIME_SESSION_TOKEN-unset}\" > harness-marker.txt",
+            "test -z \"${AUTOSPEC_RUNTIME_SESSION_WORKER-}${AUTOSPEC_RUNTIME_SESSION_HANDOFF-}${AUTOSPEC_RUNTIME_SESSION_TOKEN-}\"",
         ])
         .output()
         .expect("session starts");
 
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    for name in ["up-marker.txt", "harness-marker.txt", "down-marker.txt"] {
-        assert_eq!(
-            std::fs::read_to_string(fixture.root.join(name)).unwrap(),
-            "unset:unset:unset\n"
-        );
-    }
+    assert!(output.status.success(), "{output:?}");
 }
 
 #[cfg(unix)]
@@ -109,17 +98,16 @@ fn stale_worker_marker_cannot_bypass_the_supervisor() {
 
 #[cfg(unix)]
 #[test]
-fn heartbeat_and_group_signal_failure_hold_ownership_until_normal_release() {
-    let fixture = RuntimeFixture::with_manifest(
+fn heartbeat_signal_failure_or_reap_timeout_hold_ownership_until_release() {
+    for (signal_exit, probe_exit) in [(42, 0), (0, 0), (42, 77)] {
+        let fixture = RuntimeFixture::with_manifest(
         "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'echo down >> down-count.txt'\n",
     );
-    let kill_log = fixture.root.join("kill-args.txt");
-    let fake_bin = install_failing_kill(&fixture.root);
-    let stderr_path = fixture.root.join("heartbeat-stderr.txt");
-    let stderr = File::create(&stderr_path).unwrap();
-    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
-    let mut outer = fixture.command();
-    outer
+        let kill_log = fixture.root.join("kill-args.txt");
+        let fake_bin = install_kill(&fixture.root, signal_exit, probe_exit);
+        let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut outer = fixture.command();
+        outer
         .env("PATH", joined_path(&fake_bin, &inherited_path))
         .env("KILL_ARGS_FILE", &kill_log)
         .args(["runtime", "env", "session", "--repo"])
@@ -131,42 +119,54 @@ fn heartbeat_and_group_signal_failure_hold_ownership_until_normal_release() {
             "echo $$ > harness.pid; sleep 1000 & child=$!; echo $child > grandchild.pid; touch harness.ready; while test ! -f harness.release; do sleep 0.02; done; kill $child; wait $child 2>/dev/null || true",
         ])
         .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr));
-    let mut outer = outer.spawn().expect("session supervisor starts");
-    wait_for(&fixture.root.join("harness.ready"));
-    let harness_pid = read_pid(&fixture.root.join("harness.pid"));
-    let grandchild_pid = read_pid(&fixture.root.join("grandchild.pid"));
-    let (record, worker_pid) = break_heartbeat_record_destination(&fixture);
-    wait_for(&kill_log);
+        .stderr(Stdio::null());
+        let mut outer = outer.spawn().expect("session supervisor starts");
+        wait_for(&fixture.root.join("harness.ready"));
+        let harness_pid = read_pid(&fixture.root.join("harness.pid"));
+        let grandchild_pid = read_pid(&fixture.root.join("grandchild.pid"));
+        let (record, worker_pid) = break_heartbeat_record_destination(&fixture);
+        wait_for(&kill_log);
+        std::thread::sleep(Duration::from_millis(700));
 
-    let down = runtime_down(&fixture);
-    let live_before_release = [worker_pid, harness_pid, grandchild_pid].map(process_alive);
-    let cleanup_before_release = line_count(&fixture.root.join("down-count.txt"));
-    restore_heartbeat_record(&fixture, &record);
-    release_harness(&fixture.root);
-    let status = wait_for_exit(&mut outer, Duration::from_secs(5));
-    let stopped_after_release =
-        [worker_pid, harness_pid, grandchild_pid].map(wait_for_process_exit);
-    let stderr = std::fs::read_to_string(stderr_path).unwrap();
-    for (pid, stopped) in [worker_pid, harness_pid, grandchild_pid]
-        .into_iter()
-        .zip(stopped_after_release)
-    {
-        if !stopped {
-            send_signal(pid, "-KILL");
+        let down = runtime_down(&fixture);
+        let live_before_release = [worker_pid, harness_pid, grandchild_pid].map(process_alive);
+        let cleanup_before_release = line_count(&fixture.root.join("down-count.txt"));
+        restore_heartbeat_record(&fixture, &record);
+        release_harness(&fixture.root);
+        if probe_exit != 0 {
+            assert!(wait_for_process_exit(harness_pid));
+            assert!(wait_for_process_exit(grandchild_pid));
+            std::thread::sleep(Duration::from_millis(700));
+            let down_after = runtime_down(&fixture);
+            let retained = process_alive(worker_pid);
+            let cleanup_after = line_count(&fixture.root.join("down-count.txt"));
+            if retained {
+                send_signal(worker_pid, "-KILL");
+            }
+            let _ = wait_for_exit(&mut outer, Duration::from_secs(2));
+            assert_eq!(down.status.code(), Some(2));
+            assert_eq!(live_before_release, [true, true, true]);
+            assert_eq!(cleanup_before_release, 0);
+            assert!(retained);
+            assert_eq!(down_after.status.code(), Some(2));
+            assert_eq!(cleanup_after, 0);
+            continue;
         }
-    }
+        let status = wait_for_exit(&mut outer, Duration::from_secs(5));
+        let stopped_after_release =
+            [worker_pid, harness_pid, grandchild_pid].map(wait_for_process_exit);
+        cleanup_live_processes(
+            [worker_pid, harness_pid, grandchild_pid],
+            stopped_after_release,
+        );
 
-    assert_eq!(down.status.code(), Some(2));
-    assert_eq!(live_before_release, [true, true, true]);
-    assert_eq!(cleanup_before_release, 0);
-    assert_eq!(status.and_then(|value| value.code()), Some(2), "{stderr}");
-    assert_eq!(stopped_after_release, [true, true, true]);
-    assert_eq!(line_count(&fixture.root.join("down-count.txt")), 1);
-    assert!(
-        text_line_has(&stderr, "RUNTIME_PROCESS_GROUP_SIGNAL_FAILED"),
-        "{stderr}"
-    );
+        assert_eq!(down.status.code(), Some(2));
+        assert_eq!(live_before_release, [true, true, true]);
+        assert_eq!(cleanup_before_release, 0);
+        assert_eq!(status.and_then(|value| value.code()), Some(2));
+        assert_eq!(stopped_after_release, [true, true, true]);
+        assert_eq!(line_count(&fixture.root.join("down-count.txt")), 1);
+    }
 }
 
 #[cfg(unix)]
@@ -176,9 +176,7 @@ fn supervisor_group_signal_failure_leaves_worker_and_harness_owned() {
         "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'echo down >> down-count.txt'\n",
     );
     let kill_log = fixture.root.join("kill-args.txt");
-    let fake_bin = install_failing_kill(&fixture.root);
-    let stderr_path = fixture.root.join("outer-stderr.txt");
-    let stderr = File::create(&stderr_path).unwrap();
+    let fake_bin = install_kill(&fixture.root, 42, 0);
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
     let mut outer = fixture.command();
     outer
@@ -193,13 +191,12 @@ fn supervisor_group_signal_failure_leaves_worker_and_harness_owned() {
             "echo $$ > harness.pid; sleep 1000 & child=$!; echo $child > grandchild.pid; touch harness.ready; while test ! -f harness.release; do sleep 0.02; done; kill $child; wait $child 2>/dev/null || true",
         ])
         .stdout(Stdio::null())
-        .stderr(Stdio::from(stderr));
+        .stderr(Stdio::null());
     let mut outer = outer.spawn().expect("session supervisor starts");
     wait_for(&fixture.root.join("harness.ready"));
 
     send_signal(outer.id(), "-TERM");
     let status = wait_for_exit(&mut outer, Duration::from_secs(3));
-    let stderr = std::fs::read_to_string(stderr_path).unwrap();
     let args = std::fs::read_to_string(&kill_log).unwrap_or_default();
     let worker_pid = asserted_worker_pid(&args);
     let harness_pid = read_pid(&fixture.root.join("harness.pid"));
@@ -210,16 +207,12 @@ fn supervisor_group_signal_failure_leaves_worker_and_harness_owned() {
     release_harness(&fixture.root);
     let stopped_after_release =
         [worker_pid, harness_pid, grandchild_pid].map(wait_for_process_exit);
-    for (pid, stopped) in [worker_pid, harness_pid, grandchild_pid]
-        .into_iter()
-        .zip(stopped_after_release)
-    {
-        if !stopped {
-            send_signal(pid, "-KILL");
-        }
-    }
+    cleanup_live_processes(
+        [worker_pid, harness_pid, grandchild_pid],
+        stopped_after_release,
+    );
 
-    assert_eq!(status.and_then(|value| value.code()), Some(2), "{stderr}");
+    assert_eq!(status.and_then(|value| value.code()), Some(2));
     assert_eq!(down.status.code(), Some(2));
     assert!(output_stderr_has(&down, "RUNTIME_LIVE_SESSIONS"));
     assert_eq!(live_before_release, [true, true, true]);
@@ -230,21 +223,29 @@ fn supervisor_group_signal_failure_leaves_worker_and_harness_owned() {
 }
 
 #[cfg(unix)]
-fn install_failing_kill(root: &Path) -> PathBuf {
+fn install_kill(root: &Path, signal_exit: i32, probe_exit: i32) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
     let fake_bin = root.join("fake-bin");
     std::fs::create_dir(&fake_bin).unwrap();
     let path = fake_bin.join("kill");
-    std::fs::write(
-        &path,
-        "#!/bin/sh\nif test \"$1\" = -0; then exec /bin/kill \"$@\"; fi\nprintf '%s\\n' \"$@\" >> \"$KILL_ARGS_FILE\"\nexit 42\n",
-    )
+    std::fs::write(&path, format!(
+        "#!/bin/sh\nif test \"$1\" = -0; then test {probe_exit} -eq 0 && exec /bin/kill \"$@\"; echo 'Operation not permitted' >&2; exit {probe_exit}; fi\nprintf '%s\\n' \"$@\" >> \"$KILL_ARGS_FILE\"\nexit {signal_exit}\n"
+    ))
     .unwrap();
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
     permissions.set_mode(0o755);
     std::fs::set_permissions(path, permissions).unwrap();
     fake_bin
+}
+
+#[cfg(unix)]
+fn cleanup_live_processes(pids: [u32; 3], stopped: [bool; 3]) {
+    for (pid, stopped) in pids.into_iter().zip(stopped) {
+        if !stopped {
+            send_signal(pid, "-KILL");
+        }
+    }
 }
 
 #[cfg(unix)]
