@@ -532,6 +532,8 @@ git commit -m "feat: isolate Maven 4 installs per worktree"
 - Create: `tests/fixtures/runtime-resources/compose/external.yaml`
 - Create: `tests/fixtures/runtime-resources/compose/writable-bind.yaml`
 - Create: `crates/autospec-cli/src/commands/runtime/env/compose.rs`
+- Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
+- Modify: `crates/autospec-cli/src/commands/runtime/env/lifecycle.rs`
 - Modify: `crates/autospec-cli/tests/runtime_resources.rs`
 
 **Interfaces:**
@@ -578,7 +580,7 @@ Expected: every unsafe fixture has exactly its stable rule ID and path, the safe
 - [ ] **Step 5: Commit the Compose policy gate**
 
 ```bash
-git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/compose.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env/compose.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources/compose
+git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/compose.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/compose.rs crates/autospec-cli/src/commands/runtime/env/lifecycle.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources/compose
 git commit -m "feat: fail closed on unsafe Compose resources"
 ```
 
