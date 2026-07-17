@@ -757,6 +757,13 @@ git commit -m "feat: normalize safe Compose isolation changes deterministically"
 
 ## Task 8: Add the internal normalizer skill and one-time migration workflow
 
+**Prerequisite regression repair:** issue #2130 must land before this task. Task 7
+initially hashed canonical absolute paths, making identical worktrees disagree on
+the migration fingerprint, and could not plan the required manifest migration
+when no runtime manifest existed. The repair must make fingerprints repo-relative
+and let read-only `--check` plan a deterministic v2 `.autospec/runtime.yml` that
+`--apply` creates and rolls back transactionally.
+
 **Files:**
 - Create: `skills/autospec-compose-normalize/SKILL.md`
 - Create: `skills/autospec-compose-normalize/codex/prompt.md`
