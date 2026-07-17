@@ -180,6 +180,31 @@ pub struct IsolationDiagnostic {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum EnvironmentLifecycle { Planned, Provisioning, Active, TearingDown, CleanupFailed }
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentOwner {
+    pub schema_version: u32,
+    pub identity: EnvironmentIdentity,
+    pub host: String,
+    pub created_at_unix_ms: u64,
+    pub manifest_digest: String,
+    pub lifecycle: EnvironmentLifecycle,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionRecord {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub pid: u32,
+    pub process_start: String,
+    pub harness: String,
+    pub host: String,
+    pub started_at_unix_ms: u64,
+    pub heartbeat_at_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ComposePlan {
     pub isolation: ComposeIsolation,
     pub files: Vec<PathBuf>,
