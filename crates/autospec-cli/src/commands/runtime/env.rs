@@ -13,6 +13,7 @@ use autospec_core::runtime_env::{
 
 use crate::commands::CommandFailure;
 
+mod compose;
 mod isolation;
 mod lifecycle;
 mod maven;
