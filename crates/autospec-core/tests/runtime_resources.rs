@@ -3,8 +3,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use autospec_core::runtime_env::{
-    load_generation_token, read_json, write_json_atomic, ComposePlan, EnvironmentIdentity,
-    EnvironmentLifecycle, EnvironmentOwner, IsolationDiagnostic, OwnedVolume, ResolvedExport,
+    load_generation_token, read_json, write_json_atomic, ComposeExport, ComposeIsolation,
+    ComposePlan, ComposePolicy, EnvironmentIdentity, EnvironmentLifecycle, EnvironmentOwner,
+    ExportProtocol, ExportValue, IsolationDiagnostic, OwnedVolume, ResolvedExport,
     ResourceInventory, RuntimeContext, RuntimeManifest, SessionRecord,
 };
 
@@ -212,6 +213,260 @@ fn isolation_diagnostic_has_the_exact_schema_one_json_shape() {
         serde_json::from_value::<IsolationDiagnostic>(encoded).unwrap(),
         diagnostic
     );
+}
+
+fn compose_policy_plan(repo: &Path) -> ComposePlan {
+    ComposePlan {
+        isolation: ComposeIsolation::Managed,
+        files: vec![repo.join("compose.yaml")],
+        project_name: "agent_env-a".to_string(),
+        exports: vec![ComposeExport {
+            service: "web".to_string(),
+            target: 8080,
+            protocol: ExportProtocol::Tcp,
+            env: "WEB_PORT".to_string(),
+            value: ExportValue::Port,
+        }],
+        preserve_volumes: Vec::new(),
+        shared_networks: vec!["company-vpn".to_string()],
+        shared_volumes: vec!["shared-cache".to_string()],
+    }
+}
+
+fn compose_policy_diagnostics(
+    repo: &TempRepo,
+    model: serde_json::Value,
+) -> Vec<IsolationDiagnostic> {
+    ComposePolicy::evaluate(&model, &compose_policy_plan(repo.path()))
+}
+
+#[test]
+fn compose_policy_fixed_port_reports_exact_path_and_value() {
+    let repo = TempRepo::with_files(&[("compose.yaml", "services: {}\n")]);
+    let diagnostics = compose_policy_diagnostics(
+        &repo,
+        serde_json::json!({"services":{"web":{"ports":[{"target":8080,"published":"49152","protocol":"tcp"}]}}}),
+    );
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "COMPOSE_FIXED_PORT");
+    assert_eq!(diagnostics[0].resource, "services.web.ports[0].published");
+    assert_eq!(diagnostics[0].evidence, "49152");
+    assert_eq!(diagnostics[0].environment_id, "env-a");
+    assert_eq!(
+        diagnostics[0].recovery_command,
+        format!(
+            "autospec runtime env normalize-compose --repo {} --check",
+            repo.path().display()
+        )
+    );
+}
+
+#[test]
+fn compose_policy_explicit_context_keeps_nested_files_at_the_worktree_boundary() {
+    let repo = TempRepo::with_files(&[("deploy/compose.yaml", "services: {}\n")]);
+    let mut plan = compose_policy_plan(repo.path());
+    plan.files = vec![repo.path().join("deploy/compose.yaml")];
+    let diagnostics = ComposePolicy::evaluate_in_context(
+        &serde_json::json!({"services":{"web":{"container_name":"web"}}}),
+        &plan,
+        "exact-environment",
+        repo.path(),
+    );
+
+    assert_eq!(diagnostics[0].environment_id, "exact-environment");
+    assert_eq!(
+        diagnostics[0].recovery_command,
+        format!(
+            "autospec runtime env normalize-compose --repo {} --check",
+            repo.path().display()
+        )
+    );
+}
+
+#[test]
+fn compose_policy_rejects_undeclared_targets_and_protocols() {
+    let repo = TempRepo::with_files(&[("compose.yaml", "services: {}\n")]);
+    let diagnostics = compose_policy_diagnostics(
+        &repo,
+        serde_json::json!({"services":{"web":{"ports":[
+            {"target":8080,"protocol":"sctp"},
+            {"target":9090,"protocol":"tcp"}
+        ]}}}),
+    );
+
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|item| (item.code.as_str(), item.resource.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("COMPOSE_UNDECLARED_PORT", "services.web.ports[0].protocol"),
+            ("COMPOSE_UNDECLARED_PORT", "services.web.ports[1].target")
+        ]
+    );
+}
+
+#[test]
+fn compose_policy_rejects_global_service_identity() {
+    let repo = TempRepo::with_files(&[("compose.yaml", "services: {}\n")]);
+    let diagnostics = compose_policy_diagnostics(
+        &repo,
+        serde_json::json!({"services":{"web":{"container_name":"fixed-web","network_mode":"host"}}}),
+    );
+
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|item| (item.code.as_str(), item.resource.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("COMPOSE_CONTAINER_NAME", "services.web.container_name"),
+            ("COMPOSE_HOST_NETWORK", "services.web.network_mode")
+        ]
+    );
+}
+
+#[test]
+fn compose_policy_rejects_global_names_and_fixed_addresses() {
+    let repo = TempRepo::with_files(&[("compose.yaml", "services: {}\n")]);
+    let diagnostics = compose_policy_diagnostics(
+        &repo,
+        serde_json::json!({
+            "services":{"web":{"networks":{"private":{"ipv4_address":"10.0.0.8"}}}},
+            "networks":{"private":{"name":"global-network"}},
+            "volumes":{"data":{"name":"global-volume"}}
+        }),
+    );
+
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|item| (item.code.as_str(), item.resource.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("COMPOSE_GLOBAL_NAME", "networks.private.name"),
+            (
+                "COMPOSE_FIXED_ADDRESS",
+                "services.web.networks.private.ipv4_address"
+            ),
+            ("COMPOSE_GLOBAL_NAME", "volumes.data.name")
+        ]
+    );
+}
+
+#[test]
+fn compose_policy_allows_only_exact_declared_external_keys() {
+    let repo = TempRepo::with_files(&[("compose.yaml", "services: {}\n")]);
+    let diagnostics = compose_policy_diagnostics(
+        &repo,
+        serde_json::json!({
+            "networks":{
+                "company-vpn":{"external":true,"name":"corp-vpn"},
+                "company":{"external":true}
+            },
+            "volumes":{
+                "shared-cache":{"external":true,"name":"corp-cache"},
+                "cache":{"external":true}
+            }
+        }),
+    );
+
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|item| (item.code.as_str(), item.resource.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("COMPOSE_EXTERNAL_UNDECLARED", "networks.company.external"),
+            ("COMPOSE_EXTERNAL_UNDECLARED", "volumes.cache.external")
+        ]
+    );
+}
+
+#[test]
+fn compose_policy_allows_read_only_and_contained_writable_binds() {
+    let repo = TempRepo::with_files(&[
+        ("compose.yaml", "services: {}\n"),
+        ("inside/data.txt", "data\n"),
+    ]);
+    let outside = repo.path().parent().unwrap().join("outside-bind");
+    std::fs::create_dir_all(&outside).unwrap();
+    let model = serde_json::json!({
+        "services":{"web":{"volumes":[
+            {"type":"bind","source":outside,"target":"/readonly","read_only":true},
+            {"type":"bind","source":repo.path().join("inside"),"target":"/inside"}
+        ]}},
+        "networks":{"private":{"name":"agent_env-a_private"}},
+        "volumes":{"data":{"name":"agent_env-a_data"}}
+    });
+
+    assert!(compose_policy_diagnostics(&repo, model).is_empty());
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
+fn compose_policy_rejects_writable_bind_outside_worktree() {
+    let repo = TempRepo::with_files(&[("compose.yaml", "services: {}\n")]);
+    let outside = repo.path().parent().unwrap().join("outside-writable-bind");
+    std::fs::create_dir_all(&outside).unwrap();
+    let model = serde_json::json!({"services":{"web":{"volumes":[
+        {"type":"bind","source":outside,"target":"/outside"}
+    ]}}});
+    let diagnostics = compose_policy_diagnostics(&repo, model);
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(
+        diagnostics[0].code,
+        "COMPOSE_WRITABLE_BIND_OUTSIDE_WORKTREE"
+    );
+    assert_eq!(diagnostics[0].resource, "services.web.volumes[0].source");
+    std::fs::remove_dir_all(outside).unwrap();
+}
+
+#[test]
+fn compose_policy_returns_all_rule_ids_in_resource_path_order() {
+    let repo = TempRepo::with_files(&[("compose.yaml", "services: {}\n")]);
+    let outside = repo.path().parent().unwrap().join("outside-all-rules");
+    std::fs::create_dir_all(&outside).unwrap();
+    let diagnostics = compose_policy_diagnostics(
+        &repo,
+        serde_json::json!({
+            "services":{"web":{
+                "container_name":"web",
+                "network_mode":"host",
+                "networks":{"private":{"ipv6_address":"fd00::8"}},
+                "ports":[{"target":9090,"published":8080,"protocol":"tcp"}],
+                "volumes":[{"type":"bind","source":outside,"target":"/outside"}]
+            }},
+            "networks":{"private":{"external":true,"name":"private-global"}}
+        }),
+    );
+    let resources = diagnostics
+        .iter()
+        .map(|item| item.resource.as_str())
+        .collect::<Vec<_>>();
+    let mut sorted = resources.clone();
+    sorted.sort_unstable();
+
+    assert_eq!(resources, sorted);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|item| item.code.as_str())
+            .collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from([
+            "COMPOSE_CONTAINER_NAME",
+            "COMPOSE_EXTERNAL_UNDECLARED",
+            "COMPOSE_FIXED_ADDRESS",
+            "COMPOSE_FIXED_PORT",
+            "COMPOSE_GLOBAL_NAME",
+            "COMPOSE_HOST_NETWORK",
+            "COMPOSE_UNDECLARED_PORT",
+            "COMPOSE_WRITABLE_BIND_OUTSIDE_WORKTREE",
+        ])
+    );
+    std::fs::remove_dir_all(outside).unwrap();
 }
 
 #[test]

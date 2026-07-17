@@ -8,6 +8,7 @@ use autospec_core::runtime_env::{
 
 use crate::commands::CommandFailure;
 
+use super::compose::ComposeAdapter;
 use super::maven::MavenAdapter;
 use super::session::live_sessions;
 use super::state::{
@@ -188,6 +189,7 @@ fn provision_fresh(
         return Err(super::missing_mode_command(context));
     }
     write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Provisioning)?;
+    ComposeAdapter::validate_resolved_model(plan.compose.as_ref(), context)?;
     if let Err(error) = MavenAdapter::configure(plan.maven.as_ref(), context, &mut state, layout) {
         return cleanup_failed(layout, Some(&mut owner), error);
     }

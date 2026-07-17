@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use autospec_core::runtime_env::{
     ComposeIsolation, ComposePlan, EnvironmentIdentity, EnvironmentLifecycle, EnvironmentOwner,
     MavenIsolation, MavenPlan, ResourcePlan,
@@ -39,6 +42,24 @@ impl RuntimeFixture {
         let mut command = Command::new(env!("CARGO_BIN_EXE_autospec"));
         command.env("AGENT_ENV_STATE_ROOT", &self.state_root);
         command
+    }
+
+    #[cfg(unix)]
+    fn install_fake_docker(&self, model: &serde_json::Value) -> (PathBuf, PathBuf) {
+        let bin = self.root.join("fake-bin");
+        std::fs::create_dir_all(&bin).expect("create fake Docker directory");
+        let docker = bin.join("docker");
+        std::fs::write(
+            &docker,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FAKE_DOCKER_LOG\"\nif [ \"${FAKE_DOCKER_EXIT:-0}\" -ne 0 ]; then\n  printf 'compose config failed\\n' >&2\n  exit \"$FAKE_DOCKER_EXIT\"\nfi\ncat \"$FAKE_DOCKER_MODEL\"\n",
+        )
+        .expect("write fake Docker");
+        let mut permissions = std::fs::metadata(&docker).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&docker, permissions).unwrap();
+        let model_path = self.root.join("resolved-model.json");
+        std::fs::write(&model_path, serde_json::to_vec(model).unwrap()).unwrap();
+        (bin, model_path)
     }
 }
 
@@ -328,4 +349,191 @@ fn owner_lifecycle_is_persisted_before_provision_and_teardown_effects() {
         String::from_utf8_lossy(&down.stderr)
     );
     assert!(fixture.root.join("teardown-seen").is_file());
+}
+
+#[cfg(unix)]
+fn compose_manifest(command: &str) -> String {
+    format!(
+        "version: 2\ndefault_mode: local\nmodes:\n  local:\n    command: {command}\nresources:\n  compose:\n    files: [compose.yaml, compose.override.yaml]\n    exports:\n      - service: web\n        target: 8080\n        protocol: tcp\n        env: WEB_PORT\n        value: port\n"
+    )
+}
+
+#[cfg(unix)]
+fn compose_command(fixture: &RuntimeFixture, bin: &Path, model: &Path) -> Command {
+    let log = fixture.root.join("docker-arguments.log");
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(bin.to_path_buf()).chain(std::env::split_paths(&inherited_path)),
+    )
+    .unwrap();
+    let mut command = fixture.command();
+    command
+        .env("PATH", path)
+        .env("FAKE_DOCKER_LOG", log)
+        .env("FAKE_DOCKER_MODEL", model);
+    command
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_config_orders_files_and_project_before_the_config_subcommand() {
+    let fixture = RuntimeFixture::with_manifest(&compose_manifest("sh -c 'true'"));
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({
+        "services":{"web":{"ports":[{"target":8080,"protocol":"tcp"}]}}
+    }));
+    let identity = EnvironmentIdentity::resolve(&fixture.root, "local", None).unwrap();
+    let plan = autospec_core::runtime_env::RuntimeManifest::resource_plan_for_repo(
+        &fixture.root,
+        &identity,
+    )
+    .unwrap();
+    let project_name = plan.compose.unwrap().project_name;
+
+    let output = compose_command(&fixture, &bin, &model)
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("runtime Compose validation starts");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let arguments = std::fs::read_to_string(fixture.root.join("docker-arguments.log")).unwrap();
+    assert_eq!(
+        arguments.lines().collect::<Vec<_>>(),
+        vec![
+            "compose",
+            "-f",
+            fixture.root.join("compose.yaml").to_str().unwrap(),
+            "-f",
+            fixture.root.join("compose.override.yaml").to_str().unwrap(),
+            "--project-name",
+            project_name.as_str(),
+            "config",
+            "--format",
+            "json"
+        ]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_config_preserves_the_nonzero_docker_exit() {
+    let fixture = RuntimeFixture::with_manifest(&compose_manifest("sh -c 'true'"));
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({}));
+
+    let output = compose_command(&fixture, &bin, &model)
+        .env("FAKE_DOCKER_EXIT", "37")
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("runtime Compose validation starts");
+
+    assert_eq!(output.status.code(), Some(37));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "compose config failed\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_config_validation_finishes_before_any_startup_effect() {
+    let fixture =
+        RuntimeFixture::with_manifest(&compose_manifest("sh -c 'printf started > startup-effect'"));
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({
+        "services":{"web":{"ports":[{"target":8080,"published":8080,"protocol":"tcp"}]}}
+    }));
+
+    let output = compose_command(&fixture, &bin, &model)
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("runtime Compose validation starts");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!fixture.root.join("startup-effect").exists());
+    let arguments = std::fs::read_to_string(fixture.root.join("docker-arguments.log")).unwrap();
+    assert_eq!(
+        arguments
+            .lines()
+            .filter(|argument| *argument == "up")
+            .count(),
+        0
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_config_nested_file_diagnostic_keeps_repo_and_environment_context() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 2\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\nresources:\n  compose:\n    files: [subdir/compose.yaml]\n",
+    );
+    std::fs::create_dir_all(fixture.root.join("subdir")).unwrap();
+    std::fs::write(fixture.root.join("subdir/compose.yaml"), "services: {}\n").unwrap();
+    let (bin, model) = fixture
+        .install_fake_docker(&serde_json::json!({"services":{"web":{"container_name":"web"}}}));
+    let identity = EnvironmentIdentity::resolve(&fixture.root, "local", None).unwrap();
+
+    let output = compose_command(&fixture, &bin, &model)
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("runtime Compose validation starts");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        format!(
+            "COMPOSE_CONTAINER_NAME: services.web.container_name=web (environment {}; recovery: autospec runtime env normalize-compose --repo {} --check)\n",
+            identity.environment_id,
+            fixture.root.display()
+        )
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_config_policy_failure_can_be_corrected_and_retried() {
+    let fixture = RuntimeFixture::with_manifest(&compose_manifest("sh -c 'true'"));
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({
+        "services":{"web":{"container_name":"web"}}
+    }));
+
+    let rejected = compose_command(&fixture, &bin, &model)
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    assert_eq!(rejected.status.code(), Some(2));
+    std::fs::write(
+        &model,
+        serde_json::to_vec(&serde_json::json!({
+            "services":{"web":{"ports":[{"target":8080,"protocol":"tcp"}]}}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let corrected = compose_command(&fixture, &bin, &model)
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert!(
+        corrected.status.success(),
+        "{}",
+        String::from_utf8_lossy(&corrected.stderr)
+    );
 }

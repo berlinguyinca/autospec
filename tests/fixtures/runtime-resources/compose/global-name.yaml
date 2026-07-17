@@ -1,0 +1,7 @@
+services:
+  web:
+    image: nginx:alpine
+    networks: [private]
+networks:
+  private:
+    name: global-network

@@ -1,0 +1,7 @@
+services:
+  web:
+    image: nginx:alpine
+    volumes:
+      - type: bind
+        source: /tmp/shared-data
+        target: /data

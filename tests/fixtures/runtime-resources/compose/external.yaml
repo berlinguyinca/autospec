@@ -1,0 +1,7 @@
+services:
+  web:
+    image: nginx:alpine
+    networks: [company-vpn]
+networks:
+  company-vpn:
+    external: true
