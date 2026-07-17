@@ -8,10 +8,40 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
     "$REPO_ROOT/skills/autospec-run/SKILL.md" \
     "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
     "$REPO_ROOT/skills/autospec-run/opencode/agent.md"; do
-    grep -q '<!-- agent-env-provision:begin -->' "$surface"
-    grep -q 'autospec runtime env up --repo "$PWD"' "$surface"
-    grep -q 'AUTOSPEC_PUBLIC_URL.*canonical browser/QA URL' "$surface"
+    grep -q '<!-- autospec-block:runtime-resource-preflight -->' "$surface"
+    expanded="$BATS_TEST_TMPDIR/legacy-$(basename "$(dirname "$surface")")-$(basename "$surface")"
+    bash "$REPO_ROOT/scripts/expand-skill-blocks.sh" "$surface" > "$expanded"
+    grep -q 'autospec runtime env up --repo "$PWD"' "$expanded"
+    grep -q 'AUTOSPEC_PUBLIC_URL.*canonical browser/QA URL' "$expanded"
     grep -q 'autospec runtime env down --repo /tmp/wt-<BRANCH>' "$surface"
     ! grep -q 'agent-env.sh' "$surface"
   done
+}
+
+@test "autospec and autospec-run always normalize Compose before broker up" {
+  for surface in \
+    "$REPO_ROOT/skills/autospec/SKILL.md" \
+    "$REPO_ROOT/skills/autospec/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec/opencode/agent.md" \
+    "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec-run/opencode/agent.md"; do
+    grep -q '<!-- autospec-block:runtime-resource-preflight -->' "$surface"
+    expanded="$BATS_TEST_TMPDIR/$(basename "$(dirname "$surface")")-$(basename "$surface")"
+    bash "$REPO_ROOT/scripts/expand-skill-blocks.sh" "$surface" > "$expanded"
+    grep -q 'autospec runtime env normalize-compose --repo "$PWD" --check' "$expanded"
+    normalize_line="$(grep -n -m1 'normalize-compose --repo' "$expanded" | cut -d: -f1)"
+    up_line="$(grep -n -m1 'autospec runtime env up --repo' "$expanded" | cut -d: -f1)"
+    [ -n "$normalize_line" ]
+    [ -n "$up_line" ]
+    [ "$normalize_line" -lt "$up_line" ]
+  done
+}
+
+@test "runtime preflight is unconditional even when no manifest exists" {
+  block="$REPO_ROOT/templates/skill-blocks/runtime-resource-preflight.md"
+  [ -f "$block" ]
+  grep -q 'autospec runtime env normalize-compose --repo "$PWD" --check' "$block"
+  ! grep -B2 -A2 'normalize-compose --repo' "$block" | \
+    grep -Eq '\[ -f .*runtime\.yml|manifest.*exists'
 }
