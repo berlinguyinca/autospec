@@ -75,6 +75,7 @@
 - Create: `crates/autospec-core/tests/runtime_resources.rs`
 - Create: `crates/autospec-cli/src/commands/runtime/env/state.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
+- Create: `crates/autospec-cli/src/commands/runtime/env/isolation.rs`
 - Modify: `crates/autospec-cli/tests/runtime_commands.rs`
 
 **Interfaces:**
@@ -350,7 +351,7 @@ Expected: v1 and v2 tests pass, no unresolved advisory is reported, and Autospec
 - [ ] **Step 5: Commit manifest v2 and detection**
 
 ```bash
-git add Cargo.lock crates/autospec-core/Cargo.toml crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/manifest.rs crates/autospec-core/src/runtime_env/manifest_v2.rs crates/autospec-core/src/runtime_env/resource_plan.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/tests/runtime_env.rs crates/autospec-core/tests/runtime_resource_plan.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources
+git add Cargo.lock crates/autospec-core/Cargo.toml crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/manifest.rs crates/autospec-core/src/runtime_env/manifest_v2.rs crates/autospec-core/src/runtime_env/resource_plan.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/tests/runtime_env.rs crates/autospec-core/tests/runtime_resource_plan.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/isolation.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources
 git commit -m "feat: plan Maven and Compose resources from runtime v2"
 ```
 
@@ -574,6 +575,7 @@ git commit -m "feat: fail closed on unsafe Compose resources"
 
 **Interfaces:**
 - Consumes: validated Compose plan, environment lease, lifecycle state, and inventory.
+- Consumes automatic resource-only plans for compose-only repositories without requiring a manifest mode command.
 - Produces: `ComposeOverride::render(plan) -> Result<String, IsolationDiagnostic>` containing only export ports and ownership labels.
 - Produces: `ComposeAdapter::up`, `discover_inventory`, `resolve_exports`, and `down_owned`.
 - Extends `RuntimeState` with only declared export environment values and canonical public URL selection.
@@ -613,6 +615,8 @@ Write the override atomically inside the environment state directory. Run:
 docker compose -f <source> -f <override> --project-name <project> up -d --remove-orphans
 docker compose -f <source> -f <override> --project-name <project> port <service> <target>/<protocol>
 ```
+
+Wire `up`, `exec`, and `session` to retain and provision the automatic plan returned by Task 2, including repositories with only a standard Compose file and no runtime manifest.
 
 Add `com.autospec.environment-id`, `com.autospec.owner-key`, and `com.autospec.plan-digest` labels. Inventory actual resource IDs after every successful external step. Before `down`, capture anonymous and named volume mount IDs; run Compose down without `--volumes`; then delete only labeled, recorded, non-preserved volume IDs. Verify containers, networks, and deletable volumes are gone before deleting state. A failed check leaves `CleanupFailed` state and a rerunnable recovery command.
 
