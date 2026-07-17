@@ -185,7 +185,7 @@ pub(super) fn run_session_supervisor(command: &mut Command) -> Result<(), Comman
             let received = super::received_session_signal();
             if !forwarded && (received == 2 || received == 15) {
                 if let Err(error) = signal_process_group(worker.child().id(), received) {
-                    let _ = worker.terminate();
+                    worker.disarm();
                     return Err(error);
                 }
                 forwarded = true;
@@ -221,14 +221,10 @@ impl ChildGuard {
     }
 
     pub(super) fn terminate(&mut self) -> Result<(), CommandFailure> {
-        let mut group_error = None;
         if let Some(child) = &mut self.child {
             #[cfg(unix)]
             if self.process_group {
-                group_error = signal_process_group(child.id(), 9).err();
-                if group_error.is_some() {
-                    let _ = child.kill();
-                }
+                signal_process_group(child.id(), 9)?;
             } else {
                 let _ = child.kill();
             }
@@ -240,10 +236,30 @@ impl ChildGuard {
             }
         }
         self.disarm();
-        match group_error {
-            Some(error) => Err(error),
-            None => Ok(()),
+        Ok(())
+    }
+
+    pub(super) fn wait_for_natural_group_exit(&mut self) {
+        let Some(child) = &mut self.child else {
+            return;
+        };
+        let process_group = child.id();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) | Err(_) => std::thread::sleep(Duration::from_millis(10)),
+            }
         }
+        #[cfg(unix)]
+        if self.process_group {
+            loop {
+                match process_group_is_alive(process_group) {
+                    Ok(false) => break,
+                    Ok(true) | Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                }
+            }
+        }
+        self.disarm();
     }
 }
 
@@ -261,12 +277,7 @@ fn signal_process_group(pid: u32, signal: i32) -> Result<(), CommandFailure> {
         15 => "-TERM",
         _ => return Err(diagnostic("unsupported runtime process-group signal")),
     };
-    let pid = i32::try_from(pid)
-        .map_err(|_| diagnostic("runtime process-group ID exceeds signed integer range"))?;
-    if pid <= 0 {
-        return Err(diagnostic("runtime process-group ID must be positive"));
-    }
-    let process_group = format!("-{pid}");
+    let process_group = process_group_argument(pid)?;
     let status = Command::new("kill")
         .args([signal, "--", &process_group])
         .status()
@@ -282,6 +293,28 @@ fn signal_process_group(pid: u32, signal: i32) -> Result<(), CommandFailure> {
             "RUNTIME_PROCESS_GROUP_SIGNAL_FAILED: kill {signal} exited with {status}"
         )))
     }
+}
+
+#[cfg(unix)]
+fn process_group_is_alive(pid: u32) -> Result<bool, CommandFailure> {
+    let process_group = process_group_argument(pid)?;
+    Command::new("/bin/kill")
+        .args(["-0", "--", &process_group])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .map_err(|error| diagnostic(format!("could not inspect runtime process group: {error}")))
+}
+
+#[cfg(unix)]
+fn process_group_argument(pid: u32) -> Result<String, CommandFailure> {
+    let pid = i32::try_from(pid)
+        .map_err(|_| diagnostic("runtime process-group ID exceeds signed integer range"))?;
+    if pid <= 0 {
+        return Err(diagnostic("runtime process-group ID must be positive"));
+    }
+    Ok(format!("-{pid}"))
 }
 
 fn reap_child_bounded(child: &mut Child) -> Result<bool, CommandFailure> {

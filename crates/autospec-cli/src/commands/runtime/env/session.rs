@@ -107,6 +107,7 @@ pub(super) fn run_session_command(
             "runtime harness termination also failed",
             error,
         ));
+        child.wait_for_natural_group_exit();
     }
     let should_teardown = matches!(&result, Ok(SessionWait::Interrupted(_))) || !keep_alive;
     let cleanup = cleanup_session(context, state, plan, session_lease, should_teardown);

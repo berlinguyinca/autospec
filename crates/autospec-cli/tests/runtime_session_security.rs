@@ -109,21 +109,26 @@ fn stale_worker_marker_cannot_bypass_the_supervisor() {
 
 #[cfg(unix)]
 #[test]
-fn heartbeat_failure_kills_the_harness_group_and_reports_cleanup_failure() {
+fn heartbeat_and_group_signal_failure_hold_ownership_until_normal_release() {
     let fixture = RuntimeFixture::with_manifest(
-        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'true'\n",
+        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'echo down >> down-count.txt'\n",
     );
+    let kill_log = fixture.root.join("kill-args.txt");
+    let fake_bin = install_failing_kill(&fixture.root);
     let stderr_path = fixture.root.join("heartbeat-stderr.txt");
     let stderr = File::create(&stderr_path).unwrap();
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
     let mut outer = fixture.command();
     outer
+        .env("PATH", joined_path(&fake_bin, &inherited_path))
+        .env("KILL_ARGS_FILE", &kill_log)
         .args(["runtime", "env", "session", "--repo"])
         .arg(&fixture.root)
         .args([
             "--",
             "sh",
             "-c",
-            "echo $$ > harness.pid; sleep 1000 & echo $! > grandchild.pid; touch harness.ready; wait",
+            "echo $$ > harness.pid; sleep 1000 & child=$!; echo $child > grandchild.pid; touch harness.ready; while test ! -f harness.release; do sleep 0.02; done; kill $child; wait $child 2>/dev/null || true",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr));
@@ -131,35 +136,44 @@ fn heartbeat_failure_kills_the_harness_group_and_reports_cleanup_failure() {
     wait_for(&fixture.root.join("harness.ready"));
     let harness_pid = read_pid(&fixture.root.join("harness.pid"));
     let grandchild_pid = read_pid(&fixture.root.join("grandchild.pid"));
-    replace_sessions_directory_with_file(&fixture);
+    let (record, worker_pid) = break_heartbeat_record_destination(&fixture);
+    wait_for(&kill_log);
 
-    let status = wait_for_exit(&mut outer, Duration::from_secs(4));
-    let harness_stopped = wait_for_process_exit(harness_pid);
-    let grandchild_stopped = wait_for_process_exit(grandchild_pid);
+    let down = runtime_down(&fixture);
+    let live_before_release = [worker_pid, harness_pid, grandchild_pid].map(process_alive);
+    let cleanup_before_release = line_count(&fixture.root.join("down-count.txt"));
+    restore_heartbeat_record(&fixture, &record);
+    release_harness(&fixture.root);
+    let status = wait_for_exit(&mut outer, Duration::from_secs(5));
+    let stopped_after_release =
+        [worker_pid, harness_pid, grandchild_pid].map(wait_for_process_exit);
     let stderr = std::fs::read_to_string(stderr_path).unwrap();
-    for (pid, stopped) in [
-        (harness_pid, harness_stopped),
-        (grandchild_pid, grandchild_stopped),
-    ] {
+    for (pid, stopped) in [worker_pid, harness_pid, grandchild_pid]
+        .into_iter()
+        .zip(stopped_after_release)
+    {
         if !stopped {
             send_signal(pid, "-KILL");
         }
     }
 
+    assert_eq!(down.status.code(), Some(2));
+    assert_eq!(live_before_release, [true, true, true]);
+    assert_eq!(cleanup_before_release, 0);
     assert_eq!(status.and_then(|value| value.code()), Some(2), "{stderr}");
-    assert!(harness_stopped, "harness leader remained alive");
-    assert!(grandchild_stopped, "harness grandchild remained alive");
+    assert_eq!(stopped_after_release, [true, true, true]);
+    assert_eq!(line_count(&fixture.root.join("down-count.txt")), 1);
     assert!(
-        text_line_has(&stderr, "runtime session cleanup also failed"),
+        text_line_has(&stderr, "RUNTIME_PROCESS_GROUP_SIGNAL_FAILED"),
         "{stderr}"
     );
 }
 
 #[cfg(unix)]
 #[test]
-fn group_signal_failure_returns_diagnostic_and_reaps_worker() {
+fn supervisor_group_signal_failure_leaves_worker_and_harness_owned() {
     let fixture = RuntimeFixture::with_manifest(
-        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'true'\n",
+        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'echo down >> down-count.txt'\n",
     );
     let kill_log = fixture.root.join("kill-args.txt");
     let fake_bin = install_failing_kill(&fixture.root);
@@ -176,7 +190,7 @@ fn group_signal_failure_returns_diagnostic_and_reaps_worker() {
             "--",
             "sh",
             "-c",
-            "echo $$ > harness.pid; touch harness.ready; while :; do sleep 1; done",
+            "echo $$ > harness.pid; sleep 1000 & child=$!; echo $child > grandchild.pid; touch harness.ready; while test ! -f harness.release; do sleep 0.02; done; kill $child; wait $child 2>/dev/null || true",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr));
@@ -184,23 +198,35 @@ fn group_signal_failure_returns_diagnostic_and_reaps_worker() {
     wait_for(&fixture.root.join("harness.ready"));
 
     send_signal(outer.id(), "-TERM");
-    let started = Instant::now();
     let status = wait_for_exit(&mut outer, Duration::from_secs(3));
     let stderr = std::fs::read_to_string(stderr_path).unwrap();
     let args = std::fs::read_to_string(&kill_log).unwrap_or_default();
     let worker_pid = asserted_worker_pid(&args);
-    cleanup_harness(&fixture.root);
+    let harness_pid = read_pid(&fixture.root.join("harness.pid"));
+    let grandchild_pid = read_pid(&fixture.root.join("grandchild.pid"));
+    let down = runtime_down(&fixture);
+    let live_before_release = [worker_pid, harness_pid, grandchild_pid].map(process_alive);
+    let cleanup_before_release = line_count(&fixture.root.join("down-count.txt"));
+    release_harness(&fixture.root);
+    let stopped_after_release =
+        [worker_pid, harness_pid, grandchild_pid].map(wait_for_process_exit);
+    for (pid, stopped) in [worker_pid, harness_pid, grandchild_pid]
+        .into_iter()
+        .zip(stopped_after_release)
+    {
+        if !stopped {
+            send_signal(pid, "-KILL");
+        }
+    }
 
     assert_eq!(status.and_then(|value| value.code()), Some(2), "{stderr}");
-    assert!(
-        text_line_has(&stderr, "RUNTIME_PROCESS_GROUP_SIGNAL_FAILED"),
-        "{stderr}"
-    );
-    assert!(started.elapsed() < Duration::from_secs(3));
-    assert!(
-        !process_alive(worker_pid),
-        "worker {worker_pid} remained alive"
-    );
+    assert_eq!(down.status.code(), Some(2));
+    assert!(output_stderr_has(&down, "RUNTIME_LIVE_SESSIONS"));
+    assert_eq!(live_before_release, [true, true, true]);
+    assert_eq!(cleanup_before_release, 0);
+    assert_eq!(stopped_after_release, [true, true, true]);
+    wait_for(&fixture.root.join("down-count.txt"));
+    assert_eq!(line_count(&fixture.root.join("down-count.txt")), 1);
 }
 
 #[cfg(unix)]
@@ -212,7 +238,7 @@ fn install_failing_kill(root: &Path) -> PathBuf {
     let path = fake_bin.join("kill");
     std::fs::write(
         &path,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$KILL_ARGS_FILE\"\nexit 42\n",
+        "#!/bin/sh\nif test \"$1\" = -0; then exec /bin/kill \"$@\"; fi\nprintf '%s\\n' \"$@\" >> \"$KILL_ARGS_FILE\"\nexit 42\n",
     )
     .unwrap();
     let mut permissions = std::fs::metadata(&path).unwrap().permissions();
@@ -256,24 +282,40 @@ fn wait_for_exit(child: &mut Child, timeout: Duration) -> Option<ExitStatus> {
 }
 
 #[cfg(unix)]
-fn cleanup_harness(root: &Path) {
-    let pid = read_pid(&root.join("harness.pid"));
-    if process_alive(pid) {
-        send_signal(pid, "-KILL");
-    }
+fn release_harness(root: &Path) {
+    std::fs::write(root.join("harness.release"), "release\n").unwrap();
 }
 
 #[cfg(unix)]
-fn replace_sessions_directory_with_file(fixture: &RuntimeFixture) {
-    let environment = std::fs::read_dir(&fixture.state_root)
+fn break_heartbeat_record_destination(fixture: &RuntimeFixture) -> (String, u32) {
+    let sessions = environment_dir(fixture).join("sessions");
+    let record = std::fs::read_dir(&sessions)
         .unwrap()
-        .next()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .unwrap();
+    let contents = std::fs::read_to_string(&record).unwrap();
+    let worker_pid = serde_json::from_str::<serde_json::Value>(&contents).unwrap()["pid"]
+        .as_u64()
+        .and_then(|value| u32::try_from(value).ok())
+        .unwrap();
+    std::fs::remove_file(&record).unwrap();
+    std::fs::create_dir(&record).unwrap();
+    (contents, worker_pid)
+}
+
+#[cfg(unix)]
+fn restore_heartbeat_record(fixture: &RuntimeFixture, contents: &str) {
+    let sessions = environment_dir(fixture).join("sessions");
+    let record = std::fs::read_dir(&sessions)
         .unwrap()
-        .unwrap()
-        .path();
-    let sessions = environment.join("sessions");
-    std::fs::remove_dir_all(&sessions).unwrap();
-    std::fs::write(sessions, "not a directory\n").unwrap();
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("json"))
+        .unwrap();
+    std::fs::remove_dir(&record).unwrap();
+    std::fs::write(record, contents).unwrap();
 }
 
 #[cfg(unix)]
@@ -284,6 +326,23 @@ fn runtime_down(fixture: &RuntimeFixture) -> std::process::Output {
         .arg(&fixture.root)
         .output()
         .unwrap()
+}
+
+#[cfg(unix)]
+fn environment_dir(fixture: &RuntimeFixture) -> PathBuf {
+    std::fs::read_dir(&fixture.state_root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+}
+
+fn line_count(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .count()
 }
 
 #[cfg(unix)]
