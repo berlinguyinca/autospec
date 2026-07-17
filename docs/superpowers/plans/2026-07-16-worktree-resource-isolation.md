@@ -907,11 +907,14 @@ git commit -m "feat: keep every harness inside owned runtime resources"
 - Modify: `docs/memory/MEMORY.md`
 - Modify: `tests/smoke/test_install_all_skills.bats`
 - Modify: `crates/autospec-core/src/validation/external.rs`
+- Modify: `crates/autospec-cli/src/commands/runtime/env/state.rs`
+- Modify: `crates/autospec-cli/tests/runtime_state_reconciliation.rs`
 
 **Interfaces:**
 - Consumes: every broker, skill, alias, and cleanup contract from Tasks 1–9.
 - Produces: a rerunnable real-engine proof report containing peak containers, startup/teardown duration, collisions, retries, and leaks.
 - Documents: manifest v2, opt-outs, proof downgrades, diagnostics, recovery, and exact Maven/Compose ownership semantics.
+- Enforces: private runtime state (`0700` directories and `0600` files on Unix) and rejects symlinked state/session roots before destructive cleanup.
 
 - [ ] **Step 1: Add the failing forty-stack proof and documentation assertions**
 
@@ -921,7 +924,7 @@ The proof creates 40 linked worktrees, starts them concurrently, and records one
 environment_id,compose_project,container_id,network_id,volume_id,host_port,http_status
 ```
 
-It asserts 40 unique values in each resource column, HTTP status `200` for every generated URL, zero collision/retry exhaustion, reference-count survival in selected worktrees, crash recovery at provisioning/teardown checkpoints, and zero labeled resources after cleanup. Documentation tests require every public command, v2 key, opt-out, and stable recovery code.
+It asserts 40 unique values in each resource column, HTTP status `200` for every generated URL, zero collision/retry exhaustion, reference-count survival in selected worktrees, crash recovery at provisioning/teardown checkpoints, and zero labeled resources after cleanup. Unix security regressions assert state directories are mode `0700`, authoritative files are `0600`, and symlinked environment/session roots fail closed before cleanup. Documentation tests require every public command, v2 key, opt-out, and stable recovery code.
 
 - [ ] **Step 2: Run the proof before the final wiring and capture any red assertion**
 
@@ -944,7 +947,7 @@ Explain that opt-outs export `AUTOSPEC_ISOLATION_BYPASSED=1` and downgrade isola
 
 Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace && bats tests/integration/runtime-maven-isolation.bats && bats tests/integration/runtime-compose-isolation.bats && bats tests/integration/runtime-compose-40-stack.bats && cargo run -q -p autospec-cli -- validate --fast && cargo run -q -p autospec-cli -- validate && git diff --check`
 
-Expected: all Rust, Bats, lock-step, generated, Maven 4, Docker Compose, 40-stack, and leak checks pass; the 40-stack JSON reports `collisions: 0`, `retry_exhaustions: 0`, and `leaked_resources: 0`.
+Expected: all Rust, Bats, lock-step, generated, Maven 4, Docker Compose, 40-stack, permission/symlink hardening, and leak checks pass; the 40-stack JSON reports `collisions: 0`, `retry_exhaustions: 0`, and `leaked_resources: 0`.
 
 - [ ] **Step 5: Commit final proof and documentation**
 
