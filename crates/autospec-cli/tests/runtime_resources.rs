@@ -12,6 +12,330 @@ use autospec_core::runtime_env::{
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
+fn normalize_cli_fixture(name: &str) -> RuntimeFixture {
+    let fixture = RuntimeFixture::empty();
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tests/fixtures/compose-normalize")
+        .join(name);
+    std::fs::create_dir_all(fixture.root.join(".autospec")).unwrap();
+    std::fs::copy(
+        source.join("runtime.yml"),
+        fixture.root.join(".autospec/runtime.yml"),
+    )
+    .unwrap();
+    std::fs::copy(
+        source.join("compose.yaml"),
+        fixture.root.join("compose.yaml"),
+    )
+    .unwrap();
+    fixture
+}
+
+fn normalize_command(fixture: &RuntimeFixture, operation: &str) -> Command {
+    let mut command = fixture.command();
+    command.args(["runtime", "env", "normalize-compose", "--repo"]);
+    command.arg(&fixture.root).arg(operation);
+    command
+}
+
+#[test]
+fn normalize_check_is_read_only_and_returns_a_stable_fingerprint() {
+    let fixture = normalize_cli_fixture("fixed-port");
+    let compose = fixture.root.join("compose.yaml");
+    let before = std::fs::read(&compose).unwrap();
+
+    let first = normalize_command(&fixture, "--check").output().unwrap();
+    let second = normalize_command(&fixture, "--check").output().unwrap();
+
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout);
+    let report: serde_json::Value = serde_json::from_slice(&first.stdout).unwrap();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["fingerprint"].as_str().unwrap().len(), 64);
+    assert_eq!(std::fs::read(compose).unwrap(), before);
+}
+
+#[test]
+#[cfg(unix)]
+fn normalize_check_uses_the_complete_compose_model_before_reporting() {
+    let fixture = normalize_cli_fixture("fixed-port");
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({
+        "services":{"web":{"image":"nginx","ports":[{"target":8080,"published":"8080","protocol":"tcp"}]}}
+    }));
+    let log = fixture.root.join("docker.log");
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .unwrap();
+
+    let output = normalize_command(&fixture, "--check")
+        .env("PATH", path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .env("FAKE_DOCKER_MODEL", model)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let arguments = std::fs::read_to_string(log).expect("check must invoke docker compose config");
+    assert!(arguments.contains("compose\n--profile\n*\n--all-resources\n"));
+    assert!(arguments.contains("config\n--format\njson\n"));
+}
+
+#[test]
+fn normalize_help_and_digest_case_are_explicit() {
+    let help = RuntimeFixture::empty()
+        .command()
+        .args(["runtime", "env", "--help"])
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&help.stdout)
+        .contains("normalize-compose --repo PATH --check|--apply --fingerprint SHA256"));
+
+    let fixture = normalize_cli_fixture("fixed-port");
+    let uppercase = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", &"A".repeat(64)])
+        .output()
+        .unwrap();
+    assert_eq!(uppercase.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&uppercase.stderr).contains("lowercase SHA-256"));
+}
+
+#[test]
+fn normalize_unsafe_check_is_json_and_apply_refuses_without_writes() {
+    let fixture = normalize_cli_fixture("host-network");
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({
+        "services":{"web":{"image":"nginx","network_mode":"host"}}
+    }));
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .unwrap();
+    let log = fixture.root.join("docker.log");
+    let compose = fixture.root.join("compose.yaml");
+    let before = std::fs::read(&compose).unwrap();
+    let check = normalize_command(&fixture, "--check")
+        .env("PATH", &path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .env("FAKE_DOCKER_MODEL", &model)
+        .output()
+        .unwrap();
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(
+        report["remaining_diagnostics"][0]["code"],
+        "COMPOSE_HOST_NETWORK"
+    );
+
+    let apply = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", report["fingerprint"].as_str().unwrap()])
+        .env("PATH", &path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .env("FAKE_DOCKER_MODEL", &model)
+        .output()
+        .unwrap();
+    assert_eq!(apply.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&apply.stderr).contains("NORMALIZE_UNRESOLVED_DIAGNOSTICS"));
+    assert_eq!(std::fs::read(compose).unwrap(), before);
+}
+
+#[test]
+#[cfg(unix)]
+fn normalize_flow_manifest_check_and_apply_preserve_golden_bytes() {
+    let fixture = RuntimeFixture::empty();
+    std::fs::create_dir_all(fixture.root.join(".autospec")).unwrap();
+    let compose = fixture.root.join("compose.yaml");
+    let manifest = fixture.root.join(".autospec/runtime.yml");
+    let compose_bytes =
+        b"services:\n  web:\n    image: nginx\n    ports:\n      - \"18080:8080\"\n";
+    let manifest_bytes = b"{version: 2, resources: {compose: {files: [compose.yaml]}}}\n";
+    std::fs::write(&compose, compose_bytes).unwrap();
+    std::fs::write(&manifest, manifest_bytes).unwrap();
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({
+        "services":{"web":{"image":"nginx","ports":[{"target":8080,"published":"18080","protocol":"tcp"}]}}
+    }));
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .unwrap();
+    let log = fixture.root.join("docker.log");
+
+    let check = normalize_command(&fixture, "--check")
+        .env("PATH", &path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .env("FAKE_DOCKER_MODEL", &model)
+        .output()
+        .unwrap();
+    assert!(check.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(
+        report["remaining_diagnostics"][0]["code"],
+        "NORMALIZE_FLOW_MANIFEST_UNSUPPORTED"
+    );
+    assert_eq!(std::fs::read(&compose).unwrap(), compose_bytes);
+    assert_eq!(std::fs::read(&manifest).unwrap(), manifest_bytes);
+
+    let apply = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", report["fingerprint"].as_str().unwrap()])
+        .env("PATH", &path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .env("FAKE_DOCKER_MODEL", &model)
+        .output()
+        .unwrap();
+    assert_eq!(apply.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&apply.stderr).contains("NORMALIZE_UNRESOLVED_DIAGNOSTICS"));
+    assert_eq!(std::fs::read(compose).unwrap(), compose_bytes);
+    assert_eq!(std::fs::read(manifest).unwrap(), manifest_bytes);
+}
+
+#[test]
+fn normalize_apply_rejects_a_stale_fingerprint_before_writes() {
+    let fixture = normalize_cli_fixture("fixed-port");
+    let manifest = fixture.root.join(".autospec/runtime.yml");
+    let original = std::fs::read(&manifest).unwrap();
+    let output = normalize_command(&fixture, "--check").output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let fingerprint = report["fingerprint"].as_str().unwrap();
+    let stale = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", &"0".repeat(fingerprint.len())])
+        .output()
+        .unwrap();
+
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("NORMALIZE_STALE_FINGERPRINT"));
+    assert_eq!(std::fs::read(manifest).unwrap(), original);
+}
+
+#[test]
+#[cfg(unix)]
+fn normalize_apply_is_idempotent_after_complete_model_verification() {
+    if !current_compose_supports_complete_config() {
+        eprintln!("SKIP: current Docker Compose with --all-resources is unavailable");
+        return;
+    }
+    let fixture = normalize_cli_fixture("fixed-port");
+    let check = normalize_command(&fixture, "--check").output().unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    let fingerprint = report["fingerprint"].as_str().unwrap();
+
+    let first = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", fingerprint])
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let compose = fixture.root.join("compose.yaml");
+    let manifest = fixture.root.join(".autospec/runtime.yml");
+    let after = (
+        std::fs::read(&compose).unwrap(),
+        std::fs::read(&manifest).unwrap(),
+    );
+    let next = normalize_command(&fixture, "--check").output().unwrap();
+    let next_report: serde_json::Value = serde_json::from_slice(&next.stdout).unwrap();
+    let next_fingerprint = next_report["fingerprint"].as_str().unwrap();
+    let second = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", next_fingerprint])
+        .output()
+        .unwrap();
+
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(after.0, std::fs::read(compose).unwrap());
+    assert_eq!(after.1, std::fs::read(manifest).unwrap());
+}
+
+#[test]
+#[cfg(unix)]
+fn normalize_apply_rolls_back_all_files_when_compose_verification_fails() {
+    let fixture = normalize_cli_fixture("fixed-port");
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({}));
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .unwrap();
+    let compose = fixture.root.join("compose.yaml");
+    let manifest = fixture.root.join(".autospec/runtime.yml");
+    let before = (
+        std::fs::read(&compose).unwrap(),
+        std::fs::read(&manifest).unwrap(),
+    );
+    let check = normalize_command(&fixture, "--check")
+        .env("PATH", &path)
+        .env("FAKE_DOCKER_LOG", fixture.root.join("docker.log"))
+        .env("FAKE_DOCKER_MODEL", &model)
+        .output()
+        .unwrap();
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+
+    let output = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", report["fingerprint"].as_str().unwrap()])
+        .env("PATH", path)
+        .env("FAKE_DOCKER_LOG", fixture.root.join("docker.log"))
+        .env("FAKE_DOCKER_MODEL", model)
+        .env("FAKE_DOCKER_EXIT", "42")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("NORMALIZE_COMPOSE_CONFIG_FAILED"));
+    assert_eq!(std::fs::read(compose).unwrap(), before.0);
+    assert_eq!(std::fs::read(manifest).unwrap(), before.1);
+}
+
+#[test]
+#[cfg(unix)]
+fn normalize_apply_passes_the_current_compose_complete_model() {
+    if !current_compose_supports_complete_config() {
+        eprintln!("SKIP: current Docker Compose with --all-resources is unavailable");
+        return;
+    }
+    for name in [
+        "fixed-port",
+        "container-name",
+        "project-name",
+        "single-http",
+    ] {
+        let fixture = normalize_cli_fixture(name);
+        let check = normalize_command(&fixture, "--check").output().unwrap();
+        let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+        let apply = normalize_command(&fixture, "--apply")
+            .args(["--fingerprint", report["fingerprint"].as_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            apply.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&apply.stderr)
+        );
+        let config = Command::new("docker")
+            .args(["compose", "-f"])
+            .arg(fixture.root.join("compose.yaml"))
+            .arg("config")
+            .current_dir(&fixture.root)
+            .output()
+            .unwrap();
+        assert!(
+            config.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&config.stderr)
+        );
+    }
+}
+
 struct RuntimeFixture {
     root: PathBuf,
     state_root: PathBuf,

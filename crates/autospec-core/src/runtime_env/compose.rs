@@ -8,6 +8,8 @@ mod runtime;
 
 pub use runtime::{ComposeOverride, ComposeOwnership};
 
+pub const COMPOSE_POLICY_VERSION: u32 = 1;
+
 pub struct ComposePolicy;
 
 impl ComposePolicy {

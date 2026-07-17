@@ -4,10 +4,471 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use autospec_core::runtime_env::{
     load_generation_token, read_json, write_json_atomic, ComposeExport, ComposeIsolation,
-    ComposeOverride, ComposeOwnership, ComposePlan, ComposePolicy, EnvironmentIdentity,
-    EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue, IsolationDiagnostic,
-    OwnedVolume, ResolvedExport, ResourceInventory, RuntimeContext, RuntimeManifest, SessionRecord,
+    ComposeNormalizer, ComposeOverride, ComposeOwnership, ComposePlan, ComposePolicy,
+    EnvironmentIdentity, EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue,
+    IsolationDiagnostic, OwnedVolume, ResolvedExport, ResourceInventory, RuntimeContext,
+    RuntimeManifest, SessionRecord,
 };
+
+fn normalize_fixture(name: &str) -> TempRepo {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tests/fixtures/compose-normalize")
+        .join(name);
+    let compose = std::fs::read_to_string(root.join("compose.yaml")).unwrap();
+    let manifest = std::fs::read_to_string(root.join("runtime.yml")).unwrap();
+    TempRepo::with_files(&[
+        ("compose.yaml", compose.as_str()),
+        (".autospec/runtime.yml", manifest.as_str()),
+    ])
+}
+
+#[test]
+fn normalize_fixed_port_preserves_comments_and_plans_one_export() {
+    let fixture = normalize_fixture("fixed-port");
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+    let rendered = plan
+        .rendered_file(&fixture.path().join("compose.yaml"))
+        .unwrap();
+    let manifest = plan
+        .rendered_file(&fixture.path().join(".autospec/runtime.yml"))
+        .unwrap();
+
+    assert_eq!(plan.schema_version, 1);
+    assert_eq!(plan.fingerprint.len(), 64);
+    assert!(rendered.contains("# keep database explanation"));
+    assert!(!rendered.contains("8080:8080"));
+    let parsed = RuntimeManifest::parse(&manifest)
+        .unwrap_or_else(|error| panic!("rendered manifest is invalid: {error}\n{manifest}"));
+    assert_eq!(
+        parsed.resources().compose.exports[0].env,
+        "AUTOSPEC_COMPOSE_WEB_8080_TCP"
+    );
+    assert!(parsed
+        .resources()
+        .compose
+        .exports
+        .iter()
+        .all(|export| export.env != "AUTOSPEC_PUBLIC_URL"));
+}
+
+#[test]
+fn normalize_removes_only_exact_safe_names() {
+    for name in ["container-name", "project-name"] {
+        let fixture = normalize_fixture(name);
+        let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+        let rendered = plan
+            .rendered_file(&fixture.path().join("compose.yaml"))
+            .unwrap();
+        assert!(!rendered.contains("container_name:"), "{name}");
+        assert!(
+            !rendered.contains("name: ${COMPOSE_PROJECT_NAME}_"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn normalize_keeps_container_name_when_an_exact_value_references_it() {
+    let fixture = normalize_fixture("container-name-reference");
+    let path = fixture.path().join("compose.yaml");
+    let original = std::fs::read(&path).unwrap();
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+
+    assert_eq!(plan.rendered_bytes(&path).unwrap(), original);
+    assert_eq!(
+        plan.remaining_diagnostics[0].code,
+        "COMPOSE_CONTAINER_NAME_REFERENCE"
+    );
+}
+
+#[test]
+fn normalize_single_declared_http_port_adds_one_public_url() {
+    let fixture = normalize_fixture("single-http");
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+    let manifest = plan
+        .rendered_file(&fixture.path().join(".autospec/runtime.yml"))
+        .unwrap();
+    let parsed = RuntimeManifest::parse(&manifest).unwrap();
+
+    assert_eq!(
+        parsed
+            .resources()
+            .compose
+            .exports
+            .iter()
+            .filter(|export| export.env == "AUTOSPEC_PUBLIC_URL")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn normalize_ambiguous_and_unsafe_inputs_remain_byte_identical() {
+    for name in ["multiple-http", "external", "host-network", "unknown-port"] {
+        let fixture = normalize_fixture(name);
+        let path = fixture.path().join("compose.yaml");
+        let original = std::fs::read(&path).unwrap();
+        let first = ComposeNormalizer::plan(fixture.path()).unwrap();
+        let second = ComposeNormalizer::plan(fixture.path()).unwrap();
+        assert_eq!(first.fingerprint, second.fingerprint, "{name}");
+        assert_eq!(first.rendered_bytes(&path).unwrap(), original, "{name}");
+        assert!(!first.remaining_diagnostics.is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn normalize_apply_rejects_stale_bytes_before_writing() {
+    let fixture = normalize_fixture("fixed-port");
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+    let manifest = fixture.path().join(".autospec/runtime.yml");
+    let original = std::fs::read(&manifest).unwrap();
+    std::fs::write(fixture.path().join("compose.yaml"), "services: {}\n").unwrap();
+
+    let error = ComposeNormalizer::apply(&plan, &plan.fingerprint)
+        .expect_err("stale input must fail before a write");
+
+    assert!(error.to_string().contains("NORMALIZE_STALE_SOURCE"));
+    assert_eq!(std::fs::read(manifest).unwrap(), original);
+}
+
+fn task5_normalize_fixture(name: &str) -> TempRepo {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("tests/fixtures/runtime-resources/compose")
+        .join(name);
+    let compose = std::fs::read_to_string(source).unwrap();
+    TempRepo::with_files(&[
+        ("compose.yaml", &compose),
+        (
+            ".autospec/runtime.yml",
+            "version: 2\nresources:\n  compose:\n    files: [compose.yaml]\n",
+        ),
+    ])
+}
+
+#[test]
+fn normalize_retains_exact_task5_diagnostics_and_never_plans_partial_writes() {
+    let cases = [
+        (
+            "container-name.yaml",
+            "COMPOSE_CONTAINER_NAME",
+            "services.web.container_name",
+            "fixed-web",
+        ),
+        (
+            "host-network.yaml",
+            "COMPOSE_HOST_NETWORK",
+            "services.web.network_mode",
+            "host",
+        ),
+        (
+            "global-name.yaml",
+            "COMPOSE_GLOBAL_NAME",
+            "networks.private.name",
+            "global-network",
+        ),
+        (
+            "fixed-ip.yaml",
+            "COMPOSE_FIXED_ADDRESS",
+            "services.web.networks.private.ipv4_address",
+            "10.0.0.8",
+        ),
+        (
+            "external.yaml",
+            "COMPOSE_EXTERNAL_UNDECLARED",
+            "networks.company-vpn.external",
+            "company-vpn",
+        ),
+        (
+            "writable-bind.yaml",
+            "COMPOSE_WRITABLE_BIND_OUTSIDE_WORKTREE",
+            "services.web.volumes[0].source",
+            "/tmp/shared-data",
+        ),
+    ];
+    for (name, code, resource, evidence) in cases {
+        let fixture = task5_normalize_fixture(name);
+        let compose = fixture.path().join("compose.yaml");
+        let before = std::fs::read(&compose).unwrap();
+        let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+        let diagnostic = plan
+            .remaining_diagnostics
+            .iter()
+            .find(|item| item.code == code)
+            .unwrap();
+        assert_eq!(
+            (&diagnostic.resource, &diagnostic.evidence),
+            (&resource.to_string(), &evidence.to_string()),
+            "{name}"
+        );
+        assert_eq!(plan.changed_files(), 0, "{name}");
+        assert_eq!(plan.rendered_bytes(&compose).unwrap(), before, "{name}");
+        assert!(
+            ComposeNormalizer::apply(&plan, &plan.fingerprint).is_err(),
+            "{name}"
+        );
+        assert_eq!(std::fs::read(compose).unwrap(), before, "{name}");
+    }
+}
+
+#[test]
+fn normalize_global_http_selection_and_slug_collisions_fail_closed_across_files() {
+    let manifest = "version: 2\nresources:\n  compose:\n    files: [a.yaml, b.yaml]\n";
+    let fixture = TempRepo::with_files(&[
+        ("a.yaml", "services:\n  foo-bar:\n    image: nginx\n    ports:\n      - target: 8080\n        published: 18080\n        protocol: tcp\n        app_protocol: http\n"),
+        ("b.yaml", "services:\n  foo_bar:\n    image: nginx\n    ports:\n      - target: 8080\n        published: 18081\n        protocol: tcp\n        app_protocol: http\n"),
+        (".autospec/runtime.yml", manifest),
+    ]);
+    let before = ["a.yaml", "b.yaml", ".autospec/runtime.yml"]
+        .map(|path| std::fs::read(fixture.path().join(path)).unwrap());
+
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+
+    let codes = plan
+        .remaining_diagnostics
+        .iter()
+        .map(|item| item.code.as_str())
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&"COMPOSE_HTTP_AMBIGUOUS"));
+    assert!(codes.contains(&"COMPOSE_EXPORT_ENV_CONFLICT"));
+    assert_eq!(plan.changed_files(), 0);
+    for (index, path) in ["a.yaml", "b.yaml", ".autospec/runtime.yml"]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            plan.rendered_bytes(&fixture.path().join(path)).unwrap(),
+            before[index]
+        );
+    }
+}
+
+#[test]
+fn normalize_existing_equal_export_preserves_manifest_bytes_and_conflicts_fail_closed() {
+    let compose = "services:\n  web:\n    image: nginx\n    ports:\n      - \"18080:8080\"\n";
+    let equal = "version: 2\nresources:\n  compose:\n    files:\n      - compose.yaml # keep file order\n    exports:\n      # keep existing export\n      - service: web\n        target: 8080\n        protocol: tcp\n        env: AUTOSPEC_COMPOSE_WEB_8080_TCP\n        value: port\n";
+    let fixture =
+        TempRepo::with_files(&[("compose.yaml", compose), (".autospec/runtime.yml", equal)]);
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+    assert!(plan.remaining_diagnostics.is_empty());
+    assert_eq!(
+        plan.rendered_bytes(&fixture.path().join(".autospec/runtime.yml"))
+            .unwrap(),
+        equal.as_bytes()
+    );
+
+    let conflicting = equal.replace("service: web", "service: other");
+    let fixture = TempRepo::with_files(&[
+        ("compose.yaml", compose),
+        (".autospec/runtime.yml", &conflicting),
+    ]);
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+    assert!(plan
+        .remaining_diagnostics
+        .iter()
+        .any(|item| item.code == "COMPOSE_EXPORT_ENV_CONFLICT"));
+    assert_eq!(plan.changed_files(), 0);
+}
+
+#[test]
+fn normalize_existing_equal_http_export_is_one_canonical_candidate() {
+    let compose = "services:\n  web:\n    image: nginx\n    ports:\n      - target: 8080\n        published: 18080\n        protocol: tcp\n        app_protocol: http\n";
+    let manifest = "version: 2\nresources:\n  compose:\n    files: [compose.yaml]\n    exports:\n      - service: web\n        target: 8080\n        protocol: http\n        env: AUTOSPEC_COMPOSE_WEB_8080_HTTP\n        value: url\n";
+    let fixture = TempRepo::with_files(&[
+        ("compose.yaml", compose),
+        (".autospec/runtime.yml", manifest),
+    ]);
+
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+    assert!(plan.remaining_diagnostics.is_empty());
+    let rendered = plan
+        .rendered_file(&fixture.path().join(".autospec/runtime.yml"))
+        .unwrap();
+    let parsed = RuntimeManifest::parse(&rendered).unwrap();
+    assert_eq!(
+        parsed
+            .resources()
+            .compose
+            .exports
+            .iter()
+            .filter(|export| export.env == "AUTOSPEC_PUBLIC_URL")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn normalize_duplicate_equal_exports_across_layers_edits_both_sources_once() {
+    let base = "services:\n  web:\n    image: nginx\n    ports:\n      - target: 8080\n        published: 18080\n        protocol: tcp\n";
+    let override_file = "services:\n  web:\n    ports:\n      - target: 8080\n        published: 18080\n        protocol: tcp\n";
+    let manifest = "version: 2\nresources:\n  compose:\n    files: [base.yaml, override.yaml]\n";
+    let fixture = TempRepo::with_files(&[
+        ("base.yaml", base),
+        ("override.yaml", override_file),
+        (".autospec/runtime.yml", manifest),
+    ]);
+
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+
+    assert!(plan.remaining_diagnostics.is_empty());
+    assert_eq!(
+        plan.edits
+            .iter()
+            .filter(|edit| matches!(
+                edit,
+                autospec_core::runtime_env::NormalizationEdit::RemovePublishedPort { .. }
+            ))
+            .count(),
+        2
+    );
+    let rendered_manifest = plan
+        .rendered_file(&fixture.path().join(".autospec/runtime.yml"))
+        .unwrap();
+    let parsed = RuntimeManifest::parse(&rendered_manifest).unwrap();
+    assert_eq!(
+        parsed
+            .resources()
+            .compose
+            .exports
+            .iter()
+            .filter(|export| export.env == "AUTOSPEC_COMPOSE_WEB_8080_TCP")
+            .count(),
+        1
+    );
+    for source in ["base.yaml", "override.yaml"] {
+        assert!(!plan
+            .rendered_file(&fixture.path().join(source))
+            .unwrap()
+            .contains("published:"));
+    }
+
+    ComposeNormalizer::apply(&plan, &plan.fingerprint).unwrap();
+    let after = ["base.yaml", "override.yaml", ".autospec/runtime.yml"]
+        .map(|path| std::fs::read(fixture.path().join(path)).unwrap());
+    let second = ComposeNormalizer::plan(fixture.path()).unwrap();
+    assert_eq!(second.changed_files(), 0);
+    ComposeNormalizer::apply(&second, &second.fingerprint).unwrap();
+    for (index, path) in ["base.yaml", "override.yaml", ".autospec/runtime.yml"]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            std::fs::read(fixture.path().join(path)).unwrap(),
+            after[index]
+        );
+    }
+}
+
+#[test]
+fn normalize_flow_mapping_manifest_fails_closed_with_stable_diagnostic() {
+    let compose = "services:\n  web:\n    image: nginx\n    ports:\n      - \"18080:8080\"\n";
+    let manifest = "{version: 2, resources: {compose: {files: [compose.yaml]}}}\n";
+    let fixture = TempRepo::with_files(&[
+        ("compose.yaml", compose),
+        (".autospec/runtime.yml", manifest),
+    ]);
+    let before = ["compose.yaml", ".autospec/runtime.yml"]
+        .map(|path| std::fs::read(fixture.path().join(path)).unwrap());
+
+    let plan = ComposeNormalizer::plan(fixture.path()).unwrap();
+
+    assert_eq!(plan.remaining_diagnostics.len(), 1);
+    assert_eq!(
+        plan.remaining_diagnostics[0].code,
+        "NORMALIZE_FLOW_MANIFEST_UNSUPPORTED"
+    );
+    assert_eq!(plan.changed_files(), 0);
+    for (index, path) in ["compose.yaml", ".autospec/runtime.yml"].iter().enumerate() {
+        assert_eq!(
+            plan.rendered_bytes(&fixture.path().join(path)).unwrap(),
+            before[index]
+        );
+    }
+    let error = ComposeNormalizer::apply(&plan, &plan.fingerprint).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("NORMALIZE_UNRESOLVED_DIAGNOSTICS"));
+    for (index, path) in ["compose.yaml", ".autospec/runtime.yml"].iter().enumerate() {
+        assert_eq!(
+            std::fs::read(fixture.path().join(path)).unwrap(),
+            before[index]
+        );
+    }
+}
+
+#[test]
+fn normalize_only_rejects_aliases_that_affect_an_edit() {
+    let unrelated = normalize_fixture("anchors");
+    let unrelated_plan = ComposeNormalizer::plan(unrelated.path()).unwrap();
+    assert!(unrelated_plan.remaining_diagnostics.is_empty());
+    assert!(unrelated_plan.changed_files() > 0);
+
+    let affected = TempRepo::with_files(&[
+        ("compose.yaml", "x-published: &published 18080\nservices:\n  web:\n    image: nginx\n    ports:\n      - target: 8080\n        published: *published\n        protocol: tcp\n"),
+        (".autospec/runtime.yml", "version: 2\nresources:\n  compose:\n    files: [compose.yaml]\n"),
+    ]);
+    let before = std::fs::read(affected.path().join("compose.yaml")).unwrap();
+    let affected_plan = ComposeNormalizer::plan(affected.path()).unwrap();
+    assert!(affected_plan
+        .remaining_diagnostics
+        .iter()
+        .any(|item| item.code == "COMPOSE_UNSAFE_YAML_REFERENCE"));
+    assert_eq!(
+        affected_plan
+            .rendered_bytes(&affected.path().join("compose.yaml"))
+            .unwrap(),
+        before
+    );
+}
+
+#[test]
+fn normalize_preserves_exact_inline_comment_bytes_around_removed_fields() {
+    let container = normalize_fixture("container-name");
+    let rendered = ComposeNormalizer::plan(container.path())
+        .unwrap()
+        .rendered_file(&container.path().join("compose.yaml"))
+        .unwrap();
+    assert_eq!(
+        rendered,
+        "services:\n  web:\n    image: nginx:alpine\n     # safe redundant identity\n"
+    );
+
+    let resources = normalize_fixture("project-name");
+    let rendered = ComposeNormalizer::plan(resources.path())
+        .unwrap()
+        .rendered_file(&resources.path().join("compose.yaml"))
+        .unwrap();
+    assert!(rendered.contains("     # keep network identity note\n"));
+    assert!(rendered.contains("     # keep volume identity note\n"));
+
+    let long = TempRepo::with_files(&[
+        ("compose.yaml", "services:\n  web:\n    image: nginx\n    ports:\n      - target: 8080\n        published: 18080 # keep published explanation\n        protocol: tcp\n"),
+        (".autospec/runtime.yml", "version: 2\nresources:\n  compose:\n    files: [compose.yaml]\n"),
+    ]);
+    let rendered = ComposeNormalizer::plan(long.path())
+        .unwrap()
+        .rendered_file(&long.path().join("compose.yaml"))
+        .unwrap();
+    assert!(rendered.contains("         # keep published explanation\n"));
+}
+
+#[test]
+fn normalize_appends_manifest_exports_without_reordering_existing_nodes() {
+    let compose = "services:\n  web:\n    image: nginx\n    ports:\n      - \"18080:8080\"\n";
+    let manifest = "version: 2\nresources:\n  compose:\n    files:\n      - compose.yaml # keep file order\n    exports:\n      # keep first export comment\n      - service: other\n        target: 9000\n        protocol: tcp\n        env: OTHER_PORT\n        value: port\n";
+    let fixture = TempRepo::with_files(&[
+        ("compose.yaml", compose),
+        (".autospec/runtime.yml", manifest),
+    ]);
+    let rendered = ComposeNormalizer::plan(fixture.path())
+        .unwrap()
+        .rendered_file(&fixture.path().join(".autospec/runtime.yml"))
+        .unwrap();
+
+    assert!(rendered.starts_with(manifest));
+    assert!(rendered.ends_with("      - service: web\n        target: 8080\n        protocol: tcp\n        env: AUTOSPEC_COMPOSE_WEB_8080_TCP\n        value: port\n"));
+}
 
 static NEXT_TEMP_REPO: AtomicUsize = AtomicUsize::new(0);
 

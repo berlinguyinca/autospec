@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 mod compose;
+mod compose_normalize;
 mod diagnostic;
 mod identity;
 mod manifest;
@@ -14,7 +15,10 @@ mod resources;
 mod session;
 mod shell_command;
 
-pub use compose::{ComposeOverride, ComposeOwnership, ComposePolicy};
+pub use compose::{ComposeOverride, ComposeOwnership, ComposePolicy, COMPOSE_POLICY_VERSION};
+pub use compose_normalize::{
+    ComposeNormalizer, NormalizationEdit, NormalizationPlan, ResourceKind, RuntimeResourcesReport,
+};
 pub use diagnostic::IsolationDiagnostic;
 pub use identity::{load_generation_token, EnvironmentIdentity};
 pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
