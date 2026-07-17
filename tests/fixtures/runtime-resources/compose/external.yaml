@@ -5,3 +5,4 @@ services:
 networks:
   company-vpn:
     external: true
+    name: shared-company-vpn

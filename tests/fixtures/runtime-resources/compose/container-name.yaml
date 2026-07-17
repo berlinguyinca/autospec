@@ -2,3 +2,4 @@ services:
   web:
     image: nginx:alpine
     container_name: fixed-web
+    profiles: [hidden]

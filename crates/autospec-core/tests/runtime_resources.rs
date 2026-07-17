@@ -256,7 +256,7 @@ fn compose_policy_fixed_port_reports_exact_path_and_value() {
     assert_eq!(
         diagnostics[0].recovery_command,
         format!(
-            "autospec runtime env normalize-compose --repo {} --check",
+            "autospec runtime env normalize-compose --repo '{}' --check",
             repo.path().display()
         )
     );
@@ -278,7 +278,7 @@ fn compose_policy_explicit_context_keeps_nested_files_at_the_worktree_boundary()
     assert_eq!(
         diagnostics[0].recovery_command,
         format!(
-            "autospec runtime env normalize-compose --repo {} --check",
+            "autospec runtime env normalize-compose --repo '{}' --check",
             repo.path().display()
         )
     );
@@ -385,6 +385,43 @@ fn compose_policy_allows_only_exact_declared_external_keys() {
 }
 
 #[test]
+fn compose_policy_undeclared_external_reports_only_the_external_rule() {
+    let repo = TempRepo::with_files(&[("compose.yaml", "services: {}\n")]);
+    let diagnostics = compose_policy_diagnostics(
+        &repo,
+        serde_json::json!({
+            "networks":{"company":{"external":true,"name":"shared-company-network"}}
+        }),
+    );
+
+    assert_eq!(diagnostics.len(), 1);
+    assert_eq!(diagnostics[0].code, "COMPOSE_EXTERNAL_UNDECLARED");
+    assert_eq!(diagnostics[0].resource, "networks.company.external");
+}
+
+#[test]
+fn compose_policy_shell_quotes_recovery_repository() {
+    let repo = TempRepo::with_files(&[("space's dir/compose.yaml", "services: {}\n")]);
+    let nested_repo = repo.path().join("space's dir");
+    let mut plan = compose_policy_plan(&nested_repo);
+    plan.files = vec![nested_repo.join("compose.yaml")];
+    let diagnostics = ComposePolicy::evaluate_in_context(
+        &serde_json::json!({"services":{"web":{"container_name":"web"}}}),
+        &plan,
+        "env-a",
+        &nested_repo,
+    );
+
+    assert_eq!(
+        diagnostics[0].recovery_command,
+        format!(
+            "autospec runtime env normalize-compose --repo '{}' --check",
+            nested_repo.display().to_string().replace('\'', "'\\''")
+        )
+    );
+}
+
+#[test]
 fn compose_policy_allows_read_only_and_contained_writable_binds() {
     let repo = TempRepo::with_files(&[
         ("compose.yaml", "services: {}\n"),
@@ -439,7 +476,8 @@ fn compose_policy_returns_all_rule_ids_in_resource_path_order() {
                 "ports":[{"target":9090,"published":8080,"protocol":"tcp"}],
                 "volumes":[{"type":"bind","source":outside,"target":"/outside"}]
             }},
-            "networks":{"private":{"external":true,"name":"private-global"}}
+            "networks":{"private":{"external":true,"name":"private-global"}},
+            "volumes":{"data":{"name":"global-data"}}
         }),
     );
     let resources = diagnostics

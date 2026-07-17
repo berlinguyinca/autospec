@@ -51,7 +51,7 @@ impl RuntimeFixture {
         let docker = bin.join("docker");
         std::fs::write(
             &docker,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FAKE_DOCKER_LOG\"\nif [ \"${FAKE_DOCKER_EXIT:-0}\" -ne 0 ]; then\n  printf 'compose config failed\\n' >&2\n  exit \"$FAKE_DOCKER_EXIT\"\nfi\ncat \"$FAKE_DOCKER_MODEL\"\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FAKE_DOCKER_LOG\"\nif [ \"${FAKE_DOCKER_EXIT:-0}\" -ne 0 ]; then\n  printf 'compose config failed \\n\\n' >&2\n  exit \"$FAKE_DOCKER_EXIT\"\nfi\ncat \"$FAKE_DOCKER_MODEL\"\n",
         )
         .expect("write fake Docker");
         let mut permissions = std::fs::metadata(&docker).unwrap().permissions();
@@ -407,6 +407,9 @@ fn compose_config_orders_files_and_project_before_the_config_subcommand() {
         arguments.lines().collect::<Vec<_>>(),
         vec![
             "compose",
+            "--profile",
+            "*",
+            "--all-resources",
             "-f",
             fixture.root.join("compose.yaml").to_str().unwrap(),
             "-f",
@@ -422,7 +425,7 @@ fn compose_config_orders_files_and_project_before_the_config_subcommand() {
 
 #[test]
 #[cfg(unix)]
-fn compose_config_preserves_the_nonzero_docker_exit() {
+fn compose_config_preserves_nonzero_exit_and_stderr_trailing_text() {
     let fixture = RuntimeFixture::with_manifest(&compose_manifest("sh -c 'true'"));
     std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
     std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
@@ -438,7 +441,7 @@ fn compose_config_preserves_the_nonzero_docker_exit() {
     assert_eq!(output.status.code(), Some(37));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
-        "compose config failed\n"
+        "compose config failed \n\n\n"
     );
 }
 
@@ -493,7 +496,7 @@ fn compose_config_nested_file_diagnostic_keeps_repo_and_environment_context() {
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
         format!(
-            "COMPOSE_CONTAINER_NAME: services.web.container_name=web (environment {}; recovery: autospec runtime env normalize-compose --repo {} --check)\n",
+            "COMPOSE_CONTAINER_NAME: services.web.container_name=web (environment {}; recovery: autospec runtime env normalize-compose --repo '{}' --check)\n",
             identity.environment_id,
             fixture.root.display()
         )
@@ -537,3 +540,143 @@ fn compose_config_policy_failure_can_be_corrected_and_retried() {
         String::from_utf8_lossy(&corrected.stderr)
     );
 }
+
+#[cfg(unix)]
+fn current_compose_supports_complete_config() -> bool {
+    Command::new("docker")
+        .args([
+            "compose",
+            "--profile",
+            "*",
+            "--all-resources",
+            "config",
+            "--help",
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[cfg(unix)]
+fn runtime_fixture_source(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/runtime-resources/compose")
+        .join(name)
+}
+
+#[cfg(unix)]
+fn real_compose_fixture(name: &str) -> (RuntimeFixture, EnvironmentIdentity) {
+    let manifest = "version: 2\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\nresources:\n  compose:\n    files: [compose.yaml]\n    exports:\n      - service: web\n        target: 8080\n        protocol: tcp\n        env: WEB_PORT\n        value: port\n";
+    let fixture = RuntimeFixture::with_manifest(manifest);
+    std::fs::copy(
+        runtime_fixture_source(name),
+        fixture.root.join("compose.yaml"),
+    )
+    .unwrap();
+    let identity = EnvironmentIdentity::resolve(&fixture.root, "local", None).unwrap();
+    (fixture, identity)
+}
+
+#[cfg(unix)]
+fn assert_real_compose_fixture(name: &str, expected: Option<(&str, &str, &str)>) {
+    let (fixture, identity) = real_compose_fixture(name);
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    if let Some((code, resource, evidence)) = expected {
+        assert_eq!(output.status.code(), Some(2), "{name}");
+        let recovery = format!(
+            "autospec runtime env normalize-compose --repo '{}' --check",
+            fixture.root.display()
+        );
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!(
+                "{code}: {resource}={evidence} (environment {}; recovery: {recovery})\n",
+                identity.environment_id
+            )
+        );
+    } else {
+        assert!(output.status.success(), "{name}");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_current_plugin_drives_the_committed_fixture_matrix() {
+    if !current_compose_supports_complete_config() {
+        eprintln!("SKIP: current Docker Compose with --all-resources is unavailable");
+        return;
+    }
+    assert_real_compose_fixture("safe.yaml", None);
+    for (name, code, resource, evidence) in COMPOSE_UNSAFE_FIXTURES {
+        assert_real_compose_fixture(name, Some((code, resource, evidence)));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_current_plugin_includes_inactive_services_and_unused_resources() {
+    if !current_compose_supports_complete_config() {
+        eprintln!("SKIP: current Docker Compose with --all-resources is unavailable");
+        return;
+    }
+    for name in ["container-name.yaml", "global-name.yaml"] {
+        let (fixture, _) = real_compose_fixture(name);
+        let output = fixture
+            .command()
+            .args(["runtime", "env", "up", "--repo"])
+            .arg(&fixture.root)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(2), "{name}");
+    }
+}
+
+#[cfg(unix)]
+const COMPOSE_UNSAFE_FIXTURES: [(&str, &str, &str, &str); 7] = [
+    (
+        "fixed-port.yaml",
+        "COMPOSE_FIXED_PORT",
+        "services.web.ports[0].published",
+        "8080",
+    ),
+    (
+        "container-name.yaml",
+        "COMPOSE_CONTAINER_NAME",
+        "services.web.container_name",
+        "fixed-web",
+    ),
+    (
+        "host-network.yaml",
+        "COMPOSE_HOST_NETWORK",
+        "services.web.network_mode",
+        "host",
+    ),
+    (
+        "global-name.yaml",
+        "COMPOSE_GLOBAL_NAME",
+        "networks.private.name",
+        "global-network",
+    ),
+    (
+        "fixed-ip.yaml",
+        "COMPOSE_FIXED_ADDRESS",
+        "services.web.networks.private.ipv4_address",
+        "10.0.0.8",
+    ),
+    (
+        "external.yaml",
+        "COMPOSE_EXTERNAL_UNDECLARED",
+        "networks.company-vpn.external",
+        "company-vpn",
+    ),
+    (
+        "writable-bind.yaml",
+        "COMPOSE_WRITABLE_BIND_OUTSIDE_WORKTREE",
+        "services.web.volumes[0].source",
+        "/tmp/shared-data",
+    ),
+];

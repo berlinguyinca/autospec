@@ -110,7 +110,7 @@ impl PolicyContext {
             evidence,
             recovery_command: format!(
                 "autospec runtime env normalize-compose --repo {} --check",
-                self.repo.display()
+                super::shell_quote(&self.repo.display().to_string())
             ),
         }
     }
@@ -285,11 +285,10 @@ fn evaluate_named_resources(
             continue;
         };
         for (logical_key, settings) in resources {
-            let is_shared_external = settings.get("external").is_some_and(external_enabled)
-                && shared.iter().any(|key| key == logical_key);
+            let is_external = settings.get("external").is_some_and(external_enabled);
             if let Some(value) = settings.get("name").filter(|value| {
                 value.as_str() != Some(&format!("{}_{logical_key}", plan.project_name))
-                    && !is_shared_external
+                    && !is_external
             }) {
                 diagnostics.push(context.diagnostic(
                     "COMPOSE_GLOBAL_NAME",
@@ -297,9 +296,7 @@ fn evaluate_named_resources(
                     evidence(value),
                 ));
             }
-            if settings.get("external").is_some_and(external_enabled)
-                && !shared.iter().any(|key| key == logical_key)
-            {
+            if is_external && !shared.iter().any(|key| key == logical_key) {
                 diagnostics.push(context.diagnostic(
                     "COMPOSE_EXTERNAL_UNDECLARED",
                     format!("{kind}.{logical_key}.external"),

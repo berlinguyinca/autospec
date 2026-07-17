@@ -36,7 +36,7 @@ impl ComposeAdapter {
         context: &RuntimeContext,
     ) -> Result<Vec<u8>, CommandFailure> {
         let mut command = Command::new("docker");
-        command.arg("compose");
+        command.args(["compose", "--profile", "*", "--all-resources"]);
         for file in &plan.files {
             command.arg("-f").arg(file);
         }
@@ -59,9 +59,7 @@ impl ComposeAdapter {
             Ok(output.stdout)
         } else {
             Err(CommandFailure::status(
-                String::from_utf8_lossy(&output.stderr)
-                    .trim_end()
-                    .to_string(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
                 output.status.code().unwrap_or(2),
             ))
         }
