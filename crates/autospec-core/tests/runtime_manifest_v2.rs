@@ -37,6 +37,28 @@ fn v2_yaml_rejects_unknown_nested_mode_and_top_level_keys() {
 }
 
 #[test]
+fn malformed_quoted_v2_declaration_cannot_fall_back_to_legacy_parsing() {
+    let source = "\"version\": \"2\"\nmodes:\n  local:\n    command: true\nbroken: [\n";
+
+    let error = RuntimeManifest::parse(source).expect_err("malformed v2 YAML remains a v2 error");
+
+    assert!(error
+        .to_string()
+        .contains("could not parse runtime manifest YAML"));
+}
+
+#[test]
+fn v2_mode_environment_rejects_duplicate_names() {
+    let source = "version: 2\nmodes:\n  local:\n    command: true\n    env:\n      FEATURE_FLAG: one\n      FEATURE_FLAG: two\n";
+
+    let error = RuntimeManifest::parse(source).expect_err("duplicate mode environment is rejected");
+
+    assert!(error
+        .to_string()
+        .contains("duplicate environment name: FEATURE_FLAG"));
+}
+
+#[test]
 fn export_protocol_and_value_combinations_are_constrained() {
     for (protocol, value) in [
         ("http", "port"),

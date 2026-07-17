@@ -222,8 +222,18 @@ fn manifest_version(source: &str) -> Option<String> {
             return None;
         }
         let (key, value) = split_mapping(line)?;
-        (key == "version").then(|| unquote(value))
+        (unquote(key) == "version").then(|| tolerant_scalar(value))
     })
+}
+
+fn tolerant_scalar(value: &str) -> String {
+    let value = value.trim();
+    let quoted = value
+        .chars()
+        .next()
+        .filter(|quote| matches!(quote, '\'' | '"'))
+        .and_then(|quote| value[1..].find(quote).map(|end| &value[..=end + 1]));
+    unquote(quoted.unwrap_or_else(|| value.split_whitespace().next().unwrap_or(value)))
 }
 
 fn parse_legacy_fields(

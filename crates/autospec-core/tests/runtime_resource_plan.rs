@@ -242,7 +242,6 @@ fn compose_command_detection_uses_shell_command_positions() {
     for command in [
         "printf 'docker compose up'",
         "printf docker compose up # docker compose up",
-        "sh -c 'docker compose up'",
     ] {
         std::fs::write(
             repo.path().join(".autospec/runtime.yml"),
@@ -257,6 +256,13 @@ fn compose_command_detection_uses_shell_command_positions() {
         "printf ready; docker compose up",
         "printf ready && /usr/bin/docker-compose up",
         "docker \\\n      compose up",
+        "sh -c 'docker compose up'",
+        "exec docker compose up",
+        "env FOO=bar docker compose up",
+        "sudo docker compose up",
+        concat!("docker --con", "text local compose up"),
+        ">log docker compose up",
+        "if docker compose up; then printf ready; fi",
     ] {
         std::fs::write(
             repo.path().join(".autospec/runtime.yml"),

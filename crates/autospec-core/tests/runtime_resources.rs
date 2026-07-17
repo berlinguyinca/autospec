@@ -3,9 +3,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use autospec_core::runtime_env::{
-    load_generation_token, read_json, write_json_atomic, EnvironmentIdentity, EnvironmentLifecycle,
-    EnvironmentOwner, IsolationDiagnostic, OwnedVolume, ResolvedExport, ResourceInventory,
-    SessionRecord,
+    load_generation_token, read_json, write_json_atomic, ComposePlan, EnvironmentIdentity,
+    EnvironmentLifecycle, EnvironmentOwner, IsolationDiagnostic, OwnedVolume, ResolvedExport,
+    ResourceInventory, SessionRecord,
 };
 
 static NEXT_TEMP_REPO: AtomicUsize = AtomicUsize::new(0);
@@ -79,6 +79,23 @@ fn inventory_json_preserves_resource_ids_and_ports() {
         serde_json::from_str::<ResourceInventory>(&encoded).unwrap(),
         inventory
     );
+}
+
+#[test]
+fn legacy_compose_plan_json_defaults_new_shared_resource_fields() {
+    let legacy = r#"{
+        "isolation":"Managed",
+        "files":["compose.yaml"],
+        "project_name":"agent_legacy",
+        "exports":[],
+        "preserve_volumes":[]
+    }"#;
+
+    let plan =
+        serde_json::from_str::<ComposePlan>(legacy).expect("schema-v1 plan remains readable");
+
+    assert!(plan.shared_networks.is_empty());
+    assert!(plan.shared_volumes.is_empty());
 }
 
 #[test]

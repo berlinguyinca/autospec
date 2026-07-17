@@ -3,8 +3,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use getrandom::fill;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::{EnvironmentIdentity, RuntimeEnvError};
@@ -93,9 +92,7 @@ impl ResourcePlan {
 fn validate_off_override(key: &str, value: Option<&str>) -> Result<(), RuntimeEnvError> {
     match value {
         None | Some("off") => Ok(()),
-        Some(value) => Err(RuntimeEnvError::new(format!(
-            "unsupported {key} value: {value:?}; expected 'off'"
-        ))),
+        Some(_) => Err(RuntimeEnvError::new(format!("{key} must be 'off'"))),
     }
 }
 
@@ -201,7 +198,9 @@ pub struct ComposePlan {
     pub project_name: String,
     pub exports: Vec<ComposeExport>,
     pub preserve_volumes: Vec<String>,
+    #[serde(default)]
     pub shared_networks: Vec<String>,
+    #[serde(default)]
     pub shared_volumes: Vec<String>,
 }
 

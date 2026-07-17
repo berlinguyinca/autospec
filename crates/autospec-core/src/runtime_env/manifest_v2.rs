@@ -122,6 +122,11 @@ fn parse_mode_environment(fields: &Mapping) -> Result<Vec<(String, String)>, Run
             .ok_or_else(|| {
                 RuntimeEnvError::new(format!("runtime environment {key} must be a scalar"))
             })?;
+        if environment.iter().any(|(existing, _)| existing == &key) {
+            return Err(RuntimeEnvError::new(format!(
+                "duplicate environment name: {key}"
+            )));
+        }
         environment.push((key, value));
     }
     Ok(environment)
