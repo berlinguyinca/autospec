@@ -177,6 +177,25 @@ fn linked_worktree_identity_uses_git_root_and_worktree_specific_generation() {
     );
 }
 
+#[test]
+fn generation_loader_recovers_an_interrupted_empty_initialization() {
+    let repository = TempRepo::with_files(&[("tracked.txt", "tracked\n")]);
+    run_git(repository.path(), &["init"]);
+    let git_dir = git_output(
+        repository.path(),
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
+    );
+    let generation_path = PathBuf::from(git_dir).join("autospec-runtime-generation");
+    std::fs::write(&generation_path, "").expect("seed interrupted generation creation");
+
+    let token = load_generation_token(repository.path())
+        .expect("generation loader recovers")
+        .expect("Git repository gets a generation");
+
+    assert_eq!(token.len(), 32);
+    assert_eq!(std::fs::read_to_string(generation_path).unwrap(), token);
+}
+
 fn run_git(directory: &Path, arguments: &[&str]) {
     let output = Command::new("git")
         .arg("-C")

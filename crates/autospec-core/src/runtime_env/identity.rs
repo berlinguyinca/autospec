@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -55,57 +55,58 @@ pub fn load_generation_token(repo: &Path) -> Result<Option<String>, RuntimeEnvEr
         return Ok(None);
     };
     let path = git_dir.join(GENERATION_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(token) => return Ok(Some(validate_token(token, &path)?)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(RuntimeEnvError::new(format!(
-                "could not read runtime generation {}: {error}",
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| {
+            RuntimeEnvError::new(format!(
+                "could not open runtime generation {}: {error}",
                 path.display()
-            )));
-        }
+            ))
+        })?;
+    file.lock().map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "could not lock runtime generation {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut existing = String::new();
+    file.read_to_string(&mut existing).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "could not read runtime generation {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !existing.is_empty() {
+        return validate_token(existing, &path).map(Some);
     }
 
+    let token = random_token()?;
+    file.rewind()
+        .and_then(|()| file.write_all(token.as_bytes()))
+        .and_then(|()| file.set_len(token.len() as u64))
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            RuntimeEnvError::new(format!(
+                "could not write runtime generation {}: {error}",
+                path.display()
+            ))
+        })?;
+    sync_directory(&git_dir)?;
+    Ok(Some(token))
+}
+
+fn random_token() -> Result<String, RuntimeEnvError> {
     let mut random = [0_u8; 16];
     fill(&mut random).map_err(|error| {
         RuntimeEnvError::new(format!(
             "could not generate runtime generation token: {error}"
         ))
     })?;
-    let token = random
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    match options.open(&path) {
-        Ok(mut file) => {
-            file.write_all(token.as_bytes())
-                .and_then(|()| file.sync_all())
-                .map_err(|error| {
-                    RuntimeEnvError::new(format!(
-                        "could not write runtime generation {}: {error}",
-                        path.display()
-                    ))
-                })?;
-            sync_directory(&git_dir)?;
-            Ok(Some(token))
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            std::fs::read_to_string(&path)
-                .map_err(|error| {
-                    RuntimeEnvError::new(format!(
-                        "could not read runtime generation {}: {error}",
-                        path.display()
-                    ))
-                })
-                .and_then(|token| validate_token(token, &path).map(Some))
-        }
-        Err(error) => Err(RuntimeEnvError::new(format!(
-            "could not create runtime generation {}: {error}",
-            path.display()
-        ))),
-    }
+    Ok(random.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 fn resolve_git_path(repo: &Path, selector: &str) -> Result<Option<PathBuf>, RuntimeEnvError> {
