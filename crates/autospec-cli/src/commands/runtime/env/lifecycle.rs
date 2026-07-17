@@ -191,8 +191,12 @@ fn provision_fresh(
     if let Err(error) = MavenAdapter::configure(plan.maven.as_ref(), context, &mut state, layout) {
         return cleanup_failed(layout, Some(&mut owner), error);
     }
-    super::write_state(context, &state)?;
-    super::run_mode_command(command, context, Some(&state), bypassed)?;
+    if let Err(error) = super::write_state(context, &state) {
+        return cleanup_failed(layout, Some(&mut owner), error);
+    }
+    if let Err(error) = super::run_mode_command(command, context, Some(&state), bypassed) {
+        return cleanup_failed(layout, Some(&mut owner), error);
+    }
     write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Active)?;
     Ok(state)
 }

@@ -16,7 +16,7 @@ mod shell_command;
 pub use diagnostic::IsolationDiagnostic;
 pub use identity::{load_generation_token, EnvironmentIdentity};
 pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
-pub use maven::{MavenArgs, MavenPurgeTarget};
+pub use maven::{MavenArgPlatform, MavenArgs, MavenPurgeTarget};
 pub use resources::{
     read_json, write_json_atomic, ComposeExport, ComposeIsolation, ComposePlan,
     ComposeResourceConfig, EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue,

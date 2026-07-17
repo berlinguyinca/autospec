@@ -3,7 +3,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use autospec_core::runtime_env::{MavenArgs, ResourceInventory};
+use autospec_core::runtime_env::{
+    EnvironmentLifecycle, EnvironmentOwner, MavenArgs, ResourceInventory,
+};
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
@@ -185,6 +187,29 @@ fn ordinary_down_retains_prefix_and_purge_removes_only_owned_content() {
     assert_success(&down(&fixture, true));
     assert!(!owned.exists());
     assert_eq!(std::fs::read_to_string(cached).unwrap(), "shared");
+}
+
+#[test]
+fn failed_mode_command_records_cleanup_failed_and_explicit_purge_recovers() {
+    let fixture = MavenFixture::new("4.0.0-rc-5");
+    std::fs::write(
+        fixture.root.join(".autospec/runtime.yml"),
+        "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'exit 41'\n",
+    )
+    .unwrap();
+
+    let failed = fixture.up();
+    assert_eq!(failed.status.code(), Some(41));
+    let environment = fixture.environment();
+    let owner: EnvironmentOwner =
+        autospec_core::runtime_env::read_json(&environment.join("owner.json")).unwrap();
+    assert_eq!(owner.lifecycle, EnvironmentLifecycle::CleanupFailed);
+    let owned = fixture.inventory().maven_local_prefix.unwrap();
+    std::fs::create_dir_all(&owned).unwrap();
+
+    assert_success(&down(&fixture, true));
+    assert!(!owned.exists());
+    assert!(!environment.join("owner.json").exists());
 }
 
 #[test]

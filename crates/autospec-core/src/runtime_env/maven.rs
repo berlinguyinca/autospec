@@ -1,11 +1,13 @@
 #![allow(clippy::result_large_err)] // Public plan contract returns the schema-stable diagnostic directly.
 
-use std::ffi::{OsStr, OsString};
-use std::iter::Peekable;
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
-use std::str::Chars;
 
 use super::{IsolationDiagnostic, MavenPlan};
+
+mod arguments;
+
+pub use arguments::{MavenArgPlatform, MavenArgs};
 
 const MANAGED_PROPERTIES: [(&str, &str); 4] = [
     ("aether.lrm.enhanced.split", "true"),
@@ -13,130 +15,6 @@ const MANAGED_PROPERTIES: [(&str, &str); 4] = [
     ("aether.lrm.enhanced.localPrefix", ""),
     ("aether.system.named.factory", "file-lock"),
 ];
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MavenArgs {
-    tokens: Vec<OsString>,
-}
-
-impl MavenArgs {
-    pub fn parse(source: &str) -> Result<Self, IsolationDiagnostic> {
-        ArgumentParser::new(source)
-            .parse()
-            .map(|tokens| Self { tokens })
-    }
-
-    pub fn tokens(&self) -> &[OsString] {
-        &self.tokens
-    }
-
-    pub fn append_property(&mut self, key: &str, value: &str) {
-        self.tokens.push(OsString::from(format!("-D{key}={value}")));
-    }
-
-    pub fn render(&self) -> String {
-        self.tokens
-            .iter()
-            .map(|token| quote_token(token.as_os_str()))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-}
-
-struct ArgumentParser<'a> {
-    characters: Peekable<Chars<'a>>,
-    tokens: Vec<OsString>,
-    token: String,
-    quote: Option<char>,
-    started: bool,
-}
-
-impl<'a> ArgumentParser<'a> {
-    fn new(source: &'a str) -> Self {
-        Self {
-            characters: source.chars().peekable(),
-            tokens: Vec::new(),
-            token: String::new(),
-            quote: None,
-            started: false,
-        }
-    }
-
-    fn parse(mut self) -> Result<Vec<OsString>, IsolationDiagnostic> {
-        while let Some(character) = self.characters.next() {
-            self.consume(character)?;
-        }
-        self.finish()
-    }
-
-    fn consume(&mut self, character: char) -> Result<(), IsolationDiagnostic> {
-        match self.quote {
-            Some(marker) if character == marker => self.quote = None,
-            Some('\'') => self.token.push(character),
-            Some('"') if character == '\\' => self.consume_double_escape(),
-            Some(_) => self.token.push(character),
-            None if character == '\'' || character == '"' => self.open_quote(character),
-            None if character.is_whitespace() => self.flush(),
-            None if character == '\\' => self.consume_escape()?,
-            None => self.push(character),
-        }
-        Ok(())
-    }
-
-    fn consume_double_escape(&mut self) {
-        match self.characters.peek().copied() {
-            Some(next) if next == '"' || next == '\\' => {
-                self.characters.next();
-                self.token.push(next);
-            }
-            _ => self.token.push('\\'),
-        }
-    }
-
-    fn consume_escape(&mut self) -> Result<(), IsolationDiagnostic> {
-        let next = self.characters.next().ok_or_else(|| {
-            diagnostic(
-                "MAVEN_ARGUMENT_PARSE",
-                "MAVEN_ARGS",
-                "trailing escape in MAVEN_ARGS",
-                "",
-            )
-        })?;
-        self.push(next);
-        Ok(())
-    }
-
-    fn open_quote(&mut self, marker: char) {
-        self.quote = Some(marker);
-        self.started = true;
-    }
-
-    fn push(&mut self, character: char) {
-        self.token.push(character);
-        self.started = true;
-    }
-
-    fn flush(&mut self) {
-        if self.started {
-            self.tokens
-                .push(OsString::from(std::mem::take(&mut self.token)));
-            self.started = false;
-        }
-    }
-
-    fn finish(mut self) -> Result<Vec<OsString>, IsolationDiagnostic> {
-        if self.quote.is_some() {
-            return Err(diagnostic(
-                "MAVEN_ARGUMENT_PARSE",
-                "MAVEN_ARGS",
-                "unterminated quote in MAVEN_ARGS",
-                "",
-            ));
-        }
-        self.flush();
-        Ok(self.tokens)
-    }
-}
 
 impl MavenPlan {
     pub fn arguments(
@@ -153,9 +31,14 @@ impl MavenPlan {
         });
         let parsed = MavenArgs::parse(existing)?;
         let mut arguments = MavenArgs { tokens: Vec::new() };
-        for token in parsed.tokens {
-            if let Some(token) = caller_token(token, &expected, environment_id)? {
-                arguments.tokens.push(token);
+        let mut index = 0;
+        while index < parsed.tokens.len() {
+            let consumed = managed_property_at(&parsed.tokens, index, &expected, environment_id)?;
+            if consumed == 0 {
+                arguments.tokens.push(parsed.tokens[index].clone());
+                index += 1;
+            } else {
+                index += consumed;
             }
         }
         for (key, value) in &expected {
@@ -165,20 +48,25 @@ impl MavenPlan {
     }
 }
 
-fn caller_token(
-    token: OsString,
+fn managed_property_at(
+    tokens: &[OsString],
+    index: usize,
     expected: &[(&str, String); 4],
     environment_id: &str,
-) -> Result<Option<OsString>, IsolationDiagnostic> {
-    let text = token.to_string_lossy();
-    let Some((key, value)) = text
-        .strip_prefix("-D")
+) -> Result<usize, IsolationDiagnostic> {
+    let text = tokens[index].to_string_lossy();
+    let compact = text.strip_prefix("-D").filter(|value| !value.is_empty());
+    let separated = (text == "-D")
+        .then(|| tokens.get(index + 1)?.to_str())
+        .flatten();
+    let Some((key, value)) = compact
+        .or(separated)
         .and_then(|value| value.split_once('='))
     else {
-        return Ok(Some(token));
+        return Ok(0);
     };
     let Some((_, managed_value)) = expected.iter().find(|(managed, _)| *managed == key) else {
-        return Ok(Some(token));
+        return Ok(0);
     };
     if value != managed_value {
         return Err(diagnostic(
@@ -188,7 +76,7 @@ fn caller_token(
             environment_id,
         ));
     }
-    Ok(None)
+    Ok(if compact.is_some() { 1 } else { 2 })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -267,19 +155,6 @@ fn validate_environment_id(environment_id: &str) -> Result<(), IsolationDiagnost
         ));
     }
     Ok(())
-}
-
-fn quote_token(token: &OsStr) -> String {
-    let value = token.to_string_lossy();
-    if !value.is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "-._/:=+".contains(character))
-    {
-        value.into_owned()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
 }
 
 fn purge_diagnostic(code: &str, target: &Path, environment_id: &str) -> IsolationDiagnostic {
