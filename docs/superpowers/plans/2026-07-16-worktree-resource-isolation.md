@@ -375,6 +375,7 @@ git commit -m "feat: plan Maven and Compose resources from runtime v2"
 - Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
 - Modify: `crates/autospec-cli/tests/runtime_resources.rs`
 - Create: `crates/autospec-cli/tests/runtime_sessions.rs`
+- Create: `crates/autospec-cli/tests/runtime_session_security.rs`
 - Create: `crates/autospec-cli/tests/runtime_state_reconciliation.rs`
 
 **Interfaces:**
@@ -420,7 +421,7 @@ Construct `RuntimeContext` and `StateLayout` from `ResourcePlan.identity.environ
 
 Preserve `session --keep-alive`: final release records zero live sessions but suppresses automatic teardown, allowing an explicit later `down`. Without `--keep-alive`, final release tears down ephemeral resources while retaining the Maven installed-artifact prefix.
 
-Run harnesses under a supervised internal session worker. The worker, not the outer CLI process, owns the session lock and heartbeat; if the outer process is killed, the worker keeps the environment live until the harness exits. Monitoring failures terminate and reap the harness before releasing the session lock.
+Run harnesses under a supervised internal session worker. The worker, not the outer CLI process, owns the session lock and heartbeat; if the outer process is killed, the worker keeps the environment live until the harness exits. Authenticate the internal worker with a random, one-shot handoff that external harnesses and manifest commands never inherit. Monitoring failures terminate and reap the complete harness process group before releasing the session lock. Use the repository's structured `kill -- -PGID` process-group boundary; keep raw signal FFI confined to the existing independently reviewed fixed-signal handler.
 
 Persist owner lifecycle before each external side effect. On `up`, compare the plan digest and inventory: finish an idempotent recorded step or enter `TearingDown` and remove recorded partial resources before retrying. Never treat the presence of `env` as proof that provisioning completed.
 
@@ -428,14 +429,14 @@ Treat any subset of `owner.json`, `plan.json`, and `inventory.json` as partial a
 
 - [ ] **Step 4: Run session, signal, and state regressions**
 
-Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p autospec-core --test runtime_session && cargo test -p autospec-core --test runtime_resources && cargo test -p autospec-cli --test runtime_sessions -- --nocapture && cargo test -p autospec-cli --test runtime_resources`
+Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p autospec-core --test runtime_session && cargo test -p autospec-core --test runtime_resources && cargo test -p autospec-cli --test runtime_sessions -- --nocapture && cargo test -p autospec-cli --test runtime_session_security -- --nocapture && cargo test -p autospec-cli --test runtime_resources`
 
 Expected: overlapping sessions share state, signals preserve child exit semantics, partial state reconciles, and teardown occurs once after the final release.
 
 - [ ] **Step 5: Commit reference-counted sessions**
 
 ```bash
-git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/src/runtime_env/session.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-core/tests/runtime_session.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/isolation.rs crates/autospec-cli/src/commands/runtime/env/lifecycle.rs crates/autospec-cli/src/commands/runtime/env/session.rs crates/autospec-cli/src/commands/runtime/env/state.rs crates/autospec-cli/tests/runtime_commands.rs crates/autospec-cli/tests/runtime_resources.rs crates/autospec-cli/tests/runtime_sessions.rs crates/autospec-cli/tests/runtime_state_reconciliation.rs
+git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/src/runtime_env/session.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-core/tests/runtime_session.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/isolation.rs crates/autospec-cli/src/commands/runtime/env/lifecycle.rs crates/autospec-cli/src/commands/runtime/env/session.rs crates/autospec-cli/src/commands/runtime/env/state.rs crates/autospec-cli/tests/runtime_commands.rs crates/autospec-cli/tests/runtime_resources.rs crates/autospec-cli/tests/runtime_sessions.rs crates/autospec-cli/tests/runtime_session_security.rs crates/autospec-cli/tests/runtime_state_reconciliation.rs
 git commit -m "feat: reference-count shared worktree runtime sessions"
 ```
 
