@@ -250,6 +250,31 @@ pub struct ResolvedExport {
     pub port: u16,
 }
 
+impl ResolvedExport {
+    pub fn render(&self, declaration: &ComposeExport) -> Result<String, RuntimeEnvError> {
+        if self.env != declaration.env || self.host != "127.0.0.1" || self.port == 0 {
+            return Err(RuntimeEnvError::new(
+                "resolved Compose export does not match its validated declaration",
+            ));
+        }
+        match (&declaration.protocol, &declaration.value) {
+            (ExportProtocol::Http, ExportValue::Url) => {
+                Ok(format!("http://{}:{}", self.host, self.port))
+            }
+            (ExportProtocol::Https, ExportValue::Url) => {
+                Ok(format!("https://{}:{}", self.host, self.port))
+            }
+            (ExportProtocol::Tcp | ExportProtocol::Udp, ExportValue::Port) => {
+                Ok(self.port.to_string())
+            }
+            (_, ExportValue::HostPort) => Ok(format!("{}:{}", self.host, self.port)),
+            _ => Err(RuntimeEnvError::new(
+                "resolved Compose export has an incompatible value type",
+            )),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ResourceInventory {
     pub schema_version: u32,
@@ -260,6 +285,21 @@ pub struct ResourceInventory {
     pub volumes: Vec<OwnedVolume>,
     pub exports: Vec<ResolvedExport>,
     pub maven_local_prefix: Option<PathBuf>,
+}
+
+impl ResourceInventory {
+    pub fn deletable_volumes(&self, preserved: &[String]) -> Vec<String> {
+        self.volumes
+            .iter()
+            .filter(|volume| {
+                volume
+                    .logical_key
+                    .as_ref()
+                    .is_none_or(|key| !preserved.contains(key))
+            })
+            .map(|volume| volume.id.clone())
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

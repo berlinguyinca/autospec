@@ -2,8 +2,8 @@ use std::fs;
 use std::path::Path;
 
 use autospec_core::runtime_env::{
-    EnvironmentLifecycle, EnvironmentOwner, ResourceInventory, ResourcePlan, RuntimeContext,
-    RuntimeState,
+    ComposeIsolation, EnvironmentLifecycle, EnvironmentOwner, ResourceInventory, ResourcePlan,
+    RuntimeContext, RuntimeState,
 };
 
 use crate::commands::CommandFailure;
@@ -44,7 +44,11 @@ pub(super) fn teardown_locked(
     validate_authoritative(&authoritative, desired)?;
     validate_teardown_lifecycle(&authoritative.owner.lifecycle)?;
     let mut owner = authoritative.owner;
-    if inventory_has_teardown_blockers(&authoritative.inventory) {
+    let managed_compose = desired
+        .compose
+        .as_ref()
+        .is_some_and(|compose| compose.isolation == ComposeIsolation::Managed);
+    if inventory_has_teardown_blockers(&authoritative.inventory) && !managed_compose {
         write_lifecycle(&layout, &mut owner, EnvironmentLifecycle::CleanupFailed)?;
         return Err(CommandFailure::diagnostic(
             "RUNTIME_INVENTORY_NOT_EMPTY: refusing cleanup of recorded resources",
@@ -57,6 +61,11 @@ pub(super) fn teardown_locked(
         {
             return cleanup_failed(&layout, Some(&mut owner), error);
         }
+    }
+    if let Err(error) =
+        ComposeAdapter::down_owned(desired.compose.as_ref(), desired, context, &layout)
+    {
+        return cleanup_failed(&layout, Some(&mut owner), error);
     }
     let retained_inventory: ResourceInventory = match super::state::read_json(&layout.inventory) {
         Ok(inventory) => inventory,
@@ -179,6 +188,7 @@ fn provision_fresh(
     plan: &ResourcePlan,
     bypassed: bool,
 ) -> Result<RuntimeState, CommandFailure> {
+    ComposeAdapter::reject_caller_project_name(plan.compose.as_ref())?;
     let mut owner = initialize_authoritative_state(layout, plan)?;
     let mut state = super::state_from_context(context)?;
     let command = context
@@ -189,8 +199,18 @@ fn provision_fresh(
         return Err(super::missing_mode_command(context));
     }
     write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Provisioning)?;
-    ComposeAdapter::validate_resolved_model(plan.compose.as_ref(), context)?;
+    let resolved_compose = ComposeAdapter::validate_resolved_model(plan.compose.as_ref(), context)?;
     if let Err(error) = MavenAdapter::configure(plan.maven.as_ref(), context, &mut state, layout) {
+        return cleanup_failed(layout, Some(&mut owner), error);
+    }
+    if let Err(error) = ComposeAdapter::up(
+        plan.compose.as_ref(),
+        plan,
+        resolved_compose.as_deref(),
+        context,
+        &mut state,
+        layout,
+    ) {
         return cleanup_failed(layout, Some(&mut owner), error);
     }
     if let Err(error) = super::write_state(context, &state) {

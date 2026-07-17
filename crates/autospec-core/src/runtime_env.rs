@@ -14,7 +14,7 @@ mod resources;
 mod session;
 mod shell_command;
 
-pub use compose::ComposePolicy;
+pub use compose::{ComposeOverride, ComposeOwnership, ComposePolicy};
 pub use diagnostic::IsolationDiagnostic;
 pub use identity::{load_generation_token, EnvironmentIdentity};
 pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
@@ -205,6 +205,12 @@ impl RuntimeState {
             .iter()
             .find(|(candidate, _)| candidate == key)
             .map(|(_, value)| value.as_str())
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
     }
 
     pub fn replace_existing_value(

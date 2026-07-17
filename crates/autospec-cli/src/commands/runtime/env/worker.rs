@@ -13,19 +13,6 @@ const LEGACY_SESSION_WORKER_ENV: &str = "AUTOSPEC_RUNTIME_SESSION_WORKER";
 const SESSION_HANDOFF_ENV: &str = "AUTOSPEC_RUNTIME_SESSION_HANDOFF";
 const SESSION_TOKEN_ENV: &str = "AUTOSPEC_RUNTIME_SESSION_TOKEN";
 const SESSION_HANDOFF_PREFIX: &str = "autospec-runtime-session-handoff-";
-const STATE_ENVIRONMENT_KEYS: [&str; 10] = [
-    "AGENT_ENV_ID",
-    "AGENT_ENV_MODE",
-    "AGENT_ENV_REPO",
-    "AGENT_ENV_MANIFEST",
-    "AGENT_FRONTEND_PORT",
-    "AGENT_BACKEND_PORT",
-    "AGENT_PUBLIC_URL",
-    "AUTOSPEC_PUBLIC_URL",
-    "COMPOSE_PROJECT_NAME",
-    "MAVEN_ARGS",
-];
-
 struct SessionWorkerHandoff {
     path: PathBuf,
     token: String,
@@ -140,19 +127,12 @@ pub(super) fn spawn_direct_command(
 
 pub(super) fn configure_runtime_environment(
     process: &mut Command,
-    context: &RuntimeContext,
+    _context: &RuntimeContext,
     state: &RuntimeState,
     bypassed: bool,
 ) {
-    for key in STATE_ENVIRONMENT_KEYS {
-        if let Some(value) = state.value(key) {
-            process.env(key, value);
-        }
-    }
-    for (key, _) in context.mode.env() {
-        if let Some(value) = state.value(key) {
-            process.env(key, value);
-        }
+    for (key, value) in state.values() {
+        process.env(key, value);
     }
     if bypassed {
         process.env("AUTOSPEC_ISOLATION_BYPASSED", "1");
@@ -161,6 +141,7 @@ pub(super) fn configure_runtime_environment(
 
 pub(super) fn scrub_external_environment(command: &mut Command) {
     command
+        .env_remove("COMPOSE_PROJECT_NAME")
         .env_remove(LEGACY_SESSION_WORKER_ENV)
         .env_remove(SESSION_HANDOFF_ENV)
         .env_remove(SESSION_TOKEN_ENV);

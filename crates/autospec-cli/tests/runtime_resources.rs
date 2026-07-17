@@ -6,8 +6,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::os::unix::fs::PermissionsExt;
 
 use autospec_core::runtime_env::{
-    ComposeIsolation, ComposePlan, EnvironmentIdentity, EnvironmentLifecycle, EnvironmentOwner,
-    MavenIsolation, MavenPlan, ResourcePlan,
+    read_json, ComposeIsolation, ComposePlan, EnvironmentIdentity, EnvironmentLifecycle,
+    EnvironmentOwner, MavenIsolation, MavenPlan, ResourceInventory, ResourcePlan,
 };
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
@@ -49,17 +49,56 @@ impl RuntimeFixture {
         let bin = self.root.join("fake-bin");
         std::fs::create_dir_all(&bin).expect("create fake Docker directory");
         let docker = bin.join("docker");
-        std::fs::write(
-            &docker,
-            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FAKE_DOCKER_LOG\"\nif [ \"${FAKE_DOCKER_EXIT:-0}\" -ne 0 ]; then\n  printf 'compose config failed \\n\\n' >&2\n  exit \"$FAKE_DOCKER_EXIT\"\nfi\ncat \"$FAKE_DOCKER_MODEL\"\n",
-        )
-        .expect("write fake Docker");
+        let source = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FAKE_DOCKER_LOG\"\ncase \" $* \" in\n  *\" config @@format json \"*)\n    if [ \"${FAKE_DOCKER_EXIT:-0}\" -ne 0 ]; then\n      printf 'compose config failed \\n\\n' >&2\n      exit \"$FAKE_DOCKER_EXIT\"\n    fi\n    cat \"$FAKE_DOCKER_MODEL\" ;;\n  *\" port @@protocol \"*) printf '%s\\n' '127.0.0.1:49152' ;;\n  *) : ;;\nesac\n";
+        std::fs::write(&docker, source.replace("@@", concat!("-", "-")))
+            .expect("write fake Docker");
         let mut permissions = std::fs::metadata(&docker).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&docker, permissions).unwrap();
         let model_path = self.root.join("resolved-model.json");
         std::fs::write(&model_path, serde_json::to_vec(model).unwrap()).unwrap();
         (bin, model_path)
+    }
+
+    #[cfg(unix)]
+    fn install_real_config_docker(&self) -> PathBuf {
+        let bin = self.root.join("real-config-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let docker = bin.join("docker");
+        let source = "#!/bin/sh\ncase \" $* \" in\n  *\" config @@format json \"*) exec \"$REAL_DOCKER\" \"$@\" ;;\n  *\" port @@protocol \"*) printf '%s\\n' '127.0.0.1:49152' ;;\n  *) : ;;\nesac\n";
+        std::fs::write(&docker, source.replace("@@", concat!("-", "-"))).unwrap();
+        let mut permissions = std::fs::metadata(&docker).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&docker, permissions).unwrap();
+        bin
+    }
+
+    #[cfg(unix)]
+    fn install_lifecycle_fake_docker(&self) -> PathBuf {
+        let bin = self.root.join("fake-lifecycle-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let docker = bin.join("docker");
+        let source = r##"#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+case " $* " in
+  *" config @@format json "*) printf '%s\n' '{"services":{"web":{"image":"nginx","ports":[{"target":8080,"protocol":"tcp"}]}},"networks":{"default":{}},"volumes":{"cache":{}}}' ;;
+  *" compose "*" up -d @@remove-orphans "*) : ;;
+  *" compose "*" port @@protocol tcp web 8080 "*) printf '%s\n' '127.0.0.1:49152' ;;
+  *" ps -aq "*) printf '%s\n' 'container-a' ;;
+  *" network ls -q "*) printf '%s\n' 'network-a' ;;
+  *" volume ls -q "*) printf '%s\n' 'volume-a' ;;
+  *"com.docker.compose.volume"*) printf '%s\n' "${FAKE_LOGICAL_VOLUME:-}" ;;
+  *"{{json "*) printf '{"com.autospec.environment-id":"%s","com.autospec.owner-key":"%s","com.autospec.plan-digest":"%s"}\n' "${FAKE_ENVIRONMENT_ID:-}" "${FAKE_OWNER_KEY:-}" "${FAKE_PLAN_DIGEST:-}" ;;
+  *" compose "*" down @@remove-orphans "*) touch "$FAKE_DOCKER_DOWN" ;;
+  *" inspect "*) [ ! -f "$FAKE_DOCKER_DOWN" ] ;;
+  *) : ;;
+esac
+"##;
+        std::fs::write(&docker, source.replace("@@", concat!("-", "-"))).unwrap();
+        let mut permissions = std::fs::metadata(&docker).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&docker, permissions).unwrap();
+        bin
     }
 }
 
@@ -358,6 +397,13 @@ fn compose_manifest(command: &str) -> String {
     )
 }
 
+fn compose_manifest_with_preserved_cache(command: &str) -> String {
+    format!(
+        "{}    preserve_volumes: [cache]\n",
+        compose_manifest(command)
+    )
+}
+
 #[cfg(unix)]
 fn compose_command(fixture: &RuntimeFixture, bin: &Path, model: &Path) -> Command {
     let log = fixture.root.join("docker-arguments.log");
@@ -403,24 +449,29 @@ fn compose_config_orders_files_and_project_before_the_config_subcommand() {
         String::from_utf8_lossy(&output.stderr)
     );
     let arguments = std::fs::read_to_string(fixture.root.join("docker-arguments.log")).unwrap();
-    assert_eq!(
-        arguments.lines().collect::<Vec<_>>(),
-        vec![
-            "compose",
-            "--profile",
-            "*",
-            "--all-resources",
-            "-f",
-            fixture.root.join("compose.yaml").to_str().unwrap(),
-            "-f",
-            fixture.root.join("compose.override.yaml").to_str().unwrap(),
-            "--project-name",
-            project_name.as_str(),
-            "config",
-            "--format",
-            "json"
-        ]
-    );
+    let arguments = arguments.lines().collect::<Vec<_>>();
+    let compose_file = fixture.root.join("compose.yaml");
+    let compose_override = fixture.root.join("compose.override.yaml");
+    let expected = vec![
+        "compose",
+        "--profile",
+        "*",
+        "--all-resources",
+        "-f",
+        compose_file.to_str().unwrap(),
+        "-f",
+        compose_override.to_str().unwrap(),
+        "--project-name",
+        project_name.as_str(),
+        "config",
+        "--format",
+        "json",
+    ];
+    assert_eq!(&arguments[..expected.len()], expected);
+    assert!(arguments
+        .iter()
+        .position(|argument| *argument == "up")
+        .is_some_and(|up| up > expected.len()));
 }
 
 #[test]
@@ -469,6 +520,203 @@ fn compose_config_validation_finishes_before_any_startup_effect() {
         arguments
             .lines()
             .filter(|argument| *argument == "up")
+            .count(),
+        0
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_lifecycle_rejects_caller_project_before_docker_side_effect() {
+    let fixture = RuntimeFixture::with_manifest(&compose_manifest("sh -c 'true'"));
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({}));
+
+    let output = compose_command(&fixture, &bin, &model)
+        .env("COMPOSE_PROJECT_NAME", "caller-owned")
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "COMPOSE_PROJECT_NAME_CALLER_OVERRIDE: the broker owns the Compose project name\n"
+    );
+    assert!(!fixture.root.join("docker-arguments.log").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_lifecycle_records_actual_ids_and_exports_dynamic_state() {
+    let fixture =
+        RuntimeFixture::with_manifest(&compose_manifest("sh -c 'test \"$WEB_PORT\" = 49152'"));
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
+    let bin = fixture.install_lifecycle_fake_docker();
+    let log = fixture.root.join("lifecycle-docker.log");
+
+    let output = fixture
+        .command()
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("FAKE_DOCKER_LOG", &log)
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let identity = EnvironmentIdentity::resolve(&fixture.root, "local", None).unwrap();
+    let inventory: ResourceInventory = read_json(
+        &fixture
+            .state_root
+            .join(identity.environment_id)
+            .join("inventory.json"),
+    )
+    .unwrap();
+    assert_eq!(inventory.containers, vec!["container-a"]);
+    assert_eq!(inventory.networks, vec!["network-a"]);
+    assert_eq!(inventory.volumes[0].id, "volume-a");
+    assert_eq!(inventory.exports[0].port, 49152);
+    let commands = std::fs::read_to_string(log).unwrap();
+    let config_command = format!("config {}format json", concat!("-", "-"));
+    let up_command = format!("up -d {}remove-orphans", concat!("-", "-"));
+    let config = commands
+        .lines()
+        .position(|line| line.ends_with(&config_command))
+        .unwrap();
+    let up = commands
+        .lines()
+        .position(|line| line.ends_with(&up_command))
+        .unwrap();
+    assert!(config < up);
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_lifecycle_ownership_mismatch_records_cleanup_failed_recovery() {
+    let fixture = RuntimeFixture::with_manifest(&compose_manifest("sh -c 'true'"));
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
+    let bin = fixture.install_lifecycle_fake_docker();
+    let log = fixture.root.join("lifecycle-docker.log");
+    let mut command = fixture.command();
+    command
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("FAKE_DOCKER_LOG", &log);
+    let up = command
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    assert!(up.status.success());
+
+    let down = fixture
+        .command()
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("FAKE_DOCKER_LOG", &log)
+        .args(["runtime", "env", "down", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert_eq!(down.status.code(), Some(2));
+    let identity = EnvironmentIdentity::resolve(&fixture.root, "local", None).unwrap();
+    let owner: EnvironmentOwner = read_json(
+        &fixture
+            .state_root
+            .join(&identity.environment_id)
+            .join("owner.json"),
+    )
+    .unwrap();
+    assert_eq!(owner.lifecycle, EnvironmentLifecycle::CleanupFailed);
+    assert_eq!(
+        String::from_utf8(down.stderr).unwrap(),
+        format!(
+            "COMPOSE_OWNERSHIP_MISMATCH: recovery: autospec runtime env down {}repo '{}' {}mode local\n",
+            concat!("-", "-"), fixture.root.display(), concat!("-", "-")
+        )
+    );
+    let down_command = format!("down {}remove-orphans", concat!("-", "-"));
+    assert_eq!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .filter(|line| line.ends_with(&down_command))
+            .count(),
+        0
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_lifecycle_preserves_declared_volume_and_tears_down_exact_owned_stack() {
+    let fixture =
+        RuntimeFixture::with_manifest(&compose_manifest_with_preserved_cache("sh -c 'true'"));
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
+    let bin = fixture.install_lifecycle_fake_docker();
+    let log = fixture.root.join("lifecycle-docker.log");
+    let down_marker = fixture.root.join("docker-down");
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let up = fixture
+        .command()
+        .env("PATH", &path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .env("FAKE_LOGICAL_VOLUME", "cache")
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    assert!(
+        up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    let identity = EnvironmentIdentity::resolve(&fixture.root, "local", None).unwrap();
+    let environment = fixture.state_root.join(&identity.environment_id);
+    let owner: EnvironmentOwner = read_json(&environment.join("owner.json")).unwrap();
+    let plan: ResourcePlan = read_json(&environment.join("plan.json")).unwrap();
+
+    let down = fixture
+        .command()
+        .env("PATH", path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .env("FAKE_DOCKER_DOWN", &down_marker)
+        .env("FAKE_ENVIRONMENT_ID", &identity.environment_id)
+        .env("FAKE_OWNER_KEY", &owner.identity.owner_key)
+        .env("FAKE_PLAN_DIGEST", &plan.digest)
+        .args(["runtime", "env", "down", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert!(
+        down.status.success(),
+        "{}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+    assert!(!environment.join("owner.json").exists());
+    assert_eq!(
+        std::fs::read_to_string(log)
+            .unwrap()
+            .lines()
+            .filter(|line| line.starts_with("volume rm "))
             .count(),
         0
     );
@@ -579,8 +827,14 @@ fn real_compose_fixture(name: &str) -> (RuntimeFixture, EnvironmentIdentity) {
 #[cfg(unix)]
 fn assert_real_compose_fixture(name: &str, expected: Option<(&str, &str, &str)>) {
     let (fixture, identity) = real_compose_fixture(name);
+    let bin = fixture.install_real_config_docker();
     let output = fixture
         .command()
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("REAL_DOCKER", "/usr/bin/docker")
         .args(["runtime", "env", "up", "--repo"])
         .arg(&fixture.root)
         .output()

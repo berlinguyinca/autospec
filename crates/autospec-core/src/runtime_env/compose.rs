@@ -4,6 +4,10 @@ use serde_json::Value;
 
 use super::{ComposePlan, ExportProtocol, IsolationDiagnostic, RuntimeEnvError};
 
+mod runtime;
+
+pub use runtime::{ComposeOverride, ComposeOwnership};
+
 pub struct ComposePolicy;
 
 impl ComposePolicy {
