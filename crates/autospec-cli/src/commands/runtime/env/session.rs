@@ -1,15 +1,14 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
-use std::time::{Duration, Instant};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use autospec_core::runtime_env::{
-    random_session_token, read_json, write_json_atomic, ReleaseDecision, RuntimeContext,
-    RuntimeState, SessionRecord, SessionSet,
+    random_session_token, read_json, write_json_atomic, ReleaseDecision, ResourcePlan,
+    RuntimeContext, RuntimeState, SessionRecord, SessionSet,
 };
 
 use crate::commands::CommandFailure;
@@ -97,6 +96,7 @@ pub(super) fn run_session_command(
     command: &[String],
     context: &RuntimeContext,
     state: &RuntimeState,
+    plan: &ResourcePlan,
     mut session_lease: SessionLease,
     keep_alive: bool,
     bypassed: bool,
@@ -106,34 +106,43 @@ pub(super) fn run_session_command(
         {
             Ok(child) => child,
             Err(error) => {
-                let _ = cleanup_session(context, state, session_lease, true);
+                let _ = cleanup_session(context, state, plan, session_lease, true);
                 return Err(error);
             }
         };
-    let mut child = ChildGuard::new(child);
+    let mut child = ChildGuard::new(child, false);
     let result = wait_for_session_child(child.child(), &mut session_lease);
     match &result {
         Ok(_) => child.disarm(),
         Err(_) => child.terminate(),
     }
     let should_teardown = matches!(&result, Ok(SessionWait::Interrupted(_))) || !keep_alive;
-    let cleanup = cleanup_session(context, state, session_lease, should_teardown);
+    let cleanup = cleanup_session(context, state, plan, session_lease, should_teardown);
     session_result(result, cleanup)
 }
 
 pub(super) fn run_session_supervisor(command: &mut Command) -> Result<(), CommandFailure> {
     prepare_signal_handlers();
-    let mut worker =
-        ChildGuard::new(command.spawn().map_err(|error| {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut worker = ChildGuard::new(
+        command.spawn().map_err(|error| {
             diagnostic(format!("could not start runtime session worker: {error}"))
-        })?);
+        })?,
+        cfg!(unix),
+    );
+    let mut forwarded = false;
     loop {
         #[cfg(unix)]
         {
             let received = RECEIVED_SIGNAL.load(Ordering::Relaxed);
-            if received == 2 || received == 15 {
-                // SAFETY: the worker PID belongs to this process and the signal is fixed.
-                unsafe { kill(worker.child().id() as i32, received) };
+            if !forwarded && (received == 2 || received == 15) {
+                // SAFETY: the worker leads its isolated process group.
+                unsafe { kill(-(worker.child().id() as i32), received) };
+                forwarded = true;
             }
         }
         if let Some(status) = worker.child().try_wait().map_err(wait_error)? {
@@ -144,20 +153,34 @@ pub(super) fn run_session_supervisor(command: &mut Command) -> Result<(), Comman
     }
 }
 
-struct ChildGuard(Option<Child>);
+struct ChildGuard {
+    child: Option<Child>,
+    process_group: bool,
+}
 
 impl ChildGuard {
-    fn new(child: Child) -> Self {
-        Self(Some(child))
+    fn new(child: Child, process_group: bool) -> Self {
+        Self {
+            child: Some(child),
+            process_group,
+        }
     }
     fn child(&mut self) -> &mut Child {
-        self.0.as_mut().expect("child is armed")
+        self.child.as_mut().expect("child is armed")
     }
     fn disarm(&mut self) {
-        self.0.take();
+        self.child.take();
     }
     fn terminate(&mut self) {
-        if let Some(child) = &mut self.0 {
+        if let Some(child) = &mut self.child {
+            #[cfg(unix)]
+            if self.process_group {
+                // SAFETY: the child leads the process group created by the supervisor.
+                unsafe { kill(-(child.id() as i32), 9) };
+            } else {
+                let _ = child.kill();
+            }
+            #[cfg(not(unix))]
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -203,6 +226,7 @@ fn session_result(
 fn cleanup_session(
     context: &RuntimeContext,
     state: &RuntimeState,
+    plan: &ResourcePlan,
     session_lease: SessionLease,
     should_teardown: bool,
 ) -> Result<(), CommandFailure> {
@@ -215,7 +239,7 @@ fn cleanup_session(
     session_lease.release()?;
     let decision = sessions.release(&session_id);
     if should_teardown && decision == ReleaseDecision::TearDown {
-        super::lifecycle::teardown_locked(context, Some(state))?;
+        super::lifecycle::teardown_locked(context, Some(state), plan)?;
     }
     Ok(())
 }

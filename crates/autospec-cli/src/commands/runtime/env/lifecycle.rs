@@ -21,10 +21,10 @@ pub(super) fn provision_locked(
 ) -> Result<RuntimeState, CommandFailure> {
     let layout = layout_for_context(context);
     if let Some(authoritative) = read_authoritative_state(&layout)? {
-        if active_state_matches(&authoritative, plan, context) {
+        validate_authoritative(&authoritative, plan)?;
+        if active_state_matches(&authoritative, context) {
             return super::read_state(context);
         }
-        validate_authoritative(&authoritative, plan)?;
         reconcile_provisioning(context, &layout, authoritative)?;
     } else if context.env_file.is_file() {
         return Err(partial_state(&layout));
@@ -35,29 +35,37 @@ pub(super) fn provision_locked(
 pub(super) fn teardown_locked(
     context: &RuntimeContext,
     state: Option<&RuntimeState>,
+    desired: &ResourcePlan,
 ) -> Result<(), CommandFailure> {
     let layout = layout_for_context(context);
-    let mut owner = read_authoritative_state(&layout)?.map(|state| state.owner);
-    if let Some(owner) = &mut owner {
-        write_lifecycle(&layout, owner, EnvironmentLifecycle::TearingDown)?;
+    let authoritative = read_authoritative_state(&layout)?.ok_or_else(|| partial_state(&layout))?;
+    validate_authoritative(&authoritative, desired)?;
+    validate_teardown_lifecycle(&authoritative.owner.lifecycle)?;
+    let mut owner = authoritative.owner;
+    if !inventory_is_empty(&authoritative.inventory) {
+        write_lifecycle(&layout, &mut owner, EnvironmentLifecycle::CleanupFailed)?;
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_INVENTORY_NOT_EMPTY: refusing cleanup of recorded resources",
+        ));
     }
+    write_lifecycle(&layout, &mut owner, EnvironmentLifecycle::TearingDown)?;
     if let Some(state) = state {
         if let Err(error) =
             super::run_mode_command(context.mode.down(), context, Some(state), false)
         {
-            return cleanup_failed(&layout, owner.as_mut(), error);
+            return cleanup_failed(&layout, Some(&mut owner), error);
         }
     }
     for path in [&layout.env, &layout.inventory, &layout.plan] {
         if let Err(error) = remove_file_if_present(path) {
-            return cleanup_failed(&layout, owner.as_mut(), error);
+            return cleanup_failed(&layout, Some(&mut owner), error);
         }
     }
     if let Err(error) = remove_directory_if_present(&layout.sessions) {
-        return cleanup_failed(&layout, owner.as_mut(), error);
+        return cleanup_failed(&layout, Some(&mut owner), error);
     }
     if let Err(error) = remove_file_if_present(&layout.owner) {
-        return cleanup_failed(&layout, owner.as_mut(), error);
+        return cleanup_failed(&layout, Some(&mut owner), error);
     }
     Ok(())
 }
@@ -66,6 +74,14 @@ pub(super) fn validate_authoritative(
     state: &super::state::AuthoritativeState,
     desired: &ResourcePlan,
 ) -> Result<(), CommandFailure> {
+    if state.owner.schema_version != 1
+        || state.plan.schema_version != 1
+        || state.inventory.schema_version != 1
+    {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_SCHEMA_MISMATCH: authoritative runtime state requires schema version 1",
+        ));
+    }
     if state.owner.identity != desired.identity
         || state.inventory.environment_id != desired.identity.environment_id
     {
@@ -73,7 +89,7 @@ pub(super) fn validate_authoritative(
             "RUNTIME_OWNER_MISMATCH: persisted runtime identity does not match this environment",
         ));
     }
-    if state.owner.manifest_digest != state.plan.digest || state.plan.digest != desired.digest {
+    if state.owner.manifest_digest != desired.digest || state.plan != *desired {
         return Err(CommandFailure::diagnostic(
             "RUNTIME_PLAN_MISMATCH: persisted runtime plan does not match the requested plan",
         ));
@@ -103,15 +119,9 @@ pub(super) fn validate_teardown_lifecycle(
 
 fn active_state_matches(
     state: &super::state::AuthoritativeState,
-    plan: &ResourcePlan,
     context: &RuntimeContext,
 ) -> bool {
-    state.owner.lifecycle == EnvironmentLifecycle::Active
-        && state.owner.identity == plan.identity
-        && state.owner.manifest_digest == plan.digest
-        && state.plan.digest == plan.digest
-        && state.inventory.environment_id == plan.identity.environment_id
-        && context.env_file.is_file()
+    state.owner.lifecycle == EnvironmentLifecycle::Active && context.env_file.is_file()
 }
 
 fn reconcile_provisioning(

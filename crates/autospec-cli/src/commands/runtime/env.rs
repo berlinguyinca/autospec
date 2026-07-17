@@ -437,7 +437,7 @@ fn down(options: Options) -> Result<(), CommandFailure> {
     } else {
         None
     };
-    teardown_locked(&context, state.as_ref())
+    teardown_locked(&context, state.as_ref(), &plan)
 }
 
 fn exec(options: ExecOptions) -> Result<(), CommandFailure> {
@@ -496,6 +496,7 @@ fn session(options: SessionOptions) -> Result<(), CommandFailure> {
         &options.command,
         &context,
         &state,
+        &plan,
         session_lease,
         keep_alive,
         invocation.bypassed,
