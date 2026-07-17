@@ -1,10 +1,7 @@
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-#[cfg(unix)]
-use std::sync::atomic::{AtomicI32, Ordering};
 
 use autospec_core::runtime_env::{
     random_session_token, read_json, write_json_atomic, ReleaseDecision, ResourcePlan,
@@ -14,21 +11,7 @@ use autospec_core::runtime_env::{
 use crate::commands::CommandFailure;
 
 use super::state::EnvironmentLease;
-
-#[cfg(unix)]
-static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
-
-#[cfg(unix)]
-extern "C" fn record_signal(signal: i32) {
-    RECEIVED_SIGNAL.store(signal, Ordering::Relaxed);
-}
-
-// SECURITY: fixed POSIX signal numbers and an atomic-only handler.
-#[cfg(unix)]
-extern "C" {
-    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
-    fn kill(pid: i32, signal: i32) -> i32;
-}
+use super::worker::ChildGuard;
 
 enum SessionWait {
     Exited(ExitStatus),
@@ -101,126 +84,76 @@ pub(super) fn run_session_command(
     keep_alive: bool,
     bypassed: bool,
 ) -> Result<(), CommandFailure> {
-    let child =
-        match super::spawn_direct_command(command, &context.repo, Some((context, state)), bypassed)
-        {
-            Ok(child) => child,
-            Err(error) => {
-                let _ = cleanup_session(context, state, plan, session_lease, true);
-                return Err(error);
-            }
-        };
-    let mut child = ChildGuard::new(child, false);
-    let result = wait_for_session_child(child.child(), &mut session_lease);
-    match &result {
-        Ok(_) => child.disarm(),
-        Err(_) => child.terminate(),
+    let child = match super::worker::spawn_direct_command(
+        command,
+        &context.repo,
+        Some((context, state)),
+        bypassed,
+        true,
+    ) {
+        Ok(child) => child,
+        Err(error) => {
+            let cleanup = cleanup_session(context, state, plan, session_lease, true);
+            return session_result(Err(error), cleanup);
+        }
+    };
+    let mut child = ChildGuard::new(child, cfg!(unix));
+    let mut result = wait_for_session_child(child.child(), &mut session_lease);
+    if matches!(result, Ok(SessionWait::Exited(_))) {
+        child.disarm();
+    } else if let Err(error) = child.terminate() {
+        result = Err(add_secondary_failure(
+            result.err(),
+            "runtime harness termination also failed",
+            error,
+        ));
     }
     let should_teardown = matches!(&result, Ok(SessionWait::Interrupted(_))) || !keep_alive;
     let cleanup = cleanup_session(context, state, plan, session_lease, should_teardown);
     session_result(result, cleanup)
 }
 
-pub(super) fn run_session_supervisor(command: &mut Command) -> Result<(), CommandFailure> {
-    prepare_signal_handlers();
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    let mut worker = ChildGuard::new(
-        command.spawn().map_err(|error| {
-            diagnostic(format!("could not start runtime session worker: {error}"))
-        })?,
-        cfg!(unix),
-    );
-    let mut forwarded = false;
-    loop {
-        #[cfg(unix)]
-        {
-            let received = RECEIVED_SIGNAL.load(Ordering::Relaxed);
-            if !forwarded && (received == 2 || received == 15) {
-                // SAFETY: the worker leads its isolated process group.
-                unsafe { kill(-(worker.child().id() as i32), received) };
-                forwarded = true;
-            }
-        }
-        if let Some(status) = worker.child().try_wait().map_err(wait_error)? {
-            worker.disarm();
-            return super::child_status(status);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-struct ChildGuard {
-    child: Option<Child>,
-    process_group: bool,
-}
-
-impl ChildGuard {
-    fn new(child: Child, process_group: bool) -> Self {
-        Self {
-            child: Some(child),
-            process_group,
-        }
-    }
-    fn child(&mut self) -> &mut Child {
-        self.child.as_mut().expect("child is armed")
-    }
-    fn disarm(&mut self) {
-        self.child.take();
-    }
-    fn terminate(&mut self) {
-        if let Some(child) = &mut self.child {
-            #[cfg(unix)]
-            if self.process_group {
-                // SAFETY: the child leads the process group created by the supervisor.
-                unsafe { kill(-(child.id() as i32), 9) };
-            } else {
-                let _ = child.kill();
-            }
-            #[cfg(not(unix))]
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        self.disarm();
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        self.terminate();
-    }
-}
-
-pub(super) fn prepare_signal_handlers() {
-    #[cfg(unix)]
-    install_signal_handlers();
-}
-
 fn session_result(
     result: Result<SessionWait, CommandFailure>,
     cleanup: Result<(), CommandFailure>,
 ) -> Result<(), CommandFailure> {
-    match result {
-        Ok(SessionWait::Interrupted(signal)) => {
-            let _ = cleanup;
-            Err(CommandFailure::status(
-                String::new(),
-                if signal == 2 { 130 } else { 143 },
-            ))
-        }
-        Ok(SessionWait::Exited(status)) if status.success() => cleanup,
-        Ok(SessionWait::Exited(status)) => {
-            let _ = cleanup;
-            super::child_status(status)
-        }
-        Err(error) => {
-            let _ = cleanup;
-            Err(error)
-        }
+    let primary = match result {
+        Ok(SessionWait::Interrupted(signal)) => Err(CommandFailure::status(
+            String::new(),
+            if signal == 2 { 130 } else { 143 },
+        )),
+        Ok(SessionWait::Exited(status)) => super::child_status(status),
+        Err(error) => Err(error),
+    };
+    match (primary, cleanup) {
+        (Ok(()), cleanup) => cleanup,
+        (Err(primary), Ok(())) => Err(primary),
+        (Err(primary), Err(cleanup)) => Err(add_secondary_failure(
+            Some(primary),
+            "runtime session cleanup also failed",
+            cleanup,
+        )),
     }
+}
+
+fn add_secondary_failure(
+    primary: Option<CommandFailure>,
+    label: &str,
+    secondary: CommandFailure,
+) -> CommandFailure {
+    let Some(primary) = primary else {
+        return secondary;
+    };
+    let separator = if primary.message.is_empty() { "" } else { "; " };
+    let secondary_message = if secondary.message.is_empty() {
+        format!("exit {}", secondary.exit_code)
+    } else {
+        secondary.message
+    };
+    CommandFailure::status(
+        format!("{}{separator}{label}: {secondary_message}", primary.message),
+        primary.exit_code,
+    )
 }
 
 fn cleanup_session(
@@ -245,26 +178,14 @@ fn cleanup_session(
 }
 
 #[cfg(unix)]
-fn install_signal_handlers() {
-    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
-    // SAFETY: SIGINT/SIGTERM are fixed and the handler only writes an atomic.
-    unsafe {
-        signal(2, record_signal);
-        signal(15, record_signal);
-    }
-}
-
-#[cfg(unix)]
 fn wait_for_session_child(
     child: &mut Child,
     session_lease: &mut SessionLease,
 ) -> Result<SessionWait, CommandFailure> {
     let mut last_heartbeat = Instant::now();
     loop {
-        let signal = RECEIVED_SIGNAL.load(Ordering::Relaxed);
+        let signal = super::received_session_signal();
         if signal == 2 || signal == 15 {
-            let _ = child.kill();
-            let _ = child.wait();
             return Ok(SessionWait::Interrupted(signal));
         }
         if let Some(status) = child.try_wait().map_err(wait_error)? {

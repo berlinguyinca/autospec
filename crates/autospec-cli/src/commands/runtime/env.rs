@@ -1,8 +1,11 @@
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Command;
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use autospec_core::runtime_env::{
     EnvironmentLifecycle, ResourcePlan, RuntimeContext, RuntimeManifest, RuntimeState,
@@ -14,6 +17,7 @@ mod isolation;
 mod lifecycle;
 mod session;
 mod state;
+mod worker;
 
 use isolation::{
     bypass_without_planning, invocation_isolation, planning_identity, whole_environment_disabled,
@@ -22,26 +26,25 @@ use lifecycle::{
     partial_state, provision_locked, teardown_locked, validate_authoritative,
     validate_teardown_lifecycle,
 };
-use session::{
-    live_sessions, prepare_signal_handlers, run_session_command, run_session_supervisor,
-    SessionLease,
-};
+use session::{live_sessions, run_session_command, SessionLease};
 use state::{
     layout_for_context, read_authoritative_state, read_runtime_state, write_runtime_state,
     EnvironmentLease, StateLayout,
 };
 
-const STATE_ENVIRONMENT_KEYS: [&str; 9] = [
-    "AGENT_ENV_ID",
-    "AGENT_ENV_MODE",
-    "AGENT_ENV_REPO",
-    "AGENT_ENV_MANIFEST",
-    "AGENT_FRONTEND_PORT",
-    "AGENT_BACKEND_PORT",
-    "AGENT_PUBLIC_URL",
-    "AUTOSPEC_PUBLIC_URL",
-    "COMPOSE_PROJECT_NAME",
-];
+#[cfg(unix)]
+static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
+
+#[cfg(unix)]
+extern "C" fn record_signal(signal: i32) {
+    RECEIVED_SIGNAL.store(signal, Ordering::Relaxed);
+}
+
+// SECURITY: fixed POSIX signal numbers and an atomic-only handler.
+#[cfg(unix)]
+extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
 
 #[derive(Debug, Clone)]
 struct Options {
@@ -474,8 +477,13 @@ fn session(options: SessionOptions) -> Result<(), CommandFailure> {
             return run_direct_command(&options.command, &repo, None, bypassed);
         }
     }
-    if !environment_flag("AUTOSPEC_RUNTIME_SESSION_WORKER") {
-        return supervise_session_worker(&options, &repo);
+    if !worker::consume_session_worker_handoff() {
+        return worker::supervise_session_worker(
+            &options.command,
+            &repo,
+            &options.options.mode,
+            options.keep_alive,
+        );
     }
     let invocation = invocation_isolation(&repo, &options.options.mode)?;
     let plan = invocation
@@ -488,7 +496,7 @@ fn session(options: SessionOptions) -> Result<(), CommandFailure> {
         .command
         .first()
         .expect("session command is not empty");
-    prepare_signal_handlers();
+    reset_session_signal_handlers();
     let session_lease = SessionLease::register(&context.environment_dir, harness)?;
     drop(lease);
     let keep_alive = options.keep_alive || environment_flag("AUTOSPEC_ENV_KEEP_ALIVE");
@@ -501,25 +509,6 @@ fn session(options: SessionOptions) -> Result<(), CommandFailure> {
         keep_alive,
         invocation.bypassed,
     )
-}
-
-fn supervise_session_worker(options: &SessionOptions, repo: &Path) -> Result<(), CommandFailure> {
-    let executable = std::env::current_exe().map_err(|error| {
-        CommandFailure::diagnostic(format!("could not locate runtime session worker: {error}"))
-    })?;
-    let mut worker = Command::new(executable);
-    worker
-        .args(["runtime", "env", "session", "--repo"])
-        .arg(repo)
-        .args(["--mode", &options.options.mode]);
-    if options.keep_alive {
-        worker.arg("--keep-alive");
-    }
-    worker
-        .arg("--")
-        .args(&options.command)
-        .env("AUTOSPEC_RUNTIME_SESSION_WORKER", "1");
-    run_session_supervisor(&mut worker)
 }
 
 fn context_from_plan(
@@ -779,34 +768,11 @@ fn run_direct_command(
     runtime: Option<(&RuntimeContext, &RuntimeState)>,
     bypassed: bool,
 ) -> Result<(), CommandFailure> {
-    let mut child = spawn_direct_command(command, repo, runtime, bypassed)?;
+    let mut child = worker::spawn_direct_command(command, repo, runtime, bypassed, false)?;
     let status = child.wait().map_err(|error| {
         CommandFailure::diagnostic(format!("could not wait for runtime child command: {error}"))
     })?;
     child_status(status)
-}
-
-fn spawn_direct_command(
-    command: &[String],
-    repo: &Path,
-    runtime: Option<(&RuntimeContext, &RuntimeState)>,
-    bypassed: bool,
-) -> Result<Child, CommandFailure> {
-    let (program, arguments) = command.split_first().ok_or_else(|| {
-        CommandFailure::diagnostic("autospec runtime env requires a child command")
-    })?;
-    let mut child = Command::new(program);
-    child.args(arguments).current_dir(repo);
-    if let Some((context, state)) = runtime {
-        configure_runtime_environment(&mut child, context, state, bypassed);
-    } else if bypassed {
-        child.env("AUTOSPEC_ISOLATION_BYPASSED", "1");
-    }
-    child.spawn().map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not run runtime child command {program}: {error}"
-        ))
-    })
 }
 
 fn environment_flag(key: &str) -> bool {
@@ -824,34 +790,14 @@ pub(super) fn run_mode_command(
     };
     let mut process = Command::new("sh");
     process.args(["-c", command]).current_dir(&context.repo);
+    worker::scrub_external_environment(&mut process);
     if let Some(state) = state {
-        configure_runtime_environment(&mut process, context, state, bypassed);
+        worker::configure_runtime_environment(&mut process, context, state, bypassed);
     }
     let status = process.status().map_err(|error| {
         CommandFailure::diagnostic(format!("could not run runtime manifest command: {error}"))
     })?;
     child_status(status)
-}
-
-fn configure_runtime_environment(
-    process: &mut Command,
-    context: &RuntimeContext,
-    state: &RuntimeState,
-    bypassed: bool,
-) {
-    for key in STATE_ENVIRONMENT_KEYS {
-        if let Some(value) = state.value(key) {
-            process.env(key, value);
-        }
-    }
-    for (key, _) in context.mode.env() {
-        if let Some(value) = state.value(key) {
-            process.env(key, value);
-        }
-    }
-    if bypassed {
-        process.env("AUTOSPEC_ISOLATION_BYPASSED", "1");
-    }
 }
 
 fn child_status(status: std::process::ExitStatus) -> Result<(), CommandFailure> {
@@ -869,6 +815,28 @@ fn child_status(status: std::process::ExitStatus) -> Result<(), CommandFailure> 
         #[cfg(not(unix))]
         let code = status.code().unwrap_or(1);
         Err(CommandFailure::status(String::new(), code))
+    }
+}
+
+pub(super) fn reset_session_signal_handlers() {
+    #[cfg(unix)]
+    install_signal_handlers();
+}
+
+pub(super) fn received_session_signal() -> i32 {
+    #[cfg(unix)]
+    return RECEIVED_SIGNAL.load(Ordering::Relaxed);
+    #[cfg(not(unix))]
+    0
+}
+
+#[cfg(unix)]
+fn install_signal_handlers() {
+    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    // SAFETY: SIGINT/SIGTERM are fixed and the handler only writes an atomic.
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
     }
 }
 
