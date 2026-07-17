@@ -22,66 +22,122 @@ pub(super) fn reconcile(
     context: &RuntimeContext,
 ) -> Result<(), CommandFailure> {
     let recorded_volumes = inventory.volumes.clone();
-    let containers = project_ids(ResourceKind::Container, &plan.project_name)?;
-    let networks = project_ids(ResourceKind::Network, &plan.project_name)?;
-    let named_volumes = project_ids(ResourceKind::Volume, &plan.project_name)?;
-    let all_containers = all_ids(ResourceKind::Container)?;
-    let all_networks = all_ids(ResourceKind::Network)?;
-    let all_volumes = all_ids(ResourceKind::Volume)?;
-    reject_recorded_foreign(
-        inventory,
-        &containers,
-        &networks,
-        &named_volumes,
-        &all_containers,
-        &all_networks,
-        &all_volumes,
+    let discovered = discover_project_resources(plan)?;
+    reject_recorded_foreign(inventory, &discovered, context)?;
+    record_project_ids(
+        ResourceKind::Container,
+        &discovered.containers,
+        ownership,
         context,
     )?;
-
-    for id in &containers {
-        verify_labels(ResourceKind::Container, id, ownership, context)?;
-    }
-    inventory.containers = containers;
+    inventory.containers = discovered.containers;
     persist(layout, inventory)?;
-
-    for id in &networks {
-        verify_labels(ResourceKind::Network, id, ownership, context)?;
-    }
-    inventory.networks = networks;
+    record_project_ids(
+        ResourceKind::Network,
+        &discovered.networks,
+        ownership,
+        context,
+    )?;
+    inventory.networks = discovered.networks;
     persist(layout, inventory)?;
+    let volumes = discover_owned_volumes(
+        discovered.named_volumes,
+        &discovered.all_volumes,
+        ownership,
+        context,
+        layout,
+        inventory,
+    )?;
+    if detached_anonymous_volume(&recorded_volumes, &volumes, &discovered.all_volumes) {
+        return Err(recovery(context, "COMPOSE_OWNERSHIP_MISMATCH"));
+    }
+    inventory.volumes = volumes;
+    persist(layout, inventory)
+}
 
+struct DiscoveredResources {
+    containers: Vec<String>,
+    networks: Vec<String>,
+    named_volumes: Vec<String>,
+    all_containers: BTreeSet<String>,
+    all_networks: BTreeSet<String>,
+    all_volumes: BTreeSet<String>,
+}
+
+fn discover_project_resources(plan: &ComposePlan) -> Result<DiscoveredResources, CommandFailure> {
+    Ok(DiscoveredResources {
+        containers: project_ids(ResourceKind::Container, &plan.project_name)?,
+        networks: project_ids(ResourceKind::Network, &plan.project_name)?,
+        named_volumes: project_ids(ResourceKind::Volume, &plan.project_name)?,
+        all_containers: all_ids(ResourceKind::Container)?,
+        all_networks: all_ids(ResourceKind::Network)?,
+        all_volumes: all_ids(ResourceKind::Volume)?,
+    })
+}
+
+fn record_project_ids(
+    kind: ResourceKind,
+    ids: &[String],
+    ownership: &ComposeOwnership,
+    context: &RuntimeContext,
+) -> Result<(), CommandFailure> {
+    for id in ids {
+        verify_labels(kind, id, ownership, context)?;
+    }
+    Ok(())
+}
+
+fn discover_owned_volumes(
+    named: Vec<String>,
+    all: &BTreeSet<String>,
+    ownership: &ComposeOwnership,
+    context: &RuntimeContext,
+    layout: &StateLayout,
+    inventory: &mut ResourceInventory,
+) -> Result<Vec<OwnedVolume>, CommandFailure> {
     let mut volumes = Vec::new();
-    for id in named_volumes {
+    for id in named {
         verify_labels(ResourceKind::Volume, &id, ownership, context)?;
         volumes.push(OwnedVolume {
             logical_key: volume_logical_key(&id)?,
             id,
         });
-        inventory.volumes = volumes.clone();
-        persist(layout, inventory)?;
+        persist_volumes(layout, inventory, &volumes)?;
     }
-    for container in &inventory.containers {
-        for id in container_mounts(container)? {
-            if all_volumes.contains(&id) && !volumes.iter().any(|volume| volume.id == id) {
+    let containers = inventory.containers.clone();
+    for container in containers {
+        for id in container_mounts(&container)? {
+            if all.contains(&id) && !volumes.iter().any(|volume| volume.id == id) {
                 volumes.push(OwnedVolume {
                     logical_key: None,
                     id,
                 });
-                inventory.volumes = volumes.clone();
-                persist(layout, inventory)?;
+                persist_volumes(layout, inventory, &volumes)?;
             }
         }
     }
-    if recorded_volumes.iter().any(|volume| {
-        volume.logical_key.is_none()
-            && all_volumes.contains(&volume.id)
-            && !volumes.iter().any(|current| current.id == volume.id)
-    }) {
-        return Err(recovery(context, "COMPOSE_OWNERSHIP_MISMATCH"));
-    }
-    inventory.volumes = volumes;
+    Ok(volumes)
+}
+
+fn persist_volumes(
+    layout: &StateLayout,
+    inventory: &mut ResourceInventory,
+    volumes: &[OwnedVolume],
+) -> Result<(), CommandFailure> {
+    inventory.volumes = volumes.to_vec();
     persist(layout, inventory)
+}
+
+fn detached_anonymous_volume(
+    recorded: &[OwnedVolume],
+    discovered: &[OwnedVolume],
+    all: &BTreeSet<String>,
+) -> bool {
+    recorded.iter().any(|volume| {
+        volume.logical_key.is_none()
+            && all.contains(&volume.id)
+            && !discovered.iter().any(|current| current.id == volume.id)
+    })
 }
 
 pub(super) fn remove_exact_owned(
@@ -174,30 +230,23 @@ fn verify_deleted(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn reject_recorded_foreign(
     inventory: &ResourceInventory,
-    project_containers: &[String],
-    project_networks: &[String],
-    project_volumes: &[String],
-    all_containers: &BTreeSet<String>,
-    all_networks: &BTreeSet<String>,
-    all_volumes: &BTreeSet<String>,
+    discovered: &DiscoveredResources,
     context: &RuntimeContext,
 ) -> Result<(), CommandFailure> {
-    let foreign = inventory
-        .containers
-        .iter()
-        .any(|id| all_containers.contains(id) && !project_containers.contains(id))
-        || inventory
+    let foreign =
+        inventory.containers.iter().any(|id| {
+            discovered.all_containers.contains(id) && !discovered.containers.contains(id)
+        }) || inventory
             .networks
             .iter()
-            .any(|id| all_networks.contains(id) && !project_networks.contains(id))
-        || inventory.volumes.iter().any(|volume| {
-            volume.logical_key.is_some()
-                && all_volumes.contains(&volume.id)
-                && !project_volumes.contains(&volume.id)
-        });
+            .any(|id| discovered.all_networks.contains(id) && !discovered.networks.contains(id))
+            || inventory.volumes.iter().any(|volume| {
+                volume.logical_key.is_some()
+                    && discovered.all_volumes.contains(&volume.id)
+                    && !discovered.named_volumes.contains(&volume.id)
+            });
     if foreign {
         Err(recovery(context, "COMPOSE_OWNERSHIP_MISMATCH"))
     } else {

@@ -26,7 +26,7 @@ use isolation::{
 };
 use lifecycle::{
     partial_state, provision_locked, teardown_locked, validate_authoritative,
-    validate_teardown_lifecycle,
+    validate_cached_state, validate_teardown_lifecycle,
 };
 use maven::MavenAdapter;
 use session::{live_sessions, run_session_command, SessionLease};
@@ -465,7 +465,13 @@ fn down(options: DownOptions) -> Result<(), CommandFailure> {
         )));
     }
     let state = if context.env_file.is_file() {
-        Some(read_state(&context)?)
+        let cached = read_state(&context)?;
+        Some(validate_cached_state(
+            &context,
+            &plan,
+            &authoritative.inventory,
+            &cached,
+        )?)
     } else {
         None
     };

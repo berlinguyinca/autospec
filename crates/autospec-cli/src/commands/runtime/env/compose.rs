@@ -38,6 +38,17 @@ impl ComposeAdapter {
         lifecycle::up(compose, plan, resolved, context, state, layout)
     }
 
+    pub(super) fn validate_canonical_export(
+        compose: Option<&ComposePlan>,
+    ) -> Result<(), CommandFailure> {
+        let Some(plan) = compose.filter(|plan| plan.isolation == ComposeIsolation::Managed) else {
+            return Ok(());
+        };
+        plan.canonical_url_export_index()
+            .map(|_| ())
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+    }
+
     pub(super) fn down_owned(
         compose: Option<&ComposePlan>,
         plan: &ResourcePlan,

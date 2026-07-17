@@ -205,7 +205,7 @@ pub struct ComposePlan {
 }
 
 impl ComposePlan {
-    pub fn canonical_url_export_index(&self) -> Result<usize, RuntimeEnvError> {
+    pub fn canonical_url_export_index(&self) -> Result<Option<usize>, RuntimeEnvError> {
         let explicit = self
             .exports
             .iter()
@@ -216,13 +216,14 @@ impl ComposePlan {
             if matches!(
                 export.protocol,
                 ExportProtocol::Http | ExportProtocol::Https
-            ) {
-                return Ok(*index);
+            ) && export.value == ExportValue::Url
+            {
+                return Ok(Some(*index));
             }
         }
         if !explicit.is_empty() {
             return Err(RuntimeEnvError::new(
-                "COMPOSE_CANONICAL_URL_INVALID: AUTOSPEC_PUBLIC_URL must be one HTTP(S) export",
+                "COMPOSE_CANONICAL_URL_INVALID: AUTOSPEC_PUBLIC_URL must be one URL-valued HTTP(S) export",
             ));
         }
         let candidates = self
@@ -238,7 +239,8 @@ impl ComposePlan {
             .map(|(index, _)| index)
             .collect::<Vec<_>>();
         match candidates.as_slice() {
-            [index] => Ok(*index),
+            [] => Ok(None),
+            [index] => Ok(Some(*index)),
             _ => Err(RuntimeEnvError::new(
                 "COMPOSE_CANONICAL_URL_AMBIGUOUS: declare exactly one HTTP(S) export or AUTOSPEC_PUBLIC_URL",
             )),
@@ -315,6 +317,21 @@ impl ResolvedExport {
             )),
         }
     }
+
+    pub fn canonical_url(&self, declaration: &ComposeExport) -> Result<String, RuntimeEnvError> {
+        if self.env != declaration.env || self.host != "127.0.0.1" || self.port == 0 {
+            return Err(RuntimeEnvError::new(
+                "resolved Compose export does not match its validated declaration",
+            ));
+        }
+        match declaration.protocol {
+            ExportProtocol::Http => Ok(format!("http://{}:{}", self.host, self.port)),
+            ExportProtocol::Https => Ok(format!("https://{}:{}", self.host, self.port)),
+            ExportProtocol::Tcp | ExportProtocol::Udp => Err(RuntimeEnvError::new(
+                "resolved Compose export cannot provide a canonical HTTP(S) URL",
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -326,6 +343,12 @@ pub struct ResourceInventory {
     pub networks: Vec<String>,
     pub volumes: Vec<OwnedVolume>,
     pub exports: Vec<ResolvedExport>,
+    #[serde(default)]
+    pub frontend_port: Option<u16>,
+    #[serde(default)]
+    pub backend_port: Option<u16>,
+    #[serde(default)]
+    pub maven_arguments: Option<String>,
     pub maven_local_prefix: Option<PathBuf>,
 }
 

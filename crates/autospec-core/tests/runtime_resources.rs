@@ -108,6 +108,9 @@ fn inventory_json_preserves_resource_ids_and_ports() {
             host: "127.0.0.1".to_string(),
             port: 49152,
         }],
+        frontend_port: Some(49152),
+        backend_port: Some(49153),
+        maven_arguments: Some("-T 2".to_string()),
         maven_local_prefix: Some(PathBuf::from("autospec/env-a")),
     };
 
@@ -226,7 +229,7 @@ fn resolved_compose_exports_render_by_declared_value_type() {
 #[test]
 fn compose_canonical_url_requires_explicit_or_unique_http_export() {
     let mut plan = compose_policy_plan(Path::new("/repo"));
-    assert!(plan.canonical_url_export_index().is_err());
+    assert_eq!(plan.canonical_url_export_index().unwrap(), None);
 
     plan.exports = vec![ComposeExport {
         service: "web".to_string(),
@@ -235,7 +238,7 @@ fn compose_canonical_url_requires_explicit_or_unique_http_export() {
         env: "WEB_URL".to_string(),
         value: ExportValue::Url,
     }];
-    assert_eq!(plan.canonical_url_export_index().unwrap(), 0);
+    assert_eq!(plan.canonical_url_export_index().unwrap(), Some(0));
 
     plan.exports.push(ComposeExport {
         service: "admin".to_string(),
@@ -247,7 +250,32 @@ fn compose_canonical_url_requires_explicit_or_unique_http_export() {
     assert!(plan.canonical_url_export_index().is_err());
 
     plan.exports[1].env = "AUTOSPEC_PUBLIC_URL".to_string();
-    assert_eq!(plan.canonical_url_export_index().unwrap(), 1);
+    assert_eq!(plan.canonical_url_export_index().unwrap(), Some(1));
+
+    plan.exports[1].value = ExportValue::HostPort;
+    assert!(plan.canonical_url_export_index().is_err());
+}
+
+#[test]
+fn http_host_port_keeps_its_export_shape_but_has_a_canonical_url() {
+    let declaration = ComposeExport {
+        service: "web".to_string(),
+        target: 8080,
+        protocol: ExportProtocol::Http,
+        env: "WEB_HOST".to_string(),
+        value: ExportValue::HostPort,
+    };
+    let resolved = ResolvedExport {
+        env: declaration.env.clone(),
+        host: "127.0.0.1".to_string(),
+        port: 49152,
+    };
+
+    assert_eq!(resolved.render(&declaration).unwrap(), "127.0.0.1:49152");
+    assert_eq!(
+        resolved.canonical_url(&declaration).unwrap(),
+        "http://127.0.0.1:49152"
+    );
 }
 
 #[test]

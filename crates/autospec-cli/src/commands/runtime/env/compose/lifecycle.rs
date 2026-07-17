@@ -139,12 +139,15 @@ fn set_canonical_url(
     inventory: &ResourceInventory,
     state: &mut RuntimeState,
 ) -> Result<(), CommandFailure> {
-    let index = plan
+    let Some(index) = plan
         .canonical_url_export_index()
-        .map_err(|error| failure(error.to_string()))?;
+        .map_err(|error| failure(error.to_string()))?
+    else {
+        return Ok(());
+    };
     let declaration = &plan.exports[index];
     let value = inventory.exports[index]
-        .render(declaration)
+        .canonical_url(declaration)
         .map_err(|error| failure(error.to_string()))?;
     state
         .set_value("AUTOSPEC_PUBLIC_URL", value.clone())

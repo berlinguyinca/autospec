@@ -120,6 +120,23 @@ esac
         std::fs::set_permissions(&docker, permissions).unwrap();
         bin
     }
+
+    #[cfg(unix)]
+    fn install_fake_maven(&self) -> PathBuf {
+        let bin = self.root.join("fake-maven-bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let mvn = bin.join("mvn");
+        let repository = self.root.join("maven-repository");
+        let source = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then printf '%s\\n' 'Apache Maven 4.0.0-rc-5'; exit 0; fi\nmkdir -p '{repository}'\nprintf '%s\\n' '{repository}'\n",
+            repository = repository.display(),
+        );
+        std::fs::write(&mvn, source).unwrap();
+        let mut permissions = std::fs::metadata(&mvn).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&mvn, permissions).unwrap();
+        bin
+    }
 }
 
 impl Drop for RuntimeFixture {
@@ -422,6 +439,24 @@ fn compose_manifest_with_preserved_cache(command: &str) -> String {
         "{}    preserve_volumes: [cache]\n",
         compose_manifest(command)
     )
+}
+
+#[cfg(unix)]
+fn replace_exported_value(path: &Path, key: &str, value: &str) {
+    let source = std::fs::read_to_string(path).unwrap();
+    let prefix = format!("export {key}=");
+    let replaced = source
+        .lines()
+        .map(|line| {
+            if line.starts_with(&prefix) {
+                format!("{prefix}'{value}'")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(path, format!("{replaced}\n")).unwrap();
 }
 
 #[cfg(unix)]
@@ -762,6 +797,177 @@ fn compose_lifecycle_rejects_tampered_child_environment_before_spawn() {
         String::from_utf8_lossy(&exec.stderr)
     );
     assert!(!marker.exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_lifecycle_rejects_tampered_authoritative_values_before_spawn() {
+    for (key, value) in [
+        ("AGENT_ENV_ID", "foreign-environment"),
+        ("COMPOSE_PROJECT_NAME", "foreign-project"),
+        ("MODE_SENTINEL", "foreign-mode-value"),
+        ("WEB_URL", "http://127.0.0.1:1"),
+    ] {
+        let manifest = compose_manifest("sh -c 'true'").replace(
+            "    command: sh -c 'true'\n",
+            "    command: sh -c 'true'\n    env:\n      MODE_SENTINEL: declared\n",
+        );
+        let fixture = RuntimeFixture::with_manifest(&manifest);
+        std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+        std::fs::write(fixture.root.join("compose.override.yaml"), "services: {}\n").unwrap();
+        let bin = fixture.install_lifecycle_fake_docker();
+        let log = fixture.root.join("lifecycle-docker.log");
+        let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+        let up = fixture
+            .command()
+            .env("PATH", &path)
+            .env("FAKE_DOCKER_LOG", &log)
+            .args(["runtime", "env", "up", "--repo"])
+            .arg(&fixture.root)
+            .output()
+            .unwrap();
+        assert!(
+            up.status.success(),
+            "{}",
+            String::from_utf8_lossy(&up.stderr)
+        );
+        let identity = EnvironmentIdentity::resolve(&fixture.root, "local", None).unwrap();
+        replace_exported_value(
+            &fixture.state_root.join(identity.environment_id).join("env"),
+            key,
+            value,
+        );
+        let marker = fixture.root.join(format!("spawned-{key}"));
+
+        let exec = fixture
+            .command()
+            .env("PATH", &path)
+            .env("FAKE_DOCKER_LOG", &log)
+            .args(["runtime", "env", "exec", "--repo"])
+            .arg(&fixture.root)
+            .args(["--", "sh", "-c"])
+            .arg(format!("touch '{}'", marker.display()))
+            .output()
+            .unwrap();
+
+        assert_eq!(exec.status.code(), Some(2), "{key}");
+        assert!(
+            String::from_utf8_lossy(&exec.stderr).contains("RUNTIME_CHILD_ENV_VALUE_MISMATCH"),
+            "{key}: {}",
+            String::from_utf8_lossy(&exec.stderr)
+        );
+        assert!(!marker.exists(), "{key} reached the child process");
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn maven_lifecycle_rejects_tampered_repository_argument_before_spawn() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\n",
+    );
+    std::fs::write(fixture.root.join("pom.xml"), "<project/>\n").unwrap();
+    let bin = fixture.install_fake_maven();
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    let up = fixture
+        .command()
+        .env("PATH", &path)
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    assert!(
+        up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    let identity = EnvironmentIdentity::resolve(&fixture.root, "local", None).unwrap();
+    replace_exported_value(
+        &fixture.state_root.join(identity.environment_id).join("env"),
+        "MAVEN_ARGS",
+        "-Dmaven.repo.local=/tmp/foreign-repository",
+    );
+    let marker = fixture.root.join("tampered-maven-child-started");
+
+    let exec = fixture
+        .command()
+        .env("PATH", path)
+        .args(["runtime", "env", "exec", "--repo"])
+        .arg(&fixture.root)
+        .args(["--", "sh", "-c"])
+        .arg(format!("touch '{}'", marker.display()))
+        .output()
+        .unwrap();
+
+    assert_eq!(exec.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&exec.stderr)
+        .contains("RUNTIME_CHILD_ENV_VALUE_MISMATCH: MAVEN_ARGS"));
+    assert!(!marker.exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_canonical_ambiguity_fails_before_any_docker_side_effect() {
+    let manifest = "version: 2\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\nresources:\n  compose:\n    files: [compose.yaml]\n    exports:\n      - { service: web, target: 8080, protocol: http, env: WEB_URL, value: url }\n      - { service: admin, target: 8081, protocol: https, env: ADMIN_URL, value: url }\n";
+    let fixture = RuntimeFixture::with_manifest(manifest);
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({}));
+
+    let output = compose_command(&fixture, &bin, &model)
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("COMPOSE_CANONICAL_URL_AMBIGUOUS"));
+    assert!(!fixture.root.join("docker-arguments.log").exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn compose_without_http_exports_provisions_and_http_host_port_sets_scheme_url() {
+    for exports in [
+        "",
+        "    exports:\n      - { service: web, target: 8080, protocol: tcp, env: WEB_PORT, value: port }\n",
+    ] {
+        let manifest = format!("version: 2\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\nresources:\n  compose:\n    files: [compose.yaml]\n{exports}");
+        let fixture = RuntimeFixture::with_manifest(&manifest);
+        std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+        let model = if exports.is_empty() {
+            serde_json::json!({"services":{"web":{"image":"nginx"}}})
+        } else {
+            serde_json::json!({"services":{"web":{"ports":[{"target":8080,"protocol":"tcp"}]}}})
+        };
+        let (bin, model) = fixture.install_fake_docker(&model);
+        let output = compose_command(&fixture, &bin, &model)
+            .args(["runtime", "env", "up", "--repo"])
+            .arg(&fixture.root)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let manifest = "version: 2\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'test \"$WEB_HOST\" = 127.0.0.1:49152 && test \"$AUTOSPEC_PUBLIC_URL\" = http://127.0.0.1:49152 && test \"$AGENT_PUBLIC_URL\" = http://127.0.0.1:49152'\nresources:\n  compose:\n    files: [compose.yaml]\n    exports:\n      - { service: web, target: 8080, protocol: http, env: WEB_HOST, value: host-port }\n";
+    let fixture = RuntimeFixture::with_manifest(manifest);
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+    let bin = fixture.install_lifecycle_fake_docker();
+    let output = fixture
+        .command()
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("FAKE_DOCKER_LOG", fixture.root.join("docker.log"))
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
