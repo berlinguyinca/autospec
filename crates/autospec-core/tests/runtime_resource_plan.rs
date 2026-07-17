@@ -252,28 +252,39 @@ fn compose_command_detection_uses_shell_command_positions() {
             .expect("quoted and comment data do not claim Compose authority");
     }
 
+    let mut missed_authority = Vec::new();
     for command in [
         "printf ready; docker compose up",
         "printf ready && /usr/bin/docker-compose up",
         "docker \\\n      compose up",
         "sh -c 'docker compose up'",
+        "sh -ec 'docker compose up'",
         "exec docker compose up",
         "env FOO=bar docker compose up",
+        "env -i docker compose up",
         "sudo docker compose up",
+        "sudo -u root docker compose up",
         concat!("docker --con", "text local compose up"),
+        "docker -c local compose up",
         ">log docker compose up",
+        "2>log docker compose up",
         "if docker compose up; then printf ready; fi",
+        "if false; then :; else docker compose up; fi",
     ] {
         std::fs::write(
             repo.path().join(".autospec/runtime.yml"),
             format!("version: 1\nmodes:\n  local:\n    command: {command}\n"),
         )
         .unwrap();
-        let error =
-            RuntimeManifest::resource_plan_for_repo(repo.path(), &fixture_identity(repo.path()))
-                .expect_err("command-position Compose authority is rejected");
-        assert!(error.to_string().contains("RUNTIME_DUAL_COMPOSE_AUTHORITY"));
+        match RuntimeManifest::resource_plan_for_repo(repo.path(), &fixture_identity(repo.path())) {
+            Ok(_) => missed_authority.push(command),
+            Err(error) => assert!(error.to_string().contains("RUNTIME_DUAL_COMPOSE_AUTHORITY")),
+        }
     }
+    assert!(
+        missed_authority.is_empty(),
+        "command-position Compose authority was missed for {missed_authority:?}"
+    );
 
     std::fs::write(
         repo.path().join(".autospec/runtime.yml"),

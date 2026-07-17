@@ -14,8 +14,16 @@ enum CommandWord {
     Compose,
     Docker,
     Shell,
-    Wrapper,
+    Wrapper(WrapperKind),
+    Control,
     Other,
+}
+
+#[derive(Clone, Copy)]
+enum WrapperKind {
+    Env,
+    Exec,
+    Sudo,
 }
 
 #[derive(Default)]
@@ -25,6 +33,8 @@ struct ScanState {
     docker_option_value: bool,
     shell_option: bool,
     shell_script: bool,
+    wrapper: Option<WrapperKind>,
+    wrapper_option_value: bool,
     redirect_target: bool,
 }
 
@@ -80,13 +90,47 @@ impl ScanState {
             return compose_authority_inner(value, depth + 1);
         }
         if self.shell_option {
-            self.shell_option = false;
-            self.shell_script = value == "-c";
+            self.consume_shell_option(value);
             return Ok(false);
+        }
+        if let Some(wrapper) = self.wrapper {
+            return self.consume_wrapper_word(wrapper, value, expansion);
         }
         if self.docker_command {
             return Ok(self.consume_docker_word(value));
         }
+        self.consume_command_word(value, expansion)
+    }
+
+    fn consume_shell_option(&mut self, value: &str) {
+        if shell_option_runs_command(value) {
+            self.shell_option = false;
+            self.shell_script = true;
+        } else if !value.starts_with('-') {
+            self.shell_option = false;
+            self.command_position = false;
+        }
+    }
+
+    fn consume_wrapper_word(
+        &mut self,
+        wrapper: WrapperKind,
+        value: &str,
+        expansion: bool,
+    ) -> Result<bool, RuntimeEnvError> {
+        if self.wrapper_option_value {
+            self.wrapper_option_value = false;
+            return Ok(false);
+        }
+        if value == "--" {
+            self.wrapper = None;
+            return Ok(false);
+        }
+        if value.starts_with('-') {
+            self.wrapper_option_value = wrapper_option_needs_value(wrapper, value)?;
+            return Ok(false);
+        }
+        self.wrapper = None;
         self.consume_command_word(value, expansion)
     }
 
@@ -115,10 +159,11 @@ impl ScanState {
             return Ok(false);
         }
         match classify_command_word(value, expansion)? {
-            CommandWord::Assignment | CommandWord::Wrapper => {}
+            CommandWord::Assignment | CommandWord::Control => {}
             CommandWord::Compose => return Ok(true),
             CommandWord::Docker => self.docker_command = true,
             CommandWord::Shell => self.shell_option = true,
+            CommandWord::Wrapper(wrapper) => self.wrapper = Some(wrapper),
             CommandWord::Other => self.command_position = false,
         }
         Ok(false)
@@ -138,9 +183,10 @@ fn classify_command_word(value: &str, expansion: bool) -> Result<CommandWord, Ru
         "docker-compose" => CommandWord::Compose,
         "docker" => CommandWord::Docker,
         "sh" | "bash" | "dash" | "zsh" => CommandWord::Shell,
-        "exec" | "env" | "sudo" | "if" | "then" | "elif" | "while" | "until" | "do" | "!" => {
-            CommandWord::Wrapper
-        }
+        "env" => CommandWord::Wrapper(WrapperKind::Env),
+        "exec" => CommandWord::Wrapper(WrapperKind::Exec),
+        "sudo" => CommandWord::Wrapper(WrapperKind::Sudo),
+        "if" | "then" | "elif" | "else" | "while" | "until" | "do" | "!" => CommandWord::Control,
         _ => CommandWord::Other,
     })
 }
@@ -148,8 +194,41 @@ fn classify_command_word(value: &str, expansion: bool) -> Result<CommandWord, Ru
 fn docker_option_needs_value(value: &str) -> bool {
     matches!(
         value,
-        "--config" | "--context" | "--host" | "--log-level" | "-H"
+        "--config" | "--context" | "--host" | "--log-level" | "-c" | "-H"
     )
+}
+
+fn shell_option_runs_command(value: &str) -> bool {
+    value
+        .strip_prefix('-')
+        .is_some_and(|options| !options.starts_with('-') && options.contains('c'))
+}
+
+fn wrapper_option_needs_value(wrapper: WrapperKind, value: &str) -> Result<bool, RuntimeEnvError> {
+    let option_kind = match wrapper {
+        WrapperKind::Env => match value {
+            "-u" | "--unset" | "-C" | "--chdir" | "-S" | "--split-string" => Some(true),
+            "-i" | "--ignore-environment" | "-0" | "--null" => Some(false),
+            _ => None,
+        },
+        WrapperKind::Exec => match value {
+            "-a" => Some(true),
+            "-c" | "-l" => Some(false),
+            _ => None,
+        },
+        WrapperKind::Sudo => match value {
+            "-u" | "--user" | "-g" | "--group" | "-h" | "--host" | "-p" | "--prompt" | "-r"
+            | "--role" | "-t" | "--type" | "-C" | "--chdir" => Some(true),
+            "-E" | "--preserve-env" | "-H" | "--set-home" | "-i" | "--login" | "-n"
+            | "--non-interactive" | "-S" | "--stdin" => Some(false),
+            _ => None,
+        },
+    };
+    option_kind.ok_or_else(|| {
+        RuntimeEnvError::new(format!(
+            "RUNTIME_AMBIGUOUS_COMPOSE_AUTHORITY: unsupported wrapper option {value}"
+        ))
+    })
 }
 
 pub(super) fn join_line_continuations(source: &str) -> Vec<String> {
@@ -207,7 +286,7 @@ fn tokenize(command: &str) -> Result<Vec<Token>, RuntimeEnvError> {
                 tokens.push(Token::Separator);
             }
             '<' | '>' => {
-                flush_word(&mut tokens, &mut word, &mut expansion);
+                flush_redirection_prefix(&mut tokens, &mut word, &mut expansion);
                 tokens.push(Token::Redirection);
                 if chars.peek() == Some(&character) {
                     chars.next();
@@ -218,6 +297,15 @@ fn tokenize(command: &str) -> Result<Vec<Token>, RuntimeEnvError> {
     }
     flush_word(&mut tokens, &mut word, &mut expansion);
     Ok(tokens)
+}
+
+fn flush_redirection_prefix(tokens: &mut Vec<Token>, word: &mut String, expansion: &mut bool) {
+    if word.chars().all(|value| value.is_ascii_digit()) {
+        word.clear();
+        *expansion = false;
+    } else {
+        flush_word(tokens, word, expansion);
+    }
 }
 
 fn read_quoted<I: Iterator<Item = char>>(
