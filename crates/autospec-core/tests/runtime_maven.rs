@@ -31,7 +31,7 @@ fn maven_arguments_round_trip_quoted_posix_and_windows_tokens() {
     )
     .unwrap();
     assert_eq!(
-        posix.render_for(MavenArgPlatform::Posix),
+        posix.render_for(MavenArgPlatform::Posix).unwrap(),
         r#"-T 2 -s '/tmp/settings with spaces.xml' 'can'\''t'"#
     );
 
@@ -51,7 +51,7 @@ fn maven_arguments_round_trip_quoted_posix_and_windows_tokens() {
         ]
     );
     assert_eq!(
-        windows.render_for(MavenArgPlatform::Windows),
+        windows.render_for(MavenArgPlatform::Windows).unwrap(),
         r#"-T 2 -s "C:\Users\Agent Data\settings.xml" "say \"hello\"""#
     );
 }
@@ -61,9 +61,39 @@ fn windows_render_doubles_trailing_backslashes_before_the_closing_quote() {
     let args = MavenArgs::from_tokens([r#"C:\Agent Data\"#]);
 
     assert_eq!(
-        args.render_for(MavenArgPlatform::Windows),
+        args.render_for(MavenArgPlatform::Windows).unwrap(),
         r#""C:\Agent Data\\""#
     );
+}
+
+#[test]
+fn windows_render_quotes_cmd_metacharacters_before_maven_cmd_expands_them() {
+    let args = MavenArgs::from_tokens([
+        "left&right",
+        "left|right",
+        "left^right",
+        "(group)",
+        "input<output",
+        "input>output",
+        "-Dservice.url=https://example.test/path?left=1&right=2",
+    ]);
+
+    assert_eq!(
+        args.render_for(MavenArgPlatform::Windows).unwrap(),
+        r#""left&right" "left|right" "left^right" "(group)" "input<output" "input>output" "-Dservice.url=https://example.test/path?left=1&right=2""#
+    );
+}
+
+#[test]
+fn windows_render_rejects_percent_and_bang_expansion() {
+    for token in ["%TEMP%", "!MAVEN_SECRET!"] {
+        let error = MavenArgs::from_tokens([token])
+            .render_for(MavenArgPlatform::Windows)
+            .unwrap_err();
+
+        assert_eq!(error.code, "MAVEN_ARGUMENT_UNSAFE_WINDOWS_EXPANSION");
+        assert_eq!(error.resource, "MAVEN_ARGS");
+    }
 }
 
 #[test]

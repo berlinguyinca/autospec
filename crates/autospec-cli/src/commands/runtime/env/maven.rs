@@ -26,7 +26,8 @@ impl MavenAdapter {
         Self::probe(&context.repo)?;
         let arguments = MavenPlan::arguments(&caller_maven_args()?, &context.environment_id)
             .map_err(diagnostic)?;
-        let repository = Self::effective_local_repository(&context.repo, &arguments.render())?;
+        let rendered_arguments = arguments.render().map_err(diagnostic)?;
+        let repository = Self::effective_local_repository(&context.repo, &rendered_arguments)?;
         let target = MavenPurgeTarget::for_environment(&repository, &context.environment_id)
             .map_err(diagnostic)?;
         validate_plan_prefix(plan, &context.environment_id)?;
@@ -37,7 +38,7 @@ impl MavenAdapter {
             Some(target.target().to_path_buf()),
         )?;
         state
-            .set_value("MAVEN_ARGS", arguments.render())
+            .set_value("MAVEN_ARGS", rendered_arguments)
             .map_err(|error| failure(error.to_string()))
     }
 
@@ -139,7 +140,8 @@ impl MavenAdapter {
             &context.environment_id,
         )
         .map_err(diagnostic)?;
-        let repository = Self::effective_local_repository(&context.repo, &arguments.render())?;
+        let rendered_arguments = arguments.render().map_err(diagnostic)?;
+        let repository = Self::effective_local_repository(&context.repo, &rendered_arguments)?;
         let target = MavenPurgeTarget::for_environment(&repository, &context.environment_id)
             .map_err(diagnostic)?;
         if inventory.environment_id != context.environment_id

@@ -2,7 +2,6 @@ use std::ffi::{OsStr, OsString};
 use std::iter::Peekable;
 use std::str::Chars;
 
-use super::diagnostic;
 use crate::runtime_env::IsolationDiagnostic;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,19 +59,20 @@ impl MavenArgs {
         self.tokens.push(OsString::from(format!("-D{key}={value}")));
     }
 
-    pub fn render(&self) -> String {
+    pub fn render(&self) -> Result<String, IsolationDiagnostic> {
         self.render_for(MavenArgPlatform::current())
     }
 
-    pub fn render_for(&self, platform: MavenArgPlatform) -> String {
-        self.tokens
+    pub fn render_for(&self, platform: MavenArgPlatform) -> Result<String, IsolationDiagnostic> {
+        Ok(self
+            .tokens
             .iter()
             .map(|token| match platform {
-                MavenArgPlatform::Posix => quote_posix(token.as_os_str()),
+                MavenArgPlatform::Posix => Ok(quote_posix(token.as_os_str())),
                 MavenArgPlatform::Windows => quote_windows(token.as_os_str()),
             })
-            .collect::<Vec<_>>()
-            .join(" ")
+            .collect::<Result<Vec<_>, _>>()?
+            .join(" "))
     }
 }
 
@@ -236,14 +236,23 @@ fn quote_posix(token: &OsStr) -> String {
     }
 }
 
-fn quote_windows(token: &OsStr) -> String {
+fn quote_windows(token: &OsStr) -> Result<String, IsolationDiagnostic> {
     let value = token.to_string_lossy();
-    if !value.is_empty()
-        && !value
-            .chars()
-            .any(|value| value.is_whitespace() || value == '"')
+    if value
+        .chars()
+        .any(|character| matches!(character, '%' | '!'))
     {
-        return value.into_owned();
+        return Err(diagnostic(
+            "MAVEN_ARGUMENT_UNSAFE_WINDOWS_EXPANSION",
+            "MAVEN_ARGS contains '%' or '!', which mvn.cmd may expand",
+        ));
+    }
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-._/:=+\\".contains(character))
+    {
+        return Ok(value.into_owned());
     }
     let mut rendered = String::from("\"");
     let mut slashes = 0;
@@ -262,9 +271,13 @@ fn quote_windows(token: &OsStr) -> String {
     }
     rendered.extend(std::iter::repeat_n('\\', slashes * 2));
     rendered.push('"');
-    rendered
+    Ok(rendered)
 }
 
 fn parse_diagnostic(evidence: &str) -> IsolationDiagnostic {
-    diagnostic("MAVEN_ARGUMENT_PARSE", "MAVEN_ARGS", evidence, "")
+    diagnostic("MAVEN_ARGUMENT_PARSE", evidence)
+}
+
+fn diagnostic(code: &str, evidence: &str) -> IsolationDiagnostic {
+    super::diagnostic(code, "MAVEN_ARGS", evidence, "")
 }
