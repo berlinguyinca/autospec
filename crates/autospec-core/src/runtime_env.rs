@@ -3,9 +3,19 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod diagnostic;
+mod identity;
 mod manifest;
+mod resources;
 
+pub use diagnostic::IsolationDiagnostic;
+pub use identity::{load_generation_token, EnvironmentIdentity};
 pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
+pub use resources::{
+    read_json, write_json_atomic, ComposeExport, ComposeIsolation, ComposePlan,
+    EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue, MavenIsolation, MavenPlan,
+    OwnedVolume, ResolvedExport, ResourceInventory, ResourcePlan, SessionRecord,
+};
 
 const BROKER_OWNED_ENVIRONMENT_KEYS: [&str; 9] = [
     "AGENT_ENV_ID",

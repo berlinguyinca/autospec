@@ -8,6 +8,55 @@ use serde_json::{json, Value};
 
 static NEXT_RUNTIME_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
+#[test]
+fn runtime_env_lease_blocks_a_second_process_until_release() {
+    use std::time::{Duration, Instant};
+
+    let fixture = RuntimeFixture::empty();
+    let environment = fixture.state_root.join("lease-environment");
+    let first_ready = fixture.root.join("first.ready");
+    let first_release = fixture.root.join("first.release");
+    let second_ready = fixture.root.join("second.ready");
+    let second_release = fixture.root.join("second.release");
+
+    let mut first = lease_probe(&environment, &first_ready, &first_release);
+    wait_for_file(&first_ready, Duration::from_secs(5));
+    let mut second = lease_probe(&environment, &second_ready, &second_release);
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        !second_ready.exists(),
+        "second lease acquired while first was held"
+    );
+
+    std::fs::write(&first_release, "release\n").expect("release first probe");
+    assert!(first.wait().expect("first probe exits").success());
+    wait_for_file(&second_ready, Duration::from_secs(5));
+    std::fs::write(&second_release, "release\n").expect("release second probe");
+    assert!(second.wait().expect("second probe exits").success());
+
+    fn lease_probe(
+        environment: &std::path::Path,
+        ready: &std::path::Path,
+        release: &std::path::Path,
+    ) -> std::process::Child {
+        autospec()
+            .args(["runtime", "env", "lease-probe"])
+            .arg(environment)
+            .arg(ready)
+            .arg(release)
+            .spawn()
+            .expect("lease probe starts")
+    }
+
+    fn wait_for_file(path: &std::path::Path, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while !path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(path.exists(), "timed out waiting for {}", path.display());
+    }
+}
+
 fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
 }
