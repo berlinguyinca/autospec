@@ -369,11 +369,13 @@ git commit -m "feat: plan Maven and Compose resources from runtime v2"
 - Create: `crates/autospec-core/src/runtime_env/session.rs`
 - Create: `crates/autospec-core/tests/runtime_session.rs`
 - Create: `crates/autospec-cli/src/commands/runtime/env/session.rs`
+- Create: `crates/autospec-cli/src/commands/runtime/env/lifecycle.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env/isolation.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env/state.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
 - Modify: `crates/autospec-cli/tests/runtime_resources.rs`
 - Create: `crates/autospec-cli/tests/runtime_sessions.rs`
+- Create: `crates/autospec-cli/tests/runtime_state_reconciliation.rs`
 
 **Interfaces:**
 - Consumes: `EnvironmentLease`, owner, plan, and inventory from Task 1.
@@ -433,7 +435,7 @@ Expected: overlapping sessions share state, signals preserve child exit semantic
 - [ ] **Step 5: Commit reference-counted sessions**
 
 ```bash
-git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/src/runtime_env/session.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-core/tests/runtime_session.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/isolation.rs crates/autospec-cli/src/commands/runtime/env/session.rs crates/autospec-cli/src/commands/runtime/env/state.rs crates/autospec-cli/tests/runtime_commands.rs crates/autospec-cli/tests/runtime_resources.rs crates/autospec-cli/tests/runtime_sessions.rs
+git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/src/runtime_env/session.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-core/tests/runtime_session.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/isolation.rs crates/autospec-cli/src/commands/runtime/env/lifecycle.rs crates/autospec-cli/src/commands/runtime/env/session.rs crates/autospec-cli/src/commands/runtime/env/state.rs crates/autospec-cli/tests/runtime_commands.rs crates/autospec-cli/tests/runtime_resources.rs crates/autospec-cli/tests/runtime_sessions.rs crates/autospec-cli/tests/runtime_state_reconciliation.rs
 git commit -m "feat: reference-count shared worktree runtime sessions"
 ```
 
