@@ -775,6 +775,8 @@ and let read-only `--check` plan a deterministic v2 `.autospec/runtime.yml` that
 - Modify: `skills/autospec-run/SKILL.md`, `skills/autospec-run/codex/prompt.md`, `skills/autospec-run/opencode/agent.md`
 - Modify: `skills/autospec/SKILL.md`, `skills/autospec/codex/prompt.md`, `skills/autospec/opencode/agent.md`
 - Modify: `tests/autospec-run-agent-env-contract.bats`
+- Modify: `tests/block-expansion-gate.bats`
+- Modify: `tests/install-expansion.bats`
 - Modify: `crates/autospec-core/src/validation/external.rs`
 - Create: `tests/fixtures/skill-goldens/autospec-compose-normalize.SKILL.md.sha256`
 - Create: `tests/fixtures/skill-goldens/autospec-compose-normalize.codex.prompt.md.sha256`
