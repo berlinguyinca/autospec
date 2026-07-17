@@ -253,8 +253,24 @@ fn git_rev_parse_operational_failure_is_not_treated_as_non_git() {
     let error = EnvironmentIdentity::resolve(&invalid_working_directory, "local", None)
         .expect_err("git operational failure is surfaced");
 
-    assert!(error.to_string().contains("git rev-parse failed"));
-    assert!(error.to_string().contains("Not a directory"));
+    let message = error.to_string();
+    assert!(message.contains("git rev-parse failed for"));
+    assert!(message.contains(&invalid_working_directory.display().to_string()));
+    assert!(message.contains("(--show-toplevel)"));
+}
+
+#[test]
+fn git_operational_error_with_non_repository_words_later_is_not_non_git() {
+    let repository = TempRepo::with_files(&[("not a git repository", "file\n")]);
+    let invalid_working_directory = repository.path().join("not a git repository");
+
+    let error = EnvironmentIdentity::resolve(&invalid_working_directory, "local", None)
+        .expect_err("later stderr words do not trigger non-Git fallback");
+
+    let message = error.to_string();
+    assert!(message.contains("git rev-parse failed for"));
+    assert!(message.contains(&invalid_working_directory.display().to_string()));
+    assert!(message.contains("(--show-toplevel)"));
 }
 
 fn run_git(directory: &Path, arguments: &[&str]) {

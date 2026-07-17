@@ -151,7 +151,7 @@ fn resolve_git_path(repo: &Path, selector: &str) -> Result<Option<PathBuf>, Runt
         .map_err(|error| RuntimeEnvError::new(format!("could not run git rev-parse: {error}")))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if stderr.contains("not a git repository") {
+        if stderr.starts_with("fatal: not a git repository") {
             return Ok(None);
         }
         return Err(RuntimeEnvError::new(format!(
