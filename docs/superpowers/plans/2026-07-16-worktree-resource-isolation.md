@@ -262,6 +262,7 @@ git commit -m "feat: make runtime resource ownership generation-aware"
 - Create: `crates/autospec-cli/src/commands/runtime/env/isolation.rs`
 - Modify: `crates/autospec-cli/tests/runtime_commands.rs`
 - Modify: `crates/autospec-cli/tests/runtime_resources.rs`
+- Modify: `crates/autospec-cli/tests/runtime_commands.rs`
 - Create: `tests/fixtures/runtime-resources/manifest-v2.yml`
 - Create: `tests/fixtures/runtime-resources/compose.yaml`
 
@@ -428,7 +429,7 @@ Expected: overlapping sessions share state, signals preserve child exit semantic
 - [ ] **Step 5: Commit reference-counted sessions**
 
 ```bash
-git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/src/runtime_env/session.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-core/tests/runtime_session.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/isolation.rs crates/autospec-cli/src/commands/runtime/env/session.rs crates/autospec-cli/src/commands/runtime/env/state.rs crates/autospec-cli/tests/runtime_resources.rs crates/autospec-cli/tests/runtime_sessions.rs
+git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/src/runtime_env/session.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-core/tests/runtime_session.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/isolation.rs crates/autospec-cli/src/commands/runtime/env/session.rs crates/autospec-cli/src/commands/runtime/env/state.rs crates/autospec-cli/tests/runtime_commands.rs crates/autospec-cli/tests/runtime_resources.rs crates/autospec-cli/tests/runtime_sessions.rs
 git commit -m "feat: reference-count shared worktree runtime sessions"
 ```
 
