@@ -6,10 +6,11 @@ use autospec_core::runtime_env::{
 
 use crate::commands::CommandFailure;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(super) struct InvocationIsolation {
     pub(super) bypassed: bool,
     pub(super) whole_environment_disabled: bool,
+    pub(super) plan: Option<ResourcePlan>,
 }
 
 pub(super) fn invocation_isolation(
@@ -21,12 +22,13 @@ pub(super) fn invocation_isolation(
         return Ok(InvocationIsolation {
             bypassed: bypass_without_planning(true)?,
             whole_environment_disabled: true,
+            plan: None,
         });
     }
     let maven = environment_value("AUTOSPEC_MAVEN_ISOLATION")?;
     let compose = environment_value("AUTOSPEC_COMPOSE_ISOLATION")?;
     let identity = planning_identity(repo, requested_mode)?;
-    let (_, bypassed) = RuntimeManifest::resource_plan_for_repo_with_overrides(
+    let (plan, bypassed) = RuntimeManifest::resource_plan_for_repo_with_overrides(
         repo,
         &identity,
         maven.as_deref(),
@@ -52,6 +54,7 @@ pub(super) fn invocation_isolation(
     Ok(InvocationIsolation {
         bypassed,
         whole_environment_disabled,
+        plan: Some(plan),
     })
 }
 
@@ -75,7 +78,7 @@ pub(super) fn whole_environment_disabled() -> Result<bool, CommandFailure> {
     }
 }
 
-fn planning_identity(
+pub(super) fn planning_identity(
     repo: &Path,
     requested_mode: &str,
 ) -> Result<EnvironmentIdentity, CommandFailure> {

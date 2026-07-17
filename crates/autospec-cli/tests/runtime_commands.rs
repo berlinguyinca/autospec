@@ -316,6 +316,23 @@ impl RuntimeFixture {
                     .any(|record| record.is_ok())
             })
     }
+
+    fn has_only_lease_tombstone(&self) -> bool {
+        let Ok(mut environments) = std::fs::read_dir(&self.state_root) else {
+            return false;
+        };
+        let Some(Ok(environment)) = environments.next() else {
+            return false;
+        };
+        if environments.next().is_some() {
+            return false;
+        }
+        let Ok(mut entries) = std::fs::read_dir(environment.path()) else {
+            return false;
+        };
+        matches!(entries.next(), Some(Ok(entry)) if entry.file_name() == "lease.lock")
+            && entries.next().is_none()
+    }
 }
 
 impl Drop for RuntimeFixture {
@@ -555,7 +572,13 @@ fn runtime_env_exec_runs_a_direct_child_in_the_provisioned_environment() {
     let (environment_id, public_url) = child_output
         .split_once('|')
         .expect("direct child output has both values");
-    assert!(environment_id.starts_with("sample-app-"));
+    let state_environment_id = std::fs::read_dir(&fixture.state_root)
+        .expect("state root exists")
+        .next()
+        .expect("environment exists")
+        .expect("environment entry")
+        .file_name();
+    assert_eq!(state_environment_id.to_string_lossy(), environment_id);
     assert!(public_url.starts_with("http://127.0.0.1:"));
     let status = fixture
         .command()
@@ -662,9 +685,7 @@ fn runtime_env_session_cleans_up_when_its_child_cannot_start() {
 
     assert_eq!(output.status.code(), Some(2));
     assert!(!fixture.has_session_record());
-    assert!(std::fs::read_dir(&fixture.state_root)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(true));
+    assert!(fixture.has_only_lease_tombstone());
     assert_eq!(
         std::fs::read_to_string(fixture.root.join("down.txt")).expect("teardown ran"),
         "down"
@@ -819,9 +840,7 @@ fn runtime_env_session_tears_down_after_sigterm() {
 
     assert_eq!(output.status.code(), Some(143));
     assert!(!fixture.has_session_record());
-    assert!(std::fs::read_dir(&fixture.state_root)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(true));
+    assert!(fixture.has_only_lease_tombstone());
     assert_eq!(
         std::fs::read_to_string(fixture.root.join("down.txt")).expect("teardown ran"),
         "down"
@@ -1022,7 +1041,7 @@ fn runtime_env_up_prints_the_legacy_protocol_and_reuses_existing_state() {
     );
     let first_stdout = String::from_utf8_lossy(&first.stdout);
     let expected_prefixes = [
-        "AGENT_ENV_ID=sample-app-",
+        "AGENT_ENV_ID=autospec-runtime-cli-",
         "AGENT_ENV_MODE=local",
         "AGENT_ENV_REPO=",
         "AGENT_ENV_FILE=",
@@ -1030,7 +1049,7 @@ fn runtime_env_up_prints_the_legacy_protocol_and_reuses_existing_state() {
         "AGENT_BACKEND_PORT=",
         "AGENT_PUBLIC_URL=http://127.0.0.1:",
         "AUTOSPEC_PUBLIC_URL=http://127.0.0.1:",
-        "COMPOSE_PROJECT_NAME=agent_sample_app_",
+        "COMPOSE_PROJECT_NAME=agent_autospec_runtime_cli_",
     ];
     assert_eq!(first_stdout.lines().count(), expected_prefixes.len());
     for (line, prefix) in first_stdout.lines().zip(expected_prefixes) {
@@ -1115,9 +1134,7 @@ fn runtime_env_down_is_idempotent_after_state_cleanup() {
         std::fs::read_to_string(fixture.root.join("down.txt")).unwrap(),
         "down"
     );
-    assert!(std::fs::read_dir(&fixture.state_root)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(true));
+    assert!(fixture.has_only_lease_tombstone());
 }
 
 #[test]

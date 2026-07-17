@@ -3,7 +3,8 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use autospec_core::runtime_env::{
-    ComposeIsolation, ComposePlan, EnvironmentIdentity, MavenIsolation, MavenPlan, ResourcePlan,
+    ComposeIsolation, ComposePlan, EnvironmentIdentity, EnvironmentLifecycle, EnvironmentOwner,
+    MavenIsolation, MavenPlan, ResourcePlan,
 };
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
@@ -285,4 +286,46 @@ fn invalid_resource_override_fails_before_a_disabled_command_can_start() {
 
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("AUTOSPEC_MAVEN_ISOLATION"));
+}
+
+#[test]
+fn owner_lifecycle_is_persisted_before_provision_and_teardown_effects() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'grep -q Provisioning \"$AGENT_ENV_STATE_ROOT/$AGENT_ENV_ID/owner.json\" && touch provisioning-seen'\n    down: sh -c 'grep -q TearingDown \"$AGENT_ENV_STATE_ROOT/$AGENT_ENV_ID/owner.json\" && touch teardown-seen'\n",
+    );
+    let up = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("up starts");
+    assert!(
+        up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    assert!(fixture.root.join("provisioning-seen").is_file());
+
+    let environment = std::fs::read_dir(&fixture.state_root)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let active: EnvironmentOwner =
+        autospec_core::runtime_env::read_json(&environment.join("owner.json")).unwrap();
+    assert_eq!(active.lifecycle, EnvironmentLifecycle::Active);
+
+    let down = fixture
+        .command()
+        .args(["runtime", "env", "down", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("down starts");
+    assert!(
+        down.status.success(),
+        "{}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+    assert!(fixture.root.join("teardown-seen").is_file());
 }
