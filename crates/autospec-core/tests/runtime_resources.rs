@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use autospec_core::runtime_env::{
     load_generation_token, read_json, write_json_atomic, ComposePlan, EnvironmentIdentity,
     EnvironmentLifecycle, EnvironmentOwner, IsolationDiagnostic, OwnedVolume, ResolvedExport,
-    ResourceInventory, SessionRecord,
+    ResourceInventory, RuntimeContext, RuntimeManifest, SessionRecord,
 };
 
 static NEXT_TEMP_REPO: AtomicUsize = AtomicUsize::new(0);
@@ -51,6 +51,43 @@ fn generation_token_prevents_path_reuse_from_adopting_state() {
 
     assert_ne!(first.environment_id, second.environment_id);
     assert_ne!(first.owner_key, second.owner_key);
+}
+
+#[test]
+fn generation_identity_selects_the_authoritative_state_directory() {
+    let repo = TempRepo::with_files(&[(
+        ".autospec/runtime.yml",
+        "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: true\n",
+    )]);
+    let manifest = RuntimeManifest::read_from_repo(repo.path()).unwrap();
+    let first = EnvironmentIdentity::resolve(repo.path(), "local", Some("gen-a")).unwrap();
+    let second = EnvironmentIdentity::resolve(repo.path(), "local", Some("gen-b")).unwrap();
+    let state_root = repo.path().join("state");
+
+    let first_context = RuntimeContext::new_with_identity(
+        manifest.clone(),
+        repo.path(),
+        "local",
+        &state_root,
+        &first,
+    )
+    .unwrap();
+    let second_context =
+        RuntimeContext::new_with_identity(manifest, repo.path(), "local", &state_root, &second)
+            .unwrap();
+
+    assert_eq!(
+        first_context.environment_dir.file_name().unwrap(),
+        first.environment_id.as_str()
+    );
+    assert_eq!(
+        second_context.environment_dir.file_name().unwrap(),
+        second.environment_id.as_str()
+    );
+    assert_ne!(
+        first_context.environment_dir,
+        second_context.environment_dir
+    );
 }
 
 #[test]

@@ -1,21 +1,27 @@
 use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, Command};
 use std::time::Duration;
 
-#[cfg(unix)]
-use std::sync::atomic::{AtomicI32, Ordering};
-
-use autospec_core::runtime_env::{RuntimeContext, RuntimeManifest, RuntimeState};
+use autospec_core::runtime_env::{
+    EnvironmentLifecycle, ResourcePlan, RuntimeContext, RuntimeManifest, RuntimeState,
+};
 
 use crate::commands::CommandFailure;
 
 mod isolation;
+mod session;
 mod state;
 
-use isolation::{bypass_without_planning, invocation_isolation, whole_environment_disabled};
-use state::{read_runtime_state, write_runtime_state, EnvironmentLease};
+use isolation::{
+    bypass_without_planning, invocation_isolation, planning_identity, whole_environment_disabled,
+};
+use session::{live_sessions, prepare_signal_handlers, run_session_command, SessionLease};
+use state::{
+    initialize_authoritative_state, layout_for_context, read_authoritative_state,
+    read_runtime_state, write_lifecycle, write_runtime_state, EnvironmentLease, StateLayout,
+};
 
 const STATE_ENVIRONMENT_KEYS: [&str; 9] = [
     "AGENT_ENV_ID",
@@ -28,21 +34,6 @@ const STATE_ENVIRONMENT_KEYS: [&str; 9] = [
     "AUTOSPEC_PUBLIC_URL",
     "COMPOSE_PROJECT_NAME",
 ];
-
-// SECURITY: this fixed FFI signature exposes only the installed signal numbers
-// and an atomic-only handler; security-workstream verifies this exact boundary.
-#[cfg(unix)]
-extern "C" {
-    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
-}
-
-#[cfg(unix)]
-static RECEIVED_SIGNAL: AtomicI32 = AtomicI32::new(0);
-
-#[cfg(unix)]
-extern "C" fn record_signal(signal: i32) {
-    RECEIVED_SIGNAL.store(signal, Ordering::Relaxed);
-}
 
 #[derive(Debug, Clone)]
 struct Options {
@@ -74,11 +65,6 @@ struct SessionOptions {
     options: Options,
     command: Vec<String>,
     keep_alive: bool,
-}
-
-enum SessionWait {
-    Exited(ExitStatus),
-    Interrupted(i32),
 }
 
 pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -369,8 +355,11 @@ fn up(options: Options) -> Result<(), CommandFailure> {
         println!("AUTOSPEC_ISOLATION_BYPASSED=1");
         return Ok(());
     }
-    let context = context_from_repo(&repo, &options.mode)?;
-    let state = provision(&context, invocation.bypassed)?;
+    let plan = invocation
+        .plan
+        .expect("enabled runtime invocation has a plan");
+    let context = context_from_plan(&repo, &options.mode, &plan)?;
+    let state = provision(&context, &plan, invocation.bypassed)?;
     print_protocol(&context, &state, invocation.bypassed);
     Ok(())
 }
@@ -399,17 +388,41 @@ fn status(options: Options) -> Result<(), CommandFailure> {
 
 fn down(options: Options) -> Result<(), CommandFailure> {
     let context = context(&options)?;
+    if !context.environment_dir.exists() {
+        return Ok(());
+    }
+    let _lease = EnvironmentLease::acquire(&context.environment_dir)?;
+    let live = live_sessions(&context.environment_dir)?;
+    if !live.is_empty() {
+        return Err(CommandFailure::diagnostic(format!(
+            "RUNTIME_LIVE_SESSIONS: {} live runtime session(s) prevent teardown",
+            live.len()
+        )));
+    }
     let state = if context.env_file.is_file() {
         Some(read_state(&context)?)
     } else {
         None
     };
-    teardown(&context, state.as_ref())
+    teardown_locked(&context, state.as_ref())
 }
 
-fn teardown(context: &RuntimeContext, state: Option<&RuntimeState>) -> Result<(), CommandFailure> {
+fn teardown_locked(
+    context: &RuntimeContext,
+    state: Option<&RuntimeState>,
+) -> Result<(), CommandFailure> {
+    let layout = layout_for_context(context);
+    let mut owner = read_authoritative_state(&layout)?.map(|state| state.owner);
+    if let Some(owner) = &mut owner {
+        write_lifecycle(&layout, owner, EnvironmentLifecycle::TearingDown)?;
+    }
     if let Some(state) = state {
-        run_mode_command(context.mode.down(), context, Some(state), false)?;
+        if let Err(error) = run_mode_command(context.mode.down(), context, Some(state), false) {
+            if let Some(owner) = &mut owner {
+                write_lifecycle(&layout, owner, EnvironmentLifecycle::CleanupFailed)?;
+            }
+            return Err(error);
+        }
     }
     match fs::remove_dir_all(&context.environment_dir) {
         Ok(()) => Ok(()),
@@ -427,8 +440,11 @@ fn exec(options: ExecOptions) -> Result<(), CommandFailure> {
     if invocation.whole_environment_disabled {
         return run_direct_command(&options.command, &repo, None, true);
     }
-    let context = context_from_repo(&repo, &options.options.mode)?;
-    let state = provision(&context, invocation.bypassed)?;
+    let plan = invocation
+        .plan
+        .expect("enabled runtime invocation has a plan");
+    let context = context_from_plan(&repo, &options.options.mode, &plan)?;
+    let state = provision(&context, &plan, invocation.bypassed)?;
     run_direct_command(
         &options.command,
         &context.repo,
@@ -453,13 +469,25 @@ fn session(options: SessionOptions) -> Result<(), CommandFailure> {
         }
     }
     let invocation = invocation_isolation(&repo, &options.options.mode)?;
-    let context = context_from_repo(&repo, &options.options.mode)?;
-    let state = provision(&context, invocation.bypassed)?;
+    prepare_signal_handlers();
+    let plan = invocation
+        .plan
+        .expect("enabled runtime invocation has a plan");
+    let context = context_from_plan(&repo, &options.options.mode, &plan)?;
+    let lease = EnvironmentLease::acquire(&context.environment_dir)?;
+    let state = provision_locked(&context, &plan, invocation.bypassed)?;
+    let harness = options
+        .command
+        .first()
+        .expect("session command is not empty");
+    let session_lease = SessionLease::register(&context.environment_dir, harness)?;
+    drop(lease);
     let keep_alive = options.keep_alive || environment_flag("AUTOSPEC_ENV_KEEP_ALIVE");
     run_session_command(
         &options.command,
         &context,
         &state,
+        session_lease,
         keep_alive,
         invocation.bypassed,
     )
@@ -471,10 +499,31 @@ fn context(options: &Options) -> Result<RuntimeContext, CommandFailure> {
 }
 
 fn context_from_repo(repo: &Path, mode: &str) -> Result<RuntimeContext, CommandFailure> {
+    let identity = planning_identity(repo, mode)?;
+    context_from_identity(repo, mode, &identity)
+}
+
+fn context_from_plan(
+    repo: &Path,
+    mode: &str,
+    plan: &ResourcePlan,
+) -> Result<RuntimeContext, CommandFailure> {
+    context_from_identity(repo, mode, &plan.identity)
+}
+
+fn context_from_identity(
+    repo: &Path,
+    mode: &str,
+    identity: &autospec_core::runtime_env::EnvironmentIdentity,
+) -> Result<RuntimeContext, CommandFailure> {
     let manifest = RuntimeManifest::read_from_repo(repo)
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
-    RuntimeContext::new(manifest, repo, mode, &state_root()?)
-        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+    let root = state_root()?;
+    let layout = StateLayout::new(&root, &identity.environment_id);
+    let context = RuntimeContext::new_with_identity(manifest, repo, mode, &root, identity)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    debug_assert_eq!(context.environment_dir, layout.environment_dir);
+    Ok(context)
 }
 
 fn canonical_repo(repo: &Path) -> Result<PathBuf, CommandFailure> {
@@ -639,34 +688,113 @@ fn replace_state_value(
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))
 }
 
-fn provision(context: &RuntimeContext, bypassed: bool) -> Result<RuntimeState, CommandFailure> {
-    if context.env_file.is_file() {
-        return read_state(context);
+fn provision(
+    context: &RuntimeContext,
+    plan: &ResourcePlan,
+    bypassed: bool,
+) -> Result<RuntimeState, CommandFailure> {
+    let _lease = EnvironmentLease::acquire(&context.environment_dir)?;
+    provision_locked(context, plan, bypassed)
+}
+
+fn provision_locked(
+    context: &RuntimeContext,
+    plan: &ResourcePlan,
+    bypassed: bool,
+) -> Result<RuntimeState, CommandFailure> {
+    let layout = layout_for_context(context);
+    if let Some(authoritative) = read_authoritative_state(&layout)? {
+        if active_state_matches(&authoritative, plan, context) {
+            return read_state(context);
+        }
+        reconcile_partial(context, &layout, authoritative.owner)?;
+    } else if context.env_file.is_file() {
+        let owner = initialize_authoritative_state(&layout, plan)?;
+        reconcile_partial(context, &layout, owner)?;
     }
-    fs::create_dir_all(&context.environment_dir).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not create runtime environment {}: {error}",
-            context.environment_dir.display()
-        ))
-    })?;
+    provision_fresh(context, &layout, plan, bypassed)
+}
+
+fn active_state_matches(
+    state: &state::AuthoritativeState,
+    plan: &ResourcePlan,
+    context: &RuntimeContext,
+) -> bool {
+    state.owner.lifecycle == EnvironmentLifecycle::Active
+        && state.owner.identity == plan.identity
+        && state.owner.manifest_digest == plan.digest
+        && state.plan.digest == plan.digest
+        && state.inventory.environment_id == plan.identity.environment_id
+        && context.env_file.is_file()
+}
+
+fn reconcile_partial(
+    context: &RuntimeContext,
+    layout: &StateLayout,
+    mut owner: autospec_core::runtime_env::EnvironmentOwner,
+) -> Result<(), CommandFailure> {
+    if !live_sessions(&context.environment_dir)?.is_empty() {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_LIVE_SESSIONS: cannot reconcile partial state with live sessions",
+        ));
+    }
+    let state = context
+        .env_file
+        .is_file()
+        .then(|| read_state(context))
+        .transpose()?;
+    write_lifecycle(layout, &mut owner, EnvironmentLifecycle::TearingDown)?;
+    if let Some(state) = &state {
+        if let Err(error) = run_mode_command(context.mode.down(), context, Some(state), false) {
+            write_lifecycle(layout, &mut owner, EnvironmentLifecycle::CleanupFailed)?;
+            return Err(error);
+        }
+    }
+    remove_file_if_present(&context.env_file)
+}
+
+fn provision_fresh(
+    context: &RuntimeContext,
+    layout: &StateLayout,
+    plan: &ResourcePlan,
+    bypassed: bool,
+) -> Result<RuntimeState, CommandFailure> {
+    let mut owner = initialize_authoritative_state(layout, plan)?;
     let state = state_from_context(context)?;
     write_state(context, &state)?;
     let command = context
         .mode
         .command()
-        .filter(|command| !command.trim().is_empty())
-        .ok_or_else(|| {
-            CommandFailure::status(
-                format!(
-                    "agent-env: mode '{}' has no command in {}",
-                    context.mode.name(),
-                    context.manifest.path().display()
-                ),
-                1,
-            )
-        })?;
-    run_mode_command(Some(command), context, Some(&state), bypassed)?;
+        .filter(|command| !command.trim().is_empty());
+    if command.is_none() && plan.maven.is_none() && plan.compose.is_none() {
+        return Err(missing_mode_command(context));
+    }
+    write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Provisioning)?;
+    run_mode_command(command, context, Some(&state), bypassed)?;
+    write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Active)?;
     Ok(state)
+}
+
+fn missing_mode_command(context: &RuntimeContext) -> CommandFailure {
+    CommandFailure::status(
+        format!(
+            "agent-env: mode '{}' has no command in {}",
+            context.mode.name(),
+            context.manifest.path().display()
+        ),
+        1,
+    )
+}
+
+fn remove_file_if_present(path: &Path) -> Result<(), CommandFailure> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(CommandFailure::diagnostic(format!(
+            "could not remove runtime state {}: {error}",
+            path.display()
+        ))),
+    }
 }
 
 fn write_state(context: &RuntimeContext, state: &RuntimeState) -> Result<(), CommandFailure> {
@@ -729,145 +857,8 @@ fn spawn_direct_command(
     })
 }
 
-fn run_session_command(
-    command: &[String],
-    context: &RuntimeContext,
-    state: &RuntimeState,
-    keep_alive: bool,
-    bypassed: bool,
-) -> Result<(), CommandFailure> {
-    #[cfg(unix)]
-    install_signal_handlers();
-
-    let session_file = match write_session_record(context, command) {
-        Ok(path) => path,
-        Err(error) => {
-            let _ = teardown(context, Some(state));
-            return Err(error);
-        }
-    };
-    let mut child =
-        match spawn_direct_command(command, &context.repo, Some((context, state)), bypassed) {
-            Ok(child) => child,
-            Err(error) => {
-                let _ = cleanup_session(context, state, &session_file, true);
-                return Err(error);
-            }
-        };
-    let result = wait_for_session_child(&mut child);
-    let should_teardown = matches!(&result, Ok(SessionWait::Interrupted(_))) || !keep_alive;
-    let cleanup = cleanup_session(context, state, &session_file, should_teardown);
-
-    match result {
-        Ok(SessionWait::Interrupted(signal)) => {
-            let _ = cleanup;
-            Err(CommandFailure::status(
-                String::new(),
-                if signal == 2 { 130 } else { 143 },
-            ))
-        }
-        Ok(SessionWait::Exited(status)) if status.success() => cleanup,
-        Ok(SessionWait::Exited(status)) => {
-            let _ = cleanup;
-            child_status(status)
-        }
-        Err(error) => {
-            let _ = cleanup;
-            Err(error)
-        }
-    }
-}
-
-fn write_session_record(
-    context: &RuntimeContext,
-    command: &[String],
-) -> Result<PathBuf, CommandFailure> {
-    let sessions = context.environment_dir.join("sessions");
-    fs::create_dir_all(&sessions).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not create runtime session directory {}: {error}",
-            sessions.display()
-        ))
-    })?;
-    let record = sessions.join(std::process::id().to_string());
-    fs::write(
-        &record,
-        format!(
-            "pid={}\ncommand={}\n",
-            std::process::id(),
-            command.join(" ")
-        ),
-    )
-    .map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not write runtime session record {}: {error}",
-            record.display()
-        ))
-    })?;
-    Ok(record)
-}
-
-fn cleanup_session(
-    context: &RuntimeContext,
-    state: &RuntimeState,
-    session_file: &Path,
-    should_teardown: bool,
-) -> Result<(), CommandFailure> {
-    match fs::remove_file(session_file) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(CommandFailure::diagnostic(format!(
-                "could not remove runtime session record {}: {error}",
-                session_file.display()
-            )));
-        }
-    }
-    if should_teardown {
-        teardown(context, Some(state))?;
-    }
-    Ok(())
-}
-
 fn environment_flag(key: &str) -> bool {
     matches!(std::env::var(key).as_deref(), Ok("1"))
-}
-
-#[cfg(unix)]
-fn install_signal_handlers() {
-    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
-    // The normal session loop consumes the recorded signal before teardown.
-    // SECURITY: SIGINT/SIGTERM are fixed POSIX values and the handler records
-    // only an atomic flag; security-workstream verifies this exact boundary.
-    unsafe {
-        signal(2, record_signal);
-        signal(15, record_signal);
-    }
-}
-
-#[cfg(unix)]
-fn wait_for_session_child(child: &mut Child) -> Result<SessionWait, CommandFailure> {
-    loop {
-        let signal = RECEIVED_SIGNAL.load(Ordering::Relaxed);
-        if signal == 2 || signal == 15 {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(SessionWait::Interrupted(signal));
-        }
-        if let Some(status) = child.try_wait().map_err(|error| {
-            CommandFailure::diagnostic(format!("could not wait for runtime child command: {error}"))
-        })? {
-            return Ok(SessionWait::Exited(status));
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-#[cfg(not(unix))]
-fn wait_for_session_child(child: &mut Child) -> Result<SessionWait, CommandFailure> {
-    child.wait().map(SessionWait::Exited).map_err(|error| {
-        CommandFailure::diagnostic(format!("could not wait for runtime child command: {error}"))
-    })
 }
 
 fn run_mode_command(

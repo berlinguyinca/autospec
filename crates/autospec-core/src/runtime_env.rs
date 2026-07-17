@@ -9,6 +9,7 @@ mod manifest;
 mod manifest_v2;
 mod resource_plan;
 mod resources;
+mod session;
 mod shell_command;
 
 pub use diagnostic::IsolationDiagnostic;
@@ -20,6 +21,7 @@ pub use resources::{
     MavenIsolation, MavenPlan, MavenResourceConfig, OwnedVolume, ResolvedExport, ResourceInventory,
     ResourcePlan, RuntimeResources, SessionRecord,
 };
+pub use session::{random_session_token, ProcessIdentity, ReleaseDecision, SessionSet};
 
 const BROKER_OWNED_ENVIRONMENT_KEYS: [&str; 9] = [
     "AGENT_ENV_ID",
@@ -69,6 +71,43 @@ impl RuntimeContext {
         let environment_dir = state_root.join(&environment_id);
         let env_file = environment_dir.join("env");
 
+        Ok(Self {
+            repo,
+            manifest,
+            mode,
+            environment_id,
+            environment_dir,
+            env_file,
+        })
+    }
+
+    pub fn new_with_identity(
+        mut manifest: RuntimeManifest,
+        repo: &Path,
+        requested_mode: &str,
+        state_root: &Path,
+        identity: &EnvironmentIdentity,
+    ) -> Result<Self, RuntimeEnvError> {
+        let manifest_relative_path = manifest.path().strip_prefix(repo).map_err(|_| {
+            RuntimeEnvError::new(format!(
+                "runtime manifest {} is not inside repo {}",
+                manifest.path().display(),
+                repo.display()
+            ))
+        })?;
+        let repo = std::fs::canonicalize(repo).map_err(|error| {
+            RuntimeEnvError::new(format!("repo does not exist: {} ({error})", repo.display()))
+        })?;
+        manifest.path = repo.join(manifest_relative_path);
+        let mode = manifest.selected_mode(requested_mode)?.clone();
+        if identity.canonical_repo != repo || identity.mode != mode.name() {
+            return Err(RuntimeEnvError::new(
+                "runtime environment identity does not match the selected repository and mode",
+            ));
+        }
+        let environment_id = identity.environment_id.clone();
+        let environment_dir = state_root.join(&environment_id);
+        let env_file = environment_dir.join("env");
         Ok(Self {
             repo,
             manifest,
