@@ -318,3 +318,8 @@ fn temporary_name(path: &Path) -> String {
         std::process::id()
     )
 }
+
+#[cfg(test)]
+pub(super) fn assert_error(message: &str, expected: &str) {
+    assert!(message.contains(expected), "{message}");
+}

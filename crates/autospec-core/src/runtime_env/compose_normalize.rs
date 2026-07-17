@@ -296,7 +296,7 @@ mod transaction_tests {
             },
         )
         .expect_err("mutation must make the plan stale");
-        assert!(error.to_string().contains("NORMALIZE_STALE_SOURCE"));
+        transaction::assert_error(&error.to_string(), "NORMALIZE_STALE_SOURCE");
         assert_eq!(
             std::fs::read(&fixture.files[0].path).unwrap(),
             b"external mutation"
@@ -315,7 +315,7 @@ mod transaction_tests {
             &Faults::default(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("NORMALIZE_POLICY_FAILED"));
+        transaction::assert_error(&error.to_string(), "NORMALIZE_POLICY_FAILED");
         fixture.assert_originals();
 
         let fixture = TransactionFixture::new(3);
@@ -329,8 +329,9 @@ mod transaction_tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("NORMALIZE_RENAME_FAILED"));
-        assert!(error.contains("rollback[0]") && error.contains("rollback[1]"));
+        transaction::assert_error(&error, "NORMALIZE_RENAME_FAILED");
+        transaction::assert_error(&error, "rollback[0]");
+        transaction::assert_error(&error, "rollback[1]");
         assert_eq!(std::fs::read(&fixture.files[2].path).unwrap(), b"old-2");
     }
 
