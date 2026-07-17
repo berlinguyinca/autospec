@@ -2,11 +2,10 @@ use std::fs;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
-#[cfg(unix)]
-use std::time::Duration;
 
 use autospec_core::runtime_env::{RuntimeContext, RuntimeManifest, RuntimeState};
 

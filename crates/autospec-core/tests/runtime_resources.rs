@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use autospec_core::runtime_env::{
     load_generation_token, read_json, write_json_atomic, EnvironmentIdentity, EnvironmentLifecycle,
-    EnvironmentOwner, OwnedVolume, ResolvedExport, ResourceInventory, SessionRecord,
+    EnvironmentOwner, IsolationDiagnostic, OwnedVolume, ResolvedExport, ResourceInventory,
+    SessionRecord,
 };
 
 static NEXT_TEMP_REPO: AtomicUsize = AtomicUsize::new(0);
@@ -132,6 +133,34 @@ fn owner_and_session_contracts_round_trip_with_schema_one() {
 }
 
 #[test]
+fn isolation_diagnostic_has_the_exact_schema_one_json_shape() {
+    let diagnostic = IsolationDiagnostic {
+        schema_version: 1,
+        code: "RUNTIME_COLLISION".to_string(),
+        environment_id: "env-a".to_string(),
+        resource: "compose.web.ports[0]".to_string(),
+        evidence: "fixed host port 8080".to_string(),
+        recovery_command: "autospec runtime env normalize".to_string(),
+    };
+    let expected = serde_json::json!({
+        "schema_version": 1,
+        "code": "RUNTIME_COLLISION",
+        "environment_id": "env-a",
+        "resource": "compose.web.ports[0]",
+        "evidence": "fixed host port 8080",
+        "recovery_command": "autospec runtime env normalize",
+    });
+
+    let encoded = serde_json::to_value(&diagnostic).unwrap();
+
+    assert_eq!(encoded, expected);
+    assert_eq!(
+        serde_json::from_value::<IsolationDiagnostic>(encoded).unwrap(),
+        diagnostic
+    );
+}
+
+#[test]
 fn linked_worktree_identity_uses_git_root_and_worktree_specific_generation() {
     let repository = TempRepo::with_files(&[("tracked.txt", "tracked\n")]);
     run_git(repository.path(), &["init"]);
@@ -194,6 +223,38 @@ fn generation_loader_recovers_an_interrupted_empty_initialization() {
 
     assert_eq!(token.len(), 32);
     assert_eq!(std::fs::read_to_string(generation_path).unwrap(), token);
+}
+
+#[test]
+fn generation_loader_replaces_a_partial_non_empty_authoritative_token() {
+    let repository = TempRepo::with_files(&[("tracked.txt", "tracked\n")]);
+    run_git(repository.path(), &["init"]);
+    let git_dir = PathBuf::from(git_output(
+        repository.path(),
+        &["rev-parse", "--path-format=absolute", "--git-dir"],
+    ));
+    let generation_path = git_dir.join("autospec-runtime-generation");
+    std::fs::write(&generation_path, "partial-token").expect("seed partial generation token");
+
+    let token = load_generation_token(repository.path())
+        .expect("generation loader recovers")
+        .expect("Git repository gets a generation");
+
+    assert_eq!(token.len(), 32);
+    assert_eq!(std::fs::read_to_string(generation_path).unwrap(), token);
+    assert!(git_dir.join("autospec-runtime-generation.lock").is_file());
+}
+
+#[test]
+fn git_rev_parse_operational_failure_is_not_treated_as_non_git() {
+    let repository = TempRepo::with_files(&[("not-a-directory", "file\n")]);
+    let invalid_working_directory = repository.path().join("not-a-directory");
+
+    let error = EnvironmentIdentity::resolve(&invalid_working_directory, "local", None)
+        .expect_err("git operational failure is surfaced");
+
+    assert!(error.to_string().contains("git rev-parse failed"));
+    assert!(error.to_string().contains("Not a directory"));
 }
 
 fn run_git(directory: &Path, arguments: &[&str]) {

@@ -8,6 +8,10 @@ use serde_json::{json, Value};
 
 static NEXT_RUNTIME_FIXTURE: AtomicUsize = AtomicUsize::new(0);
 
+fn autospec() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_autospec"))
+}
+
 #[test]
 fn runtime_env_lease_blocks_a_second_process_until_release() {
     use std::time::{Duration, Instant};
@@ -19,9 +23,9 @@ fn runtime_env_lease_blocks_a_second_process_until_release() {
     let second_ready = fixture.root.join("second.ready");
     let second_release = fixture.root.join("second.release");
 
-    let mut first = lease_probe(&environment, &first_ready, &first_release);
+    let first = lease_probe(&environment, &first_ready, &first_release);
     wait_for_file(&first_ready, Duration::from_secs(5));
-    let mut second = lease_probe(&environment, &second_ready, &second_release);
+    let second = lease_probe(&environment, &second_ready, &second_release);
     std::thread::sleep(Duration::from_millis(150));
     assert!(
         !second_ready.exists(),
@@ -38,14 +42,14 @@ fn runtime_env_lease_blocks_a_second_process_until_release() {
         environment: &std::path::Path,
         ready: &std::path::Path,
         release: &std::path::Path,
-    ) -> std::process::Child {
-        autospec()
+    ) -> ChildGuard {
+        let mut command = autospec();
+        command
             .args(["runtime", "env", "lease-probe"])
             .arg(environment)
             .arg(ready)
-            .arg(release)
-            .spawn()
-            .expect("lease probe starts")
+            .arg(release);
+        ChildGuard::spawn(&mut command)
     }
 
     fn wait_for_file(path: &std::path::Path, timeout: Duration) {
@@ -57,8 +61,25 @@ fn runtime_env_lease_blocks_a_second_process_until_release() {
     }
 }
 
-fn autospec() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_autospec"))
+struct ChildGuard(Option<std::process::Child>);
+
+impl ChildGuard {
+    fn spawn(command: &mut Command) -> Self {
+        Self(Some(command.spawn().expect("lease probe starts")))
+    }
+
+    fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
+        self.0.take().expect("lease probe child is present").wait()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 fn audit_fixture() -> PathBuf {

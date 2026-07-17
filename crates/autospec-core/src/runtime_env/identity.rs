@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::{Read, Seek, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 use super::RuntimeEnvError;
 
 const GENERATION_FILE: &str = "autospec-runtime-generation";
+const GENERATION_LOCK_FILE: &str = "autospec-runtime-generation.lock";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EnvironmentIdentity {
@@ -55,48 +56,79 @@ pub fn load_generation_token(repo: &Path) -> Result<Option<String>, RuntimeEnvEr
         return Ok(None);
     };
     let path = git_dir.join(GENERATION_FILE);
-    let mut file = OpenOptions::new()
+    let lock_path = git_dir.join(GENERATION_LOCK_FILE);
+    let lock = OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(&path)
+        .open(&lock_path)
         .map_err(|error| {
             RuntimeEnvError::new(format!(
-                "could not open runtime generation {}: {error}",
-                path.display()
+                "could not open runtime generation lock {}: {error}",
+                lock_path.display()
             ))
         })?;
-    file.lock().map_err(|error| {
+    lock.lock().map_err(|error| {
         RuntimeEnvError::new(format!(
-            "could not lock runtime generation {}: {error}",
-            path.display()
+            "could not lock runtime generation lock {}: {error}",
+            lock_path.display()
         ))
     })?;
-    let mut existing = String::new();
-    file.read_to_string(&mut existing).map_err(|error| {
-        RuntimeEnvError::new(format!(
-            "could not read runtime generation {}: {error}",
-            path.display()
-        ))
-    })?;
-    if !existing.is_empty() {
-        return validate_token(existing, &path).map(Some);
+    match std::fs::read_to_string(&path) {
+        Ok(existing) if is_valid_token(existing.trim()) => return Ok(Some(existing.trim().into())),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(RuntimeEnvError::new(format!(
+                "could not read runtime generation {}: {error}",
+                path.display()
+            )));
+        }
     }
 
     let token = random_token()?;
-    file.rewind()
-        .and_then(|()| file.write_all(token.as_bytes()))
-        .and_then(|()| file.set_len(token.len() as u64))
-        .and_then(|()| file.sync_all())
-        .map_err(|error| {
+    publish_generation_token(&git_dir, &path, &token)?;
+    Ok(Some(token))
+}
+
+fn publish_generation_token(
+    git_dir: &Path,
+    path: &Path,
+    token: &str,
+) -> Result<(), RuntimeEnvError> {
+    let temporary = git_dir.join(format!(".{GENERATION_FILE}.{token}.tmp"));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| {
+                RuntimeEnvError::new(format!(
+                    "could not create runtime generation temporary {}: {error}",
+                    temporary.display()
+                ))
+            })?;
+        file.write_all(token.as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|error| {
+                RuntimeEnvError::new(format!(
+                    "could not write runtime generation temporary {}: {error}",
+                    temporary.display()
+                ))
+            })?;
+        std::fs::rename(&temporary, path).map_err(|error| {
             RuntimeEnvError::new(format!(
-                "could not write runtime generation {}: {error}",
+                "could not publish runtime generation {}: {error}",
                 path.display()
             ))
         })?;
-    sync_directory(&git_dir)?;
-    Ok(Some(token))
+        sync_directory(git_dir)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
 }
 
 fn random_token() -> Result<String, RuntimeEnvError> {
@@ -111,13 +143,21 @@ fn random_token() -> Result<String, RuntimeEnvError> {
 
 fn resolve_git_path(repo: &Path, selector: &str) -> Result<Option<PathBuf>, RuntimeEnvError> {
     let output = Command::new("git")
+        .env("LC_ALL", "C")
         .args(["-C"])
         .arg(repo)
         .args(["rev-parse", "--path-format=absolute", selector])
         .output()
         .map_err(|error| RuntimeEnvError::new(format!("could not run git rev-parse: {error}")))?;
     if !output.status.success() {
-        return Ok(None);
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.contains("not a git repository") {
+            return Ok(None);
+        }
+        return Err(RuntimeEnvError::new(format!(
+            "git rev-parse failed for {} ({selector}): {stderr}",
+            repo.display()
+        )));
     }
     let value = String::from_utf8(output.stdout).map_err(|error| {
         RuntimeEnvError::new(format!("git rev-parse returned non-UTF-8: {error}"))
@@ -136,16 +176,8 @@ fn identity_hash(
     Ok(hex_digest(Sha256::digest(bytes).as_slice()))
 }
 
-fn validate_token(token: String, path: &Path) -> Result<String, RuntimeEnvError> {
-    let token = token.trim().to_string();
-    if token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        Ok(token)
-    } else {
-        Err(RuntimeEnvError::new(format!(
-            "invalid runtime generation token in {}",
-            path.display()
-        )))
-    }
+fn is_valid_token(token: &str) -> bool {
+    token.len() == 32 && token.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
