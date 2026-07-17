@@ -7,14 +7,14 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use autospec_core::runtime_env::{
-    EnvironmentIdentity, ResourcePlan, RuntimeContext, RuntimeManifest, RuntimeState,
-};
+use autospec_core::runtime_env::{RuntimeContext, RuntimeManifest, RuntimeState};
 
 use crate::commands::CommandFailure;
 
+mod isolation;
 mod state;
 
+use isolation::{bypass_without_planning, invocation_isolation, whole_environment_disabled};
 use state::{read_runtime_state, write_runtime_state, EnvironmentLease};
 
 const STATE_ENVIRONMENT_KEYS: [&str; 9] = [
@@ -377,7 +377,6 @@ fn up(options: Options) -> Result<(), CommandFailure> {
 
 fn status(options: Options) -> Result<(), CommandFailure> {
     let repo = canonical_repo(&options.repo)?;
-    let invocation = invocation_isolation(&repo, &options.mode)?;
     let context = context_from_repo(&repo, &options.mode)?;
     if !context.env_file.is_file() {
         return Err(CommandFailure::status(
@@ -390,7 +389,11 @@ fn status(options: Options) -> Result<(), CommandFailure> {
         ));
     }
     let state = read_state(&context)?;
-    print_protocol(&context, &state, invocation.bypassed);
+    print_protocol(
+        &context,
+        &state,
+        bypass_without_planning(whole_environment_disabled()?)?,
+    );
     Ok(())
 }
 
@@ -405,7 +408,9 @@ fn down(options: Options) -> Result<(), CommandFailure> {
 }
 
 fn teardown(context: &RuntimeContext, state: Option<&RuntimeState>) -> Result<(), CommandFailure> {
-    run_mode_command(context.mode.down(), context, state, false)?;
+    if let Some(state) = state {
+        run_mode_command(context.mode.down(), context, Some(state), false)?;
+    }
     match fs::remove_dir_all(&context.environment_dir) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -436,14 +441,14 @@ fn session(options: SessionOptions) -> Result<(), CommandFailure> {
     let repo = canonical_repo(&options.options.repo)?;
     let whole_environment_disabled = whole_environment_disabled()?;
     if whole_environment_disabled {
-        validate_invocation_overrides(&repo, &options.options.mode, true)?;
+        bypass_without_planning(true)?;
         return run_direct_command(&options.command, &repo, None, true);
     }
     if selected_manifest(&repo).is_none() {
         if environment_flag("AUTOSPEC_ENV_AUTO_INIT") {
             init_manifest(&repo, ManifestKind::Agent, false)?;
         } else {
-            let bypassed = validate_invocation_overrides(&repo, &options.options.mode, true)?;
+            let bypassed = bypass_without_planning(false)?;
             return run_direct_command(&options.command, &repo, None, bypassed);
         }
     }
@@ -463,74 +468,6 @@ fn session(options: SessionOptions) -> Result<(), CommandFailure> {
 fn context(options: &Options) -> Result<RuntimeContext, CommandFailure> {
     let repo = canonical_repo(&options.repo)?;
     context_from_repo(&repo, &options.mode)
-}
-
-#[derive(Clone, Copy)]
-struct InvocationIsolation {
-    bypassed: bool,
-    whole_environment_disabled: bool,
-}
-
-fn invocation_isolation(repo: &Path, mode: &str) -> Result<InvocationIsolation, CommandFailure> {
-    let whole_environment_disabled = whole_environment_disabled()?;
-    let bypassed = validate_invocation_overrides(repo, mode, whole_environment_disabled)?;
-    Ok(InvocationIsolation {
-        bypassed,
-        whole_environment_disabled,
-    })
-}
-
-fn validate_invocation_overrides(
-    repo: &Path,
-    mode: &str,
-    skip_resource_planning: bool,
-) -> Result<bool, CommandFailure> {
-    let identity = EnvironmentIdentity::resolve(repo, mode, None)
-        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
-    let mut plan = if skip_resource_planning {
-        ResourcePlan::new(identity, None, None)
-    } else {
-        match RuntimeManifest::resource_plan_for_repo(repo, &identity) {
-            Ok(plan) => Ok(plan),
-            Err(error)
-                if error
-                    .to_string()
-                    .contains("resource plan is empty and selected mode has no command") =>
-            {
-                ResourcePlan::new(identity, None, None)
-            }
-            Err(error) => Err(error),
-        }
-    }
-    .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
-    let maven = environment_value("AUTOSPEC_MAVEN_ISOLATION")?;
-    let compose = environment_value("AUTOSPEC_COMPOSE_ISOLATION")?;
-    plan.apply_invocation_overrides(
-        maven.as_deref(),
-        compose.as_deref(),
-        skip_resource_planning && whole_environment_disabled()?,
-    )
-    .map_err(|error| CommandFailure::diagnostic(error.to_string()))
-}
-
-fn whole_environment_disabled() -> Result<bool, CommandFailure> {
-    match environment_value("AUTOSPEC_ENV_DISABLE")?.as_deref() {
-        None => Ok(false),
-        Some("1") => Ok(true),
-        Some(value) => Err(CommandFailure::diagnostic(format!(
-            "unsupported AUTOSPEC_ENV_DISABLE value: {value:?}; expected '1'"
-        ))),
-    }
-}
-
-fn environment_value(key: &str) -> Result<Option<String>, CommandFailure> {
-    let Some(value) = std::env::var_os(key) else {
-        return Ok(None);
-    };
-    value
-        .into_string()
-        .map(Some)
-        .map_err(|_| CommandFailure::diagnostic(format!("{key} must contain valid UTF-8 text")))
 }
 
 fn context_from_repo(repo: &Path, mode: &str) -> Result<RuntimeContext, CommandFailure> {

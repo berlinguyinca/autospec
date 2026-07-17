@@ -28,10 +28,10 @@ impl std::error::Error for RuntimeEnvError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeMode {
-    name: String,
-    command: Option<String>,
-    down: Option<String>,
-    env: Vec<(String, String)>,
+    pub(super) name: String,
+    pub(super) command: Option<String>,
+    pub(super) down: Option<String>,
+    pub(super) env: Vec<(String, String)>,
 }
 
 impl RuntimeMode {
@@ -118,7 +118,7 @@ impl RuntimeManifest {
     }
 
     pub fn parse(source: &str) -> Result<Self, RuntimeEnvError> {
-        if manifest_version(source).as_deref() == Some("2") {
+        if super::manifest_v2::is_v2(source) || manifest_version(source).as_deref() == Some("2") {
             return Self::parse_v2(source);
         }
         Self::parse_v1(source)
@@ -143,15 +143,15 @@ impl RuntimeManifest {
     }
 
     fn parse_v2(source: &str) -> Result<Self, RuntimeEnvError> {
-        let (state, modes) = parse_legacy_fields(source)?;
-        validate_default_mode(state.default_mode.as_deref(), &modes)?;
+        let parsed = super::manifest_v2::parse(source)?;
+        validate_default_mode(parsed.default_mode.as_deref(), &parsed.modes)?;
         Ok(Self {
             path: PathBuf::new(),
-            name: state.name,
+            name: parsed.name,
             version: 2,
-            default_mode: state.default_mode,
-            modes,
-            resources: super::manifest_v2::parse(source)?,
+            default_mode: parsed.default_mode,
+            modes: parsed.modes,
+            resources: parsed.resources,
         })
     }
 
@@ -168,6 +168,22 @@ impl RuntimeManifest {
         identity: &EnvironmentIdentity,
     ) -> Result<ResourcePlan, RuntimeEnvError> {
         super::resource_plan::for_repo(repo, identity)
+    }
+
+    pub fn resource_plan_for_repo_with_overrides(
+        repo: &Path,
+        identity: &EnvironmentIdentity,
+        maven: Option<&str>,
+        compose: Option<&str>,
+        whole_environment_disabled: bool,
+    ) -> Result<(ResourcePlan, bool), RuntimeEnvError> {
+        super::resource_plan::for_repo_with_overrides(
+            repo,
+            identity,
+            maven,
+            compose,
+            whole_environment_disabled,
+        )
     }
 
     pub fn selected_mode(&self, requested_mode: &str) -> Result<&RuntimeMode, RuntimeEnvError> {
@@ -215,7 +231,8 @@ fn parse_legacy_fields(
 ) -> Result<(ManifestParseState, Vec<RuntimeMode>), RuntimeEnvError> {
     let mut state = ManifestParseState::default();
     let mut modes = Vec::new();
-    for (index, raw_line) in source.lines().enumerate() {
+    let logical_lines = super::shell_command::join_line_continuations(source);
+    for (index, raw_line) in logical_lines.iter().enumerate() {
         if raw_line.trim().is_empty() || raw_line.trim_start().starts_with('#') {
             continue;
         }

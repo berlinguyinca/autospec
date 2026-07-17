@@ -140,6 +140,174 @@ fn explicit_compose_files_are_resolved_in_declared_order() {
 }
 
 #[test]
+fn shared_resources_are_carried_into_the_plan_digest_and_json() {
+    let repo = TempRepo::with_files(&[
+        (
+            ".autospec/runtime.yml",
+            "version: 2\nresources:\n  compose:\n    files: [compose.yaml]\n    shared_resources:\n      networks: [company-vpn]\n      volumes: [maven-cache]\n",
+        ),
+        ("compose.yaml", "services: {}\n"),
+    ]);
+
+    let plan = RuntimeManifest::resource_plan_for_repo(repo.path(), &fixture_identity(repo.path()))
+        .expect("shared resources produce a plan");
+    let compose = plan.compose.as_ref().expect("Compose plan exists");
+    assert_eq!(compose.shared_networks, ["company-vpn"]);
+    assert_eq!(compose.shared_volumes, ["maven-cache"]);
+    let json = serde_json::to_string(&plan).unwrap();
+    assert_eq!(
+        serde_json::from_str::<autospec_core::runtime_env::ResourcePlan>(&json).unwrap(),
+        plan
+    );
+    let mut changed_compose = plan.compose.clone().unwrap();
+    changed_compose.shared_volumes.push("other-cache".into());
+    let changed = autospec_core::runtime_env::ResourcePlan::new(
+        plan.identity.clone(),
+        plan.maven.clone(),
+        Some(changed_compose),
+    )
+    .unwrap();
+    assert_ne!(changed.digest, plan.digest);
+}
+
+#[test]
+fn explicit_compose_files_must_be_regular_contained_and_canonically_unique() {
+    let repo = TempRepo::with_files(&[
+        ("compose.yaml", "services: {}\n"),
+        ("configs/placeholder", "not compose\n"),
+    ]);
+    let outside = repo.path().with_extension("outside-compose.yaml");
+    std::fs::write(&outside, "services: {}\n").expect("write outside Compose file");
+    let parent_escape = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+
+    for (files, expected) in [
+        (
+            vec![outside.display().to_string()],
+            "outside the repository",
+        ),
+        (vec![parent_escape], "outside the repository"),
+        (vec!["configs".to_string()], "regular file"),
+        (vec!["missing.yaml".to_string()], "does not exist"),
+        (
+            vec!["compose.yaml".to_string(), "./compose.yaml".to_string()],
+            "duplicate Compose file",
+        ),
+    ] {
+        let list = files
+            .iter()
+            .map(|file| format!("      - {file}\n"))
+            .collect::<String>();
+        let manifest = format!("version: 2\nresources:\n  compose:\n    files:\n{list}");
+        std::fs::create_dir_all(repo.path().join(".autospec")).unwrap();
+        std::fs::write(repo.path().join(".autospec/runtime.yml"), manifest).unwrap();
+        let error =
+            RuntimeManifest::resource_plan_for_repo(repo.path(), &fixture_identity(repo.path()))
+                .expect_err("unsafe Compose path is rejected");
+        assert!(
+            error.to_string().contains(expected),
+            "expected {expected:?} in {error:?}"
+        );
+    }
+    let _ = std::fs::remove_file(outside);
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_compose_symlink_cannot_escape_the_repository() {
+    use std::os::unix::fs::symlink;
+
+    let repo = TempRepo::with_files(&[]);
+    let outside = repo.path().with_extension("symlink-target.yaml");
+    std::fs::write(&outside, "services: {}\n").unwrap();
+    symlink(&outside, repo.path().join("compose.yaml")).unwrap();
+    std::fs::create_dir_all(repo.path().join(".autospec")).unwrap();
+    std::fs::write(
+        repo.path().join(".autospec/runtime.yml"),
+        "version: 2\nresources:\n  compose:\n    files: [compose.yaml]\n",
+    )
+    .unwrap();
+
+    let error =
+        RuntimeManifest::resource_plan_for_repo(repo.path(), &fixture_identity(repo.path()))
+            .expect_err("symlink escape is rejected");
+    assert!(error.to_string().contains("outside the repository"));
+    let _ = std::fs::remove_file(outside);
+}
+
+#[test]
+fn compose_command_detection_uses_shell_command_positions() {
+    let repo = TempRepo::with_files(&[("compose.yaml", "services: {}\n")]);
+    std::fs::create_dir_all(repo.path().join(".autospec")).unwrap();
+
+    for command in [
+        "printf 'docker compose up'",
+        "printf docker compose up # docker compose up",
+        "sh -c 'docker compose up'",
+    ] {
+        std::fs::write(
+            repo.path().join(".autospec/runtime.yml"),
+            format!("version: 1\nmodes:\n  local:\n    command: {command}\n"),
+        )
+        .unwrap();
+        RuntimeManifest::resource_plan_for_repo(repo.path(), &fixture_identity(repo.path()))
+            .expect("quoted and comment data do not claim Compose authority");
+    }
+
+    for command in [
+        "printf ready; docker compose up",
+        "printf ready && /usr/bin/docker-compose up",
+        "docker \\\n      compose up",
+    ] {
+        std::fs::write(
+            repo.path().join(".autospec/runtime.yml"),
+            format!("version: 1\nmodes:\n  local:\n    command: {command}\n"),
+        )
+        .unwrap();
+        let error =
+            RuntimeManifest::resource_plan_for_repo(repo.path(), &fixture_identity(repo.path()))
+                .expect_err("command-position Compose authority is rejected");
+        assert!(error.to_string().contains("RUNTIME_DUAL_COMPOSE_AUTHORITY"));
+    }
+
+    std::fs::write(
+        repo.path().join(".autospec/runtime.yml"),
+        "version: 1\nmodes:\n  local:\n    command: $COMPOSE_RUNNER up\n",
+    )
+    .unwrap();
+    let error =
+        RuntimeManifest::resource_plan_for_repo(repo.path(), &fixture_identity(repo.path()))
+            .expect_err("ambiguous command-position expansion fails closed");
+    assert!(error.to_string().contains("AMBIGUOUS_COMPOSE_AUTHORITY"));
+}
+
+#[test]
+fn off_only_resources_do_not_replace_a_missing_mode_command() {
+    let repo = TempRepo::with_files(&[
+        (
+            ".autospec/runtime.yml",
+            "version: 2\nresources:\n  maven:\n    isolation: off\n  compose:\n    isolation: off\n",
+        ),
+        ("pom.xml", "<project/>"),
+        ("compose.yaml", "services: {}\n"),
+    ]);
+
+    let error =
+        RuntimeManifest::resource_plan_for_repo(repo.path(), &fixture_identity(repo.path()))
+            .expect_err("off-only plan still requires a command");
+    assert!(error.to_string().contains("selected mode has no command"));
+}
+
+#[test]
+fn maven_directory_detection_ignores_a_plain_dot_mvn_file() {
+    let repo = TempRepo::with_files(&[(".mvn", "not a directory\n")]);
+
+    let error =
+        RuntimeManifest::resource_plan_for_repo(repo.path(), &fixture_identity(repo.path()))
+            .expect_err("plain .mvn does not create a Maven plan");
+    assert!(error.to_string().contains("resource plan is empty"));
+}
+
+#[test]
 fn v2_resource_grammar_rejects_ambiguous_or_unknown_values() {
     for (source, expected) in [
         (

@@ -6,12 +6,30 @@ use yaml_edit::{Document, Mapping};
 
 use super::is_valid_environment_name;
 use super::manifest::RuntimeEnvError;
+use super::manifest::RuntimeMode;
 use super::resources::{
-    ComposeExport, ComposeIsolation, ComposeResourceConfig, ExportProtocol, ExportValue,
-    MavenIsolation, MavenResourceConfig, RuntimeResources,
+    reject_duplicates, validate_logical_keys, ComposeExport, ComposeIsolation,
+    ComposeResourceConfig, ExportProtocol, ExportValue, MavenIsolation, MavenResourceConfig,
+    RuntimeResources,
 };
 
-pub(super) fn parse(source: &str) -> Result<RuntimeResources, RuntimeEnvError> {
+pub(super) struct ParsedManifest {
+    pub(super) name: Option<String>,
+    pub(super) default_mode: Option<String>,
+    pub(super) modes: Vec<RuntimeMode>,
+    pub(super) resources: RuntimeResources,
+}
+
+pub(super) fn is_v2(source: &str) -> bool {
+    Document::from_str(source)
+        .ok()
+        .and_then(|document| document.as_mapping())
+        .and_then(|mapping| mapping.get("version"))
+        .and_then(|value| value.as_scalar().map(|scalar| scalar.as_string()))
+        .is_some_and(|value| value == "2")
+}
+
+pub(super) fn parse(source: &str) -> Result<ParsedManifest, RuntimeEnvError> {
     let document = Document::from_str(source).map_err(|error| {
         RuntimeEnvError::new(format!("could not parse runtime manifest YAML: {error}"))
     })?;
@@ -23,12 +41,90 @@ pub(super) fn parse(source: &str) -> Result<RuntimeResources, RuntimeEnvError> {
         &["version", "name", "default_mode", "resources", "modes"],
         "runtime manifest",
     )?;
-    let resources = optional_mapping(&root, "resources", "runtime resources")?;
-    resources
+    let version = required_scalar(&root, "version", "runtime manifest version")?;
+    if version != "2" {
+        return Err(RuntimeEnvError::new(format!(
+            "unsupported runtime manifest version: {version}"
+        )));
+    }
+    let resources = optional_mapping(&root, "resources", "runtime resources")?
         .as_ref()
         .map(parse_resources)
-        .transpose()
-        .map(|resources| resources.unwrap_or_default())
+        .transpose()?
+        .unwrap_or_default();
+    Ok(ParsedManifest {
+        name: optional_scalar(&root, "name", "runtime manifest name")?,
+        default_mode: optional_scalar(&root, "default_mode", "default runtime mode")?,
+        modes: parse_modes(&root)?,
+        resources,
+    })
+}
+
+fn parse_modes(root: &Mapping) -> Result<Vec<RuntimeMode>, RuntimeEnvError> {
+    let Some(mapping) = optional_mapping(root, "modes", "runtime modes")? else {
+        return Ok(Vec::new());
+    };
+    let mut modes = Vec::new();
+    for entry in mapping.entries() {
+        let name = entry
+            .key_node()
+            .ok_or_else(|| RuntimeEnvError::new("runtime mode name is missing"))?
+            .as_scalar()
+            .map(|value| value.as_string())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| RuntimeEnvError::new("runtime mode name must be a string"))?;
+        if modes.iter().any(|mode: &RuntimeMode| mode.name == name) {
+            return Err(RuntimeEnvError::new(format!(
+                "duplicate runtime mode: {name}"
+            )));
+        }
+        let value = entry
+            .value_node()
+            .ok_or_else(|| RuntimeEnvError::new(format!("runtime mode {name} has no value")))?;
+        let fields = value.as_mapping().ok_or_else(|| {
+            RuntimeEnvError::new(format!("runtime mode {name} must be a mapping"))
+        })?;
+        validate_allowed_keys(fields, &["command", "down", "env"], "runtime mode")?;
+        modes.push(RuntimeMode {
+            name,
+            command: optional_scalar(fields, "command", "runtime mode command")?,
+            down: optional_scalar(fields, "down", "runtime mode down command")?,
+            env: parse_mode_environment(fields)?,
+        });
+    }
+    Ok(modes)
+}
+
+fn parse_mode_environment(fields: &Mapping) -> Result<Vec<(String, String)>, RuntimeEnvError> {
+    let Some(mapping) = optional_mapping(fields, "env", "runtime mode environment")? else {
+        return Ok(Vec::new());
+    };
+    let mut environment = Vec::new();
+    for entry in mapping.entries() {
+        let key = entry
+            .key_node()
+            .ok_or_else(|| RuntimeEnvError::new("runtime environment name is missing"))?
+            .as_scalar()
+            .map(|value| value.as_string())
+            .ok_or_else(|| RuntimeEnvError::new("runtime environment name must be a string"))?;
+        if !is_valid_environment_name(&key)
+            || super::BROKER_OWNED_ENVIRONMENT_KEYS.contains(&key.as_str())
+        {
+            return Err(RuntimeEnvError::new(format!(
+                "invalid environment name: {key}"
+            )));
+        }
+        let value = entry
+            .value_node()
+            .ok_or_else(|| RuntimeEnvError::new(format!("runtime environment {key} has no value")))?
+            .as_scalar()
+            .map(|value| value.as_string())
+            .ok_or_else(|| {
+                RuntimeEnvError::new(format!("runtime environment {key} must be a scalar"))
+            })?;
+        environment.push((key, value));
+    }
+    Ok(environment)
 }
 
 fn parse_resources(resources: &Mapping) -> Result<RuntimeResources, RuntimeEnvError> {
@@ -164,7 +260,7 @@ fn parse_export(mapping: &Mapping) -> Result<ComposeExport, RuntimeEnvError> {
         .and_then(|value| u16::try_from(value).ok())
         .filter(|value| *value > 0)
         .ok_or_else(|| RuntimeEnvError::new("Compose export target must be 1..=65535"))?;
-    let protocol = parse_export_protocol(&required_scalar(
+    let protocol = ExportProtocol::parse(&required_scalar(
         mapping,
         "protocol",
         "Compose export protocol",
@@ -185,34 +281,35 @@ fn parse_export(mapping: &Mapping) -> Result<ComposeExport, RuntimeEnvError> {
     })
 }
 
-fn parse_export_protocol(value: &str) -> Result<ExportProtocol, RuntimeEnvError> {
-    match value {
-        "http" => Ok(ExportProtocol::Http),
-        "https" => Ok(ExportProtocol::Https),
-        "tcp" => Ok(ExportProtocol::Tcp),
-        "udp" => Ok(ExportProtocol::Udp),
-        value => Err(RuntimeEnvError::new(format!(
-            "unsupported Compose export protocol: {value}"
-        ))),
-    }
-}
-
 fn parse_export_value(
     mapping: &Mapping,
     protocol: &ExportProtocol,
 ) -> Result<ExportValue, RuntimeEnvError> {
-    match optional_scalar(mapping, "value", "Compose export value")?.as_deref() {
+    let value = match optional_scalar(mapping, "value", "Compose export value")?.as_deref() {
         None if matches!(protocol, ExportProtocol::Http | ExportProtocol::Https) => {
-            Ok(ExportValue::Url)
+            ExportValue::Url
         }
-        None => Ok(ExportValue::Port),
-        Some("url") => Ok(ExportValue::Url),
-        Some("port") => Ok(ExportValue::Port),
-        Some("host-port") => Ok(ExportValue::HostPort),
-        Some(value) => Err(RuntimeEnvError::new(format!(
-            "unsupported Compose export value: {value}"
-        ))),
+        None => ExportValue::Port,
+        Some("url") => ExportValue::Url,
+        Some("port") => ExportValue::Port,
+        Some("host-port") => ExportValue::HostPort,
+        Some(value) => {
+            return Err(RuntimeEnvError::new(format!(
+                "unsupported Compose export value: {value}"
+            )))
+        }
+    };
+    let compatible = matches!(value, ExportValue::HostPort)
+        || matches!(protocol, ExportProtocol::Http | ExportProtocol::Https)
+            && matches!(value, ExportValue::Url)
+        || matches!(protocol, ExportProtocol::Tcp | ExportProtocol::Udp)
+            && matches!(value, ExportValue::Port);
+    if !compatible {
+        return Err(RuntimeEnvError::new(
+            "incompatible Compose export protocol and value",
+        ));
     }
+    Ok(value)
 }
 
 fn validate_allowed_keys(
@@ -294,31 +391,4 @@ fn scalar_list(mapping: &Mapping, key: &str, label: &str) -> Result<Vec<String>,
                 .ok_or_else(|| RuntimeEnvError::new(format!("{label} entries must be strings")))
         })
         .collect()
-}
-
-fn reject_duplicates<T: Eq + std::hash::Hash>(
-    values: &[T],
-    message: &str,
-) -> Result<(), RuntimeEnvError> {
-    let mut seen = HashSet::new();
-    if values.iter().any(|value| !seen.insert(value)) {
-        return Err(RuntimeEnvError::new(message));
-    }
-    Ok(())
-}
-
-fn validate_logical_keys(values: &[String], message: &str) -> Result<(), RuntimeEnvError> {
-    if values.iter().any(|value| {
-        value.is_empty()
-            || !value
-                .chars()
-                .all(|character| character.is_ascii_alphanumeric() || "_.-".contains(character))
-            || !value
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_alphanumeric())
-    }) {
-        return Err(RuntimeEnvError::new(message));
-    }
-    Ok(())
 }

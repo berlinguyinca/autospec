@@ -9,6 +9,7 @@ mod manifest;
 mod manifest_v2;
 mod resource_plan;
 mod resources;
+mod shell_command;
 
 pub use diagnostic::IsolationDiagnostic;
 pub use identity::{load_generation_token, EnvironmentIdentity};

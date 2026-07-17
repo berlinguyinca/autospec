@@ -14,17 +14,24 @@ struct RuntimeFixture {
 }
 
 impl RuntimeFixture {
-    fn with_manifest(manifest: &str) -> Self {
+    fn empty() -> Self {
         let suffix = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
             "autospec-runtime-resource-cli-{}-{suffix}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join(".autospec")).expect("create fixture directory");
-        std::fs::write(root.join(".autospec/runtime.yml"), manifest).expect("write manifest");
+        std::fs::create_dir_all(&root).expect("create fixture directory");
         let state_root = root.join("state");
         Self { root, state_root }
+    }
+
+    fn with_manifest(manifest: &str) -> Self {
+        let fixture = Self::empty();
+        let root = fixture.root.clone();
+        std::fs::create_dir_all(root.join(".autospec")).expect("create fixture directory");
+        std::fs::write(root.join(".autospec/runtime.yml"), manifest).expect("write manifest");
+        fixture
     }
 
     fn command(&self) -> Command {
@@ -54,6 +61,8 @@ fn fixture_plan(repo: &Path) -> ResourcePlan {
             project_name: "autospec-test-environment".to_string(),
             exports: Vec::new(),
             preserve_volumes: Vec::new(),
+            shared_networks: Vec::new(),
+            shared_volumes: Vec::new(),
         }),
     )
     .unwrap()
@@ -70,8 +79,14 @@ fn invocation_overrides_accept_only_off_and_report_bypass() {
         .expect("documented overrides apply");
 
     assert!(bypassed);
+    let overridden_digest = plan.digest.clone();
     assert_eq!(plan.maven.unwrap().isolation, MavenIsolation::Off);
     assert_eq!(plan.compose.unwrap().isolation, ComposeIsolation::Off);
+    let mut expected = fixture_plan(&fixture.root);
+    expected.maven.as_mut().unwrap().isolation = MavenIsolation::Off;
+    expected.compose.as_mut().unwrap().isolation = ComposeIsolation::Off;
+    let expected = ResourcePlan::new(expected.identity, expected.maven, expected.compose).unwrap();
+    assert_eq!(overridden_digest, expected.digest);
 
     for (maven, compose, expected) in [
         (Some("split-local"), None, "AUTOSPEC_MAVEN_ISOLATION"),
@@ -84,6 +99,51 @@ fn invocation_overrides_accept_only_off_and_report_bypass() {
             .expect_err("unsupported invocation override fails closed");
         assert!(error.to_string().contains(expected));
     }
+}
+
+#[test]
+fn compose_override_applies_before_legacy_dual_authority_validation() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 1\nmodes:\n  local:\n    command: docker compose version >/dev/null\n",
+    );
+    std::fs::write(fixture.root.join("compose.yaml"), "services: {}\n").unwrap();
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_COMPOSE_ISOLATION", "off")
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("runtime command starts");
+
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("RUNTIME_DUAL_COMPOSE_AUTHORITY"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn per_resource_bypass_is_exported_without_disabling_the_mode_command() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 1\nmodes:\n  local:\n    command: sh -c 'test \"$AUTOSPEC_ISOLATION_BYPASSED\" = 1'\n",
+    );
+    std::fs::write(fixture.root.join("pom.xml"), "<project/>\n").unwrap();
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_MAVEN_ISOLATION", "off")
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("runtime command starts");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("AUTOSPEC_ISOLATION_BYPASSED=1"));
 }
 
 #[test]
@@ -143,6 +203,70 @@ fn disabled_up_exec_and_session_skip_provisioning_and_export_the_marker() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn whole_environment_disable_does_not_require_a_manifest() {
+    let fixture = RuntimeFixture::empty();
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_ENV_DISABLE", "1")
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("disabled up starts");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "AUTOSPEC_ISOLATION_BYPASSED=1\n"
+    );
+}
+
+#[test]
+fn down_without_owned_state_never_runs_manifest_cleanup() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'printf unsafe > down.txt'\n",
+    );
+
+    for _ in 0..2 {
+        let output = fixture
+            .command()
+            .args(["runtime", "env", "down", "--repo"])
+            .arg(&fixture.root)
+            .output()
+            .expect("runtime env down starts");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(!fixture.root.join("down.txt").exists());
+    assert!(!fixture.state_root.exists());
+}
+
+#[test]
+fn status_is_read_only_without_owned_state() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'printf unsafe > down.txt'\n",
+    );
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "status", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .expect("runtime env status starts");
+
+    assert_eq!(output.status.code(), Some(3));
+    assert!(!fixture.root.join("down.txt").exists());
+    assert!(!fixture.state_root.exists());
 }
 
 #[test]

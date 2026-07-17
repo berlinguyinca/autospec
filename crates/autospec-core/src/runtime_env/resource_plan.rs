@@ -2,22 +2,39 @@ use std::path::{Path, PathBuf};
 
 use super::manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
 use super::resources::{ComposeIsolation, ComposePlan, MavenPlan, ResourcePlan, RuntimeResources};
+use super::shell_command::compose_authority;
 use super::EnvironmentIdentity;
 
 pub(super) fn for_repo(
     repo: &Path,
     identity: &EnvironmentIdentity,
 ) -> Result<ResourcePlan, RuntimeEnvError> {
+    for_repo_with_overrides(repo, identity, None, None, false).map(|(plan, _)| plan)
+}
+
+pub(super) fn for_repo_with_overrides(
+    repo: &Path,
+    identity: &EnvironmentIdentity,
+    maven_override: Option<&str>,
+    compose_override: Option<&str>,
+    whole_environment_disabled: bool,
+) -> Result<(ResourcePlan, bool), RuntimeEnvError> {
     let manifest = read_optional_manifest(repo)?;
     let selected_mode = if manifest.modes.is_empty() {
         None
     } else {
         Some(manifest.selected_mode(&identity.mode)?)
     };
-    let (maven, compose) = detected_plans(repo, identity, &manifest);
-    reject_dual_compose_authority(&manifest, selected_mode, compose.as_ref())?;
-    require_command_for_empty_plan(selected_mode, &maven, &compose)?;
-    ResourcePlan::new(identity.clone(), maven, compose)
+    let (maven, compose) = detected_plans(repo, identity, &manifest)?;
+    let mut plan = ResourcePlan::new(identity.clone(), maven, compose)?;
+    let bypassed = plan.apply_invocation_overrides(
+        maven_override,
+        compose_override,
+        whole_environment_disabled,
+    )?;
+    reject_dual_compose_authority(&manifest, selected_mode, plan.compose.as_ref())?;
+    require_managed_resource_or_command(selected_mode, &plan)?;
+    Ok((plan, bypassed))
 }
 
 fn read_optional_manifest(repo: &Path) -> Result<RuntimeManifest, RuntimeEnvError> {
@@ -41,21 +58,19 @@ fn detected_plans(
     repo: &Path,
     identity: &EnvironmentIdentity,
     manifest: &RuntimeManifest,
-) -> (Option<MavenPlan>, Option<ComposePlan>) {
-    let maven = (repo.join("pom.xml").is_file() || repo.join(".mvn").exists()).then(|| MavenPlan {
+) -> Result<(Option<MavenPlan>, Option<ComposePlan>), RuntimeEnvError> {
+    let maven = (repo.join("pom.xml").is_file() || repo.join(".mvn").is_dir()).then(|| MavenPlan {
         isolation: manifest.resources.maven.isolation.clone(),
         local_prefix: format!("autospec/{}", identity.environment_id),
     });
-    let files: Vec<PathBuf> = if manifest.resources.compose.files.is_empty() {
-        detect_compose_file(repo).into_iter().collect()
-    } else {
-        manifest
-            .resources
-            .compose
-            .files
-            .iter()
-            .map(|path| repo.join(path))
+    let files = if manifest.resources.compose.files.is_empty() {
+        detect_compose_file(repo)
+            .map(|path| canonical_compose_file(repo, &path))
+            .transpose()?
+            .into_iter()
             .collect()
+    } else {
+        explicit_compose_files(repo, &manifest.resources.compose.files)?
     };
     let compose = (!files.is_empty()).then(|| ComposePlan {
         isolation: manifest.resources.compose.isolation.clone(),
@@ -63,8 +78,10 @@ fn detected_plans(
         project_name: compose_project_name(&identity.environment_id),
         exports: manifest.resources.compose.exports.clone(),
         preserve_volumes: manifest.resources.compose.preserve_volumes.clone(),
+        shared_networks: manifest.resources.compose.shared_networks.clone(),
+        shared_volumes: manifest.resources.compose.shared_volumes.clone(),
     });
-    (maven, compose)
+    Ok((maven, compose))
 }
 
 fn reject_dual_compose_authority(
@@ -76,7 +93,9 @@ fn reject_dual_compose_authority(
         && compose.is_some_and(|plan| plan.isolation == ComposeIsolation::Managed)
         && mode
             .and_then(RuntimeMode::command)
-            .is_some_and(command_manages_compose);
+            .map(compose_authority)
+            .transpose()?
+            .unwrap_or(false);
     if dual_authority {
         return Err(RuntimeEnvError::new(
             "RUNTIME_DUAL_COMPOSE_AUTHORITY: runtime mode command and broker both manage Compose",
@@ -85,20 +104,67 @@ fn reject_dual_compose_authority(
     Ok(())
 }
 
-fn require_command_for_empty_plan(
+fn require_managed_resource_or_command(
     mode: Option<&RuntimeMode>,
-    maven: &Option<MavenPlan>,
-    compose: &Option<ComposePlan>,
+    plan: &ResourcePlan,
 ) -> Result<(), RuntimeEnvError> {
     let command_missing = mode
         .and_then(RuntimeMode::command)
         .is_none_or(|command| command.trim().is_empty());
-    if maven.is_none() && compose.is_none() && command_missing {
+    let managed_maven = plan
+        .maven
+        .as_ref()
+        .is_some_and(|resource| resource.isolation != super::MavenIsolation::Off);
+    let managed_compose = plan
+        .compose
+        .as_ref()
+        .is_some_and(|resource| resource.isolation != ComposeIsolation::Off);
+    if !managed_maven && !managed_compose && command_missing {
         return Err(RuntimeEnvError::new(
             "runtime resource plan is empty and selected mode has no command",
         ));
     }
     Ok(())
+}
+
+fn explicit_compose_files(repo: &Path, files: &[PathBuf]) -> Result<Vec<PathBuf>, RuntimeEnvError> {
+    let mut canonical = Vec::new();
+    for file in files {
+        let resolved = canonical_compose_file(repo, &repo.join(file))?;
+        if canonical.contains(&resolved) {
+            return Err(RuntimeEnvError::new("duplicate Compose file"));
+        }
+        canonical.push(resolved);
+    }
+    Ok(canonical)
+}
+
+fn canonical_compose_file(repo: &Path, file: &Path) -> Result<PathBuf, RuntimeEnvError> {
+    let canonical_repo = std::fs::canonicalize(repo).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "could not canonicalize repository {}: {error}",
+            repo.display()
+        ))
+    })?;
+    let canonical = std::fs::canonicalize(file).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "Compose file does not exist: {} ({error})",
+            file.display()
+        ))
+    })?;
+    if !canonical.starts_with(&canonical_repo) {
+        return Err(RuntimeEnvError::new(format!(
+            "Compose file is outside the repository: {}",
+            file.display()
+        )));
+    }
+    if !canonical.is_file() {
+        return Err(RuntimeEnvError::new(format!(
+            "Compose path is not a regular file: {}",
+            file.display()
+        )));
+    }
+    Ok(canonical)
 }
 
 fn detect_compose_file(repo: &Path) -> Option<PathBuf> {
@@ -125,21 +191,4 @@ fn compose_project_name(environment_id: &str) -> String {
         })
         .collect::<String>();
     format!("agent_{slug}")
-}
-
-fn command_manages_compose(command: &str) -> bool {
-    let tokens = command
-        .split_whitespace()
-        .map(|token| token.trim_matches(|character: char| "'\";|&()".contains(character)))
-        .map(|token| {
-            Path::new(token)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(token)
-        })
-        .collect::<Vec<_>>();
-    tokens.contains(&"docker-compose")
-        || tokens
-            .windows(2)
-            .any(|tokens| tokens == ["docker", "compose"])
 }
