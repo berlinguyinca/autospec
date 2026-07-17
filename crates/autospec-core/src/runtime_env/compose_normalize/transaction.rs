@@ -10,6 +10,8 @@ use crate::runtime_env::{
 };
 use getrandom::fill;
 
+mod destination;
+
 #[derive(Default)]
 pub(super) struct Faults {
     pub(super) fail_stage_at: Option<usize>,
@@ -102,11 +104,12 @@ pub(super) fn commit_files<'a>(
         .collect::<Vec<_>>();
     let staged = stage_all(&changed, faults)?;
     if let Some(index) = faults.mutate_before_recheck {
-        std::fs::write(&changed[index].path, b"external mutation").map_err(|error| {
+        std::fs::write(&files[index].path, b"external mutation").map_err(|error| {
             RuntimeEnvError::new(format!("could not inject source mutation: {error}"))
         })?;
     }
-    if let Err(error) = fingerprint::recheck_all(&changed) {
+    let planned = files.iter().collect::<Vec<_>>();
+    if let Err(error) = fingerprint::recheck_all(&planned) {
         cleanup_temporaries(&staged);
         return Err(error);
     }
@@ -138,7 +141,7 @@ fn stage_all<'a>(
 }
 
 fn stage<'a>(file: &'a PlannedFile) -> Result<Staged<'a>, RuntimeEnvError> {
-    ensure_parent(file)?;
+    destination::ensure_parent(file)?;
     let parent = file
         .path
         .parent()
@@ -163,24 +166,6 @@ fn stage<'a>(file: &'a PlannedFile) -> Result<Staged<'a>, RuntimeEnvError> {
     Err(RuntimeEnvError::new(
         "NORMALIZE_STAGE_FAILED: temporary name exhaustion",
     ))
-}
-
-fn ensure_parent(file: &PlannedFile) -> Result<(), RuntimeEnvError> {
-    let parent = file
-        .path
-        .parent()
-        .ok_or_else(|| RuntimeEnvError::new("normalization path has no parent"))?;
-    match std::fs::create_dir(parent) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => {
-            return Err(RuntimeEnvError::new(format!(
-                "NORMALIZE_STAGE_FAILED: could not create {}: {error}",
-                parent.display()
-            )))
-        }
-    }
-    fingerprint::validate_missing_destination(&file.repo, &file.path)
 }
 
 fn finish_stage<'a>(
@@ -268,21 +253,7 @@ fn restore_all(files: &[&PlannedFile], faults: &Faults) -> Vec<String> {
 
 fn restore(file: &PlannedFile, fail_rename: bool) -> Result<(), RuntimeEnvError> {
     if file.identity.is_none() {
-        std::fs::remove_file(&file.path).map_err(|error| {
-            RuntimeEnvError::new(format!("could not remove created destination: {error}"))
-        })?;
-        sync_parent(&file.path)?;
-        if !file.parent_existed {
-            std::fs::remove_dir(
-                file.path
-                    .parent()
-                    .ok_or_else(|| RuntimeEnvError::new("normalization path has no parent"))?,
-            )
-            .map_err(|error| {
-                RuntimeEnvError::new(format!("could not remove created parent: {error}"))
-            })?;
-        }
-        return Ok(());
+        return destination::remove_created(file);
     }
     let staged = stage_original(file)?;
     let result = if fail_rename {
@@ -350,14 +321,7 @@ fn cleanup_temporaries(staged: &[Staged<'_>]) {
     for item in staged {
         let _ = std::fs::remove_file(&item.temporary);
     }
-    let created_parents = staged
-        .iter()
-        .filter(|item| item.file.identity.is_none() && !item.file.parent_existed)
-        .filter_map(|item| item.file.path.parent())
-        .collect::<HashSet<_>>();
-    for parent in created_parents {
-        let _ = std::fs::remove_dir(parent);
-    }
+    destination::cleanup_created_parents(staged);
 }
 
 fn temporary_name(path: &Path) -> Result<String, RuntimeEnvError> {

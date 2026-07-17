@@ -26,14 +26,16 @@ fn normalize_fixture(name: &str) -> TempRepo {
 #[test]
 fn cross_worktree_fingerprint_is_repo_relative() {
     let compose =
-        "services:\n  web:\n    image: nginx:alpine\n    ports:\n      - \"18080:8080\"\n";
+        "services:\n  web:\n    build:\n      context: ./app\n    ports:\n      - \"18080:8080\"\n";
     let manifest = "version: 2\nresources:\n  compose:\n    files:\n      - compose.yaml\n";
     let first = TempRepo::with_files(&[
         ("compose.yaml", compose),
+        ("app/Dockerfile", "FROM scratch\n"),
         (".autospec/runtime.yml", manifest),
     ]);
     let second = TempRepo::with_files(&[
         ("compose.yaml", compose),
+        ("app/Dockerfile", "FROM scratch\n"),
         (".autospec/runtime.yml", manifest),
     ]);
 

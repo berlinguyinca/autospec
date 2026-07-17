@@ -14,7 +14,6 @@ use crate::runtime_env::{
 };
 
 mod candidates;
-
 pub(super) struct ResolvedModel {
     pub bytes: Vec<u8>,
     pub value: Value,
@@ -95,24 +94,28 @@ fn normalize_generated_names(model: &mut Value, project_name: &str) {
 }
 
 fn normalize_repo_paths(model: &mut Value, repo: &Path) {
-    let Some(services) = model.get_mut("services").and_then(Value::as_object_mut) else {
-        return;
-    };
-    for service in services.values_mut() {
-        let Some(volumes) = service.get_mut("volumes").and_then(Value::as_array_mut) else {
-            continue;
-        };
-        for volume in volumes {
-            let Some(source) = volume.get_mut("source") else {
-                continue;
-            };
-            normalize_repo_path(source, repo);
+    match model {
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                normalize_repo_paths(value, repo);
+            }
         }
+        Value::Array(values) => {
+            for value in values {
+                normalize_repo_paths(value, repo);
+            }
+        }
+        Value::String(_) => normalize_repo_path(model, repo),
+        _ => {}
     }
 }
 
 fn normalize_repo_path(value: &mut Value, repo: &Path) {
-    let Some(path) = value.as_str().map(Path::new) else {
+    let Some(path) = value
+        .as_str()
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+    else {
         return;
     };
     let Ok(relative) = path.strip_prefix(repo) else {
@@ -353,4 +356,44 @@ fn sort_diagnostics(diagnostics: &mut Vec<IsolationDiagnostic>) {
             .then_with(|| left.evidence.cmp(&right.evidence))
     });
     diagnostics.dedup();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_path_projection_covers_compose_path_fields_without_substrings() {
+        let repo = Path::new("/work/repo");
+        let mut model = serde_json::json!({
+            "configs": {"settings": {"file": "/work/repo/config/settings.yml"}},
+            "secrets": {"token": {"file": "/work/repo/secrets/token"}},
+            "services": {"web": {
+                "build": {"context": "/work/repo/app"},
+                "develop": {"watch": [{"path": "/work/repo/src"}]},
+                "environment": ["NOTE=prefix /work/repo/src suffix"]
+            }}
+        });
+
+        normalize_repo_paths(&mut model, repo);
+
+        for (pointer, expected) in [
+            (
+                "/configs/settings/file",
+                "${AUTOSPEC_REPO}/config/settings.yml",
+            ),
+            ("/secrets/token/file", "${AUTOSPEC_REPO}/secrets/token"),
+            ("/services/web/build/context", "${AUTOSPEC_REPO}/app"),
+            ("/services/web/develop/watch/0/path", "${AUTOSPEC_REPO}/src"),
+        ] {
+            assert_eq!(
+                model.pointer(pointer).and_then(Value::as_str),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            model["services"]["web"]["environment"][0],
+            "NOTE=prefix /work/repo/src suffix"
+        );
+    }
 }

@@ -201,6 +201,29 @@ mod transaction_tests {
     }
 
     #[test]
+    fn unchanged_input_race_performs_zero_autospec_renames() {
+        let mut fixture = TransactionFixture::new(2);
+        fixture.files[1].rendered = fixture.files[1].original.clone();
+
+        let error = commit_files(
+            &fixture.files,
+            &Faults {
+                mutate_before_recheck: Some(1),
+                ..Faults::default()
+            },
+        )
+        .expect_err("an unchanged fingerprint input mutation must abort commit");
+
+        transaction::assert_error(&error.to_string(), "NORMALIZE_STALE_SOURCE");
+        assert_eq!(std::fs::read(&fixture.files[0].path).unwrap(), b"old-0");
+        assert_eq!(
+            std::fs::read(&fixture.files[1].path).unwrap(),
+            b"external mutation"
+        );
+        fixture.assert_no_temporaries();
+    }
+
+    #[test]
     fn verification_and_restore_faults_preserve_primary_failure_evidence() {
         let fixture = TransactionFixture::new(3);
         let renamed = commit_files(&fixture.files, &Faults::default()).unwrap();
