@@ -1,19 +1,20 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
-use yaml_edit::Document;
 
 use super::{
-    ComposeExport, EnvironmentIdentity, IsolationDiagnostic, RuntimeEnvError, RuntimeManifest,
+    ComposeExport, ComposePlan, EnvironmentIdentity, IsolationDiagnostic, RuntimeEnvError,
+    RuntimeManifest, COMPOSE_POLICY_VERSION,
 };
 
 mod edit;
+mod fingerprint;
+mod manifest;
+mod resolved;
 mod transaction;
 
 const NORMALIZATION_SCHEMA_VERSION: u32 = 1;
-const COMPOSE_POLICY_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum ResourceKind {
@@ -51,6 +52,7 @@ struct PlannedFile {
     path: PathBuf,
     original: Vec<u8>,
     rendered: Vec<u8>,
+    identity: fingerprint::FileIdentity,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -65,34 +67,8 @@ pub struct NormalizationPlan {
     files: Vec<PlannedFile>,
     #[serde(skip)]
     environment_id: String,
-}
-
-impl NormalizationPlan {
-    pub fn rendered_file(&self, path: &Path) -> Option<String> {
-        self.rendered_bytes(path)
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-    }
-
-    pub fn rendered_bytes(&self, path: &Path) -> Option<Vec<u8>> {
-        let canonical = std::fs::canonicalize(path).ok()?;
-        self.files
-            .iter()
-            .find(|file| file.path == canonical)
-            .map(|file| file.rendered.clone())
-    }
-
-    pub fn changed_files(&self) -> usize {
-        self.files
-            .iter()
-            .filter(|file| file.original != file.rendered)
-            .count()
-    }
-
-    pub fn to_json(&self) -> Result<String, RuntimeEnvError> {
-        serde_json::to_string(self).map_err(|error| {
-            RuntimeEnvError::new(format!("could not encode normalization plan: {error}"))
-        })
-    }
+    #[serde(skip)]
+    compose: ComposePlan,
 }
 
 pub struct ComposeNormalizer;
@@ -104,59 +80,12 @@ impl ComposeNormalizer {
         })?;
         let manifest = RuntimeManifest::read_from_repo(&repo)?;
         let identity = EnvironmentIdentity::resolve(&repo, "local", None)?;
-        let resource_plan = RuntimeManifest::resource_plan_for_repo(&repo, &identity)?;
-        let compose = resource_plan.compose.ok_or_else(|| {
+        let resources = RuntimeManifest::resource_plan_for_repo(&repo, &identity)?;
+        let compose = resources.compose.ok_or_else(|| {
             RuntimeEnvError::new("NORMALIZE_COMPOSE_NOT_FOUND: no Compose file was detected")
         })?;
-        Self::plan_inputs(
-            &repo,
-            &compose.files,
-            manifest.path(),
-            &identity.environment_id,
-        )
-    }
-
-    #[rustfmt::skip]
-    pub fn plan_inputs(repo: &Path, compose_files: &[PathBuf], manifest_path: &Path, environment_id: &str) -> Result<NormalizationPlan, RuntimeEnvError> {
-        let manifest_path = std::fs::canonicalize(manifest_path).map_err(|error| {
-            RuntimeEnvError::new(format!("could not canonicalize runtime manifest: {error}"))
-        })?;
-        let manifest = RuntimeManifest::read_from_repo(repo)?;
-        let mut files = read_inputs(repo, compose_files, &manifest_path)?;
-        let mut edits = Vec::new();
-        let mut exports = Vec::new();
-        let mut diagnostics = Vec::new();
-        for file in files.iter_mut().filter(|file| file.path != manifest_path) {
-            let edited = edit::edit_compose(&file.original, environment_id, repo)?;
-            file.rendered = edited.bytes;
-            edits.extend(edited.edits);
-            exports.extend(edited.exports);
-            diagnostics.extend(edited.diagnostics);
-        }
-        diagnostics.sort_by(|left, right| {
-            left.resource
-                .cmp(&right.resource)
-                .then_with(|| left.code.cmp(&right.code))
-        });
-        if diagnostics.is_empty() {
-            let manifest_file = files.iter_mut().find(|file| file.path == manifest_path)
-                .ok_or_else(|| RuntimeEnvError::new("runtime manifest was not planned"))?;
-            let rendered = render_manifest(&manifest_file.original, &manifest, repo, compose_files, &exports)?;
-            if rendered != manifest_file.original {
-                let resources = RuntimeResourcesReport { compose_files: compose_files.to_vec(), exports };
-                edits.push(NormalizationEdit::UpsertRuntimeResources { resources });
-                manifest_file.rendered = rendered;
-            }
-        } else {
-            for file in &mut files {
-                file.rendered.clone_from(&file.original);
-            }
-            edits.clear();
-        }
-        let fingerprint = fingerprint(&files)?;
-        Ok(NormalizationPlan { schema_version: NORMALIZATION_SCHEMA_VERSION, fingerprint, edits,
-            remaining_diagnostics: diagnostics, repo: repo.to_path_buf(), files,
-            environment_id: environment_id.to_string() })
+        let model = resolved::load(&repo, &compose)?;
+        plan_resolved(&repo, manifest, compose, &identity.environment_id, model)
     }
 
     pub fn apply(plan: &NormalizationPlan, expected: &str) -> Result<(), RuntimeEnvError> {
@@ -168,191 +97,100 @@ impl ComposeNormalizer {
     }
 }
 
-fn read_inputs(
+fn plan_resolved(
     repo: &Path,
-    compose_files: &[PathBuf],
-    manifest_path: &Path,
-) -> Result<Vec<PlannedFile>, RuntimeEnvError> {
-    let mut paths = compose_files.to_vec();
-    paths.push(manifest_path.to_path_buf());
-    paths.sort();
-    paths.dedup();
-    paths
-        .into_iter()
-        .map(|path| {
-            let canonical = std::fs::canonicalize(&path).map_err(|error| {
-                RuntimeEnvError::new(format!(
-                    "could not canonicalize {}: {error}",
-                    path.display()
-                ))
-            })?;
-            if !canonical.starts_with(repo) {
-                return Err(RuntimeEnvError::new(format!(
-                    "normalization input is outside repository: {}",
-                    path.display()
-                )));
-            }
-            let original = std::fs::read(&canonical).map_err(|error| {
-                RuntimeEnvError::new(format!("could not read {}: {error}", canonical.display()))
-            })?;
-            Ok(PlannedFile {
-                path: canonical,
-                rendered: original.clone(),
-                original,
-            })
-        })
-        .collect()
-}
-
-fn fingerprint(files: &[PlannedFile]) -> Result<String, RuntimeEnvError> {
-    let mut digest = Sha256::new();
-    digest.update(NORMALIZATION_SCHEMA_VERSION.to_be_bytes());
-    digest.update(COMPOSE_POLICY_VERSION.to_be_bytes());
-    for file in files {
-        let path = file.path.to_str().ok_or_else(|| {
-            RuntimeEnvError::new(format!(
-                "normalization path is not UTF-8: {}",
-                file.path.display()
-            ))
-        })?;
-        digest.update(path.len().to_be_bytes());
-        digest.update(path.as_bytes());
-        digest.update(file.original.len().to_be_bytes());
-        digest.update(&file.original);
-    }
-    Ok(digest
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect())
-}
-
-fn render_manifest(
-    source: &[u8],
-    manifest: &RuntimeManifest,
-    repo: &Path,
-    compose_files: &[PathBuf],
-    new_exports: &[ComposeExport],
-) -> Result<Vec<u8>, RuntimeEnvError> {
-    let text = std::str::from_utf8(source)
-        .map_err(|_| RuntimeEnvError::new("runtime manifest must be UTF-8"))?;
-    let document = Document::from_str(text).map_err(|error| {
-        RuntimeEnvError::new(format!("could not parse runtime manifest YAML: {error}"))
+    manifest: RuntimeManifest,
+    compose: ComposePlan,
+    environment_id: &str,
+    model: resolved::ResolvedModel,
+) -> Result<NormalizationPlan, RuntimeEnvError> {
+    let manifest_path = std::fs::canonicalize(manifest.path()).map_err(|error| {
+        RuntimeEnvError::new(format!("could not canonicalize runtime manifest: {error}"))
     })?;
-    let root = document
-        .as_mapping()
-        .ok_or_else(|| RuntimeEnvError::new("runtime manifest root must be a mapping"))?;
-    if root.get("version").and_then(|value| value.to_i64()) != Some(2) {
-        return Err(RuntimeEnvError::new(
-            "NORMALIZE_MANIFEST_V2_REQUIRED: Compose normalization requires runtime manifest version 2",
-        ));
-    }
-    let files = compose_files
+    let mut files = fingerprint::read_inputs(repo, &compose.files, &manifest_path)?;
+    let compose_indices = files
         .iter()
-        .map(|file| {
-            file.strip_prefix(repo)
-                .unwrap_or(file)
-                .display()
-                .to_string()
-        })
+        .enumerate()
+        .filter(|(_, file)| file.path != manifest_path)
+        .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    let mut exports = manifest.resources().compose.exports.clone();
-    for export in new_exports {
-        if !exports.contains(export) {
-            exports.push(export.clone())
+    let inspected = compose_indices
+        .iter()
+        .map(|index| edit::inspect(&files[*index].original))
+        .collect::<Result<Vec<_>, _>>()?;
+    let candidates = inspected
+        .iter()
+        .map(|source| source.candidates.clone())
+        .collect::<Vec<_>>();
+    let decision = resolved::decide(
+        repo,
+        environment_id,
+        &compose,
+        &manifest,
+        &model.value,
+        &candidates,
+    );
+    let mut reported_exports = manifest.resources().compose.exports.clone();
+    for export in &decision.exports {
+        if !reported_exports.contains(export) {
+            reported_exports.push(export.clone());
         }
     }
-    let files = serde_json::to_string(&files).map_err(json_error)?;
-    let exports = serde_json::to_string(&exports.iter().map(export_value).collect::<Vec<_>>())
-        .map_err(json_error)?;
-    render_manifest_fields(text, &root, &files, &exports)
-}
-
-fn export_value(export: &ComposeExport) -> serde_json::Value {
-    let protocol = match export.protocol {
-        super::ExportProtocol::Http => "http",
-        super::ExportProtocol::Https => "https",
-        super::ExportProtocol::Tcp => "tcp",
-        super::ExportProtocol::Udp => "udp",
-    };
-    let value = match export.value {
-        super::ExportValue::Url => "url",
-        super::ExportValue::Port => "port",
-        super::ExportValue::HostPort => "host-port",
-    };
-    serde_json::json!({
-        "service": export.service, "target": export.target, "protocol": protocol,
-        "env": export.env, "value": value,
+    if decision.diagnostics.is_empty() {
+        render_approved(&mut files, &compose_indices, &inspected, &decision.approved);
+        manifest::render(
+            &mut files,
+            &manifest_path,
+            &manifest,
+            repo,
+            &compose.files,
+            &decision.exports,
+        )?;
+    }
+    let mut edits = decision.edits;
+    if files
+        .iter()
+        .any(|file| file.path == manifest_path && file.original != file.rendered)
+    {
+        edits.push(NormalizationEdit::UpsertRuntimeResources {
+            resources: RuntimeResourcesReport {
+                compose_files: compose.files.clone(),
+                exports: reported_exports,
+            },
+        });
+    }
+    let fingerprint = fingerprint::digest(
+        &files,
+        &model.bytes,
+        NORMALIZATION_SCHEMA_VERSION,
+        COMPOSE_POLICY_VERSION,
+    )?;
+    Ok(NormalizationPlan {
+        schema_version: NORMALIZATION_SCHEMA_VERSION,
+        fingerprint,
+        edits,
+        remaining_diagnostics: decision.diagnostics,
+        repo: repo.to_path_buf(),
+        files,
+        environment_id: environment_id.to_string(),
+        compose,
     })
 }
 
-fn render_manifest_fields(
-    source: &str,
-    root: &yaml_edit::Mapping,
-    files: &str,
-    exports: &str,
-) -> Result<Vec<u8>, RuntimeEnvError> {
-    let Some(resources) = root.get_mapping("resources") else {
-        let block = format!("resources:\n  compose:\n    files: {files}\n    exports: {exports}\n");
-        return Ok(insert_mapping_field(source, root, &block));
-    };
-    let Some(compose) = resources.get_mapping("compose") else {
-        let block = format!("compose:\n  files: {files}\n  exports: {exports}\n");
-        return Ok(insert_mapping_field(source, &resources, &block));
-    };
-    let mut edits = Vec::new();
-    replace_or_insert_sequence(source, &compose, "files", files, &mut edits)?;
-    replace_or_insert_sequence(source, &compose, "exports", exports, &mut edits)?;
-    Ok(apply_byte_edits(source, edits))
-}
-
-#[rustfmt::skip]
-fn replace_or_insert_sequence(source: &str, mapping: &yaml_edit::Mapping, key: &str,
-    encoded: &str, edits: &mut Vec<(usize, usize, String)>) -> Result<(), RuntimeEnvError> {
-    if let Some(node) = mapping.get(key) {
-        let sequence = node.as_sequence().ok_or_else(||
-            RuntimeEnvError::new(format!("runtime Compose {key} must be a list")))?;
-        let range = sequence.byte_range();
-        edits.push((range.start as usize, range.end as usize, encoded.to_string()));
-    } else {
-        let range = mapping.byte_range();
-        let indent = line_indent(source, range.start as usize);
-        let prefix = if source.as_bytes().get(range.end as usize - 1) == Some(&b'\n') { "" } else { "\n" };
-        edits.push((range.end as usize, range.end as usize,
-            format!("{prefix}{}{key}: {encoded}\n", " ".repeat(indent))));
+fn render_approved(
+    files: &mut [PlannedFile],
+    compose_indices: &[usize],
+    inspected: &[edit::InspectedCompose],
+    approved: &HashSet<(usize, usize)>,
+) {
+    for (source_index, file_index) in compose_indices.iter().enumerate() {
+        let local = approved
+            .iter()
+            .filter(|(file, _)| *file == source_index)
+            .map(|(_, index)| *index)
+            .collect::<HashSet<_>>();
+        files[*file_index].rendered = inspected[source_index].render(&local);
     }
-    Ok(())
-}
-
-#[rustfmt::skip]
-fn insert_mapping_field(source: &str, mapping: &yaml_edit::Mapping, block: &str) -> Vec<u8> {
-    let range = mapping.byte_range();
-    let indent = line_indent(source, range.start as usize);
-    let prefix = if source.as_bytes().get(range.end as usize - 1) == Some(&b'\n') { "" } else { "\n" };
-    let block = block.lines().map(|line| format!("{}{line}\n", " ".repeat(indent))).collect::<String>();
-    apply_byte_edits(source,
-        vec![(range.end as usize, range.end as usize, format!("{prefix}{block}"))])
-}
-
-fn line_indent(source: &str, offset: usize) -> usize {
-    let start = source[..offset].rfind('\n').map_or(0, |index| index + 1);
-    source[start..offset]
-        .bytes()
-        .take_while(|byte| *byte == b' ')
-        .count()
-}
-
-fn apply_byte_edits(source: &str, mut edits: Vec<(usize, usize, String)>) -> Vec<u8> {
-    edits.sort_by_key(|edit| std::cmp::Reverse(edit.0));
-    let mut output = source.to_string();
-    for (start, end, replacement) in edits {
-        output.replace_range(start..end, &replacement)
-    }
-    output.into_bytes()
-}
-
-fn json_error(error: serde_json::Error) -> RuntimeEnvError {
-    RuntimeEnvError::new(format!("could not encode runtime resources: {error}"))
 }
 
 pub(super) fn diagnostic(
@@ -372,5 +210,184 @@ pub(super) fn diagnostic(
             "autospec runtime env normalize-compose --repo {} --check",
             super::shell_quote(&repo.display().to_string())
         ),
+    }
+}
+
+fn normalization_edit(
+    candidate: &edit::Candidate,
+    export: Option<ComposeExport>,
+) -> NormalizationEdit {
+    match &candidate.kind {
+        edit::CandidateKind::Port { service, index, .. } => {
+            NormalizationEdit::RemovePublishedPort {
+                service: service.clone(),
+                index: *index,
+                export: export.expect("approved port candidate has an export"),
+            }
+        }
+        edit::CandidateKind::ContainerName { service } => {
+            NormalizationEdit::RemoveRedundantContainerName {
+                service: service.clone(),
+            }
+        }
+        edit::CandidateKind::ResourceName { kind, logical_key } => {
+            NormalizationEdit::RemoveProjectScopedResourceName {
+                kind: kind.clone(),
+                logical_key: logical_key.clone(),
+            }
+        }
+    }
+}
+
+fn sort_diagnostics(diagnostics: &mut Vec<IsolationDiagnostic>) {
+    diagnostics.sort_by(|left, right| {
+        left.resource
+            .cmp(&right.resource)
+            .then_with(|| left.code.cmp(&right.code))
+            .then_with(|| left.evidence.cmp(&right.evidence))
+    });
+    diagnostics.dedup();
+}
+
+fn escape_pointer(value: &str) -> String {
+    value.replace('~', "~0").replace('/', "~1")
+}
+
+#[cfg(test)]
+mod transaction_tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::transaction::{commit_files, rollback_result, Faults};
+    use super::*;
+
+    static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn stage_rename_and_parent_sync_faults_restore_every_destination() {
+        for faults in [
+            Faults {
+                fail_stage_at: Some(1),
+                ..Faults::default()
+            },
+            Faults {
+                fail_rename_at: Some(1),
+                ..Faults::default()
+            },
+            Faults {
+                fail_parent_sync: true,
+                ..Faults::default()
+            },
+        ] {
+            let fixture = TransactionFixture::new(3);
+            commit_files(&fixture.files, &faults).expect_err("fault must abort commit");
+            fixture.assert_originals();
+            fixture.assert_no_temporaries();
+        }
+    }
+
+    #[test]
+    fn stale_recheck_performs_zero_autospec_renames() {
+        let fixture = TransactionFixture::new(2);
+        let error = commit_files(
+            &fixture.files,
+            &Faults {
+                mutate_before_recheck: Some(0),
+                ..Faults::default()
+            },
+        )
+        .expect_err("mutation must make the plan stale");
+        assert!(error.to_string().contains("NORMALIZE_STALE_SOURCE"));
+        assert_eq!(
+            std::fs::read(&fixture.files[0].path).unwrap(),
+            b"external mutation"
+        );
+        assert_eq!(std::fs::read(&fixture.files[1].path).unwrap(), b"old-1");
+        fixture.assert_no_temporaries();
+    }
+
+    #[test]
+    fn verification_and_restore_faults_preserve_primary_failure_evidence() {
+        let fixture = TransactionFixture::new(3);
+        let renamed = commit_files(&fixture.files, &Faults::default()).unwrap();
+        let error: RuntimeEnvError = rollback_result::<()>(
+            RuntimeEnvError::new("NORMALIZE_POLICY_FAILED: injected verification failure"),
+            &renamed,
+            &Faults::default(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("NORMALIZE_POLICY_FAILED"));
+        fixture.assert_originals();
+
+        let fixture = TransactionFixture::new(3);
+        let error = commit_files(
+            &fixture.files,
+            &Faults {
+                fail_rename_at: Some(2),
+                fail_restore_at: HashSet::from([0, 1]),
+                ..Faults::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("NORMALIZE_RENAME_FAILED"));
+        assert!(error.contains("rollback[0]") && error.contains("rollback[1]"));
+        assert_eq!(std::fs::read(&fixture.files[2].path).unwrap(), b"old-2");
+    }
+
+    struct TransactionFixture {
+        root: PathBuf,
+        files: Vec<PlannedFile>,
+    }
+
+    impl TransactionFixture {
+        fn new(count: usize) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "autospec-normalize-transaction-{}-{}",
+                std::process::id(),
+                NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let files = (0..count).map(|index| planned_file(&root, index)).collect();
+            Self { root, files }
+        }
+
+        fn assert_originals(&self) {
+            for (index, file) in self.files.iter().enumerate() {
+                assert_eq!(
+                    std::fs::read(&file.path).unwrap(),
+                    format!("old-{index}").as_bytes()
+                );
+            }
+        }
+
+        fn assert_no_temporaries(&self) {
+            let names = std::fs::read_dir(&self.root)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>();
+            assert!(
+                names.iter().all(|name| !name.ends_with(".tmp")),
+                "{names:?}"
+            );
+        }
+    }
+
+    fn planned_file(root: &Path, index: usize) -> PlannedFile {
+        let path = root.join(format!("file-{index}.yml"));
+        let original = format!("old-{index}").into_bytes();
+        std::fs::write(&path, &original).unwrap();
+        PlannedFile {
+            identity: fingerprint::file_identity(&path).unwrap(),
+            path,
+            original,
+            rendered: format!("new-{index}").into_bytes(),
+        }
+    }
+
+    impl Drop for TransactionFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
     }
 }

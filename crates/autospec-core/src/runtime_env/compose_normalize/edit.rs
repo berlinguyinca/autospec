@@ -1,41 +1,67 @@
-use std::path::Path;
+use std::collections::HashSet;
 use std::str::FromStr;
 
-use yaml_edit::{Document, TextPosition, YamlNode};
+use yaml_edit::anchor_resolution::DocumentResolvedExt;
+use yaml_edit::{AsYaml, Document, Mapping, TextPosition, YamlNode};
 
-use super::{diagnostic, NormalizationEdit, ResourceKind};
+use super::ResourceKind;
 use crate::runtime_env::{
-    ComposeExport, ExportProtocol, ExportValue, IsolationDiagnostic, RuntimeEnvError,
+    ComposeExport, ComposePlan, ExportProtocol, ExportValue, RuntimeEnvError,
 };
 
-pub(super) struct EditedCompose {
-    pub bytes: Vec<u8>,
-    pub edits: Vec<NormalizationEdit>,
-    pub exports: Vec<ComposeExport>,
-    pub diagnostics: Vec<IsolationDiagnostic>,
+#[derive(Clone, Debug)]
+pub(super) enum CandidateKind {
+    Port {
+        service: String,
+        index: usize,
+        target: u16,
+        protocol: ExportProtocol,
+    },
+    ContainerName {
+        service: String,
+    },
+    ResourceName {
+        kind: ResourceKind,
+        logical_key: String,
+    },
 }
 
-#[derive(Clone)]
-struct PortEdit {
-    service: String,
-    index: usize,
-    target: u16,
-    protocol: ExportProtocol,
-    source: SourceEdit,
+#[derive(Clone, Debug)]
+pub(super) struct Candidate {
+    pub kind: CandidateKind,
+    pub resource: String,
+    pub target_resource: Option<String>,
+    pub evidence: String,
+    pub unsafe_reference: bool,
+    source_edit: SourceEdit,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct SourceEdit {
     start: usize,
     end: usize,
     replacement: String,
 }
 
-pub(super) fn edit_compose(
-    source: &[u8],
-    environment_id: &str,
-    repo: &Path,
-) -> Result<EditedCompose, RuntimeEnvError> {
+pub(super) struct InspectedCompose {
+    source: String,
+    pub candidates: Vec<Candidate>,
+}
+
+impl InspectedCompose {
+    pub fn render(&self, approved: &HashSet<usize>) -> Vec<u8> {
+        let edits = self
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| approved.contains(index))
+            .map(|(_, candidate)| candidate.source_edit.clone())
+            .collect();
+        apply_source_edits(&self.source, edits)
+    }
+}
+
+pub(super) fn inspect(source: &[u8]) -> Result<InspectedCompose, RuntimeEnvError> {
     let text = std::str::from_utf8(source)
         .map_err(|_| RuntimeEnvError::new("Compose source must be UTF-8"))?;
     let document = Document::from_str(text)
@@ -43,123 +69,231 @@ pub(super) fn edit_compose(
     let root = document
         .as_mapping()
         .ok_or_else(|| RuntimeEnvError::new("Compose root must be a mapping"))?;
-    let mut diagnostics = Vec::new();
-    reject_yaml_references(&root, environment_id, repo, &mut diagnostics);
-    let ports = collect_ports(&root, text, environment_id, repo, &mut diagnostics);
-    reject_unsafe_resources(&root, environment_id, repo, &mut diagnostics);
-    reject_identity_references(&root, environment_id, repo, &mut diagnostics);
-    if http_count(&ports) > 1 {
-        diagnostics.push(diagnostic(
-            environment_id,
-            repo,
-            "COMPOSE_HTTP_AMBIGUOUS",
-            "services.*.ports",
-            "multiple-http-candidates",
-        ));
-    }
-    if !diagnostics.is_empty() {
-        return Ok(unchanged(source, diagnostics));
-    }
-    let (mut changes, mut edits, mut exports) = port_changes(&ports);
-    collect_name_changes(&root, text, &mut changes, &mut edits);
-    add_public_url(&ports, &mut exports);
-    Ok(EditedCompose {
-        bytes: apply_source_edits(text, changes),
-        edits,
-        exports,
-        diagnostics,
+    let anchors = anchor_ranges(&document);
+    let mut candidates = collect_ports(&root, &anchors);
+    collect_container_names(&root, &anchors, &mut candidates);
+    collect_resource_names(&root, &anchors, &mut candidates);
+    Ok(InspectedCompose {
+        source: text.to_string(),
+        candidates,
     })
 }
 
-fn unchanged(source: &[u8], diagnostics: Vec<IsolationDiagnostic>) -> EditedCompose {
-    EditedCompose {
-        bytes: source.to_vec(),
-        edits: Vec::new(),
-        exports: Vec::new(),
-        diagnostics,
-    }
-}
-
-fn reject_yaml_references(
-    root: &yaml_edit::Mapping,
-    environment_id: &str,
-    repo: &Path,
-    diagnostics: &mut Vec<IsolationDiagnostic>,
-) {
-    if root.values().any(|value| node_has_reference(&value)) {
-        diagnostics.push(diagnostic(
-            environment_id,
-            repo,
-            "COMPOSE_UNSAFE_YAML_REFERENCE",
-            "compose",
-            "anchor-or-alias",
-        ));
-    }
-}
-
-fn node_has_reference(node: &YamlNode) -> bool {
-    node.as_alias().is_some()
-        || node.to_string().trim_start().starts_with('&')
-        || node
-            .as_mapping()
-            .is_some_and(|mapping| mapping.values().any(|value| node_has_reference(&value)))
-        || node
-            .as_sequence()
-            .is_some_and(|sequence| sequence.values().any(|value| node_has_reference(&value)))
-}
-
-#[rustfmt::skip]
-fn collect_ports(root: &yaml_edit::Mapping, source: &str, environment_id: &str,
-    repo: &Path, diagnostics: &mut Vec<IsolationDiagnostic>) -> Vec<PortEdit> {
-    let Some(services) = root.get_mapping("services") else { return Vec::new() };
-    let mut edits = Vec::new();
-    for (key, value) in services.iter() {
-        let Some(service) = scalar(&key) else { continue };
-        let Some(mapping) = value.as_mapping() else { continue };
-        if scalar_at(mapping, "network_mode").as_deref() == Some("host") {
-            diagnostics.push(diagnostic(environment_id, repo, "COMPOSE_HOST_NETWORK",
-                &format!("services.{service}.network_mode"), "host"));
-        }
-        let Some(ports) = mapping.get_sequence("ports") else { continue };
+fn collect_ports(root: &Mapping, anchors: &[(usize, usize)]) -> Vec<Candidate> {
+    let Some(services) = root.get_mapping("services") else {
+        return Vec::new();
+    };
+    let mut candidates = Vec::new();
+    for (key, node) in services.iter() {
+        let (Some(service), Some(mapping)) = (scalar(&key), node.as_mapping()) else {
+            continue;
+        };
+        let Some(ports) = mapping.get_sequence("ports") else {
+            continue;
+        };
         for (index, port) in ports.values().enumerate() {
-            match parse_port(&service, index, &port, source) {
-                Ok(Some(edit)) => edits.push(edit),
-                Ok(None) => {}
-                Err(evidence) => diagnostics.push(diagnostic(environment_id, repo,
-                    "COMPOSE_UNDECLARED_PORT", &format!("services.{service}.ports[{index}]"), &evidence)),
+            if let Some(candidate) = port_candidate(&service, index, &port, anchors) {
+                candidates.push(candidate);
             }
         }
     }
-    edits
+    candidates
 }
 
-#[rustfmt::skip]
-fn parse_port(service: &str, index: usize, node: &YamlNode, source: &str) -> Result<Option<PortEdit>, String> {
+fn port_candidate(
+    service: &str,
+    index: usize,
+    node: &YamlNode,
+    anchors: &[(usize, usize)],
+) -> Option<Candidate> {
     if let Some(value) = scalar(node) {
         let parts = value.split(':').collect::<Vec<_>>();
-        if parts.len() == 1 && valid_port(parts[0]).is_some() { return Ok(None) }
-        if parts.len() != 2 { return Err(value) }
-        valid_port(parts[0]).ok_or_else(|| value.clone())?;
-        let target = valid_port(parts[1]).ok_or_else(|| value.clone())?;
-        let range = node.as_scalar().expect("scalar branch").byte_range();
-        return Ok(Some(PortEdit { service: service.to_string(), index, target,
-            protocol: ExportProtocol::Tcp, source: replace_range(range, target.to_string()) }));
+        let (published, target) = match parts.as_slice() {
+            [published, target] => (valid_port(published)?, valid_port(target)?),
+            _ => return None,
+        };
+        let range = node_range(node)?;
+        return Some(port(
+            service,
+            index,
+            target,
+            ExportProtocol::Tcp,
+            published.to_string(),
+            overlaps_anchor(range, anchors) || node.as_alias().is_some(),
+            replace_range(range, target.to_string()),
+        ));
     }
-    let mapping = node.as_mapping().ok_or_else(|| node.to_string())?;
-    let Some(published) = mapping.get("published") else { return Ok(None) };
-    let published_number = published.to_i64().and_then(|value| u16::try_from(value).ok());
-    if published_number.is_none_or(|value| value == 0) { return Err(node.to_string()) }
-    let target = mapping.get("target").and_then(|value| value.to_i64())
-        .and_then(|value| u16::try_from(value).ok())
-        .filter(|value| *value > 0)
-        .ok_or_else(|| node.to_string())?;
-    let protocol = port_protocol(mapping).ok_or_else(|| node.to_string())?;
-    let range = published.as_scalar().ok_or_else(|| node.to_string())?.byte_range();
-    Ok(Some(PortEdit { service: service.to_string(), index, target, protocol,
-        source: remove_line(source, range) }))
+    let mapping = node.as_mapping()?;
+    let (published, edit, unsafe_reference) = removable_field(mapping, "published", anchors)?;
+    let published_evidence = scalar(&published)
+        .and_then(|value| valid_port(&value).map(|port| port.to_string()))
+        .or_else(|| unsafe_reference.then(|| published.to_string()))?;
+    let target = mapping
+        .get("target")
+        .and_then(|value| scalar(&value))
+        .and_then(|value| valid_port(&value))?;
+    let protocol = port_protocol(mapping)?;
+    Some(port(
+        service,
+        index,
+        target,
+        protocol,
+        published_evidence,
+        unsafe_reference,
+        edit,
+    ))
 }
 
-fn port_protocol(mapping: &yaml_edit::Mapping) -> Option<ExportProtocol> {
+#[allow(clippy::too_many_arguments)]
+fn port(
+    service: &str,
+    index: usize,
+    target: u16,
+    protocol: ExportProtocol,
+    evidence: String,
+    unsafe_reference: bool,
+    source_edit: SourceEdit,
+) -> Candidate {
+    Candidate {
+        kind: CandidateKind::Port {
+            service: service.to_string(),
+            index,
+            target,
+            protocol,
+        },
+        resource: format!("services.{service}.ports[{index}].published"),
+        target_resource: Some(format!("services.{service}.ports[{index}].target")),
+        evidence,
+        unsafe_reference,
+        source_edit,
+    }
+}
+
+fn collect_container_names(
+    root: &Mapping,
+    anchors: &[(usize, usize)],
+    candidates: &mut Vec<Candidate>,
+) {
+    let Some(services) = root.get_mapping("services") else {
+        return;
+    };
+    for (key, node) in services.iter() {
+        let (Some(service), Some(mapping)) = (scalar(&key), node.as_mapping()) else {
+            continue;
+        };
+        let Some((value, edit, unsafe_reference)) =
+            removable_field(mapping, "container_name", anchors)
+        else {
+            continue;
+        };
+        candidates.push(Candidate {
+            kind: CandidateKind::ContainerName {
+                service: service.clone(),
+            },
+            resource: format!("services.{service}.container_name"),
+            target_resource: None,
+            evidence: scalar(&value).unwrap_or_else(|| value.to_string()),
+            unsafe_reference,
+            source_edit: edit,
+        });
+    }
+}
+
+fn collect_resource_names(
+    root: &Mapping,
+    anchors: &[(usize, usize)],
+    candidates: &mut Vec<Candidate>,
+) {
+    for (name, kind) in [
+        ("networks", ResourceKind::Network),
+        ("volumes", ResourceKind::Volume),
+    ] {
+        let Some(resources) = root.get_mapping(name) else {
+            continue;
+        };
+        for (key, node) in resources.iter() {
+            let (Some(logical), Some(mapping)) = (scalar(&key), node.as_mapping()) else {
+                continue;
+            };
+            let Some((value, edit, unsafe_reference)) = removable_field(mapping, "name", anchors)
+            else {
+                continue;
+            };
+            let evidence = scalar(&value).unwrap_or_else(|| value.to_string());
+            if evidence != format!("${{COMPOSE_PROJECT_NAME}}_{logical}") {
+                continue;
+            }
+            candidates.push(Candidate {
+                kind: CandidateKind::ResourceName {
+                    kind: kind.clone(),
+                    logical_key: logical.clone(),
+                },
+                resource: format!("{name}.{logical}.name"),
+                target_resource: None,
+                evidence,
+                unsafe_reference,
+                source_edit: edit,
+            });
+        }
+    }
+}
+
+fn removable_field(
+    mapping: &Mapping,
+    key: &str,
+    anchors: &[(usize, usize)],
+) -> Option<(YamlNode, SourceEdit, bool)> {
+    let entry = mapping.find_entry_by_key(key)?;
+    let key_node = entry.key_node()?;
+    let value = entry.value_node()?;
+    let key_range = node_range(&key_node)?;
+    let value_range = node_range(&value)?;
+    let combined = TextPosition {
+        start: key_range.start,
+        end: value_range.end,
+    };
+    let unsafe_reference = value.as_alias().is_some() || overlaps_anchor(combined, anchors);
+    Some((
+        value,
+        SourceEdit {
+            start: combined.start as usize,
+            end: combined.end as usize,
+            replacement: String::new(),
+        },
+        unsafe_reference,
+    ))
+}
+
+fn anchor_ranges(document: &Document) -> Vec<(usize, usize)> {
+    let registry = document.build_anchor_registry();
+    registry
+        .anchor_names()
+        .filter_map(|name| registry.resolve(name).cloned())
+        .map(|node| {
+            let range = yaml_edit::advanced::syntax_node_range(&node);
+            (
+                u32::from(range.start()) as usize,
+                u32::from(range.end()) as usize,
+            )
+        })
+        .collect()
+}
+
+fn overlaps_anchor(range: TextPosition, anchors: &[(usize, usize)]) -> bool {
+    anchors
+        .iter()
+        .any(|(start, end)| *start < range.end as usize && (range.start as usize) < *end)
+}
+
+fn node_range(node: &YamlNode) -> Option<TextPosition> {
+    let range = yaml_edit::advanced::syntax_node_range(node.as_node()?);
+    Some(TextPosition {
+        start: u32::from(range.start()),
+        end: u32::from(range.end()),
+    })
+}
+
+fn port_protocol(mapping: &Mapping) -> Option<ExportProtocol> {
     let transport = scalar_at(mapping, "protocol").unwrap_or_else(|| "tcp".to_string());
     match (
         transport.as_str(),
@@ -173,154 +307,60 @@ fn port_protocol(mapping: &yaml_edit::Mapping) -> Option<ExportProtocol> {
     }
 }
 
-#[rustfmt::skip]
-fn reject_unsafe_resources(root: &yaml_edit::Mapping, environment_id: &str,
-    repo: &Path, diagnostics: &mut Vec<IsolationDiagnostic>) {
-    for kind in ["networks", "volumes"] {
-        let Some(resources) = root.get_mapping(kind) else { continue };
-        for (key, value) in resources.iter() {
-            let Some(logical) = scalar(&key) else { continue };
-            let Some(mapping) = value.as_mapping() else { continue };
-            if mapping.get("external").and_then(|value| value.to_bool()) == Some(true) {
-                diagnostics.push(diagnostic(environment_id, repo, "COMPOSE_EXTERNAL_UNDECLARED",
-                    &format!("{kind}.{logical}.external"), &logical));
-            }
-        }
-    }
-}
-
-#[rustfmt::skip]
-fn reject_identity_references(root: &yaml_edit::Mapping, environment_id: &str,
-    repo: &Path, diagnostics: &mut Vec<IsolationDiagnostic>) {
-    let Some(services) = root.get_mapping("services") else { return };
-    for (key, value) in services.iter() {
-        let Some(name) = scalar(&key) else { continue };
-        let Some(service) = value.as_mapping() else { continue };
-        let references = root.values().map(|node| scalar_count(&node, &name)).sum::<usize>();
-        if scalar_at(service, "container_name").as_deref() == Some(name.as_str()) && references > 1 {
-            diagnostics.push(diagnostic(environment_id, repo, "COMPOSE_CONTAINER_NAME_REFERENCE",
-                &format!("services.{name}.container_name"), &name));
-        }
-    }
-}
-
-#[rustfmt::skip]
-fn scalar_count(node: &YamlNode, expected: &str) -> usize {
-    if scalar(node).as_deref() == Some(expected) { return 1 }
-    if let Some(mapping) = node.as_mapping() {
-        return mapping.values().map(|value| scalar_count(&value, expected)).sum();
-    }
-    node.as_sequence().map(|sequence|
-        sequence.values().map(|value| scalar_count(&value, expected)).sum()).unwrap_or(0)
-}
-
-fn port_changes(
-    ports: &[PortEdit],
-) -> (Vec<SourceEdit>, Vec<NormalizationEdit>, Vec<ComposeExport>) {
-    let mut changes = Vec::new();
-    let mut edits = Vec::new();
-    let mut exports = Vec::new();
-    for port in ports {
-        changes.push(port.source.clone());
-        let value = if matches!(port.protocol, ExportProtocol::Http | ExportProtocol::Https) {
-            ExportValue::Url
-        } else {
-            ExportValue::Port
-        };
-        let export = compose_export(port, export_name(port), value);
-        exports.push(export.clone());
-        edits.push(NormalizationEdit::RemovePublishedPort {
-            service: port.service.clone(),
-            index: port.index,
-            export,
-        });
-    }
-    (changes, edits, exports)
-}
-
-#[rustfmt::skip]
-fn collect_name_changes(root: &yaml_edit::Mapping, source: &str,
-    changes: &mut Vec<SourceEdit>, edits: &mut Vec<NormalizationEdit>) {
-    if let Some(services) = root.get_mapping("services") {
-        for (key, value) in services.iter() {
-            let Some(name) = scalar(&key) else { continue };
-            let Some(service) = value.as_mapping() else { continue };
-            let Some(node) = service.get("container_name") else { continue };
-            if scalar(&node).as_deref() == Some(name.as_str()) {
-                changes.push(remove_node_line(source, &node));
-                edits.push(NormalizationEdit::RemoveRedundantContainerName { service: name });
-            }
-        }
-    }
-    for (name, kind) in [("networks", ResourceKind::Network), ("volumes", ResourceKind::Volume)] {
-        collect_resource_names(root, source, name, kind, changes, edits);
-    }
-}
-
-#[rustfmt::skip]
-fn collect_resource_names(root: &yaml_edit::Mapping, source: &str, name: &str,
-    kind: ResourceKind, changes: &mut Vec<SourceEdit>, edits: &mut Vec<NormalizationEdit>) {
-    let Some(resources) = root.get_mapping(name) else { return };
-    for (key, value) in resources.iter() {
-        let Some(logical) = scalar(&key) else { continue };
-        let Some(resource) = value.as_mapping() else { continue };
-        let Some(node) = resource.get("name") else { continue };
-        if scalar(&node).as_deref() == Some(&format!("${{COMPOSE_PROJECT_NAME}}_{logical}")) {
-            changes.push(remove_node_line(source, &node));
-            edits.push(NormalizationEdit::RemoveProjectScopedResourceName {
-                kind: kind.clone(), logical_key: logical });
-        }
-    }
-}
-
-fn add_public_url(ports: &[PortEdit], exports: &mut Vec<ComposeExport>) {
-    let http = ports
-        .iter()
-        .filter(|port| matches!(port.protocol, ExportProtocol::Http | ExportProtocol::Https))
-        .collect::<Vec<_>>();
-    if let [port] = http.as_slice() {
-        exports.push(compose_export(
-            port,
-            "AUTOSPEC_PUBLIC_URL".to_string(),
-            ExportValue::Url,
-        ));
-    }
-}
-
-fn compose_export(port: &PortEdit, env: String, value: ExportValue) -> ComposeExport {
-    ComposeExport {
-        service: port.service.clone(),
-        target: port.target,
-        protocol: port.protocol.clone(),
-        env,
+pub(super) fn candidate_export(candidate: &Candidate) -> Option<ComposeExport> {
+    let CandidateKind::Port {
+        service,
+        target,
+        protocol,
+        ..
+    } = &candidate.kind
+    else {
+        return None;
+    };
+    let value = if matches!(protocol, ExportProtocol::Http | ExportProtocol::Https) {
+        ExportValue::Url
+    } else {
+        ExportValue::Port
+    };
+    Some(ComposeExport {
+        service: service.clone(),
+        target: *target,
+        protocol: protocol.clone(),
+        env: export_name(service, *target, protocol),
         value,
-    }
+    })
 }
 
-#[rustfmt::skip]
-fn export_name(port: &PortEdit) -> String {
-    let service = port.service.chars().map(|character|
-        if character.is_ascii_alphanumeric() { character.to_ascii_uppercase() } else { '_' }
-    ).collect::<String>();
-    let protocol = match port.protocol {
+fn export_name(service: &str, target: u16, protocol: &ExportProtocol) -> String {
+    let service = service
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let protocol = match protocol {
         ExportProtocol::Http => "HTTP",
         ExportProtocol::Https => "HTTPS",
         ExportProtocol::Tcp => "TCP",
         ExportProtocol::Udp => "UDP",
     };
-    format!("AUTOSPEC_COMPOSE_{service}_{}_{protocol}", port.target)
-}
-
-fn valid_port(value: &str) -> Option<u16> {
-    value.parse::<u16>().ok().filter(|port| *port > 0)
+    format!("AUTOSPEC_COMPOSE_{service}_{target}_{protocol}")
 }
 
 fn scalar(node: &YamlNode) -> Option<String> {
     node.as_scalar().map(|value| value.as_string())
 }
 
-fn scalar_at(mapping: &yaml_edit::Mapping, key: &str) -> Option<String> {
+fn scalar_at(mapping: &Mapping, key: &str) -> Option<String> {
     mapping.get(key).and_then(|node| scalar(&node))
+}
+
+fn valid_port(value: &str) -> Option<u16> {
+    value.parse::<u16>().ok().filter(|port| *port > 0)
 }
 
 fn replace_range(range: TextPosition, replacement: String) -> SourceEdit {
@@ -331,30 +371,7 @@ fn replace_range(range: TextPosition, replacement: String) -> SourceEdit {
     }
 }
 
-fn remove_node_line(source: &str, node: &YamlNode) -> SourceEdit {
-    let range = node
-        .as_scalar()
-        .expect("name fields are scalars")
-        .byte_range();
-    remove_line(source, range)
-}
-
-fn remove_line(source: &str, range: TextPosition) -> SourceEdit {
-    let start = source[..range.start as usize]
-        .rfind('\n')
-        .map_or(0, |index| index + 1);
-    let end = source[range.end as usize..]
-        .find('\n')
-        .map_or(source.len(), |index| range.end as usize + index + 1);
-    SourceEdit {
-        start,
-        end,
-        replacement: String::new(),
-    }
-}
-
-fn apply_source_edits(source: &str, edits: Vec<SourceEdit>) -> Vec<u8> {
-    let mut edits = edits;
+fn apply_source_edits(source: &str, mut edits: Vec<SourceEdit>) -> Vec<u8> {
     edits.sort_by_key(|edit| std::cmp::Reverse(edit.start));
     let mut output = source.to_string();
     for edit in edits {
@@ -363,9 +380,14 @@ fn apply_source_edits(source: &str, edits: Vec<SourceEdit>) -> Vec<u8> {
     output.into_bytes()
 }
 
-fn http_count(edits: &[PortEdit]) -> usize {
-    edits
-        .iter()
-        .filter(|edit| matches!(edit.protocol, ExportProtocol::Http | ExportProtocol::Https))
-        .count()
+pub(super) fn resolved_resource_matches(
+    model: &serde_json::Value,
+    plan: &ComposePlan,
+    candidate: &Candidate,
+    logical: &str,
+) -> bool {
+    model
+        .pointer(&format!("/{}", candidate.resource.replace('.', "/")))
+        .and_then(serde_json::Value::as_str)
+        == Some(&format!("{}_{}", plan.project_name, logical))
 }

@@ -1,38 +1,44 @@
-use std::path::Path;
-use std::process::Command;
+use std::collections::HashSet;
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{fingerprint, ComposeNormalizer, NormalizationPlan, PlannedFile};
+use super::{fingerprint, resolved, ComposeNormalizer, PlannedFile, NORMALIZATION_SCHEMA_VERSION};
 use crate::runtime_env::{
-    write_file_atomic, ComposeIsolation, ComposePlan, ComposePolicy, EnvironmentIdentity,
-    RuntimeEnvError, RuntimeManifest,
+    ComposePolicy, EnvironmentIdentity, RuntimeEnvError, RuntimeManifest, COMPOSE_POLICY_VERSION,
 };
 
-const PROFILE_FLAG: &str = concat!("-", "-profile");
-const ALL_RESOURCES_FLAG: &str = concat!("-", "-all-resources");
-const PROJECT_NAME_FLAG: &str = concat!("-", "-project-name");
-const FORMAT_FLAG: &str = concat!("-", "-format");
+static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
-pub(super) fn apply(plan: &NormalizationPlan, expected: &str) -> Result<(), RuntimeEnvError> {
+#[derive(Default)]
+pub(super) struct Faults {
+    pub(super) fail_stage_at: Option<usize>,
+    pub(super) mutate_before_recheck: Option<usize>,
+    pub(super) fail_rename_at: Option<usize>,
+    pub(super) fail_restore_at: HashSet<usize>,
+    pub(super) fail_parent_sync: bool,
+}
+
+struct Staged<'a> {
+    file: &'a PlannedFile,
+    temporary: PathBuf,
+}
+
+pub(super) fn apply(
+    plan: &super::NormalizationPlan,
+    expected: &str,
+) -> Result<(), RuntimeEnvError> {
     validate_apply(plan, expected)?;
-    let changed = plan
-        .files
-        .iter()
-        .filter(|file| file.original != file.rendered)
-        .collect::<Vec<_>>();
-    for file in &changed {
-        if let Err(error) = write_file_atomic(&file.path, &file.rendered) {
-            rollback(&changed)?;
-            return Err(error);
-        }
-    }
-    if let Err(error) = ComposeNormalizer::verify(plan) {
-        rollback(&changed)?;
-        return Err(error);
+    let renamed = commit_files(&plan.files, &Faults::default())?;
+    if let Err(primary) = ComposeNormalizer::verify(plan) {
+        return rollback_result(primary, &renamed, &Faults::default());
     }
     Ok(())
 }
 
-fn validate_apply(plan: &NormalizationPlan, expected: &str) -> Result<(), RuntimeEnvError> {
+fn validate_apply(plan: &super::NormalizationPlan, expected: &str) -> Result<(), RuntimeEnvError> {
     if expected != plan.fingerprint {
         return Err(RuntimeEnvError::new(format!(
             "NORMALIZE_STALE_FINGERPRINT: expected {}, received {expected}",
@@ -44,27 +50,35 @@ fn validate_apply(plan: &NormalizationPlan, expected: &str) -> Result<(), Runtim
             "NORMALIZE_UNRESOLVED_DIAGNOSTICS: unsafe Compose input remains unchanged",
         ));
     }
-    if fingerprint(&read_current(&plan.files)?)? != plan.fingerprint {
+    let current = fingerprint::read_current(&plan.files)?;
+    let model = resolved::load(&plan.repo, &plan.compose)?;
+    let current_fingerprint = fingerprint::digest(
+        &current,
+        &model.bytes,
+        NORMALIZATION_SCHEMA_VERSION,
+        COMPOSE_POLICY_VERSION,
+    )?;
+    if current_fingerprint != plan.fingerprint {
         return Err(RuntimeEnvError::new(
-            "NORMALIZE_STALE_SOURCE: source bytes changed after planning",
+            "NORMALIZE_STALE_SOURCE: source bytes, identities, or resolved model changed after planning",
         ));
     }
     Ok(())
 }
 
-pub(super) fn verify(plan: &NormalizationPlan) -> Result<(), RuntimeEnvError> {
+pub(super) fn verify(plan: &super::NormalizationPlan) -> Result<(), RuntimeEnvError> {
     let identity = EnvironmentIdentity::resolve(&plan.repo, "local", None)?;
-    let resource_plan = RuntimeManifest::resource_plan_for_repo(&plan.repo, &identity)?;
-    let compose = resource_plan.compose.ok_or_else(|| {
+    let resources = RuntimeManifest::resource_plan_for_repo(&plan.repo, &identity)?;
+    let compose = resources.compose.ok_or_else(|| {
         RuntimeEnvError::new("NORMALIZE_VERIFY_NO_COMPOSE: normalized Compose plan is absent")
     })?;
-    let model = resolved_model(&plan.repo, &compose)?;
-    let diagnostics = ComposePolicy::evaluate_json_in_context(
-        &model,
+    let model = resolved::load(&plan.repo, &compose)?;
+    let diagnostics = ComposePolicy::evaluate_in_context(
+        &model.value,
         &compose,
         &plan.environment_id,
         &plan.repo,
-    )?;
+    );
     if diagnostics.is_empty() {
         Ok(())
     } else {
@@ -79,67 +93,228 @@ pub(super) fn verify(plan: &NormalizationPlan) -> Result<(), RuntimeEnvError> {
     }
 }
 
-fn read_current(files: &[PlannedFile]) -> Result<Vec<PlannedFile>, RuntimeEnvError> {
-    files
+pub(super) fn commit_files<'a>(
+    files: &'a [PlannedFile],
+    faults: &Faults,
+) -> Result<Vec<&'a PlannedFile>, RuntimeEnvError> {
+    let changed = files
         .iter()
-        .map(|file| {
-            let original = std::fs::read(&file.path).map_err(|error| {
-                RuntimeEnvError::new(format!(
-                    "could not re-read {}: {error}",
-                    file.path.display()
-                ))
-            })?;
-            Ok(PlannedFile {
-                path: file.path.clone(),
-                rendered: original.clone(),
-                original,
-            })
-        })
-        .collect()
+        .filter(|file| file.original != file.rendered)
+        .collect::<Vec<_>>();
+    let staged = stage_all(&changed, faults)?;
+    if let Some(index) = faults.mutate_before_recheck {
+        std::fs::write(&changed[index].path, b"external mutation").map_err(|error| {
+            RuntimeEnvError::new(format!("could not inject source mutation: {error}"))
+        })?;
+    }
+    if let Err(error) = fingerprint::recheck_all(&changed) {
+        cleanup_temporaries(&staged);
+        return Err(error);
+    }
+    rename_staged(staged, faults)
 }
 
-fn rollback(files: &[&PlannedFile]) -> Result<(), RuntimeEnvError> {
-    let errors = files
-        .iter()
-        .filter_map(|file| write_file_atomic(&file.path, &file.original).err())
-        .map(|error| error.to_string())
-        .collect::<Vec<_>>();
+fn stage_all<'a>(
+    files: &[&'a PlannedFile],
+    faults: &Faults,
+) -> Result<Vec<Staged<'a>>, RuntimeEnvError> {
+    let mut staged = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        match stage(file) {
+            Ok(item) if faults.fail_stage_at != Some(index) => staged.push(item),
+            Ok(item) => {
+                staged.push(item);
+                cleanup_temporaries(&staged);
+                return Err(RuntimeEnvError::new(
+                    "NORMALIZE_STAGE_FAILED: injected failure",
+                ));
+            }
+            Err(error) => {
+                cleanup_temporaries(&staged);
+                return Err(error);
+            }
+        }
+    }
+    Ok(staged)
+}
+
+fn stage<'a>(file: &'a PlannedFile) -> Result<Staged<'a>, RuntimeEnvError> {
+    let parent = file
+        .path
+        .parent()
+        .ok_or_else(|| RuntimeEnvError::new("normalization path has no parent"))?;
+    for _ in 0..32 {
+        let temporary = parent.join(temporary_name(&file.path));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+        {
+            Ok(handle) => return finish_stage(file, temporary, handle),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(RuntimeEnvError::new(format!(
+                    "NORMALIZE_STAGE_FAILED: {}: {error}",
+                    temporary.display()
+                )))
+            }
+        }
+    }
+    Err(RuntimeEnvError::new(
+        "NORMALIZE_STAGE_FAILED: temporary name exhaustion",
+    ))
+}
+
+fn finish_stage<'a>(
+    file: &'a PlannedFile,
+    temporary: PathBuf,
+    mut handle: File,
+) -> Result<Staged<'a>, RuntimeEnvError> {
+    if let Err(error) = handle
+        .write_all(&file.rendered)
+        .and_then(|()| handle.sync_all())
+    {
+        drop(handle);
+        let _ = std::fs::remove_file(&temporary);
+        return Err(RuntimeEnvError::new(format!(
+            "NORMALIZE_STAGE_FAILED: {}: {error}",
+            temporary.display()
+        )));
+    }
+    Ok(Staged { file, temporary })
+}
+
+fn rename_staged<'a>(
+    staged: Vec<Staged<'a>>,
+    faults: &Faults,
+) -> Result<Vec<&'a PlannedFile>, RuntimeEnvError> {
+    let mut renamed = Vec::new();
+    for (index, item) in staged.iter().enumerate() {
+        let result = if faults.fail_rename_at == Some(index) {
+            Err(std::io::Error::other("injected rename failure"))
+        } else {
+            std::fs::rename(&item.temporary, &item.file.path)
+        };
+        if let Err(error) = result {
+            cleanup_temporaries(&staged[index..]);
+            let primary = RuntimeEnvError::new(format!(
+                "NORMALIZE_RENAME_FAILED: {}: {error}",
+                item.file.path.display()
+            ));
+            return rollback_result(primary, &renamed, faults);
+        }
+        renamed.push(item.file);
+    }
+    if let Err(error) = sync_parents(&renamed, faults) {
+        return rollback_result(error, &renamed, faults);
+    }
+    Ok(renamed)
+}
+
+pub(super) fn rollback_result<T>(
+    primary: RuntimeEnvError,
+    renamed: &[&PlannedFile],
+    faults: &Faults,
+) -> Result<T, RuntimeEnvError> {
+    let errors = restore_all(renamed, faults);
     if errors.is_empty() {
-        Ok(())
+        Err(primary)
     } else {
         Err(RuntimeEnvError::new(format!(
-            "NORMALIZE_ROLLBACK_FAILED: {}",
+            "{}; NORMALIZE_ROLLBACK_FAILED: {}",
+            primary,
             errors.join("; ")
         )))
     }
 }
 
-fn resolved_model(repo: &Path, plan: &ComposePlan) -> Result<Vec<u8>, RuntimeEnvError> {
-    if plan.isolation != ComposeIsolation::Managed {
-        return Err(RuntimeEnvError::new("NORMALIZE_VERIFY_COMPOSE_DISABLED"));
+fn restore_all(files: &[&PlannedFile], faults: &Faults) -> Vec<String> {
+    let mut errors = Vec::new();
+    for (index, file) in files.iter().enumerate() {
+        if faults.fail_restore_at.contains(&index) {
+            errors.push(format!(
+                "rollback[{index}] {}: injected restore failure",
+                file.path.display()
+            ));
+            continue;
+        }
+        if let Err(error) = restore(file) {
+            errors.push(format!(
+                "rollback[{index}] {}: {error}",
+                file.path.display()
+            ));
+        }
     }
-    let mut command = Command::new("docker");
-    command.args(["compose", PROFILE_FLAG, "*", ALL_RESOURCES_FLAG]);
-    for file in &plan.files {
-        command.arg("-f").arg(file);
+    errors
+}
+
+fn restore(file: &PlannedFile) -> Result<(), RuntimeEnvError> {
+    let staged = stage_original(file)?;
+    std::fs::rename(&staged, &file.path)
+        .map_err(|error| RuntimeEnvError::new(format!("could not restore destination: {error}")))?;
+    sync_parent(&file.path)
+}
+
+fn stage_original(file: &PlannedFile) -> Result<PathBuf, RuntimeEnvError> {
+    let rollback = PlannedFile {
+        path: file.path.clone(),
+        original: file.rendered.clone(),
+        rendered: file.original.clone(),
+        identity: file.identity.clone(),
+    };
+    stage(&rollback).map(|staged| staged.temporary)
+}
+
+fn sync_parents(files: &[&PlannedFile], faults: &Faults) -> Result<(), RuntimeEnvError> {
+    if faults.fail_parent_sync {
+        return Err(RuntimeEnvError::new(
+            "NORMALIZE_PARENT_SYNC_FAILED: injected failure",
+        ));
     }
-    let output = command
-        .args([
-            PROJECT_NAME_FLAG,
-            &plan.project_name,
-            "config",
-            FORMAT_FLAG,
-            "json",
-        ])
-        .current_dir(repo)
-        .output()
-        .map_err(|error| RuntimeEnvError::new(format!("NORMALIZE_COMPOSE_CONFIG_EXEC: {error}")))?;
-    if output.status.success() {
-        Ok(output.stdout)
-    } else {
-        Err(RuntimeEnvError::new(format!(
-            "NORMALIZE_COMPOSE_CONFIG_FAILED: {}",
-            String::from_utf8_lossy(&output.stderr).trim_end()
-        )))
+    let parents = files
+        .iter()
+        .filter_map(|file| file.path.parent())
+        .collect::<HashSet<_>>();
+    for parent in parents {
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                RuntimeEnvError::new(format!(
+                    "NORMALIZE_PARENT_SYNC_FAILED: {}: {error}",
+                    parent.display()
+                ))
+            })?;
     }
+    Ok(())
+}
+
+fn sync_parent(path: &Path) -> Result<(), RuntimeEnvError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| RuntimeEnvError::new("normalization path has no parent"))?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| RuntimeEnvError::new(format!("could not sync rollback parent: {error}")))
+}
+
+fn cleanup_temporaries(staged: &[Staged<'_>]) {
+    for item in staged {
+        let _ = std::fs::remove_file(&item.temporary);
+    }
+}
+
+fn temporary_name(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let time = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed);
+    format!(
+        ".{name}.autospec-{}-{time}-{sequence}.tmp",
+        std::process::id()
+    )
 }

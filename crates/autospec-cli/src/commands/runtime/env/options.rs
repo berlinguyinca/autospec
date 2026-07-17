@@ -15,69 +15,112 @@ pub(super) struct NormalizeOptions {
     pub fingerprint: Option<String>,
 }
 
+struct ParseState {
+    repo: PathBuf,
+    repo_seen: bool,
+    mode: Option<NormalizeMode>,
+    fingerprint: Option<String>,
+}
+
 pub(super) fn parse_normalize_options(args: &[String]) -> Result<NormalizeOptions, CommandFailure> {
-    let mut repo = PathBuf::from(".");
-    let mut mode = None;
-    let mut fingerprint = None;
+    let mut state = ParseState {
+        repo: PathBuf::from("."),
+        repo_seen: false,
+        mode: None,
+        fingerprint: None,
+    };
     let mut index = 0;
-    while let Some(argument) = args.get(index) {
-        match argument.as_str() {
-            "--repo" => {
-                repo = PathBuf::from(option_value(args, index, "--repo")?);
-                index += 2;
-            }
-            "--check" => {
-                set_mode(&mut mode, NormalizeMode::Check)?;
-                index += 1;
-            }
-            "--apply" => {
-                set_mode(&mut mode, NormalizeMode::Apply)?;
-                index += 1;
-            }
-            "--fingerprint" => {
-                fingerprint = Some(option_value(args, index, "--fingerprint")?.to_string());
-                index += 2;
-            }
-            _ if argument.starts_with("--repo=") => {
-                repo = PathBuf::from(equals_value(argument, "--repo")?);
-                index += 1;
-            }
-            _ if argument.starts_with("--fingerprint=") => {
-                fingerprint = Some(equals_value(argument, "--fingerprint")?.to_string());
-                index += 1;
-            }
-            _ => {
-                return Err(CommandFailure::diagnostic(format!(
-                    "unknown autospec runtime env normalize-compose option: {argument}"
-                )))
-            }
-        }
+    while index < args.len() {
+        index += consume_option(args, index, &mut state)?;
     }
-    let mode = mode.ok_or_else(|| {
-        CommandFailure::diagnostic("normalize-compose requires exactly one of --check or --apply")
-    })?;
-    if mode == NormalizeMode::Apply && fingerprint.is_none() {
+    finish(state)
+}
+
+fn consume_option(
+    args: &[String],
+    index: usize,
+    state: &mut ParseState,
+) -> Result<usize, CommandFailure> {
+    let argument = &args[index];
+    match argument.as_str() {
+        "--repo" => {
+            set_repo(state, option_value(args, index, "--repo")?)?;
+            Ok(2)
+        }
+        "--check" => {
+            set_mode(&mut state.mode, NormalizeMode::Check)?;
+            Ok(1)
+        }
+        "--apply" => {
+            set_mode(&mut state.mode, NormalizeMode::Apply)?;
+            Ok(1)
+        }
+        "--fingerprint" => {
+            set_fingerprint(state, option_value(args, index, "--fingerprint")?)?;
+            Ok(2)
+        }
+        _ if argument.starts_with("--repo=") => {
+            set_repo(state, equals_value(argument, "--repo")?)?;
+            Ok(1)
+        }
+        _ if argument.starts_with("--fingerprint=") => {
+            set_fingerprint(state, equals_value(argument, "--fingerprint")?)?;
+            Ok(1)
+        }
+        _ => Err(CommandFailure::diagnostic(format!(
+            "unknown autospec runtime env normalize-compose option: {argument}"
+        ))),
+    }
+}
+
+fn finish(state: ParseState) -> Result<NormalizeOptions, CommandFailure> {
+    let mode = state.mode.ok_or_else(mode_error)?;
+    if mode == NormalizeMode::Apply && state.fingerprint.is_none() {
         return Err(CommandFailure::diagnostic(
             "normalize-compose --apply requires --fingerprint SHA256",
         ));
     }
-    if mode == NormalizeMode::Check && fingerprint.is_some() {
+    if mode == NormalizeMode::Check && state.fingerprint.is_some() {
         return Err(CommandFailure::diagnostic(
             "normalize-compose --fingerprint is valid only with --apply",
         ));
     }
-    if fingerprint.as_deref().is_some_and(|value| {
-        value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    if state.fingerprint.as_deref().is_some_and(|value| {
+        value.len() != 64
+            || !value
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     }) {
         return Err(CommandFailure::diagnostic(
-            "normalize-compose --fingerprint must be a 64-character SHA-256 hex digest",
+            "normalize-compose --fingerprint must be a 64-character lowercase SHA-256 hex digest",
         ));
     }
     Ok(NormalizeOptions {
-        repo,
+        repo: state.repo,
         mode,
-        fingerprint,
+        fingerprint: state.fingerprint,
     })
+}
+
+fn set_repo(state: &mut ParseState, value: &str) -> Result<(), CommandFailure> {
+    if state.repo_seen {
+        return Err(CommandFailure::diagnostic(
+            "normalize-compose --repo may be supplied only once",
+        ));
+    }
+    state.repo = PathBuf::from(value);
+    state.repo_seen = true;
+    Ok(())
+}
+
+fn set_fingerprint(state: &mut ParseState, value: &str) -> Result<(), CommandFailure> {
+    if state.fingerprint.is_some() {
+        return Err(CommandFailure::diagnostic(
+            "normalize-compose --fingerprint may be supplied only once",
+        ));
+    }
+    state.fingerprint = Some(value.to_string());
+    Ok(())
 }
 
 fn set_mode(
@@ -85,12 +128,14 @@ fn set_mode(
     value: NormalizeMode,
 ) -> Result<(), CommandFailure> {
     if target.replace(value).is_some() {
-        Err(CommandFailure::diagnostic(
-            "normalize-compose requires exactly one of --check or --apply",
-        ))
+        Err(mode_error())
     } else {
         Ok(())
     }
+}
+
+fn mode_error() -> CommandFailure {
+    CommandFailure::diagnostic("normalize-compose requires exactly one of --check or --apply")
 }
 
 fn option_value<'a>(

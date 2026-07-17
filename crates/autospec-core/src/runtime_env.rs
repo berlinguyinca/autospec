@@ -15,7 +15,7 @@ mod resources;
 mod session;
 mod shell_command;
 
-pub use compose::{ComposeOverride, ComposeOwnership, ComposePolicy};
+pub use compose::{ComposeOverride, ComposeOwnership, ComposePolicy, COMPOSE_POLICY_VERSION};
 pub use compose_normalize::{
     ComposeNormalizer, NormalizationEdit, NormalizationPlan, ResourceKind, RuntimeResourcesReport,
 };
