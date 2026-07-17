@@ -365,7 +365,9 @@ git commit -m "feat: plan Maven and Compose resources from runtime v2"
 **Files:**
 - Modify: `crates/autospec-core/src/runtime_env.rs`
 - Modify: `crates/autospec-core/src/runtime_env/resources.rs`
+- Modify: `crates/autospec-core/src/runtime_env/manifest_v2.rs`
 - Modify: `crates/autospec-core/tests/runtime_resources.rs`
+- Modify: `crates/autospec-core/tests/runtime_manifest_v2.rs`
 - Create: `crates/autospec-core/src/runtime_env/session.rs`
 - Create: `crates/autospec-core/tests/runtime_session.rs`
 - Create: `crates/autospec-cli/src/commands/runtime/env/session.rs`
@@ -594,6 +596,7 @@ git commit -m "feat: fail closed on unsafe Compose resources"
 - Modify: `crates/autospec-core/tests/runtime_resources.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env/compose.rs`
 - Create: `crates/autospec-cli/src/commands/runtime/env/compose/lifecycle.rs`
+- Create: `crates/autospec-cli/src/commands/runtime/env/compose/ownership.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env/lifecycle.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env/worker.rs`
@@ -660,7 +663,7 @@ Expected: two worktrees have distinct project, network, volume, and host-port ID
 - [ ] **Step 5: Commit Compose lifecycle ownership**
 
 ```bash
-git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/compose.rs crates/autospec-core/src/runtime_env/compose/runtime.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/compose.rs crates/autospec-cli/src/commands/runtime/env/compose/lifecycle.rs crates/autospec-cli/src/commands/runtime/env/lifecycle.rs crates/autospec-cli/src/commands/runtime/env/worker.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources/compose-stack tests/integration/runtime-compose-isolation.bats
+git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/compose.rs crates/autospec-core/src/runtime_env/compose/runtime.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/src/runtime_env/manifest_v2.rs crates/autospec-core/tests/runtime_manifest_v2.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/compose.rs crates/autospec-cli/src/commands/runtime/env/compose/lifecycle.rs crates/autospec-cli/src/commands/runtime/env/compose/ownership.rs crates/autospec-cli/src/commands/runtime/env/lifecycle.rs crates/autospec-cli/src/commands/runtime/env/worker.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources/compose-stack tests/integration/runtime-compose-isolation.bats
 git commit -m "feat: own isolated Compose stacks and dynamic exports"
 ```
 
