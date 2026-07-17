@@ -362,17 +362,20 @@ git commit -m "feat: plan Maven and Compose resources from runtime v2"
 ## Task 3: Make sessions reference-counted and reconcile partial state
 
 **Files:**
+- Modify: `crates/autospec-core/src/runtime_env.rs`
 - Modify: `crates/autospec-core/src/runtime_env/resources.rs`
 - Modify: `crates/autospec-core/tests/runtime_resources.rs`
+- Create: `crates/autospec-core/src/runtime_env/session.rs`
+- Create: `crates/autospec-core/tests/runtime_session.rs`
 - Create: `crates/autospec-cli/src/commands/runtime/env/session.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env/state.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
-- Modify: `crates/autospec-cli/tests/runtime_commands.rs`
-- Create: `crates/autospec-cli/tests/runtime_resources.rs`
+- Modify: `crates/autospec-cli/tests/runtime_resources.rs`
+- Create: `crates/autospec-cli/tests/runtime_sessions.rs`
 
 **Interfaces:**
 - Consumes: `EnvironmentLease`, owner, plan, and inventory from Task 1.
-- Produces: `SessionRecord { session_id, pid, process_start, harness, host, started_at, heartbeat_at }`.
+- Produces: `SessionRecord { schema_version, session_id, pid, process_start, harness, host, started_at_unix_ms, heartbeat_at_unix_ms }`.
 - Produces: `SessionLease::register`, `SessionLease::heartbeat`, `SessionLease::release`, and `live_sessions`.
 - Produces: `SessionSet` and `ReleaseDecision::{KeepActive, TearDown}` as pure reference-count policy.
 - Produces: lifecycle states `Planned`, `Provisioning`, `Active`, `TearingDown`, and `CleanupFailed` in `owner.json`.
@@ -401,7 +404,7 @@ Add CLI tests where two `session` children overlap, the first exits, `status` re
 
 - [ ] **Step 2: Run focused tests and confirm teardown currently happens too early**
 
-Run: `cargo test -p autospec-core --test runtime_resources -- --nocapture && cargo test -p autospec-cli --test runtime_commands runtime_env_two_sessions -- --nocapture`
+Run: `cargo test -p autospec-core --test runtime_session -- --nocapture && cargo test -p autospec-cli --test runtime_sessions runtime_env_two_sessions -- --nocapture`
 
 Expected: core symbols are missing and the CLI teardown counter records one teardown after the first child exits.
 
@@ -415,14 +418,14 @@ Persist owner lifecycle before each external side effect. On `up`, compare the p
 
 - [ ] **Step 4: Run session, signal, and state regressions**
 
-Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p autospec-core --test runtime_resources && cargo test -p autospec-cli --test runtime_commands runtime_env_session -- --nocapture && cargo test -p autospec-cli --test runtime_resources`
+Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p autospec-core --test runtime_session && cargo test -p autospec-core --test runtime_resources && cargo test -p autospec-cli --test runtime_sessions -- --nocapture && cargo test -p autospec-cli --test runtime_resources`
 
 Expected: overlapping sessions share state, signals preserve child exit semantics, partial state reconciles, and teardown occurs once after the final release.
 
 - [ ] **Step 5: Commit reference-counted sessions**
 
 ```bash
-git add crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/session.rs crates/autospec-cli/src/commands/runtime/env/state.rs crates/autospec-cli/tests/runtime_commands.rs crates/autospec-cli/tests/runtime_resources.rs
+git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/resources.rs crates/autospec-core/src/runtime_env/session.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-core/tests/runtime_session.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/session.rs crates/autospec-cli/src/commands/runtime/env/state.rs crates/autospec-cli/tests/runtime_resources.rs crates/autospec-cli/tests/runtime_sessions.rs
 git commit -m "feat: reference-count shared worktree runtime sessions"
 ```
 
