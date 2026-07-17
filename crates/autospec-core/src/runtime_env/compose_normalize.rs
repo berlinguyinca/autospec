@@ -49,16 +49,20 @@ pub struct RuntimeResourcesReport {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PlannedFile {
+    repo: PathBuf,
     path: PathBuf,
     original: Vec<u8>,
     rendered: Vec<u8>,
-    identity: fingerprint::FileIdentity,
+    identity: Option<fingerprint::FileIdentity>,
+    parent_existed: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct NormalizationPlan {
     pub schema_version: u32,
     pub fingerprint: String,
+    pub input_paths: Vec<PathBuf>,
+    pub manifest_path: PathBuf,
     pub edits: Vec<NormalizationEdit>,
     pub remaining_diagnostics: Vec<IsolationDiagnostic>,
     #[serde(skip)]
@@ -78,7 +82,7 @@ impl ComposeNormalizer {
         let repo = std::fs::canonicalize(repo).map_err(|error| {
             RuntimeEnvError::new(format!("could not canonicalize repository: {error}"))
         })?;
-        let manifest = RuntimeManifest::read_from_repo(&repo)?;
+        let manifest = manifest::load_or_default(&repo)?;
         let identity = EnvironmentIdentity::resolve(&repo, "local", None)?;
         let resources = RuntimeManifest::resource_plan_for_repo(&repo, &identity)?;
         let compose = resources.compose.ok_or_else(|| {
@@ -197,6 +201,29 @@ mod transaction_tests {
     }
 
     #[test]
+    fn unchanged_input_race_performs_zero_autospec_renames() {
+        let mut fixture = TransactionFixture::new(2);
+        fixture.files[1].rendered = fixture.files[1].original.clone();
+
+        let error = commit_files(
+            &fixture.files,
+            &Faults {
+                mutate_before_recheck: Some(1),
+                ..Faults::default()
+            },
+        )
+        .expect_err("an unchanged fingerprint input mutation must abort commit");
+
+        transaction::assert_error(&error.to_string(), "NORMALIZE_STALE_SOURCE");
+        assert_eq!(std::fs::read(&fixture.files[0].path).unwrap(), b"old-0");
+        assert_eq!(
+            std::fs::read(&fixture.files[1].path).unwrap(),
+            b"external mutation"
+        );
+        fixture.assert_no_temporaries();
+    }
+
+    #[test]
     fn verification_and_restore_faults_preserve_primary_failure_evidence() {
         let fixture = TransactionFixture::new(3);
         let renamed = commit_files(&fixture.files, &Faults::default()).unwrap();
@@ -250,6 +277,31 @@ mod transaction_tests {
         fixture.assert_no_temporaries();
     }
 
+    #[test]
+    fn absent_destination_stage_failure_removes_created_parent() {
+        let fixture = TransactionFixture::new(0);
+        let path = fixture.root.join(".autospec/runtime.yml");
+        let file = PlannedFile {
+            repo: fixture.root.clone(),
+            path,
+            original: Vec::new(),
+            rendered: b"version: 2\n".to_vec(),
+            identity: None,
+            parent_existed: false,
+        };
+
+        commit_files(
+            &[file],
+            &Faults {
+                fail_stage_at: Some(0),
+                ..Faults::default()
+            },
+        )
+        .expect_err("stage failure must abort commit");
+
+        assert!(!fixture.root.join(".autospec").exists());
+    }
+
     struct TransactionFixture {
         root: PathBuf,
         files: Vec<PlannedFile>,
@@ -294,7 +346,9 @@ mod transaction_tests {
         let original = format!("old-{index}").into_bytes();
         std::fs::write(&path, &original).unwrap();
         PlannedFile {
-            identity: fingerprint::file_identity(&path).unwrap(),
+            identity: Some(fingerprint::file_identity(&path).unwrap()),
+            parent_existed: true,
+            repo: root.to_path_buf(),
             path,
             original,
             rendered: format!("new-{index}").into_bytes(),

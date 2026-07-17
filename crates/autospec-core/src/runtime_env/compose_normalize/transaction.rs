@@ -10,6 +10,8 @@ use crate::runtime_env::{
 };
 use getrandom::fill;
 
+mod destination;
+
 #[derive(Default)]
 pub(super) struct Faults {
     pub(super) fail_stage_at: Option<usize>,
@@ -102,11 +104,12 @@ pub(super) fn commit_files<'a>(
         .collect::<Vec<_>>();
     let staged = stage_all(&changed, faults)?;
     if let Some(index) = faults.mutate_before_recheck {
-        std::fs::write(&changed[index].path, b"external mutation").map_err(|error| {
+        std::fs::write(&files[index].path, b"external mutation").map_err(|error| {
             RuntimeEnvError::new(format!("could not inject source mutation: {error}"))
         })?;
     }
-    if let Err(error) = fingerprint::recheck_all(&changed) {
+    let planned = files.iter().collect::<Vec<_>>();
+    if let Err(error) = fingerprint::recheck_all(&planned) {
         cleanup_temporaries(&staged);
         return Err(error);
     }
@@ -138,6 +141,7 @@ fn stage_all<'a>(
 }
 
 fn stage<'a>(file: &'a PlannedFile) -> Result<Staged<'a>, RuntimeEnvError> {
+    destination::ensure_parent(file)?;
     let parent = file
         .path
         .parent()
@@ -248,6 +252,9 @@ fn restore_all(files: &[&PlannedFile], faults: &Faults) -> Vec<String> {
 }
 
 fn restore(file: &PlannedFile, fail_rename: bool) -> Result<(), RuntimeEnvError> {
+    if file.identity.is_none() {
+        return destination::remove_created(file);
+    }
     let staged = stage_original(file)?;
     let result = if fail_rename {
         Err(std::io::Error::other("injected restore rename failure"))
@@ -268,10 +275,12 @@ fn restore(file: &PlannedFile, fail_rename: bool) -> Result<(), RuntimeEnvError>
 
 fn stage_original(file: &PlannedFile) -> Result<PathBuf, RuntimeEnvError> {
     let rollback = PlannedFile {
+        repo: file.repo.clone(),
         path: file.path.clone(),
         original: file.rendered.clone(),
         rendered: file.original.clone(),
         identity: file.identity.clone(),
+        parent_existed: file.parent_existed,
     };
     stage(&rollback).map(|staged| staged.temporary)
 }
@@ -312,6 +321,7 @@ fn cleanup_temporaries(staged: &[Staged<'_>]) {
     for item in staged {
         let _ = std::fs::remove_file(&item.temporary);
     }
+    destination::cleanup_created_parents(staged);
 }
 
 fn temporary_name(path: &Path) -> Result<String, RuntimeEnvError> {

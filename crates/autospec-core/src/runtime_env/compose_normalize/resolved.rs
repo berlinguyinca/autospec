@@ -14,7 +14,6 @@ use crate::runtime_env::{
 };
 
 mod candidates;
-
 pub(super) struct ResolvedModel {
     pub bytes: Vec<u8>,
     pub value: Value,
@@ -53,15 +52,76 @@ pub(super) fn load(repo: &Path, plan: &ComposePlan) -> Result<ResolvedModel, Run
             String::from_utf8_lossy(&output.stderr).trim_end()
         )));
     }
-    let value = serde_json::from_slice(&output.stdout).map_err(|error| {
+    let value: Value = serde_json::from_slice(&output.stdout).map_err(|error| {
         RuntimeEnvError::new(format!(
             "COMPOSE_CONFIG_INVALID_JSON: could not parse resolved Compose model: {error}"
         ))
     })?;
-    Ok(ResolvedModel {
-        bytes: output.stdout,
-        value,
+    let bytes = fingerprint_bytes(repo, plan, &value)?;
+    Ok(ResolvedModel { bytes, value })
+}
+
+fn fingerprint_bytes(
+    repo: &Path,
+    plan: &ComposePlan,
+    model: &Value,
+) -> Result<Vec<u8>, RuntimeEnvError> {
+    let mut stable = model.clone();
+    normalize_generated_names(&mut stable, &plan.project_name);
+    normalize_repo_paths(&mut stable, repo);
+    serde_json::to_vec(&stable).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "COMPOSE_CONFIG_INVALID_JSON: could not stabilize resolved model: {error}"
+        ))
     })
+}
+
+fn normalize_generated_names(model: &mut Value, project_name: &str) {
+    if model.get("name").and_then(Value::as_str) == Some(project_name) {
+        model["name"] = Value::String("${AUTOSPEC_PROJECT}".to_string());
+    }
+    for kind in ["networks", "volumes"] {
+        let Some(resources) = model.get_mut(kind).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        for (logical, settings) in resources {
+            let generated = format!("{project_name}_{logical}");
+            if settings.get("name").and_then(Value::as_str) == Some(&generated) {
+                settings["name"] = Value::String(format!("${{AUTOSPEC_PROJECT}}_{logical}"));
+            }
+        }
+    }
+}
+
+fn normalize_repo_paths(model: &mut Value, repo: &Path) {
+    match model {
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                normalize_repo_paths(value, repo);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                normalize_repo_paths(value, repo);
+            }
+        }
+        Value::String(_) => normalize_repo_path(model, repo),
+        _ => {}
+    }
+}
+
+fn normalize_repo_path(value: &mut Value, repo: &Path) {
+    let Some(path) = value
+        .as_str()
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+    else {
+        return;
+    };
+    let Ok(relative) = path.strip_prefix(repo) else {
+        return;
+    };
+    *value = Value::String(format!("${{AUTOSPEC_REPO}}/{}", relative.display()));
 }
 
 pub(super) fn decide(
@@ -296,4 +356,44 @@ fn sort_diagnostics(diagnostics: &mut Vec<IsolationDiagnostic>) {
             .then_with(|| left.evidence.cmp(&right.evidence))
     });
     diagnostics.dedup();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repo_path_projection_covers_compose_path_fields_without_substrings() {
+        let repo = Path::new("/work/repo");
+        let mut model = serde_json::json!({
+            "configs": {"settings": {"file": "/work/repo/config/settings.yml"}},
+            "secrets": {"token": {"file": "/work/repo/secrets/token"}},
+            "services": {"web": {
+                "build": {"context": "/work/repo/app"},
+                "develop": {"watch": [{"path": "/work/repo/src"}]},
+                "environment": ["NOTE=prefix /work/repo/src suffix"]
+            }}
+        });
+
+        normalize_repo_paths(&mut model, repo);
+
+        for (pointer, expected) in [
+            (
+                "/configs/settings/file",
+                "${AUTOSPEC_REPO}/config/settings.yml",
+            ),
+            ("/secrets/token/file", "${AUTOSPEC_REPO}/secrets/token"),
+            ("/services/web/build/context", "${AUTOSPEC_REPO}/app"),
+            ("/services/web/develop/watch/0/path", "${AUTOSPEC_REPO}/src"),
+        ] {
+            assert_eq!(
+                model.pointer(pointer).and_then(Value::as_str),
+                Some(expected)
+            );
+        }
+        assert_eq!(
+            model["services"]["web"]["environment"][0],
+            "NOTE=prefix /work/repo/src suffix"
+        );
+    }
 }

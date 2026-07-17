@@ -62,6 +62,153 @@ fn normalize_check_is_read_only_and_returns_a_stable_fingerprint() {
 
 #[test]
 #[cfg(unix)]
+fn normalize_without_manifest_checks_then_creates_v2_manifest() {
+    let fixture = RuntimeFixture::empty();
+    let compose = fixture.root.join("compose.yaml");
+    let manifest = fixture.root.join(".autospec/runtime.yml");
+    std::fs::write(
+        &compose,
+        "services:\n  web:\n    image: nginx\n    ports:\n      - \"18080:8080\"\n",
+    )
+    .unwrap();
+    let check = normalize_command(&fixture, "--check").output().unwrap();
+
+    assert!(
+        check.status.success(),
+        "{}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert!(!manifest.exists(), "check must remain read-only");
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(
+        report["input_paths"],
+        serde_json::json!([".autospec/runtime.yml", "compose.yaml"])
+    );
+    assert_eq!(report["manifest_path"], ".autospec/runtime.yml");
+    assert!(report["edits"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|edit| edit.get("UpsertRuntimeResources").is_some()));
+
+    let apply = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", report["fingerprint"].as_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        apply.status.success(),
+        "{}",
+        String::from_utf8_lossy(&apply.stderr)
+    );
+    let rendered = std::fs::read_to_string(manifest).unwrap();
+    let parsed = autospec_core::runtime_env::RuntimeManifest::parse(&rendered).unwrap();
+    assert_eq!(
+        parsed.resources().compose.files,
+        vec![PathBuf::from("compose.yaml")]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn normalize_without_manifest_rolls_back_created_destination() {
+    let fixture = RuntimeFixture::empty();
+    let compose = fixture.root.join("compose.yaml");
+    let manifest = fixture.root.join(".autospec/runtime.yml");
+    let original = b"services:\n  web:\n    image: nginx\n    ports:\n      - \"18080:8080\"\n";
+    std::fs::write(&compose, original).unwrap();
+    let (bin, model) = fixture.install_fake_docker(&serde_json::json!({
+        "services":{"web":{"image":"nginx","ports":[{"target":8080,"published":"18080","protocol":"tcp"}]}}
+    }));
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(&inherited)))
+        .unwrap();
+    let log = fixture.root.join("docker.log");
+    let count = fixture.root.join("docker-count");
+    let check = normalize_command(&fixture, "--check")
+        .env("PATH", &path)
+        .env("FAKE_DOCKER_LOG", &log)
+        .env("FAKE_DOCKER_MODEL", &model)
+        .env("FAKE_DOCKER_COUNT", &count)
+        .env("FAKE_DOCKER_FAIL_AFTER", "2")
+        .output()
+        .unwrap();
+    assert!(check.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+
+    let apply = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", report["fingerprint"].as_str().unwrap()])
+        .env("PATH", path)
+        .env("FAKE_DOCKER_LOG", log)
+        .env("FAKE_DOCKER_MODEL", model)
+        .env("FAKE_DOCKER_COUNT", count)
+        .env("FAKE_DOCKER_FAIL_AFTER", "2")
+        .output()
+        .unwrap();
+
+    assert!(!apply.status.success());
+    assert!(String::from_utf8_lossy(&apply.stderr).contains("NORMALIZE_COMPOSE_CONFIG_FAILED"));
+    assert!(
+        !manifest.exists(),
+        "rollback must remove a created manifest"
+    );
+    assert!(!fixture.root.join(".autospec").exists());
+    assert_eq!(std::fs::read(compose).unwrap(), original);
+}
+
+#[test]
+#[cfg(unix)]
+fn normalize_without_manifest_rejects_stale_source_before_destination_write() {
+    let fixture = RuntimeFixture::empty();
+    let compose = fixture.root.join("compose.yaml");
+    let manifest = fixture.root.join(".autospec/runtime.yml");
+    std::fs::write(
+        &compose,
+        "services:\n  web:\n    image: nginx\n    ports:\n      - \"18080:8080\"\n",
+    )
+    .unwrap();
+    let check = normalize_command(&fixture, "--check").output().unwrap();
+    assert!(check.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    let mutation = b"services: {}\n";
+    std::fs::write(&compose, mutation).unwrap();
+
+    let apply = normalize_command(&fixture, "--apply")
+        .args(["--fingerprint", report["fingerprint"].as_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(!apply.status.success());
+    assert!(String::from_utf8_lossy(&apply.stderr).contains("NORMALIZE_STALE_FINGERPRINT"));
+    assert!(!manifest.exists());
+    assert_eq!(std::fs::read(compose).unwrap(), mutation);
+}
+
+#[test]
+#[cfg(unix)]
+fn normalize_without_manifest_rejects_symlinked_destination_parent() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = RuntimeFixture::empty();
+    let outside = fixture.root.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    symlink(&outside, fixture.root.join(".autospec")).unwrap();
+    std::fs::write(
+        fixture.root.join("compose.yaml"),
+        "services:\n  web:\n    image: nginx\n",
+    )
+    .unwrap();
+
+    let check = normalize_command(&fixture, "--check").output().unwrap();
+
+    assert!(!check.status.success());
+    assert!(String::from_utf8_lossy(&check.stderr)
+        .contains("normalization destination parent is not a regular directory"));
+    assert!(!outside.join("runtime.yml").exists());
+}
+
+#[test]
+#[cfg(unix)]
 fn normalize_check_uses_the_complete_compose_model_before_reporting() {
     let fixture = normalize_cli_fixture("fixed-port");
     let (bin, model) = fixture.install_fake_docker(&serde_json::json!({
@@ -373,7 +520,7 @@ impl RuntimeFixture {
         let bin = self.root.join("fake-bin");
         std::fs::create_dir_all(&bin).expect("create fake Docker directory");
         let docker = bin.join("docker");
-        let source = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FAKE_DOCKER_LOG\"\ncase \" $* \" in\n  *\" config @@format json \"*)\n    if [ \"${FAKE_DOCKER_EXIT:-0}\" -ne 0 ]; then\n      printf 'compose config failed \\n\\n' >&2\n      exit \"$FAKE_DOCKER_EXIT\"\n    fi\n    cat \"$FAKE_DOCKER_MODEL\" ;;\n  *\" port @@protocol \"*) printf '%s\\n' '127.0.0.1:49152' ;;\n  *) : ;;\nesac\n";
+        let source = "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FAKE_DOCKER_LOG\"\ncase \" $* \" in\n  *\" config @@format json \"*)\n    if [ -n \"${FAKE_DOCKER_COUNT:-}\" ]; then\n      count=$(cat \"$FAKE_DOCKER_COUNT\" 2>/dev/null || printf 0)\n      count=$((count + 1))\n      printf '%s' \"$count\" > \"$FAKE_DOCKER_COUNT\"\n      if [ \"$count\" -gt \"${FAKE_DOCKER_FAIL_AFTER:-999999}\" ]; then\n        printf 'compose config failed\\n' >&2\n        exit 42\n      fi\n    fi\n    if [ \"${FAKE_DOCKER_EXIT:-0}\" -ne 0 ]; then\n      printf 'compose config failed \\n\\n' >&2\n      exit \"$FAKE_DOCKER_EXIT\"\n    fi\n    cat \"$FAKE_DOCKER_MODEL\" ;;\n  *\" port @@protocol \"*) printf '%s\\n' '127.0.0.1:49152' ;;\n  *) : ;;\nesac\n";
         std::fs::write(&docker, source.replace("@@", concat!("-", "-")))
             .expect("write fake Docker");
         let mut permissions = std::fs::metadata(&docker).unwrap().permissions();
