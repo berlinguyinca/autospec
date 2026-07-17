@@ -445,11 +445,14 @@ git commit -m "feat: reference-count shared worktree runtime sessions"
 
 **Files:**
 - Create: `crates/autospec-core/src/runtime_env/maven.rs`
+- Create: `crates/autospec-core/src/runtime_env/maven/arguments.rs`
 - Modify: `crates/autospec-core/src/runtime_env.rs`
-- Modify: `crates/autospec-core/tests/runtime_resources.rs`
+- Create: `crates/autospec-core/tests/runtime_maven.rs`
 - Create: `crates/autospec-cli/src/commands/runtime/env/maven.rs`
 - Modify: `crates/autospec-cli/src/commands/runtime/env.rs`
-- Modify: `crates/autospec-cli/tests/runtime_resources.rs`
+- Modify: `crates/autospec-cli/src/commands/runtime/env/lifecycle.rs`
+- Modify: `crates/autospec-cli/src/commands/runtime/env/worker.rs`
+- Create: `crates/autospec-cli/tests/runtime_maven.rs`
 - Create: `tests/integration/runtime-maven-isolation.bats`
 - Create: `tests/fixtures/runtime-resources/maven/producer/pom.xml`
 - Create: `tests/fixtures/runtime-resources/maven/consumer/pom.xml`
@@ -459,7 +462,7 @@ git commit -m "feat: reference-count shared worktree runtime sessions"
 - Produces: `MavenPlan::arguments(existing: &str, environment_id: &str) -> Result<MavenArgs, IsolationDiagnostic>`.
 - Produces: `MavenArgs::parse`, `append_property`, and `render` so quoted caller arguments round-trip into `MAVEN_ARGS`.
 - Produces: `MavenPurgeTarget::new`, plus `MavenAdapter::probe`, `effective_local_repository`, `configure`, and `purge_owned_prefix`.
-- Adds: `down --purge-maven` while ordinary `down` retains the installed-artifact prefix.
+- Adds: `down --purge-maven` while ordinary `down` retains the installed-artifact prefix plus authoritative owner/plan/inventory so a later purge needs no intervening `up`.
 
 - [ ] **Step 1: Add failing property-merge, conflict, version, and purge-boundary tests**
 
@@ -484,7 +487,7 @@ CLI tests place a fake `mvn` first on `PATH`, return Maven `4.0.0`, capture `MAV
 
 - [ ] **Step 2: Run focused tests and confirm Maven is not configured**
 
-Run: `cargo test -p autospec-core --test runtime_resources maven_ -- --nocapture && cargo test -p autospec-cli --test runtime_resources maven_ -- --nocapture`
+Run: `cargo test -p autospec-core --test runtime_maven -- --nocapture && cargo test -p autospec-cli --test runtime_maven -- --nocapture`
 
 Expected: the Maven module is absent and the fake Maven invocation receives no split-local arguments.
 
@@ -503,14 +506,14 @@ Reject any preexisting assignment to those keys unless it equals the broker valu
 
 - [ ] **Step 4: Run fake-boundary tests and the real same-GAV proof**
 
-Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p autospec-core --test runtime_resources maven_ -- --nocapture && cargo test -p autospec-cli --test runtime_resources maven_ -- --nocapture && bats tests/integration/runtime-maven-isolation.bats`
+Run: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test -p autospec-core --test runtime_maven -- --nocapture && cargo test -p autospec-cli --test runtime_maven -- --nocapture && bats tests/integration/runtime-maven-isolation.bats`
 
 Expected: two real Maven 4 worktrees install different bytes at one GAV, each consumer resolves its own bytes, and both resolve one remote dependency from the shared `cached` prefix without corruption.
 
 - [ ] **Step 5: Commit Maven isolation**
 
 ```bash
-git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/maven.rs crates/autospec-core/tests/runtime_resources.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/maven.rs crates/autospec-cli/tests/runtime_resources.rs tests/fixtures/runtime-resources/maven tests/integration/runtime-maven-isolation.bats
+git add crates/autospec-core/src/runtime_env.rs crates/autospec-core/src/runtime_env/maven.rs crates/autospec-core/tests/runtime_maven.rs crates/autospec-cli/src/commands/runtime/env.rs crates/autospec-cli/src/commands/runtime/env/lifecycle.rs crates/autospec-cli/src/commands/runtime/env/maven.rs crates/autospec-cli/src/commands/runtime/env/worker.rs crates/autospec-cli/tests/runtime_maven.rs tests/fixtures/runtime-resources/maven tests/integration/runtime-maven-isolation.bats
 git commit -m "feat: isolate Maven 4 installs per worktree"
 ```
 
