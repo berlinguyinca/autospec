@@ -33,9 +33,11 @@ warn() {
 
 front_matter_id() {
   awk '
+    BEGIN { closed = 0 }
     NR == 1 && $0 != "---" { exit 1 }
     NR == 1 { in_fm = 1; next }
     in_fm && $0 == "---" {
+      closed = 1
       if (id != "") {
         print id
         exit 0
@@ -51,7 +53,7 @@ front_matter_id() {
       }
     }
     END {
-      if (!in_fm) {
+      if (!closed) {
         exit 1
       }
     }

@@ -84,6 +84,11 @@ run_catalog() {
 id: malformed
 missing opening fence
 EOF
+    cat > "$HOME/.autospec/personas/unclosed.md" <<'EOF'
+---
+id: unclosed
+title: unclosed front matter
+EOF
 
     run_catalog list
 
@@ -93,10 +98,24 @@ EOF
         echo "malformed id should have been skipped" >&2
         return 1
     fi
+    if printf '%s\n' "$output" | grep -qx "unclosed"; then
+        echo "unclosed id should have been skipped" >&2
+        return 1
+    fi
+    if printf '%s\n' "$output" | grep -qx ""; then
+        echo "malformed front matter should not create a blank id" >&2
+        return 1
+    fi
 
     run_catalog load malformed
 
     [ "$status" -eq 1 ]
     printf '%s\n' "$output" | grep -q "persona-catalog: warning: malformed front matter:"
     printf '%s\n' "$output" | grep -q "persona-catalog: id not found: malformed"
+
+    run_catalog load unclosed
+
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "persona-catalog: warning: malformed front matter:"
+    printf '%s\n' "$output" | grep -q "persona-catalog: id not found: unclosed"
 }
