@@ -1,7 +1,19 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use std::process::Command;
 
 use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
 use autospec_core::autonomous::waterfall::{
@@ -9,12 +21,15 @@ use autospec_core::autonomous::waterfall::{
 };
 
 use super::waterfall::{
-    StoreAcquisition, Tier15EvidenceArtifact, Tier1EvidenceArtifact, WaterfallStore,
+    retry_transient_lock, StoreAcquisition, Tier15EvidenceArtifact, Tier1EvidenceArtifact,
+    WaterfallStore,
 };
 
 static ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const EVIDENCE_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+#[cfg(unix)]
+const FORK_LOCK_CHILD: &str = "AUTOSPEC_WATERFALL_FORK_LOCK_CHILD";
 
 struct TempRoot {
     path: PathBuf,
@@ -95,9 +110,13 @@ fn tier_one_point_five_receipt_with_evidence(
 }
 
 fn acquire(root: &TempRoot) -> WaterfallStore {
-    match WaterfallStore::acquire(root.path(), "owner/repo").expect("store acquisition") {
+    let acquisition = retry_transient_lock(
+        || WaterfallStore::acquire(root.path(), "owner/repo"),
+        |result| matches!(result, Ok(StoreAcquisition::Held)),
+    );
+    match acquisition.expect("store acquisition") {
         StoreAcquisition::Acquired(store) => store,
-        StoreAcquisition::Held => panic!("fresh temporary store must be available"),
+        StoreAcquisition::Held => panic!("test store remained locked for one second"),
     }
 }
 
@@ -111,6 +130,85 @@ fn concurrent_cursor_ownership_returns_typed_held_without_writing_state() {
         StoreAcquisition::Held
     ));
     assert!(!first.state_path().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn fork_inherited_lock_is_held_until_the_child_execs() {
+    let status = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "commands::autonomous::waterfall_tests::fork_inherited_lock_child",
+            "--nocapture",
+        ])
+        .env(FORK_LOCK_CHILD, "1")
+        .status()
+        .expect("start isolated fork-lock regression");
+    assert!(status.success(), "isolated fork-lock regression failed");
+}
+
+#[cfg(unix)]
+#[test]
+fn fork_inherited_lock_child() {
+    if std::env::var(FORK_LOCK_CHILD).as_deref() != Ok("1") {
+        return;
+    }
+    let root = TempRoot::new();
+    let first = acquire(&root);
+    let (mut ready_parent, ready_child) = UnixStream::pair().expect("readiness socket pair");
+    let (mut gate_parent, gate_child) = UnixStream::pair().expect("exec gate socket pair");
+
+    let spawn = thread::spawn(move || {
+        let ready_fd = ready_child.as_raw_fd();
+        let gate_fd = gate_child.as_raw_fd();
+        let mut command = Command::new("true");
+        // SAFETY: the child performs only async-signal-safe read/write syscalls before exec.
+        unsafe {
+            command.pre_exec(move || child_waits_before_exec(ready_fd, gate_fd));
+        }
+        let child = command.spawn().expect("spawn gated child");
+        drop(ready_child);
+        drop(gate_child);
+        child
+    });
+
+    let mut ready = [0_u8; 1];
+    ready_parent
+        .read_exact(&mut ready)
+        .expect("child reached pre-exec gate");
+    drop(first);
+    assert!(matches!(
+        WaterfallStore::acquire(root.path(), "owner/repo").expect("inherited acquisition"),
+        StoreAcquisition::Held
+    ));
+
+    gate_parent.write_all(&[1]).expect("release child exec");
+    let mut child = spawn.join().expect("spawn thread");
+    assert!(child.wait().expect("wait for child").success());
+    let acquired = retry_transient_lock(
+        || WaterfallStore::acquire(root.path(), "owner/repo"),
+        |result| matches!(result, Ok(StoreAcquisition::Held)),
+    );
+    assert!(matches!(acquired, Ok(StoreAcquisition::Acquired(_))));
+}
+
+#[cfg(unix)]
+fn child_waits_before_exec(ready_fd: i32, gate_fd: i32) -> std::io::Result<()> {
+    unsafe extern "C" {
+        fn read(fd: i32, buffer: *mut u8, count: usize) -> isize;
+        fn write(fd: i32, buffer: *const u8, count: usize) -> isize;
+    }
+    let ready = [1_u8; 1];
+    // SAFETY: both buffers are valid for one byte and the inherited descriptors stay open.
+    if unsafe { write(ready_fd, ready.as_ptr(), ready.len()) } != 1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut gate = [0_u8; 1];
+    // SAFETY: both buffers are valid for one byte and the inherited descriptors stay open.
+    if unsafe { read(gate_fd, gate.as_mut_ptr(), gate.len()) } != 1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[test]

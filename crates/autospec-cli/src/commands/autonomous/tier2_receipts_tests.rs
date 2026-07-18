@@ -18,6 +18,7 @@ use autospec_core::explore::specialists::{
 
 use super::tier2::Tier2Scan;
 use super::tier2_receipts::{record_tier2, Tier2Progress};
+use super::waterfall::retry_transient_lock;
 use super::waterfall::{
     StoreAcquisition, Tier15EvidenceArtifact, Tier1EvidenceArtifact, WaterfallStore,
 };
@@ -51,9 +52,13 @@ impl Drop for TempRoot {
 }
 
 pub(super) fn store(root: &TempRoot) -> WaterfallStore {
-    match WaterfallStore::acquire(root.path().join("waterfall"), REPO).expect("store acquisition") {
+    let acquisition = retry_transient_lock(
+        || WaterfallStore::acquire(root.path().join("waterfall"), REPO),
+        |result| matches!(result, Ok(StoreAcquisition::Held)),
+    );
+    match acquisition.expect("store acquisition") {
         StoreAcquisition::Acquired(store) => store,
-        StoreAcquisition::Held => panic!("fresh test root must be unlocked"),
+        StoreAcquisition::Held => panic!("test store remained locked for one second"),
     }
 }
 

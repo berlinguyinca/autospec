@@ -3,6 +3,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+use std::thread;
+#[cfg(test)]
+use std::time::{Duration, Instant};
+
 use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
 use autospec_core::autonomous::tier4::Tier4SourcePolicy;
 use autospec_core::autonomous::waterfall::{
@@ -48,6 +53,7 @@ impl WaterfallStore {
         Self::acquire_with_optional_tier4_source_policy(root, repo, None)
     }
 
+    #[cfg(test)]
     pub(in crate::commands::autonomous) fn acquire_with_tier4_source_policy(
         root: impl AsRef<Path>,
         repo: impl Into<String>,
@@ -58,6 +64,30 @@ impl WaterfallStore {
             repo,
             Some(expected_tier4_source_policy),
         )
+    }
+
+    pub(super) fn acquire_for_receipts(
+        root: impl AsRef<Path>,
+        repo: impl Into<String>,
+        expected_tier4_source_policy: Option<Tier4SourcePolicy>,
+    ) -> Result<StoreAcquisition, WaterfallStoreError> {
+        let root = root.as_ref().to_path_buf();
+        let repo = repo.into();
+        #[cfg(test)]
+        {
+            retry_transient_lock(
+                || {
+                    Self::acquire_with_optional_tier4_source_policy(
+                        &root,
+                        repo.clone(),
+                        expected_tier4_source_policy.clone(),
+                    )
+                },
+                |result| matches!(result, Ok(StoreAcquisition::Held)),
+            )
+        }
+        #[cfg(not(test))]
+        Self::acquire_with_optional_tier4_source_policy(root, repo, expected_tier4_source_policy)
     }
 
     fn acquire_with_optional_tier4_source_policy(
@@ -267,6 +297,21 @@ impl WaterfallStore {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+pub(super) fn retry_transient_lock<T>(
+    mut operation: impl FnMut() -> T,
+    is_transient: impl Fn(&T) -> bool,
+) -> T {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let result = operation();
+        if !is_transient(&result) || Instant::now() >= deadline {
+            return result;
+        }
+        thread::sleep(Duration::from_millis(1));
     }
 }
 

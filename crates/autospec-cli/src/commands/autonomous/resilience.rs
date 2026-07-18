@@ -925,6 +925,7 @@ fn pid_is_dead(_pid: u32) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::super::waterfall::retry_transient_lock;
     use super::*;
     use autospec_core::coordination::{QueueGateCounts, ReadyQueuePlan, WorkerCap};
     use std::process::Command;
@@ -1090,7 +1091,10 @@ mod tests {
             Err(_) => panic!("acquire claimed lease"),
         };
 
-        let adopted = match store.adopt(&claimed.token) {
+        let adopted = match retry_transient_lock(
+            || store.adopt(&claimed.token),
+            |result| matches!(result, Err(StoreError::Held)),
+        ) {
             Ok(lease) => lease,
             Err(_) => panic!("adopt matching lease"),
         };
@@ -1107,7 +1111,10 @@ mod tests {
         assert_eq!(running.lock_host.as_deref(), Some("autospec-test-host"));
         assert!(running.lock_acquired_at.is_some());
 
-        match store.release(&adopted) {
+        match retry_transient_lock(
+            || store.release(&adopted),
+            |result| matches!(result, Err(StoreError::Held)),
+        ) {
             Ok(()) => {}
             Err(_) => panic!("release matching lease"),
         }
