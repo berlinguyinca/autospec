@@ -14,11 +14,10 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-AUTOSPEC_HOME="${AUTOSPEC_HOME:-$HOME/.autospec}"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 BUNDLED_DIR="$REPO_ROOT/personas/catalog"
-USER_DIR="${AUTOSPEC_PERSONA_USER_DIR:-$AUTOSPEC_HOME/personas}"
+USER_DIR="$HOME/.autospec/personas"
 
 usage() {
   cat >&2 <<'EOF'
