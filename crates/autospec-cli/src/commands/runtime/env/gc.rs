@@ -185,18 +185,66 @@ fn docker_owner_keys(
         )?);
     }
     for volume in &inventory.volumes {
-        keys.extend(inspect_owner(
-            &[
-                "volume",
-                "inspect",
-                "--format",
-                "{{json .Labels}}",
+        if volume.logical_key.is_some() {
+            keys.extend(inspect_owner(
+                &[
+                    "volume",
+                    "inspect",
+                    "--format",
+                    "{{json .Labels}}",
+                    &volume.id,
+                ],
+                &ownership,
+            )?);
+        } else {
+            keys.extend(inspect_anonymous_owner(
                 &volume.id,
-            ],
-            &ownership,
-        )?);
+                &inventory.containers,
+                &ownership.owner_key,
+            )?);
+        }
     }
     Ok(keys)
+}
+
+fn inspect_anonymous_owner(
+    volume_id: &str,
+    containers: &[String],
+    owner_key: &str,
+) -> Result<Option<String>, CommandFailure> {
+    const MOUNTS: &str =
+        "{{range .Mounts}}{{if eq .Type \"volume\"}}{{println .Name}}{{end}}{{end}}";
+    for container in containers {
+        let output = Command::new("docker")
+            .args(["inspect", "--format", MOUNTS, container])
+            .output()
+            .map_err(io_failure)?;
+        if output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|mounted| mounted == volume_id)
+        {
+            return Ok(Some(owner_key.to_string()));
+        }
+        if !output.status.success() && !resource_is_absent(&output.stderr) {
+            return Err(CommandFailure::diagnostic("RESOURCE_OWNERSHIP_UNVERIFIED"));
+        }
+    }
+    existing_unmounted_volume(volume_id)
+}
+
+fn existing_unmounted_volume(volume_id: &str) -> Result<Option<String>, CommandFailure> {
+    let output = Command::new("docker")
+        .args(["volume", "inspect", volume_id])
+        .output()
+        .map_err(io_failure)?;
+    if output.status.success() {
+        Ok(Some("RESOURCE_OWNER_MISMATCH".to_string()))
+    } else if resource_is_absent(&output.stderr) {
+        Ok(None)
+    } else {
+        Err(CommandFailure::diagnostic("RESOURCE_OWNERSHIP_UNVERIFIED"))
+    }
 }
 
 fn inspect_owner(
@@ -259,12 +307,35 @@ fn delete_docker_resources(
         .as_ref()
         .map(|compose| compose.preserve_volumes.as_slice())
         .unwrap_or_default();
-    for id in inventory.deletable_volumes(preserved) {
-        run_delete(&["volume", "rm", &id])?;
-        inventory.volumes.retain(|volume| volume.id != id);
+    for volume in inventory.volumes.clone() {
+        if preserved.contains(&volume.logical_key.clone().unwrap_or_default()) {
+            continue;
+        }
+        if volume.logical_key.is_none() {
+            if docker_volume_exists(&volume.id)? {
+                return Err(CommandFailure::diagnostic("RESOURCE_OWNERSHIP_UNVERIFIED"));
+            }
+        } else {
+            run_delete(&["volume", "rm", &volume.id])?;
+        }
+        inventory.volumes.retain(|item| item.id != volume.id);
         persist_inventory(layout, inventory)?;
     }
     Ok(())
+}
+
+fn docker_volume_exists(id: &str) -> Result<bool, CommandFailure> {
+    let output = Command::new("docker")
+        .args(["volume", "inspect", id])
+        .output()
+        .map_err(io_failure)?;
+    if output.status.success() {
+        Ok(true)
+    } else if resource_is_absent(&output.stderr) {
+        Ok(false)
+    } else {
+        Err(CommandFailure::diagnostic("RESOURCE_OWNERSHIP_UNVERIFIED"))
+    }
 }
 
 fn run_delete(args: &[&str]) -> Result<(), CommandFailure> {

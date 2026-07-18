@@ -2,7 +2,16 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use getrandom::fill;
+#[cfg(unix)]
+use nix::fcntl::{openat, renameat, OFlag};
+#[cfg(unix)]
+use nix::sys::stat::Mode;
+#[cfg(unix)]
+use nix::unistd::{unlinkat, UnlinkatFlags};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -420,24 +429,41 @@ pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvEr
             path.display()
         ))
     })?;
-    std::fs::create_dir_all(parent).map_err(|error| {
-        RuntimeEnvError::new(format!(
-            "could not create runtime state directory {}: {error}",
-            parent.display()
-        ))
-    })?;
+    let parent_directory = open_private_directory(parent)?;
+
+    #[cfg(unix)]
+    {
+        let destination = path.file_name().ok_or_else(|| {
+            RuntimeEnvError::new(format!(
+                "runtime state path has no filename: {}",
+                path.display()
+            ))
+        })?;
+        write_file_atomic_at(&parent_directory, Path::new(destination), encoded)
+    }
+
+    #[cfg(not(unix))]
+    write_file_atomic_by_path(path, parent, &parent_directory, encoded)
+}
+
+#[cfg(not(unix))]
+fn write_file_atomic_by_path(
+    path: &Path,
+    parent: &Path,
+    parent_directory: &std::fs::File,
+    encoded: &[u8],
+) -> Result<(), RuntimeEnvError> {
     let temporary = create_temporary_path(path)?;
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|error| {
-                RuntimeEnvError::new(format!(
-                    "could not create runtime state {}: {error}",
-                    temporary.display()
-                ))
-            })?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = options.open(&temporary).map_err(|error| {
+            RuntimeEnvError::new(format!(
+                "could not create runtime state {}: {error}",
+                temporary.display()
+            ))
+        })?;
+        set_private_descriptor_mode(&file, 0o600)?;
         file.write_all(encoded)
             .and_then(|()| file.sync_all())
             .map_err(|error| {
@@ -452,19 +478,136 @@ pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvEr
                 path.display()
             ))
         })?;
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                RuntimeEnvError::new(format!(
-                    "could not synchronize runtime state directory {}: {error}",
-                    parent.display()
-                ))
-            })
+        parent_directory.sync_all().map_err(|error| {
+            RuntimeEnvError::new(format!(
+                "could not synchronize runtime state directory {}: {error}",
+                parent.display()
+            ))
+        })
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(unix)]
+fn write_file_atomic_at(
+    parent: &std::fs::File,
+    destination: &Path,
+    encoded: &[u8],
+) -> Result<(), RuntimeEnvError> {
+    let temporary = create_temporary_path(destination)?;
+    validate_relative_name(destination)?;
+    validate_relative_name(&temporary)?;
+    let result = (|| {
+        let flags =
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
+        let descriptor = openat(parent, &temporary, flags, Mode::from_bits_truncate(0o600))
+            .map_err(|error| {
+                RuntimeEnvError::new(format!(
+                    "could not create runtime state {}: {}",
+                    temporary.display(),
+                    error
+                ))
+            })?;
+        let mut file = std::fs::File::from(descriptor);
+        set_private_descriptor_mode(&file, 0o600)?;
+        file.write_all(encoded)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| {
+                RuntimeEnvError::new(format!(
+                    "could not write runtime state {}: {error}",
+                    temporary.display()
+                ))
+            })?;
+        renameat(parent, &temporary, parent, destination).map_err(|error| {
+            RuntimeEnvError::new(format!(
+                "could not finalize runtime state {}: {}",
+                destination.display(),
+                error
+            ))
+        })?;
+        parent.sync_all().map_err(|error| {
+            RuntimeEnvError::new(format!(
+                "could not synchronize runtime state directory: {error}"
+            ))
+        })
+    })();
+    if result.is_err() {
+        let _ = unlinkat(parent, &temporary, UnlinkatFlags::NoRemoveDir);
+    }
+    result
+}
+
+#[cfg(unix)]
+fn validate_relative_name(path: &Path) -> Result<(), RuntimeEnvError> {
+    if path.components().count() != 1 {
+        return Err(RuntimeEnvError::new(format!(
+            "runtime state descriptor path is not a filename: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn open_private_directory(path: &Path) -> Result<std::fs::File, RuntimeEnvError> {
+    std::fs::create_dir_all(path).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "could not create runtime state directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags((OFlag::O_CLOEXEC | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW).bits());
+    let directory = options.open(path).map_err(|error| {
+        #[cfg(unix)]
+        if error.raw_os_error() == Some(nix::libc::ELOOP)
+            || (error.raw_os_error() == Some(nix::libc::ENOTDIR)
+                && std::fs::symlink_metadata(path)
+                    .map(|metadata| metadata.file_type().is_symlink())
+                    .unwrap_or(false))
+        {
+            return RuntimeEnvError::new(format!(
+                "RUNTIME_STATE_SYMLINK_REJECTED: {}",
+                path.display()
+            ));
+        }
+        RuntimeEnvError::new(format!(
+            "could not securely open runtime state directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !directory
+        .metadata()
+        .map_err(|error| {
+            RuntimeEnvError::new(format!(
+                "could not inspect runtime state directory {}: {error}",
+                path.display()
+            ))
+        })?
+        .is_dir()
+    {
+        return Err(RuntimeEnvError::new(format!(
+            "runtime state path is not a directory: {}",
+            path.display()
+        )));
+    }
+    set_private_descriptor_mode(&directory, 0o700)?;
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn set_private_descriptor_mode(file: &std::fs::File, mode: u32) -> Result<(), RuntimeEnvError> {
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .map_err(|error| RuntimeEnvError::new(format!("could not secure runtime state: {error}")))
+}
+
+#[cfg(not(unix))]
+fn set_private_descriptor_mode(_file: &std::fs::File, _mode: u32) -> Result<(), RuntimeEnvError> {
+    Ok(())
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, RuntimeEnvError> {
@@ -507,4 +650,36 @@ fn create_temporary_path(path: &Path) -> Result<PathBuf, RuntimeEnvError> {
 
 fn hex_digest(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(all(test, unix))]
+mod descriptor_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    #[test]
+    fn atomic_write_stays_in_the_open_parent_after_path_substitution() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "autospec-runtime-openat-{}-{unique}",
+            std::process::id()
+        ));
+        let parent = root.join("state");
+        let retained = root.join("retained-state");
+        let external = root.join("external-state");
+        std::fs::create_dir_all(&parent).unwrap();
+        std::fs::create_dir(&external).unwrap();
+        let parent_directory = open_private_directory(&parent).unwrap();
+        std::fs::rename(&parent, &retained).unwrap();
+        symlink(&external, &parent).unwrap();
+
+        write_file_atomic_at(&parent_directory, Path::new("env"), b"retained").unwrap();
+
+        assert_eq!(std::fs::read(retained.join("env")).unwrap(), b"retained");
+        assert!(!external.join("env").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

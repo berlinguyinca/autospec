@@ -10,9 +10,11 @@ command family.
 autospec runtime env init [--repo PATH] [--manifest agent|autospec] [--force]
 autospec runtime env up [--repo PATH] [--mode MODE]
 autospec runtime env status [--repo PATH] [--mode MODE]
-autospec runtime env down [--repo PATH] [--mode MODE]
+autospec runtime env down [--repo PATH] [--mode MODE] [--purge-maven]
 autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]
 autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]
+autospec runtime env gc [--repo PATH] [--mode MODE]
+autospec runtime env normalize-compose --repo PATH --check|--apply [--fingerprint SHA256]
 ```
 
 All commands default to `--repo .`. The environment-selecting commands (`up`,
@@ -46,6 +48,47 @@ modes:
 `init` also emits `ports` and `public_url_env` compatibility declarations. They are retained
 in v1 manifests for interoperability, but v1 runtime allocation derives frontend and backend
 ports itself. Unknown top-level and mode keys are ignored by the constrained v1 parser.
+
+## V2 resource grammar and ownership
+
+Manifest `version: 2` retains `modes` and adds typed resources:
+
+```yaml
+version: 2
+default_mode: local
+modes:
+  local:
+    command: sh -c 'true'
+resources:
+  maven:
+    isolation: split-local
+  compose:
+    files: [compose.yaml]
+    exports:
+      - service: web
+        target: 8080
+        protocol: http
+        env: AUTOSPEC_PUBLIC_URL
+        value: url
+    preserve_volumes: [developer-cache]
+    shared_resources:
+      networks: [company-vpn]
+      volumes: [maven-cache]
+```
+
+Maven isolation requires Maven 4 and owns only the effective local-repository prefix
+`autospec/<AGENT_ENV_ID>`. Normal `down` preserves it; `down --purge-maven` canonicalizes the
+Maven-reported root, requires zero live sessions, and removes only that exact prefix.
+
+Compose owns one unique project plus every declared container, network, volume, export, and
+published port. Labels bind each resource to its environment, owner key, and plan digest.
+External resources are accepted only when their exact logical keys appear in
+`shared_resources`. `normalize-compose --check` emits a migration and fingerprint;
+`normalize-compose --apply --fingerprint SHA256` applies that exact plan transactionally.
+
+The opt-outs `AUTOSPEC_MAVEN_ISOLATION=off`, `AUTOSPEC_COMPOSE_ISOLATION=off`, and
+`AUTOSPEC_ENV_DISABLE=1` export `AUTOSPEC_ISOLATION_BYPASSED=1`. Evidence produced under an
+opt-out must downgrade its isolation claim from verified.
 
 ## Manifest and mode selection
 
@@ -131,3 +174,16 @@ missing state is not an error, optional `down` is skipped, and state is removed 
 configured teardown succeeds. Do not delete the state directory manually; doing so can skip a
 manifest-defined cleanup command. A `session` without keep-alive performs this cleanup
 automatically. For a keep-alive session, call `down` after the dependent work completes.
+
+State directories and session roots are `0700` on Unix; authoritative JSON, env, lease,
+registry, and session files are `0600`. `RUNTIME_STATE_SYMLINK_REJECTED` refuses a symlinked
+root before destructive cleanup. Other stable recovery diagnostics include
+`RUNTIME_PARTIAL_STATE`, `RUNTIME_OWNER_MISMATCH`, `RUNTIME_PLAN_MISMATCH`,
+`RUNTIME_LIVE_SESSIONS`, `RESOURCE_OWNER_MISMATCH`, and
+`PORT_BIND_HEALTH_RETRIES_EXHAUSTED`. Run the printed recovery command instead of deleting
+state manually. `gc` deletes only a stale generation with zero locked sessions and matching
+ownership labels.
+
+The real-engine acceptance proof is `bats tests/integration/runtime-compose-40-stack.bats`.
+It hard-fails when Docker Compose v2 is absent and writes CSV/JSON evidence under
+`reports/runtime-isolation/`.

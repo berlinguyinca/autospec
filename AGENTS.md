@@ -9,6 +9,17 @@
 - **Lock-step rule** (per `CONTRIBUTING.md`): every multi-harness skill keeps `SKILL.md` / `opencode/agent.md` / `codex/prompt.md` bodies identical; only frontmatters differ.
 - **Validation in lieu of code tests**: this repo has no language-level test runner. Validation is via shell scripts that check lock-step diffs, frontmatter parsing, `bash -n` on install scripts, and file presence. Each PR adds or extends a validation script that passes after the change.
 
+## Runtime resource isolation
+
+- Use `autospec runtime env up|status|down|exec|session|gc|normalize-compose` for every
+  manifest-v2 stack; use `down --purge-maven` only for the guarded Maven 4 prefix.
+- `AUTOSPEC_MAVEN_ISOLATION=off`, `AUTOSPEC_COMPOSE_ISOLATION=off`, and
+  `AUTOSPEC_ENV_DISABLE=1` export `AUTOSPEC_ISOLATION_BYPASSED=1`; never call the resulting
+  isolation evidence verified.
+- Runtime state is private on Unix (`0700` directories and `0600` files). Treat
+  `RUNTIME_STATE_SYMLINK_REJECTED` and ownership ambiguity as fail-closed recovery signals;
+  never delete an environment or session root manually.
+
 ## Subagent model selection (two-tier, cost-aware)
 
 When the workflow dispatches a subagent, choose tier based on the **type of work**, not by phase number alone. Two tiers:

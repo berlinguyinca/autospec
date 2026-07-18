@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[cfg(unix)]
+use std::os::unix::fs::{symlink, PermissionsExt};
+
 use autospec_core::runtime_env::{
     load_generation_token, read_json, write_json_atomic, ComposeExport, ComposeIsolation,
     ComposeNormalizer, ComposeOverride, ComposeOwnership, ComposePlan, ComposePolicy,
@@ -848,6 +851,32 @@ fn atomic_json_state_round_trips_without_evaluating_shell_text() {
 
     assert_eq!(read_json::<ResourceInventory>(&path).unwrap(), inventory);
     assert!(!marker.exists(), "JSON state was evaluated as shell source");
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_json_state_rejects_a_symlinked_parent_without_touching_its_target() {
+    let repo = TempRepo::with_files(&[]);
+    let external = repo.path().join("external-state");
+    let linked = repo.path().join("linked-state");
+    std::fs::create_dir(&external).expect("create external state directory");
+    std::fs::set_permissions(&external, std::fs::Permissions::from_mode(0o750))
+        .expect("set external state permissions");
+    symlink(&external, &linked).expect("create state parent symlink");
+    let path = linked.join("inventory.json");
+
+    let error = write_json_atomic(&path, &ResourceInventory::default())
+        .expect_err("symlinked parent must be rejected");
+
+    assert!(
+        error.to_string().contains("RUNTIME_STATE_SYMLINK_REJECTED"),
+        "{error}"
+    );
+    assert!(!external.join("inventory.json").exists());
+    assert_eq!(
+        std::fs::metadata(&external).unwrap().permissions().mode() & 0o777,
+        0o750
+    );
 }
 
 #[test]

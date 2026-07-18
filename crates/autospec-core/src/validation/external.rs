@@ -358,6 +358,14 @@ fn run_frontmatter(id: &str, required: bool, root: &Path) -> CheckResult {
 
 fn run_derive_trio_consistency(id: &str, required: bool, root: &Path) -> CheckResult {
     const COMPOSE_NORMALIZE_SUITE: &str = "tests/unit/test_autospec_compose_normalize_skill.bats";
+    const RUNTIME_PROOF_ARTIFACTS: [&str; 6] = [
+        "tests/integration/runtime-compose-40-stack.bats",
+        "tests/fixtures/runtime-resources/forty-stack/.autospec/runtime.yml",
+        "tests/fixtures/runtime-resources/forty-stack/compose.yaml",
+        "tests/fixtures/runtime-resources/forty-stack/Dockerfile",
+        "reports/runtime-isolation/compose-40-stack.csv",
+        "reports/runtime-isolation/compose-40-stack.json",
+    ];
     let derive = root.join("scripts/derive-trio.sh");
     if !derive.is_file() {
         return failure(
@@ -389,6 +397,19 @@ fn run_derive_trio_consistency(id: &str, required: bool, root: &Path) -> CheckRe
             ));
         } else {
             results.push(run_bats_suite(id, required, root, COMPOSE_NORMALIZE_SUITE));
+        }
+    }
+
+    if results.iter().all(CheckResult::is_success) {
+        for artifact in RUNTIME_PROOF_ARTIFACTS {
+            if !root.join(artifact).is_file() {
+                results.push(failure(
+                    id,
+                    required,
+                    &format!("runtime isolation proof artifact is missing: {artifact}"),
+                ));
+                break;
+            }
         }
     }
 

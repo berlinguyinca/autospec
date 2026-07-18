@@ -287,6 +287,32 @@ impl RuntimeFixture {
         std::fs::create_dir_all(fixture.root.join(".autospec"))
             .expect("create runtime manifest directory");
         std::fs::write(
+            fixture.root.join(".autospec/runtime-up.sh"),
+            format!(
+                "set -eu\n{command}\npython3 -m http.server \"$AGENT_FRONTEND_PORT\" > runtime-server.log 2>&1 &\nprintf '%s\\n' \"$!\" > runtime-server.pid\n"
+            ),
+        )
+        .expect("write runtime up script");
+        std::fs::write(
+            fixture.root.join(".autospec/runtime-down.sh"),
+            format!(
+                "set -eu\nif test -f runtime-server.pid; then\n  pid=$(cat runtime-server.pid)\n  if kill -0 \"$pid\" 2>/dev/null; then kill \"$pid\"; fi\n  rm -f runtime-server.pid\nfi\n{down}\n"
+            ),
+        )
+        .expect("write runtime down script");
+        std::fs::write(
+            fixture.root.join(".autospec/runtime.yml"),
+            "version: 1\nname: sample-app\ndefault_mode: local\nmodes:\n  local:\n    command: sh .autospec/runtime-up.sh\n    down: sh .autospec/runtime-down.sh\n",
+        )
+        .expect("write runtime manifest");
+        fixture
+    }
+
+    fn raw(command: &str, down: &str) -> Self {
+        let fixture = Self::empty();
+        std::fs::create_dir_all(fixture.root.join(".autospec"))
+            .expect("create runtime manifest directory");
+        std::fs::write(
             fixture.root.join(".autospec/runtime.yml"),
             format!(
                 "version: 1\nname: sample-app\ndefault_mode: local\nmodes:\n  local:\n    command: {command}\n    down: {down}\n"
@@ -318,27 +344,58 @@ impl RuntimeFixture {
     }
 
     fn has_only_lease_tombstone(&self) -> bool {
-        let Ok(mut environments) = std::fs::read_dir(&self.state_root) else {
+        let Ok(environments) = std::fs::read_dir(&self.state_root) else {
             return false;
         };
-        let Some(Ok(environment)) = environments.next() else {
+        let mut environments = environments
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name() != "ports");
+        let Some(environment) = environments.next() else {
             return false;
         };
         if environments.next().is_some() {
             return false;
         }
-        let Ok(mut entries) = std::fs::read_dir(environment.path()) else {
+        let Ok(entries) = std::fs::read_dir(environment.path()) else {
             return false;
         };
-        matches!(entries.next(), Some(Ok(entry)) if entry.file_name() == "lease.lock")
-            && entries.next().is_none()
+        let mut lease_found = false;
+        for entry in entries.filter_map(Result::ok) {
+            if entry.file_name() == "lease.lock" {
+                lease_found = true;
+            } else if entry.file_name() == "sessions"
+                && std::fs::read_dir(entry.path()).is_ok_and(|mut records| records.next().is_none())
+            {
+                continue;
+            } else {
+                return false;
+            }
+        }
+        lease_found
     }
 }
 
 impl Drop for RuntimeFixture {
     fn drop(&mut self) {
+        stop_runtime_server(&self.root);
         let _ = std::fs::remove_dir_all(&self.root);
     }
+}
+
+fn runtime_environment(fixture: &RuntimeFixture) -> PathBuf {
+    std::fs::read_dir(&fixture.state_root)
+        .expect("state root exists")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.join("owner.json").is_file())
+        .expect("runtime environment exists")
+}
+
+fn stop_runtime_server(root: &std::path::Path) {
+    let Ok(pid) = std::fs::read_to_string(root.join("runtime-server.pid")) else {
+        return;
+    };
+    let _ = Command::new("kill").arg(pid.trim()).output();
 }
 
 enum RuntimeEnvCommand {
@@ -450,12 +507,10 @@ fn runtime_parent_help_lists_the_complete_environment_command_family() {
 
 #[test]
 fn runtime_env_unquotes_quoted_manifest_command_and_down_scalars() {
-    let fixture = RuntimeFixture::empty();
-    std::fs::create_dir_all(fixture.root.join(".autospec"))
-        .expect("create runtime manifest directory");
+    let fixture = RuntimeFixture::new("printf up > quoted-up.txt", "printf down > quoted-down.txt");
     std::fs::write(
         fixture.root.join(".autospec/runtime.yml"),
-        "version: 1\nname: quoted-app\ndefault_mode: local\nmodes:\n  local:\n    command: \"sh -c 'printf up > quoted-up.txt'\"\n    down: 'sh -c \"printf down > quoted-down.txt\"'\n",
+        "version: 1\nname: quoted-app\ndefault_mode: local\nmodes:\n  local:\n    command: \"sh .autospec/runtime-up.sh\"\n    down: 'sh .autospec/runtime-down.sh'\n",
     )
     .expect("write quoted command manifest");
 
@@ -572,12 +627,10 @@ fn runtime_env_exec_runs_a_direct_child_in_the_provisioned_environment() {
     let (environment_id, public_url) = child_output
         .split_once('|')
         .expect("direct child output has both values");
-    let state_environment_id = std::fs::read_dir(&fixture.state_root)
-        .expect("state root exists")
-        .next()
-        .expect("environment exists")
-        .expect("environment entry")
-        .file_name();
+    let state_environment = runtime_environment(&fixture);
+    let state_environment_id = state_environment
+        .file_name()
+        .expect("runtime environment has an identifier");
     assert_eq!(state_environment_id.to_string_lossy(), environment_id);
     assert!(public_url.starts_with("http://127.0.0.1:"));
     let status = fixture
@@ -754,7 +807,7 @@ fn runtime_env_session_passes_through_without_a_manifest() {
 }
 
 #[test]
-fn runtime_env_session_auto_initializes_and_keeps_state_when_requested() {
+fn runtime_env_session_auto_initialized_placeholder_fails_health_until_configured() {
     let fixture = RuntimeFixture::empty();
     let output = fixture
         .command()
@@ -774,29 +827,10 @@ fn runtime_env_session_auto_initializes_and_keeps_state_when_requested() {
         .output()
         .expect("auto-init runtime env session starts");
 
-    assert!(
-        output.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("PORT_BIND_HEALTH_RETRIES_EXHAUSTED"));
     assert!(fixture.root.join(".agent-runtime.yml").is_file());
-    assert_eq!(
-        std::fs::read_to_string(fixture.root.join("auto-init.txt"))
-            .expect("auto-init child output"),
-        "auto"
-    );
-    let status = fixture
-        .command()
-        .args([
-            "runtime",
-            "env",
-            "status",
-            "--repo",
-            fixture.root.to_str().expect("fixture path is UTF-8"),
-        ])
-        .output()
-        .expect("runtime env status starts");
-    assert!(status.status.success());
+    assert!(!fixture.root.join("auto-init.txt").exists());
     assert!(!fixture.has_session_record());
 }
 
@@ -938,13 +972,7 @@ fn runtime_env_up_preserves_caller_overrides_in_state_output_and_child() {
             .lines()
             .any(|line| line == format!("{key}={value}")));
     }
-    let state_file = std::fs::read_dir(&fixture.state_root)
-        .expect("state root exists")
-        .next()
-        .expect("one environment exists")
-        .expect("state directory entry")
-        .path()
-        .join("env");
+    let state_file = runtime_environment(&fixture).join("env");
     let state = std::fs::read_to_string(state_file).expect("read state file");
     for (key, value) in overrides {
         assert!(state.contains(&format!("export {key}='{value}'")));
@@ -957,7 +985,7 @@ fn runtime_env_up_preserves_caller_overrides_in_state_output_and_child() {
 
 #[test]
 fn runtime_env_up_reports_a_mode_without_a_command() {
-    let fixture = RuntimeFixture::new("", "sh -c 'true'");
+    let fixture = RuntimeFixture::raw("", "sh -c 'true'");
 
     let output = fixture
         .command()

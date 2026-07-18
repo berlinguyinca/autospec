@@ -7,6 +7,26 @@ one-off compatibility overrides when no config key is present.
 
 Behavior toggles that are flag-files rather than env vars live in [`FLAGS.md`](FLAGS.md).
 
+## Runtime resource isolation
+
+Manifest `version: 2` is the canonical repository configuration for worktree resources.
+`resources.maven.isolation: split-local` requires Maven 4 and owns only
+`<effective-local-repository>/autospec/<AGENT_ENV_ID>`. `resources.compose` declares `files`,
+`exports`, `preserve_volumes`, and exact `shared_resources`; every other Compose container,
+network, volume, project name, and published port is broker-owned.
+
+| Environment value | Effect |
+|---|---|
+| `AGENT_ENV_STATE_ROOT` | Overrides the private state root; Unix directories/files are forced to `0700`/`0600`. |
+| `AUTOSPEC_MAVEN_ISOLATION=off` | Bypasses Maven isolation and exports `AUTOSPEC_ISOLATION_BYPASSED=1`. |
+| `AUTOSPEC_COMPOSE_ISOLATION=off` | Bypasses Compose isolation and exports `AUTOSPEC_ISOLATION_BYPASSED=1`. |
+| `AUTOSPEC_ENV_DISABLE=1` | Bypasses broker provisioning for a direct child and exports `AUTOSPEC_ISOLATION_BYPASSED=1`. |
+
+An opt-out downgrades an isolation claim from verified. Cleanup rejects symlinked state or
+session roots with `RUNTIME_STATE_SYMLINK_REJECTED`; use `gc` or `down --purge-maven` rather
+than deleting state by hand. Compose migrations use `normalize-compose --check` followed by
+the fingerprint-bound `--apply` command.
+
 ## Autonomous runtime
 
 ```yaml
