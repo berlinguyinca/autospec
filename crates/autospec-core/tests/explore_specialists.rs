@@ -26,11 +26,11 @@ fn trading_manifest_records_file_line_evidence_and_ranked_specialist() {
     assert!(trading
         .evidence
         .iter()
-        .any(|e| { e.file == "requirements.txt" && e.line == 2 && e.r#match.contains("ccxt") }));
+        .any(|e| { e.file == "requirements.txt" && e.line == 2 && e.r#match == "ccxt>=4.0" }));
     assert!(roster
         .suggested_specialists
         .iter()
-        .any(|s| s.slug == "trading-specialist" && s.evidence.contains("requirements.txt:2")));
+        .any(|s| s.slug == "trading-specialist" && s.evidence == "requirements.txt:2 (ccxt>=4.0)"));
 }
 
 #[test]
