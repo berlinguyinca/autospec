@@ -9,6 +9,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Returns the first non-empty line following a `LABEL:` header in `--help`
+/// output. Reusing the labeled-block parsing pattern from
+/// `cli_commands.rs::help_usage_invocation` (which reads the line after
+/// `USAGE:` rather than substring-searching the whole blob) avoids false
+/// matches between the intended structured field and incidental text
+/// elsewhere in the help output.
+fn help_section_first_line<'a>(help: &'a str, label: &str) -> Option<&'a str> {
+    help.lines()
+        .skip_while(|line| line.trim() != label)
+        .skip(1)
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
 #[test]
 fn resilience_help_names_the_canonical_write_slug() {
     let output = Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -17,8 +31,24 @@ fn resilience_help_names_the_canonical_write_slug() {
         .expect("run help");
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("resilience decide"));
-    assert!(help.contains("owner__repo"));
+
+    assert_eq!(
+        help_section_first_line(&help, "USAGE:"),
+        Some(
+            "autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]"
+        ),
+        "USAGE section did not name the `resilience decide` invocation verbatim"
+    );
+
+    let writes_line = help
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("Writes resilience state only to the canonical "));
+    assert_eq!(
+        writes_line,
+        Some("Writes resilience state only to the canonical owner__repo layout."),
+        "STATE section did not name the canonical owner__repo write slug verbatim"
+    );
 }
 
 #[test]
