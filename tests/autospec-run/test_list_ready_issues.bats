@@ -702,3 +702,28 @@ EOF
     [ "$(printf '%s' "$output" | jq -r '.diagnostics[0].kind')" = "discovery_missing_safety_review" ]
     [ ! -s "$FIXTURE_DIR/mutations.log" ]
 }
+
+@test "origin self explore-ledger issue missing safety review emits one local diagnostic without mutation" {
+    body="$(cat <<'EOF'
+## Summary
+
+Auto-filed by /autospec-explore round 4 from prior reports.
+<!-- explore-ledger source=prior-reports -->
+
+## Implementation outline
+
+- edit `discovery/prior-report.sh`
+EOF
+)"
+    labels='[{"name":"auto-implement"},{"name":"origin:self"},{"name":"ctx:32k"},{"name":"reasoning:medium"}]'
+    write_auto_issue 516 "prior report missing safety" "$body" "$labels"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(516) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==516) | .reason')" = "safety_gate_failed" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics | length')" = "1" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics[0].issue')" = "516" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics[0].reason')" = "missing_safety_reviewed" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics[0].kind')" = "discovery_missing_safety_review" ]
+    [ ! -s "$FIXTURE_DIR/mutations.log" ]
+}

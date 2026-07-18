@@ -912,6 +912,10 @@ fn local_diagnostics_json(plan: &ReadyQueuePlan) -> String {
 fn discovery_filed_issue(issue: &RemoteIssue) -> bool {
     issue.labels.iter().any(|label| label == "explore")
         || issue.body.contains("explore research-cycle finalize gate")
+        || issue
+            .body
+            .contains("Auto-filed by /autospec-explore round ")
+        || issue.body.contains("<!-- explore-ledger source=")
 }
 
 fn discovery_missing_safety_diagnostic_json(view: &QueueIssueView) -> String {
