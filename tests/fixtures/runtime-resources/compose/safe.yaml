@@ -1,0 +1,6 @@
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - target: 8080
+        protocol: tcp

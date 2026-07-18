@@ -2533,8 +2533,7 @@ fn is_flag_token_byte(byte: u8) -> bool {
 fn adjacent_with_single_gap(document: &str, left: &str, right: &str) -> bool {
     document.match_indices(left).any(|(index, _)| {
         let remainder = &document[index + left.len()..];
-        remainder.len() > right.len()
-            && remainder.as_bytes()[1..].starts_with(right.as_bytes())
+        remainder.len() > right.len() && remainder.as_bytes()[1..].starts_with(right.as_bytes())
     })
 }
 

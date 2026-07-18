@@ -1,0 +1,7 @@
+services:
+  web:
+    image: nginx:alpine
+    networks: [company]
+networks:
+  company:
+    external: true

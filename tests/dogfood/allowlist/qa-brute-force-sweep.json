@@ -37,9 +37,9 @@
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_resilience_commands.rs",
-    "function": "resilience_help_names_the_canonical_write_slug",
+    "function": "help_section_first_line",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This help-text regression checks documented CLI wording; its substring assertions do not encode domain representation logic."
+    "justification": "This helper parses a labeled CLI help section; its string operations inspect presentation structure rather than encode domain logic."
   },
   {
     "file": "crates/autospec-cli/tests/runtime_commands.rs",

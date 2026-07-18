@@ -26,6 +26,23 @@ Companion manifests are local declarative input. They contain no credentials,
 hosts, or connection strings, and they must not contain provisioning,
 migration, deletion, or deployment commands.
 
+## Maven and Compose companions
+
+Use manifest `version: 2` for resource-bearing companions. Maven supports
+`resources.maven.isolation: split-local` under Maven 4. Compose declares source files and
+exports; the broker generates the project, ownership labels, override, and host ports.
+Application commands, networks, and volumes remain repository declarations. External networks
+or volumes require exact logical keys under `shared_resources`.
+
+The lifecycle surface is `up`, `status`, `down`, `exec`, `session`, `gc`, and
+`normalize-compose`; use `down --purge-maven` for the guarded Maven prefix. Two sessions share
+one stack, and the first release cannot tear it down while the other lease is live.
+
+`AUTOSPEC_MAVEN_ISOLATION=off`, `AUTOSPEC_COMPOSE_ISOLATION=off`, and
+`AUTOSPEC_ENV_DISABLE=1` export `AUTOSPEC_ISOLATION_BYPASSED=1` and downgrade a verified
+isolation claim. Unix state directories/files use `0700`/`0600`;
+`RUNTIME_STATE_SYMLINK_REJECTED` prevents cleanup through a linked environment or session root.
+
 ## Remote-isolation naming
 
 `agent_<environment-id>` is only a non-executing naming convention for a

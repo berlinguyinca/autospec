@@ -18,9 +18,11 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec runtime env init [--repo <path>] [--manifest agent\|autospec] [--force]` | no | creates a conservative v1 runtime manifest; refuses an existing manifest without `--force` |
 | `autospec runtime env up [--repo <path>] [--mode <mode>]` | no | provisions or reuses the selected environment, runs its manifest command on first provision, and prints the sourceable environment protocol |
 | `autospec runtime env status [--repo <path>] [--mode <mode>]` | no | prints a provisioned environment or returns status `3` when it is inactive |
-| `autospec runtime env down [--repo <path>] [--mode <mode>]` | no | runs the selected optional teardown command and removes its state after successful teardown |
+| `autospec runtime env down [--repo <path>] [--mode <mode>] [--purge-maven]` | no | removes owned Compose resources; `down --purge-maven` also removes the guarded Maven 4 environment prefix |
 | `autospec runtime env exec [--repo <path>] [--mode <mode>] -- <command> [args...]` | no | provisions or reuses state, then runs one direct child with the runtime environment |
 | `autospec runtime env session [--repo <path>] [--mode <mode>] [--keep-alive] -- <command> [args...]` | no | runs one direct child with lifecycle cleanup, manifest auto-init/bypass controls, and Unix interruption cleanup |
+| `autospec runtime env gc [--repo <path>] [--mode <mode>]` | no | removes only stale resources whose generation and ownership labels are proven; ambiguity fails closed with a recovery command |
+| `autospec runtime env normalize-compose --repo <path> --check\|--apply [--fingerprint SHA256]` | yes | plans or transactionally applies a manifest-v2 Compose migration without a second YAML transformer |
 | `autospec claim state read\|upsert\|clear\|reconcile-linked-pr ...` | yes | manages the schema-1 GitHub run-state comment using lowest-comment-ID selection |
 | `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
@@ -59,6 +61,12 @@ current queue position. Use `/autospec-run` for the existing agent-execution wor
 
 For the v1 runtime-manifest grammar, state behavior, child-command semantics, and cleanup
 procedure, see [Agent runtime manifests](runbooks/agent-runtime-manifest.md).
+
+Manifest `version: 2` adds typed Maven and Compose ownership. The opt-outs
+`AUTOSPEC_MAVEN_ISOLATION=off`, `AUTOSPEC_COMPOSE_ISOLATION=off`, and
+`AUTOSPEC_ENV_DISABLE=1` export `AUTOSPEC_ISOLATION_BYPASSED=1`; evidence produced under an
+opt-out is not verified isolation. Unix state is private (`0700` directories, `0600` files),
+and `RUNTIME_STATE_SYMLINK_REJECTED` prevents destructive cleanup through a linked root.
 
 `autospec claim state` is the Rust-owned transport and codec for the existing GitHub
 run-state comment protocol. `read` fails closed when the lowest marked comment is malformed

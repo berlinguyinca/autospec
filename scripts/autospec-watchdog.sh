@@ -74,6 +74,7 @@ WATCHDOG_LOG_PREFIX="[autospec-watchdog]"
 WATCHDOG_SCRIPT_DIR="$SCRIPT_DIR"
 WORKER_LIVENESS_SH="${AUTOSPEC_WORKER_LIVENESS_SH:-$WATCHDOG_SCRIPT_DIR/worker-liveness.sh}"
 REPO_SLUG_SH="${AUTOSPEC_REPO_SLUG_SH:-$WATCHDOG_SCRIPT_DIR/repo-slug.sh}"
+RUNTIME_WORKTREE_CLEANUP_SH="${AUTOSPEC_RUNTIME_WORKTREE_CLEANUP:-$WATCHDOG_SCRIPT_DIR/autospec-runtime-worktree-cleanup.sh}"
 
 if ! command -v gh >/dev/null 2>&1; then
     echo "$WATCHDOG_LOG_PREFIX ERROR: gh CLI not found" >&2
@@ -427,7 +428,14 @@ gc_orphaned_worktrees() {
             fi
         fi
 
-        # All three guards passed → safe to prune via git's own worktree removal.
+        # All three Git guards passed. Release broker-owned resources before
+        # asking Git to remove the worktree; adapter failure preserves it.
+        if ! "$RUNTIME_WORKTREE_CLEANUP_SH" "$wt"; then
+            echo "$WATCHDOG_LOG_PREFIX gc: runtime cleanup failed for $wt; preserving worktree" >&2
+            continue
+        fi
+
+        # Runtime cleanup passed → safe to prune via Git's worktree removal.
         if git worktree remove --force "$wt" >/dev/null 2>&1; then
             garbage_collected=$((garbage_collected + 1))
             echo "$WATCHDOG_LOG_PREFIX gc: removed orphaned worktree $wt (issue #$issue, branch $branch)" >&2

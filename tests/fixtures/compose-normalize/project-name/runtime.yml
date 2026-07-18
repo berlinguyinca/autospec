@@ -1,0 +1,4 @@
+version: 2
+resources:
+  compose:
+    files: [compose.yaml]

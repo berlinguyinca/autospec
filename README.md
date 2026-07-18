@@ -237,6 +237,22 @@ For target repositories that will use GitHub issues and PRs, read
 [`docs/target-repo-setup.md`](docs/target-repo-setup.md) before running
 implementation workflows.
 
+## Worktree runtime isolation
+
+`autospec runtime env` is the resource authority for linked-worktree development. Its public
+resource commands are `up`, `status`, `down`, `exec`, `session`, `gc`, and
+`normalize-compose`; `down --purge-maven` is the explicit guarded Maven cleanup path.
+Manifest `version: 2` gives each environment a unique Compose project, labeled containers,
+networks, volumes, dynamic host ports, and a Maven 4 split local repository.
+
+Set `AUTOSPEC_MAVEN_ISOLATION=off` or `AUTOSPEC_COMPOSE_ISOLATION=off` to bypass one
+resource family, or `AUTOSPEC_ENV_DISABLE=1` to bypass the whole broker for a direct child.
+Every opt-out exports `AUTOSPEC_ISOLATION_BYPASSED=1`; isolation claims must then be
+downgraded from verified. Unix state directories are `0700`, state files are `0600`, and
+`RUNTIME_STATE_SYMLINK_REJECTED` fails closed before cleanup. See the
+[runtime manifest runbook](docs/runbooks/agent-runtime-manifest.md) and the checked-in
+[forty-stack proof](reports/runtime-isolation/compose-40-stack.json).
+
 ## No-Side-Effect Demo
 
 The launch demo shows the shape of an AutoSpec run without creating GitHub issues

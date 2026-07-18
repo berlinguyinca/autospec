@@ -343,15 +343,27 @@ install_agent_env_commands() {
 _AGENT_ENV_ALIAS_MARKER_START="# >>> autospec isolated runtime aliases >>>"
 _AGENT_ENV_ALIAS_MARKER_END="# <<< autospec isolated runtime aliases <<<"
 
+generated_harness_section() {
+    format="$1"
+    section="$2"
+    generated="$REPO_ROOT/templates/generated/harness-runtime-aliases.$format"
+    awk -v start="# BEGIN AUTOSPEC $section" -v end="# END AUTOSPEC $section" '
+        $0 == start { capture=1; next }
+        $0 == end { exit }
+        capture { print }
+    ' "$generated"
+}
+
 agent_env_alias_block() {
+    format="${1:-sh}"
     cat <<EOF
 $_AGENT_ENV_ALIAS_MARKER_START
 # Wrap agent harnesses in manifest-driven isolated runtime environments.
 # Bypass for one command with: AUTOSPEC_ENV_DISABLE=1 claude
 if command -v autospec-env >/dev/null 2>&1; then
-    alias claude='autospec-env session -- claude --dangerously-skip-permissions'
-    alias codex='autospec-env session -- codex --yolo'
-    alias opencode='autospec-env session -- opencode'
+EOF
+    generated_harness_section "$format" "RUNTIME ALIASES"
+    cat <<EOF
 fi
 $_AGENT_ENV_ALIAS_MARKER_END
 EOF
@@ -359,9 +371,10 @@ EOF
 
 install_agent_env_alias_block() {
     rc="$1"
+    format="${2:-sh}"
     block_file="$(mktemp)"
     tmp_file="$(mktemp)"
-    agent_env_alias_block > "$block_file"
+    agent_env_alias_block "$format" > "$block_file"
     [ -f "$rc" ] || touch "$rc"
     if grep -qF "$_AGENT_ENV_ALIAS_MARKER_START" "$rc"; then
         awk -v s="$_AGENT_ENV_ALIAS_MARKER_START" -v e="$_AGENT_ENV_ALIAS_MARKER_END" -v bf="$block_file" '
@@ -1228,13 +1241,12 @@ install_rollover_block() {
     # PreCompact hook can `python3 -m autospec_context_monitor`.
     install_context_monitor_pkg
 
-    local bash_block
+    local bash_block bash_wrappers
+    bash_wrappers="$(generated_harness_section sh "ROLLOVER WRAPPERS")"
     bash_block="$_ROLLOVER_MARKER_START
 export AUTOSPEC_AUTO_ROLLOVER=1
 if [ \"\${AUTOSPEC_AUTO_ROLLOVER:-0}\" = \"1\" ] && command -v autospec-session >/dev/null 2>&1; then
-    claude()   { autospec-session claude \"\$@\"; }
-    codex()    { autospec-session codex \"\$@\"; }
-    opencode() { autospec-session opencode \"\$@\"; }
+$bash_wrappers
 fi
 $_ROLLOVER_MARKER_END"
 
@@ -1254,12 +1266,12 @@ $_ROLLOVER_MARKER_END"
         if grep -qF "$_ROLLOVER_MARKER_START" "$fish_config"; then
             info "  auto-rollover block already present in $fish_config (skipping)"
         else
+            local fish_wrappers
+            fish_wrappers="$(generated_harness_section fish "ROLLOVER WRAPPERS")"
             printf '\n%s\n' "$_ROLLOVER_MARKER_START
 set -x AUTOSPEC_AUTO_ROLLOVER 1
 if test \"\$AUTOSPEC_AUTO_ROLLOVER\" = \"1\"; and command -v autospec-session >/dev/null 2>&1
-    function claude; autospec-session claude \$argv; end
-    function codex; autospec-session codex \$argv; end
-    function opencode; autospec-session opencode \$argv; end
+$fish_wrappers
 end
 $_ROLLOVER_MARKER_END" >> "$fish_config"
             info "  auto-rollover block added to $fish_config"
@@ -1584,6 +1596,7 @@ skills/autospec-run/scripts/fab-route.sh::fab-route.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
 skills/autospec-run/scripts/run-groom-preflight.sh::run-groom-preflight.sh \
 skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \
+skills/autospec-compose-normalize/scripts/workflow-guard.sh::autospec-compose-normalize-guard.sh \
 skills/autospec-doc/scripts/doc-orchestrator-entry.mjs::doc-orchestrator.mjs \
 skills/autospec-harmonize/scripts/harmonize.sh::harmonize.sh \
 skills/autospec-harmonize/scripts/design-discover.sh::design-discover.sh \
@@ -1770,7 +1783,7 @@ copy_runtime_subdirs() {
     runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] copy_runtime_subdirs: would copy runtime libs + scripts/explore-research/ to $autospec_scripts_dir/"
+        info "[dry-run] copy_runtime_subdirs: would copy runtime libs + harness table + scripts/explore-research/ to $autospec_scripts_dir/"
         return 0
     fi
 
@@ -1785,6 +1798,10 @@ copy_runtime_subdirs() {
         fi
     done
 
+    harness_config_dir="${AUTOSPEC_CONFIG_DIR:-$HOME/.autospec/config}"
+    mkdir -p "$harness_config_dir"
+    cp "$REPO_ROOT/config/harness-runtime-aliases.tsv" "$harness_config_dir/"
+
     if [ -d "$REPO_ROOT/scripts/explore-research" ]; then
         mkdir -p "$autospec_scripts_dir/explore-research"
         cp -R "$REPO_ROOT/scripts/explore-research/." "$autospec_scripts_dir/explore-research/"
@@ -1792,7 +1809,7 @@ copy_runtime_subdirs() {
     else
         warn "copy_runtime_subdirs: $REPO_ROOT/scripts/explore-research not found; skipping"
     fi
-    info "copy_runtime_subdirs: copied runtime libs + explore-research to $autospec_scripts_dir/"
+    info "copy_runtime_subdirs: copied runtime libs + harness table + explore-research to $autospec_scripts_dir/"
 }
 
 # Integration bootstrap: pull autospec (if --update) + turbo, before per-skill installers run.
