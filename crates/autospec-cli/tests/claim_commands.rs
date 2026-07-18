@@ -1,4 +1,5 @@
 use autospec_core::claim::RunStateRecord;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,12 +19,30 @@ fn temp_dir(prefix: &str) -> std::path::PathBuf {
 }
 
 fn write_executable(path: &std::path::Path, contents: &str) {
-    std::fs::write(path, contents).expect("fake command");
-    let mut permissions = std::fs::metadata(path)
+    publish_executable(path, contents.as_bytes());
+}
+
+fn publish_executable(path: &std::path::Path, contents: &[u8]) {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    let temporary = path.with_extension(format!("tmp-{}-{suffix}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .expect("fake command temporary");
+    file.write_all(contents).expect("fake command");
+    drop(file);
+    let mut permissions = std::fs::metadata(&temporary)
         .expect("fake command metadata")
         .permissions();
     permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).expect("fake command permissions");
+    std::fs::set_permissions(&temporary, permissions).expect("fake command permissions");
+    std::fs::rename(temporary, path).expect("fake command publish");
+    // ZFS can briefly reject exec immediately after the final writer closes.
+    std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
 fn path_with(bin: &std::path::Path) -> String {
