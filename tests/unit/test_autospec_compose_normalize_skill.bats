@@ -199,3 +199,21 @@ write_lookup_documents() {
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
+
+@test "release accepts an immediate claim handoff to a different owner" {
+  state="$BATS_TEST_TMPDIR/handoff-state"
+  common=(env AUTOSPEC_CLAIM_GUARD=off AUTOSPEC_STATE_DIR="$state" \
+    AUTOSPEC_REPO=example/autospec AUTOSPEC_CLAIM_GUARD_SH="$REPO_ROOT/scripts/claim-guard.sh")
+
+  run "${common[@]}" "$WORKFLOW_GUARD" claim acquire owner-a compose.yaml
+  [ "$status" -eq 0 ]
+  run "${common[@]}" "$WORKFLOW_GUARD" claim release owner-a compose.yaml
+  [ "$status" -eq 0 ]
+  run "${common[@]}" "$WORKFLOW_GUARD" claim acquire owner-b compose.yaml
+  [ "$status" -eq 0 ]
+
+  run "${common[@]}" "$WORKFLOW_GUARD" claim release owner-a compose.yaml
+  [ "$status" -eq 0 ]
+  run "${common[@]}" "$WORKFLOW_GUARD" claim verify owner-b compose.yaml
+  [ "$status" -eq 0 ]
+}

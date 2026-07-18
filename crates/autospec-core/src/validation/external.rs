@@ -1130,14 +1130,13 @@ fn block_expansion_result(
     commands: Vec<CheckResult>,
     failure_message: Option<String>,
 ) -> CheckResult {
-    let digest_input = commands
+    let mut digest_input = commands
         .iter()
         .flat_map(|result| result.output_digest.bytes().chain(std::iter::once(b'\n')))
         .collect::<Vec<_>>();
-    let digest = failure_message.as_ref().map_or_else(
-        || output_digest(&digest_input, &[]),
-        |message| output_digest(&[], message.as_bytes()),
-    );
+    if let Some(message) = &failure_message {
+        digest_input.extend_from_slice(message.as_bytes());
+    }
 
     CheckResult::completed(
         id,
@@ -1151,7 +1150,7 @@ fn block_expansion_result(
             .map(|result| result.stderr_bytes)
             .sum::<usize>()
             + failure_message.as_ref().map_or(0, |message| message.len()),
-        digest,
+        output_digest(&digest_input, &[]),
     )
 }
 
@@ -6458,11 +6457,27 @@ mod tests {
             "only SKILL expansion and hashing run"
         );
         assert_eq!(result.stderr_bytes, expected.len());
-        assert_eq!(
+        assert_ne!(
             result.output_digest,
             output_digest(&[], expected.as_bytes())
         );
         fs::remove_dir_all(root).expect("remove block expansion fixture");
+    }
+
+    #[test]
+    fn block_expansion_failure_digest_preserves_child_evidence() {
+        let child = CheckResult::completed("child", true, 0, 0, 1, 5, 0, "child-output-digest");
+        let mut evidence = b"child-output-digest\n".to_vec();
+        evidence.extend_from_slice(b"missing golden");
+
+        let result = block_expansion_result(
+            "check_block_expansion",
+            true,
+            vec![child],
+            Some("missing golden".to_string()),
+        );
+
+        assert_eq!(result.output_digest, output_digest(&evidence, &[]));
     }
 
     #[test]

@@ -131,12 +131,14 @@ verify_claims() {
 }
 
 verify_released() {
-    local token=$1 status target key
+    local token=$1 status target key owner
     shift
     status=$(run_claim_guard "$token" status)
+    owner="owner=$token"
     for target in "$@"; do
         key=$(claim_key "$target")
-        if awk -F '\t' -v key="$key" '$1 == key { found=1 } END { exit !found }' <<<"$status"; then
+        if awk -F '\t' -v key="$key" -v owner="$owner" \
+            '$1 == key && $2 == owner { found=1 } END { exit !found }' <<<"$status"; then
             printf 'code_health:compose_claim_not_released key=%s\n' "$key" >&2
             return 1
         fi
