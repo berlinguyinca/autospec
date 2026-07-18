@@ -85,20 +85,30 @@ select another migration.
 
 ```bash
 MARKER="<!-- autospec-compose-fingerprint: $FINGERPRINT -->"
-gh issue list --state all --limit 200 --search "autospec-compose-fingerprint in:body" \
-  --json number,state,url,body
-gh pr list --state all --limit 200 --search "autospec-compose-fingerprint in:body" \
-  --json number,state,mergedAt,url,body
+WORKFLOW_GUARD="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-compose-normalize-guard.sh"
+LOOKUP_RESULTS=$("$WORKFLOW_GUARD" lookup "$FINGERPRINT")
 ```
 
+The guard searches the exact 64-character fingerprint in each body, then filters for
+the full marker. Its bounded result set therefore cannot be displaced by hundreds of
+unrelated generic Compose migrations.
+
 - For a matching open issue or pull request, reuse it. A managed invocation waits for
-  its normal completion and retries the check; a direct invocation prints both known
-  URLs and exits.
+  its normal completion and retries the check; a direct invocation prints every known
+  URL and exits.
+- For a closed issue, run `gh issue reopen <number>` and reuse it. For a closed,
+  unmerged pull request, run `gh pr reopen <number>` and reuse it when GitHub permits.
+  If reopening the pull request fails, print its URL as a terminal recovery blocker;
+  never create a replacement issue or pull request for that fingerprint.
 - For a matching merged pull request, fetch and merge current `origin/main` into the
   active feature worktree, then rerun the check before `env up`.
 - Never create another migration when either exact match exists.
 - If no match exists, a direct invocation reports that state and exits. Only an
   Autospec-managed invocation continues.
+
+For every direct unmanaged invocation, run `"$WORKFLOW_GUARD" direct-refuse
+"$FINGERPRINT"` and return on its expected exit status `3`. This command prints all
+matching URLs (or the explicit no-match state) and never invokes runtime provisioning.
 
 This is the exactly one migration issue, branch, worktree, and pull request invariant
 for a fingerprint.
@@ -140,26 +150,20 @@ IFS='
 set -- $CLAIM_INPUTS
 IFS=$OLD_IFS
 CLAIMS_HELD=0
+COMPOSE_CLAIM_SESSION="${AUTOSPEC_SESSION_ID:-}"
+if [ -z "$COMPOSE_CLAIM_SESSION" ]; then
+  COMPOSE_CLAIM_SESSION=$("$WORKFLOW_GUARD" new-session-token)
+fi
 release_compose_claims() {
   if [ "${CLAIMS_HELD:-0}" = 1 ]; then
-    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh" release "$@"
+    "$WORKFLOW_GUARD" claim release "$COMPOSE_CLAIM_SESSION" "$@"
     CLAIMS_HELD=0
   fi
 }
 trap 'release_compose_claims "$@"' EXIT HUP INT TERM
-AUTOSPEC_CLAIM_GUARD=strict bash \
-  "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh" acquire "$@"
+"$WORKFLOW_GUARD" claim acquire "$COMPOSE_CLAIM_SESSION" "$@"
 CLAIMS_HELD=1
-CLAIM_STATUS=$(bash \
-  "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh" status)
-for CLAIM_TARGET in "$@"; do
-  CLAIM_KEY="path:${CLAIM_TARGET#./}"
-  if ! printf '%s\n' "$CLAIM_STATUS" | awk -F '\t' -v key="$CLAIM_KEY" \
-      '$1 == key { found=1 } END { exit !found }'; then
-    echo "code_health:compose_claim_not_persisted key=$CLAIM_KEY" >&2
-    exit 1
-  fi
-done
+"$WORKFLOW_GUARD" claim verify "$COMPOSE_CLAIM_SESSION" "$@"
 ```
 
 The acquire is all-or-nothing. On conflict, release nothing, print the owning session,
@@ -172,6 +176,10 @@ refresh the claims through merge. Call
 
 After claims succeed, repeat the exact fingerprint lookup. This closes the race between
 lookup and acquire. If a match appeared, release and reuse it.
+
+```bash
+LOOKUP_RESULTS_AFTER_CLAIM=$("$WORKFLOW_GUARD" lookup "$FINGERPRINT")
+```
 
 Create one issue with label `needs-classify`; do not add `auto-implement` directly. Its
 body must include the fingerprint marker and these lintable sections:
@@ -239,7 +247,7 @@ At every existing CI/heartbeat poll, refresh the same lease without starting ano
 background loop:
 
 ```bash
-bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh" refresh
+"$WORKFLOW_GUARD" claim refresh "$COMPOSE_CLAIM_SESSION" "$@"
 ```
 
 Merge only after required CI and review pass, using the repository's authorized

@@ -18,6 +18,7 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=
 SHARED_SCRIPT_FILES="claim-guard.sh lint-issue.sh worktree-guard.sh"
+SKILL_SCRIPT_FILES="workflow-guard.sh"
 
 err() { printf 'error: %s\n' "$*" >&2; }
 info() { printf '%s\n' "$*"; }
@@ -83,6 +84,13 @@ fetch_sources() {
             exit 1
         fi
     done
+    for rel in $SKILL_SCRIPT_FILES; do
+        if ! curl -fsSL "$SKILL_RAW_BASE/scripts/$rel" \
+            -o "$TMP_FETCH_DIR/scripts/$rel"; then
+            err "failed to download $SKILL_RAW_BASE/scripts/$rel"
+            exit 1
+        fi
+    done
     SKILL_DIR=$TMP_FETCH_DIR
 }
 
@@ -122,6 +130,14 @@ install_shared_scripts() {
     for rel in $SHARED_SCRIPT_FILES; do
         install_one "$src_dir/$rel" "$HOME/.autospec/scripts/$rel" || return 1
         run chmod +x "$HOME/.autospec/scripts/$rel"
+    done
+}
+
+install_skill_scripts() {
+    for rel in $SKILL_SCRIPT_FILES; do
+        install_one "$SKILL_DIR/scripts/$rel" \
+            "$HOME/.autospec/scripts/autospec-compose-normalize-guard.sh"
+        run chmod +x "$HOME/.autospec/scripts/autospec-compose-normalize-guard.sh"
     done
 }
 
@@ -178,6 +194,7 @@ fi
 info ""
 info "Shared autospec helper scripts:"
 install_shared_scripts
+install_skill_scripts
 
 CLAUDE_DIR=${CLAUDE_CONFIG_DIR:-$HOME/.claude}
 OPENCODE_DIR=${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}

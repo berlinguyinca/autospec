@@ -71,6 +71,10 @@ if [ "$HARNESS" = codex ] || [ "$HARNESS" = all ]; then
     remove_one "$CODEX_DIR/prompts/$SKILL_NAME.md"
     remove_one "$CODEX_DIR/skills/$SKILL_NAME/SKILL.md"
 fi
+if [ "$HARNESS" = all ]; then
+    info "Shared workflow helper:"
+    remove_one "$HOME/.autospec/scripts/autospec-compose-normalize-guard.sh"
+fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
     info "Dry run complete. No files were removed."

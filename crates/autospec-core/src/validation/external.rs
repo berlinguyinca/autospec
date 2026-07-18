@@ -1130,13 +1130,14 @@ fn block_expansion_result(
     commands: Vec<CheckResult>,
     failure_message: Option<String>,
 ) -> CheckResult {
-    let mut digest_input = commands
+    let digest_input = commands
         .iter()
         .flat_map(|result| result.output_digest.bytes().chain(std::iter::once(b'\n')))
         .collect::<Vec<_>>();
-    if let Some(message) = &failure_message {
-        digest_input.extend_from_slice(message.as_bytes());
-    }
+    let digest = failure_message.as_ref().map_or_else(
+        || output_digest(&digest_input, &[]),
+        |message| output_digest(&[], message.as_bytes()),
+    );
 
     CheckResult::completed(
         id,
@@ -1150,7 +1151,7 @@ fn block_expansion_result(
             .map(|result| result.stderr_bytes)
             .sum::<usize>()
             + failure_message.as_ref().map_or(0, |message| message.len()),
-        output_digest(&digest_input, &[]),
+        digest,
     )
 }
 
@@ -6442,13 +6443,25 @@ mod tests {
             "<!-- autospec-block:startup-self-update SKILL_NAME=demo -->\n",
         )
         .expect("write markered member fixture");
-        fs::write(goldens.join("demo.SKILL.md.sha256"), "mismatch\n")
-            .expect("write required skill golden");
+        fs::write(
+            goldens.join("demo.SKILL.md.sha256"),
+            "bc70e26f40b8816eb177813dda1f5f529a27a4641d45aa19cae2348a8c6a5fe9\n",
+        )
+        .expect("write required skill golden");
 
         let result = run_block_expansion("check", true, &root);
+        let expected = "check_block_expansion: markered member skills/demo/codex/prompt.md has no golden (tests/fixtures/skill-goldens/demo.codex.prompt.md.sha256 missing — fail closed)";
 
         assert!(result.is_failure());
-        assert!(result.stderr_bytes > 0);
+        assert_eq!(
+            result.spawn_count, 2,
+            "only SKILL expansion and hashing run"
+        );
+        assert_eq!(result.stderr_bytes, expected.len());
+        assert_eq!(
+            result.output_digest,
+            output_digest(&[], expected.as_bytes())
+        );
         fs::remove_dir_all(root).expect("remove block expansion fixture");
     }
 
