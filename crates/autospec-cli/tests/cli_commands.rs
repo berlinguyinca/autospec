@@ -25,6 +25,18 @@ fn help_usage_invocation(help: &str) -> Option<&str> {
         .find(|line| !line.is_empty())
 }
 
+/// Parses lint finding lines of the form `CODE:path:line: message` and
+/// returns the set of finding codes present. Parsing the structured
+/// `CODE:` prefix (rather than searching for the code as a raw substring
+/// anywhere in stdout) avoids false matches between codes that share a
+/// suffix, e.g. `VACUOUS_GREP_INVERSE_OR_TRUE` vs `VACUOUS_OR_TRUE`.
+fn lint_finding_codes(stdout: &str) -> std::collections::HashSet<&str> {
+    stdout
+        .lines()
+        .filter_map(|line| line.split_once(':').map(|(code, _)| code))
+        .collect()
+}
+
 #[test]
 fn help_command_table_parser_returns_command_column_only() {
     let help = "COMMANDS:\n    init           Initialize AutoSpec metadata\n    growth-report  Render metrics\n\nOPTIONS:\n    -h, --help       Print help\n";
@@ -245,10 +257,11 @@ fn lint_implementation_pre_commit_reads_only_staged_diff_and_enables_both_test_g
     assert_eq!(output.status.code(), Some(3));
     assert!(output.stderr.is_empty());
     assert_eq!(std::fs::read_to_string(log).unwrap(), "diff\n--cached\n");
-    assert!(stdout.contains("VACUOUS_GREP_INVERSE_OR_TRUE:"));
-    assert!(!stdout.contains("VACUOUS_OR_TRUE:"));
-    assert!(stdout.contains("VACUOUS_NO_ASSERT:"));
-    assert!(stdout.contains("ASSERTION_DENSITY:"));
+    let codes = lint_finding_codes(&stdout);
+    assert!(codes.contains("VACUOUS_GREP_INVERSE_OR_TRUE"));
+    assert!(!codes.contains("VACUOUS_OR_TRUE"));
+    assert!(codes.contains("VACUOUS_NO_ASSERT"));
+    assert!(codes.contains("ASSERTION_DENSITY"));
 }
 
 #[test]
