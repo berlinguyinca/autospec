@@ -93,6 +93,25 @@ pub(super) fn planning_identity(
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))
 }
 
+pub(super) fn teardown_plan(
+    repo: &Path,
+    requested_mode: &str,
+) -> Result<ResourcePlan, CommandFailure> {
+    let identity = planning_identity(repo, requested_mode)?;
+    RuntimeManifest::resource_plan_for_repo(repo, &identity)
+        .or_else(|error| {
+            if error
+                .to_string()
+                .contains("resource plan is empty and selected mode has no command")
+            {
+                ResourcePlan::new(identity, None, None)
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
 fn validate_without_plan(
     identity: &EnvironmentIdentity,
     maven: Option<&str>,

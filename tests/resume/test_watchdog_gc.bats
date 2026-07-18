@@ -36,6 +36,10 @@ setup() {
     # Records of git worktree remove invocations.
     export REMOVE_LOG="$TEST_TMP/removed.log"
     : > "$REMOVE_LOG"
+    export ACTION_LOG="$TEST_TMP/actions.log"
+    : > "$ACTION_LOG"
+    export RUNTIME_CLEANUP_LOG="$TEST_TMP/runtime-cleanup.log"
+    : > "$RUNTIME_CLEANUP_LOG"
 
     # gh mock state.
     export GH_ISSUE_STATE="CLOSED"   # state of the issue
@@ -52,6 +56,7 @@ setup() {
     write_hostname_mock
     write_gh_mock
     write_git_mock
+    write_runtime_cleanup_mock
 }
 
 teardown() { rm -rf "$TEST_TMP"; }
@@ -95,6 +100,7 @@ write_git_mock() {
 #!/usr/bin/env bash
 REAL_GIT="$REAL_GIT"
 REMOVE_LOG="$REMOVE_LOG"
+ACTION_LOG="$ACTION_LOG"
 EOF
     cat >> "$MOCK_DIR/git" <<'EOF'
 # Find a -C <dir> target if present (we ignore the dir; mock is global state).
@@ -112,6 +118,7 @@ if [ "${args[0]}" = "worktree" ] || { [ "${args[0]}" = "-C" ] && [ "${args[2]}" 
       # last arg is the path
       path="${args[$((${#args[@]}-1))]}"
       printf '%s\n' "$path" >> "$REMOVE_LOG"
+      printf 'git-remove\t%s\n' "$path" >> "$ACTION_LOG"
       exit 0
       ;;
     *)
@@ -146,6 +153,17 @@ EOF
     chmod +x "$MOCK_DIR/git"
 }
 
+write_runtime_cleanup_mock() {
+    export AUTOSPEC_RUNTIME_WORKTREE_CLEANUP="$MOCK_DIR/autospec-runtime-worktree-cleanup.sh"
+    cat > "$AUTOSPEC_RUNTIME_WORKTREE_CLEANUP" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$1" >> "$RUNTIME_CLEANUP_LOG"
+printf 'runtime-cleanup\t%s\n' "$1" >> "$ACTION_LOG"
+exit "${RUNTIME_CLEANUP_EXIT:-0}"
+EOF
+    chmod +x "$AUTOSPEC_RUNTIME_WORKTREE_CLEANUP"
+}
+
 # Create a fake /tmp/wt-* worktree directory under the GC scan root.
 make_worktree() {
     local name="$1"
@@ -175,6 +193,7 @@ was_removed() { grep -qF "$1" "$REMOVE_LOG"; }
     run_gc
     [ "$status" -eq 0 ]
     ! was_removed "$wt"
+    [ ! -s "$RUNTIME_CLEANUP_LOG" ]
 }
 
 @test "gc_in_progress_not_pruned: an in-progress-this-host worktree with a fresh heartbeat is NOT removed" {
@@ -188,6 +207,7 @@ was_removed() { grep -qF "$1" "$REMOVE_LOG"; }
     run_gc
     [ "$status" -eq 0 ]
     ! was_removed "$wt"
+    [ ! -s "$RUNTIME_CLEANUP_LOG" ]
 }
 
 @test "gc_clean_closed_pruned: clean + closed/unlabeled issue + no live heartbeat IS removed via git worktree remove --force" {
@@ -201,4 +221,18 @@ was_removed() { grep -qF "$1" "$REMOVE_LOG"; }
     run_gc
     [ "$status" -eq 0 ]
     was_removed "$wt"
+    [ "$(cat "$RUNTIME_CLEANUP_LOG")" = "$wt" ]
+    [ "$(cut -f1 "$ACTION_LOG" | paste -sd, -)" = "runtime-cleanup,git-remove" ]
+}
+
+@test "gc_runtime_cleanup_failure_preserves_the_worktree" {
+    wt="$(make_worktree wt-703)"
+    export GIT_BRANCH="feat/autospec-issue-703"
+    export RUNTIME_CLEANUP_EXIT=23
+
+    run_gc
+
+    [ "$status" -eq 0 ]
+    grep -Fxq "$wt" "$RUNTIME_CLEANUP_LOG"
+    ! was_removed "$wt"
 }

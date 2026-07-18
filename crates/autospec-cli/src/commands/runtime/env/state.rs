@@ -153,6 +153,31 @@ impl EnvironmentLease {
         })?;
         Ok(Self { _file: file })
     }
+
+    pub(super) fn try_acquire(environment_dir: &Path) -> Result<Option<Self>, CommandFailure> {
+        fs::create_dir_all(environment_dir).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not create runtime environment {}: {error}",
+                environment_dir.display()
+            ))
+        })?;
+        let path = environment_dir.join("lease.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(CommandFailure::diagnostic(format!(
+                "could not try runtime environment lease {}: {error}",
+                path.display()
+            ))),
+        }
+    }
 }
 
 pub(super) fn write_runtime_state(

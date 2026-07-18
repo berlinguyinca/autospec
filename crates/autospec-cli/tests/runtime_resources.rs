@@ -821,6 +821,40 @@ fn down_without_owned_state_never_runs_manifest_cleanup() {
 }
 
 #[test]
+fn whole_environment_disable_cannot_disable_down_for_owned_state() {
+    let fixture =
+        RuntimeFixture::with_manifest("version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n");
+    let up = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    assert!(
+        up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+
+    let down = fixture
+        .command()
+        .env("AUTOSPEC_ENV_DISABLE", "1")
+        .args(["runtime", "env", "down", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert!(
+        down.status.success(),
+        "{}",
+        String::from_utf8_lossy(&down.stderr)
+    );
+    assert!(std::fs::read_dir(&fixture.state_root)
+        .map(|mut entries| entries.all(|entry| !entry.unwrap().path().join("owner.json").exists()))
+        .unwrap_or(true));
+}
+
+#[test]
 fn status_is_read_only_without_owned_state() {
     let fixture = RuntimeFixture::with_manifest(
         "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'printf unsafe > down.txt'\n",
@@ -836,6 +870,87 @@ fn status_is_read_only_without_owned_state() {
     assert_eq!(output.status.code(), Some(3));
     assert!(!fixture.root.join("down.txt").exists());
     assert!(!fixture.state_root.exists());
+}
+
+#[test]
+fn gc_removes_stale_empty_owned_state_even_when_isolation_is_disabled() {
+    let fixture = RuntimeFixture::empty();
+    let stale_repo = fixture.root.join("removed-worktree");
+    write_gc_state(&fixture, &stale_repo, "env-stale", "owner-a", "env-stale");
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_ENV_DISABLE", "1")
+        .args(["runtime", "env", "gc", "--repo"])
+        .arg(&stale_repo)
+        .output()
+        .expect("runtime env gc starts");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!fixture.state_root.join("env-stale").exists());
+}
+
+#[test]
+fn gc_preserves_ambiguous_owner_mismatch_with_recovery_command() {
+    let fixture = RuntimeFixture::empty();
+    let stale_repo = fixture.root.join("removed-worktree");
+    write_gc_state(&fixture, &stale_repo, "env-stale", "owner-a", "env-foreign");
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "gc", "--repo"])
+        .arg(&stale_repo)
+        .output()
+        .expect("runtime env gc starts");
+
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("RESOURCE_OWNER_MISMATCH"), "{stderr}");
+    assert!(
+        stderr.contains("autospec runtime env gc --repo"),
+        "{stderr}"
+    );
+    assert!(fixture.state_root.join("env-stale").exists());
+}
+
+fn write_gc_state(
+    fixture: &RuntimeFixture,
+    stale_repo: &Path,
+    environment_id: &str,
+    owner_key: &str,
+    inventory_environment_id: &str,
+) {
+    let directory = fixture.state_root.join(environment_id);
+    std::fs::create_dir_all(&directory).unwrap();
+    let identity = EnvironmentIdentity {
+        canonical_repo: stale_repo.to_path_buf(),
+        mode: "local".into(),
+        generation: Some("stale-generation".into()),
+        environment_id: environment_id.into(),
+        owner_key: owner_key.into(),
+    };
+    let plan = ResourcePlan::new(identity.clone(), None, None).unwrap();
+    let owner = EnvironmentOwner {
+        schema_version: 1,
+        identity,
+        host: "test-host".into(),
+        created_at_unix_ms: 1,
+        manifest_digest: plan.digest.clone(),
+        lifecycle: EnvironmentLifecycle::Active,
+    };
+    let inventory = ResourceInventory {
+        schema_version: 1,
+        environment_id: inventory_environment_id.into(),
+        ..ResourceInventory::default()
+    };
+    autospec_core::runtime_env::write_json_atomic(&directory.join("owner.json"), &owner).unwrap();
+    autospec_core::runtime_env::write_json_atomic(&directory.join("plan.json"), &plan).unwrap();
+    autospec_core::runtime_env::write_json_atomic(&directory.join("inventory.json"), &inventory)
+        .unwrap();
 }
 
 #[test]
@@ -876,10 +991,10 @@ fn owner_lifecycle_is_persisted_before_provision_and_teardown_effects() {
 
     let environment = std::fs::read_dir(&fixture.state_root)
         .unwrap()
-        .next()
-        .unwrap()
-        .unwrap()
-        .path();
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.join("owner.json").is_file())
+        .unwrap();
     let active: EnvironmentOwner =
         autospec_core::runtime_env::read_json(&environment.join("owner.json")).unwrap();
     assert_eq!(active.lifecycle, EnvironmentLifecycle::Active);

@@ -10,6 +10,7 @@ mod identity;
 mod manifest;
 mod manifest_v2;
 mod maven;
+mod ports;
 mod resource_plan;
 mod resources;
 mod session;
@@ -23,6 +24,10 @@ pub use diagnostic::IsolationDiagnostic;
 pub use identity::{load_generation_token, EnvironmentIdentity};
 pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
 pub use maven::{MavenArgPlatform, MavenArgs, MavenPurgeTarget};
+pub use ports::{
+    GcDecision, GcInventorySnapshot, GcOwnerSnapshot, GcPolicy, PortClaim, PortClaimError,
+    PortRegistry,
+};
 pub use resources::{
     read_json, write_file_atomic, write_json_atomic, ComposeExport, ComposeIsolation, ComposePlan,
     ComposeResourceConfig, EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue,

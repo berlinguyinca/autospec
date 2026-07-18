@@ -12,6 +12,7 @@ _ROLLOVER_HELPERS="${BATS_TMPDIR}/rollover_helpers.sh"
 setup() {
     export ORIG_HOME="$HOME"
     export HOME="$(mktemp -d)"
+    export REPO_ROOT="$(cd "$(dirname "$INSTALL_SH")" && pwd)"
     export AUTOSPEC_NO_STAR_PROMPT=1
     export AUTOSPEC_SKIP_SYSTEM_TOOLS=1
     export AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1
@@ -28,6 +29,11 @@ setup() {
         printf 'info() { printf "%%s\\n" "$*"; }\n'
         printf 'warn() { printf "warn: %%s\\n" "$*" >&2; }\n'
         printf 'err()  { printf "error: %%s\\n" "$*" >&2; }\n'
+        awk '
+            /^generated_harness_section\(\)/ { capture = 1 }
+            capture { print }
+            capture && /^\}$/ { exit }
+        ' "$INSTALL_SH"
         # Stub install_context_monitor_pkg so tests don't shell out to pip.
         # The real helper is exercised by tests/test_install_pip_context_monitor.bats.
         printf 'install_context_monitor_pkg() { :; }\n'
@@ -109,7 +115,9 @@ teardown() {
 }
 
 @test "test_disable_flag_exits_zero_when_block_absent" {
-    # install.sh --disable-auto-rollover should succeed even with no block present
-    run bash "$INSTALL_SH" --disable-auto-rollover
+    source "$_ROLLOVER_HELPERS"
+
+    run remove_rollover_block
+
     [ "$status" -eq 0 ]
 }

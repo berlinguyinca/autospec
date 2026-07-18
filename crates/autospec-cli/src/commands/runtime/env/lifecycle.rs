@@ -91,6 +91,11 @@ pub(super) fn teardown_locked(
         write_lifecycle(&layout, &mut owner, EnvironmentLifecycle::Active)?;
         return Ok(());
     }
+    let state_root = layout
+        .environment_dir
+        .parent()
+        .expect("runtime environment has a state root");
+    super::gc::release_ports(state_root, &context.environment_id)?;
     for path in [&layout.env, &layout.inventory, &layout.plan] {
         if let Err(error) = remove_file_if_present(path) {
             return cleanup_failed(&layout, Some(&mut owner), error);

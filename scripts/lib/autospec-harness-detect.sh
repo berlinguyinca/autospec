@@ -38,6 +38,27 @@ if [ -n "${_AUTOSPEC_HARNESS_DETECT_LOADED:-}" ]; then
 fi
 _AUTOSPEC_HARNESS_DETECT_LOADED=1
 
+_autospec_harness_table() {
+    if [ -n "${AUTOSPEC_HARNESS_RUNTIME_ALIASES:-}" ]; then
+        printf '%s' "$AUTOSPEC_HARNESS_RUNTIME_ALIASES"
+        return
+    fi
+    local script_dir
+    script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+    for candidate in \
+        "$script_dir/../../config/harness-runtime-aliases.tsv" \
+        "$script_dir/harness-runtime-aliases.tsv"; do
+        if [ -f "$candidate" ]; then printf '%s' "$candidate"; return; fi
+    done
+    return 1
+}
+
+autospec_harness_supported_ids() {
+    local table
+    table="$(_autospec_harness_table)" || return 1
+    awk -F '\t' 'NF == 4 { print $1 }' "$table"
+}
+
 # ── canonicalize (lifted from refine-prompt.sh / autospec-continue.sh) ──
 _autospec_harness_canonicalize() {
     local p="$1"
@@ -113,9 +134,10 @@ autospec_harness_dispatcher_safe() {
 # when nothing is detected so existing behavior is preserved.
 autospec_harness_detect() {
     if [ -n "${AUTOSPEC_HANDOFF_DISPATCHER_KIND:-}" ]; then
-        case "$AUTOSPEC_HANDOFF_DISPATCHER_KIND" in
-            claude|codex|opencode) printf '%s' "$AUTOSPEC_HANDOFF_DISPATCHER_KIND"; return 0 ;;
-        esac
+        if autospec_harness_binary_for "$AUTOSPEC_HANDOFF_DISPATCHER_KIND" >/dev/null; then
+            printf '%s' "$AUTOSPEC_HANDOFF_DISPATCHER_KIND"
+            return 0
+        fi
     fi
     local probe_root="${AUTOSPEC_HARNESS_PROBE_ROOT:-$HOME}"
     if [ -d "$probe_root/.claude/skills" ]; then
@@ -127,9 +149,13 @@ autospec_harness_detect() {
     if [ -d "$probe_root/.config/opencode/agent" ] || [ -d "$probe_root/.config/opencode" ]; then
         printf 'opencode'; return 0
     fi
-    if command -v claude   >/dev/null 2>&1; then printf 'claude';   return 0; fi
-    if command -v codex    >/dev/null 2>&1; then printf 'codex';    return 0; fi
-    if command -v opencode >/dev/null 2>&1; then printf 'opencode'; return 0; fi
+    local kind binary
+    while IFS= read -r kind; do
+        binary="$(autospec_harness_binary_for "$kind")" || continue
+        if command -v "$binary" >/dev/null 2>&1; then printf '%s' "$kind"; return 0; fi
+    done <<EOF
+$(autospec_harness_supported_ids)
+EOF
     # Default fallback so callers don't NPE; the binary-resolve step below
     # will exit 3 when no dispatcher binary is present.
     printf 'claude'
@@ -139,12 +165,9 @@ autospec_harness_detect() {
 # autospec_harness_binary_for <kind>
 # Emits the canonical binary name for the harness on stdout.
 autospec_harness_binary_for() {
-    case "$1" in
-        claude)   printf 'claude'   ;;
-        codex)    printf 'codex'    ;;
-        opencode) printf 'opencode' ;;
-        *) return 1 ;;
-    esac
+    local table
+    table="$(_autospec_harness_table)" || return 1
+    awk -F '\t' -v id="$1" '$1 == id { print $2; found=1; exit } END { exit found ? 0 : 1 }' "$table"
 }
 
 # autospec_harness_resolve_dispatcher
