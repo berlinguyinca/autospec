@@ -1307,8 +1307,7 @@ _autospec_conductor_inferred_source_summary() {
 
     local bundle
     bundle="$(REPO_ROOT="$repo_root" AUTOSPEC_HOME="$autospec_home" \
-        bash "$sources_cmd" --repo-root "$repo_root" --autospec-home "$autospec_home" \
-        2>/dev/null || true)"
+        bash "$sources_cmd" 2>/dev/null || true)"
     if [ -z "$bundle" ]; then
         printf '0 none\n'
         return 0
