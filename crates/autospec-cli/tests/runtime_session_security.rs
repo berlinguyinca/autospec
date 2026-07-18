@@ -29,18 +29,41 @@ impl RuntimeFixture {
         command.env("AGENT_ENV_STATE_ROOT", &self.state_root);
         command
     }
+
+    fn healthy(command: &str, down: &str) -> Self {
+        let fixture = Self::with_manifest(
+            "version: 1\nmodes:\n  local:\n    command: sh .autospec/runtime-up.sh\n    down: sh .autospec/runtime-down.sh\n",
+        );
+        std::fs::write(
+            fixture.root.join(".autospec/runtime-up.sh"),
+            format!(
+                "set -eu\n{command}\npython3 -m http.server \"$AGENT_FRONTEND_PORT\" > runtime-server.log 2>&1 &\nprintf '%s\\n' \"$!\" > runtime-server.pid\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            fixture.root.join(".autospec/runtime-down.sh"),
+            format!(
+                "set -eu\npid=$(cat runtime-server.pid)\nif /bin/kill -0 \"$pid\" 2>/dev/null; then /bin/kill \"$pid\"; fi\nrm -f runtime-server.pid\n{down}\n"
+            ),
+        )
+        .unwrap();
+        fixture
+    }
 }
 
 impl Drop for RuntimeFixture {
     fn drop(&mut self) {
+        stop_runtime_server(&self.root);
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
 #[test]
 fn session_worker_marker_is_absent_from_manifest_and_harness_commands() {
-    let fixture = RuntimeFixture::with_manifest(
-        "version: 1\nmodes:\n  local:\n    command: sh -c 'test -z \"${AUTOSPEC_RUNTIME_SESSION_WORKER-}${AUTOSPEC_RUNTIME_SESSION_HANDOFF-}${AUTOSPEC_RUNTIME_SESSION_TOKEN-}\"'\n    down: sh -c 'test -z \"${AUTOSPEC_RUNTIME_SESSION_WORKER-}${AUTOSPEC_RUNTIME_SESSION_HANDOFF-}${AUTOSPEC_RUNTIME_SESSION_TOKEN-}\"'\n",
+    let fixture = RuntimeFixture::healthy(
+        "test -z \"${AUTOSPEC_RUNTIME_SESSION_WORKER-}${AUTOSPEC_RUNTIME_SESSION_HANDOFF-}${AUTOSPEC_RUNTIME_SESSION_TOKEN-}\"",
+        "test -z \"${AUTOSPEC_RUNTIME_SESSION_WORKER-}${AUTOSPEC_RUNTIME_SESSION_HANDOFF-}${AUTOSPEC_RUNTIME_SESSION_TOKEN-}\"",
     );
 
     let output = fixture
@@ -62,9 +85,7 @@ fn session_worker_marker_is_absent_from_manifest_and_harness_commands() {
 #[cfg(unix)]
 #[test]
 fn stale_worker_marker_cannot_bypass_the_supervisor() {
-    let fixture = RuntimeFixture::with_manifest(
-        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'true'\n",
-    );
+    let fixture = RuntimeFixture::healthy("true", "true");
     let mut outer = fixture.command();
     outer
         .env("AUTOSPEC_RUNTIME_SESSION_WORKER", "1")
@@ -100,9 +121,7 @@ fn stale_worker_marker_cannot_bypass_the_supervisor() {
 #[test]
 fn heartbeat_signal_failure_or_reap_timeout_hold_ownership_until_release() {
     for (signal_exit, probe_exit) in [(42, 0), (0, 0), (42, 77)] {
-        let fixture = RuntimeFixture::with_manifest(
-        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'echo down >> down-count.txt'\n",
-    );
+        let fixture = RuntimeFixture::healthy("true", "echo down >> down-count.txt");
         let kill_log = fixture.root.join("kill-args.txt");
         let fake_bin = install_kill(&fixture.root, signal_exit, probe_exit);
         let inherited_path = std::env::var_os("PATH").unwrap_or_default();
@@ -172,9 +191,7 @@ fn heartbeat_signal_failure_or_reap_timeout_hold_ownership_until_release() {
 #[cfg(unix)]
 #[test]
 fn supervisor_group_signal_failure_leaves_worker_and_harness_owned() {
-    let fixture = RuntimeFixture::with_manifest(
-        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'echo down >> down-count.txt'\n",
-    );
+    let fixture = RuntimeFixture::healthy("true", "echo down >> down-count.txt");
     let kill_log = fixture.root.join("kill-args.txt");
     let fake_bin = install_kill(&fixture.root, 42, 0);
     let inherited_path = std::env::var_os("PATH").unwrap_or_default();
@@ -333,10 +350,17 @@ fn runtime_down(fixture: &RuntimeFixture) -> std::process::Output {
 fn environment_dir(fixture: &RuntimeFixture) -> PathBuf {
     std::fs::read_dir(&fixture.state_root)
         .unwrap()
-        .next()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.join("owner.json").is_file())
         .unwrap()
-        .unwrap()
-        .path()
+}
+
+fn stop_runtime_server(root: &Path) {
+    let Ok(pid) = std::fs::read_to_string(root.join("runtime-server.pid")) else {
+        return;
+    };
+    let _ = Command::new("/bin/kill").arg(pid.trim()).output();
 }
 
 fn line_count(path: &Path) -> usize {

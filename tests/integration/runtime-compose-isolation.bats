@@ -12,8 +12,19 @@ setup() {
 }
 
 teardown() {
-  if ! "$AUTOSPEC_BIN" runtime env down --repo "$TEST_ROOT/a" >/dev/null 2>&1; then :; fi
-  if ! "$AUTOSPEC_BIN" runtime env down --repo "$TEST_ROOT/b" >/dev/null 2>&1; then :; fi
+  local failed=0
+  if [ -n "${FORGED_VOLUME:-}" ]; then
+    if ! docker volume rm "$FORGED_VOLUME" >/dev/null 2>&1; then
+      failed=1
+    fi
+  fi
+  if ! "$AUTOSPEC_BIN" runtime env down --repo "$TEST_ROOT/a" >/dev/null 2>&1; then
+    failed=1
+  fi
+  if ! "$AUTOSPEC_BIN" runtime env down --repo "$TEST_ROOT/b" >/dev/null 2>&1; then
+    failed=1
+  fi
+  return "$failed"
 }
 
 wait_for_http() {
@@ -53,6 +64,23 @@ owned_count() {
   [ "$(jq '.volumes | length' "$dir_a/inventory.json")" -eq 2 ]
   volumes_a=($(jq -r '.volumes[].id' "$dir_a/inventory.json"))
   volumes_b=($(jq -r '.volumes[].id' "$dir_b/inventory.json"))
+
+  export FORGED_VOLUME="autospec-forged-anonymous-$BATS_TEST_NUMBER-$$"
+  docker volume create "$FORGED_VOLUME" >/dev/null
+  jq --arg id "$FORGED_VOLUME" '.volumes += [{logical_key:null,id:$id}]' \
+    "$dir_a/inventory.json" > "$dir_a/inventory.forged.json"
+  chmod 600 "$dir_a/inventory.forged.json"
+  mv "$dir_a/inventory.forged.json" "$dir_a/inventory.json"
+  run "$AUTOSPEC_BIN" runtime env gc --repo "$TEST_ROOT/a"
+  [ "$status" -eq 2 ]
+  [[ "$output" == RESOURCE_OWNER_MISMATCH:* ]]
+  docker volume inspect "$FORGED_VOLUME" >/dev/null
+  jq --arg id "$FORGED_VOLUME" '.volumes |= map(select(.id != $id))' \
+    "$dir_a/inventory.json" > "$dir_a/inventory.restored.json"
+  chmod 600 "$dir_a/inventory.restored.json"
+  mv "$dir_a/inventory.restored.json" "$dir_a/inventory.json"
+  docker volume rm "$FORGED_VOLUME" >/dev/null
+  unset FORGED_VOLUME
 
   touch "$TEST_ROOT/release-never"
   "$AUTOSPEC_BIN" runtime env session --repo "$TEST_ROOT/a" -- sh -c \

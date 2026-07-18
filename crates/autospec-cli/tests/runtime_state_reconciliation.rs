@@ -3,6 +3,9 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::fs::{symlink, PermissionsExt};
+
 use autospec_core::runtime_env::{
     write_json_atomic, EnvironmentLifecycle, EnvironmentOwner, ResourceInventory, ResourcePlan,
 };
@@ -14,10 +17,44 @@ struct RuntimeFixture {
     state_root: PathBuf,
 }
 
+struct SessionGuard(Option<std::process::Child>);
+
+impl SessionGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn id(&self) -> u32 {
+        self.0.as_ref().expect("session child exists").id()
+    }
+
+    fn wait_with_output(mut self) -> std::io::Result<std::process::Output> {
+        self.0
+            .take()
+            .expect("session child exists")
+            .wait_with_output()
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        let Some(mut child) = self.0.take() else {
+            return;
+        };
+        #[cfg(unix)]
+        let _ = Command::new("kill")
+            .args(["-TERM", &child.id().to_string()])
+            .output();
+        #[cfg(not(unix))]
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
 impl RuntimeFixture {
     fn counted() -> Self {
         Self::with_manifest(
-            "version: 1\nmodes:\n  local:\n    command: sh -c 'echo up >> up-count.txt'\n    down: sh -c 'echo down >> down-count.txt'\n",
+            "version: 1\nmodes:\n  local:\n    command: sh -c 'python3 -m http.server \"$AGENT_FRONTEND_PORT\" > server.log 2>&1 & echo $! > server.pid; echo up >> up-count.txt'\n    down: sh -c 'kill \"$(cat server.pid)\"; echo down >> down-count.txt'\n",
         )
     }
 
@@ -43,6 +80,7 @@ impl RuntimeFixture {
 
 impl Drop for RuntimeFixture {
     fn drop(&mut self) {
+        stop_fixture_server(&self.root);
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -138,7 +176,7 @@ fn identity_mismatch_fails_closed_without_cleanup() {
 #[test]
 fn cleanup_command_failure_persists_cleanup_failed_owner() {
     let fixture = RuntimeFixture::with_manifest(
-        "version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n    down: sh -c 'exit 42'\n",
+        "version: 1\nmodes:\n  local:\n    command: sh -c 'python3 -m http.server \"$AGENT_FRONTEND_PORT\" > server.log 2>&1 & echo $! > server.pid'\n    down: sh -c 'kill \"$(cat server.pid)\"; exit 42'\n",
     );
     assert!(runtime(&fixture, "up").status.success());
     assert_eq!(runtime(&fixture, "down").status.code(), Some(42));
@@ -165,20 +203,22 @@ fn final_session_release_rejects_nonempty_inventory_without_cleanup() {
     let fixture = RuntimeFixture::counted();
     let ready = fixture.root.join("session.ready");
     let release = fixture.root.join("session.release");
-    let session = fixture
-        .command()
-        .args(["runtime", "env", "session", "--repo"])
-        .arg(&fixture.root)
-        .args([
-            "--",
-            "sh",
-            "-c",
-            "touch session.ready; while test ! -f session.release; do sleep 0.02; done",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("session starts");
+    let session = SessionGuard::new(
+        fixture
+            .command()
+            .args(["runtime", "env", "session", "--repo"])
+            .arg(&fixture.root)
+            .args([
+                "--",
+                "sh",
+                "-c",
+                "touch session.ready; while test ! -f session.release; do sleep 0.02; done",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("session starts"),
+    );
     wait_for(&ready);
     let environment = environment_dir(&fixture);
     seed_owned_container(&environment);
@@ -226,17 +266,97 @@ fn authoritative_schema_mismatch_fails_closed_without_cleanup() {
 
 #[cfg(unix)]
 #[test]
+fn runtime_state_directories_and_files_are_private() {
+    let fixture = RuntimeFixture::counted();
+    let up = runtime(&fixture, "up");
+    assert!(
+        up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    let environment = environment_dir(&fixture);
+    let session = fixture
+        .command()
+        .args(["runtime", "env", "session", "--keep-alive", "--repo"])
+        .arg(&fixture.root)
+        .args(["--", "sh", "-c", "true"])
+        .output()
+        .unwrap();
+    assert!(session.status.success());
+
+    for directory in [
+        &fixture.state_root,
+        &environment,
+        &environment.join("sessions"),
+    ] {
+        assert_eq!(mode(directory), 0o700, "{}", directory.display());
+    }
+    for file in [
+        "owner.json",
+        "plan.json",
+        "inventory.json",
+        "env",
+        "lease.lock",
+    ] {
+        let path = environment.join(file);
+        assert_eq!(mode(&path), 0o600, "{}", path.display());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn down_rejects_a_symlinked_environment_root_before_cleanup() {
+    let fixture = RuntimeFixture::counted();
+    assert!(runtime(&fixture, "up").status.success());
+    let environment = environment_dir(&fixture);
+    let actual = fixture.root.join("relocated-environment");
+    std::fs::rename(&environment, &actual).unwrap();
+    symlink(&actual, &environment).unwrap();
+    let down_count = line_count(&fixture.root.join("down-count.txt"));
+
+    let output = runtime(&fixture, "down");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr_has(&output, "RUNTIME_STATE_SYMLINK_REJECTED"));
+    assert_eq!(line_count(&fixture.root.join("down-count.txt")), down_count);
+    assert!(actual.join("owner.json").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn down_rejects_a_symlinked_session_root_before_cleanup() {
+    let fixture = RuntimeFixture::counted();
+    assert!(runtime(&fixture, "up").status.success());
+    let environment = environment_dir(&fixture);
+    let external = fixture.root.join("external-sessions");
+    std::fs::create_dir(&external).unwrap();
+    std::fs::remove_dir(environment.join("sessions")).unwrap();
+    symlink(&external, environment.join("sessions")).unwrap();
+    let down_count = line_count(&fixture.root.join("down-count.txt"));
+
+    let output = runtime(&fixture, "down");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr_has(&output, "RUNTIME_STATE_SYMLINK_REJECTED"));
+    assert_eq!(line_count(&fixture.root.join("down-count.txt")), down_count);
+    assert!(environment.join("owner.json").is_file());
+}
+
+#[cfg(unix)]
+#[test]
 fn outer_sigterm_stops_the_provisioning_process_tree() {
     let fixture = RuntimeFixture::with_manifest(
         "version: 1\nmodes:\n  local:\n    command: sh -c 'echo $$ > provision.pid; touch provision.ready; while :; do sleep 1; done'\n    down: sh -c 'echo down >> down-count.txt'\n",
     );
-    let outer = fixture
-        .command()
-        .args(["runtime", "env", "session", "--repo"])
-        .arg(&fixture.root)
-        .args(["--", "sh", "-c", "true"])
-        .spawn()
-        .expect("session wrapper starts");
+    let outer = SessionGuard::new(
+        fixture
+            .command()
+            .args(["runtime", "env", "session", "--repo"])
+            .arg(&fixture.root)
+            .args(["--", "sh", "-c", "true"])
+            .spawn()
+            .expect("session wrapper starts"),
+    );
     wait_for(&fixture.root.join("provision.ready"));
     let provisioning_pid: u32 = std::fs::read_to_string(fixture.root.join("provision.pid"))
         .unwrap()
@@ -267,10 +387,10 @@ fn runtime(fixture: &RuntimeFixture, operation: &str) -> std::process::Output {
 fn environment_dir(fixture: &RuntimeFixture) -> PathBuf {
     std::fs::read_dir(&fixture.state_root)
         .unwrap()
-        .next()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.join("owner.json").is_file())
         .unwrap()
-        .unwrap()
-        .path()
 }
 
 fn line_count(path: &Path) -> usize {
@@ -358,4 +478,16 @@ fn stderr_has(output: &std::process::Output, marker: &str) -> bool {
     String::from_utf8_lossy(&output.stderr)
         .lines()
         .any(|line| line.starts_with(marker))
+}
+
+fn stop_fixture_server(root: &Path) {
+    let Ok(pid) = std::fs::read_to_string(root.join("server.pid")) else {
+        return;
+    };
+    let _ = Command::new("kill").arg(pid.trim()).output();
+}
+
+#[cfg(unix)]
+fn mode(path: &Path) -> u32 {
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }

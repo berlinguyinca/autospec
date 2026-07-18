@@ -21,8 +21,18 @@ impl RuntimeFixture {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join(".autospec")).expect("create fixture directory");
         std::fs::write(
+            root.join(".autospec/runtime-up.sh"),
+            "set -eu\necho up >> up-count.txt\npython3 -m http.server \"$AGENT_FRONTEND_PORT\" > runtime-server.log 2>&1 &\nprintf '%s\\n' \"$!\" > runtime-server.pid\n",
+        )
+        .expect("write runtime up script");
+        std::fs::write(
+            root.join(".autospec/runtime-down.sh"),
+            "set -eu\npid=$(cat runtime-server.pid)\nif kill -0 \"$pid\" 2>/dev/null; then kill \"$pid\"; fi\nrm -f runtime-server.pid\necho down >> down-count.txt\n",
+        )
+        .expect("write runtime down script");
+        std::fs::write(
             root.join(".autospec/runtime.yml"),
-            "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'echo up >> up-count.txt'\n    down: sh -c 'echo down >> down-count.txt'\n",
+            "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh .autospec/runtime-up.sh\n    down: sh .autospec/runtime-down.sh\n",
         )
         .expect("write manifest");
         let state_root = root.join("state");
@@ -58,6 +68,7 @@ impl RuntimeFixture {
 }
 impl Drop for RuntimeFixture {
     fn drop(&mut self) {
+        stop_runtime_server(&self.root);
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
@@ -292,10 +303,17 @@ fn runtime_up(fixture: &RuntimeFixture) -> std::process::Output {
 fn environment_dir(fixture: &RuntimeFixture) -> PathBuf {
     std::fs::read_dir(&fixture.state_root)
         .expect("state root exists")
-        .next()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.join("owner.json").is_file())
         .expect("environment exists")
-        .expect("environment entry")
-        .path()
+}
+
+fn stop_runtime_server(root: &Path) {
+    let Ok(pid) = std::fs::read_to_string(root.join("runtime-server.pid")) else {
+        return;
+    };
+    let _ = Command::new("kill").arg(pid.trim()).output();
 }
 
 fn only_session_record(fixture: &RuntimeFixture) -> PathBuf {

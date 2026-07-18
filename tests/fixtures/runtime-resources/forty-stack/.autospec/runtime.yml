@@ -1,0 +1,15 @@
+version: 2
+default_mode: local
+modes:
+  local:
+    command: sh -c 'true'
+resources:
+  compose:
+    files:
+      - compose.yaml
+    exports:
+      - service: web
+        target: 80
+        protocol: http
+        env: AUTOSPEC_PUBLIC_URL
+        value: url

@@ -2,6 +2,9 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use getrandom::fill;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -426,18 +429,19 @@ pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvEr
             parent.display()
         ))
     })?;
+    set_private_mode(parent, 0o700)?;
     let temporary = create_temporary_path(path)?;
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|error| {
-                RuntimeEnvError::new(format!(
-                    "could not create runtime state {}: {error}",
-                    temporary.display()
-                ))
-            })?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&temporary).map_err(|error| {
+            RuntimeEnvError::new(format!(
+                "could not create runtime state {}: {error}",
+                temporary.display()
+            ))
+        })?;
         file.write_all(encoded)
             .and_then(|()| file.sync_all())
             .map_err(|error| {
@@ -452,6 +456,7 @@ pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvEr
                 path.display()
             ))
         })?;
+        set_private_mode(path, 0o600)?;
         std::fs::File::open(parent)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| {
@@ -465,6 +470,22 @@ pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvEr
         let _ = std::fs::remove_file(&temporary);
     }
     result
+}
+
+#[cfg(unix)]
+fn set_private_mode(path: &Path, mode: u32) -> Result<(), RuntimeEnvError> {
+    let permissions = std::fs::Permissions::from_mode(mode);
+    std::fs::set_permissions(path, permissions).map_err(|error| {
+        RuntimeEnvError::new(format!(
+            "could not secure runtime state {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn set_private_mode(_path: &Path, _mode: u32) -> Result<(), RuntimeEnvError> {
+    Ok(())
 }
 
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T, RuntimeEnvError> {

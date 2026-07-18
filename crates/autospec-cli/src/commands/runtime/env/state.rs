@@ -3,6 +3,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use autospec_core::runtime_env::{
     reserve_loopback_port, EnvironmentLifecycle, EnvironmentOwner, PortRegistry, PortReservation,
     ResourceInventory, ResourcePlan, RuntimeContext, RuntimeState,
@@ -11,6 +14,9 @@ use autospec_core::runtime_env::{
 use crate::commands::CommandFailure;
 
 pub(super) use autospec_core::runtime_env::{read_json, write_json_atomic};
+
+const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
+const PRIVATE_FILE_MODE: u32 = 0o600;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct StateLayout {
@@ -35,6 +41,16 @@ impl StateLayout {
             sessions: environment_dir.join("sessions"),
             environment_dir,
         }
+    }
+
+    fn prepare(&self) -> Result<(), CommandFailure> {
+        let root = self
+            .environment_dir
+            .parent()
+            .expect("runtime environment directory has a state root");
+        ensure_private_directory(root)?;
+        ensure_private_directory(&self.environment_dir)?;
+        ensure_private_directory(&self.sessions)
     }
 }
 
@@ -195,7 +211,8 @@ struct PortRegistryLease {
 impl PortRegistryLease {
     fn acquire(root: &Path) -> Result<Self, CommandFailure> {
         let directory = root.join("ports");
-        fs::create_dir_all(&directory).map_err(io_error)?;
+        ensure_private_directory(root)?;
+        ensure_private_directory(&directory)?;
         let file = open_locked(&directory.join("lease.lock"))?;
         let registry_path = directory.join("registry.json");
         let registry = if registry_path.is_file() {
@@ -238,6 +255,7 @@ fn open_locked(path: &Path) -> Result<File, CommandFailure> {
         .truncate(false)
         .open(path)
         .map_err(io_error)?;
+    ensure_private_file(path)?;
     file.lock().map_err(io_error)?;
     Ok(file)
 }
@@ -258,12 +276,16 @@ fn io_error(error: std::io::Error) -> CommandFailure {
 
 impl EnvironmentLease {
     pub(super) fn acquire(environment_dir: &Path) -> Result<Self, CommandFailure> {
-        fs::create_dir_all(environment_dir).map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "could not create runtime environment {}: {error}",
-                environment_dir.display()
-            ))
-        })?;
+        StateLayout::new(
+            environment_dir
+                .parent()
+                .expect("runtime environment directory has a state root"),
+            environment_dir
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("runtime environment ID is UTF-8"),
+        )
+        .prepare()?;
         let path = environment_dir.join("lease.lock");
         let file = OpenOptions::new()
             .read(true)
@@ -277,6 +299,7 @@ impl EnvironmentLease {
                     path.display()
                 ))
             })?;
+        ensure_private_file(&path)?;
         file.lock().map_err(|error| {
             CommandFailure::diagnostic(format!(
                 "could not lock runtime environment lease {}: {error}",
@@ -287,12 +310,16 @@ impl EnvironmentLease {
     }
 
     pub(super) fn try_acquire(environment_dir: &Path) -> Result<Option<Self>, CommandFailure> {
-        fs::create_dir_all(environment_dir).map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "could not create runtime environment {}: {error}",
-                environment_dir.display()
-            ))
-        })?;
+        StateLayout::new(
+            environment_dir
+                .parent()
+                .expect("runtime environment directory has a state root"),
+            environment_dir
+                .file_name()
+                .and_then(|value| value.to_str())
+                .expect("runtime environment ID is UTF-8"),
+        )
+        .prepare()?;
         let path = environment_dir.join("lease.lock");
         let file = OpenOptions::new()
             .read(true)
@@ -301,6 +328,7 @@ impl EnvironmentLease {
             .truncate(false)
             .open(&path)
             .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        ensure_private_file(&path)?;
         match file.try_lock() {
             Ok(()) => Ok(Some(Self { _file: file })),
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
@@ -325,6 +353,7 @@ pub(super) fn write_runtime_state(
             temporary.display()
         ))
     })?;
+    ensure_private_file(&temporary)?;
     file.write_all(state.render_env_file().as_bytes())
         .map_err(|error| {
             CommandFailure::diagnostic(format!(
@@ -337,7 +366,8 @@ pub(super) fn write_runtime_state(
             "could not finalize runtime environment {}: {error}",
             context.env_file.display()
         ))
-    })
+    })?;
+    ensure_private_file(&context.env_file)
 }
 
 pub(super) fn read_runtime_state(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
@@ -349,4 +379,38 @@ pub(super) fn read_runtime_state(context: &RuntimeContext) -> Result<RuntimeStat
     })?;
     RuntimeState::from_env_file(&source)
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), CommandFailure> {
+    reject_symlink(path)?;
+    fs::create_dir_all(path).map_err(io_error)?;
+    reject_symlink(path)?;
+    set_mode(path, PRIVATE_DIRECTORY_MODE)
+}
+
+fn ensure_private_file(path: &Path) -> Result<(), CommandFailure> {
+    reject_symlink(path)?;
+    set_mode(path, PRIVATE_FILE_MODE)
+}
+
+fn reject_symlink(path: &Path) -> Result<(), CommandFailure> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(CommandFailure::diagnostic(
+            format!("RUNTIME_STATE_SYMLINK_REJECTED: {}", path.display()),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io_error(error)),
+    }
+}
+
+#[cfg(unix)]
+fn set_mode(path: &Path, mode: u32) -> Result<(), CommandFailure> {
+    let permissions = fs::Permissions::from_mode(mode);
+    fs::set_permissions(path, permissions).map_err(io_error)
+}
+
+#[cfg(not(unix))]
+fn set_mode(_path: &Path, _mode: u32) -> Result<(), CommandFailure> {
+    Ok(())
 }
