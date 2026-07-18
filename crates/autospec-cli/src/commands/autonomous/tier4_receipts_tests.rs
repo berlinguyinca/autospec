@@ -16,6 +16,7 @@ use super::tier3_receipts::{record_tier3, Tier3Progress};
 use super::tier3_receipts_tests::{observation as tier3_observation, seed_tier_three_cursor};
 use super::tier4::{disabled_by_checked_in_policy, Tier4Scan};
 use super::tier4_receipts::{record_tier4, record_tier4_with_source_policy, Tier4Progress};
+use super::waterfall::retry_transient_lock;
 use super::waterfall::{StoreAcquisition, WaterfallStore};
 
 pub(super) fn seed_tier_four_cursor(root: &TempRoot) {
@@ -57,15 +58,19 @@ pub(super) fn record_tier4_with_expected_policy(
 }
 
 pub(super) fn tier4_store(root: &TempRoot) -> WaterfallStore {
-    match WaterfallStore::acquire_with_tier4_source_policy(
-        root.path().join("waterfall"),
-        REPO,
-        expected_source_policy(),
-    )
-    .expect("store acquisition")
-    {
+    let acquisition = retry_transient_lock(
+        || {
+            WaterfallStore::acquire_with_tier4_source_policy(
+                root.path().join("waterfall"),
+                REPO,
+                expected_source_policy(),
+            )
+        },
+        |result| matches!(result, Ok(StoreAcquisition::Held)),
+    );
+    match acquisition.expect("store acquisition") {
         StoreAcquisition::Acquired(store) => store,
-        StoreAcquisition::Held => panic!("fresh test root must be unlocked"),
+        StoreAcquisition::Held => panic!("test store remained locked for one second"),
     }
 }
 
@@ -247,15 +252,19 @@ fn fully_sealed_alternate_policy_dry_evidence_is_rejected_by_trusted_policy() {
         "retained completed Tier 4 history must not replay without trusted policy"
     );
     drop(alternate_store);
-    let mismatched_store = match WaterfallStore::acquire_with_tier4_source_policy(
-        root.path().join("waterfall"),
-        REPO,
-        expected_source_policy(),
-    )
-    .expect("store acquisition")
-    {
+    let mismatched_acquisition = retry_transient_lock(
+        || {
+            WaterfallStore::acquire_with_tier4_source_policy(
+                root.path().join("waterfall"),
+                REPO,
+                expected_source_policy(),
+            )
+        },
+        |result| matches!(result, Ok(StoreAcquisition::Held)),
+    );
+    let mismatched_store = match mismatched_acquisition.expect("store acquisition") {
         StoreAcquisition::Acquired(store) => store,
-        StoreAcquisition::Held => panic!("fresh test root must be unlocked"),
+        StoreAcquisition::Held => panic!("test store remained locked for one second"),
     };
     assert!(mismatched_store.load_state().is_err());
 }

@@ -31,11 +31,12 @@ pub(super) fn record_tier2(
     repo: &str,
     scan: Tier2Scan,
 ) -> Result<Tier2Progress, String> {
-    let store =
-        match WaterfallStore::acquire(state_root.join("waterfall"), repo).map_err(store_error)? {
-            StoreAcquisition::Acquired(store) => store,
-            StoreAcquisition::Held => return Ok(Tier2Progress::Pending),
-        };
+    let store = match WaterfallStore::acquire_for_receipts(state_root.join("waterfall"), repo, None)
+        .map_err(store_error)?
+    {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => return Ok(Tier2Progress::Pending),
+    };
     let Some(state) = store.load_state().map_err(store_error)? else {
         return Ok(Tier2Progress::Pending);
     };

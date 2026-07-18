@@ -49,15 +49,12 @@ fn record_tier4_with_optional_source_policy(
     scan: Tier4Scan,
     expected_source_policy: Option<Tier4SourcePolicy>,
 ) -> Result<Tier4Progress, String> {
-    let store = match expected_source_policy {
-        Some(policy) => WaterfallStore::acquire_with_tier4_source_policy(
-            state_root.join("waterfall"),
-            repo,
-            policy,
-        )
-        .map_err(store_error)?,
-        None => WaterfallStore::acquire(state_root.join("waterfall"), repo).map_err(store_error)?,
-    };
+    let store = WaterfallStore::acquire_for_receipts(
+        state_root.join("waterfall"),
+        repo,
+        expected_source_policy,
+    )
+    .map_err(store_error)?;
     let store = match store {
         StoreAcquisition::Acquired(store) => store,
         StoreAcquisition::Held => return Ok(Tier4Progress::Pending),

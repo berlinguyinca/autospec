@@ -665,30 +665,31 @@ EOF
   [ "$status" -eq 0 ]
 }
 
-# ── 11. Main-health red → drain skipped, Tier-1 merges halt ──────────────────
-# Phase 5.5 integration fix (#1380): the conductor MUST poll main-health and
-# never drain onto a red main.  Prior to the fix, autospec_conductor_run() never
-# invoked autonomous-resilience.sh main-health, so a red main did not halt
-# Tier-1 merges (spec Phase-1 safety invariant).
-@test "conductor: main-health red halts Tier-1 drain" {
+# ── 11. Legacy main-health red → Rust remains admission owner
+# Rust evaluates main health before the legacy shell conductor can consider a
+# ready issue. The shell path must stay non-authoritative so it cannot apply a
+# second, divergent health decision after Rust has admitted the work.
+@test "conductor: legacy main-health red does not veto Rust-admitted Tier-1 drain" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'
   _install_stub "autonomous-waterfall.sh" \
     'printf '"'"'{"tier":1,"action":"run-backlog","reason":"test"}\n'"'"''
   _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
   _install_stub "autonomous-spend-ledger.sh" \
     'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
-  # Resilience stub: main-health returns DECISION:halt (red main).
+  # A legacy resilience result must not override Rust's earlier admission.
+  local resilience_log="$TEST_TMP/resilience.log"
+  export RESILIENCE_LOG="$resilience_log"
   _install_stub "autonomous-resilience.sh" \
     'case "${1:-}" in
        state) printf "DECISION:state-written\n" ;;
        lock)  printf "DECISION:lock-acquired\nLOCK_SESSION:test\n" ;;
-       main-health) printf "DECISION:halt\nCI_STATE:failure\n"; exit 1 ;;
+       main-health) printf "called\n" >> "$RESILIENCE_LOG"; printf "DECISION:halt\nCI_STATE:failure\n"; exit 1 ;;
        *) exit 0 ;;
      esac'
   _install_stub "autospec-usage-limit.sh" 'exit 0'
 
   local run_log="$TEST_TMP/run.log"
-  export AUTOSPEC_RUN_CMD="printf 'should-not-run\n' >> '$run_log'"
+  export AUTOSPEC_RUN_CMD="printf 'drain-ran\n' >> '$run_log'"
 
   run bash -c "
     . '$LOOP_LIB'
@@ -701,33 +702,31 @@ EOF
     autospec_conductor_run
   " 2>&1
 
-  # Drain must NOT have run (no merging onto a red main).
-  if [ -f "$run_log" ]; then
-    ! grep -q 'should-not-run' "$run_log"
-  fi
-  # Loop must report the main-health halt stop reason.
-  [[ "$output" == *"main-health"* ]]
+  grep -q 'drain-ran' "$run_log"
+  [ ! -e "$resilience_log" ]
 }
 
-# ── 12. Main-health pending → drain skipped this cycle (no halt) ─────────────
-@test "conductor: main-health pending skips drain without halting" {
+# ── 12. Legacy main-health pending → Rust remains admission owner
+@test "conductor: legacy main-health pending does not veto Rust-admitted Tier-1 drain" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'
   _install_stub "autonomous-waterfall.sh" \
     'printf '"'"'{"tier":1,"action":"run-backlog","reason":"test"}\n'"'"''
   _install_stub "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
   _install_stub "autonomous-spend-ledger.sh" \
     'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+  local resilience_log="$TEST_TMP/resilience.log"
+  export RESILIENCE_LOG="$resilience_log"
   _install_stub "autonomous-resilience.sh" \
     'case "${1:-}" in
        state) printf "DECISION:state-written\n" ;;
        lock)  printf "DECISION:lock-acquired\nLOCK_SESSION:test\n" ;;
-       main-health) printf "DECISION:wait\nCI_STATE:pending\n" ;;
+       main-health) printf "called\n" >> "$RESILIENCE_LOG"; printf "DECISION:wait\nCI_STATE:pending\n" ;;
        *) exit 0 ;;
      esac'
   _install_stub "autospec-usage-limit.sh" 'exit 0'
 
   local run_log="$TEST_TMP/run.log"
-  export AUTOSPEC_RUN_CMD="printf 'should-not-run\n' >> '$run_log'"
+  export AUTOSPEC_RUN_CMD="printf 'drain-ran\n' >> '$run_log'"
 
   run bash -c "
     . '$LOOP_LIB'
@@ -740,10 +739,8 @@ EOF
     autospec_conductor_run
   " 2>&1
 
-  # Drain skipped while main is pending.
-  if [ -f "$run_log" ]; then
-    ! grep -q 'should-not-run' "$run_log"
-  fi
+  grep -q 'drain-ran' "$run_log"
+  [ ! -e "$resilience_log" ]
 }
 
 @test "conductor: Tier 1.5 promotion runs before parking when backlog is empty" {

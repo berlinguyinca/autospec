@@ -1596,6 +1596,7 @@ skills/autospec-run/scripts/fab-route.sh::fab-route.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
 skills/autospec-run/scripts/run-groom-preflight.sh::run-groom-preflight.sh \
 skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \
+skills/autospec-compose-normalize/scripts/workflow-guard.sh::autospec-compose-normalize-guard.sh \
 skills/autospec-doc/scripts/doc-orchestrator-entry.mjs::doc-orchestrator.mjs \
 skills/autospec-harmonize/scripts/harmonize.sh::harmonize.sh \
 skills/autospec-harmonize/scripts/design-discover.sh::design-discover.sh \

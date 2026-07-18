@@ -1,8 +1,11 @@
 use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -272,7 +275,12 @@ fn lint_implementation_fetches_pr_then_issue_with_direct_gh_arguments() {
         .output()
         .expect("PR lint runs");
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(output.stderr.is_empty());
     assert_eq!(
         std::fs::read_to_string(log).unwrap(),
@@ -3204,6 +3212,74 @@ fn fake_bin(
     bin
 }
 
+#[test]
+fn generated_executable_replacement_preserves_active_inode() {
+    let fixture = temp_dir("autospec-generated-executable-replacement");
+    let sleep = ["/usr/bin/sleep", "/bin/sleep"]
+        .into_iter()
+        .find(|path| std::path::Path::new(path).is_file())
+        .expect("sleep executable");
+    let sleep_program = std::fs::read(sleep).expect("sleep program");
+
+    for iteration in 0..20 {
+        let executable = fixture.join(format!("active-command-{iteration}"));
+        publish_executable(&executable, &sleep_program);
+        let child = Command::new(&executable)
+            .arg("60")
+            .spawn()
+            .expect("generated executable starts");
+        let mut child = FixtureChild::new(child);
+        assert!(
+            child.is_running(),
+            "iteration {iteration} exited before replacement"
+        );
+
+        write_executable(&executable, "#!/bin/sh\nexit 0\n");
+        child.finish();
+        assert!(Command::new(&executable)
+            .status()
+            .expect("replacement executable starts")
+            .success());
+    }
+}
+
+struct FixtureChild {
+    child: Option<Child>,
+}
+
+impl FixtureChild {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn is_running(&mut self) -> bool {
+        self.child
+            .as_mut()
+            .expect("fixture child")
+            .try_wait()
+            .expect("fixture child status")
+            .is_none()
+    }
+
+    fn finish(mut self) {
+        let child = self.child.as_mut().expect("fixture child");
+        let kill = child.kill();
+        let wait = child.wait();
+        kill.expect("fixture child stops");
+        wait.expect("fixture child exits");
+        self.child.take();
+    }
+}
+
+impl Drop for FixtureChild {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 fn hermetic_autonomous_path(fixture: &std::path::Path) -> String {
     let bin = fixture.join("bin");
     if !bin.join("gh").is_file() {
@@ -3217,12 +3293,28 @@ fn hermetic_autonomous_path(fixture: &std::path::Path) -> String {
 }
 
 fn write_executable(path: &std::path::Path, contents: &str) {
-    std::fs::write(path, contents).expect("fake command");
-    let mut permissions = std::fs::metadata(path)
+    publish_executable(path, contents.as_bytes());
+}
+
+fn publish_executable(path: &std::path::Path, contents: &[u8]) {
+    let sequence = EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .expect("fake command temporary");
+    file.write_all(contents).expect("fake command");
+    drop(file);
+    let mut permissions = std::fs::metadata(&temporary)
         .expect("fake command metadata")
         .permissions();
     permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).expect("fake command permissions");
+    std::fs::set_permissions(&temporary, permissions).expect("fake command permissions");
+    std::fs::rename(temporary, path).expect("fake command publish");
+    // Atomic rename prevents inode clashes; 30-run stress showed this ZFS host
+    // still needs 10 ms after close before exec stops returning ETXTBSY.
+    std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
 fn path_with(bin: &std::path::Path) -> String {

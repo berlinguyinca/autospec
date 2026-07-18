@@ -194,7 +194,8 @@ body must include the fingerprint marker and these lintable sections:
 - `## Tests required`: real Compose validation and the repository full suite.
 - `### Primary smoke test (inner loop)`: one command line only.
 
-Run `scripts/lint-issue.sh` on the body before `gh issue create`. Then run
+Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh` on the body
+before `gh issue create`. Then run
 `autospec-classify` for the new issue and verify `needs-classify` was replaced by
 `auto-implement` with both `ctx:*` and `reasoning:*` labels before implementation.
 
