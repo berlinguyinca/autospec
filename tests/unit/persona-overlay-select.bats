@@ -50,6 +50,14 @@ run_synth() {
         bash "$PERSONA_SYNTH" --repo-root "$REPO_UNDER_TEST" --autospec-home "$AUTOSPEC_HOME" --force
 }
 
+run_synth_no_force() {
+    run env \
+        HOME="$HOME" \
+        AUTOSPEC_PERSONA_SYNTH_CMD="exit 99" \
+        "$@" \
+        bash "$PERSONA_SYNTH" --repo-root "$REPO_UNDER_TEST" --autospec-home "$AUTOSPEC_HOME"
+}
+
 @test "security-labeled issue selects the security hardener overlay" {
     select_overlay --title "Rotate API credentials safely" --body "Tighten token validation." --labels "security,bug"
 
@@ -75,6 +83,41 @@ run_synth() {
     grep -q "Issue archetype overlay" "$REPO_UNDER_TEST/.autospec/operator-persona.effective.md"
     if grep -q "Security Hardener" "$AUTOSPEC_HOME/operator-persona.md"; then
         echo "global base persona should not be mutated by issue overlay" >&2
+        return 1
+    fi
+}
+
+@test "fresh global persona still refreshes the current issue overlay" {
+    cp "$BASE_PERSONA" "$AUTOSPEC_HOME/operator-persona.md"
+
+    run_synth_no_force \
+        AUTOSPEC_PERSONA_ISSUE_TITLE="Validate secret handling" \
+        AUTOSPEC_PERSONA_ISSUE_BODY="Credential parsing crosses a trust boundary." \
+        AUTOSPEC_PERSONA_ISSUE_LABELS="security"
+
+    [ "$status" -eq 0 ]
+    grep -q "global persona fresh" <<<"$output"
+    grep -q "Security Hardener" "$REPO_UNDER_TEST/.autospec/operator-persona.effective.md"
+    grep -q "Issue archetype overlay" "$REPO_UNDER_TEST/.autospec/operator-persona.effective.md"
+}
+
+@test "fresh global persona discards stale issue overlays when no issue is active" {
+    cp "$BASE_PERSONA" "$AUTOSPEC_HOME/operator-persona.md"
+    mkdir -p "$REPO_UNDER_TEST/.autospec"
+    cat > "$REPO_UNDER_TEST/.autospec/operator-persona.effective.md" <<'STALE'
+# Operator persona
+
+## Issue archetype overlay
+
+# Security Hardener
+STALE
+
+    run_synth_no_force
+
+    [ "$status" -eq 0 ]
+    grep -q "global persona fresh" <<<"$output"
+    if grep -q "Issue archetype overlay" "$REPO_UNDER_TEST/.autospec/operator-persona.effective.md"; then
+        echo "stale issue overlay should be removed when no issue is active" >&2
         return 1
     fi
 }
