@@ -1,34 +1,8 @@
 #!/usr/bin/env bash
-# scripts/worktree-guard.sh — deterministic worktree preflight + creation guard.
-#
-# The worktree rule (autospec-run SKILL.md) exists only as prose; this script
-# makes it enforceable. It is the shared, no-LLM enforcement tool referenced by
-# docs/specs/2026-06-03-worktree-guard-design.md §D1. Installed to
-# ~/.autospec/scripts/ by install.sh's copy_repo_scripts glob.
-#
-# Subcommands:
-#   worktree-guard.sh assert [--base <ref>] [--strict-base]
-#       Preflight the current directory before any edit/commit.
-#   worktree-guard.sh resolve-branch --branch <B> --repo <O/R>
-#       The G2 PR-aware ladder. Emits a JSON verdict; exit 0 always.
-#   worktree-guard.sh resolve-base [--base <ref>] [--pr-base]
-#       Emit the configured base ref, or the PR base branch with --pr-base.
-#   worktree-guard.sh create --branch <B> [--base <ref>] [--path <P>] [--adopt]
-#       Create (or verified-clean reuse) a fresh worktree off the base.
-#
-# Exit codes (PINNED — shared across spec-2 children #959-#966):
-#   0  ok
-#   2  usage / not a git directory
-#   3  in_primary_checkout   (git-dir == git-common-dir)
-#   4  dirty                 (git status --porcelain non-empty, incl. untracked)
-#                            also: create dirty/wrong-branch reuse refusal
-#   5  stale_base            (HEAD behind base after fetch; warn unless --strict-base)
-#
-# resolve-branch JSON: {"state":"open-pr"|"branch-only"|"fresh","pr":N|null}.
-#
-# Conventions: set -eu (no pipefail — we branch on subcommand exits explicitly);
-# usage()/die() helpers follow the runtime-script conventions; no RETURN traps; if/then/fi
-# for one-sided conditionals under set -e (repo gotchas).
+# Deterministic linked-worktree preflight + creation guard.
+# Installed to ~/.autospec/scripts/ by install.sh's copy_repo_scripts glob.
+# Exit codes: 0 ok, 2 usage/non-git, 3 primary checkout, 4 dirty/reuse refusal,
+# 5 stale base. resolve-branch emits {"state":"open-pr"|"branch-only"|"fresh","pr":N|null}.
 
 set -eu
 
