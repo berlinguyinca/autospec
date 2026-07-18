@@ -57,6 +57,37 @@ Usage: heartbeat-read.sh [--issue <N>] [--repo <owner/repo>]
 Without `--issue`: prints all heartbeat file paths in the repo's subdir (one per line).
 With `--issue`: prints the JSON content of that heartbeat, or empty if not found.
 
+### `worktree-guard.sh`
+
+<!-- autospec-doc-scope:
+  src: ["scripts/worktree-guard.sh", "skills/autospec-run/prompts/phase4-implementer.md"]
+  reason: "Public worktree guard and Phase 4 implementer base-branch contract"
+  mismatch_action: warn
+-->
+
+Enforces Phase 4 linked-worktree safety before agents edit or commit. The `assert`
+subcommand refuses the primary checkout, dirty worktrees, and stale bases under
+`--strict-base`; `resolve-branch` returns the PR-aware ladder verdict; `create`
+creates or adopts the per-issue linked worktree.
+
+```
+Usage: worktree-guard.sh assert [--base <ref>] [--strict-base]
+       worktree-guard.sh resolve-branch --branch <B> --repo <O/R>
+       worktree-guard.sh resolve-base [--base <ref>] [--pr-base]
+       worktree-guard.sh create --branch <B> [--base <ref>] [--path <P>] [--adopt]
+Env:   AUTOSPEC_BASE_BRANCH   default base branch/ref when --base is omitted
+Config: .autospec/autospec.yml git.base_branch is used when AUTOSPEC_BASE_BRANCH is unset
+```
+
+Base precedence is `--base`, then `AUTOSPEC_BASE_BRANCH`, then
+`.autospec/autospec.yml` `git.base_branch`, then `origin/main`. Plain branch
+names such as `master_ai` or `release/2026` resolve to `origin/<branch>`;
+`origin/<branch>` and `refs/remotes/origin/<branch>` remain remote refs. If no
+explicit/env/config base is set and `origin/main` is absent, the guard falls
+back to `gh repo view --json defaultBranchRef`. `resolve-base --pr-base` emits
+the branch name suitable for `gh pr create --base`, so prompt snippets do not
+duplicate the base-selection parser.
+
 ### `lint-issue.sh`
 
 Quality-gate for GitHub issue bodies before they enter the `auto-implement` queue.
