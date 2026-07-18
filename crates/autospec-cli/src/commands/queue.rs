@@ -867,19 +867,64 @@ fn discovered_workers() -> usize {
 }
 
 fn plan_json(plan: &ReadyQueuePlan, constrained: bool) -> String {
+    let diagnostics = local_diagnostics_json(plan);
+    let diagnostics_field = if diagnostics == "[]" {
+        String::new()
+    } else {
+        format!(",\"diagnostics\":{diagnostics}")
+    };
     format!(
-        "{{\"ready\":{},\"blocked\":{},\"claimed\":{},\"conflicts\":{},\"gate_counts\":{},\"scan_scope\":{},\"worker_cap\":{{\"max_repo_workers\":{},\"active_count\":{},\"remaining\":{},\"reached\":{}}},\"batch\":{}}}",
+        "{{\"ready\":{},\"blocked\":{},\"claimed\":{},\"conflicts\":{},\"gate_counts\":{}{},\"scan_scope\":{},\"worker_cap\":{{\"max_repo_workers\":{},\"active_count\":{},\"remaining\":{},\"reached\":{}}},\"batch\":{}}}",
         views_json(&plan.ready),
         views_json(&plan.blocked),
         issues_json(&plan.claimed),
         views_json(&plan.conflicts),
         gate_counts_json(plan),
+        diagnostics_field,
         json_string(if constrained { "slice" } else { "repository" }),
         plan.worker_cap.max_repo_workers,
         plan.worker_cap.active_count,
         plan.worker_cap.remaining,
         json_bool(plan.worker_cap.reached),
         views_json(&plan.batch),
+    )
+}
+
+fn local_diagnostics_json(plan: &ReadyQueuePlan) -> String {
+    let mut seen = BTreeSet::new();
+    let diagnostics = plan
+        .blocked
+        .iter()
+        .filter(|view| {
+            view.reason.as_deref() == Some("safety_gate_failed")
+                && view
+                    .safety_gate
+                    .as_ref()
+                    .is_some_and(|gate| gate.reason == "missing_safety_reviewed")
+                && discovery_filed_issue(&view.issue)
+        })
+        .filter(|view| seen.insert(view.issue.number))
+        .map(discovery_missing_safety_diagnostic_json)
+        .collect::<Vec<_>>();
+    format!("[{}]", diagnostics.join(","))
+}
+
+fn discovery_filed_issue(issue: &RemoteIssue) -> bool {
+    issue.labels.iter().any(|label| label == "explore")
+        || issue.body.contains("explore research-cycle finalize gate")
+        || issue
+            .body
+            .contains("Auto-filed by /autospec-explore round ")
+        || issue.body.contains("<!-- explore-ledger source=")
+}
+
+fn discovery_missing_safety_diagnostic_json(view: &QueueIssueView) -> String {
+    format!(
+        "{{\"kind\":\"discovery_missing_safety_review\",\"issue\":{},\"reason\":\"missing_safety_reviewed\",\"message\":{}}}",
+        view.issue.number,
+        json_string(
+            "discovery-filed auto-implement issue is blocked locally until canonical safety review metadata is stamped"
+        )
     )
 }
 

@@ -18,6 +18,7 @@
 setup() {
     REPO_ROOT="$(git rev-parse --show-toplevel)"
     AUTOSPEC="$REPO_ROOT/target/debug/autospec"
+    unset AUTOSPEC_RUN_ONLY_ISSUES
     if [ ! -x "$AUTOSPEC" ]; then
         cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
     fi
@@ -27,6 +28,7 @@ setup() {
     # Default active list: no in-progress workers.
     printf '[]\n' > "$FIXTURE_DIR/active.json"
     printf '[]\n' > "$FIXTURE_DIR/prs.json"
+    : > "$FIXTURE_DIR/mutations.log"
     # Closed dep targets (space/newline separated numbers); default empty => OPEN.
     : > "$FIXTURE_DIR/closed"
 
@@ -38,6 +40,36 @@ set -eu
 FIXTURE_DIR="$FIXTURE_DIR"
 sub="\${1:-} \${2:-}"
 case "\$sub" in
+  "api graphql")
+    if [ -f "$FIXTURE_DIR/pr-list-fail" ]; then
+      printf 'simulated pr list failure
+' >&2
+      exit 1
+    fi
+    if [ -n "\${MALFORMED_PR_JSON:-}" ]; then
+      cat "\$FIXTURE_DIR/prs.json"
+      exit 0
+    fi
+    jq '{items:[.[] | {number,state:(.state // "OPEN"),body:(.body // ""),statusCheckRollup:(.statusCheckRollup // [])}],page_info:{has_next_page:false,end_cursor:null}}' "\$FIXTURE_DIR/prs.json"
+    ;;
+  "api --method")
+    endpoint=""
+    while [ "\$#" -gt 0 ]; do
+      if [ "\$1" = "GET" ]; then endpoint="\${2:-}"; fi
+      shift
+    done
+    case "\$endpoint" in
+      *"labels=auto-implement"*)
+        jq '{raw_count:length, items:[.[] | {number,title,body,labels:[.labels[].name],author:(.author // {login:""})}]}' "\$FIXTURE_DIR/auto.json"
+        ;;
+      *"labels=in-progress-by-bot"*)
+        jq '{raw_count:length, items:[.[] | {number,title,body,labels:[.labels[].name],author:(.author // {login:""})}]}' "\$FIXTURE_DIR/active.json"
+        ;;
+      *)
+        printf '{"raw_count":0,"items":[]}\n'
+        ;;
+    esac
+    ;;
   "issue list")
     label=""
     while [ "\$#" -gt 0 ]; do
@@ -57,6 +89,10 @@ case "\$sub" in
       state="CLOSED"
     fi
     printf '{"state":"%s","body":"","labels":[]}\n' "\$state"
+    ;;
+  "issue edit"|"issue comment"|"label create")
+    printf '%s\n' "\$*" >> "\$FIXTURE_DIR/mutations.log"
+    exit 1
     ;;
   "pr list")
     if [ -f "$FIXTURE_DIR/pr-list-fail" ]; then
@@ -641,4 +677,53 @@ BODY
     [ "$(printf '%s' "$output" | jq -r '.blocked | map(.number) | index(1779) != null')" = "true" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1779) | .reason')" = "autospec_needs_human" ]
     [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==1779) | .blocked_label')" = "autospec:needs-human" ]
+}
+
+@test "discovery issue missing safety review emits one local diagnostic without mutation" {
+    body="$(cat <<'EOF'
+## Summary
+
+Discovery filed this issue after adversarial verification, but no safety metadata was stamped.
+
+## Implementation outline
+
+- edit `discovery/missing-safety.sh`
+EOF
+)"
+    labels='[{"name":"auto-implement"},{"name":"explore"},{"name":"ctx:32k"},{"name":"reasoning:medium"}]'
+    write_auto_issue 515 "explore missing safety" "$body" "$labels"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(515) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==515) | .reason')" = "safety_gate_failed" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics | length')" = "1" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics[0].issue')" = "515" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics[0].reason')" = "missing_safety_reviewed" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics[0].kind')" = "discovery_missing_safety_review" ]
+    [ ! -s "$FIXTURE_DIR/mutations.log" ]
+}
+
+@test "origin self explore-ledger issue missing safety review emits one local diagnostic without mutation" {
+    body="$(cat <<'EOF'
+## Summary
+
+Auto-filed by /autospec-explore round 4 from prior reports.
+<!-- explore-ledger source=prior-reports -->
+
+## Implementation outline
+
+- edit `discovery/prior-report.sh`
+EOF
+)"
+    labels='[{"name":"auto-implement"},{"name":"origin:self"},{"name":"ctx:32k"},{"name":"reasoning:medium"}]'
+    write_auto_issue 516 "prior report missing safety" "$body" "$labels"
+
+    output="$(run_list_ready)"
+    [ "$(printf '%s' "$output" | jq -r '.ready | map(.number) | index(516) != null')" = "false" ]
+    [ "$(printf '%s' "$output" | jq -r '.blocked[] | select(.number==516) | .reason')" = "safety_gate_failed" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics | length')" = "1" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics[0].issue')" = "516" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics[0].reason')" = "missing_safety_reviewed" ]
+    [ "$(printf '%s' "$output" | jq -r '.diagnostics[0].kind')" = "discovery_missing_safety_review" ]
+    [ ! -s "$FIXTURE_DIR/mutations.log" ]
 }
