@@ -715,7 +715,7 @@ fn compose_override_publishes_only_declared_loopback_targets_with_ownership() {
 
     assert_eq!(
         rendered,
-        "services:\n  web:\n    labels:\n      com.autospec.environment-id: 'env-a'\n      com.autospec.owner-key: 'owner-a'\n      com.autospec.plan-digest: 'digest-a'\n    ports:\n      - target: 8080\n        published: '0'\n        host_ip: '127.0.0.1'\n        protocol: tcp\nnetworks:\n  private:\n    labels:\n      com.autospec.environment-id: 'env-a'\n      com.autospec.owner-key: 'owner-a'\n      com.autospec.plan-digest: 'digest-a'\nvolumes:\n  cache:\n    labels:\n      com.autospec.environment-id: 'env-a'\n      com.autospec.owner-key: 'owner-a'\n      com.autospec.plan-digest: 'digest-a'\n"
+        "services:\n  web:\n    labels:\n      com.autospec.environment-id: 'env-a'\n      com.autospec.owner-key: 'owner-a'\n      com.autospec.plan-digest: 'digest-a'\n    ports: !override\n      - target: 8080\n        published: '0'\n        host_ip: '127.0.0.1'\n        protocol: tcp\nnetworks:\n  private:\n    labels:\n      com.autospec.environment-id: 'env-a'\n      com.autospec.owner-key: 'owner-a'\n      com.autospec.plan-digest: 'digest-a'\nvolumes:\n  cache:\n    labels:\n      com.autospec.environment-id: 'env-a'\n      com.autospec.owner-key: 'owner-a'\n      com.autospec.plan-digest: 'digest-a'\n"
     );
 }
 

@@ -112,3 +112,30 @@ owned_count() {
     [ "$status" -ne 0 ]
   done
 }
+
+@test "normalized fixed publication becomes one broker-owned loopback export" {
+  sed -i '/^    networks:/i\    ports:\n      - "18080:8080"' "$TEST_ROOT/a/compose.yaml"
+
+  run "$AUTOSPEC_BIN" runtime env normalize-compose --repo "$TEST_ROOT/a" --check
+  [ "$status" -eq 0 ]
+  fingerprint="$(printf '%s\n' "$output" | jq -r .fingerprint)"
+  [ "${#fingerprint}" -eq 64 ]
+
+  run "$AUTOSPEC_BIN" runtime env normalize-compose --repo "$TEST_ROOT/a" --apply \
+    --fingerprint "$fingerprint"
+  [ "$status" -eq 0 ]
+  grep -F -- '- "8080"' "$TEST_ROOT/a/compose.yaml"
+
+  run "$AUTOSPEC_BIN" runtime env up --repo "$TEST_ROOT/a"
+  [ "$status" -eq 0 ]
+  dir_a="$(dirname "$(printf '%s\n' "$output" | sed -n 's/^AGENT_ENV_FILE=//p')")"
+  project="$(jq -r .compose_project "$dir_a/inventory.json")"
+  url="$(jq -r '.exports[0] | "http://\(.host):\(.port)"' "$dir_a/inventory.json")"
+  wait_for_http "$url"
+
+  docker compose -f "$TEST_ROOT/a/compose.yaml" \
+    -f "$dir_a/compose.autospec.override.yaml" \
+    --project-name "$project" config --format json > "$TEST_ROOT/merged.json"
+  [ "$(jq '.services.web.ports | length' "$TEST_ROOT/merged.json")" -eq 1 ]
+  [ "$(jq -r '.services.web.ports[0].host_ip' "$TEST_ROOT/merged.json")" = "127.0.0.1" ]
+}

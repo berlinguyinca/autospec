@@ -82,7 +82,7 @@ fn render_services(
             .filter(|export| export.service == *service)
             .collect::<Vec<_>>();
         if !exports.is_empty() {
-            output.push_str("    ports:\n");
+            output.push_str("    ports: !override\n");
         }
         for export in exports {
             let protocol = match export.protocol {
