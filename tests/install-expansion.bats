@@ -237,12 +237,12 @@ EOF
     # The reference must use $REPO_ROOT (or the variable holding the repo root),
     # not $HOME, ~/.autospec, or AUTOSPEC_SCRIPTS_DIR (installed copies).
     # Check that every line referencing the expander uses REPO_ROOT.
+    executable_refs="$(grep -E '^[[:space:]]*[^#].*expand-skill-blocks\.sh' "$INSTALL_SH")"
+    [ -n "$executable_refs" ]
     while IFS= read -r line; do
         # Must contain REPO_ROOT (or equivalent repo-relative anchor).
-        if [[ "$line" =~ 'expand-skill-blocks.sh' ]]; then
-            [[ "$line" =~ 'REPO_ROOT' ]] || [[ "$line" =~ 'SCRIPT_DIR' ]]
-        fi
-    done < <(grep 'expand-skill-blocks.sh' "$INSTALL_SH")
+        [[ "$line" =~ 'REPO_ROOT' ]] || [[ "$line" =~ 'SCRIPT_DIR' ]]
+    done <<< "$executable_refs"
 }
 
 # ─── test 6: real end-to-end via a fixture skill with a marker ────────────────

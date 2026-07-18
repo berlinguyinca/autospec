@@ -357,6 +357,7 @@ fn run_frontmatter(id: &str, required: bool, root: &Path) -> CheckResult {
 }
 
 fn run_derive_trio_consistency(id: &str, required: bool, root: &Path) -> CheckResult {
+    const COMPOSE_NORMALIZE_SUITE: &str = "tests/unit/test_autospec_compose_normalize_skill.bats";
     let derive = root.join("scripts/derive-trio.sh");
     if !derive.is_file() {
         return failure(
@@ -376,6 +377,18 @@ fn run_derive_trio_consistency(id: &str, required: bool, root: &Path) -> CheckRe
         results.push(result);
         if failed {
             break;
+        }
+    }
+
+    if results.iter().all(CheckResult::is_success) {
+        if !root.join(COMPOSE_NORMALIZE_SUITE).is_file() {
+            results.push(failure(
+                id,
+                required,
+                "Compose normalizer skill contract suite is missing",
+            ));
+        } else {
+            results.push(run_bats_suite(id, required, root, COMPOSE_NORMALIZE_SUITE));
         }
     }
 
@@ -6405,6 +6418,67 @@ if failures:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn block_expansion_rejects_markered_member_without_golden() {
+        let root = std::env::temp_dir().join(format!(
+            "autospec-block-expansion-missing-golden-{}",
+            std::process::id()
+        ));
+        let scripts = root.join("scripts");
+        let skill = root.join("skills/demo");
+        let goldens = root.join("tests/fixtures/skill-goldens");
+        fs::create_dir_all(skill.join("codex")).expect("create skill fixture");
+        fs::create_dir_all(&scripts).expect("create scripts fixture");
+        fs::create_dir_all(&goldens).expect("create golden fixture");
+        fs::write(
+            scripts.join("expand-skill-blocks.sh"),
+            "#!/bin/sh\ncat \"$1\"\n",
+        )
+        .expect("write expander fixture");
+        fs::write(skill.join("SKILL.md"), "# demo\n").expect("write skill fixture");
+        fs::write(
+            skill.join("codex/prompt.md"),
+            "<!-- autospec-block:startup-self-update SKILL_NAME=demo -->\n",
+        )
+        .expect("write markered member fixture");
+        fs::write(
+            goldens.join("demo.SKILL.md.sha256"),
+            "bc70e26f40b8816eb177813dda1f5f529a27a4641d45aa19cae2348a8c6a5fe9\n",
+        )
+        .expect("write required skill golden");
+
+        let result = run_block_expansion("check", true, &root);
+        let expected = "check_block_expansion: markered member skills/demo/codex/prompt.md has no golden (tests/fixtures/skill-goldens/demo.codex.prompt.md.sha256 missing — fail closed)";
+
+        assert!(result.is_failure());
+        assert_eq!(
+            result.spawn_count, 2,
+            "only SKILL expansion and hashing run"
+        );
+        assert_eq!(result.stderr_bytes, expected.len());
+        assert_ne!(
+            result.output_digest,
+            output_digest(&[], expected.as_bytes())
+        );
+        fs::remove_dir_all(root).expect("remove block expansion fixture");
+    }
+
+    #[test]
+    fn block_expansion_failure_digest_preserves_child_evidence() {
+        let child = CheckResult::completed("child", true, 0, 0, 1, 5, 0, "child-output-digest");
+        let mut evidence = b"child-output-digest\n".to_vec();
+        evidence.extend_from_slice(b"missing golden");
+
+        let result = block_expansion_result(
+            "check_block_expansion",
+            true,
+            vec![child],
+            Some("missing golden".to_string()),
+        );
+
+        assert_eq!(result.output_digest, output_digest(&evidence, &[]));
+    }
 
     #[test]
     fn aggregate_preserves_a_missing_child_tool_failure() {
