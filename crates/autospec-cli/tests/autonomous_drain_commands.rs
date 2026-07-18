@@ -14,6 +14,19 @@ fn workspace_root() -> PathBuf {
         .expect("workspace root")
 }
 
+/// Reports whether Rust source `text` contains a literal call-site for
+/// `pattern` outside of `//` line comments. Raw `str::contains` over the
+/// whole file body would also match the pattern inside a comment (e.g. a
+/// doc note explaining why the legacy invocation was removed), which is
+/// not an actual restoration of the forbidden authority. Stripping each
+/// line's trailing `//...` comment before scanning keeps the check
+/// anchored to real code content.
+fn source_invokes(text: &str, pattern: &str) -> bool {
+    text.lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+        .any(|code| code.contains(pattern))
+}
+
 #[test]
 fn rust_drain_source_does_not_restore_shell_or_legacy_drain_authority() {
     let source = fs::read_to_string(
@@ -27,7 +40,7 @@ fn rust_drain_source_does_not_restore_shell_or_legacy_drain_authority() {
         "autospec-autonomous-run-drain.sh",
     ] {
         assert!(
-            !source.contains(forbidden),
+            !source_invokes(&source, forbidden),
             "drain command retains legacy authority: {forbidden}"
         );
     }
