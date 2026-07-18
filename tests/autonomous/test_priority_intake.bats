@@ -743,6 +743,17 @@ PYEOF
 
     GATE_CALLED_LOG="$TMP/gate-called.log"
 
+    cat > "$SCRIPTS_DIR/autospec" <<'EOF'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "queue ready") printf '{"ready":[{"number":1724}],"blocked":[],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[{"number":1724}]}
+' ;;
+  *) exit 0 ;;
+esac
+EOF
+    chmod +x "$SCRIPTS_DIR/autospec"
+    export AUTOSPEC_QUEUE_BIN="$SCRIPTS_DIR/autospec"
+
     # Premerge gate records it was called, then returns merge-ok.
     cat > "$SCRIPTS_DIR/autonomous-premerge-gate.sh" <<EOF
 #!/usr/bin/env bash

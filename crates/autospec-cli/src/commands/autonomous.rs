@@ -582,6 +582,7 @@ fn lifecycle_park_name(reason: LifecycleParkReason) -> &'static str {
         LifecycleParkReason::BudgetSoftCap => "budget_soft_cap",
         LifecycleParkReason::BudgetHardCap => "budget_hard_cap",
         LifecycleParkReason::IdleRescan => "idle_rescan",
+        LifecycleParkReason::NoSteering => "no-steering",
     }
 }
 

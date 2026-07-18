@@ -1929,6 +1929,16 @@ fi'
         _reason="$(printf '%s' "$_tier_json" \
             | jq -r '.reason // ""' 2>/dev/null || echo "")"
 
+        if { [ "$_action" = "run-explore-once" ] \
+                || [ "$_action" = "run-architecture-improvement" ] \
+                || [ "$_action" = "run-explore-once-internet" ]; } \
+                && [ "${AUTOSPEC_ALLOW_UNSTEERED_GENERATION:-0}" != "1" ] \
+                && [ ! -s "$_priorities_file" ] \
+                && [ ! -s "$_eff_persona" ]; then
+            _action="park"
+            _reason="no-steering"
+        fi
+
         printf '[conductor] tier=%s action=%s\n' "$_tier" "$_action" >&2
 
         # ── Step 4 + 5: Tier-1 drain gated on premerge check ─────────────────

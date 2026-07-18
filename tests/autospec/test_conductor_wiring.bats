@@ -846,6 +846,7 @@ EOF
 
   export AUTOSPEC_PROMOTE_OPEN_ISSUES_CMD="printf '{\"dry\":false,\"filed\":0,\"promoted\":[]}\n'"
   export AUTOSPEC_EXPLORE_CMD="printf '{\"dry\":true,\"filed\":0,\"reason\":\"tier2-dry\"}\n'"
+  export AUTOSPEC_ALLOW_UNSTEERED_GENERATION=1
 
   run bash -c "
     . '$LOOP_LIB'
@@ -877,6 +878,7 @@ EOF
 
   local arch_log="$TEST_TMP/arch.log"
   export AUTOSPEC_ARCHITECTURE_IMPROVEMENT_CMD="printf '{\"dry\":false,\"filed\":1}\n'; printf 'arch-called\n' >> '$arch_log'"
+  export AUTOSPEC_ALLOW_UNSTEERED_GENERATION=1
 
   run bash -c "
     . '$LOOP_LIB'
@@ -909,6 +911,7 @@ EOF
   local self_log="$TEST_TMP/self-improvement.log"
   _install_stub "autonomous-self-improvement.sh" \
     "printf '%s\n' \"\$*\" >> '$self_log'; printf '{\"dry\":false,\"filed\":1,\"reason\":\"filed deterministic self-improvement candidates\"}\n'"
+  export AUTOSPEC_ALLOW_UNSTEERED_GENERATION=1
 
   run bash -c "
     . '$LOOP_LIB'
