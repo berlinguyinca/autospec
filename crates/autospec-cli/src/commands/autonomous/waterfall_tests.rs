@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::io::{Read, Write};
@@ -182,14 +183,40 @@ fn fork_inherited_lock_child() {
         StoreAcquisition::Held
     ));
 
+    let waterfall_root = root.path().to_path_buf();
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+    let acquisition = thread::spawn(move || {
+        let result = WaterfallStore::acquire_for_receipts(waterfall_root, "owner/repo", None);
+        acquired_tx.send(result).expect("send receipt acquisition");
+    });
+    assert!(matches!(
+        acquired_rx.recv_timeout(Duration::from_millis(25)),
+        Err(RecvTimeoutError::Timeout)
+    ));
+
     gate_parent.write_all(&[1]).expect("release child exec");
+    let acquired = acquired_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("receipt acquisition completed after child exec");
+    assert!(matches!(acquired, Ok(StoreAcquisition::Acquired(_))));
+    acquisition.join().expect("receipt acquisition thread");
     let mut child = spawn.join().expect("spawn thread");
     assert!(child.wait().expect("wait for child").success());
-    let acquired = retry_transient_lock(
-        || WaterfallStore::acquire(root.path(), "owner/repo"),
-        |result| matches!(result, Ok(StoreAcquisition::Held)),
-    );
-    assert!(matches!(acquired, Ok(StoreAcquisition::Acquired(_))));
+}
+
+#[test]
+fn receipt_acquisition_returns_held_after_bounded_retry_deadline() {
+    let root = TempRoot::new();
+    let first = acquire(&root);
+    let started = Instant::now();
+
+    let acquisition = WaterfallStore::acquire_for_receipts(root.path(), "owner/repo", None)
+        .expect("bounded receipt acquisition");
+
+    assert!(matches!(acquisition, StoreAcquisition::Held));
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    drop(first);
 }
 
 #[cfg(unix)]
