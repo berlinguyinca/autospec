@@ -59,7 +59,7 @@ write_lookup_documents() {
   grep -q 'gh pr reopen <number>' "$SKILL"
   grep -q 'terminal recovery blocker' "$SKILL"
   grep -q 'needs-classify' "$SKILL"
-  grep -q 'scripts/lint-issue.sh' "$SKILL"
+  grep -Fq '${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh' "$SKILL"
   grep -q 'gh issue create --title' "$SKILL"
   grep -q '/autospec-classify --issues' "$SKILL"
   grep -q 'gh pr create' "$SKILL"
