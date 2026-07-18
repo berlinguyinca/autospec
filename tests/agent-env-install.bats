@@ -35,3 +35,30 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   grep -q 'AUTOSPEC_SKIP_AGENT_ENV_ALIASES' "$REPO_ROOT/install.sh"
   grep -q '^install_agent_env_aliases$' "$REPO_ROOT/install.sh"
 }
+
+@test "custom runtime config install is discovered by the installed detector" {
+  install_root="$BATS_TEST_TMPDIR/install"
+  scripts_dir="$install_root/scripts"
+  config_dir="$BATS_TEST_TMPDIR/custom-config"
+  helpers="$BATS_TEST_TMPDIR/copy-runtime-subdirs.sh"
+  {
+    printf 'DRY_RUN=0\n'
+    printf 'info() { :; }\nwarn() { printf "%%s\\n" "$*" >&2; }\n'
+    awk '
+      /^copy_runtime_subdirs\(\)/ { capture=1 }
+      capture { print }
+      capture && /^}$/ { exit }
+    ' "$REPO_ROOT/install.sh"
+  } > "$helpers"
+  # shellcheck source=/dev/null
+  source "$helpers"
+
+  AUTOSPEC_SCRIPTS_DIR="$scripts_dir" AUTOSPEC_CONFIG_DIR="$config_dir" copy_runtime_subdirs
+  run env AUTOSPEC_CONFIG_DIR="$config_dir" bash -c '
+    source "$1/lib/autospec-harness-detect.sh"
+    autospec_harness_supported_ids
+  ' _ "$scripts_dir"
+
+  [ "$status" -eq 0 ]
+  [ "$output" = $'claude\ncodex\nopencode' ]
+}

@@ -46,6 +46,7 @@ _autospec_harness_table() {
     local script_dir
     script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
     for candidate in \
+        "${AUTOSPEC_CONFIG_DIR:-$HOME/.autospec/config}/harness-runtime-aliases.tsv" \
         "$script_dir/../../config/harness-runtime-aliases.tsv" \
         "$script_dir/harness-runtime-aliases.tsv"; do
         if [ -f "$candidate" ]; then printf '%s' "$candidate"; return; fi

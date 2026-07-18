@@ -11,6 +11,12 @@ setup() {
   [ -x "$AUTOSPEC_BIN" ] || cargo build -q -p autospec-cli --manifest-path "$ROOT/Cargo.toml"
 }
 
+@test "runtime collector module is tracked for clean archives" {
+  run git -C "$ROOT" ls-files --error-unmatch crates/autospec-cli/src/commands/runtime/env/gc.rs
+
+  [ "$status" -eq 0 ]
+}
+
 teardown() { rm -rf "$TEST_TMP"; }
 
 @test "cleanup adapter delegates to the real runtime collector" {

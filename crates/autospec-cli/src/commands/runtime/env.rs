@@ -35,8 +35,8 @@ use maven::MavenAdapter;
 use options::{parse_normalize_options, NormalizeMode, NormalizeOptions};
 use session::{live_sessions, run_session_command, SessionLease};
 use state::{
-    layout_for_context, read_authoritative_state, read_runtime_state, write_runtime_state,
-    EnvironmentLease, StateLayout,
+    claim_ports, layout_for_context, read_authoritative_state, read_runtime_state,
+    write_runtime_state, EnvironmentLease, PortReservations, StateLayout,
 };
 
 #[cfg(unix)]
@@ -724,14 +724,17 @@ fn state_root() -> Result<PathBuf, CommandFailure> {
     Ok(PathBuf::from(home).join(".autospec/envs"))
 }
 
-pub(super) fn state_from_context(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
+fn state_from_context(
+    context: &RuntimeContext,
+) -> Result<(RuntimeState, PortReservations), CommandFailure> {
     let frontend_override = caller_override("AGENT_FRONTEND_PORT");
     let backend_override = caller_override("AGENT_BACKEND_PORT");
-    let (frontend, backend) = gc::claim_ports(
+    let reservations = claim_ports(
         context,
         frontend_override.as_deref(),
         backend_override.as_deref(),
     )?;
+    let (frontend, backend) = reservations.ports();
     let mut state = RuntimeState::from_context(context, frontend, backend);
 
     let public_url = caller_override("AGENT_PUBLIC_URL").unwrap_or_else(|| {
@@ -751,7 +754,7 @@ pub(super) fn state_from_context(context: &RuntimeContext) -> Result<RuntimeStat
     if let Some(value) = caller_override("COMPOSE_PROJECT_NAME") {
         replace_state_value(&mut state, "COMPOSE_PROJECT_NAME", value)?;
     }
-    Ok(state)
+    Ok((state, reservations))
 }
 
 fn caller_override(key: &str) -> Option<String> {

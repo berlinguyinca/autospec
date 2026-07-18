@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::net::{TcpListener, TcpStream};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -103,6 +105,83 @@ impl PortClaimError {
     }
 }
 
+pub struct PortReservation {
+    claim: PortClaim,
+    listener: Option<TcpListener>,
+}
+
+impl PortReservation {
+    pub fn port(&self) -> u16 {
+        self.claim.port
+    }
+
+    pub fn release_for_launch(&mut self) -> u16 {
+        self.listener.take();
+        self.port()
+    }
+
+    pub fn release_claim(self, registry: &mut PortRegistry) -> Result<(), PortClaimError> {
+        self.claim.release(registry)
+    }
+}
+
+pub fn reserve_loopback_port(
+    registry: &mut PortRegistry,
+    environment_id: &str,
+    requested: Option<u16>,
+    attempts: usize,
+) -> Result<PortReservation, PortClaimError> {
+    if let Some(port) = requested {
+        return reserve_one(registry, environment_id, port);
+    }
+    for _ in 0..attempts {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|_| PortClaimError::new("PORT_BIND_UNAVAILABLE", 0, None))?;
+        let port = listener
+            .local_addr()
+            .map_err(|_| PortClaimError::new("PORT_BIND_UNAVAILABLE", 0, None))?
+            .port();
+        if let Ok(claim) = registry.claim(environment_id, port) {
+            return Ok(PortReservation {
+                claim,
+                listener: Some(listener),
+            });
+        }
+    }
+    Err(PortClaimError::new(
+        "PORT_ALLOCATION_RETRIES_EXHAUSTED",
+        0,
+        None,
+    ))
+}
+
+fn reserve_one(
+    registry: &mut PortRegistry,
+    environment_id: &str,
+    port: u16,
+) -> Result<PortReservation, PortClaimError> {
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .map_err(|_| PortClaimError::new("PORT_BIND_UNAVAILABLE", port, None))?;
+    let claim = registry.claim_fixed(environment_id, port)?;
+    Ok(PortReservation {
+        claim,
+        listener: Some(listener),
+    })
+}
+
+pub fn wait_for_loopback_bind(port: u16, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GcOwnerSnapshot {
     pub environment_id: String,
@@ -152,5 +231,36 @@ impl GcPolicy {
             return GcDecision::Retain("WORKTREE_GENERATION_ACTIVE");
         }
         GcDecision::Delete
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::{Command, Stdio};
+
+    use super::*;
+
+    #[test]
+    fn reservation_holds_loopback_until_the_launch_boundary() {
+        let mut registry = PortRegistry::default();
+        let mut reservation = reserve_loopback_port(&mut registry, "env-a", None, 5).unwrap();
+
+        assert!(!python_bind(reservation.port()));
+        let port = reservation.release_for_launch();
+        assert!(python_bind(port));
+    }
+
+    fn python_bind(port: u16) -> bool {
+        Command::new("python3")
+            .args([
+                "-c",
+                "import socket,sys; s=socket.socket(); s.bind(('127.0.0.1', int(sys.argv[1])))",
+                &port.to_string(),
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success()
     }
 }

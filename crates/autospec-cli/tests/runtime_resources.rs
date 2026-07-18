@@ -917,6 +917,217 @@ fn gc_preserves_ambiguous_owner_mismatch_with_recovery_command() {
     assert!(fixture.state_root.join("env-stale").exists());
 }
 
+#[test]
+fn provisioning_failure_releases_every_claimed_port() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 1\nmodes:\n  local:\n    command: sh -c 'exit 23'\n",
+    );
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let inventory_path = environment_directory(&fixture).join("inventory.json");
+    let inventory: ResourceInventory = read_json(&inventory_path).unwrap();
+    let registry: autospec_core::runtime_env::PortRegistry =
+        read_json(&fixture.state_root.join("ports/registry.json")).unwrap();
+    assert_eq!(registry.owner(inventory.frontend_port.unwrap()), None);
+    assert_eq!(registry.owner(inventory.backend_port.unwrap()), None);
+}
+
+#[test]
+fn direct_server_reallocates_after_a_real_bind_collision() {
+    let fixture = RuntimeFixture::empty();
+    std::fs::create_dir_all(fixture.root.join(".autospec")).unwrap();
+    let command = format!(
+        "if [ ! -f {root}/first-attempt ]; then touch {root}/first-attempt; python3 -m http.server \"$AGENT_FRONTEND_PORT\" --bind 127.0.0.1 >/dev/null 2>&1 & echo $! > {root}/first.pid; exit 23; fi; python3 -m http.server \"$AGENT_FRONTEND_PORT\" --bind 127.0.0.1 >/dev/null 2>&1 & echo $! > {root}/second.pid",
+        root = fixture.root.display()
+    );
+    std::fs::write(
+        fixture.root.join(".autospec/runtime.yml"),
+        format!("version: 1\nmodes:\n  local:\n    command: sh -c '{command}'\n"),
+    )
+    .unwrap();
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    for name in ["first.pid", "second.pid"] {
+        if let Ok(pid) = std::fs::read_to_string(fixture.root.join(name)) {
+            let _ = Command::new("kill").arg(pid.trim()).status();
+        }
+    }
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let inventory: ResourceInventory =
+        read_json(&environment_directory(&fixture).join("inventory.json")).unwrap();
+    assert_ne!(inventory.frontend_port, inventory.backend_port);
+}
+
+#[test]
+fn gc_refuses_inventory_shared_with_a_locked_foreign_environment() {
+    let fixture = RuntimeFixture::empty();
+    let candidate_repo = fixture.root.join("removed-candidate");
+    let foreign_repo = fixture.root.join("foreign-repo");
+    let shared = fixture.root.join("maven/autospec/shared");
+    write_gc_state(
+        &fixture,
+        &candidate_repo,
+        "env-candidate",
+        "owner-a",
+        "env-candidate",
+    );
+    write_gc_state(
+        &fixture,
+        &foreign_repo,
+        "env-foreign",
+        "owner-b",
+        "env-foreign",
+    );
+    for environment in ["env-candidate", "env-foreign"] {
+        let path = fixture.state_root.join(environment).join("inventory.json");
+        let mut inventory: ResourceInventory = read_json(&path).unwrap();
+        inventory.maven_local_prefix = Some(shared.clone());
+        autospec_core::runtime_env::write_json_atomic(&path, &inventory).unwrap();
+    }
+    let ready = fixture.root.join("foreign-ready");
+    let release = fixture.root.join("foreign-release");
+    let mut holder = fixture
+        .command()
+        .args(["runtime", "env", "lease-probe"])
+        .arg(fixture.state_root.join("env-foreign"))
+        .arg(&ready)
+        .arg(&release)
+        .spawn()
+        .unwrap();
+    wait_for_file(&ready);
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "gc", "--repo"])
+        .arg(&candidate_repo)
+        .output()
+        .unwrap();
+
+    std::fs::write(release, "release\n").unwrap();
+    assert!(holder.wait().unwrap().success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("RESOURCE_OWNER_MISMATCH"));
+    assert!(fixture.state_root.join("env-candidate").is_dir());
+}
+
+#[test]
+fn gc_treats_an_already_absent_container_as_deleted() {
+    let fixture = RuntimeFixture::empty();
+    let stale_repo = fixture.root.join("removed-worktree");
+    write_gc_state(&fixture, &stale_repo, "env-stale", "owner-a", "env-stale");
+    let inventory_path = fixture.state_root.join("env-stale/inventory.json");
+    let mut inventory: ResourceInventory = read_json(&inventory_path).unwrap();
+    inventory.containers = vec![format!("autospec-absent-{}", std::process::id())];
+    autospec_core::runtime_env::write_json_atomic(&inventory_path, &inventory).unwrap();
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "gc", "--repo"])
+        .arg(&stale_repo)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!fixture.state_root.join("env-stale").exists());
+}
+
+#[test]
+fn gc_reuses_guarded_maven_purge_and_rejects_a_wrong_effective_root() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 2\nresources:\n  maven:\n    isolation: split-local\n  compose:\n    isolation: off\nmodes:\n  local:\n    command: true\n",
+    );
+    std::fs::write(
+        fixture.root.join("pom.xml"),
+        "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>test</groupId><artifactId>gc</artifactId><version>1</version></project>\n",
+    )
+    .unwrap();
+    let up = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+    assert!(
+        up.status.success(),
+        "{}",
+        String::from_utf8_lossy(&up.stderr)
+    );
+    let directory = environment_directory(&fixture);
+    let plan_path = directory.join("plan.json");
+    let owner_path = directory.join("owner.json");
+    let inventory_path = directory.join("inventory.json");
+    let plan: ResourcePlan = read_json(&plan_path).unwrap();
+    let mut identity = plan.identity.clone();
+    identity.generation = Some("stale-generation".into());
+    let stale_plan =
+        ResourcePlan::new(identity.clone(), plan.maven.clone(), plan.compose.clone()).unwrap();
+    let mut owner: EnvironmentOwner = read_json(&owner_path).unwrap();
+    owner.identity = identity;
+    owner.manifest_digest = stale_plan.digest.clone();
+    autospec_core::runtime_env::write_json_atomic(&plan_path, &stale_plan).unwrap();
+    autospec_core::runtime_env::write_json_atomic(&owner_path, &owner).unwrap();
+    let wrong_prefix = fixture
+        .root
+        .join("wrong-root/autospec")
+        .join(&owner.identity.environment_id);
+    std::fs::create_dir_all(&wrong_prefix).unwrap();
+    std::fs::write(wrong_prefix.join("must-survive"), "owned elsewhere\n").unwrap();
+    let mut inventory: ResourceInventory = read_json(&inventory_path).unwrap();
+    inventory.maven_local_prefix = Some(wrong_prefix.clone());
+    autospec_core::runtime_env::write_json_atomic(&inventory_path, &inventory).unwrap();
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "gc", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("MAVEN_PURGE_IDENTITY_MISMATCH"));
+    assert!(wrong_prefix.join("must-survive").is_file());
+}
+
+fn environment_directory(fixture: &RuntimeFixture) -> PathBuf {
+    std::fs::read_dir(&fixture.state_root)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.join("owner.json").is_file())
+        .unwrap()
+}
+
+fn wait_for_file(path: &Path) {
+    for _ in 0..200 {
+        if path.is_file() {
+            return;
+        }
+        let _ = Command::new("sleep").arg("0.01").status();
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
 fn write_gc_state(
     fixture: &RuntimeFixture,
     stale_repo: &Path,

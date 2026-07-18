@@ -1,9 +1,10 @@
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use autospec_core::runtime_env::{
-    ComposeIsolation, EnvironmentLifecycle, EnvironmentOwner, MavenIsolation, MavenPlan,
-    ResourceInventory, ResourcePlan, RuntimeContext, RuntimeState,
+    wait_for_loopback_bind, ComposeIsolation, EnvironmentLifecycle, EnvironmentOwner,
+    MavenIsolation, MavenPlan, ResourceInventory, ResourcePlan, RuntimeContext, RuntimeState,
 };
 
 use crate::commands::CommandFailure;
@@ -12,8 +13,8 @@ use super::compose::ComposeAdapter;
 use super::maven::MavenAdapter;
 use super::session::live_sessions;
 use super::state::{
-    initialize_authoritative_state, layout_for_context, read_authoritative_state, write_lifecycle,
-    StateLayout,
+    initialize_authoritative_state, layout_for_context, read_authoritative_state, release_ports,
+    write_lifecycle, PortReservations, StateLayout,
 };
 
 const INITIAL_OVERRIDE_KEYS: [&str; 5] = [
@@ -95,7 +96,7 @@ pub(super) fn teardown_locked(
         .environment_dir
         .parent()
         .expect("runtime environment has a state root");
-    super::gc::release_ports(state_root, &context.environment_id)?;
+    release_ports(state_root, &context.environment_id)?;
     for path in [&layout.env, &layout.inventory, &layout.plan] {
         if let Err(error) = remove_file_if_present(path) {
             return cleanup_failed(&layout, Some(&mut owner), error);
@@ -237,8 +238,6 @@ fn provision_fresh(
     bypassed: bool,
 ) -> Result<RuntimeState, CommandFailure> {
     let mut owner = initialize_authoritative_state(layout, plan)?;
-    let mut state = super::state_from_context(context)?;
-    record_allocated_ports(layout, &state)?;
     let command = context
         .mode
         .command()
@@ -247,32 +246,103 @@ fn provision_fresh(
         return Err(super::missing_mode_command(context));
     }
     write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Provisioning)?;
+    if plan.maven.is_none() && plan.compose.is_none() {
+        return provision_direct(context, layout, plan, command, bypassed, owner);
+    }
+    provision_resources(context, layout, plan, command, bypassed, owner)
+}
+
+fn provision_resources(
+    context: &RuntimeContext,
+    layout: &StateLayout,
+    plan: &ResourcePlan,
+    command: Option<&str>,
+    bypassed: bool,
+    mut owner: EnvironmentOwner,
+) -> Result<RuntimeState, CommandFailure> {
     ComposeAdapter::validate_canonical_export(plan.compose.as_ref())?;
-    let resolved_compose = ComposeAdapter::validate_resolved_model(plan.compose.as_ref(), context)?;
-    if let Err(error) = MavenAdapter::configure(plan.maven.as_ref(), context, &mut state, layout) {
-        return cleanup_failed(layout, Some(&mut owner), error);
+    let resolved = ComposeAdapter::validate_resolved_model(plan.compose.as_ref(), context)?;
+    let (mut state, mut ports) = super::state_from_context(context)?;
+    let result = (|| {
+        record_allocated_ports(layout, &state)?;
+        configure_resources(context, layout, plan, resolved.as_deref(), &mut state)?;
+        super::write_state(context, &state)?;
+        ports.release_for_launch();
+        super::run_mode_command(command, context, Some(&state), bypassed)?;
+        write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Active)?;
+        Ok(state)
+    })();
+    match result {
+        Ok(state) => Ok(state),
+        Err(error) => release_after_failure(layout, &mut owner, ports, error),
     }
-    if let Err(error) = record_maven_arguments(layout, plan, &state) {
-        return cleanup_failed(layout, Some(&mut owner), error);
-    }
-    if let Err(error) = ComposeAdapter::up(
+}
+
+fn configure_resources(
+    context: &RuntimeContext,
+    layout: &StateLayout,
+    plan: &ResourcePlan,
+    resolved_compose: Option<&[u8]>,
+    state: &mut RuntimeState,
+) -> Result<(), CommandFailure> {
+    MavenAdapter::configure(plan.maven.as_ref(), context, state, layout)?;
+    record_maven_arguments(layout, plan, state)?;
+    ComposeAdapter::up(
         plan.compose.as_ref(),
         plan,
-        resolved_compose.as_deref(),
+        resolved_compose,
         context,
-        &mut state,
+        state,
         layout,
-    ) {
-        return cleanup_failed(layout, Some(&mut owner), error);
+    )
+}
+
+fn provision_direct(
+    context: &RuntimeContext,
+    layout: &StateLayout,
+    _plan: &ResourcePlan,
+    command: Option<&str>,
+    bypassed: bool,
+    mut owner: EnvironmentOwner,
+) -> Result<RuntimeState, CommandFailure> {
+    for attempt in 0..5 {
+        let (state, mut ports) = super::state_from_context(context)?;
+        if let Err(error) = record_allocated_ports(layout, &state)
+            .and_then(|()| super::write_state(context, &state))
+        {
+            return release_after_failure(layout, &mut owner, ports, error);
+        }
+        let (frontend, backend) = ports.release_for_launch();
+        match super::run_mode_command(command, context, Some(&state), bypassed) {
+            Ok(()) => {
+                return match write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Active) {
+                    Ok(()) => Ok(state),
+                    Err(error) => release_after_failure(layout, &mut owner, ports, error),
+                };
+            }
+            Err(_error) if bind_collision(frontend, backend) && attempt < 4 => {
+                ports.release_claims()?;
+            }
+            Err(error) => return release_after_failure(layout, &mut owner, ports, error),
+        }
     }
-    if let Err(error) = super::write_state(context, &state) {
-        return cleanup_failed(layout, Some(&mut owner), error);
-    }
-    if let Err(error) = super::run_mode_command(command, context, Some(&state), bypassed) {
-        return cleanup_failed(layout, Some(&mut owner), error);
-    }
-    write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Active)?;
-    Ok(state)
+    unreachable!("bounded direct-server attempts always return")
+}
+
+fn bind_collision(frontend: u16, backend: u16) -> bool {
+    [frontend, backend]
+        .into_iter()
+        .any(|port| wait_for_loopback_bind(port, Duration::from_secs(2)))
+}
+
+fn release_after_failure<T>(
+    layout: &StateLayout,
+    owner: &mut EnvironmentOwner,
+    ports: PortReservations,
+    error: CommandFailure,
+) -> Result<T, CommandFailure> {
+    ports.release_claims()?;
+    cleanup_failed(layout, Some(owner), error)
 }
 
 fn required_inventory_port(value: Option<u16>, key: &str) -> Result<u16, CommandFailure> {

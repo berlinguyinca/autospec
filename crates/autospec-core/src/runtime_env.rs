@@ -25,8 +25,8 @@ pub use identity::{load_generation_token, EnvironmentIdentity};
 pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
 pub use maven::{MavenArgPlatform, MavenArgs, MavenPurgeTarget};
 pub use ports::{
-    GcDecision, GcInventorySnapshot, GcOwnerSnapshot, GcPolicy, PortClaim, PortClaimError,
-    PortRegistry,
+    reserve_loopback_port, wait_for_loopback_bind, GcDecision, GcInventorySnapshot,
+    GcOwnerSnapshot, GcPolicy, PortClaim, PortClaimError, PortRegistry, PortReservation,
 };
 pub use resources::{
     read_json, write_file_atomic, write_json_atomic, ComposeExport, ComposeIsolation, ComposePlan,
