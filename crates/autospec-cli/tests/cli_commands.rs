@@ -3205,11 +3205,14 @@ fn fake_bin(
 }
 
 fn hermetic_autonomous_path(fixture: &std::path::Path) -> String {
-    let bin = fake_bin(
-        fixture,
-        None,
-        Some("#!/bin/sh\nwhile kill -0 \"$PPID\" 2>/dev/null; do sleep 0.1; done\nexit 1\n"),
-    );
+    let bin = fixture.join("bin");
+    if !bin.join("gh").is_file() {
+        fake_bin(
+            fixture,
+            None,
+            Some("#!/bin/sh\nwhile kill -0 \"$PPID\" 2>/dev/null; do sleep 0.1; done\nexit 1\n"),
+        );
+    }
     path_with(&bin)
 }
 
