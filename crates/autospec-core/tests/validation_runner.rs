@@ -280,7 +280,7 @@ fn runner_aggregates_typed_derive_trio_commands() {
 
     assert_eq!(report.results.len(), 1);
     assert_eq!(report.results[0].exit_code, Some(0));
-    assert_eq!(report.results[0].spawn_count, 2);
+    assert_eq!(report.results[0].spawn_count, 3);
 }
 
 #[test]
