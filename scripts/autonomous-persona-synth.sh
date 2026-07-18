@@ -287,6 +287,18 @@ confidence_note() {
       done
 }
 
+issue_archetype_overlay() {
+  local _id
+  [ -f "$SCRIPT_DIR/persona-catalog.sh" ] || return 0
+  _id="$(bash "$SCRIPT_DIR/persona-catalog.sh" select-overlay 2>/dev/null || true)"
+  [ -n "$_id" ] || return 0
+
+  printf '\n## Issue archetype overlay\n\n'
+  printf '_Selected persona archetype: `%s`._\n\n' "$_id"
+  bash "$SCRIPT_DIR/persona-catalog.sh" load "$_id" 2>/dev/null || true
+  printf '\n'
+}
+
 # ---------------------------------------------------------------------------
 # Main flow.
 # ---------------------------------------------------------------------------
@@ -368,6 +380,7 @@ _eff_tmp="$EFFECTIVE_FILE.tmp.$$"
   else
     printf '_No repo-local overlay sources present._\n\n'
   fi
+  issue_archetype_overlay
   confidence_note "$GLOBAL_BUNDLE" "$OVERLAY_BUNDLE" "$GLOBAL_FILE"
 } > "$_eff_tmp"
 mv -f "$_eff_tmp" "$EFFECTIVE_FILE"
