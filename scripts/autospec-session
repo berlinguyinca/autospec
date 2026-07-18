@@ -99,9 +99,9 @@ info "Creating tmux session '${session}' with harness '${harness}'."
 started_at="$(date +%s)"
 
 if [[ $# -gt 0 ]]; then
-    tmux new-session -d -s "$session" "$harness" "$@"
+    tmux new-session -d -s "$session" autospec-env session -- "$harness" "$@"
 else
-    tmux new-session -d -s "$session" "$harness"
+    tmux new-session -d -s "$session" autospec-env session -- "$harness"
 fi
 
 # ---------------------------------------------------------------------------

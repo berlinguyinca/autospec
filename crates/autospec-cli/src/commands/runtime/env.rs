@@ -1,5 +1,4 @@
 use std::fs;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -15,6 +14,7 @@ use autospec_core::runtime_env::{
 use crate::commands::CommandFailure;
 
 mod compose;
+mod gc;
 mod isolation;
 mod lifecycle;
 mod maven;
@@ -24,7 +24,8 @@ mod state;
 mod worker;
 
 use isolation::{
-    bypass_without_planning, invocation_isolation, planning_identity, whole_environment_disabled,
+    bypass_without_planning, invocation_isolation, planning_identity, teardown_plan,
+    whole_environment_disabled,
 };
 use lifecycle::{
     partial_state, provision_locked, teardown_locked, validate_authoritative,
@@ -34,8 +35,8 @@ use maven::MavenAdapter;
 use options::{parse_normalize_options, NormalizeMode, NormalizeOptions};
 use session::{live_sessions, run_session_command, SessionLease};
 use state::{
-    layout_for_context, read_authoritative_state, read_runtime_state, write_runtime_state,
-    EnvironmentLease, StateLayout,
+    claim_ports, layout_for_context, read_authoritative_state, read_runtime_state,
+    write_runtime_state, EnvironmentLease, PortReservations, StateLayout,
 };
 
 #[cfg(unix)]
@@ -101,6 +102,7 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
         "up" => up(parse_options(options)?),
         "status" => status(parse_options(options)?),
         "down" => down(parse_down_options(options)?),
+        "gc" => run_gc(parse_options(options)?),
         "exec" => exec(parse_exec_options(options)?),
         "session" => session(parse_session_options(options)?),
         "normalize-compose" => normalize_compose(parse_normalize_options(options)?),
@@ -418,6 +420,13 @@ fn init(options: InitOptions) -> Result<(), CommandFailure> {
 fn up(options: Options) -> Result<(), CommandFailure> {
     let repo = canonical_repo(&options.repo)?;
     let invocation = invocation_isolation(&repo, &options.mode)?;
+    compose::ComposeAdapter::reject_caller_project_name(
+        invocation
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.compose.as_ref()),
+    )?;
+    gc::collect(&state_root()?, None)?;
     if invocation.whole_environment_disabled {
         println!("AUTOSPEC_ISOLATION_BYPASSED=1");
         return Ok(());
@@ -433,6 +442,7 @@ fn up(options: Options) -> Result<(), CommandFailure> {
 
 fn status(options: Options) -> Result<(), CommandFailure> {
     let repo = canonical_repo(&options.repo)?;
+    gc::collect(&state_root()?, None)?;
     let identity = planning_identity(&repo, &options.mode)?;
     let context = context_from_identity(&repo, &options.mode, &identity)?;
     if !context.environment_dir.exists() {
@@ -467,6 +477,22 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     Ok(())
 }
 
+fn run_gc(options: Options) -> Result<(), CommandFailure> {
+    let repo = absolute_repo_candidate(&options.repo)?;
+    let removed = gc::collect(&state_root()?, Some(&repo))?;
+    println!("AUTOSPEC_RUNTIME_GC_REMOVED={removed}");
+    Ok(())
+}
+
+fn absolute_repo_candidate(repo: &Path) -> Result<PathBuf, CommandFailure> {
+    if repo.is_absolute() {
+        return Ok(repo.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(repo))
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
+}
+
 fn down(options: DownOptions) -> Result<(), CommandFailure> {
     let repo = canonical_repo(&options.options.repo)?;
     let identity = planning_identity(&repo, &options.options.mode)?;
@@ -481,8 +507,7 @@ fn down(options: DownOptions) -> Result<(), CommandFailure> {
         None if !context.env_file.is_file() => return Ok(()),
         None => return Err(partial_state(&layout)),
     };
-    let invocation = invocation_isolation(&repo, &options.options.mode)?;
-    let plan = required_plan(invocation.plan)?;
+    let plan = teardown_plan(&repo, &options.options.mode)?;
     validate_authoritative(&authoritative, &plan)?;
     validate_teardown_lifecycle(&authoritative.owner.lifecycle)?;
     let live = live_sessions(&context.environment_dir)?;
@@ -699,40 +724,18 @@ fn state_root() -> Result<PathBuf, CommandFailure> {
     Ok(PathBuf::from(home).join(".autospec/envs"))
 }
 
-fn free_port() -> Result<u16, CommandFailure> {
-    let listener = TcpListener::bind("127.0.0.1:0").map_err(|error| {
-        CommandFailure::diagnostic(format!("could not allocate runtime port: {error}"))
-    })?;
-    listener
-        .local_addr()
-        .map(|address| address.port())
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not read runtime port: {error}"))
-        })
-}
-
-pub(super) fn state_from_context(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
+fn state_from_context(
+    context: &RuntimeContext,
+) -> Result<(RuntimeState, PortReservations), CommandFailure> {
     let frontend_override = caller_override("AGENT_FRONTEND_PORT");
     let backend_override = caller_override("AGENT_BACKEND_PORT");
-    let mut state = RuntimeState::from_context(
+    let reservations = claim_ports(
         context,
-        if frontend_override.is_some() {
-            0
-        } else {
-            free_port()?
-        },
-        if backend_override.is_some() {
-            0
-        } else {
-            free_port()?
-        },
-    );
-    if let Some(value) = frontend_override {
-        replace_state_value(&mut state, "AGENT_FRONTEND_PORT", value)?;
-    }
-    if let Some(value) = backend_override {
-        replace_state_value(&mut state, "AGENT_BACKEND_PORT", value)?;
-    }
+        frontend_override.as_deref(),
+        backend_override.as_deref(),
+    )?;
+    let (frontend, backend) = reservations.ports();
+    let mut state = RuntimeState::from_context(context, frontend, backend);
 
     let public_url = caller_override("AGENT_PUBLIC_URL").unwrap_or_else(|| {
         format!(
@@ -751,7 +754,7 @@ pub(super) fn state_from_context(context: &RuntimeContext) -> Result<RuntimeStat
     if let Some(value) = caller_override("COMPOSE_PROJECT_NAME") {
         replace_state_value(&mut state, "COMPOSE_PROJECT_NAME", value)?;
     }
-    Ok(state)
+    Ok((state, reservations))
 }
 
 fn caller_override(key: &str) -> Option<String> {
@@ -938,6 +941,6 @@ fn print_state_value(state: &RuntimeState, key: &str) {
 
 fn print_help() {
     println!(
-        "autospec runtime env\n\nUSAGE:\n    autospec runtime env init [--repo PATH] [--manifest agent|autospec] [--force]\n    autospec runtime env up [--repo PATH] [--mode MODE]\n    autospec runtime env status [--repo PATH] [--mode MODE]\n    autospec runtime env down [--repo PATH] [--mode MODE] [--purge-maven]\n    autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]\n    autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]\n    autospec runtime env normalize-compose --repo PATH --check|--apply --fingerprint SHA256"
+        "autospec runtime env\n\nUSAGE:\n    autospec runtime env init [--repo PATH] [--manifest agent|autospec] [--force]\n    autospec runtime env up [--repo PATH] [--mode MODE]\n    autospec runtime env status [--repo PATH] [--mode MODE]\n    autospec runtime env down [--repo PATH] [--mode MODE] [--purge-maven]\n    autospec runtime env gc [--repo PATH]\n    autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]\n    autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]\n    autospec runtime env normalize-compose --repo PATH --check|--apply --fingerprint SHA256"
     );
 }

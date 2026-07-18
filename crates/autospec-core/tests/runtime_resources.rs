@@ -6,9 +6,79 @@ use autospec_core::runtime_env::{
     load_generation_token, read_json, write_json_atomic, ComposeExport, ComposeIsolation,
     ComposeNormalizer, ComposeOverride, ComposeOwnership, ComposePlan, ComposePolicy,
     EnvironmentIdentity, EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue,
-    IsolationDiagnostic, OwnedVolume, ResolvedExport, ResourceInventory, RuntimeContext,
-    RuntimeManifest, SessionRecord,
+    GcDecision, GcInventorySnapshot, GcOwnerSnapshot, GcPolicy, IsolationDiagnostic, OwnedVolume,
+    PortRegistry, ResolvedExport, ResourceInventory, RuntimeContext, RuntimeManifest,
+    SessionRecord,
 };
+
+#[test]
+fn fixed_port_claim_conflicts_across_environment_ids() {
+    let mut registry = PortRegistry::default();
+    registry.claim_fixed("env-a", 42_000).unwrap();
+
+    let error = registry.claim_fixed("env-b", 42_000).unwrap_err();
+
+    assert_eq!(error.code, "PORT_ALREADY_CLAIMED");
+}
+
+#[test]
+fn releasing_a_port_claim_allows_a_second_environment_to_claim_it() {
+    let mut registry = PortRegistry::default();
+    let claim = registry.claim("env-a", 42_001).unwrap();
+    claim.release(&mut registry).unwrap();
+
+    assert_eq!(registry.claim("env-b", 42_001).unwrap().port, 42_001);
+}
+
+#[test]
+fn gc_refuses_a_resource_with_an_owner_label_mismatch() {
+    let owner = GcOwnerSnapshot {
+        environment_id: "env-a".into(),
+        owner_key: "owner-a".into(),
+        recorded_generation: Some("old-generation".into()),
+        current_generation: Some("new-generation".into()),
+        worktree_exists: true,
+        locked_session_records: 0,
+    };
+    let inventory = GcInventorySnapshot {
+        environment_id: "env-a".into(),
+        docker_owner_keys: vec!["different-owner".into()],
+        live_environment_owners: Vec::new(),
+    };
+
+    assert_eq!(
+        GcPolicy::evaluate(&owner, &inventory),
+        GcDecision::Ambiguous("RESOURCE_OWNER_MISMATCH")
+    );
+}
+
+#[test]
+fn gc_deletes_only_stale_generation_without_live_sessions() {
+    let owner = GcOwnerSnapshot {
+        environment_id: "env-a".into(),
+        owner_key: "owner-a".into(),
+        recorded_generation: Some("old-generation".into()),
+        current_generation: None,
+        worktree_exists: false,
+        locked_session_records: 0,
+    };
+    let inventory = GcInventorySnapshot {
+        environment_id: "env-a".into(),
+        docker_owner_keys: vec!["owner-a".into()],
+        live_environment_owners: Vec::new(),
+    };
+
+    assert_eq!(GcPolicy::evaluate(&owner, &inventory), GcDecision::Delete);
+
+    let live = GcOwnerSnapshot {
+        locked_session_records: 1,
+        ..owner
+    };
+    assert_eq!(
+        GcPolicy::evaluate(&live, &inventory),
+        GcDecision::Retain("LIVE_SESSION_RECORD")
+    );
+}
 
 fn normalize_fixture(name: &str) -> TempRepo {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

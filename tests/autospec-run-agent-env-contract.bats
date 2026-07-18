@@ -45,3 +45,16 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/.." && pwd)"
   ! grep -B2 -A2 'normalize-compose --repo' "$block" | \
     grep -Eq '\[ -f .*runtime\.yml|manifest.*exists'
 }
+
+@test "Phase 4 cleanup releases runtime resources before Git removal" {
+  for surface in \
+    "$REPO_ROOT/skills/autospec/SKILL.md" \
+    "$REPO_ROOT/skills/autospec/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec/opencode/agent.md" \
+    "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+    "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
+    "$REPO_ROOT/skills/autospec-run/opencode/agent.md"; do
+    grep -E 'autospec runtime env down --repo /tmp/wt-<BRANCH>.*autospec-runtime-worktree-cleanup\.sh.*worktree remove /tmp/wt-<BRANCH>' "$surface"
+    ! grep -E 'autospec runtime env down .*\|\| true' "$surface"
+  done
+}

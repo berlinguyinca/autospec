@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use autospec_core::runtime_env::{
-    EnvironmentLifecycle, EnvironmentOwner, ResourceInventory, ResourcePlan, RuntimeContext,
-    RuntimeState,
+    reserve_loopback_port, EnvironmentLifecycle, EnvironmentOwner, PortRegistry, PortReservation,
+    ResourceInventory, ResourcePlan, RuntimeContext, RuntimeState,
 };
 
 use crate::commands::CommandFailure;
@@ -124,6 +124,138 @@ pub(super) struct EnvironmentLease {
     _file: File,
 }
 
+const MAX_BIND_ATTEMPTS: usize = 5;
+
+pub(super) struct PortReservations {
+    root: PathBuf,
+    environment_id: String,
+    frontend: PortReservation,
+    backend: PortReservation,
+}
+
+impl PortReservations {
+    pub(super) fn ports(&self) -> (u16, u16) {
+        (self.frontend.port(), self.backend.port())
+    }
+
+    pub(super) fn release_for_launch(&mut self) -> (u16, u16) {
+        (
+            self.frontend.release_for_launch(),
+            self.backend.release_for_launch(),
+        )
+    }
+
+    pub(super) fn release_claims(self) -> Result<(), CommandFailure> {
+        release_ports(&self.root, &self.environment_id)
+    }
+}
+
+pub(super) fn claim_ports(
+    context: &RuntimeContext,
+    frontend: Option<&str>,
+    backend: Option<&str>,
+) -> Result<PortReservations, CommandFailure> {
+    let root = context
+        .environment_dir
+        .parent()
+        .expect("environment state root");
+    let mut lease = PortRegistryLease::acquire(root)?;
+    lease.registry.release_environment(&context.environment_id);
+    let frontend = lease.reserve(&context.environment_id, frontend)?;
+    let backend = match lease.reserve(&context.environment_id, backend) {
+        Ok(reservation) => reservation,
+        Err(error) => {
+            frontend
+                .release_claim(&mut lease.registry)
+                .map_err(port_failure)?;
+            return Err(error);
+        }
+    };
+    lease.persist()?;
+    Ok(PortReservations {
+        root: root.to_path_buf(),
+        environment_id: context.environment_id.clone(),
+        frontend,
+        backend,
+    })
+}
+
+pub(super) fn release_ports(root: &Path, environment_id: &str) -> Result<(), CommandFailure> {
+    let mut lease = PortRegistryLease::acquire(root)?;
+    lease.registry.release_environment(environment_id);
+    lease.persist()
+}
+
+struct PortRegistryLease {
+    _file: File,
+    registry_path: PathBuf,
+    registry: PortRegistry,
+}
+
+impl PortRegistryLease {
+    fn acquire(root: &Path) -> Result<Self, CommandFailure> {
+        let directory = root.join("ports");
+        fs::create_dir_all(&directory).map_err(io_error)?;
+        let file = open_locked(&directory.join("lease.lock"))?;
+        let registry_path = directory.join("registry.json");
+        let registry = if registry_path.is_file() {
+            read_json(&registry_path).map_err(runtime_error)?
+        } else {
+            PortRegistry::default()
+        };
+        Ok(Self {
+            _file: file,
+            registry_path,
+            registry,
+        })
+    }
+
+    fn reserve(
+        &mut self,
+        environment_id: &str,
+        value: Option<&str>,
+    ) -> Result<PortReservation, CommandFailure> {
+        let requested = value.map(parse_port).transpose()?;
+        reserve_loopback_port(
+            &mut self.registry,
+            environment_id,
+            requested,
+            MAX_BIND_ATTEMPTS,
+        )
+        .map_err(port_failure)
+    }
+
+    fn persist(&self) -> Result<(), CommandFailure> {
+        write_json_atomic(&self.registry_path, &self.registry).map_err(runtime_error)
+    }
+}
+
+fn open_locked(path: &Path) -> Result<File, CommandFailure> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(io_error)?;
+    file.lock().map_err(io_error)?;
+    Ok(file)
+}
+
+fn parse_port(value: &str) -> Result<u16, CommandFailure> {
+    value
+        .parse::<u16>()
+        .map_err(|_| CommandFailure::diagnostic("PORT_INVALID"))
+}
+
+fn port_failure(error: autospec_core::runtime_env::PortClaimError) -> CommandFailure {
+    CommandFailure::diagnostic(format!("{}: port {}", error.code, error.port))
+}
+
+fn io_error(error: std::io::Error) -> CommandFailure {
+    CommandFailure::diagnostic(error.to_string())
+}
+
 impl EnvironmentLease {
     pub(super) fn acquire(environment_dir: &Path) -> Result<Self, CommandFailure> {
         fs::create_dir_all(environment_dir).map_err(|error| {
@@ -152,6 +284,31 @@ impl EnvironmentLease {
             ))
         })?;
         Ok(Self { _file: file })
+    }
+
+    pub(super) fn try_acquire(environment_dir: &Path) -> Result<Option<Self>, CommandFailure> {
+        fs::create_dir_all(environment_dir).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not create runtime environment {}: {error}",
+                environment_dir.display()
+            ))
+        })?;
+        let path = environment_dir.join("lease.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(Self { _file: file })),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => Err(CommandFailure::diagnostic(format!(
+                "could not try runtime environment lease {}: {error}",
+                path.display()
+            ))),
+        }
     }
 }
 
