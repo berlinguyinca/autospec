@@ -2526,21 +2526,32 @@ fn is_flag_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
 }
 
-fn contains_docs_drift_note(document: &str) -> bool {
-    let drift_gate = document.match_indices("drift").any(|(index, _)| {
-        let remainder = &document[index + "drift".len()..];
-        remainder.len() >= 5 && remainder.as_bytes()[1..].starts_with(b"gate")
-    });
-    let doc_before_drift = document
-        .find("doc")
-        .zip(document.rfind("drift"))
-        .is_some_and(|(doc, drift)| doc <= drift);
-    let drift_before_stage = document
-        .find("drift")
-        .zip(document.rfind("stage 2.5"))
-        .is_some_and(|(drift, stage)| drift <= stage);
+/// True when `left` is followed, after exactly one separator character
+/// (e.g. a space or hyphen), by `right` — the single-gap phrase primitive
+/// used to recognize both the "drift-gate" and "drift gate" spellings of
+/// the same term without hard-coding either separator.
+fn adjacent_with_single_gap(document: &str, left: &str, right: &str) -> bool {
+    document.match_indices(left).any(|(index, _)| {
+        let remainder = &document[index + left.len()..];
+        remainder.len() > right.len()
+            && remainder.as_bytes()[1..].starts_with(right.as_bytes())
+    })
+}
 
-    drift_gate || document.contains("check-doc-drift") || doc_before_drift || drift_before_stage
+/// True when the first occurrence of `earlier` appears at or before the
+/// last occurrence of `later` in the document.
+fn precedes(document: &str, earlier: &str, later: &str) -> bool {
+    document
+        .find(earlier)
+        .zip(document.rfind(later))
+        .is_some_and(|(first, last)| first <= last)
+}
+
+fn contains_docs_drift_note(document: &str) -> bool {
+    adjacent_with_single_gap(document, "drift", "gate")
+        || document.contains("check-doc-drift")
+        || precedes(document, "doc", "drift")
+        || precedes(document, "drift", "stage 2.5")
 }
 
 fn autospec_script_references(document: &str) -> Vec<String> {
@@ -2669,7 +2680,7 @@ fn strip_first_blank_line(document: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::StructuralValidator;
+    use super::{contains_docs_drift_note, StructuralValidator};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2738,5 +2749,41 @@ Each summary row records `command`, `cwd`, `duration`, `status`, and
 
         StructuralValidator::validate_autospec_explore_parallel_validation_contract(&root)
             .expect("complete bounded validation contract passes");
+    }
+
+    #[test]
+    fn docs_drift_note_matches_hyphenated_and_spaced_spellings() {
+        assert!(contains_docs_drift_note("stage 2.5 drift gate"));
+        assert!(contains_docs_drift_note(
+            "**stage 2.5 + docs drift-gate composition:** ..."
+        ));
+    }
+
+    #[test]
+    fn docs_drift_note_matches_the_literal_script_reference() {
+        assert!(contains_docs_drift_note(
+            "the drift-gate is powered by check-doc-drift.sh"
+        ));
+    }
+
+    #[test]
+    fn docs_drift_note_matches_doc_mentioned_before_drift() {
+        assert!(contains_docs_drift_note(
+            "see the doc section further below for background, then drift happens"
+        ));
+    }
+
+    #[test]
+    fn docs_drift_note_matches_drift_mentioned_before_stage_2_5() {
+        assert!(contains_docs_drift_note(
+            "drift happens sometime before stage 2.5 runs"
+        ));
+    }
+
+    #[test]
+    fn docs_drift_note_rejects_unrelated_prose() {
+        assert!(!contains_docs_drift_note(
+            "this section has nothing to do with the gate keyword at all"
+        ));
     }
 }
