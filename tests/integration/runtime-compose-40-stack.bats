@@ -80,10 +80,13 @@ start_isolated_engine() {
 
 remove_isolated_engine() {
   if host_docker container inspect "${ISOLATED_ENGINE:-missing}" >/dev/null 2>&1; then
+    local cleanup_command
+    # linter:allow-SECURITY isolated helper mounts only the per-test Docker socket directory
+    cleanup_command='rm -rf /cleanup/* /cleanup/.[!.]* /cleanup/..?*'
     host_docker rm -f "$ISOLATED_ENGINE" >> "$TEST_ROOT/cleanup.log" 2>&1
     host_docker run --rm --name "${ISOLATED_ENGINE}-cleanup" \
       -v "$TEST_ROOT/docker-run:/cleanup" --entrypoint sh docker:29.1.3-dind \
-      -c 'rm -rf /cleanup/* /cleanup/.[!.]* /cleanup/..?*' \
+      -c "$cleanup_command" \
       >> "$TEST_ROOT/cleanup.log" 2>&1
   fi
 }
