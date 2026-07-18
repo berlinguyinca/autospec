@@ -25,6 +25,9 @@ const INITIAL_OVERRIDE_KEYS: [&str; 5] = [
     "COMPOSE_PROJECT_NAME",
 ];
 
+const DIRECT_BIND_TIMEOUT: Duration = Duration::from_secs(2);
+const DIRECT_LAUNCH_ATTEMPTS: usize = 5;
+
 pub(super) fn provision_locked(
     context: &RuntimeContext,
     plan: &ResourcePlan,
@@ -305,7 +308,7 @@ fn provision_direct(
     bypassed: bool,
     mut owner: EnvironmentOwner,
 ) -> Result<RuntimeState, CommandFailure> {
-    for attempt in 0..5 {
+    for attempt in 0..DIRECT_LAUNCH_ATTEMPTS {
         let (state, mut ports) = super::state_from_context(context)?;
         if let Err(error) = record_allocated_ports(layout, &state)
             .and_then(|()| super::write_state(context, &state))
@@ -314,13 +317,21 @@ fn provision_direct(
         }
         let (frontend, backend) = ports.release_for_launch();
         match super::run_mode_command(command, context, Some(&state), bypassed) {
-            Ok(()) => {
-                return match write_lifecycle(layout, &mut owner, EnvironmentLifecycle::Active) {
-                    Ok(()) => Ok(state),
-                    Err(error) => release_after_failure(layout, &mut owner, ports, error),
-                };
+            Ok(()) if wait_for_loopback_bind(frontend, DIRECT_BIND_TIMEOUT) => {
+                return activate_direct(layout, &mut owner, ports, state);
             }
-            Err(_error) if bind_collision(frontend, backend) && attempt < 4 => {
+            Ok(()) if attempt + 1 < DIRECT_LAUNCH_ATTEMPTS => {
+                ports.release_claims()?;
+            }
+            Ok(()) => {
+                let error = CommandFailure::diagnostic(
+                    "PORT_BIND_HEALTH_RETRIES_EXHAUSTED: frontend port did not bind after 5 attempts",
+                );
+                return release_after_failure(layout, &mut owner, ports, error);
+            }
+            Err(_error)
+                if bind_collision(frontend, backend) && attempt + 1 < DIRECT_LAUNCH_ATTEMPTS =>
+            {
                 ports.release_claims()?;
             }
             Err(error) => return release_after_failure(layout, &mut owner, ports, error),
@@ -332,7 +343,19 @@ fn provision_direct(
 fn bind_collision(frontend: u16, backend: u16) -> bool {
     [frontend, backend]
         .into_iter()
-        .any(|port| wait_for_loopback_bind(port, Duration::from_secs(2)))
+        .any(|port| wait_for_loopback_bind(port, DIRECT_BIND_TIMEOUT))
+}
+
+fn activate_direct(
+    layout: &StateLayout,
+    owner: &mut EnvironmentOwner,
+    ports: PortReservations,
+    state: RuntimeState,
+) -> Result<RuntimeState, CommandFailure> {
+    match write_lifecycle(layout, owner, EnvironmentLifecycle::Active) {
+        Ok(()) => Ok(state),
+        Err(error) => release_after_failure(layout, owner, ports, error),
+    }
 }
 
 fn release_after_failure<T>(

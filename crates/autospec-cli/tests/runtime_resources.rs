@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use autospec_core::runtime_env::{
     read_json, ComposeIsolation, ComposePlan, EnvironmentIdentity, EnvironmentLifecycle,
-    EnvironmentOwner, MavenIsolation, MavenPlan, ResourceInventory, ResourcePlan,
+    EnvironmentOwner, MavenIsolation, MavenPlan, ResolvedExport, ResourceInventory, ResourcePlan,
 };
 
 static NEXT_FIXTURE: AtomicUsize = AtomicUsize::new(0);
@@ -822,8 +822,17 @@ fn down_without_owned_state_never_runs_manifest_cleanup() {
 
 #[test]
 fn whole_environment_disable_cannot_disable_down_for_owned_state() {
-    let fixture =
-        RuntimeFixture::with_manifest("version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n");
+    let fixture = RuntimeFixture::empty();
+    let pid = fixture.root.join("server.pid");
+    std::fs::create_dir_all(fixture.root.join(".autospec")).unwrap();
+    std::fs::write(
+        fixture.root.join(".autospec/runtime.yml"),
+        format!(
+            "version: 1\nmodes:\n  local:\n    command: sh -c 'python3 -m http.server \"$AGENT_FRONTEND_PORT\" --bind 127.0.0.1 >/dev/null 2>&1 & echo $! > {pid}'\n    down: sh -c 'kill \"$(cat {pid})\"'\n",
+            pid = pid.display()
+        ),
+    )
+    .unwrap();
     let up = fixture
         .command()
         .args(["runtime", "env", "up", "--repo"])
@@ -976,6 +985,76 @@ fn direct_server_reallocates_after_a_real_bind_collision() {
 }
 
 #[test]
+fn direct_server_requires_frontend_bind_before_active() {
+    let fixture = RuntimeFixture::empty();
+    std::fs::create_dir_all(fixture.root.join(".autospec")).unwrap();
+    let attempts = fixture.root.join("attempts");
+    std::fs::write(
+        fixture.root.join(".autospec/runtime.yml"),
+        format!(
+            "version: 1\nmodes:\n  local:\n    command: sh -c 'printf x >> {}; exit 0'\n",
+            attempts.display()
+        ),
+    )
+    .unwrap();
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).starts_with("PORT_BIND_HEALTH_RETRIES_EXHAUSTED")
+    );
+    assert_eq!(std::fs::read_to_string(attempts).unwrap(), "xxxxx");
+    let directory = environment_directory(&fixture);
+    let owner: EnvironmentOwner = read_json(&directory.join("owner.json")).unwrap();
+    assert_eq!(owner.lifecycle, EnvironmentLifecycle::CleanupFailed);
+    let inventory: ResourceInventory = read_json(&directory.join("inventory.json")).unwrap();
+    let registry: autospec_core::runtime_env::PortRegistry =
+        read_json(&fixture.state_root.join("ports/registry.json")).unwrap();
+    assert_eq!(registry.owner(inventory.frontend_port.unwrap()), None);
+    assert_eq!(registry.owner(inventory.backend_port.unwrap()), None);
+}
+
+#[test]
+fn direct_server_becomes_active_after_real_frontend_bind() {
+    let fixture = RuntimeFixture::empty();
+    std::fs::create_dir_all(fixture.root.join(".autospec")).unwrap();
+    let pid = fixture.root.join("server.pid");
+    std::fs::write(
+        fixture.root.join(".autospec/runtime.yml"),
+        format!(
+            "version: 1\nmodes:\n  local:\n    command: sh -c 'python3 -m http.server \"$AGENT_FRONTEND_PORT\" --bind 127.0.0.1 >/dev/null 2>&1 & echo $! > {}'\n",
+            pid.display()
+        ),
+    )
+    .unwrap();
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    if let Ok(server_pid) = std::fs::read_to_string(&pid) {
+        let _ = Command::new("kill").arg(server_pid.trim()).status();
+    }
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let owner: EnvironmentOwner =
+        read_json(&environment_directory(&fixture).join("owner.json")).unwrap();
+    assert_eq!(owner.lifecycle, EnvironmentLifecycle::Active);
+}
+
+#[test]
 fn gc_refuses_inventory_shared_with_a_locked_foreign_environment() {
     let fixture = RuntimeFixture::empty();
     let candidate_repo = fixture.root.join("removed-candidate");
@@ -1020,6 +1099,80 @@ fn gc_refuses_inventory_shared_with_a_locked_foreign_environment() {
         .output()
         .unwrap();
 
+    std::fs::write(release, "release\n").unwrap();
+    assert!(holder.wait().unwrap().success());
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).starts_with("RESOURCE_OWNER_MISMATCH"));
+    assert!(fixture.state_root.join("env-candidate").is_dir());
+}
+
+#[test]
+fn gc_refuses_cross_role_and_export_ports_owned_by_a_locked_foreign_environment() {
+    for (
+        candidate_frontend,
+        candidate_backend,
+        candidate_export,
+        foreign_frontend,
+        foreign_backend,
+        foreign_export,
+    ) in [
+        (Some(41001), None, None, None, Some(41001), None),
+        (None, None, Some(41002), Some(41002), None, None),
+        (None, Some(41003), None, None, None, Some(41003)),
+    ] {
+        let fixture = RuntimeFixture::empty();
+        let candidate_repo = fixture.root.join("removed-candidate");
+        let foreign_repo = fixture.root.join("foreign-repo");
+        write_gc_state(
+            &fixture,
+            &candidate_repo,
+            "env-candidate",
+            "owner-a",
+            "env-candidate",
+        );
+        write_gc_state(
+            &fixture,
+            &foreign_repo,
+            "env-foreign",
+            "owner-b",
+            "env-foreign",
+        );
+        set_inventory_ports(
+            &fixture,
+            "env-candidate",
+            candidate_frontend,
+            candidate_backend,
+            candidate_export,
+        );
+        set_inventory_ports(
+            &fixture,
+            "env-foreign",
+            foreign_frontend,
+            foreign_backend,
+            foreign_export,
+        );
+        assert_gc_rejects_locked_foreign_port_owner(&fixture, &candidate_repo);
+    }
+}
+
+fn assert_gc_rejects_locked_foreign_port_owner(fixture: &RuntimeFixture, candidate_repo: &Path) {
+    let ready = fixture.root.join("foreign-ready");
+    let release = fixture.root.join("foreign-release");
+    let mut holder = fixture
+        .command()
+        .args(["runtime", "env", "lease-probe"])
+        .arg(fixture.state_root.join("env-foreign"))
+        .arg(&ready)
+        .arg(&release)
+        .spawn()
+        .unwrap();
+    wait_for_file(&ready);
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "gc", "--repo"])
+        .arg(candidate_repo)
+        .output()
+        .unwrap();
     std::fs::write(release, "release\n").unwrap();
     assert!(holder.wait().unwrap().success());
     assert_eq!(output.status.code(), Some(2));
@@ -1164,6 +1317,31 @@ fn write_gc_state(
         .unwrap();
 }
 
+fn set_inventory_ports(
+    fixture: &RuntimeFixture,
+    environment_id: &str,
+    frontend: Option<u16>,
+    backend: Option<u16>,
+    export: Option<u16>,
+) {
+    let path = fixture
+        .state_root
+        .join(environment_id)
+        .join("inventory.json");
+    let mut inventory: ResourceInventory = read_json(&path).unwrap();
+    inventory.frontend_port = frontend;
+    inventory.backend_port = backend;
+    inventory.exports = export
+        .map(|port| ResolvedExport {
+            env: "TEST_URL".into(),
+            host: "127.0.0.1".into(),
+            port,
+        })
+        .into_iter()
+        .collect();
+    autospec_core::runtime_env::write_json_atomic(&path, &inventory).unwrap();
+}
+
 #[test]
 fn invalid_resource_override_fails_before_a_disabled_command_can_start() {
     let fixture =
@@ -1184,9 +1362,17 @@ fn invalid_resource_override_fails_before_a_disabled_command_can_start() {
 
 #[test]
 fn owner_lifecycle_is_persisted_before_provision_and_teardown_effects() {
-    let fixture = RuntimeFixture::with_manifest(
-        "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'grep -q Provisioning \"$AGENT_ENV_STATE_ROOT/$AGENT_ENV_ID/owner.json\" && touch provisioning-seen'\n    down: sh -c 'grep -q TearingDown \"$AGENT_ENV_STATE_ROOT/$AGENT_ENV_ID/owner.json\" && touch teardown-seen'\n",
-    );
+    let fixture = RuntimeFixture::empty();
+    let pid = fixture.root.join("server.pid");
+    std::fs::create_dir_all(fixture.root.join(".autospec")).unwrap();
+    std::fs::write(
+        fixture.root.join(".autospec/runtime.yml"),
+        format!(
+            "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'grep -q Provisioning \"$AGENT_ENV_STATE_ROOT/$AGENT_ENV_ID/owner.json\" || exit 1; touch provisioning-seen; python3 -m http.server \"$AGENT_FRONTEND_PORT\" --bind 127.0.0.1 >/dev/null 2>&1 & echo $! > {pid}'\n    down: sh -c 'grep -q TearingDown \"$AGENT_ENV_STATE_ROOT/$AGENT_ENV_ID/owner.json\" || exit 1; touch teardown-seen; kill \"$(cat {pid})\"'\n",
+            pid = pid.display()
+        ),
+    )
+    .unwrap();
     let up = fixture
         .command()
         .args(["runtime", "env", "up", "--repo"])
@@ -1700,9 +1886,17 @@ fn status_rejects_tampered_allowed_value_without_printing_it() {
 
 #[test]
 fn supported_initial_overrides_survive_reuse_exec_and_session_without_caller_env() {
-    let fixture = RuntimeFixture::with_manifest(
-        "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'true'\n",
-    );
+    let fixture = RuntimeFixture::empty();
+    let pid = fixture.root.join("server.pid");
+    std::fs::create_dir_all(fixture.root.join(".autospec")).unwrap();
+    std::fs::write(
+        fixture.root.join(".autospec/runtime.yml"),
+        format!(
+            "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh -c 'python3 -m http.server \"$AGENT_FRONTEND_PORT\" --bind 127.0.0.1 >/dev/null 2>&1 & echo $! > {}'\n",
+            pid.display()
+        ),
+    )
+    .unwrap();
     let overrides = [
         ("AGENT_FRONTEND_PORT", "45101"),
         ("AGENT_BACKEND_PORT", "45102"),
@@ -1777,6 +1971,9 @@ fn supported_initial_overrides_survive_reuse_exec_and_session_without_caller_env
             std::fs::read_to_string(fixture.root.join(marker)).unwrap(),
             "45101|45102|http://agent.override.test|https://autospec.override.test|caller_compose"
         );
+    }
+    if let Ok(server_pid) = std::fs::read_to_string(pid) {
+        let _ = Command::new("kill").arg(server_pid.trim()).status();
     }
 }
 

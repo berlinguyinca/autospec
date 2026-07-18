@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -136,16 +137,21 @@ fn inventories_overlap(left: &ResourceInventory, right: &ResourceInventory) -> b
             .iter()
             .any(|item| right.volumes.iter().any(|other| item.id == other.id))
         || left.maven_local_prefix.is_some() && left.maven_local_prefix == right.maven_local_prefix
-        || same_port(left.frontend_port, right.frontend_port)
-        || same_port(left.backend_port, right.backend_port)
+        || !owned_host_ports(left).is_disjoint(&owned_host_ports(right))
 }
 
 fn shared(left: &[String], right: &[String]) -> bool {
     left.iter().any(|item| right.contains(item))
 }
 
-fn same_port(left: Option<u16>, right: Option<u16>) -> bool {
-    left.is_some() && left == right
+fn owned_host_ports(inventory: &ResourceInventory) -> BTreeSet<u16> {
+    inventory
+        .frontend_port
+        .into_iter()
+        .chain(inventory.backend_port)
+        .chain(inventory.exports.iter().map(|export| export.port))
+        .filter(|port| *port > 0)
+        .collect()
 }
 
 fn current_generation(repo: &Path, exists: bool) -> Result<Option<String>, CommandFailure> {
