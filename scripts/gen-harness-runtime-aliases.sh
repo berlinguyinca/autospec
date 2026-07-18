@@ -38,7 +38,7 @@ render_sh() {
         { suffix=$3 == "" ? "" : " " $3; printf "alias %s=\047autospec-env session -- %s%s\047\n", $1, $2, suffix }
         END { print "# END AUTOSPEC RUNTIME ALIASES"; print "# BEGIN AUTOSPEC ROLLOVER WRAPPERS" }
     ' "$SOURCE"
-    awk -F '\t' '{ suffix=$3 == "" ? "" : " " $3; printf "%s() { autospec-session %s%s \"$@\"; } # autospec-env session -- %s%s\n", $1, $2, suffix, $2, suffix }' "$SOURCE"
+    awk -F '\t' '{ suffix=$3 == "" ? "" : " " $3; printf "unalias %s 2>/dev/null || true\n%s() { autospec-session %s%s \"$@\"; } # autospec-env session -- %s%s\n", $1, $1, $2, suffix, $2, suffix }' "$SOURCE"
     printf '%s\n' '# END AUTOSPEC ROLLOVER WRAPPERS'
 }
 

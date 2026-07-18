@@ -34,6 +34,16 @@ GENERATOR="$ROOT/scripts/gen-harness-runtime-aliases.sh"
     "$ROOT/scripts/autospec-session"
 }
 
+@test "generated Bash aliases and rollover wrappers source together" {
+  run bash --noprofile --norc -ic 'source "$1"; type claude; type codex; type opencode' \
+    bash "$ROOT/templates/generated/harness-runtime-aliases.sh"
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"claude is a function"* ]]
+  [[ "$output" == *"codex is a function"* ]]
+  [[ "$output" == *"opencode is a function"* ]]
+}
+
 @test "harness detection reads the canonical table without permission flags" {
   grep -F 'harness-runtime-aliases.tsv' "$ROOT/scripts/lib/autospec-harness-detect.sh"
   ! grep -E -- '--yolo|--dangerously-skip-permissions' "$ROOT/scripts/lib/autospec-harness-detect.sh"
