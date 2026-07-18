@@ -3,6 +3,12 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
+use std::ffi::CString;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use autospec_core::runtime_env::{
@@ -342,23 +348,45 @@ fn write_private_atomic(path: &Path, encoded: &[u8]) -> Result<(), CommandFailur
 }
 
 fn open_private_lock(path: &Path) -> Result<File, CommandFailure> {
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
     #[cfg(unix)]
-    options
-        .mode(PRIVATE_FILE_MODE)
-        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW);
+    {
+        let parent = path.parent().ok_or_else(|| {
+            CommandFailure::diagnostic(format!(
+                "runtime lock path has no parent: {}",
+                path.display()
+            ))
+        })?;
+        let name = path.file_name().ok_or_else(|| {
+            CommandFailure::diagnostic(format!(
+                "runtime lock path has no filename: {}",
+                path.display()
+            ))
+        })?;
+        let parent_directory = open_private_directory_handle(parent)?;
+        open_private_lock_at(&parent_directory, Path::new(name))
+    }
+
     #[cfg(not(unix))]
-    reject_symlink(path)?;
-    let file = options
-        .open(path)
-        .map_err(|error| private_open_error(path, error))?;
-    set_descriptor_mode(&file, PRIVATE_FILE_MODE)?;
-    Ok(file)
+    {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        reject_symlink(path)?;
+        let file = options
+            .open(path)
+            .map_err(|error| private_open_error(path, error))?;
+        set_descriptor_mode(&file, PRIVATE_FILE_MODE)?;
+        Ok(file)
+    }
 }
 
 #[cfg(unix)]
 fn secure_directory_descriptor(path: &Path) -> Result<(), CommandFailure> {
+    let directory = open_private_directory_handle(path)?;
+    set_descriptor_mode(&directory, PRIVATE_DIRECTORY_MODE)
+}
+
+#[cfg(unix)]
+fn open_private_directory_handle(path: &Path) -> Result<File, CommandFailure> {
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -372,7 +400,7 @@ fn secure_directory_descriptor(path: &Path) -> Result<(), CommandFailure> {
             path.display()
         )));
     }
-    set_descriptor_mode(&directory, PRIVATE_DIRECTORY_MODE)
+    Ok(directory)
 }
 
 #[cfg(not(unix))]
@@ -398,6 +426,49 @@ fn private_open_error(path: &Path, error: std::io::Error) -> CommandFailure {
         "could not securely open runtime state {}: {error}",
         path.display()
     ))
+}
+
+#[cfg(unix)]
+fn open_private_lock_at(parent: &File, name: &Path) -> Result<File, CommandFailure> {
+    let name = relative_cstring(name)?;
+    let flags =
+        nix::libc::O_RDWR | nix::libc::O_CREAT | nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW;
+    // SAFETY: the directory descriptor and NUL-terminated filename remain valid;
+    // ownership of a successful descriptor transfers to File exactly once.
+    let descriptor = unsafe {
+        nix::libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            flags,
+            PRIVATE_FILE_MODE as nix::libc::mode_t,
+        )
+    };
+    if descriptor < 0 {
+        return Err(private_open_error(
+            Path::new(name.to_str().unwrap_or("lease.lock")),
+            std::io::Error::last_os_error(),
+        ));
+    }
+    // SAFETY: openat returned a newly owned descriptor.
+    let file = unsafe { File::from_raw_fd(descriptor) };
+    set_descriptor_mode(&file, PRIVATE_FILE_MODE)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn relative_cstring(path: &Path) -> Result<CString, CommandFailure> {
+    if path.components().count() != 1 {
+        return Err(CommandFailure::diagnostic(format!(
+            "runtime state descriptor path is not a filename: {}",
+            path.display()
+        )));
+    }
+    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
+        CommandFailure::diagnostic(format!(
+            "runtime state filename contains NUL: {}",
+            path.display()
+        ))
+    })
 }
 
 fn reject_symlink(path: &Path) -> Result<(), CommandFailure> {
@@ -482,6 +553,27 @@ mod tests {
             fs::metadata(&target).unwrap().permissions().mode() & 0o777,
             0o640
         );
+        fs::remove_dir_all(directory).expect("remove state test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_open_stays_in_the_open_parent_after_path_substitution() {
+        let directory = test_directory("lock-openat");
+        let parent = directory.join("state");
+        let retained = directory.join("retained-state");
+        let external = directory.join("external-state");
+        fs::create_dir(&parent).unwrap();
+        fs::create_dir(&external).unwrap();
+        let parent_directory = open_private_directory_handle(&parent).unwrap();
+        fs::rename(&parent, &retained).unwrap();
+        symlink(&external, &parent).unwrap();
+
+        let lock = open_private_lock_at(&parent_directory, Path::new("lease.lock")).unwrap();
+        lock.unlock().unwrap();
+
+        assert!(retained.join("lease.lock").is_file());
+        assert!(!external.join("lease.lock").exists());
         fs::remove_dir_all(directory).expect("remove state test directory");
     }
 }
