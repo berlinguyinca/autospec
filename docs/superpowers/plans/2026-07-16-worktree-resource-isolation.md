@@ -770,6 +770,7 @@ and let read-only `--check` plan a deterministic v2 `.autospec/runtime.yml` that
 - Create: `skills/autospec-compose-normalize/opencode/agent.md`
 - Create: `skills/autospec-compose-normalize/install.sh`
 - Create: `skills/autospec-compose-normalize/uninstall.sh`
+- Create: `skills/autospec-compose-normalize/scripts/workflow-guard.sh`
 - Create: `tests/unit/test_autospec_compose_normalize_skill.bats`
 - Create: `templates/skill-blocks/runtime-resource-preflight.md`
 - Modify: `skills/autospec-run/SKILL.md`, `skills/autospec-run/codex/prompt.md`, `skills/autospec-run/opencode/agent.md`
