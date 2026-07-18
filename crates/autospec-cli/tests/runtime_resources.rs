@@ -569,7 +569,11 @@ case " $* " in
   *" network ls -q "*) [ -f "$state/network-removed" ] || printf '%s\n' "${FAKE_NETWORK_ID:-network-a}" ;;
   *" volume ls -q "*) [ -f "$state/volume-removed" ] || printf '%s\n' "${FAKE_VOLUME_ID:-volume-a}" ;;
   *"{{range .Mounts}}"*)
-    if [ "${FAKE_ANONYMOUS_VOLUME:-}" ]; then printf '%s\n' "$FAKE_ANONYMOUS_VOLUME"; fi ;;
+    if [ "${FAKE_ANONYMOUS_VOLUME:-}" ]; then
+      printf '%s\n' "$FAKE_ANONYMOUS_VOLUME"
+    elif [ -z "${FAKE_LOGICAL_VOLUME:-}" ]; then
+      printf '%s\n' "${FAKE_VOLUME_ID:-volume-a}"
+    fi ;;
   *"com.docker.compose.volume"*) printf '%s\n' "${FAKE_LOGICAL_VOLUME:-}" ;;
   *"{{json "*)
     [ "${FAKE_INSPECT_EXIT:-0}" -eq 0 ] || exit "$FAKE_INSPECT_EXIT"
@@ -1879,8 +1883,11 @@ fn status_rejects_tampered_allowed_value_without_printing_it() {
         .unwrap();
 
     assert_eq!(status.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&status.stderr)
-        .contains("RUNTIME_CHILD_ENV_VALUE_MISMATCH: WEB_URL"));
+    let stderr = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        stderr.contains("RUNTIME_CHILD_ENV_VALUE_MISMATCH: WEB_URL"),
+        "{stderr}"
+    );
     assert!(!String::from_utf8_lossy(&status.stdout).contains(tampered));
 }
 
