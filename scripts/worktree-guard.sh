@@ -47,6 +47,11 @@ Subcommands:
   create          Create or verified-clean-reuse a fresh worktree off the base.
                   Dirty or wrong-branch reuse is refused (exit 4).
 
+Base selection:
+  --base <ref> wins. Otherwise AUTOSPEC_BASE_BRANCH wins. Otherwise
+  .autospec/autospec.yml git.base_branch wins. Otherwise origin/main is used,
+  falling back to gh repo view's defaultBranchRef only when origin/main is absent.
+
 Exit codes: 0 ok, 2 usage/non-git, 3 in_primary_checkout, 4 dirty, 5 stale_base.
 EOF
 }
@@ -61,16 +66,89 @@ die() {
 # Emit a stable code_health/identifier line so callers can grep it.
 emit() { printf '%s\n' "$*" >&2; }
 
+qualify_base_ref() {
+    # Accept either a full remote ref (origin/master_ai) or a plain branch name
+    # (master_ai). Plain branch names are intentionally interpreted as origin/*
+    # because worktree-guard compares/fetches against the remote base.
+    local ref="$1"
+    case "$ref" in
+        refs/*|*/*) printf '%s\n' "$ref" ;;
+        *)          printf 'origin/%s\n' "$ref" ;;
+    esac
+}
+
+autospec_config_base_branch() {
+    [ -f ".autospec/autospec.yml" ] || return 1
+    awk '
+        function clean(value) {
+            sub(/[[:space:]]*#.*/, "", value)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            gsub(/^["'\'']|["'\'']$/, "", value)
+            return value
+        }
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        /^[[:space:]]*git[.]base_branch[[:space:]]*:/ {
+            sub(/^[^:]*:[[:space:]]*/, "", $0)
+            value=clean($0)
+            if (value != "") { print value; exit }
+        }
+        /^[^[:space:]][^:]*:/ {
+            in_git = ($0 ~ /^git[[:space:]]*:/)
+            next
+        }
+        in_git && /^[[:space:]]+base_branch[[:space:]]*:/ {
+            sub(/^[[:space:]]*base_branch[[:space:]]*:[[:space:]]*/, "", $0)
+            value=clean($0)
+            if (value != "") { print value; exit }
+        }
+    ' .autospec/autospec.yml
+}
+
+gh_default_base_ref() {
+    local branch
+    branch="$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name // empty' 2>/dev/null || true)"
+    [ -n "$branch" ] || return 1
+    qualify_base_ref "$branch"
+}
+
+resolve_base_ref() {
+    # resolve_base_ref <cli-base> <cli-explicit>
+    local cli_base="$1" cli_explicit="$2" configured=0 base=""
+    if [ "$cli_explicit" -eq 1 ]; then
+        configured=1
+        base="$cli_base"
+    elif [ -n "${AUTOSPEC_BASE_BRANCH:-}" ]; then
+        configured=1
+        base="$AUTOSPEC_BASE_BRANCH"
+    else
+        base="$(autospec_config_base_branch 2>/dev/null || true)"
+        if [ -n "$base" ]; then
+            configured=1
+        else
+            base="origin/main"
+        fi
+    fi
+
+    base="$(qualify_base_ref "$base")"
+
+    if [ "$configured" -eq 0 ] && ! git rev-parse --verify "$base^{commit}" >/dev/null 2>&1; then
+        gh_default_base_ref 2>/dev/null || printf '%s\n' "$base"
+    else
+        printf '%s\n' "$base"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # assert
 # ---------------------------------------------------------------------------
 cmd_assert() {
-    local base="origin/main"
+    local base=""
+    local base_explicit=0
     local strict_base=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
-            --base)        [ $# -ge 2 ] || die 2 "--base requires a value"; base="$2"; shift 2 ;;
+            --base)        [ $# -ge 2 ] || die 2 "--base requires a value"; base="$2"; base_explicit=1; shift 2 ;;
             --strict-base) strict_base=1; shift ;;
             -h|--help)     usage; exit 0 ;;
             *)             die 2 "assert: unknown arg: $1" ;;
@@ -84,6 +162,8 @@ cmd_assert() {
     fi
     common_dir="$(git rev-parse --git-common-dir 2>/dev/null)" \
         || die 2 "assert: cannot resolve --git-common-dir"
+
+    base="$(resolve_base_ref "$base" "$base_explicit")"
 
     # Normalise both to absolute paths before comparing: in a linked worktree
     # --git-dir is <primary>/.git/worktrees/<name> and --git-common-dir is
@@ -183,11 +263,11 @@ cmd_resolve_branch() {
 # create
 # ---------------------------------------------------------------------------
 cmd_create() {
-    local branch="" base="origin/main" path="" adopt=0
+    local branch="" base="" path="" adopt=0 base_explicit=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --branch)  [ $# -ge 2 ] || die 2 "--branch requires a value"; branch="$2"; shift 2 ;;
-            --base)    [ $# -ge 2 ] || die 2 "--base requires a value"; base="$2"; shift 2 ;;
+            --base)    [ $# -ge 2 ] || die 2 "--base requires a value"; base="$2"; base_explicit=1; shift 2 ;;
             --path)    [ $# -ge 2 ] || die 2 "--path requires a value"; path="$2"; shift 2 ;;
             --adopt)   adopt=1; shift ;;
             -h|--help) usage; exit 0 ;;
@@ -204,6 +284,7 @@ cmd_create() {
             die 2 "create: git fetch origin failed (after retry)"
         fi
     fi
+    base="$(resolve_base_ref "$base" "$base_explicit")"
 
     # Existing path: reuse ONLY if clean AND on the same branch AND it is a
     # linked worktree (NOT the primary checkout). Reusing the primary checkout
@@ -238,6 +319,10 @@ cmd_create() {
 
     # Adopt an existing remote branch, or create a fresh branch off the base.
     if [ "$adopt" -eq 1 ]; then
+        if git worktree list --porcelain | grep -Fx "branch refs/heads/$branch" >/dev/null 2>&1; then
+            emit "code_health:worktree_adopt_checkout_failed"
+            die 2 "create: branch $branch is already checked out in another worktree"
+        fi
         if ! git worktree add "$path" "origin/$branch" >/dev/null 2>&1; then
             emit "code_health:worktree_create_failed"
             die 2 "create: git worktree add (adopt) failed for origin/$branch at $path"
