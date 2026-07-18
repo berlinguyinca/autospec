@@ -2,7 +2,10 @@ use std::io::Write;
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -3225,16 +3228,10 @@ fn generated_executable_replacement_preserves_active_inode() {
             .arg("60")
             .spawn()
             .expect("generated executable starts");
-        let child = FixtureChild::new(child);
-        for _ in 0..100 {
-            if std::path::Path::new(&format!("/proc/{}/exe", child.id())).is_file() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        let mut child = FixtureChild::new(child);
         assert!(
-            std::path::Path::new(&format!("/proc/{}/exe", child.id())).is_file(),
-            "iteration {iteration} never became ready"
+            child.is_running(),
+            "iteration {iteration} exited before replacement"
         );
 
         write_executable(&executable, "#!/bin/sh\nexit 0\n");
@@ -3255,14 +3252,22 @@ impl FixtureChild {
         Self { child: Some(child) }
     }
 
-    fn id(&self) -> u32 {
-        self.child.as_ref().expect("fixture child").id()
+    fn is_running(&mut self) -> bool {
+        self.child
+            .as_mut()
+            .expect("fixture child")
+            .try_wait()
+            .expect("fixture child status")
+            .is_none()
     }
 
     fn finish(mut self) {
-        let mut child = self.child.take().expect("fixture child");
-        child.kill().expect("fixture child stops");
-        child.wait().expect("fixture child exits");
+        let child = self.child.as_mut().expect("fixture child");
+        let kill = child.kill();
+        let wait = child.wait();
+        kill.expect("fixture child stops");
+        wait.expect("fixture child exits");
+        self.child.take();
     }
 }
 
@@ -3292,11 +3297,8 @@ fn write_executable(path: &std::path::Path, contents: &str) {
 }
 
 fn publish_executable(path: &std::path::Path, contents: &[u8]) {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock")
-        .as_nanos();
-    let temporary = path.with_extension(format!("tmp-{}-{suffix}", std::process::id()));
+    let sequence = EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -3310,7 +3312,8 @@ fn publish_executable(path: &std::path::Path, contents: &[u8]) {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&temporary, permissions).expect("fake command permissions");
     std::fs::rename(temporary, path).expect("fake command publish");
-    // ZFS can briefly reject exec immediately after the final writer closes.
+    // Atomic rename prevents inode clashes; 30-run stress showed this ZFS host
+    // still needs 10 ms after close before exec stops returning ETXTBSY.
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
 

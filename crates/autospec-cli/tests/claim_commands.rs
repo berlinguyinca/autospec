@@ -2,7 +2,10 @@ use autospec_core::claim::RunStateRecord;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -23,11 +26,8 @@ fn write_executable(path: &std::path::Path, contents: &str) {
 }
 
 fn publish_executable(path: &std::path::Path, contents: &[u8]) {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock")
-        .as_nanos();
-    let temporary = path.with_extension(format!("tmp-{}-{suffix}", std::process::id()));
+    let sequence = EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -41,7 +41,8 @@ fn publish_executable(path: &std::path::Path, contents: &[u8]) {
     permissions.set_mode(0o755);
     std::fs::set_permissions(&temporary, permissions).expect("fake command permissions");
     std::fs::rename(temporary, path).expect("fake command publish");
-    // ZFS can briefly reject exec immediately after the final writer closes.
+    // Atomic rename prevents inode clashes; 30-run stress showed this ZFS host
+    // still needs 10 ms after close before exec stops returning ETXTBSY.
     std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
