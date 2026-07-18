@@ -423,13 +423,7 @@ pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvEr
             path.display()
         ))
     })?;
-    std::fs::create_dir_all(parent).map_err(|error| {
-        RuntimeEnvError::new(format!(
-            "could not create runtime state directory {}: {error}",
-            parent.display()
-        ))
-    })?;
-    set_private_mode(parent, 0o700)?;
+    let parent_directory = open_private_directory(parent)?;
     let temporary = create_temporary_path(path)?;
     let result = (|| {
         let mut options = OpenOptions::new();
@@ -442,6 +436,7 @@ pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvEr
                 temporary.display()
             ))
         })?;
+        set_private_descriptor_mode(&file, 0o600)?;
         file.write_all(encoded)
             .and_then(|()| file.sync_all())
             .map_err(|error| {
@@ -456,15 +451,12 @@ pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvEr
                 path.display()
             ))
         })?;
-        set_private_mode(path, 0o600)?;
-        std::fs::File::open(parent)
-            .and_then(|directory| directory.sync_all())
-            .map_err(|error| {
-                RuntimeEnvError::new(format!(
-                    "could not synchronize runtime state directory {}: {error}",
-                    parent.display()
-                ))
-            })
+        parent_directory.sync_all().map_err(|error| {
+            RuntimeEnvError::new(format!(
+                "could not synchronize runtime state directory {}: {error}",
+                parent.display()
+            ))
+        })
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
@@ -472,19 +464,62 @@ pub fn write_file_atomic(path: &Path, encoded: &[u8]) -> Result<(), RuntimeEnvEr
     result
 }
 
-#[cfg(unix)]
-fn set_private_mode(path: &Path, mode: u32) -> Result<(), RuntimeEnvError> {
-    let permissions = std::fs::Permissions::from_mode(mode);
-    std::fs::set_permissions(path, permissions).map_err(|error| {
+fn open_private_directory(path: &Path) -> Result<std::fs::File, RuntimeEnvError> {
+    std::fs::create_dir_all(path).map_err(|error| {
         RuntimeEnvError::new(format!(
-            "could not secure runtime state {}: {error}",
+            "could not create runtime state directory {}: {error}",
             path.display()
         ))
-    })
+    })?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    let directory = options.open(path).map_err(|error| {
+        #[cfg(unix)]
+        if error.raw_os_error() == Some(libc::ELOOP)
+            || (error.raw_os_error() == Some(libc::ENOTDIR)
+                && std::fs::symlink_metadata(path)
+                    .map(|metadata| metadata.file_type().is_symlink())
+                    .unwrap_or(false))
+        {
+            return RuntimeEnvError::new(format!(
+                "RUNTIME_STATE_SYMLINK_REJECTED: {}",
+                path.display()
+            ));
+        }
+        RuntimeEnvError::new(format!(
+            "could not securely open runtime state directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !directory
+        .metadata()
+        .map_err(|error| {
+            RuntimeEnvError::new(format!(
+                "could not inspect runtime state directory {}: {error}",
+                path.display()
+            ))
+        })?
+        .is_dir()
+    {
+        return Err(RuntimeEnvError::new(format!(
+            "runtime state path is not a directory: {}",
+            path.display()
+        )));
+    }
+    set_private_descriptor_mode(&directory, 0o700)?;
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn set_private_descriptor_mode(file: &std::fs::File, mode: u32) -> Result<(), RuntimeEnvError> {
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
+        .map_err(|error| RuntimeEnvError::new(format!("could not secure runtime state: {error}")))
 }
 
 #[cfg(not(unix))]
-fn set_private_mode(_path: &Path, _mode: u32) -> Result<(), RuntimeEnvError> {
+fn set_private_descriptor_mode(_file: &std::fs::File, _mode: u32) -> Result<(), RuntimeEnvError> {
     Ok(())
 }
 

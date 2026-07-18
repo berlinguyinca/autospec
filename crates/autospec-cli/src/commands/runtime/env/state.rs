@@ -1,10 +1,9 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use autospec_core::runtime_env::{
     reserve_loopback_port, EnvironmentLifecycle, EnvironmentOwner, PortRegistry, PortReservation,
@@ -248,14 +247,7 @@ impl PortRegistryLease {
 }
 
 fn open_locked(path: &Path) -> Result<File, CommandFailure> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(io_error)?;
-    ensure_private_file(path)?;
+    let file = open_private_lock(path)?;
     file.lock().map_err(io_error)?;
     Ok(file)
 }
@@ -287,19 +279,7 @@ impl EnvironmentLease {
         )
         .prepare()?;
         let path = environment_dir.join("lease.lock");
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|error| {
-                CommandFailure::diagnostic(format!(
-                    "could not open runtime environment lease {}: {error}",
-                    path.display()
-                ))
-            })?;
-        ensure_private_file(&path)?;
+        let file = open_private_lock(&path)?;
         file.lock().map_err(|error| {
             CommandFailure::diagnostic(format!(
                 "could not lock runtime environment lease {}: {error}",
@@ -321,14 +301,7 @@ impl EnvironmentLease {
         )
         .prepare()?;
         let path = environment_dir.join("lease.lock");
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
-        ensure_private_file(&path)?;
+        let file = open_private_lock(&path)?;
         match file.try_lock() {
             Ok(()) => Ok(Some(Self { _file: file })),
             Err(std::fs::TryLockError::WouldBlock) => Ok(None),
@@ -344,30 +317,7 @@ pub(super) fn write_runtime_state(
     context: &RuntimeContext,
     state: &RuntimeState,
 ) -> Result<(), CommandFailure> {
-    let temporary = context
-        .env_file
-        .with_extension(format!("tmp-{}", std::process::id()));
-    let mut file = File::create(&temporary).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not write runtime environment {}: {error}",
-            temporary.display()
-        ))
-    })?;
-    ensure_private_file(&temporary)?;
-    file.write_all(state.render_env_file().as_bytes())
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "could not write runtime environment {}: {error}",
-                temporary.display()
-            ))
-        })?;
-    fs::rename(&temporary, &context.env_file).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not finalize runtime environment {}: {error}",
-            context.env_file.display()
-        ))
-    })?;
-    ensure_private_file(&context.env_file)
+    write_private_atomic(&context.env_file, state.render_env_file().as_bytes())
 }
 
 pub(super) fn read_runtime_state(context: &RuntimeContext) -> Result<RuntimeState, CommandFailure> {
@@ -384,13 +334,70 @@ pub(super) fn read_runtime_state(context: &RuntimeContext) -> Result<RuntimeStat
 fn ensure_private_directory(path: &Path) -> Result<(), CommandFailure> {
     reject_symlink(path)?;
     fs::create_dir_all(path).map_err(io_error)?;
-    reject_symlink(path)?;
-    set_mode(path, PRIVATE_DIRECTORY_MODE)
+    secure_directory_descriptor(path)
 }
 
-fn ensure_private_file(path: &Path) -> Result<(), CommandFailure> {
+fn write_private_atomic(path: &Path, encoded: &[u8]) -> Result<(), CommandFailure> {
+    autospec_core::runtime_env::write_file_atomic(path, encoded).map_err(runtime_error)
+}
+
+fn open_private_lock(path: &Path) -> Result<File, CommandFailure> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    options
+        .mode(PRIVATE_FILE_MODE)
+        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW);
+    #[cfg(not(unix))]
     reject_symlink(path)?;
-    set_mode(path, PRIVATE_FILE_MODE)
+    let file = options
+        .open(path)
+        .map_err(|error| private_open_error(path, error))?;
+    set_descriptor_mode(&file, PRIVATE_FILE_MODE)?;
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn secure_directory_descriptor(path: &Path) -> Result<(), CommandFailure> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_DIRECTORY | nix::libc::O_NOFOLLOW);
+    let directory = options
+        .open(path)
+        .map_err(|error| private_open_error(path, error))?;
+    if !directory.metadata().map_err(io_error)?.is_dir() {
+        return Err(CommandFailure::diagnostic(format!(
+            "RUNTIME_STATE_NOT_DIRECTORY: {}",
+            path.display()
+        )));
+    }
+    set_descriptor_mode(&directory, PRIVATE_DIRECTORY_MODE)
+}
+
+#[cfg(not(unix))]
+fn secure_directory_descriptor(path: &Path) -> Result<(), CommandFailure> {
+    reject_symlink(path)?;
+    Ok(())
+}
+
+fn private_open_error(path: &Path, error: std::io::Error) -> CommandFailure {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(nix::libc::ELOOP)
+        || (error.raw_os_error() == Some(nix::libc::ENOTDIR)
+            && fs::symlink_metadata(path)
+                .map(|metadata| metadata.file_type().is_symlink())
+                .unwrap_or(false))
+    {
+        return CommandFailure::diagnostic(format!(
+            "RUNTIME_STATE_SYMLINK_REJECTED: {}",
+            path.display()
+        ));
+    }
+    CommandFailure::diagnostic(format!(
+        "could not securely open runtime state {}: {error}",
+        path.display()
+    ))
 }
 
 fn reject_symlink(path: &Path) -> Result<(), CommandFailure> {
@@ -405,12 +412,76 @@ fn reject_symlink(path: &Path) -> Result<(), CommandFailure> {
 }
 
 #[cfg(unix)]
-fn set_mode(path: &Path, mode: u32) -> Result<(), CommandFailure> {
+fn set_descriptor_mode(file: &File, mode: u32) -> Result<(), CommandFailure> {
     let permissions = fs::Permissions::from_mode(mode);
-    fs::set_permissions(path, permissions).map_err(io_error)
+    file.set_permissions(permissions).map_err(io_error)
 }
 
 #[cfg(not(unix))]
-fn set_mode(_path: &Path, _mode: u32) -> Result<(), CommandFailure> {
+fn set_descriptor_mode(_file: &File, _mode: u32) -> Result<(), CommandFailure> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    fn test_directory(name: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock is after the Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "autospec-runtime-state-{name}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&directory).expect("create state test directory");
+        directory
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_state_write_does_not_follow_the_legacy_predictable_symlink() {
+        let directory = test_directory("atomic-symlink");
+        let destination = directory.join("env");
+        let target = directory.join("external-target");
+        let predictable = destination.with_extension(format!("tmp-{}", std::process::id()));
+        fs::write(&target, "sentinel").expect("write attack target");
+        symlink(&target, &predictable).expect("create predictable temporary symlink");
+
+        write_private_atomic(&destination, b"replacement").expect("write state atomically");
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "sentinel");
+        assert_eq!(fs::read_to_string(&destination).unwrap(), "replacement");
+        assert!(fs::symlink_metadata(&predictable)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        fs::remove_dir_all(directory).expect("remove state test directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_open_rejects_a_symlink_without_changing_its_target() {
+        let directory = test_directory("lock-symlink");
+        let target = directory.join("external-target");
+        let lock = directory.join("lease.lock");
+        fs::write(&target, "sentinel").expect("write attack target");
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o640))
+            .expect("set target permissions");
+        symlink(&target, &lock).expect("create lock symlink");
+
+        let error = open_locked(&lock).expect_err("symlinked lock must be rejected");
+
+        assert!(error.message.contains("RUNTIME_STATE_SYMLINK_REJECTED"));
+        assert_eq!(fs::read_to_string(&target).unwrap(), "sentinel");
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        fs::remove_dir_all(directory).expect("remove state test directory");
+    }
 }
