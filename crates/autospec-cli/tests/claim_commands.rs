@@ -59,6 +59,41 @@ fn claim_run_state(stdout: &[u8]) -> RunStateRecord {
     RunStateRecord::parse_json(text.trim()).expect("claim state stdout is a run-state JSON object")
 }
 
+/// One `gh api <endpoint> [-X <method>]` invocation recovered from the call
+/// log the fake `gh` script appends (one CLI argument per line, invocations
+/// concatenated with no delimiter between them).
+#[derive(Debug, PartialEq, Eq)]
+struct GhApiCall {
+    endpoint: String,
+    method: Option<String>,
+}
+
+/// Parses the raw call log into the `gh api <endpoint> [-X <method>]`
+/// invocations it contains. Replaces matching on raw newline-joined
+/// substrings (fragile to one endpoint's logged args being a prefix/suffix
+/// of another's) with a parsed, structurally-compared call list.
+fn gh_api_calls(log: &str) -> Vec<GhApiCall> {
+    let lines: Vec<&str> = log.lines().collect();
+    let mut calls = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i] == "api" && i + 1 < lines.len() {
+            let endpoint = lines[i + 1].to_string();
+            let method = if lines.get(i + 2) == Some(&"-X") {
+                lines.get(i + 3).map(|m| (*m).to_string())
+            } else {
+                None
+            };
+            let advance = if method.is_some() { 4 } else { 2 };
+            calls.push(GhApiCall { endpoint, method });
+            i += advance;
+        } else {
+            i += 1;
+        }
+    }
+    calls
+}
+
 #[test]
 fn claim_state_read_selects_the_lowest_marked_github_comment() {
     let fixture = temp_dir("autospec-claim-state-read");
@@ -143,8 +178,15 @@ fn claim_state_upsert_patches_the_lowest_comment_and_deletes_higher_duplicates()
     assert_eq!(state.ttl_seconds, 7200);
     assert_eq!(state.claimed_at, "2026-07-14T00:00:00Z");
     let calls = std::fs::read_to_string(log).expect("gh call log");
-    assert!(calls.contains("repos/testorg/testrepo/issues/comments/100\n-X\nPATCH"));
-    assert!(calls.contains("repos/testorg/testrepo/issues/comments/101\n-X\nDELETE"));
+    let api_calls = gh_api_calls(&calls);
+    assert!(api_calls.contains(&GhApiCall {
+        endpoint: "repos/testorg/testrepo/issues/comments/100".to_string(),
+        method: Some("PATCH".to_string()),
+    }));
+    assert!(api_calls.contains(&GhApiCall {
+        endpoint: "repos/testorg/testrepo/issues/comments/101".to_string(),
+        method: Some("DELETE".to_string()),
+    }));
 }
 
 #[test]

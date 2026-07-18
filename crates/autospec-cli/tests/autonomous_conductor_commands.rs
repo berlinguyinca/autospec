@@ -16,26 +16,104 @@ fn workspace_root() -> std::path::PathBuf {
         .expect("workspace root")
 }
 
+/// How a forbidden-authority pattern must be located in source text.
+///
+/// Bare Rust substring matching is brittle: a needle like `"Command"` also
+/// matches inside unrelated identifiers such as `SubCommand` or
+/// `TierCommand`. Each table entry below states its own match primitive so
+/// callers never fall back to an ambiguous raw `contains`.
+enum SourcePattern {
+    /// The needle must appear as a whole identifier token (no adjacent
+    /// identifier characters on either side).
+    Token(&'static str),
+    /// The needle is an identifier-family prefix (e.g. `FOO_BAR_`): only the
+    /// left boundary is checked, so suffixed family members still match.
+    Prefix(&'static str),
+    /// The needle is an unambiguous literal snippet (path or multi-token
+    /// code fragment) where raw substring matching carries no synonym risk.
+    Literal(&'static str),
+}
+
+impl SourcePattern {
+    fn needle(&self) -> &'static str {
+        match self {
+            SourcePattern::Token(needle)
+            | SourcePattern::Prefix(needle)
+            | SourcePattern::Literal(needle) => needle,
+        }
+    }
+
+    fn matches(&self, source: &str) -> bool {
+        match self {
+            SourcePattern::Token(needle) => contains_identifier_token(source, needle),
+            SourcePattern::Prefix(needle) => contains_left_bounded(source, needle),
+            SourcePattern::Literal(needle) => source.contains(needle),
+        }
+    }
+}
+
+fn is_identifier_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// True if `needle` occurs in `source` with no identifier character
+/// immediately before or after the match (i.e. as a standalone token).
+fn contains_identifier_token(source: &str, needle: &str) -> bool {
+    source.match_indices(needle).any(|(start, matched)| {
+        let before_is_boundary = source[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_identifier_char(c));
+        let end = start + matched.len();
+        let after_is_boundary = source[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_identifier_char(c));
+        before_is_boundary && after_is_boundary
+    })
+}
+
+/// True if `needle` occurs in `source` with no identifier character
+/// immediately before the match; the character after the match is
+/// unconstrained so identifier-family prefixes (e.g. `FOO_BAR_BAZ`) match.
+fn contains_left_bounded(source: &str, needle: &str) -> bool {
+    source.match_indices(needle).any(|(start, _)| {
+        source[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_identifier_char(c))
+    })
+}
+
+fn assert_no_forbidden_authority(source: &str, patterns: &[SourcePattern], context: &str) {
+    for pattern in patterns {
+        assert!(
+            !pattern.matches(source),
+            "{context} retains legacy authority: {}",
+            pattern.needle()
+        );
+    }
+}
+
 #[test]
 fn foreground_source_has_no_legacy_shell_authority() {
     let source =
         fs::read_to_string(workspace_root().join("crates/autospec-cli/src/commands/autonomous.rs"))
             .expect("read autonomous command source");
 
-    for forbidden in [
-        "AUTOSPEC_AUTONOMOUS_SCRIPT",
-        "AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD",
-        "AUTOSPEC_MAIN_HEALTH_",
-        "scripts/autospec-autonomous.sh",
-        "scripts/autonomous-resilience.sh",
-        "Command::new(\"bash\")",
-        "Command::new(\"sh\")",
-    ] {
-        assert!(
-            !source.contains(forbidden),
-            "foreground command retains legacy authority: {forbidden}"
-        );
-    }
+    assert_no_forbidden_authority(
+        &source,
+        &[
+            SourcePattern::Token("AUTOSPEC_AUTONOMOUS_SCRIPT"),
+            SourcePattern::Token("AUTOSPEC_AUTONOMOUS_CONDUCTOR_CMD"),
+            SourcePattern::Prefix("AUTOSPEC_MAIN_HEALTH_"),
+            SourcePattern::Literal("scripts/autospec-autonomous.sh"),
+            SourcePattern::Literal("scripts/autonomous-resilience.sh"),
+            SourcePattern::Literal("Command::new(\"bash\")"),
+            SourcePattern::Literal("Command::new(\"sh\")"),
+        ],
+        "foreground command",
+    );
     assert!(source.contains("executor-result"));
     assert!(source.contains("ExecutorRequest"));
 
@@ -44,19 +122,18 @@ fn foreground_source_has_no_legacy_shell_authority() {
             .join("crates/autospec-cli/src/commands/autonomous/waterfall_coordinator.rs"),
     )
     .expect("read native waterfall coordinator source");
-    for forbidden in [
-        "ready_plan_for",
-        "NoWorkState::record",
-        "why-no-work.json",
-        "claim::",
-        "Command",
-        "std::process",
-    ] {
-        assert!(
-            !coordinator.contains(forbidden),
-            "tier-one coordinator retains forbidden authority: {forbidden}"
-        );
-    }
+    assert_no_forbidden_authority(
+        &coordinator,
+        &[
+            SourcePattern::Token("ready_plan_for"),
+            SourcePattern::Literal("NoWorkState::record"),
+            SourcePattern::Literal("why-no-work.json"),
+            SourcePattern::Literal("claim::"),
+            SourcePattern::Token("Command"),
+            SourcePattern::Literal("std::process"),
+        ],
+        "tier-one coordinator",
+    );
     assert!(coordinator.contains("ConductorLease"));
 }
 
