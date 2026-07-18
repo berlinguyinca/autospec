@@ -12,5 +12,8 @@ path = "src/main.rs"
 [dependencies]
 autospec-core = { path = "../autospec-core" }
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["process", "signal"] } # why: safe PID existence probes without sending a signal
+
 [dev-dependencies]
 serde_json = "1" # why: parse runtime command JSON in tests instead of substring matching

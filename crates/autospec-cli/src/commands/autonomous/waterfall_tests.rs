@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
 use autospec_core::autonomous::waterfall::{
@@ -9,13 +11,13 @@ use autospec_core::autonomous::waterfall::{
 };
 
 use super::waterfall::{
-    StoreAcquisition, Tier15EvidenceArtifact, Tier1EvidenceArtifact, WaterfallStore,
+    retry_transient_lock, StoreAcquisition, Tier15EvidenceArtifact, Tier1EvidenceArtifact,
+    WaterfallStore,
 };
 
 static ROOT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 const EVIDENCE_DIGEST: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-
 struct TempRoot {
     path: PathBuf,
 }
@@ -95,9 +97,13 @@ fn tier_one_point_five_receipt_with_evidence(
 }
 
 fn acquire(root: &TempRoot) -> WaterfallStore {
-    match WaterfallStore::acquire(root.path(), "owner/repo").expect("store acquisition") {
+    let acquisition = retry_transient_lock(
+        || WaterfallStore::acquire(root.path(), "owner/repo"),
+        |result| matches!(result, Ok(StoreAcquisition::Held)),
+    );
+    match acquisition.expect("store acquisition") {
         StoreAcquisition::Acquired(store) => store,
-        StoreAcquisition::Held => panic!("fresh temporary store must be available"),
+        StoreAcquisition::Held => panic!("test store remained locked for one second"),
     }
 }
 
@@ -111,6 +117,51 @@ fn concurrent_cursor_ownership_returns_typed_held_without_writing_state() {
         StoreAcquisition::Held
     ));
     assert!(!first.state_path().exists());
+}
+
+#[test]
+fn cloned_lock_descriptor_blocks_until_its_last_owner_closes() {
+    let root = TempRoot::new();
+    let first = acquire(&root);
+    let inherited_lock = first.clone_lock_for_test();
+    drop(first);
+    assert!(matches!(
+        WaterfallStore::acquire(root.path(), "owner/repo").expect("cloned-lock acquisition"),
+        StoreAcquisition::Held
+    ));
+
+    let waterfall_root = root.path().to_path_buf();
+    let (acquired_tx, acquired_rx) = mpsc::channel();
+    let acquisition = thread::spawn(move || {
+        let result = WaterfallStore::acquire_for_receipts(waterfall_root, "owner/repo", None);
+        acquired_tx.send(result).expect("send receipt acquisition");
+    });
+    assert!(matches!(
+        acquired_rx.recv_timeout(Duration::from_millis(25)),
+        Err(RecvTimeoutError::Timeout)
+    ));
+
+    drop(inherited_lock);
+    let acquired = acquired_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("receipt acquisition completed after inherited lock closed");
+    assert!(matches!(acquired, Ok(StoreAcquisition::Acquired(_))));
+    acquisition.join().expect("receipt acquisition thread");
+}
+
+#[test]
+fn receipt_acquisition_returns_held_after_bounded_retry_deadline() {
+    let root = TempRoot::new();
+    let first = acquire(&root);
+    let started = Instant::now();
+
+    let acquisition = WaterfallStore::acquire_for_receipts(root.path(), "owner/repo", None)
+        .expect("bounded receipt acquisition");
+
+    assert!(matches!(acquisition, StoreAcquisition::Held));
+    assert!(started.elapsed() >= Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    drop(first);
 }
 
 #[test]
