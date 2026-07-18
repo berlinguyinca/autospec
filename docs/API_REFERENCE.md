@@ -73,6 +73,7 @@ creates or adopts the per-issue linked worktree.
 ```
 Usage: worktree-guard.sh assert [--base <ref>] [--strict-base]
        worktree-guard.sh resolve-branch --branch <B> --repo <O/R>
+       worktree-guard.sh resolve-base [--base <ref>] [--pr-base]
        worktree-guard.sh create --branch <B> [--base <ref>] [--path <P>] [--adopt]
 Env:   AUTOSPEC_BASE_BRANCH   default base branch/ref when --base is omitted
 Config: .autospec/autospec.yml git.base_branch is used when AUTOSPEC_BASE_BRANCH is unset
@@ -83,7 +84,9 @@ Base precedence is `--base`, then `AUTOSPEC_BASE_BRANCH`, then
 names such as `master_ai` or `release/2026` resolve to `origin/<branch>`;
 `origin/<branch>` and `refs/remotes/origin/<branch>` remain remote refs. If no
 explicit/env/config base is set and `origin/main` is absent, the guard falls
-back to `gh repo view --json defaultBranchRef`.
+back to `gh repo view --json defaultBranchRef`. `resolve-base --pr-base` emits
+the branch name suitable for `gh pr create --base`, so prompt snippets do not
+duplicate the base-selection parser.
 
 ### `lint-issue.sh`
 

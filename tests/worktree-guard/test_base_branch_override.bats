@@ -143,6 +143,35 @@ YAML
     [ "$(cat "$wt/seed.txt")" = "master-ai" ]
 }
 
+@test "create: root .autospec/autospec.yml is honored from a nested directory" {
+    seed_branch main main
+    seed_branch master_ai master-ai
+    mkdir -p "$PRIMARY/.autospec" "$PRIMARY/nested/deep"
+    cat > "$PRIMARY/.autospec/autospec.yml" <<'YAML'
+git:
+  base_branch: master_ai
+YAML
+    wt="$TEST_TMP/wt-nested-config"
+
+    run bash -c "cd '$PRIMARY/nested/deep' && bash '$GUARD' create --branch feat/nested-config --path '$wt'"
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$wt/seed.txt")" = "master-ai" ]
+}
+
+@test "resolve-base: emits remote ref and PR base forms" {
+    seed_branch main main
+    seed_branch release/2026 release-2026
+
+    run bash -c "cd '$PRIMARY' && AUTOSPEC_BASE_BRANCH=release/2026 bash '$GUARD' resolve-base"
+    [ "$status" -eq 0 ]
+    [ "$output" = "origin/release/2026" ]
+
+    run bash -c "cd '$PRIMARY' && AUTOSPEC_BASE_BRANCH=origin/release/2026 bash '$GUARD' resolve-base --pr-base"
+    [ "$status" -eq 0 ]
+    [ "$output" = "release/2026" ]
+}
+
 @test "create: default path slugifies slash-containing branch names" {
     seed_branch main main
     branch="feat/default-path-$(basename "$TEST_TMP")"

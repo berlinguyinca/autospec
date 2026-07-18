@@ -11,6 +11,8 @@
 #       Preflight the current directory before any edit/commit.
 #   worktree-guard.sh resolve-branch --branch <B> --repo <O/R>
 #       The G2 PR-aware ladder. Emits a JSON verdict; exit 0 always.
+#   worktree-guard.sh resolve-base [--base <ref>] [--pr-base]
+#       Emit the configured base ref, or the PR base branch with --pr-base.
 #   worktree-guard.sh create --branch <B> [--base <ref>] [--path <P>] [--adopt]
 #       Create (or verified-clean reuse) a fresh worktree off the base.
 #
@@ -37,6 +39,7 @@ usage() {
 Usage:
   worktree-guard.sh assert [--base <ref>] [--strict-base]
   worktree-guard.sh resolve-branch --branch <B> --repo <O/R>
+  worktree-guard.sh resolve-base [--base <ref>] [--pr-base]
   worktree-guard.sh create --branch <B> [--base <ref>] [--path <P>] [--adopt]
 
 Subcommands:
@@ -44,6 +47,8 @@ Subcommands:
                   3 in_primary_checkout / 4 dirty / 5 stale_base.
   resolve-branch  PR-aware ladder verdict as JSON on stdout (exit 0 always):
                   {"state":"open-pr"|"branch-only"|"fresh","pr":N|null}.
+  resolve-base    Emit the base ref selected by --base / env / config / default.
+                  With --pr-base, emit the branch name for gh pr create --base.
   create          Create or verified-clean-reuse a fresh worktree off the base.
                   Dirty or wrong-branch reuse is refused (exit 4).
 
@@ -66,6 +71,10 @@ die() {
 # Emit a stable code_health/identifier line so callers can grep it.
 emit() { printf '%s\n' "$*" >&2; }
 
+repo_root() {
+    git rev-parse --show-toplevel 2>/dev/null || pwd
+}
+
 qualify_base_ref() {
     # Accept either a full remote ref (origin/master_ai) or a plain branch name
     # (master_ai). Plain branch names are intentionally interpreted as origin/*
@@ -87,7 +96,10 @@ qualify_base_ref() {
 }
 
 autospec_config_base_branch() {
-    [ -f ".autospec/autospec.yml" ] || return 1
+    local root config
+    root="$(repo_root)"
+    config="$root/.autospec/autospec.yml"
+    [ -f "$config" ] || return 1
     awk '
         function clean(value) {
             sub(/[[:space:]]*#.*/, "", value)
@@ -110,7 +122,24 @@ autospec_config_base_branch() {
             value=clean($0)
             if (value != "") { print value; exit }
         }
-    ' .autospec/autospec.yml
+    ' "$config"
+}
+
+pr_base_from_ref() {
+    local ref="$1"
+    case "$ref" in
+        refs/heads/*) printf '%s\n' "${ref#refs/heads/}" ;;
+        refs/remotes/*/*) printf '%s\n' "${ref#refs/remotes/*/}" ;;
+        */*)
+            local remote_name="${ref%%/*}"
+            if git remote 2>/dev/null | grep -Fx "$remote_name" >/dev/null 2>&1; then
+                printf '%s\n' "${ref#*/}"
+            else
+                printf '%s\n' "$ref"
+            fi
+            ;;
+        *) printf '%s\n' "$ref" ;;
+    esac
 }
 
 gh_default_base_ref() {
@@ -269,6 +298,29 @@ cmd_resolve_branch() {
 }
 
 # ---------------------------------------------------------------------------
+# resolve-base
+# ---------------------------------------------------------------------------
+cmd_resolve_base() {
+    local base="" base_explicit=0 pr_base=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --base)    [ $# -ge 2 ] || die 2 "--base requires a value"; base="$2"; base_explicit=1; shift 2 ;;
+            --pr-base) pr_base=1; shift ;;
+            -h|--help) usage; exit 0 ;;
+            *)         die 2 "resolve-base: unknown arg: $1" ;;
+        esac
+    done
+
+    base="$(resolve_base_ref "$base" "$base_explicit")"
+    if [ "$pr_base" -eq 1 ]; then
+        pr_base_from_ref "$base"
+    else
+        printf '%s\n' "$base"
+    fi
+    exit 0
+}
+
+# ---------------------------------------------------------------------------
 # create
 # ---------------------------------------------------------------------------
 cmd_create() {
@@ -363,6 +415,7 @@ main() {
     case "$sub" in
         assert)         cmd_assert "$@" ;;
         resolve-branch) cmd_resolve_branch "$@" ;;
+        resolve-base)   cmd_resolve_base "$@" ;;
         create)         cmd_create "$@" ;;
         -h|--help)      usage; exit 0 ;;
         *)              echo "$PROG: unknown subcommand: $sub" >&2; usage >&2; exit 2 ;;

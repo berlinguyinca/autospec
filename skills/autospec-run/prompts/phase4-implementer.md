@@ -85,63 +85,13 @@ per-repo default when the environment is unset, and missing unconfigured
 `origin/main` falls back to GitHub's default branch.
 
 ```bash
-BASE_BRANCH="${AUTOSPEC_BASE_BRANCH:-}"
-BASE_CONFIGURED=0
-if [ -n "$BASE_BRANCH" ]; then
-    BASE_CONFIGURED=1
-fi
-if [ -z "$BASE_BRANCH" ] && [ -f .autospec/autospec.yml ]; then
-    BASE_BRANCH=$(awk '
-        /^[[:space:]]*git[.]base_branch[[:space:]]*:/ { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/["'\'']/, ""); print; exit }
-        /^[^[:space:]][^:]*:/ { in_git=($0 ~ /^git[[:space:]]*:/); next }
-        in_git && /^[[:space:]]+base_branch[[:space:]]*:/ { sub(/^[[:space:]]*base_branch[[:space:]]*:[[:space:]]*/, ""); gsub(/["'\'']/, ""); print; exit }
-    ' .autospec/autospec.yml 2>/dev/null || true)
-    if [ -n "$BASE_BRANCH" ]; then
-        BASE_CONFIGURED=1
-    fi
-fi
-BASE_BRANCH="${BASE_BRANCH:-main}"
-base_ref_for() {
-    case "$1" in
-        refs/heads/*) printf 'origin/%s\n' "${1#refs/heads/}" ;;
-        refs/remotes/*) printf '%s\n' "${1#refs/remotes/}" ;;
-        */*)
-            remote_name="${1%%/*}"
-            if git remote 2>/dev/null | grep -Fx "$remote_name" >/dev/null 2>&1; then
-                printf '%s\n' "$1"
-            else
-                printf 'origin/%s\n' "$1"
-            fi
-            ;;
-        *) printf 'origin/%s\n' "$1" ;;
-    esac
-}
-pr_base_for() {
-    case "$1" in
-        refs/heads/*) printf '%s\n' "${1#refs/heads/}" ;;
-        refs/remotes/*/*) printf '%s\n' "${1#refs/remotes/*/}" ;;
-        */*)
-            remote_name="${1%%/*}"
-            if git remote 2>/dev/null | grep -Fx "$remote_name" >/dev/null 2>&1; then
-                printf '%s\n' "${1#*/}"
-            else
-                printf '%s\n' "$1"
-            fi
-            ;;
-        *) printf '%s\n' "$1" ;;
-    esac
-}
-BASE_REF="$(base_ref_for "$BASE_BRANCH")"
+WORKTREE_GUARD="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh"
+BASE_REF="$(bash "$WORKTREE_GUARD" resolve-base)"
+DEFAULT_PR_BASE="$(bash "$WORKTREE_GUARD" resolve-base --pr-base)"
 if ! git rev-parse --verify "$BASE_REF^{commit}" >/dev/null 2>&1; then
-    if [ "$BASE_CONFIGURED" -eq 0 ] && [ "$BASE_REF" = "origin/main" ]; then
-        BASE_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name // empty')
-        BASE_REF="$(base_ref_for "$BASE_BRANCH")"
-    else
-        echo "Configured base ref not found: $BASE_REF" >&2
-        exit 1
-    fi
+    echo "Resolved base ref not found: $BASE_REF" >&2
+    exit 1
 fi
-DEFAULT_PR_BASE="$(pr_base_for "$BASE_REF")"
 ```
 
 ### Migration-replay pre-PR hook
