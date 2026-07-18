@@ -81,6 +81,28 @@ SH
     [ "$status" -eq 0 ]
 }
 
+@test "assert: plain branch names containing slashes still target origin/<branch>" {
+    seed_branch main main
+    seed_branch release/2026 release-2026
+    wt="$TEST_TMP/wt-slash"
+    git -C "$PRIMARY" worktree add -q -b feat/slash "$wt" origin/release/2026
+
+    run bash -c "cd '$wt' && AUTOSPEC_BASE_BRANCH=release/2026 bash '$GUARD' assert --strict-base"
+
+    [ "$status" -eq 0 ]
+}
+
+@test "assert: full remote refs are preserved" {
+    seed_branch main main
+    seed_branch master_ai master-ai
+    wt="$TEST_TMP/wt-remote-ref"
+    git -C "$PRIMARY" worktree add -q -b feat/remote-ref "$wt" origin/master_ai
+
+    run bash -c "cd '$wt' && AUTOSPEC_BASE_BRANCH=origin/master_ai bash '$GUARD' assert --strict-base"
+
+    [ "$status" -eq 0 ]
+}
+
 @test "create: falls back to gh default branch when origin/main is absent" {
     seed_branch master_ai master-ai
     install_gh_default_branch_shim master_ai

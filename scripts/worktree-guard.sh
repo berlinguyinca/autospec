@@ -72,8 +72,16 @@ qualify_base_ref() {
     # because worktree-guard compares/fetches against the remote base.
     local ref="$1"
     case "$ref" in
-        refs/*|*/*) printf '%s\n' "$ref" ;;
-        *)          printf 'origin/%s\n' "$ref" ;;
+        refs/*) printf '%s\n' "$ref" ;;
+        */*)
+            local remote_name="${ref%%/*}"
+            if git remote 2>/dev/null | grep -Fx "$remote_name" >/dev/null 2>&1; then
+                printf '%s\n' "$ref"
+            else
+                printf 'origin/%s\n' "$ref"
+            fi
+            ;;
+        *) printf 'origin/%s\n' "$ref" ;;
     esac
 }
 

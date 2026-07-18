@@ -94,11 +94,40 @@ if [ -z "$BASE_BRANCH" ] && [ -f .autospec/autospec.yml ]; then
     ' .autospec/autospec.yml 2>/dev/null || true)
 fi
 BASE_BRANCH="${BASE_BRANCH:-main}"
-BASE_REF="origin/$BASE_BRANCH"
+base_ref_for() {
+    case "$1" in
+        refs/*) printf '%s\n' "$1" ;;
+        */*)
+            remote_name="${1%%/*}"
+            if git remote 2>/dev/null | grep -Fx "$remote_name" >/dev/null 2>&1; then
+                printf '%s\n' "$1"
+            else
+                printf 'origin/%s\n' "$1"
+            fi
+            ;;
+        *) printf 'origin/%s\n' "$1" ;;
+    esac
+}
+pr_base_for() {
+    case "$1" in
+        refs/heads/*) printf '%s\n' "${1#refs/heads/}" ;;
+        */*)
+            remote_name="${1%%/*}"
+            if git remote 2>/dev/null | grep -Fx "$remote_name" >/dev/null 2>&1; then
+                printf '%s\n' "${1#*/}"
+            else
+                printf '%s\n' "$1"
+            fi
+            ;;
+        *) printf '%s\n' "$1" ;;
+    esac
+}
+BASE_REF="$(base_ref_for "$BASE_BRANCH")"
 if ! git rev-parse --verify "$BASE_REF^{commit}" >/dev/null 2>&1; then
     BASE_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name // empty')
-    BASE_REF="origin/$BASE_BRANCH"
+    BASE_REF="$(base_ref_for "$BASE_BRANCH")"
 fi
+DEFAULT_PR_BASE="$(pr_base_for "$BASE_REF")"
 ```
 
 ### Migration-replay pre-PR hook
@@ -309,7 +338,7 @@ if [ -f .autospec/explore-mode.json ]; then
     EXPLORE_BASE=$(grep -o '"branch"[[:space:]]*:[[:space:]]*"[^"]*"' .autospec/explore-mode.json \
         | sed 's/.*"branch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 fi
-PR_BASE="${EXPLORE_BASE:-$BASE_BRANCH}"
+PR_BASE="${EXPLORE_BASE:-$DEFAULT_PR_BASE}"
 
 if [ -n "$EXPLORE_BASE" ]; then
     gh pr create --base "$EXPLORE_BASE" --title "<title>" --body "<body>"
