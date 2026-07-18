@@ -515,36 +515,29 @@ pub(crate) fn ready_plan_for(
     ))
 }
 
+type ReadyOptionSetter = fn(&mut ReadyOptions, &[String], &mut usize) -> Result<(), CommandFailure>;
+
+const READY_OPTION_SETTERS: &[(&str, ReadyOptionSetter)] = &[
+    ("--repo", set_ready_repo),
+    ("--batch-size", set_ready_batch_size),
+];
+
 fn parse_ready_options(args: &[String]) -> Result<ReadyOptions, CommandFailure> {
     let mut options = ReadyOptions::default();
     let mut index = 0;
     while index < args.len() {
-        match args[index].as_str() {
-            "--repo" => {
-                let value = next_value(args, &mut index, "--repo")?;
-                if options.repo.replace(value).is_some() {
-                    return Err(CommandFailure::diagnostic(
-                        "--repo accepts exactly one value",
-                    ));
-                }
-            }
-            "--batch-size" => {
-                let value = next_value(args, &mut index, "--batch-size")?;
-                let batch_size = value
-                    .parse::<usize>()
-                    .map_err(|_| CommandFailure::diagnostic("--batch-size must be an integer"))?;
-                if options.batch_size.replace(batch_size.max(1)).is_some() {
-                    return Err(CommandFailure::diagnostic(
-                        "--batch-size accepts exactly one value",
-                    ));
-                }
-            }
-            "--help" | "-h" => {
+        let option = args[index].as_str();
+        match READY_OPTION_SETTERS
+            .iter()
+            .find(|(name, _)| *name == option)
+        {
+            Some((_, setter)) => setter(&mut options, args, &mut index)?,
+            None if matches!(option, "--help" | "-h") => {
                 return Err(CommandFailure::diagnostic(
                     "--help cannot be combined with queue ready options",
                 ));
             }
-            option => {
+            None => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown autospec queue ready option: {option}"
                 )));
@@ -553,6 +546,37 @@ fn parse_ready_options(args: &[String]) -> Result<ReadyOptions, CommandFailure> 
         index += 1;
     }
     Ok(options)
+}
+
+fn set_ready_repo(
+    options: &mut ReadyOptions,
+    args: &[String],
+    index: &mut usize,
+) -> Result<(), CommandFailure> {
+    let value = next_value(args, index, "--repo")?;
+    if options.repo.replace(value).is_some() {
+        return Err(CommandFailure::diagnostic(
+            "--repo accepts exactly one value",
+        ));
+    }
+    Ok(())
+}
+
+fn set_ready_batch_size(
+    options: &mut ReadyOptions,
+    args: &[String],
+    index: &mut usize,
+) -> Result<(), CommandFailure> {
+    let value = next_value(args, index, "--batch-size")?;
+    let batch_size = value
+        .parse::<usize>()
+        .map_err(|_| CommandFailure::diagnostic("--batch-size must be an integer"))?;
+    if options.batch_size.replace(batch_size.max(1)).is_some() {
+        return Err(CommandFailure::diagnostic(
+            "--batch-size accepts exactly one value",
+        ));
+    }
+    Ok(())
 }
 
 fn next_value(args: &[String], index: &mut usize, option: &str) -> Result<String, CommandFailure> {
