@@ -26,7 +26,7 @@ fn trading_manifest_records_file_line_evidence_and_ranked_specialist() {
     assert!(trading
         .evidence
         .iter()
-        .any(|e| { e.file == "requirements.txt" && e.line == 2 && e.r#match.contains("ccxt") }));
+        .any(|e| { e.file == "requirements.txt" && e.line == 2 && e.r#match == "ccxt>=4.0" }));
     assert!(roster
         .suggested_specialists
         .iter()
