@@ -8,12 +8,13 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use autospec_core::autonomous::drain::{decide, DrainDecision, DrainObservation, DrainProgress};
+use autospec_core::autonomous::drain::{
+    decide, DrainDecision, DrainExecutorInput, DrainObservation, DrainProgress,
+};
 use autospec_core::autonomous_lifecycle::RepositoryScope;
 
 use super::{json_escape, Command, CommandFailure, Options, RunLayout};
 
-const DRAIN_RUN_PROMPT: &str = "$autospec-run";
 const GITHUB_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
 const OBSERVER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
@@ -168,14 +169,10 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
 }
 
 fn spawn_child(options: &Options) -> Result<Child, CommandFailure> {
-    Command::new("omx")
-        .args([
-            "exec",
-            "--cd",
-            &options.repo_dir,
-            "--dangerously-bypass-approvals-and-sandbox",
-            DRAIN_RUN_PROMPT,
-        ])
+    let input = DrainExecutorInput::omx_autospec_run(&options.repo_dir)
+        .map_err(CommandFailure::diagnostic)?;
+    Command::new(input.program())
+        .args(input.arguments())
         .current_dir(&options.repo_dir)
         .process_group(0)
         .stdout(Stdio::piped())

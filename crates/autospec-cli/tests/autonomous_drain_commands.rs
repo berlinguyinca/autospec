@@ -34,6 +34,14 @@ fn rust_drain_source_does_not_restore_shell_or_legacy_drain_authority() {
     )
     .expect("read drain command source");
 
+    assert!(
+        source.contains("DrainExecutorInput::omx_autospec_run"),
+        "drain command must receive typed executor input from autospec-core"
+    );
+    assert!(
+        !source.contains("DRAIN_RUN_PROMPT"),
+        "drain command must not retain a raw shell-shaped prompt string"
+    );
     for forbidden in [
         "Command::new(\"sh\")",
         "Command::new(\"bash\")",
@@ -44,6 +52,48 @@ fn rust_drain_source_does_not_restore_shell_or_legacy_drain_authority() {
             "drain command retains legacy authority: {forbidden}"
         );
     }
+}
+
+#[test]
+fn drain_dispatches_literal_autospec_run_token_without_legacy_script_authority() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let args_file = fixture.root.join("omx-args");
+    let legacy_marker = fixture.root.join("legacy-drain-invoked");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$AUTOSPEC_TEST_OMX_ARGS\"\n",
+    );
+    write_executable(
+        &bin.join("autospec-autonomous-run-drain.sh"),
+        "#!/bin/sh\nprintf legacy > \"$AUTOSPEC_TEST_LEGACY_MARKER\"\nexit 9\n",
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture
+        .command(&bin)
+        .env("AUTOSPEC_TEST_OMX_ARGS", &args_file)
+        .env("AUTOSPEC_TEST_LEGACY_MARKER", &legacy_marker)
+        .output()
+        .expect("run drain with typed executor input");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    let args = fs::read_to_string(&args_file).expect("read captured omx args");
+    assert_eq!(
+        args.lines().collect::<Vec<_>>(),
+        [
+            "exec",
+            "--cd",
+            fixture.repo_dir.to_str().expect("repo dir"),
+            "--dangerously-bypass-approvals-and-sandbox",
+            "$autospec-run"
+        ]
+    );
+    assert!(
+        !legacy_marker.exists(),
+        "native drain must not invoke the historical drain script"
+    );
 }
 
 #[test]
