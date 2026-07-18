@@ -299,15 +299,32 @@ issue_archetype_overlay() {
   printf '\n'
 }
 
+write_effective_persona() {
+  local _global_json="$1"
+  local _overlay_json="$2"
+  mkdir -p "$(dirname "$EFFECTIVE_FILE")" 2>/dev/null || true
+  _eff_tmp="$EFFECTIVE_FILE.tmp.$$"
+  {
+    cat "$GLOBAL_FILE"
+    printf '\n## Repo overlay\n\n'
+    _overlay_count="$(printf '%s' "$_overlay_json" | jq 'length' 2>/dev/null || echo 0)"
+    if [ "$_overlay_count" -gt 0 ]; then
+      printf '_Effective persona refined by %s repo-local overlay source(s):_\n\n' "$_overlay_count"
+      printf '%s' "$_overlay_json" \
+        | jq -r '.[] | "- " + (.source) + " (" + (.path) + ")"' 2>/dev/null || true
+      printf '\n'
+    else
+      printf '_No repo-local overlay sources present._\n\n'
+    fi
+    issue_archetype_overlay
+    confidence_note "$_global_json" "$_overlay_json" "$GLOBAL_FILE"
+  } > "$_eff_tmp"
+  mv -f "$_eff_tmp" "$EFFECTIVE_FILE"
+}
+
 # ---------------------------------------------------------------------------
 # Main flow.
 # ---------------------------------------------------------------------------
-
-# ── Cadence / staleness gate ───────────────────────────────────────────────
-if [ "$FORCE" -ne 1 ] && is_fresh; then
-  echo "autonomous-persona-synth: global persona fresh (< ${REFRESH_DAYS}d) — skipping synthesis" >&2
-  exit 0
-fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "autonomous-persona-synth: [dry-run] would synthesize $GLOBAL_FILE and apply overlay to $EFFECTIVE_FILE" >&2
@@ -318,6 +335,13 @@ fi
 BUNDLE_JSON="$(REPO_ROOT="$REPO_ROOT" AUTOSPEC_HOME="$AUTOSPEC_HOME" bash "$SOURCES_SH")"
 GLOBAL_BUNDLE="$(printf '%s' "$BUNDLE_JSON" | jq -c '.global // []')"
 OVERLAY_BUNDLE="$(printf '%s' "$BUNDLE_JSON" | jq -c '.overlay // []')"
+
+# ── Cadence / staleness gate ───────────────────────────────────────────────
+if [ "$FORCE" -ne 1 ] && is_fresh; then
+  write_effective_persona "$GLOBAL_BUNDLE" "$OVERLAY_BUNDLE"
+  echo "autonomous-persona-synth: global persona fresh (< ${REFRESH_DAYS}d) — refreshed effective persona" >&2
+  exit 0
+fi
 
 # ── Acquire global-file lock ───────────────────────────────────────────────
 if ! acquire_lock; then
@@ -366,24 +390,7 @@ cat "$_merged" > "$_global_tmp"
 mv -f "$_global_tmp" "$GLOBAL_FILE"
 
 # ── Apply overlay → effective persona + per-dimension confidence ────────────
-mkdir -p "$(dirname "$EFFECTIVE_FILE")" 2>/dev/null || true
-_eff_tmp="$EFFECTIVE_FILE.tmp.$$"
-{
-  cat "$GLOBAL_FILE"
-  printf '\n## Repo overlay\n\n'
-  _overlay_count="$(printf '%s' "$OVERLAY_BUNDLE" | jq 'length' 2>/dev/null || echo 0)"
-  if [ "$_overlay_count" -gt 0 ]; then
-    printf '_Effective persona refined by %s repo-local overlay source(s):_\n\n' "$_overlay_count"
-    printf '%s' "$OVERLAY_BUNDLE" \
-      | jq -r '.[] | "- " + (.source) + " (" + (.path) + ")"' 2>/dev/null || true
-    printf '\n'
-  else
-    printf '_No repo-local overlay sources present._\n\n'
-  fi
-  issue_archetype_overlay
-  confidence_note "$GLOBAL_BUNDLE" "$OVERLAY_BUNDLE" "$GLOBAL_FILE"
-} > "$_eff_tmp"
-mv -f "$_eff_tmp" "$EFFECTIVE_FILE"
+write_effective_persona "$GLOBAL_BUNDLE" "$OVERLAY_BUNDLE"
 
 # ── Inline cleanup + lock release (no trap) ────────────────────────────────
 rm -rf "$_tmp_dir"
