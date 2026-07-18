@@ -30,7 +30,7 @@ fn trading_manifest_records_file_line_evidence_and_ranked_specialist() {
     assert!(roster
         .suggested_specialists
         .iter()
-        .any(|s| s.slug == "trading-specialist" && s.evidence.contains("requirements.txt:2")));
+        .any(|s| s.slug == "trading-specialist" && s.evidence == "requirements.txt:2 (ccxt>=4.0)"));
 }
 
 #[test]
