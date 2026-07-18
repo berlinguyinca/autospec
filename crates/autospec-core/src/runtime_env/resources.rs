@@ -3,15 +3,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use std::ffi::CString;
-#[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd};
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use getrandom::fill;
+#[cfg(unix)]
+use nix::fcntl::{openat, renameat, OFlag};
+#[cfg(unix)]
+use nix::sys::stat::Mode;
+#[cfg(unix)]
+use nix::unistd::{unlinkat, UnlinkatFlags};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -498,31 +498,20 @@ fn write_file_atomic_at(
     encoded: &[u8],
 ) -> Result<(), RuntimeEnvError> {
     let temporary = create_temporary_path(destination)?;
-    let destination_name = relative_cstring(destination)?;
-    let temporary_name = relative_cstring(&temporary)?;
+    validate_relative_name(destination)?;
+    validate_relative_name(&temporary)?;
     let result = (|| {
         let flags =
-            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW;
-        // SAFETY: the directory descriptor and NUL-terminated name are valid for
-        // this call; ownership of a successful descriptor transfers to File.
-        let descriptor = unsafe {
-            libc::openat(
-                parent.as_raw_fd(),
-                temporary_name.as_ptr(),
-                flags,
-                0o600 as libc::mode_t,
-            )
-        };
-        if descriptor < 0 {
-            return Err(RuntimeEnvError::new(format!(
-                "could not create runtime state {}: {}",
-                temporary.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
-        // SAFETY: openat returned a new owned descriptor and File assumes its
-        // sole ownership exactly once.
-        let mut file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+            OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
+        let descriptor = openat(parent, &temporary, flags, Mode::from_bits_truncate(0o600))
+            .map_err(|error| {
+                RuntimeEnvError::new(format!(
+                    "could not create runtime state {}: {}",
+                    temporary.display(),
+                    error
+                ))
+            })?;
+        let mut file = std::fs::File::from(descriptor);
         set_private_descriptor_mode(&file, 0o600)?;
         file.write_all(encoded)
             .and_then(|()| file.sync_all())
@@ -532,23 +521,13 @@ fn write_file_atomic_at(
                     temporary.display()
                 ))
             })?;
-        // SAFETY: both names are valid C strings and both directory descriptors
-        // remain open for the duration of the atomic promotion.
-        let promoted = unsafe {
-            libc::renameat(
-                parent.as_raw_fd(),
-                temporary_name.as_ptr(),
-                parent.as_raw_fd(),
-                destination_name.as_ptr(),
-            )
-        };
-        if promoted != 0 {
-            return Err(RuntimeEnvError::new(format!(
+        renameat(parent, &temporary, parent, destination).map_err(|error| {
+            RuntimeEnvError::new(format!(
                 "could not finalize runtime state {}: {}",
                 destination.display(),
-                std::io::Error::last_os_error()
-            )));
-        }
+                error
+            ))
+        })?;
         parent.sync_all().map_err(|error| {
             RuntimeEnvError::new(format!(
                 "could not synchronize runtime state directory: {error}"
@@ -556,29 +535,20 @@ fn write_file_atomic_at(
         })
     })();
     if result.is_err() {
-        // SAFETY: the descriptor and temporary name remain valid; cleanup is
-        // best-effort and never follows a symlink outside the held directory.
-        unsafe {
-            libc::unlinkat(parent.as_raw_fd(), temporary_name.as_ptr(), 0);
-        }
+        let _ = unlinkat(parent, &temporary, UnlinkatFlags::NoRemoveDir);
     }
     result
 }
 
 #[cfg(unix)]
-fn relative_cstring(path: &Path) -> Result<CString, RuntimeEnvError> {
+fn validate_relative_name(path: &Path) -> Result<(), RuntimeEnvError> {
     if path.components().count() != 1 {
         return Err(RuntimeEnvError::new(format!(
             "runtime state descriptor path is not a filename: {}",
             path.display()
         )));
     }
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        RuntimeEnvError::new(format!(
-            "runtime state filename contains NUL: {}",
-            path.display()
-        ))
-    })
+    Ok(())
 }
 
 fn open_private_directory(path: &Path) -> Result<std::fs::File, RuntimeEnvError> {
@@ -591,11 +561,11 @@ fn open_private_directory(path: &Path) -> Result<std::fs::File, RuntimeEnvError>
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
-    options.custom_flags(libc::O_CLOEXEC | libc::O_DIRECTORY | libc::O_NOFOLLOW);
+    options.custom_flags((OFlag::O_CLOEXEC | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW).bits());
     let directory = options.open(path).map_err(|error| {
         #[cfg(unix)]
-        if error.raw_os_error() == Some(libc::ELOOP)
-            || (error.raw_os_error() == Some(libc::ENOTDIR)
+        if error.raw_os_error() == Some(nix::libc::ELOOP)
+            || (error.raw_os_error() == Some(nix::libc::ENOTDIR)
                 && std::fs::symlink_metadata(path)
                     .map(|metadata| metadata.file_type().is_symlink())
                     .unwrap_or(false))

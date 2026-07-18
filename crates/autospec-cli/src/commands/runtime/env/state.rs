@@ -3,18 +3,16 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
-use std::ffi::CString;
-#[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd};
-#[cfg(unix)]
-use std::os::unix::ffi::OsStrExt;
-#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
 use autospec_core::runtime_env::{
     reserve_loopback_port, EnvironmentLifecycle, EnvironmentOwner, PortRegistry, PortReservation,
     ResourceInventory, ResourcePlan, RuntimeContext, RuntimeState,
 };
+#[cfg(unix)]
+use nix::fcntl::{openat, OFlag};
+#[cfg(unix)]
+use nix::sys::stat::Mode;
 
 use crate::commands::CommandFailure;
 
@@ -430,45 +428,29 @@ fn private_open_error(path: &Path, error: std::io::Error) -> CommandFailure {
 
 #[cfg(unix)]
 fn open_private_lock_at(parent: &File, name: &Path) -> Result<File, CommandFailure> {
-    let name = relative_cstring(name)?;
-    let flags =
-        nix::libc::O_RDWR | nix::libc::O_CREAT | nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW;
-    // SAFETY: the directory descriptor and NUL-terminated filename remain valid;
-    // ownership of a successful descriptor transfers to File exactly once.
-    let descriptor = unsafe {
-        nix::libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            flags,
-            PRIVATE_FILE_MODE as nix::libc::mode_t,
-        )
-    };
-    if descriptor < 0 {
-        return Err(private_open_error(
-            Path::new(name.to_str().unwrap_or("lease.lock")),
-            std::io::Error::last_os_error(),
-        ));
-    }
-    // SAFETY: openat returned a newly owned descriptor.
-    let file = unsafe { File::from_raw_fd(descriptor) };
+    validate_relative_name(name)?;
+    let flags = OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW;
+    let descriptor = openat(
+        parent,
+        name,
+        flags,
+        Mode::from_bits_truncate(PRIVATE_FILE_MODE),
+    )
+    .map_err(|error| private_open_error(name, std::io::Error::from_raw_os_error(error as i32)))?;
+    let file = File::from(descriptor);
     set_descriptor_mode(&file, PRIVATE_FILE_MODE)?;
     Ok(file)
 }
 
 #[cfg(unix)]
-fn relative_cstring(path: &Path) -> Result<CString, CommandFailure> {
+fn validate_relative_name(path: &Path) -> Result<(), CommandFailure> {
     if path.components().count() != 1 {
         return Err(CommandFailure::diagnostic(format!(
             "runtime state descriptor path is not a filename: {}",
             path.display()
         )));
     }
-    CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-        CommandFailure::diagnostic(format!(
-            "runtime state filename contains NUL: {}",
-            path.display()
-        ))
-    })
+    Ok(())
 }
 
 fn reject_symlink(path: &Path) -> Result<(), CommandFailure> {

@@ -10,8 +10,10 @@ path = "src/lib.rs"
 
 [dependencies]
 getrandom = "=0.4.3"
-libc = "=0.2.186" # why: no-follow descriptor opens prevent runtime-state symlink races on Unix
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
 sha2 = "=0.11.0"
 yaml-edit = "=0.2.3" # why: parse manifest v2 resources without losing YAML structure
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["fs"] } # why: safe descriptor-relative runtime-state operations
