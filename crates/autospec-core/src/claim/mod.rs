@@ -1390,6 +1390,30 @@ pub fn lowest_marked_comment(comments: &[RemoteComment]) -> Option<&RemoteCommen
         .min_by_key(|comment| comment.id)
 }
 
+/// Return the exact marked comment a losing worker may delete.
+///
+/// The CAS owner is the lowest marked comment ID. A worker that loses claim
+/// confirmation may self-clean only a higher-ID comment whose parsed
+/// `worker_id` is literally equal to its own ID. This keeps dotted IDs distinct
+/// from near-collisions and prevents regex-like matching from deleting another
+/// worker's comment.
+pub fn claim_losing_worker_comment_id(
+    comments: &[RemoteComment],
+    worker_id: &str,
+) -> Option<u64> {
+    let lowest = lowest_marked_comment(comments).map(|comment| comment.id);
+    comments
+        .iter()
+        .filter_map(|comment| {
+            parse_run_state_comment(&comment.body)
+                .ok()
+                .filter(|record| record.worker_id == worker_id)
+                .map(|_| comment.id)
+        })
+        .filter(|comment_id| Some(*comment_id) != lowest)
+        .max()
+}
+
 fn parse_marked_record(body: &str) -> Result<RunStateRecord, String> {
     let (_, after_begin) = body
         .split_once(RUN_STATE_BEGIN_MARKER)

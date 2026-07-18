@@ -8,10 +8,10 @@ use autospec_core::autonomous_lifecycle::{
     WorkerId, ABANDONED_LEASE_SECS, STALE_LEASE_SECS,
 };
 use autospec_core::claim::{
-    executor_result_evidence_exists, find_reconcilable_pull_request,
+    claim_losing_worker_comment_id, executor_result_evidence_exists, find_reconcilable_pull_request,
     is_executor_result_pull_request, is_reconcilable_pull_request, lowest_marked_comment,
     parse_claim_issue_json, parse_open_pull_requests_json, parse_paths_argument,
-    parse_remote_comments_json, parse_run_state_comment, select_run_state,
+    parse_remote_comments_json, select_run_state,
     terminal_merged_comment_exists, ExecutorResultEvidence, RunStateRecord,
     RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
 };
@@ -1745,17 +1745,7 @@ fn cleanup_own_marked_comments(
     worker_id: &str,
     comments: &[autospec_core::claim::RemoteComment],
 ) {
-    let lowest = lowest_marked_comment(comments).map(|comment| comment.id);
-    let own = comments
-        .iter()
-        .filter_map(|comment| {
-            parse_run_state_comment(&comment.body)
-                .ok()
-                .filter(|record| record.worker_id == worker_id)
-                .map(|_| comment.id)
-        })
-        .max();
-    if let Some(comment_id) = own.filter(|comment_id| Some(*comment_id) != lowest) {
+    if let Some(comment_id) = claim_losing_worker_comment_id(comments, worker_id) {
         let _ = delete_comment(repo, comment_id);
     }
     cleanup_startup_heartbeat(repo, issue);
