@@ -98,8 +98,6 @@ struct LeaseTransaction {
 impl LeaseTransaction {
     #[cfg(unix)]
     fn try_open(path: &Path) -> Result<Self, StoreError> {
-        use std::os::fd::AsRawFd;
-
         let parent = path.parent().expect("lease lock path has a parent");
         fs::create_dir_all(parent).map_err(|error| {
             StoreError::Diagnostic(format!(
@@ -120,25 +118,13 @@ impl LeaseTransaction {
                 ))
             })?;
 
-        unsafe extern "C" {
-            fn flock(fd: i32, operation: i32) -> i32;
-        }
-        const LOCK_EX: i32 = 2;
-        const LOCK_NB: i32 = 4;
-        // SAFETY: `file` remains open for the transaction lifetime and `LOCK_EX | LOCK_NB`
-        // is the documented POSIX non-blocking exclusive advisory-lock operation.
-        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
-            Ok(Self { _file: file })
-        } else {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::WouldBlock {
-                Err(StoreError::Held)
-            } else {
-                Err(StoreError::Diagnostic(format!(
-                    "cannot lock resilience lease {}: {error}",
-                    path.display()
-                )))
-            }
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(fs::TryLockError::WouldBlock) => Err(StoreError::Held),
+            Err(fs::TryLockError::Error(error)) => Err(StoreError::Diagnostic(format!(
+                "cannot lock resilience lease {}: {error}",
+                path.display()
+            ))),
         }
     }
 
@@ -910,12 +896,15 @@ fn pid_is_dead(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return true;
     }
-    unsafe extern "C" {
-        fn kill(pid: i32, signal: i32) -> i32;
-    }
-    // SAFETY: POSIX `kill(pid, 0)` only probes process existence; it does not send a signal.
-    let result = unsafe { kill(pid as i32, 0) };
-    result != 0 && io::Error::last_os_error().raw_os_error() != Some(1)
+    pid_probe_is_dead(nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        None,
+    ))
+}
+
+#[cfg(unix)]
+fn pid_probe_is_dead(result: Result<(), nix::errno::Errno>) -> bool {
+    matches!(result, Err(nix::errno::Errno::ESRCH))
 }
 
 #[cfg(not(unix))]
@@ -928,13 +917,55 @@ mod tests {
     use super::super::waterfall::retry_transient_lock;
     use super::*;
     use autospec_core::coordination::{QueueGateCounts, ReadyQueuePlan, WorkerCap};
-    use std::process::Command;
+    use std::process::{Child, Command};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
     const LEASE_LOCK_TEST_ROOT: &str = "AUTOSPEC_LEASE_LOCK_TEST_ROOT";
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct ChildGuard(Child);
+
+    impl ChildGuard {
+        fn stop_and_reap(&mut self) {
+            self.0.kill().expect("stop liveness child");
+            self.0.wait().expect("reap liveness child");
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn pid_liveness_requires_observed_process_absence() {
+        assert!(!pid_is_dead(std::process::id()));
+        assert!(pid_is_dead(0));
+        assert!(pid_is_dead(i32::MAX as u32 + 1));
+
+        let mut child = ChildGuard(
+            Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("start liveness child"),
+        );
+        let pid = child.0.id();
+        assert!(!pid_is_dead(pid));
+        child.stop_and_reap();
+        assert!(pid_is_dead(pid));
+    }
+
+    #[test]
+    fn pid_probe_fails_closed_for_errors_other_than_process_absence() {
+        assert!(!pid_probe_is_dead(Ok(())));
+        assert!(pid_probe_is_dead(Err(nix::errno::Errno::ESRCH)));
+        assert!(!pid_probe_is_dead(Err(nix::errno::Errno::EPERM)));
+        assert!(!pid_probe_is_dead(Err(nix::errno::Errno::EINVAL)));
+    }
 
     #[test]
     fn competing_conductors_hold_one_owner_before_operator_write() {

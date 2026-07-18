@@ -121,6 +121,11 @@ impl WaterfallStore {
         &self.state_path
     }
 
+    #[cfg(test)]
+    pub(in crate::commands::autonomous) fn clone_lock_for_test(&self) -> File {
+        self._lock.try_clone().expect("clone waterfall lock")
+    }
+
     pub(super) fn receipt_path(
         &self,
         receipt: &TierReceipt,
@@ -364,25 +369,13 @@ fn try_lock(path: &Path) -> Result<Option<File>, WaterfallStoreError> {
 
     #[cfg(unix)]
     {
-        use std::os::fd::AsRawFd;
-
-        unsafe extern "C" {
-            fn flock(fd: i32, operation: i32) -> i32;
-        }
-        const LOCK_EX: i32 = 2;
-        const LOCK_NB: i32 = 4;
-        // SAFETY: the returned file retains the successful flock for the store lifetime.
-        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
-            return Ok(Some(file));
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::WouldBlock {
-            Ok(None)
-        } else {
-            Err(WaterfallStoreError::Diagnostic(format!(
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(WaterfallStoreError::Diagnostic(format!(
                 "cannot lock waterfall store {}: {error}",
                 path.display()
-            )))
+            ))),
         }
     }
 
