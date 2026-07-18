@@ -80,9 +80,10 @@ Config: .autospec/autospec.yml git.base_branch is used when AUTOSPEC_BASE_BRANCH
 
 Base precedence is `--base`, then `AUTOSPEC_BASE_BRANCH`, then
 `.autospec/autospec.yml` `git.base_branch`, then `origin/main`. Plain branch
-names such as `master_ai` resolve to `origin/master_ai`. If no explicit/env/config
-base is set and `origin/main` is absent, the guard falls back to
-`gh repo view --json defaultBranchRef`.
+names such as `master_ai` or `release/2026` resolve to `origin/<branch>`;
+`origin/<branch>` and `refs/remotes/origin/<branch>` remain remote refs. If no
+explicit/env/config base is set and `origin/main` is absent, the guard falls
+back to `gh repo view --json defaultBranchRef`.
 
 ### `lint-issue.sh`
 

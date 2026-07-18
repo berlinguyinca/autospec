@@ -25,6 +25,7 @@ setup() {
 
 teardown() {
     unset AUTOSPEC_BASE_BRANCH
+    rm -rf "/tmp/wt-feat-default-path-$(basename "$TEST_TMP")"
     rm -rf "$TEST_TMP"
 }
 
@@ -103,6 +104,17 @@ SH
     [ "$status" -eq 0 ]
 }
 
+@test "assert: refs/heads values resolve to the matching origin branch" {
+    seed_branch main main
+    seed_branch master_ai master-ai
+    wt="$TEST_TMP/wt-refs-heads"
+    git -C "$PRIMARY" worktree add -q -b feat/refs-heads "$wt" origin/master_ai
+
+    run bash -c "cd '$wt' && AUTOSPEC_BASE_BRANCH=refs/heads/master_ai bash '$GUARD' assert --strict-base"
+
+    [ "$status" -eq 0 ]
+}
+
 @test "create: falls back to gh default branch when origin/main is absent" {
     seed_branch master_ai master-ai
     install_gh_default_branch_shim master_ai
@@ -129,6 +141,18 @@ YAML
 
     [ "$status" -eq 0 ]
     [ "$(cat "$wt/seed.txt")" = "master-ai" ]
+}
+
+@test "create: default path slugifies slash-containing branch names" {
+    seed_branch main main
+    branch="feat/default-path-$(basename "$TEST_TMP")"
+    wt="/tmp/wt-feat-default-path-$(basename "$TEST_TMP")"
+
+    run bash -c "cd '$PRIMARY' && bash '$GUARD' create --branch '$branch'"
+
+    [ "$status" -eq 0 ]
+    [ -d "$wt" ]
+    [ "$(git -C "$wt" rev-parse --abbrev-ref HEAD)" = "$branch" ]
 }
 
 @test "create: default behavior still uses origin/main when present" {

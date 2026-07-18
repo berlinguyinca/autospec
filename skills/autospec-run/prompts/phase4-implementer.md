@@ -86,17 +86,25 @@ per-repo default when the environment is unset, and missing unconfigured
 
 ```bash
 BASE_BRANCH="${AUTOSPEC_BASE_BRANCH:-}"
+BASE_CONFIGURED=0
+if [ -n "$BASE_BRANCH" ]; then
+    BASE_CONFIGURED=1
+fi
 if [ -z "$BASE_BRANCH" ] && [ -f .autospec/autospec.yml ]; then
     BASE_BRANCH=$(awk '
         /^[[:space:]]*git[.]base_branch[[:space:]]*:/ { sub(/^[^:]*:[[:space:]]*/, ""); gsub(/["'\'']/, ""); print; exit }
         /^[^[:space:]][^:]*:/ { in_git=($0 ~ /^git[[:space:]]*:/); next }
         in_git && /^[[:space:]]+base_branch[[:space:]]*:/ { sub(/^[[:space:]]*base_branch[[:space:]]*:[[:space:]]*/, ""); gsub(/["'\'']/, ""); print; exit }
     ' .autospec/autospec.yml 2>/dev/null || true)
+    if [ -n "$BASE_BRANCH" ]; then
+        BASE_CONFIGURED=1
+    fi
 fi
 BASE_BRANCH="${BASE_BRANCH:-main}"
 base_ref_for() {
     case "$1" in
-        refs/*) printf '%s\n' "$1" ;;
+        refs/heads/*) printf 'origin/%s\n' "${1#refs/heads/}" ;;
+        refs/remotes/*) printf '%s\n' "${1#refs/remotes/}" ;;
         */*)
             remote_name="${1%%/*}"
             if git remote 2>/dev/null | grep -Fx "$remote_name" >/dev/null 2>&1; then
@@ -111,6 +119,7 @@ base_ref_for() {
 pr_base_for() {
     case "$1" in
         refs/heads/*) printf '%s\n' "${1#refs/heads/}" ;;
+        refs/remotes/*/*) printf '%s\n' "${1#refs/remotes/*/}" ;;
         */*)
             remote_name="${1%%/*}"
             if git remote 2>/dev/null | grep -Fx "$remote_name" >/dev/null 2>&1; then
@@ -124,8 +133,13 @@ pr_base_for() {
 }
 BASE_REF="$(base_ref_for "$BASE_BRANCH")"
 if ! git rev-parse --verify "$BASE_REF^{commit}" >/dev/null 2>&1; then
-    BASE_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name // empty')
-    BASE_REF="$(base_ref_for "$BASE_BRANCH")"
+    if [ "$BASE_CONFIGURED" -eq 0 ] && [ "$BASE_REF" = "origin/main" ]; then
+        BASE_BRANCH=$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name // empty')
+        BASE_REF="$(base_ref_for "$BASE_BRANCH")"
+    else
+        echo "Configured base ref not found: $BASE_REF" >&2
+        exit 1
+    fi
 fi
 DEFAULT_PR_BASE="$(pr_base_for "$BASE_REF")"
 ```

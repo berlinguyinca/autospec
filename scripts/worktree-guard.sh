@@ -72,7 +72,8 @@ qualify_base_ref() {
     # because worktree-guard compares/fetches against the remote base.
     local ref="$1"
     case "$ref" in
-        refs/*) printf '%s\n' "$ref" ;;
+        refs/heads/*)   printf 'origin/%s\n' "${ref#refs/heads/}" ;;
+        refs/remotes/*) printf '%s\n' "${ref#refs/remotes/}" ;;
         */*)
             local remote_name="${ref%%/*}"
             if git remote 2>/dev/null | grep -Fx "$remote_name" >/dev/null 2>&1; then
@@ -283,7 +284,7 @@ cmd_create() {
         esac
     done
     [ -n "$branch" ] || die 2 "create: --branch is required"
-    [ -n "$path" ]   || path="/tmp/wt-${branch}"
+    [ -n "$path" ]   || path="/tmp/wt-${branch//\//-}"
 
     # fetch-before-branch (G4) with a single retry; surface on persistent failure.
     if ! git fetch origin >/dev/null 2>&1; then
