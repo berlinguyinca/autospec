@@ -12,7 +12,8 @@
 # Output: JSON to stdout
 #   {
 #     "global":  [ {source, precedence, path, present:true}, ... ],
-#     "overlay": [ {source, precedence, path, present:true}, ... ]
+#     "overlay": [ {source, precedence, path, present:true}, ... ],
+#     "meta":    {source_count, confidence}
 #   }
 #
 # Source classes and precedences:
@@ -138,4 +139,22 @@ _overlay_json="$(jq -s 'sort_by(.precedence)' "$_overlay_jsonl")"
 jq -n \
   --argjson global  "$_global_json" \
   --argjson overlay "$_overlay_json" \
-  '{global: $global, overlay: $overlay}'
+  '
+  def confidence($global_count; $overlay_count):
+    if ($global_count + $overlay_count) == 0 then "none"
+    elif ($global_count + $overlay_count) == 1 then "low"
+    elif $global_count == 0 then "medium"
+    else "high"
+    end;
+  ($global | length) as $global_count
+  | ($overlay | length) as $overlay_count
+  | {
+      global: $global,
+      overlay: $overlay,
+      meta: {
+        source_count: ($global_count + $overlay_count),
+        global_count: $global_count,
+        overlay_count: $overlay_count,
+        confidence: confidence($global_count; $overlay_count)
+      }
+    }'
