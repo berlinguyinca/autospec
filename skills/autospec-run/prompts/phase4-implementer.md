@@ -310,6 +310,7 @@ else
     pr_url="$(gh pr create --base "$PR_BASE" --title "<title>" --body "<body>")"
 fi
 pr_number="$(gh pr view "$pr_url" --json number --jq .number)"
+[ -n "$pr_number" ] && [ "$pr_number" != "null" ] || { echo "gh pr create succeeded but PR number could not be resolved" >&2; exit 1; }
 current_state="$(autospec claim state read --issue <ISSUE> --repo <REPO> 2>/dev/null || true)"
 worker_id="$(printf '%s' "$current_state" | jq -r '.worker_id // empty' 2>/dev/null || true)"
 [ -n "$worker_id" ] || worker_id="${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:phase4:$$}"

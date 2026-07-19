@@ -210,10 +210,23 @@ JSON
 
 @test "phase4 pr creation marks heartbeat and run-state with the PR number" {
     prompt="$REPO_ROOT/skills/autospec-run/prompts/phase4-implementer.md"
-    run grep -Eq 'heartbeat-write\.sh.+--step[[:space:]]+pr_created.+--pr' "$prompt"
+    run grep -Fq 'pr_number="$(gh pr view "$pr_url" --json number --jq .number)"' "$prompt"
     [ "$status" -eq 0 ]
-    run grep -Eq 'autospec claim state upsert.+--state[[:space:]]+pr_created.+--pr' "$prompt"
+    run grep -Fq '[ -n "$pr_number" ] && [ "$pr_number" != "null" ]' "$prompt"
     [ "$status" -eq 0 ]
+    heartbeat_cmd='heartbeat-write.sh" --issue <ISSUE> --repo <REPO> --branch "$branch_name" --step pr_created --pr "$pr_number"'
+    run_state_cmd='autospec claim state upsert --issue <ISSUE> --repo <REPO> --worker-id "$worker_id" --state pr_created --step pr_created --branch "$branch_name" --pr "$pr_number"'
+    run grep -Fq "$heartbeat_cmd" "$prompt"
+    [ "$status" -eq 0 ]
+    run grep -Fq "$run_state_cmd" "$prompt"
+    [ "$status" -eq 0 ]
+    pr_number_line="$(grep -nF 'pr_number="$(gh pr view "$pr_url" --json number --jq .number)"' "$prompt" | cut -d: -f1)"
+    heartbeat_line="$(grep -nF "$heartbeat_cmd" "$prompt" | cut -d: -f1)"
+    run_state_line="$(grep -nF "$run_state_cmd" "$prompt" | cut -d: -f1)"
+    handoff_line="$(grep -nF 'any later handoff' "$prompt" | cut -d: -f1)"
+    [ "$pr_number_line" -lt "$heartbeat_line" ]
+    [ "$heartbeat_line" -lt "$run_state_line" ]
+    [ "$run_state_line" -lt "$handoff_line" ]
 
     heartbeat_dir="$TEST_TMP/heartbeats"
     export AUTOSPEC_HEARTBEAT_DIR="$heartbeat_dir"
