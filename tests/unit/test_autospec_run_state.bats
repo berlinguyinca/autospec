@@ -214,8 +214,8 @@ JSON
     [ "$status" -eq 0 ]
     run grep -Fq '[ -n "$pr_number" ] && [ "$pr_number" != "null" ]' "$prompt"
     [ "$status" -eq 0 ]
-    heartbeat_cmd='heartbeat-write.sh" --issue <ISSUE> --repo <REPO> --branch "$branch_name" --step pr_created --pr "$pr_number"'
-    run_state_cmd='autospec claim state upsert --issue <ISSUE> --repo <REPO> --worker-id "$worker_id" --state pr_created --step pr_created --branch "$branch_name" --pr "$pr_number"'
+    heartbeat_cmd='heartbeat-write.sh" --issue <ISSUE> --repo <REPO> --branch "$branch_name" --step pr_created --pr "$pr_number" || exit 1'
+    run_state_cmd='autospec claim state upsert --issue <ISSUE> --repo <REPO> --worker-id "$worker_id" --state pr_created --step pr_created --branch "$branch_name" --pr "$pr_number" || exit 1'
     run grep -Fq "$heartbeat_cmd" "$prompt"
     [ "$status" -eq 0 ]
     run grep -Fq "$run_state_cmd" "$prompt"
