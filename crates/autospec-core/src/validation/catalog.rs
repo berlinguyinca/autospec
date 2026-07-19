@@ -399,6 +399,9 @@ impl ValidationCheck {
             "check_shared_script_install" => {
                 CheckOwner::RustNative(StructuralCheck::SharedScriptInstall)
             }
+            "check_root_helper_wrapper_policy" => {
+                CheckOwner::RustNative(StructuralCheck::RootHelperWrapperPolicy)
+            }
             "check_derive_trio_consistency" => {
                 CheckOwner::ExternalBatch(ExternalCheck::DeriveTrioConsistency)
             }
@@ -522,6 +525,7 @@ pub enum StructuralCheck {
     SelfUpdateDuo,
     CodexSkillsInstall,
     SharedScriptInstall,
+    RootHelperWrapperPolicy,
     StartupPreflight,
 }
 
@@ -586,6 +590,7 @@ const LEGACY_TOP_LEVEL_CALL_IDS: &[&str] = &[
     "check_enforcement_defaults_section",
     "check_codex_skills_install",
     "check_shared_script_install",
+    "check_root_helper_wrapper_policy",
     "check_mutation_and_negative_path",
     "check_python_suites",
     "check_agents_md_subagent_section",
@@ -737,6 +742,7 @@ const STANDARD_CHECK_IDS: &[&str] = &[
     "check_startup_preflight",
     "check_codex_skills_install",
     "check_shared_script_install",
+    "check_root_helper_wrapper_policy",
     "check_mutation_and_negative_path",
     "check_python_suites",
     "check_subagent_model_tier",
