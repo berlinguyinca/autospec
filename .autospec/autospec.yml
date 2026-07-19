@@ -292,6 +292,11 @@ fenced_surfaces:
       - scripts/worktree-guard.sh
       - scripts/claim-guard.sh
       - scripts/autospec-autonomy-gate.sh
+  - id: autospec-policy-config
+    severity: fenced
+    reason: AutoSpec policy config edits can change autonomous safety policy.
+    paths:
+      - ".autospec/**"
 telemetry:
   # The ONLY operator-facing flag surface for autospec-db telemetry
   # (spec: docs/specs/2026-07-10-autospec-db-telemetry-design.md §Configuration).
