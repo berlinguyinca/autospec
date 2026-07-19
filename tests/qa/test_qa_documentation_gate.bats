@@ -84,6 +84,14 @@ EOF
     grep -q 'Missing audience page\|missing audience page' "$SKILL_MD"
 }
 
+@test "autospec-qa trio uses the shared browser verification states" {
+    for file in "$SKILL_MD" "$CODEX_MD" "$OC_MD"; do
+        grep -q 'browser-verified' "$file"
+        grep -q 'fallback-smoke-only' "$file"
+        grep -q 'not-run' "$file"
+    done
+}
+
 @test "trio lock-step: SKILL.md and codex/prompt.md have identical content after frontmatter strip" {
     command -v python3 >/dev/null 2>&1 || skip "python3 required for frontmatter stripping"
     local skill_content codex_content
