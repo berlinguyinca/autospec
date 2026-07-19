@@ -1580,6 +1580,174 @@ fn explicit_zero_lifetime_budget_remains_valid() {
 }
 
 #[test]
+fn autonomous_monitor_reads_canonical_resilience_status_for_heartbeat_age() {
+    let fixture = ResilienceFixture::new();
+    let heartbeat = now_secs().saturating_sub(5);
+    fixture.write_state(
+        "owner__repo",
+        format!(
+            r#"{{"repo":"owner/repo","status":"running","heartbeat_at":{heartbeat},"cycle":12}}"#
+        ),
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["state_status"], "running");
+    assert_eq!(body["current_cycle"], "12");
+    assert!(
+        body["heartbeat_age_secs"].as_u64().is_some(),
+        "monitor should report heartbeat age from canonical resilience state: {body}"
+    );
+}
+
+#[test]
+fn autonomous_monitor_does_not_invent_dry_result_for_tier_errors() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 9 repo=owner/repo
+[conductor] waterfall decision tier=2 action=run-explore-once reason=local-discovery
+[conductor] Tier 2 explore result: ERROR helper unavailable
+",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!(
+            "{}
+",
+            logpath.display()
+        ),
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["current_tier"], "2");
+    assert_eq!(body["tier_dry_result"], serde_json::Value::Null);
+}
+
+#[test]
+fn autonomous_monitor_does_not_fall_back_to_stale_dry_result_after_tier_error() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 8 repo=owner/repo
+[conductor] Tier 2 explore result: dry=true filed=0
+[conductor] cycle 9 repo=owner/repo
+[conductor] waterfall decision tier=2 action=run-explore-once reason=local-discovery
+[conductor] Tier 2 explore result: ERROR helper unavailable
+",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!(
+            "{}
+",
+            logpath.display()
+        ),
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["current_tier"], "2");
+    assert_eq!(body["tier_dry_result"], serde_json::Value::Null);
+}
+
+#[test]
+fn autonomous_monitor_distinguishes_launch_dry_run_from_tier_dry_result() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 7 repo=owner/repo\n\
+[conductor] waterfall decision tier=2 action=run-explore-once reason=local-discovery\n\
+[conductor] Tier 2 explore result: dry=true filed=0\n",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.pid"),
+        "999999\n",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!("{}\n", logpath.display()),
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/launch.json"),
+        "{\"repo\":\"owner/repo\",\"repo_dir\":\".\",\"argv\":[\"autospec\",\"autonomous\",\"start\",\"--repo\",\"owner/repo\",\"--dry-run\"],\"conductor_argv\":[\"autospec\",\"autonomous\",\"run-foreground\",\"--dry-run\"]}\n",
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["run_mode"], "dry-run");
+    assert_eq!(body["current_tier"], "2");
+    assert_eq!(body["current_action"], "run-explore-once");
+    assert_eq!(body["tier_dry_result"]["dry"], true);
+    assert_eq!(body["tier_dry_result"]["filed"], 0);
+    assert!(body["tier_dry_result"]["explanation"]
+        .as_str()
+        .expect("dry explanation")
+        .contains("tier produced no filed candidates"));
+}
+
+#[test]
+fn autonomous_monitor_falls_back_to_logs_and_discovery_artifacts() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 8 repo=owner/repo\n\
+[conductor] waterfall decision tier=4 action=run-explore-once-internet reason=internet-discovery\n\
+[conductor] Tier 4 explore result: dry=false filed=2\n",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!("{}\n", logpath.display()),
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/launch.json"),
+        "{\"repo\":\"owner/repo\",\"repo_dir\":\".\",\"argv\":[\"autospec\",\"autonomous\",\"start\",\"--repo\",\"owner/repo\"],\"conductor_argv\":[\"autospec\",\"autonomous\",\"run-foreground\"]}\n",
+    );
+    write_file(
+        &fixture.repo_dir.join(".autospec/explore-once-101/research.json"),
+        "{\"verification_mode\":\"verified\",\"proposals\":[{\"title\":\"Fix flaky drain\"},{\"title\":\"Improve monitor output\"}]}",
+    );
+    write_file(
+        &fixture
+            .repo_dir
+            .join(".autospec/explore-once-101/candidates.json"),
+        "[{\"title\":\"Fix flaky drain\"},{\"title\":\"Improve monitor output\"}]",
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["run_mode"], "real");
+    assert_eq!(body["current_cycle"], "8");
+    assert_eq!(body["current_tier"], "4");
+    assert_eq!(body["current_action"], "run-explore-once-internet");
+    assert_eq!(body["discovery_artifacts"][0]["proposals"], 2);
+    assert_eq!(body["discovery_artifacts"][0]["candidates"], 2);
+    assert_eq!(
+        body["discovery_artifacts"][0]["verification_mode"],
+        "verified"
+    );
+    assert_eq!(
+        body["discovery_artifacts"][0]["filed_issue_titles"][0],
+        "Fix flaky drain"
+    );
+}
+
+#[test]
 fn resilience_source_keeps_shell_resilience_authority_out_of_rust() {
     let source = fs::read_to_string(
         workspace_root().join("crates/autospec-cli/src/commands/autonomous/resilience.rs"),
@@ -1670,7 +1838,12 @@ impl ResilienceFixture {
             .env("AUTOSPEC_STATE_DIR", &self.state_root)
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", &self.spend_root)
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator_root)
-            .env("HOME", &self.root);
+            .env("HOME", &self.root)
+            .env_remove("AUTOSPEC_STOP_FLAG_FILE")
+            .env_remove("AUTOSPEC_RUN_ONLY_ISSUES")
+            .env_remove("AUTOSPEC_RUN_CMD")
+            .env_remove("AUTOSPEC_EXPLORE_CMD")
+            .env_remove("AUTOSPEC_EXPLORE_VERIFY_CMD");
         command
     }
 
