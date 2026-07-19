@@ -3,10 +3,11 @@ use autospec_core::state::{SpecRunState, SpecStateStore};
 pub fn run(args: &[String]) -> Result<(), String> {
     let store = SpecStateStore::load_or_default(".")?;
     let counts = Counts::from_store(&store);
+    let parent_counts = store.parent_issue_counts();
 
     if super::is_json(args) {
         println!(
-            "{{\"command\":\"status\",\"status\":\"ok\",\"specs\":{{\"planned\":{},\"ready\":{},\"running\":{},\"passed\":{},\"failed\":{},\"blocked\":{},\"deferred\":{},\"superseded\":{}}}}}",
+            "{{\"command\":\"status\",\"status\":\"ok\",\"specs\":{{\"planned\":{},\"ready\":{},\"running\":{},\"passed\":{},\"failed\":{},\"blocked\":{},\"deferred\":{},\"superseded\":{}}},\"parent_issues\":{{\"pending_children\":{},\"quarantined_parent_decomposed\":{},\"complete_but_stale\":{},\"closed\":{}}}}}",
             counts.planned,
             counts.ready,
             counts.running,
@@ -14,7 +15,11 @@ pub fn run(args: &[String]) -> Result<(), String> {
             counts.failed,
             counts.blocked,
             counts.deferred,
-            counts.superseded
+            counts.superseded,
+            parent_counts.pending_children,
+            parent_counts.quarantined_parent_decomposed,
+            parent_counts.complete_but_stale,
+            parent_counts.closed
         );
     } else {
         println!(
@@ -28,6 +33,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
             counts.deferred,
             counts.superseded
         );
+        println!(
+            "parent issues: pending_children={} quarantined_parent_decomposed={} complete_but_stale={} closed={}",
+            parent_counts.pending_children,
+            parent_counts.quarantined_parent_decomposed,
+            parent_counts.complete_but_stale,
+            parent_counts.closed
+        );
+        for line in store.parent_issue_status_lines() {
+            println!("parent issue {line}");
+        }
     }
     Ok(())
 }

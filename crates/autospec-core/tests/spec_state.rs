@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use autospec_core::state::{SpecLifecycle, SpecRunState, SpecStateStore};
+use autospec_core::state::{ParentIssueStatus, SpecLifecycle, SpecRunState, SpecStateStore};
 
 static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
 
@@ -359,4 +359,42 @@ fn spec_state_store_round_trips_escaped_lifecycle_metadata() {
             .as_deref(),
         Some(reason)
     );
+}
+
+#[test]
+fn parent_issue_closes_after_children_terminal() {
+    use ParentIssueStatus::*;
+
+    const DECOMPOSITION_COMMENT: &str = "<!-- autospec-parent-decomposition:begin -->\nParent issue #1899 was decomposed into child implementation issues:\n- #1900\n- #1901\n<!-- autospec-parent-decomposition:end -->";
+    const COMPLETION_SUMMARY: &str = "<!-- autospec-parent-complete:begin -->\nAll child implementation issues for parent #1899 reached a terminal state:\n- #1900\n- #1901\n\nClosing parent issue automatically.\n<!-- autospec-parent-complete:end -->";
+    let mut store = SpecStateStore::new();
+    let decomposition = store
+        .record_parent_decomposition(1899, vec![1900, 1901], true)
+        .expect("quarantined parent decomposition is recorded");
+
+    assert_eq!(decomposition.comment_body, DECOMPOSITION_COMMENT);
+    assert_eq!(
+        store.parent_issue_status(1899),
+        Some(QuarantinedParentDecomposed)
+    );
+    assert!(store
+        .record_child_terminal(1900)
+        .expect("first child terminal state is recorded")
+        .is_empty());
+    assert_eq!(
+        store.parent_issue_status(1899),
+        Some(QuarantinedParentDecomposed)
+    );
+    let completed = store
+        .record_child_terminal(1901)
+        .expect("last child terminal state is recorded");
+
+    assert_eq!(completed.len(), 1);
+    assert_eq!(completed[0].parent_issue, 1899);
+    assert_eq!(completed[0].completion_summary, COMPLETION_SUMMARY);
+    assert_eq!(store.parent_issue_status(1899), Some(CompleteButStale));
+    store
+        .record_parent_closed(1899)
+        .expect("parent close confirmation is recorded");
+    assert_eq!(store.parent_issue_status(1899), Some(Closed));
 }
