@@ -26,7 +26,7 @@ use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{claim, queue, CommandFailure};
 
@@ -80,6 +80,7 @@ mod waterfall_tests;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const DEFERRED_EXECUTOR_REASON: &str = "awaiting_typed_implementation_executor";
+const SESSION_RECONCILIATION_TIMEOUT_SECS: u64 = 300;
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -2495,10 +2496,38 @@ impl ExecutorRequest {
     }
 
     fn run(&self) -> ExecutorReceipt {
-        let output = Command::new(&self.program)
+        self.run_with_timeout(Duration::from_secs(SESSION_RECONCILIATION_TIMEOUT_SECS))
+    }
+
+    fn run_with_timeout(&self, timeout: Duration) -> ExecutorReceipt {
+        let mut child = match Command::new(&self.program)
             .args(&self.args)
             .current_dir(&self.current_dir)
-            .output();
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => return ExecutorReceipt::failed(),
+        };
+        let started = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) if started.elapsed() >= timeout => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return ExecutorReceipt::failed_startup();
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(10)),
+                Err(_) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return ExecutorReceipt::failed();
+                }
+            }
+        }
+        let output = child.wait_with_output();
         let expected = executor_receipt_json(&self.repo, self.issue);
         if output.is_ok_and(|output| {
             output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected
@@ -2518,6 +2547,13 @@ impl ExecutorReceipt {
         Self {
             outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
             claim_step: "executor_receipt_failed".to_string(),
+        }
+    }
+
+    fn failed_startup() -> Self {
+        Self {
+            outcome: ConductorOutcome::Retryable("failed-startup".to_string()),
+            claim_step: "failed-startup".to_string(),
         }
     }
 }
@@ -3835,10 +3871,12 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
     let mut last_workdir = String::new();
     let mut helper_failure_seen = false;
     let mut helper_states = Vec::new();
+    let mut child_sessions = Vec::<ChildSessionStartup>::new();
     let mut leader_nudge_seen = false;
     let mut suppressed_leader_nudges = 0usize;
     while index < lines.len() {
         let line = lines[index].trim();
+        let line_ts = line_timestamp(line);
         if line.contains("leader_nudge_tick") {
             if leader_nudge_seen {
                 suppressed_leader_nudges += 1;
@@ -3857,6 +3895,25 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
                 &mut helper_states,
                 HelperRecoveryState::RetryingHelper,
             );
+        }
+        if let Some(start) = session_start_event(line, line_ts) {
+            rows.push(format!(
+                "time unknown - session {} entered starting.",
+                start.session_id
+            ));
+            child_sessions.push(start);
+        }
+        if let Some(session_id) = session_start_reconciled_event(line) {
+            if let Some(session) = child_sessions
+                .iter_mut()
+                .rev()
+                .find(|session| session.session_id == session_id)
+            {
+                session.state = ChildStartupState::Claimed;
+            }
+            rows.push(format!(
+                "time unknown - session {session_id} entered claimed after session_start_reconciled."
+            ));
         }
         if helper_failure_seen && records_helper_blocked(line) {
             push_helper_recovery_state(
@@ -3930,10 +3987,58 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
                 rows.push(format!("{summary}."));
             }
         }
+        if let Some(now) = line_ts {
+            record_session_startup_timeouts(&mut rows, &mut child_sessions, now);
+        }
         index += 1;
+    }
+    if let Some(now) = lines.iter().filter_map(|line| line_timestamp(line)).max() {
+        record_session_startup_timeouts(&mut rows, &mut child_sessions, now);
     }
     flush_suppressed_leader_nudges(&mut rows, &mut suppressed_leader_nudges);
     dedupe_rows(rows)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChildStartupState {
+    Starting,
+    Claimed,
+    FailedStartup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChildSessionStartup {
+    session_id: String,
+    started_at: Option<u64>,
+    session_turns_zero: bool,
+    issue_claim_missing: bool,
+    state: ChildStartupState,
+}
+
+fn record_session_startup_timeouts(
+    rows: &mut Vec<String>,
+    sessions: &mut [ChildSessionStartup],
+    now: u64,
+) {
+    for session in sessions {
+        if session.state != ChildStartupState::Starting {
+            continue;
+        }
+        let Some(started_at) = session.started_at else {
+            continue;
+        };
+        if now.saturating_sub(started_at) < SESSION_RECONCILIATION_TIMEOUT_SECS {
+            continue;
+        }
+        if !session.session_turns_zero || !session.issue_claim_missing {
+            continue;
+        }
+        session.state = ChildStartupState::FailedStartup;
+        rows.push(format!(
+            "time unknown - session {} entered failed-startup after unreconciled session_start timeout; terminated and queued for retry.",
+            session.session_id
+        ));
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4009,6 +4114,56 @@ fn records_helper_continuation(line: &str) -> bool {
 
 fn records_helper_blocked(line: &str) -> bool {
     has_any_marker(&line.to_ascii_lowercase(), HELPER_BLOCKED_MARKERS)
+}
+
+fn session_start_event(line: &str, started_at: Option<u64>) -> Option<ChildSessionStartup> {
+    if line.contains("session_start_reconciled") || !line.contains("session_start") {
+        return None;
+    }
+    let session_id = line_key_value(line, "child")
+        .or_else(|| line_key_value(line, "session"))
+        .or_else(|| line_key_value(line, "session_id"))
+        .or_else(|| extract_json_string(line, "child"))
+        .or_else(|| extract_json_string(line, "session"))
+        .or_else(|| extract_json_string(line, "session_id"))
+        .unwrap_or_else(|| "unknown".to_string());
+    Some(ChildSessionStartup {
+        session_id,
+        started_at,
+        session_turns_zero: line_key_value(line, "session_turns")
+            .or_else(|| extract_json_number(line, "session_turns"))
+            .as_deref()
+            .is_some_and(|value| value == "0"),
+        issue_claim_missing: line_key_value(line, "issue_claim")
+            .or_else(|| extract_json_string(line, "issue_claim"))
+            .as_deref()
+            .is_none_or(|value| matches!(value, "" | "none" | "null")),
+        state: ChildStartupState::Starting,
+    })
+}
+
+fn session_start_reconciled_event(line: &str) -> Option<String> {
+    if !line.contains("session_start_reconciled") {
+        return None;
+    }
+    line_key_value(line, "child")
+        .or_else(|| line_key_value(line, "session"))
+        .or_else(|| line_key_value(line, "session_id"))
+        .or_else(|| extract_json_string(line, "child"))
+        .or_else(|| extract_json_string(line, "session"))
+        .or_else(|| extract_json_string(line, "session_id"))
+        .or_else(|| Some("unknown".to_string()))
+}
+
+fn line_key_value(line: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    line.split_whitespace()
+        .find_map(|part| part.strip_prefix(&prefix))
+        .map(|value| {
+            value
+                .trim_matches(|ch| matches!(ch, ',' | '"' | '\''))
+                .to_string()
+        })
 }
 
 fn has_any_marker(haystack: &str, markers: &[&str]) -> bool {
@@ -4389,6 +4544,53 @@ fn summarize_timeline_line(line: &str) -> String {
     }
 }
 
+fn line_timestamp(line: &str) -> Option<u64> {
+    if let Some(ts) = extract_json_number(line, "ts").and_then(|value| value.parse().ok()) {
+        return Some(ts);
+    }
+    let stamp = line.get(..20)?;
+    if !stamp.ends_with('Z') || stamp.as_bytes().get(10) != Some(&b'T') {
+        return None;
+    }
+    let year = stamp.get(0..4)?.parse::<i64>().ok()?;
+    let month = stamp.get(5..7)?.parse::<u32>().ok()?;
+    let day = stamp.get(8..10)?.parse::<u32>().ok()?;
+    let hour = stamp.get(11..13)?.parse::<u32>().ok()?;
+    let minute = stamp.get(14..16)?.parse::<u32>().ok()?;
+    let second = stamp.get(17..19)?.parse::<u32>().ok()?;
+    if stamp.as_bytes().get(4) != Some(&b'-')
+        || stamp.as_bytes().get(7) != Some(&b'-')
+        || stamp.as_bytes().get(13) != Some(&b':')
+        || stamp.as_bytes().get(16) != Some(&b':')
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let days = days_from_civil(year, month, day)?;
+    let seconds = days
+        .checked_mul(86_400)?
+        .checked_add(i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second))?;
+    u64::try_from(seconds).ok()
+}
+
+fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
+    let year = year - i64::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let year_of_era = year - era * 400;
+    let month = i64::from(month);
+    let day = i64::from(day);
+    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
+    if !(0..=365).contains(&day_of_year) {
+        return None;
+    }
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
+}
+
 fn resolve_repo(options: &Options) -> String {
     if options.repo != "unknown" && !options.repo.is_empty() {
         return options.repo.clone();
@@ -4641,6 +4843,25 @@ mod foreground_tests {
             ConductorOutcome::Blocked("executor_receipt_failed".to_string())
         );
         assert_eq!(receipt.claim_step, "executor_receipt_failed");
+    }
+
+    #[test]
+    fn executor_startup_timeout_becomes_retryable_failed_startup() {
+        let request = ExecutorRequest {
+            program: PathBuf::from("sh"),
+            args: vec!["-c".to_string(), "sleep 10".to_string()],
+            current_dir: std::env::temp_dir(),
+            repo: "test/repo".to_string(),
+            issue: 42,
+        };
+
+        let receipt = request.run_with_timeout(Duration::from_millis(20));
+
+        assert_eq!(
+            receipt.outcome,
+            ConductorOutcome::Retryable("failed-startup".to_string())
+        );
+        assert_eq!(receipt.claim_step, "failed-startup");
     }
 
     #[test]
