@@ -3833,8 +3833,50 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
     let mut rows = Vec::new();
     let mut index = 0;
     let mut last_workdir = String::new();
+    let mut helper_failure_seen = false;
+    let mut helper_states = Vec::new();
+    let mut leader_nudge_seen = false;
+    let mut suppressed_leader_nudges = 0usize;
     while index < lines.len() {
         let line = lines[index].trim();
+        if line.contains("leader_nudge_tick") {
+            if leader_nudge_seen {
+                suppressed_leader_nudges += 1;
+            } else {
+                leader_nudge_seen = true;
+                rows.push(format!("time unknown - {}.", summarize_timeline_line(line)));
+            }
+            index += 1;
+            continue;
+        }
+        flush_suppressed_leader_nudges(&mut rows, &mut suppressed_leader_nudges);
+        if records_spawn_agent_failure(line) {
+            helper_failure_seen = true;
+            push_helper_recovery_state(
+                &mut rows,
+                &mut helper_states,
+                HelperRecoveryState::RetryingHelper,
+            );
+        }
+        if helper_failure_seen && records_helper_blocked(line) {
+            push_helper_recovery_state(
+                &mut rows,
+                &mut helper_states,
+                HelperRecoveryState::BlockedHelperSpawn,
+            );
+        } else if helper_failure_seen && records_helper_continuation(line) {
+            push_helper_recovery_state(
+                &mut rows,
+                &mut helper_states,
+                HelperRecoveryState::ContinuingWithoutHelper,
+            );
+        } else if helper_failure_seen && records_collab_wait(line) {
+            push_helper_recovery_state(
+                &mut rows,
+                &mut helper_states,
+                HelperRecoveryState::RetryingHelper,
+            );
+        }
         if let Some(rest) = line.strip_prefix("workdir:") {
             last_workdir = rest.trim().to_string();
         } else if let Some(cycle) = conductor_cycle(line) {
@@ -3890,7 +3932,91 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
         }
         index += 1;
     }
+    flush_suppressed_leader_nudges(&mut rows, &mut suppressed_leader_nudges);
     dedupe_rows(rows)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelperRecoveryState {
+    RetryingHelper,
+    ContinuingWithoutHelper,
+    BlockedHelperSpawn,
+}
+
+impl HelperRecoveryState {
+    fn summary(self) -> &'static str {
+        match self {
+            Self::RetryingHelper => {
+                "entered retrying-helper after SpawnAgent helper failure; wait/nudge handling is bounded by retry policy"
+            }
+            Self::ContinuingWithoutHelper => {
+                "entered continuing-without-helper after helper spawn failed; foreground loop will not wait on a missing helper"
+            }
+            Self::BlockedHelperSpawn => {
+                "entered blocked-helper-spawn after helper spawn retries were exhausted"
+            }
+        }
+    }
+}
+
+fn push_helper_recovery_state(
+    rows: &mut Vec<String>,
+    seen: &mut Vec<HelperRecoveryState>,
+    state: HelperRecoveryState,
+) {
+    if seen.contains(&state) {
+        return;
+    }
+    seen.push(state);
+    rows.push(format!("time unknown - {}.", state.summary()));
+}
+
+fn flush_suppressed_leader_nudges(rows: &mut Vec<String>, suppressed: &mut usize) {
+    if *suppressed == 0 {
+        return;
+    }
+    let suffix = if *suppressed == 1 { "" } else { "s" };
+    rows.push(format!(
+        "time unknown - suppressed {} repeated leader nudge tick{}.",
+        *suppressed, suffix
+    ));
+    *suppressed = 0;
+}
+
+const SPAWN_AGENT_MARKER: &str = "SpawnAgent";
+const SPAWN_FAILURE_MARKERS: &[&str] = &["failed", "failure", "unavailable", "error"];
+const COLLAB_WAIT_MARKERS: &[&str] = &["collab: Wait", "collab: wait"];
+const HELPER_CONTINUATION_MARKERS: &[&str] =
+    &["continuing without helper", "continue without helper"];
+const HELPER_BLOCKED_MARKERS: &[&str] = &[
+    "blocked-helper-spawn",
+    "helper spawn retries exhausted",
+    "both valid shapes fail",
+    "both valid shapes failed",
+];
+
+fn records_spawn_agent_failure(line: &str) -> bool {
+    has_marker(line, SPAWN_AGENT_MARKER) && has_any_marker(line, SPAWN_FAILURE_MARKERS)
+}
+
+fn records_collab_wait(line: &str) -> bool {
+    has_any_marker(line, COLLAB_WAIT_MARKERS)
+}
+
+fn records_helper_continuation(line: &str) -> bool {
+    has_any_marker(&line.to_ascii_lowercase(), HELPER_CONTINUATION_MARKERS)
+}
+
+fn records_helper_blocked(line: &str) -> bool {
+    has_any_marker(&line.to_ascii_lowercase(), HELPER_BLOCKED_MARKERS)
+}
+
+fn has_any_marker(haystack: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| has_marker(haystack, marker))
+}
+
+fn has_marker(haystack: &str, marker: &str) -> bool {
+    haystack.contains(marker)
 }
 
 fn conductor_cycle(line: &str) -> Option<String> {

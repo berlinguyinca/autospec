@@ -2107,6 +2107,47 @@ fn autonomous_timeline_reports_forecast_and_planned_steps() {
 }
 
 #[test]
+fn autonomous_timeline_rate_limits_leader_nudges_and_reports_helper_recovery() {
+    let temp = temp_dir("autospec-autonomous-helper-recovery");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let home = temp.join("home");
+    write_conductor_log(
+        &operator_dir,
+        "berlinguyinca_autospec",
+        "2026-07-19T01:00:00Z SpawnAgent full-history helper failed: unavailable
+2026-07-19T01:00:01Z collab: Wait
+2026-07-19T01:00:02Z leader_nudge_tick issue=1847
+2026-07-19T01:00:03Z leader_nudge_tick issue=1847
+2026-07-19T01:00:04Z leader_nudge_tick issue=1847
+2026-07-19T01:00:05Z continuing without helper after SpawnAgent failure
+",
+    );
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "timeline",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--lines",
+            "80",
+        ])
+        .env("HOME", &home)
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .output()
+        .expect("autospec autonomous timeline runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("retrying-helper"));
+    assert!(stdout.contains("continuing-without-helper"));
+    assert_eq!(stdout.matches("leader_nudge_tick").count(), 1, "{stdout}");
+    assert!(stdout.contains("suppressed 2 repeated leader nudge tick"));
+}
+
+#[test]
 fn autonomous_timeline_reports_item_timing() {
     let temp = temp_dir("autospec-autonomous-timeline-timing");
     let operator_dir = temp.join("operator");
