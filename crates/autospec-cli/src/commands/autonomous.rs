@@ -930,9 +930,9 @@ impl MonitorSnapshot {
             stop_flag,
             stop_mode,
             run_mode: monitor_run_mode(&launch),
-            state_status: state.status,
-            heartbeat_age_secs: heartbeat_age_secs(&state.heartbeat_at),
-            current_cycle: latest_cycle(&timeline_lines).unwrap_or(state.last_cycle),
+            state_status: state.status.clone().unwrap_or_default(),
+            heartbeat_age_secs: state.heartbeat_age_secs(),
+            current_cycle: latest_cycle(&timeline_lines).unwrap_or(state.current_cycle),
             current_tier: latest_key_after(&timeline_lines, "tier=").unwrap_or_default(),
             current_action: latest_key_after(&timeline_lines, "action=").unwrap_or_default(),
             tier_dry_result,
@@ -1254,23 +1254,31 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     let supervisor = read_unit("supervisor", &layout.state_dir);
     let state = resilience::status(&layout.repo)
         .map_err(resilience_admission_error)?
-        .map(|state| StateMetadata {
-            status: state.status,
-            heartbeat_at: state
-                .heartbeat_at
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "null".to_string()),
-            last_cycle: state.last_cycle,
+        .map(|state| {
+            StateMetadata::ok(
+                state.status,
+                state.heartbeat_at.map(|value| value.to_string()),
+                state.last_cycle,
+            )
         })
         .unwrap_or_else(|| read_state_metadata(&layout));
     let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_status\":\"{}\",\"heartbeat_at\":{},\"last_cycle\":\"{}\",\"spend\":{{\"tokens\":{},\"issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"last_blocker\":\"{}\",\"spend\":{{\"tokens\":{},\"issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&layout.repo),
-            json_escape(&state.status),
-            state.heartbeat_at,
+            state.outcome.as_str(),
+            state.status_json(),
+            state.heartbeat_at_json(),
+            state
+                .heartbeat_age_secs()
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "null".to_string()),
             json_escape(&state.last_cycle),
+            json_escape(&state.current_cycle),
+            json_escape(&state.current_tier),
+            json_escape(&state.current_action),
+            json_escape(&state.last_blocker),
             spend.tokens,
             spend.issues,
             unit_status_json(&conductor),
@@ -1388,7 +1396,7 @@ fn list(options: Options) -> Result<(), String> {
                 json_escape(&layout.repo),
                 conductor.running,
                 json_escape(&state.last_cycle),
-                json_escape(&state.status),
+                json_escape(state.status.as_deref().unwrap_or_default()),
                 launch,
                 unit_status_json(&conductor),
                 unit_status_json(&monitor),
@@ -3009,11 +3017,84 @@ struct IssueTiming {
     done: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
+enum StateMetadataOutcome {
+    Ok,
+    Unavailable,
+    MalformedState,
+}
+
+impl StateMetadataOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "Ok",
+            Self::Unavailable => "Unavailable",
+            Self::MalformedState => "MalformedState",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct StateMetadata {
-    status: String,
-    heartbeat_at: String,
+    outcome: StateMetadataOutcome,
+    status: Option<String>,
+    heartbeat_at: Option<String>,
     last_cycle: String,
+    current_cycle: String,
+    current_tier: String,
+    current_action: String,
+    last_blocker: String,
+}
+
+impl StateMetadata {
+    fn ok(status: String, heartbeat_at: Option<String>, last_cycle: String) -> Self {
+        Self {
+            outcome: StateMetadataOutcome::Ok,
+            status: Some(status),
+            heartbeat_at,
+            current_cycle: last_cycle.clone(),
+            last_cycle,
+            current_tier: String::new(),
+            current_action: String::new(),
+            last_blocker: String::new(),
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self::without_state(StateMetadataOutcome::Unavailable)
+    }
+
+    fn malformed() -> Self {
+        Self::without_state(StateMetadataOutcome::MalformedState)
+    }
+
+    fn without_state(outcome: StateMetadataOutcome) -> Self {
+        Self {
+            outcome,
+            status: None,
+            heartbeat_at: None,
+            last_cycle: String::new(),
+            current_cycle: String::new(),
+            current_tier: String::new(),
+            current_action: String::new(),
+            last_blocker: String::new(),
+        }
+    }
+
+    fn status_json(&self) -> String {
+        optional_json_string(self.status.as_deref())
+    }
+
+    fn heartbeat_at_json(&self) -> String {
+        self.heartbeat_at
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| "null".to_string())
+    }
+
+    fn heartbeat_age_secs(&self) -> Option<u64> {
+        self.heartbeat_at.as_deref().and_then(heartbeat_age_secs)
+    }
 }
 
 impl RunLayout {
@@ -3471,13 +3552,12 @@ fn monitor_state_metadata(layout: &RunLayout) -> StateMetadata {
     resilience::status(&layout.repo)
         .ok()
         .flatten()
-        .map(|state| StateMetadata {
-            status: state.status,
-            heartbeat_at: state
-                .heartbeat_at
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "null".to_string()),
-            last_cycle: state.last_cycle,
+        .map(|state| {
+            StateMetadata::ok(
+                state.status,
+                state.heartbeat_at.map(|value| value.to_string()),
+                state.last_cycle,
+            )
         })
         .unwrap_or_else(|| read_state_metadata(layout))
 }
@@ -3489,11 +3569,37 @@ fn read_state_metadata(layout: &RunLayout) -> StateMetadata {
     )
     .join(&layout.scope)
     .join("state.json");
-    let raw = fs::read_to_string(path).unwrap_or_default();
+    let Ok(raw) = fs::read_to_string(path) else {
+        return StateMetadata::unavailable();
+    };
+    let Some(status) = extract_json_string(&raw, "status") else {
+        return StateMetadata::malformed();
+    };
+    let Some(heartbeat_at) = extract_json_number(&raw, "heartbeat_at") else {
+        return StateMetadata::malformed();
+    };
+    let Some(last_cycle) = extract_json_number(&raw, "cycle") else {
+        return StateMetadata::malformed();
+    };
+    let current_cycle = extract_json_number(&raw, "current_cycle")
+        .or_else(|| extract_json_string(&raw, "current_cycle"))
+        .unwrap_or_else(|| last_cycle.clone());
+
     StateMetadata {
-        status: extract_json_string(&raw, "status").unwrap_or_default(),
-        heartbeat_at: extract_json_number(&raw, "heartbeat_at").unwrap_or_else(|| "null".into()),
-        last_cycle: extract_json_number(&raw, "cycle").unwrap_or_default(),
+        outcome: StateMetadataOutcome::Ok,
+        status: Some(status),
+        heartbeat_at: Some(heartbeat_at),
+        last_cycle,
+        current_cycle,
+        current_tier: extract_json_string(&raw, "current_tier")
+            .or_else(|| extract_json_number(&raw, "current_tier"))
+            .or_else(|| extract_json_string(&raw, "tier"))
+            .or_else(|| extract_json_number(&raw, "tier"))
+            .unwrap_or_default(),
+        current_action: extract_json_string(&raw, "current_action")
+            .or_else(|| extract_json_string(&raw, "action"))
+            .unwrap_or_default(),
+        last_blocker: extract_json_string(&raw, "last_blocker").unwrap_or_default(),
     }
 }
 
@@ -4034,6 +4140,12 @@ fn parse_github_slug(remote: &str) -> Option<String> {
         return Some(trimmed[index + "github.com/".len()..].to_string());
     }
     None
+}
+
+fn optional_json_string(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("\"{}\"", json_escape(value)))
+        .unwrap_or_else(|| "null".to_string())
 }
 
 fn extract_json_string(raw: &str, key: &str) -> Option<String> {
