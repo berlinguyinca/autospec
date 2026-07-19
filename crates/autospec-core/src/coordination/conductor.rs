@@ -1,4 +1,5 @@
 mod invariants;
+mod normalized;
 mod persistence;
 
 const CONDUCTOR_SCHEMA: u64 = 1;
@@ -22,6 +23,12 @@ pub enum ConductorPhase {
     Paused,
     SliceComplete,
     AllDone,
+    TierDry,
+    AllBlocked,
+    VerifierUnavailable,
+    IdleRescan,
+    ResourcePark,
+    OperatorStop,
 }
 
 impl ConductorPhase {
@@ -35,23 +42,10 @@ pub enum ConductorOutcome {
     Succeeded,
     Retryable(String),
     Blocked(String),
-}
-
-impl ConductorOutcome {
-    fn validate(&self) -> Result<(), String> {
-        match self {
-            Self::Succeeded => Ok(()),
-            Self::Retryable(reason) if reason.trim().is_empty() => {
-                Err("retryable conductor outcome requires a reason".to_string())
-            }
-            Self::Blocked(reason)
-                if reason.trim().is_empty() || reason == RETRY_LIMIT_EXHAUSTED =>
-            {
-                Err("blocked conductor outcome has an invalid reason".to_string())
-            }
-            Self::Retryable(_) | Self::Blocked(_) => Ok(()),
-        }
-    }
+    AllBlocked { reason: String, issues: Box<[u64]> },
+    VerifierUnavailable { reason: String },
+    ResourcePark { reason: String },
+    OperatorStop { reason: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -239,6 +233,10 @@ impl ConductorState {
             ConductorOutcome::Succeeded => self.phase = ConductorPhase::DispatchRecorded,
             ConductorOutcome::Retryable(_) => self.record_retryable_dispatch()?,
             ConductorOutcome::Blocked(reason) => self.record_blocked_dispatch(reason),
+            ConductorOutcome::AllBlocked { reason, .. }
+            | ConductorOutcome::VerifierUnavailable { reason }
+            | ConductorOutcome::ResourcePark { reason }
+            | ConductorOutcome::OperatorStop { reason } => self.record_blocked_dispatch(reason),
         }
         Ok(())
     }

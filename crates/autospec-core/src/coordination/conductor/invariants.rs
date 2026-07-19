@@ -70,6 +70,12 @@ impl ConductorState {
                 self.validate_retry_state()
             }
             ConductorPhase::Paused => self.validate_paused_state(),
+            ConductorPhase::TierDry
+            | ConductorPhase::AllBlocked
+            | ConductorPhase::VerifierUnavailable
+            | ConductorPhase::IdleRescan
+            | ConductorPhase::ResourcePark
+            | ConductorPhase::OperatorStop => self.validate_boundary_state(),
             ConductorPhase::SliceComplete | ConductorPhase::AllDone => {
                 Err("terminal conductor phase reached nonterminal validation".to_string())
             }
@@ -134,7 +140,10 @@ impl ConductorState {
         let resume_phase = self
             .resume_phase
             .ok_or_else(|| "paused conductor state requires resume phase".to_string())?;
-        if resume_phase.is_terminal() || resume_phase == ConductorPhase::Paused {
+        if resume_phase.is_terminal()
+            || resume_phase.is_boundary()
+            || resume_phase == ConductorPhase::Paused
+        {
             return Err("paused conductor state has invalid resume phase".to_string());
         }
         let mut resumed = self.clone();
@@ -142,5 +151,44 @@ impl ConductorState {
         resumed.pause_reason = None;
         resumed.resume_phase = None;
         resumed.validate()
+    }
+
+    fn validate_boundary_state(&self) -> Result<(), String> {
+        if self.selected_issue.is_some()
+            || !self.serialization_reasons.is_empty()
+            || self.pause_reason.is_some()
+            || self.resume_phase.is_some()
+        {
+            return Err("conductor boundary state carries active issue metadata".to_string());
+        }
+        self.validate_boundary_outcome()
+    }
+
+    fn validate_boundary_outcome(&self) -> Result<(), String> {
+        let valid = matches!(
+            (&self.phase, &self.last_outcome),
+            (ConductorPhase::TierDry | ConductorPhase::IdleRescan, None)
+                | (
+                    ConductorPhase::AllBlocked,
+                    Some(ConductorOutcome::AllBlocked { .. }),
+                )
+                | (
+                    ConductorPhase::VerifierUnavailable,
+                    Some(ConductorOutcome::VerifierUnavailable { .. }),
+                )
+                | (
+                    ConductorPhase::ResourcePark,
+                    Some(ConductorOutcome::ResourcePark { .. }),
+                )
+                | (
+                    ConductorPhase::OperatorStop,
+                    Some(ConductorOutcome::OperatorStop { .. }),
+                )
+        );
+        if valid {
+            Ok(())
+        } else {
+            Err("conductor boundary state has incompatible phase/outcome".to_string())
+        }
     }
 }

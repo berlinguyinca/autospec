@@ -34,6 +34,12 @@ impl ConductorPhase {
             Self::Paused => "paused",
             Self::SliceComplete => "slice_complete",
             Self::AllDone => "all_done",
+            Self::TierDry => "tier_dry",
+            Self::AllBlocked => "all_blocked",
+            Self::VerifierUnavailable => "verifier_unavailable",
+            Self::IdleRescan => "idle_rescan",
+            Self::ResourcePark => "resource_park",
+            Self::OperatorStop => "operator_stop",
         }
     }
 
@@ -49,6 +55,12 @@ impl ConductorPhase {
             "paused" => Ok(Self::Paused),
             "slice_complete" => Ok(Self::SliceComplete),
             "all_done" => Ok(Self::AllDone),
+            "tier_dry" => Ok(Self::TierDry),
+            "all_blocked" => Ok(Self::AllBlocked),
+            "verifier_unavailable" => Ok(Self::VerifierUnavailable),
+            "idle_rescan" => Ok(Self::IdleRescan),
+            "resource_park" => Ok(Self::ResourcePark),
+            "operator_stop" => Ok(Self::OperatorStop),
             _ => Err(format!("unknown conductor phase: {value}")),
         }
     }
@@ -66,20 +78,55 @@ impl ConductorOutcome {
                 "{{\"kind\":\"blocked\",\"reason\":\"{}\"}}",
                 escape_json(reason)
             ),
+            Self::AllBlocked { reason, issues } => format!(
+                "{{\"kind\":\"all_blocked\",\"reason\":\"{}\",\"issues\":[{}]}}",
+                escape_json(reason),
+                issues
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ),
+            Self::VerifierUnavailable { reason } => format!(
+                "{{\"kind\":\"verifier_unavailable\",\"reason\":\"{}\"}}",
+                escape_json(reason)
+            ),
+            Self::ResourcePark { reason } => format!(
+                "{{\"kind\":\"resource_park\",\"reason\":\"{}\"}}",
+                escape_json(reason)
+            ),
+            Self::OperatorStop { reason } => format!(
+                "{{\"kind\":\"operator_stop\",\"reason\":\"{}\"}}",
+                escape_json(reason)
+            ),
         }
     }
 
     fn parse(value: JsonValue) -> Result<Self, String> {
         let mut object = value.into_object("conductor outcome")?;
-        require_only_keys(&object, &["kind", "reason"], "conductor outcome")?;
+        require_only_keys(&object, &["kind", "reason", "issues"], "conductor outcome")?;
         let kind = take_required(&mut object, "kind", "conductor outcome")?
             .into_string("conductor outcome.kind")?;
         let reason = take_required(&mut object, "reason", "conductor outcome")?
             .into_optional_string("conductor outcome.reason")?;
+        let issues = optional_issues(object.remove("issues"), "conductor outcome.issues")?;
         let outcome = match (kind.as_str(), reason) {
             ("succeeded", None) => Ok(Self::Succeeded),
             ("retryable", Some(reason)) if !reason.is_empty() => Ok(Self::Retryable(reason)),
             ("blocked", Some(reason)) if !reason.is_empty() => Ok(Self::Blocked(reason)),
+            ("all_blocked", Some(reason)) if !reason.is_empty() => Ok(Self::AllBlocked {
+                reason,
+                issues: issues.into_boxed_slice(),
+            }),
+            ("verifier_unavailable", Some(reason)) if !reason.is_empty() => {
+                Ok(Self::VerifierUnavailable { reason })
+            }
+            ("resource_park", Some(reason)) if !reason.is_empty() => {
+                Ok(Self::ResourcePark { reason })
+            }
+            ("operator_stop", Some(reason)) if !reason.is_empty() => {
+                Ok(Self::OperatorStop { reason })
+            }
             _ => Err("invalid conductor outcome".to_string()),
         }?;
         outcome.validate()?;
@@ -90,10 +137,11 @@ impl ConductorOutcome {
 impl ConductorState {
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":{CONDUCTOR_SCHEMA},\"repo\":\"{}\",\"scope\":\"{}\",\"phase\":\"{}\",\"selected_issue\":{},\"serialization_reasons\":[{}],\"retry_count\":{},\"retry_limit\":{},\"last_outcome\":{},\"pause_reason\":{},\"terminal_reason\":{},\"resume_phase\":{}}}",
+            "{{\"schema\":{CONDUCTOR_SCHEMA},\"repo\":\"{}\",\"scope\":\"{}\",\"phase\":\"{}\",\"state\":\"{}\",\"selected_issue\":{},\"serialization_reasons\":[{}],\"retry_count\":{},\"retry_limit\":{},\"last_outcome\":{},\"pause_reason\":{},\"terminal_reason\":{},\"resume_phase\":{}}}",
             escape_json(&self.repo),
             self.scope.as_str(),
             self.phase.as_str(),
+            self.normalized_state(),
             optional_number_json(self.selected_issue),
             self.serialization_reasons
                 .iter()
@@ -124,6 +172,7 @@ impl ConductorState {
                 "repo",
                 "scope",
                 "phase",
+                "state",
                 "selected_issue",
                 "serialization_reasons",
                 "retry_count",
@@ -153,6 +202,7 @@ impl ConductorState {
             &take_required(&mut object, "phase", "conductor state")?
                 .into_string("conductor state.phase")?,
         )?;
+        let normalized_state = optional_string(object.remove("state"), "conductor state.state")?;
         let selected_issue = optional_number(
             take_required(&mut object, "selected_issue", "conductor state")?,
             "conductor state.selected_issue",
@@ -200,6 +250,13 @@ impl ConductorState {
             resume_phase,
         };
         state.validate()?;
+        if let Some(normalized_state) = normalized_state {
+            if normalized_state != state.normalized_state() {
+                return Err(
+                    "conductor state normalized state does not match phase/outcome".to_string(),
+                );
+            }
+        }
         Ok(state)
     }
 }
@@ -232,6 +289,14 @@ fn optional_number(value: JsonValue, context: &str) -> Result<Option<u64>, Strin
     }
 }
 
+fn optional_string(value: Option<JsonValue>, context: &str) -> Result<Option<String>, String> {
+    value.map_or(Ok(None), |value| {
+        value
+            .into_optional_string(context)
+            .map(|value| value.filter(|value| !value.is_empty()))
+    })
+}
+
 fn parse_serialization_reasons(value: JsonValue) -> Result<Vec<String>, String> {
     let values = value.into_array("conductor state.serialization_reasons")?;
     let mut reasons = Vec::with_capacity(values.len());
@@ -247,6 +312,22 @@ fn optional_outcome(value: JsonValue) -> Result<Option<ConductorOutcome>, String
         JsonValue::Null => Ok(None),
         value => ConductorOutcome::parse(value).map(Some),
     }
+}
+
+fn optional_issues(value: Option<JsonValue>, context: &str) -> Result<Vec<u64>, String> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value.into_array(context)?;
+    let mut issues = Vec::with_capacity(values.len());
+    for (index, value) in values.into_iter().enumerate() {
+        let issue = value.into_number(&format!("{context}[{index}]"))?;
+        if issue == 0 {
+            return Err(format!("{context}[{index}] must be positive"));
+        }
+        issues.push(issue);
+    }
+    Ok(issues)
 }
 
 fn optional_phase(value: JsonValue, context: &str) -> Result<Option<ConductorPhase>, String> {

@@ -8,10 +8,10 @@ use autospec_core::autonomous_lifecycle::{
     WorkerId, ABANDONED_LEASE_SECS, STALE_LEASE_SECS,
 };
 use autospec_core::claim::{
-    claim_losing_worker_comment_id, executor_result_evidence_exists, find_reconcilable_pull_request,
-    is_executor_result_pull_request, is_reconcilable_pull_request, lowest_marked_comment,
-    parse_claim_issue_json, parse_open_pull_requests_json, parse_paths_argument,
-    parse_remote_comments_json, select_run_state,
+    claim_losing_worker_comment_id, executor_result_evidence_exists,
+    find_reconcilable_pull_request, is_executor_result_pull_request, is_reconcilable_pull_request,
+    lowest_marked_comment, parse_claim_issue_json, parse_open_pull_requests_json,
+    parse_paths_argument, parse_remote_comments_json, select_run_state,
     terminal_merged_comment_exists, ExecutorResultEvidence, RunStateRecord,
     RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
 };
@@ -691,7 +691,12 @@ pub(crate) fn record_executor_result(
             }
             Some(pull_request)
         }
-        ConductorOutcome::Blocked(_) | ConductorOutcome::Retryable(_) => {
+        ConductorOutcome::Blocked(_)
+        | ConductorOutcome::AllBlocked { .. }
+        | ConductorOutcome::VerifierUnavailable { .. }
+        | ConductorOutcome::ResourcePark { .. }
+        | ConductorOutcome::OperatorStop { .. }
+        | ConductorOutcome::Retryable(_) => {
             if pull_request.is_some() {
                 return Ok(ExecutorResultRecord::EvidenceUnavailable);
             }
@@ -794,7 +799,12 @@ fn record_executor_result_with_step(
             }
             pull_request.to_string()
         }
-        ConductorOutcome::Blocked(_) | ConductorOutcome::Retryable(_) => {
+        ConductorOutcome::Blocked(_)
+        | ConductorOutcome::AllBlocked { .. }
+        | ConductorOutcome::VerifierUnavailable { .. }
+        | ConductorOutcome::ResourcePark { .. }
+        | ConductorOutcome::OperatorStop { .. }
+        | ConductorOutcome::Retryable(_) => {
             if pull_request.is_some() {
                 return Ok(ExecutorResultRecord::EvidenceUnavailable);
             }
@@ -849,7 +859,11 @@ fn server_lease_is_fresh(server_timestamp: &str, ttl_seconds: u64) -> bool {
 fn executor_result_step(outcome: &ConductorOutcome) -> &'static str {
     match outcome {
         ConductorOutcome::Succeeded => "executor_succeeded",
-        ConductorOutcome::Blocked(_) => "executor_blocked",
+        ConductorOutcome::Blocked(_)
+        | ConductorOutcome::AllBlocked { .. }
+        | ConductorOutcome::VerifierUnavailable { .. }
+        | ConductorOutcome::ResourcePark { .. }
+        | ConductorOutcome::OperatorStop { .. } => "executor_blocked",
         ConductorOutcome::Retryable(_) => "executor_retryable",
     }
 }
@@ -857,7 +871,11 @@ fn executor_result_step(outcome: &ConductorOutcome) -> &'static str {
 fn executor_result_outcome_name(outcome: &ConductorOutcome) -> &'static str {
     match outcome {
         ConductorOutcome::Succeeded => "succeeded",
-        ConductorOutcome::Blocked(_) => "blocked",
+        ConductorOutcome::Blocked(_)
+        | ConductorOutcome::AllBlocked { .. }
+        | ConductorOutcome::VerifierUnavailable { .. }
+        | ConductorOutcome::ResourcePark { .. }
+        | ConductorOutcome::OperatorStop { .. } => "blocked",
         ConductorOutcome::Retryable(_) => "retryable",
     }
 }
