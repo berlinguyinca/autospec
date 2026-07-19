@@ -44,7 +44,7 @@ fn normalized_state_names_an_all_blocked_cycle_with_affected_issues() {
         .transition(ConductorEvent::DispatchRecorded {
             outcome: ConductorOutcome::AllBlocked {
                 reason: "tier1_all_blocked".to_string(),
-                issues: vec![42, 43],
+                issues: vec![42, 43].into_boxed_slice(),
             },
         })
         .expect("all-blocked outcome is recorded");

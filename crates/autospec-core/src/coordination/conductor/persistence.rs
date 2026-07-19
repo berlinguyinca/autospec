@@ -114,9 +114,10 @@ impl ConductorOutcome {
             ("succeeded", None) => Ok(Self::Succeeded),
             ("retryable", Some(reason)) if !reason.is_empty() => Ok(Self::Retryable(reason)),
             ("blocked", Some(reason)) if !reason.is_empty() => Ok(Self::Blocked(reason)),
-            ("all_blocked", Some(reason)) if !reason.is_empty() => {
-                Ok(Self::AllBlocked { reason, issues })
-            }
+            ("all_blocked", Some(reason)) if !reason.is_empty() => Ok(Self::AllBlocked {
+                reason,
+                issues: issues.into_boxed_slice(),
+            }),
             ("verifier_unavailable", Some(reason)) if !reason.is_empty() => {
                 Ok(Self::VerifierUnavailable { reason })
             }

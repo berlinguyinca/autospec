@@ -42,7 +42,7 @@ pub enum ConductorOutcome {
     Succeeded,
     Retryable(String),
     Blocked(String),
-    AllBlocked { reason: String, issues: Vec<u64> },
+    AllBlocked { reason: String, issues: Box<[u64]> },
     VerifierUnavailable { reason: String },
     ResourcePark { reason: String },
     OperatorStop { reason: String },

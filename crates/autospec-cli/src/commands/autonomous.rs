@@ -1252,7 +1252,7 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     let conductor = read_unit("conductor", &layout.state_dir);
     let monitor = read_unit("monitor", &layout.state_dir);
     let supervisor = read_unit("supervisor", &layout.state_dir);
-    let state = resilience::status(&layout.repo)
+    let mut state = resilience::status(&layout.repo)
         .map_err(resilience_admission_error)?
         .map(|state| {
             StateMetadata::ok(
@@ -1262,10 +1262,11 @@ fn status(options: Options) -> Result<(), CommandFailure> {
             )
         })
         .unwrap_or_else(|| read_state_metadata(&layout));
+    state.fill_normalized_state(&layout);
     let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"last_blocker\":\"{}\",\"spend\":{{\"tokens\":{},\"issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"spend\":{{\"tokens\":{},\"issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&layout.repo),
             state.outcome.as_str(),
             state.status_json(),
@@ -1278,6 +1279,7 @@ fn status(options: Options) -> Result<(), CommandFailure> {
             json_escape(&state.current_cycle),
             json_escape(&state.current_tier),
             json_escape(&state.current_action),
+            json_escape(&state.normalized_state),
             json_escape(&state.last_blocker),
             spend.tokens,
             spend.issues,
@@ -1472,13 +1474,19 @@ fn timeline(options: Options) -> Result<(), String> {
     };
     let all_lines = timeline_all_lines(&logpath, &layout.repo)?;
     let selected_lines = tail_lines(&all_lines, options.lines);
-    let events = timeline_events(&selected_lines);
+    let mut events = timeline_events(&selected_lines);
+    let normalized_state =
+        foreground_normalized_state(&layout, latest_cycle_number(&all_lines)).unwrap_or_default();
+    if !normalized_state.is_empty() {
+        events.push(format!("time unknown - conductor {normalized_state}."));
+    }
     let forecast = timeline_forecast(&all_lines);
     let timings = timeline_timings(&all_lines);
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"timeline\",\"repo\":\"{}\",\"events\":\"{}\"}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"timeline\",\"repo\":\"{}\",\"normalized_state\":\"{}\",\"events\":\"{}\"}}",
             json_escape(&layout.repo),
+            json_escape(&normalized_state),
             json_escape(&selected_lines.join("\n"))
         );
     } else {
@@ -2225,7 +2233,11 @@ fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
             ConductorOutcome::Succeeded => {
                 emit_executor_protocol("accepted", Some(&input), input.pr, None, 0)
             }
-            ConductorOutcome::Blocked(_) => {
+            ConductorOutcome::Blocked(_)
+            | ConductorOutcome::AllBlocked { .. }
+            | ConductorOutcome::VerifierUnavailable { .. }
+            | ConductorOutcome::ResourcePark { .. }
+            | ConductorOutcome::OperatorStop { .. } => {
                 emit_executor_protocol("blocked", Some(&input), None, input.reason.as_deref(), 20)
             }
             ConductorOutcome::Retryable(_) => {
@@ -2264,7 +2276,11 @@ impl ExecutorResultInput {
     fn outcome_name(&self) -> &'static str {
         match self.outcome {
             ConductorOutcome::Succeeded => "succeeded",
-            ConductorOutcome::Blocked(_) => "blocked",
+            ConductorOutcome::Blocked(_)
+            | ConductorOutcome::AllBlocked { .. }
+            | ConductorOutcome::VerifierUnavailable { .. }
+            | ConductorOutcome::ResourcePark { .. }
+            | ConductorOutcome::OperatorStop { .. } => "blocked",
             ConductorOutcome::Retryable(_) => "retryable",
         }
     }
@@ -3043,6 +3059,7 @@ struct StateMetadata {
     current_cycle: String,
     current_tier: String,
     current_action: String,
+    normalized_state: String,
     last_blocker: String,
 }
 
@@ -3056,6 +3073,7 @@ impl StateMetadata {
             last_cycle,
             current_tier: String::new(),
             current_action: String::new(),
+            normalized_state: String::new(),
             last_blocker: String::new(),
         }
     }
@@ -3077,7 +3095,16 @@ impl StateMetadata {
             current_cycle: String::new(),
             current_tier: String::new(),
             current_action: String::new(),
+            normalized_state: String::new(),
             last_blocker: String::new(),
+        }
+    }
+
+    fn fill_normalized_state(&mut self, layout: &RunLayout) {
+        if self.normalized_state.is_empty() {
+            self.normalized_state =
+                foreground_normalized_state(layout, parse_cycle_number(&self.current_cycle))
+                    .unwrap_or_default();
         }
     }
 
@@ -3599,8 +3626,28 @@ fn read_state_metadata(layout: &RunLayout) -> StateMetadata {
         current_action: extract_json_string(&raw, "current_action")
             .or_else(|| extract_json_string(&raw, "action"))
             .unwrap_or_default(),
+        normalized_state: extract_json_string(&raw, "normalized_state")
+            .or_else(|| extract_json_string(&raw, "state"))
+            .unwrap_or_default(),
         last_blocker: extract_json_string(&raw, "last_blocker").unwrap_or_default(),
     }
+}
+
+fn foreground_normalized_state(layout: &RunLayout, cycle: u64) -> Option<String> {
+    let source =
+        fs::read_to_string(foreground_state_path(layout, ConductorScope::Repository)).ok()?;
+    let state = ConductorState::parse_json(&source).ok()?;
+    Some(state.normalized_state_for_cycle(cycle))
+}
+
+fn latest_cycle_number(lines: &[String]) -> u64 {
+    latest_cycle(lines)
+        .and_then(|cycle| cycle.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn parse_cycle_number(value: &str) -> u64 {
+    value.parse::<u64>().unwrap_or(0)
 }
 
 fn newest_legacy_logpath() -> Option<String> {
