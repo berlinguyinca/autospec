@@ -109,7 +109,9 @@ Use `autospec-autonomous-status --json` for monitoring integrations; its unit
 payloads include PID/log metadata plus `stale_pid` and `metadata_only` so dead
 PID files are visible instead of being mistaken for a clean stopped state. The
 Rust status path also reports `state_status`, `heartbeat_at`, `last_cycle`, and
-the spend ledger when the matching state/spend files are present. Use
+the spend ledger when the matching state/spend files are present. Ledger
+issue fields distinguish filed issue count from budget-counted issue units;
+`issues` remains a legacy compatibility alias for budget-counted issues. Use
 `autospec-autonomous-cleanup --json` to remove dead PID/logpath metadata for one
 repo scope without signaling live processes. Use `autospec-autonomous-list --json`
 or `autospec-autonomous-status --all --json` for fleet visibility across
@@ -219,7 +221,7 @@ This is the primary merge loop body.
 4. **Pre-merge gate** — run `autospec-autonomy-gate.sh` (qa+secaudit when available). If missing or fenced → emit `code_health:autonomous_gate_missing`, quarantine/file `autospec:needs-human`, halt only that merge lane, and continue.
 5. **Drain** — invoke `/autospec-run` for the selected issue. Inherits all existing `autospec-run` guards: worktree isolation, claim-guard, admin-merge authority, lock-step validation.
 6. **Main-health check** — after each merge, poll `gh api repos/{owner}/{repo}/commits/main/status`. Green → continue. Pending → wait one poll interval. Red → halt Tier-1 main merges, file `autospec:needs-human`, notify asynchronously, and continue only safe non-main/sandbox candidates until main is green.
-7. **Spend ledger** — tally tokens/issues in `~/.autospec/autonomous-spend.json` (path-scoped). At `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS` (or issue count) → **resource-park and notify** (cumulative cost kill-switch).
+7. **Spend ledger** — tally tokens plus filed issue count and budget-counted issue units in `~/.autospec/autonomous-spend.json` (path-scoped). At `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS` (or budget-counted issue units) → **resource-park and notify** (cumulative cost kill-switch); `issues` remains a legacy compatibility alias for budget-counted issues.
 8. **Usage-limit recovery** — inherits `autospec-usage-limit.sh`. When the harness reports a deterministic quota pause, arm the supervisor with the resume command and exit. Supervisor relaunches after reset.
 9. **Daily digest** — once per UTC day, write `.autospec/autonomous-digest.md` and open/update a pinned issue with the summary.
 10. **Loop** — return to step 2.
@@ -370,7 +372,7 @@ autospec-autonomous start [--max-cycles N] [--dry-run] [--no-digest] [--poll-int
 
 - `--max-cycles N` — outer loop cycle cap. Default unlimited; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
 - `--budget-tokens N` — lifetime token ceiling (sets `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`). Default 50M; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
-- `--budget-issues N` — lifetime issue ceiling. Default unlimited; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
+- `--budget-issues N` — lifetime budget-counted issue-unit ceiling. Default unlimited; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
 - `--dry-run` — go through the waterfall steps but do not invoke `/autospec-run` or merge; log what would happen.
 - `--no-digest` — skip daily digest writes; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
 - `--poll-interval-sec N` — cycle polling interval in seconds. Default 60; aliases the Rust lifecycle interval and is forwarded through the Rust `run-foreground` shim.
@@ -433,10 +435,10 @@ monitor failures, not proof that the issue failed.
 - `skills/autospec-autonomous/opencode/agent.md` — OpenCode mirror (lockstep).
 - `autospec-autonomous.sh` — installed operator lifecycle command (`start`, `list`, `status`, `timeline`, `logs`, `watch`, `stop`, `restart`).
 - `autospec-autonomous-run-drain.sh` — installed Tier-1 drain wrapper that runs `$autospec-run` through `omx exec`.
-- `autospec-loop.sh` (shared loop driver, `${AUTOSPEC_SCRIPTS_DIR}/lib/`) — extended with `autospec_conductor_run()`, the never-idle conductor entry point wiring control-channel → waterfall → Tier 1.5 promotion / Tier 2–4 discovery → premerge-gate → drain → spend-ledger → resilience → digest (issue #1378).
+- `autospec-loop.sh` (shared loop driver, `${AUTOSPEC_SCRIPTS_DIR}/lib/`) — extended with `autospec_conductor_run()`, the never-idle conductor entry point wiring control-channel → waterfall → Tier 1.5 promotion / Tier 2–4 discovery → premerge-gate → drain → spend-ledger → resilience → digest (issue #1378); the conductor passes filed issue counts and budget issue units separately to the ledger.
 - `autonomous-control-channel.sh` — label query → command decision (Phase 1, Issue #1373).
 - `autonomous-waterfall.sh` — Tier 0/1/1.5/2/3/4 selection logic (Issue #1374, activated by issue #1529), plus capability-gated Tiers 5-7 growth outbound/define/measure (growth conductor fold-in).
-- `autonomous-spend-ledger.sh` — cumulative token/issue tally + kill-switch (Phase 1, Issue #1375).
+- `autonomous-spend-ledger.sh` — cumulative token, filed-issue, and budget-counted issue-unit tally + kill-switch (Phase 1, Issue #1375); its `--issues` input is a legacy alias for `--budget-issues`.
 - `autonomous-premerge-gate.sh` — blocking autospec-qa pre-merge barrier (Phase 1, Issue #1376).
 - `autonomous-resilience.sh` — run-state, lock, quarantine, main-health (Phase 1, Issue #1377).
 - `usage-observe.sh` — per-harness live-usage observability probe; emits `{harness,observable,percent,source}` to gate the F6b governor's mechanism (F6a spike).
