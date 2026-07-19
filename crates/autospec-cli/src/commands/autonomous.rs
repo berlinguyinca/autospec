@@ -1268,7 +1268,7 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"spend\":{{\"tokens\":{},\"issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"spend\":{{\"tokens\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&layout.repo),
             state.outcome.as_str(),
             state.status_json(),
@@ -1284,7 +1284,8 @@ fn status(options: Options) -> Result<(), CommandFailure> {
             json_escape(&state.normalized_state),
             json_escape(&state.last_blocker),
             spend.tokens,
-            spend.issues,
+            spend.filed_issues,
+            spend.budget_issues,
             unit_status_json(&conductor),
             unit_status_json(&monitor),
             unit_status_json(&supervisor)
