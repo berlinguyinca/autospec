@@ -1631,6 +1631,36 @@ fn autonomous_monitor_does_not_invent_dry_result_for_tier_errors() {
 }
 
 #[test]
+fn autonomous_monitor_does_not_fall_back_to_stale_dry_result_after_tier_error() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 8 repo=owner/repo
+[conductor] Tier 2 explore result: dry=true filed=0
+[conductor] cycle 9 repo=owner/repo
+[conductor] waterfall decision tier=2 action=run-explore-once reason=local-discovery
+[conductor] Tier 2 explore result: ERROR helper unavailable
+",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!(
+            "{}
+",
+            logpath.display()
+        ),
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["current_tier"], "2");
+    assert_eq!(body["tier_dry_result"], serde_json::Value::Null);
+}
+
+#[test]
 fn autonomous_monitor_distinguishes_launch_dry_run_from_tier_dry_result() {
     let fixture = ResilienceFixture::new();
     let logpath = fixture.root.join("conductor.log");

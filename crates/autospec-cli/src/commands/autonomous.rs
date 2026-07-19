@@ -1095,19 +1095,21 @@ fn latest_key_after(lines: &[String], key: &str) -> Option<String> {
 }
 
 fn latest_tier_dry_result(lines: &[String]) -> Option<TierDryResult> {
-    lines.iter().rev().find_map(|line| {
+    let (tier, after_tier) = lines.iter().rev().find_map(|line| {
         let trimmed = line.trim();
         let rest = trimmed.strip_prefix("[conductor] Tier ")?;
         let (tier, after_tier) = rest.split_once(' ')?;
-        if !after_tier.starts_with("explore result:") {
-            return None;
+        if after_tier.starts_with("explore result:") {
+            Some((tier, after_tier))
+        } else {
+            None
         }
-        let dry = value_after_token(after_tier, "dry=")?;
-        Some(TierDryResult {
-            tier: tier.to_string(),
-            dry,
-            filed: value_after_token(after_tier, "filed=").unwrap_or_else(|| "0".to_string()),
-        })
+    })?;
+    let dry = value_after_token(after_tier, "dry=")?;
+    Some(TierDryResult {
+        tier: tier.to_string(),
+        dry,
+        filed: value_after_token(after_tier, "filed=").unwrap_or_else(|| "0".to_string()),
     })
 }
 
