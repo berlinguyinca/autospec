@@ -37,3 +37,9 @@ claude-haiku-cloud:
   ctx: 64000
   reasoning: medium
   allowed: ctx:small,ctx:medium,reasoning:shallow,reasoning:medium
+
+# ── Advisor pattern (docs/specs/2026-07-08-autospec-advisor-pattern-design.md) ──
+# On-demand strong-model escalation for cheap-tier executors is NOT configured
+# here — it lives in the `advisor:` block of .autospec/autospec.yml as a single
+# `policy: auto|on|off` + budget. Under `auto`, autospec self-governs which gates
+# are active from its own telemetry (no per-gate levers). See that file.

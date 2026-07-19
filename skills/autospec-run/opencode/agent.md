@@ -81,10 +81,10 @@ instead of making the operator hand-parse heartbeat JSON.
 - `--coordination-status` — print active workers, claimed issues, blockers,
   stale claims, conflicts, and the next safe batch, then exit without claiming.
 - `--max-parallel-safe` — print the next safe parallel batch from
-  `list-ready-issues.sh` and exit without claiming.
-- `--claim <issue>` — attempt a deterministic claim via `claim-issue.sh` and
-  exit with that helper's status (`0` claimed, `2` already claimed/skipped).
-- `--release <issue>` — release a distributed claim via `release-issue.sh`.
+  `autospec queue ready` and exit without claiming.
+- `--claim <issue>` — attempt a deterministic claim via `autospec claim acquire`
+  and exit with that command's status (`0` claimed, `2` already claimed/skipped).
+- `--release <issue>` — release a distributed claim via `autospec claim release`.
 
 ### Auto-init `~/.autospec/model-profiles.yml`
 
@@ -174,7 +174,9 @@ Detect your harness by checking available tools before any phase:
    - `TIER_A` = current top GPT model + `reasoning_effort=high`
    - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
 
-**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same subagent dispatch with `TIER_A`. Preserve the parent context on retry; for Codex native subagents, fork/inherit the current conversation context and use the latest top GPT model instead of moving the work into the main session. Never ask the user.
+**Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same subagent dispatch with `TIER_A`. Preserve the parent context on retry by passing a bounded handoff containing the issue number, repo path, branch/worktree plan, relevant issue body sections, last error, and current queue/claim state. Codex native subagents with explicit `agent_type`, `model`, or `reasoning_effort` MUST use a bounded handoff, not a full-history fork; do not ask Codex to inherit/fork the full parent conversation when those fields are set. Never ask the user.
+
+**Codex SpawnAgent call-shape contract:** Codex has two valid subagent call shapes. Use the bounded handoff when setting an explicit executor/tier route: `SpawnAgent({ prompt: bounded_handoff, agent_type: "executor", model: TIER_B, reasoning_effort: "medium" })`. Use a full-history fork only when inheriting the current conversation without explicit routing: `SpawnAgent({ prompt: full_history_prompt, full_history: true })`. Never combine `full_history: true` with `agent_type`, `model`, or `reasoning_effort`. On Codex dispatch failure, retry once with the other valid shape when that still satisfies the phase's tier rule; if both valid shapes fail, release the claimed issue back to `auto-implement` with a visible blocker comment.
 
 Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
 
@@ -200,6 +202,21 @@ bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-batch-start.sh" --wri
 ```
 
 This writes the UTC ISO 8601 timestamp to `~/.autospec/.run-batch-start` (idempotent within a run; pass `--force` only when intentionally starting a fresh batch window). Phase 5.5 reads it back via `run-batch-start.sh --read`, which yields `BATCH_START_DATE`.
+
+## Explore-on-drain counter reset (run-start, once)
+
+Reset the per-repo explore-on-drain cycle counter so a fresh `/autospec-run` always starts with a clean slate (spec: "counter resets when the operator clears it or starts a fresh `/autospec-run`"). Run once, immediately after the batch-start timestamp above:
+
+```bash
+# Derive the canonical per-repo slug (owner__name) for state scoping.
+_eod_slug="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null \
+    | sed 's#/#__#' \
+    || printf '%s' "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" \
+         | tr '/' '_' | sed 's/^_//')"
+rm -f "$HOME/.autospec/explore-on-drain/${_eod_slug}/cycles"
+```
+
+This ensures the cycle cap (`AUTOSPEC_EXPLORE_ON_DRAIN_MAX_CYCLES`, default 3) counts only chains within the current run, not across multiple historical runs. The `_eod_slug` variable is reused in the ALL_DONE block below.
 
 ## Single-instance session lock (run-start, once)
 
@@ -236,7 +253,7 @@ same session id (a fresh session gets a new id), and `--force` overrides it.
 
 Record this durable preference in `AGENTS.md` (idempotent — skip if already present):
 
-> **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) the full target-repo validation/test suite has passed locally after the branch is current with `main`, (b) all required CI checks pass — slow optional checks like TeamCity may be pending only after the full local suite is green, (c) the self-review subagent returned `LGTM`, (d) PR closes an `auto-implement` issue from a `feat/*` branch.
+> **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) the full target-repo validation/test suite has passed locally after the branch is current with `main`, (b) all **non-advisory** required CI checks pass — checks matching `AUTOSPEC_PR_ADVISORY_CHECKS` (default `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`; e.g. self-hosted TeamCity) are advisory and may be pending **or failing** once the full local suite is green, (c) the self-review subagent returned `LGTM`, (d) PR closes an `auto-implement` issue from a `feat/*` branch.
 
 **Off-peak tip:** For queues of 10+ issues (8+ hour runs), consider launching at night or on weekends. Usage limits are shared across all sessions — running long batches off-peak preserves daytime tokens for interactive work.
 
@@ -290,12 +307,28 @@ while true:
   if [ "$status" = "ALL_DONE" ]; then
     # Queue drained — consult explore-on-drain.sh to decide whether to
     # auto-chain into /autospec-explore or exit normally to Phase 6.
-    # The helper encapsulates: flag check → autonomy gate → cycle-cap.
-    # It emits "chain" or "stop" on stdout; default (flag absent) is "stop".
-    _drain_decision=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-on-drain.sh")
+    # The helper encapsulates: flag check → autonomy gate → dry-well guard
+    # → per-repo cycle-cap.  It emits "chain" or "stop"; default is "stop".
+    # Pass AUTOSPEC_REPO so the helper scopes state to this repo without
+    # calling gh a second time (uses the same slug as the run-start reset).
+    _drain_decision=$(AUTOSPEC_REPO="${AUTOSPEC_REPO:-{repo}}" \
+        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-on-drain.sh")
     if [ "$_drain_decision" = "chain" ]; then
       echo "[orchestrator] explore-on-drain: chaining into /autospec-explore on sandbox branch"
+      # Record the PR merge watermark before explore starts so we can count
+      # only the PRs it ships (used by the dry-well sentinel below).
+      _eod_before="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       /autospec-explore   # runs on its own sandbox branch, NEVER main
+      # Count PRs merged by this explore cycle and write the dry-well sentinel.
+      # explore-on-drain.sh reads this before the NEXT chain decision:
+      # if the count is 0 it emits "stop" (dry-well guard).
+      _eod_shipped="$(gh pr list --state merged \
+          --json mergedAt,labels \
+          --jq "[.[] | select(.mergedAt >= \"${_eod_before}\" and any(.labels[]; .name == \"autospec-explore\"))] | length" \
+          2>/dev/null || echo 1)"
+      mkdir -p "$HOME/.autospec/explore-on-drain/${_eod_slug}"
+      printf '%s\n' "${_eod_shipped}" \
+          > "$HOME/.autospec/explore-on-drain/${_eod_slug}/last-shipped"
     fi
     break   # proceed to Phase 6 final report
   fi
@@ -357,6 +390,22 @@ Pass the following prompt verbatim to each background subagent:
 >     fi
 >   fi
 
+>   # Backlog grooming preflight — run exactly one existing-backlog grooming
+>   # cycle before each queue scan when grooming policy is auto/on. The helper
+>   # invokes autonomous-promote-open-issues.sh --apply, but mutations are still
+>   # protected by the orchestrator's double gate: --apply AND grooming policy
+>   # in {auto,on}. This is no discovery: do not run Tier 2-4 discovery and do
+>   # not file new issues from this preflight.
+>   GROOM_PREFLIGHT="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-groom-preflight.sh"
+>   [ -x "$GROOM_PREFLIGHT" ] || GROOM_PREFLIGHT="skills/autospec-run/scripts/run-groom-preflight.sh"
+>   if [ -f "$GROOM_PREFLIGHT" ]; then
+>     bash "$GROOM_PREFLIGHT" \
+>       --repo "{repo}" \
+>       --report "${AUTOSPEC_RUN_REPORT:-$HOME/.autospec/autospec-run-report.md}" || true
+>   else
+>     echo "WARN: backlog grooming preflight helper missing; continuing drain"
+>   fi
+
 ### Queue priority sort (autospec-review interlock)
 
 When selecting the next `auto-implement` issue, sort:
@@ -386,6 +435,17 @@ GATE=$(gh issue view "$ISSUE" --json labels --jq '[.labels[].name] | join(",")' 
   (`rm -rf build && .venv/bin/python src/generate.py`) → `stl-release-gate.py`
   on affected models (blocking geometry stages must pass; vision is advisory) →
   unittest, and the Primary smoke is the model's focused regression test.
+- `GATE=growth` — the issue carries `growth:artifact`. Keep the **standard
+  implementer**, and add one **content-quality gate** to Phase 4 before the
+  standard reviewer + `growth-ethics` + `autospec-secaudit` gates: run
+  `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/growth-content-quality-precheck.sh`
+  on the changed content (deterministic pre-checks: keyword-density ceiling,
+  FTC-disclosure presence, citation presence), then a `TIER_A` reviewer for
+  E-E-A-T / brand-voice, wrapped in the standard 5-attempt adaptive-retry loop
+  that feeds findings back as directives. A failing gate blocks merge
+  (fail-closed); it never ships unreviewed growth content. This makes the gate
+  fire for every path that reaches a `growth:artifact` issue — the autonomous
+  Tier-1 drain and `/autospec-grow-run` R1 alike.
 - `GATE=default` — every other issue keeps the standard implementer + gate.
 
 The branch is the only difference; the fab branch's gate prose lives in
@@ -394,40 +454,53 @@ match: `area:fabric` stays `default`), so it is deterministic and testable.
 
 ### Distributed coordinator selection
 
-Before choosing `ready[0]`, prefer the distributed coordinator helpers when they
-exist in `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}` or the checked-out
-repo:
+Before choosing `ready[0]`, resolve the Rust control-plane binary:
 
 ```bash
-COORD_LIST="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/list-ready-issues.sh"
-COORD_CLAIM="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-issue.sh"
-COORD_RELEASE="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/release-issue.sh"
-[ -x "$COORD_LIST" ] || COORD_LIST="skills/autospec-run/scripts/list-ready-issues.sh"
-[ -x "$COORD_CLAIM" ] || COORD_CLAIM="skills/autospec-run/scripts/claim-issue.sh"
-[ -x "$COORD_RELEASE" ] || COORD_RELEASE="skills/autospec-run/scripts/release-issue.sh"
+AUTOSPEC_QUEUE_BIN="${AUTOSPEC_QUEUE_BIN:-${AUTOSPEC_BIN:-autospec}}"
 ```
 
-If `--coordination-status` is active, run `list-ready-issues.sh --repo {repo}
+If `--coordination-status` is active, run `autospec queue ready --repo {repo}
 --batch-size "${AUTOSPEC_BATCH_SIZE:-1}"`, print the JSON, and exit. If
 `--max-parallel-safe` is active, print only the `.batch` array and exit.
 
 During the normal monitor loop:
 
-1. Run `list-ready-issues.sh --repo {repo} --batch-size "$effective_batch_size"`
+> **Issue intent safety claim gate.** `autospec claim acquire` reads the current
+> labels and issue body, validates the reviewed Safety review block, performs the
+> label transition, and confirms the lowest-ID run-state comment. The monitor
+> never reimplements that safety or lease transition with `gh issue edit`.
+
+1. Run `autospec queue ready --repo {repo} --batch-size "$effective_batch_size"`
    after watchdog reconciliation and profile filtering.
 2. Use `.ready[0].number` as the next issue candidate.
-3. Claim it through `claim-issue.sh --issue "$ISSUE" --repo {repo}
+3. Claim it through `autospec claim acquire --issue "$ISSUE" --repo {repo}
    --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --branch "<BRANCH>"`.
 4. Treat claim exit `2` as a normal lost-race or conflict outcome: refresh the
    queue and try another candidate without failing the batch.
-5. On failure, stop, or retry exhaustion, call `release-issue.sh` before
+5. On failure, stop, or retry exhaustion, call `autospec claim release` before
    returning `auto-implement` to the queue.
 
-The GitHub `autospec-run-state` comment written by these helpers is the
+### Final safety-stamp contract
+
+`autospec queue review-safety` is the only automatic writer of issue-intent
+safety outcomes. After an admission surface persists its final issue body and
+adds interim `auto-implement`, it must invoke the exact target:
+
+```bash
+autospec queue review-safety --repo {repo} --limit 1 --issue <N>
+```
+
+Only the command's `pass: 1` total admits that invocation. The ready queue and
+claim command consume Rust's typed passing evidence and refuse a missing,
+ambiguous, or blocking result. They never reconstruct, stamp, or replace a
+safety decision with `gh` commands or `lint issue safety` output.
+
+The GitHub `autospec-run-state` comment written by the Rust control plane is the
 cross-workstation source of truth. Local process heartbeat files remain useful
 for same-host progress and compatibility, but they are not authoritative across
-machines. If any coordinator helper is unavailable, fall back to the existing
-inline label-swap path below.
+machines. If the Rust command is unavailable, fail the monitor start visibly;
+do not fall back to an inline label-swap path.
 
 >   all_open = [open auto-implement issues, sorted ascending by issue number]
 >   candidates = [all_open issues whose Depends-on deps are all CLOSED, sorted ascending]
@@ -522,12 +595,12 @@ inline label-swap path below.
 >   fi
 >   echo "[monitor] effective_batch_size=$effective_batch_size (next issue reasoning: $_next_reasoning)"
 >   ISSUE = ready[0]
->   # Atomic claim: claim-issue.sh is the SOLE claim path. It performs the
+>   # Atomic claim: autospec claim acquire is the SOLE claim path. It performs the
 >   # check-and-swap (auto-implement -> in-progress-by-bot) atomically with a
 >   # read-back verification, so the hot loop NEVER re-implements the inline
 >   # label swap. Multiple monitors can race the same candidate; exactly one
 >   # wins (exit 0), the rest lose (non-zero) and skip to the next candidate.
->   claim_json="$("$COORD_CLAIM" --issue "$ISSUE" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:monitor:$$}" --branch "${BRANCH:-}")" && claim_rc=0 || claim_rc=$?
+>   claim_json="$("$AUTOSPEC_CLAIM_BIN" claim acquire --issue "$ISSUE" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:monitor:$$}" --branch "${BRANCH:-}")" && claim_rc=0 || claim_rc=$?
 >   # exit 1 = hard usage error (never a race signal); exit 2 = lost race.
 >   # Split them: a misconfigured claim (rc 1 or any other non-2 non-zero) must
 >   # surface an operator-visible WARN, not masquerade as a silently-dropped
@@ -538,13 +611,13 @@ inline label-swap path below.
 >     ready=($READY_REMOVE)
 >     continue
 >   elif [ "$claim_rc" -ne 0 ]; then
->     echo "[monitor] WARN: claim hard error for #$ISSUE (rc=$claim_rc) — usage/config error, NOT a lost race; skipping. Check claim-issue.sh invocation." >&2
+>     echo "[monitor] WARN: claim hard error for #$ISSUE (rc=$claim_rc) — usage/config error, NOT a lost race; skipping. Check autospec claim acquire invocation." >&2
 >     READY_REMOVE=$(printf "%s\n%s" "$READY_REMOVE" "$ISSUE" | grep -v "^${ISSUE}$" || true)
 >     ready=($READY_REMOVE)
 >     continue
 >   fi
 >   # exit 0 only: this monitor now owns #$ISSUE (label already swapped to
->   # in-progress-by-bot by claim-issue.sh) -> heartbeat write -> process(ISSUE).
+>   # in-progress-by-bot by autospec claim acquire) -> heartbeat write -> process(ISSUE).
 >   _hb_slug="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")"
 >   mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
 >   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$_hb_slug/$ISSUE.json"
@@ -652,6 +725,12 @@ inline label-swap path below.
 >     --body-file "skills/autospec-run/prompts/phase4-implementer.md")
 >   ```
 >   `gen-implementer-prompt.sh` emits the static cached prefix (framed by `<!-- CACHE BOUNDARY -->` markers, containing SKILL.md + AGENTS.md + RULE_ID table + tag-filtered saved-memory) first; the `phase4-implementer.md` body and the issue assignment ride below it as the dynamic suffix. Pass the prefix block (up to and including the closing `<!-- CACHE BOUNDARY -->`) with `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache reuses it across dispatches in the same monitor session. This only changes prompt **assembly/caching** — the implementer's absorbed-discipline BEHAVIOR (every step in `phase4-implementer.md`) is unchanged.
+>   UI/client-interaction issues handled by that prompt must record exactly one
+>   browser verification state in the PR body's `## Validation` section:
+>   `browser-verified`, `fallback-smoke-only`, or `not-run`. Harness-caused
+>   Browser connector skips that produce `fallback-smoke-only` or `not-run` must
+>   open or link a browser remediation issue with the redacted error detail before
+>   merge.
 > - **Otherwise** — use the legacy inline prompt below (current behavior). Legacy path is retained until every pre-v2 issue has drained.
 >
 > Both paths share the same outer monitor loop (queue scan, lock-step compliance, label-based locking, heartbeat updates, post-process pickup). The selection only changes the inner subagent prompt body.
@@ -781,6 +860,11 @@ inline label-swap path below.
 >        echo "[ladder] fresh — created <BRANCH>"
 >        ;;
 >    esac
+>    # Reset repo-local state roots after entering the issue worktree. Parent
+>    # autospec-run processes may export AUTOSPEC_REPO_DIR for the primary
+>    # checkout; premerge/validation helpers must read mutable artifacts such as
+>    # .autospec/qa-verdict.json from this active worktree instead.
+>    export AUTOSPEC_REPO_DIR="$PWD"
 >    # MANDATORY assert gate: MUST exit 0 before the first file edit/commit. A
 >    # non-zero exit (in_primary_checkout / dirty / stale_base) is NEVER worked
 >    # around — comment the emitted code_health identifier on the issue, restore
@@ -794,7 +878,8 @@ inline label-swap path below.
 >    ```
 >    <!-- worktree-ladder:end -->
 >    On the `open-pr` path the verification bar EQUALS fresh work — full tests + the standard review loop, never a blind merge. Cleanup is identical for every path: after the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`; never delete un-pushed work before merge.
-> 1a. **Claim the edit surface (claim-guard), nested inside the issue claim.** After the `worktree-guard.sh assert` gate passes and BEFORE the first file edit, take a fine-grained lease on the skill(s)/paths this issue will touch so a concurrent session in another worktree cannot stomp the same trio+golden surface. This is the inner layer of the three-layer caller pattern (worktree-guard → claim-guard scan → claim-guard acquire); it composes with — and sits inside — the issue-level lease you already hold. Set `TARGETS` to the space-separated skill names and/or repo-relative paths the issue's **Files touched** lists.
+<!-- autospec-block:runtime-resource-preflight -->
+> 1b. **Claim the edit surface (claim-guard), nested inside the issue claim.** After the `worktree-guard.sh assert` gate passes and BEFORE the first file edit, take a fine-grained lease on the skill(s)/paths this issue will touch so a concurrent session in another worktree cannot stomp the same trio+golden surface. This is the inner layer of the three-layer caller pattern (worktree-guard → claim-guard scan → claim-guard acquire); it composes with — and sits inside — the issue-level lease you already hold. Set `TARGETS` to the space-separated skill names and/or repo-relative paths the issue's **Files touched** lists.
 >    <!-- claim-guard-acquire:begin -->
 >    ```bash
 >    TARGETS="<space-separated skills/paths from the issue's Files touched>"
@@ -812,7 +897,7 @@ inline label-swap path below.
 > 3. **Full test suite gate.** Run the target repo's full validation/test suite, not only the Primary smoke test. Command resolution order:
 >    1. If `AUTOSPEC_FULL_TEST_COMMAND` is set, run `bash -lc "$AUTOSPEC_FULL_TEST_COMMAND"`.
 >    2. Else run every command listed under the issue's **Operator/full verification** section.
->    3. Else run the repo-standard full suite: `bash scripts/validate.sh` when present; otherwise use the ecosystem default (`npm test`, `pytest`, `go test ./...`, `cargo test`, `mvn test`, etc.).
+>    3. Else run the repo-standard full suite: `autospec validate` when present; otherwise use the ecosystem default (`npm test`, `pytest`, `go test ./...`, `cargo test`, `mvn test`, etc.).
 >    If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat. Do NOT dispatch LGTM review while the full suite is failing. Do NOT run `gh pr merge` while the full suite is failing. Record the exact full-suite command and passing output summary in the PR comment or final report.
 >    Once the suite first passes, fire the transition notification: `case "$_notify_fired" in *:tests_passed:*) ;; *) _notify_fired="${_notify_fired}:tests_passed:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: tests_passed" "Full suite green on {repo}" || true ;; esac`
 > 3a. **autospec-test gate** (run when `skills/autospec-test/scripts/run-gate.sh` exists in the repo): invoke the gate against the PR's target repo root. Handle exit codes per spec §7a/§7b:
@@ -861,7 +946,7 @@ inline label-swap path below.
 >          const flag = process.env.AUTOSPEC_WITH_DOCS === '1';
 >          const { generate } = resolveAutoRegenerate({ config: cfg, issueBody: body, withDocsFlag: flag });
 >          process.stdout.write(generate ? '1' : '0');
->          __REGEN_EOF__
+> __REGEN_EOF__
 >          )
 >          if [ "${_REGEN:-0}" = "1" ]; then
 >            # auto_regenerate is ON — run the regenerate self-heal path.
@@ -972,6 +1057,21 @@ inline label-swap path below.
 >        fi
 >        det_exit=$?
 >
+>      Reuse lens (issues #1439/#1440/#1442): when armed, extract the reuse-triage
+>      RULE_IDs from the deterministic findings so the reviewer prompt receives the
+>      build-vs-buy block. Flag-OFF or no reuse hits → `_reuse_flags_file` stays empty
+>      → the reviewer prompt is byte-identical to today (the `${_reuse_flags_file:+…}`
+>      expansion below adds nothing):
+>        ```bash
+>        _reuse_flags_file=""
+>        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ -f /tmp/guardian-<PR>.md ]; then
+>          _reuse_candidate=$(mktemp -t autospec-reuse-flags-XXXXXX)
+>          grep -E '^(REINVENT_REPO_UTIL|NEW_DEP_UNJUSTIFIED|NEW_ABSTRACTION_SINGLE_CALLER):' \
+>            /tmp/guardian-<PR>.md > "$_reuse_candidate" 2>/dev/null || true
+>          if [ -s "$_reuse_candidate" ]; then _reuse_flags_file="$_reuse_candidate"; fi
+>        fi
+>        ```
+>
 >      **Model tier:** `TIER_B` for ALL issues — including `regression` and `priority:high`. The single fused reviewer carries the regression gap-check (see brief below), so no second Tier-A pass is dispatched. **Escape hatch:** `AUTOSPEC_REVIEWER_TIER` overrides the reviewer tier — unset (or any value other than `opus`) → `TIER_B` (sonnet); set `AUTOSPEC_REVIEWER_TIER=opus` to restore `TIER_A` for the reviewer. Silently fall back to `TIER_A` if `TIER_B` is unavailable.
 >
 >      **Assemble reviewer prompt** — call `gen-reviewer-prompt.sh` to compose the combined prompt (static cached prefix + dynamic suffix):
@@ -989,7 +1089,8 @@ inline label-swap path below.
 >        --issue-body "/tmp/issue-<ISSUE>-body.md" \
 >        --prev-findings "/tmp/guardian-<PR>.md" \
 >        --issue-labels "<ISSUE_LABELS>" \
->        --repo "<REPO>")
+>        --repo "<REPO>" \
+>        ${_reuse_flags_file:+--reuse-flags "$_reuse_flags_file"})
 >      ```
 >      Pass `combined_reviewer_prompt` as the reviewer subagent prompt. The static cached prefix is framed by `<!-- CACHE BOUNDARY -->` markers; pass it with `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache can reuse it across inner-loop iterations.
 >
@@ -1015,11 +1116,25 @@ inline label-swap path below.
 >        > 6. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits), whether every new code unit exists for a concrete issue/spec requirement rather than convenience, and whether deprecated routes, caches, buckets, stores, workers, config keys, UI paths, docs, specs, tests, or fixtures were removed instead of revived to make tests pass.
 >        > 7. Collect findings as a numbered list.
 >        > 8. Critical self-question before LGTM: "What else could still pass here while the real user workflow fails, and how could this be better?" Check especially mocked-vs-deployed behavior, external service assumptions, fallback paths, user-visible outcomes, and missing no-mock smoke coverage. If the answer is actionable inside the issue scope, emit it as a finding or required test.
+
+>        > 8a. **data-scope invariant lens (diagnostic/filter endpoints):** When the issue touches endpoints, dashboards, reports, or diagnostics that accept optional job/sample/filter parameters, verify filters never widen to unrelated records. empty optional filters reject unless documented as a deliberate all-records mode. Require concrete evidence for `job-only`, `sample-only`, `job+sample`, `unsupported-filter`, and `empty-filter` paths; unsupported-filter and empty-filter cases must prove rejection or a documented scoped response, not silent broadening.
 >        > 9. **Regression gap-check (MANDATORY for `regression`/`priority:high` issues; skip otherwise):** ask "would the reviewer have caught the original gap?" If the fused review as written would NOT have caught the gap this regression closes, add the missing checklist item(s) to `reports/autospec-review/reviewer-lessons.md` (one entry per item, with parent `gap_id` and date) and apply those new checks to this diff before issuing the verdict. This folds the former second-pass regression meta-review into this single reviewer pass — the reviewer-lessons write-path is preserved here; there is no second Tier-A dispatch.
 >        >
 >        > **Hard limit:** max **25 tool calls total** (Parts 1 + 2 combined). If budget exhausted, append `RULE_ID:OUT_OF_SCOPE: reviewer budget exhausted; PR needs human review` and proceed to verdict.
 >        >
->        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings.
+>        > **Simplicity axis is ADVISE-only (anti-gold-plating):** the reuse / build-vs-buy / "how could this be better?" axis may argue only toward *less* code — reuse a named existing util (`scripts/lib/`, repo source), adopt a named library, or delete an unneeded abstraction — and only when tied to a named acceptance criterion. It may NEVER emit a `BLOCK` that demands *more* code, a new abstraction, or speculative generality; such suggestions are at most `ADVISE` and never halt the commit. Every reuse verdict must name the matched util or library (evidence-bound), never assert a match from belief.
+>        >
+>        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings. A reuse `BLOCK` is provisional until it survives the refute pass below.
+>
+>      **Reuse-BLOCK refute pass (before consuming the verdict):** If the findings list contains a build-vs-buy / reuse `BLOCK`, do NOT halt on it yet. Dispatch a **cheap refute pass** — one short `TIER_B` second voter (≤5 tool calls) whose only job is to *kill* the BLOCK: `rg`-search the repo for the named util/library and confirm the claimed reuse target actually exists, is reachable, and fits this call site. **Majority rules:** keep the BLOCK only if the refuter also upholds it; if the refuter refutes it (the named target is absent, unreachable, or ill-fitting), demote that BLOCK to `ADVISE`, drop it from the blocking findings, and continue. If demotion leaves no remaining blocking findings, treat the verdict as `LGTM`. This keeps a hallucinated "library exists" from stalling the merge (`feedback_llm_validator_adaptive_retry`). **Record the outcome of this reuse `BLOCK` decision to the reuse-lens ledger HERE** (issue #1442) — at the decision point, so precision = upheld ÷ total is computed only over real reuse BLOCKs and never from phantom rows on clean passes. Set `_reuse_block_raised=1`, `_reuse_trigger` to the flagged RULE_ID, and `_reuse_upheld=true` when the refuter upheld the BLOCK or `_reuse_upheld=false` when it was refuted/demoted-to-ADVISE, then:
+>        ```bash
+>        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ "${_reuse_block_raised:-0}" = "1" ]; then
+>          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/interrogation-ledger.sh" record \
+>            --issue "<ISSUE>" --pr "<PR>" --trigger "${_reuse_trigger:-REINVENT_REPO_UTIL}" \
+>            --verdict BLOCK --upheld "${_reuse_upheld:-true}" \
+>          || true  # write failure is best-effort; never blocks the PR
+>        fi
+>        ```
 >
 >      If `LGTM` && det_exit == 0:
 >        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
@@ -1030,6 +1145,9 @@ inline label-swap path below.
 >            --dispatch-id "<DISPATCH_ID>-reviewer" --role reviewer --issue "<ISSUE>" \
 >            --tokens-json ".autospec/tokens-<ISSUE>-reviewer.json"
 >        fi
+>        # Reuse-lens verdict is recorded at the refute-pass decision point above
+>        # (issue #1442), not here — recording in this LGTM-only branch produced
+>        # phantom BLOCK rows on clean passes and never recorded upheld BLOCKs.
 >        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
 >        # On relaunch: run ci-wait-poll.sh <PR>; break SUCCESS if exit 0 (pass)
 >        break SUCCESS only if the full suite passed and required checks pass.
@@ -1056,15 +1174,56 @@ inline label-swap path below.
 >    ```bash
 >    max_attempts="${AUTOSPEC_REBASE_MAX_ATTEMPTS:-3}"
 >    attempt=0
+>    # Advisory checks (e.g. self-hosted TeamCity) are operator-declared via
+>    # AUTOSPEC_PR_ADVISORY_CHECKS, defaulting to the same regex the conductor's
+>    # main-health gate already honors (AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS) —
+>    # one shared definition. Unset/empty ("^$") matches no real check name, so
+>    # default behavior is unchanged: every FAILURE blocks.
+>    adv="${AUTOSPEC_PR_ADVISORY_CHECKS:-${AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS:-^$}}"
 >    wait_for_ci_green() {
 >        while :; do
 >            rollup=$(gh pr view <PR> --json statusCheckRollup --jq '.statusCheckRollup // []')
->            pending=$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion == null)] | length')
->            bad=$(printf '%s' "$rollup" | jq '[.[] | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length')
+>            pending=$(printf '%s' "$rollup" | jq --arg adv "$adv" '[.[] | select((((.name // .context // "") as $n | $n != "" and ($n | test($adv)))) | not) | select(.conclusion == null)] | length')
+>            bad=$(printf '%s' "$rollup" | jq --arg adv "$adv" '[.[] | select((((.name // .context // "") as $n | $n != "" and ($n | test($adv)))) | not) | select(.conclusion=="FAILURE" or .conclusion=="CANCELLED" or .conclusion=="TIMED_OUT" or .conclusion=="ACTION_REQUIRED")] | length')
 >            total=$(printf '%s' "$rollup" | jq 'length')
 >            if [ "$bad" != "0" ]; then
->                gh issue comment <ISSUE> --body "PR #<PR>: a required check failed after rebase-and-retest. Pausing for operator review."
->                exit 1
+>                # Distinguish inherited base-branch CI rot from branch-caused failures
+>                # before blocking. Capture the PR head rollup and the current base
+>                # commit's check/status contexts as merge evidence, then let
+>                # ci-status-compare.sh emit classification plus blocked_branch and
+>                # blocked_inherited arrays for the PR comment/final report.
+>                base_sha=$(gh pr view <PR> --json baseRefOid --jq .baseRefOid)
+>                head_checks="/tmp/autospec-ci-head-<PR>.json"
+>                base_checks="/tmp/autospec-ci-base-<PR>.json"
+>                base_check_runs="/tmp/autospec-ci-base-check-runs-<PR>.json"
+>                base_statuses="/tmp/autospec-ci-base-statuses-<PR>.json"
+>                compare_json="/tmp/autospec-ci-compare-<PR>.json"
+>                printf '%s\n' "$rollup" > "$head_checks"
+>                gh api "repos/{repo}/commits/$base_sha/check-runs" --paginate \
+>                  --jq '[.check_runs[] | {name, conclusion, status, detailsUrl: .details_url}]' \
+>                  > "$base_check_runs"
+>                gh api "repos/{repo}/commits/$base_sha/status" \
+>                  --jq '[.statuses[] | {context, state, targetUrl: .target_url}]' \
+>                  > "$base_statuses"
+>                jq -s 'add' "$base_check_runs" "$base_statuses" > "$base_checks"
+>                bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ci-status-compare.sh" \
+>                  --head "$head_checks" --base "$base_checks" > "$compare_json"
+>                classification=$(jq -r '.classification' "$compare_json")
+>                target_url=$(jq -r '.target_url // ""' "$compare_json")
+>                case "$classification" in
+>                  inherited)
+>                    gh issue comment <ISSUE> --body "PR #<PR>: required checks are red, but ci-status-compare classified them as inherited base-branch CI rot (blocked_inherited). Merge evidence: ${target_url:-see attached rollup}; compare artifact: \`$compare_json\`. Pausing for operator review instead of marking the branch broken."
+>                    exit 1
+>                    ;;
+>                  branch_caused)
+>                    gh issue comment <ISSUE> --body "PR #<PR>: required checks failed and ci-status-compare classified them as branch-caused (blocked_branch). Merge evidence: ${target_url:-see attached rollup}; compare artifact: \`$compare_json\`."
+>                    exit 1
+>                    ;;
+>                  *)
+>                    gh issue comment <ISSUE> --body "PR #<PR>: required checks looked bad but ci-status-compare returned \`$classification\`; pausing for operator review. Compare artifact: \`$compare_json\`."
+>                    exit 1
+>                    ;;
+>                esac
 >            fi
 >            if [ "$total" != "0" ] && [ "$pending" = "0" ]; then return 0; fi
 >            sleep 30
@@ -1097,12 +1256,58 @@ inline label-swap path below.
 >    fi
 >    # Mandatory final local proof after the branch is current with main.
 >    # Run the **Full test suite gate** here using the same command resolution order
->    # (`AUTOSPEC_FULL_TEST_COMMAND`, Operator/full verification, then `bash scripts/validate.sh` fallback).
+>    # (`AUTOSPEC_FULL_TEST_COMMAND`, Operator/full verification, then `autospec validate` fallback).
 >    # If it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`.
+>    #
+>    # Final quality gate (pre-merge, fail-closed): after the full suite passes and
+>    # before admin-merging, discover repository-specific whole-workspace quality
+>    # commands and run each one from the target repo root. Discovery is additive:
+>    #   1. If AUTOSPEC_FINAL_QUALITY_COMMAND is set, run it exactly as provided.
+>    #   2. If a root Cargo.toml exists and `cargo metadata --no-deps --format-version=1`
+>    #      succeeds, this is a Rust workspace; run:
+>    #      `cargo clippy --workspace --all-targets -- -D warnings`
+>    # Treat every discovered command as required merge evidence. Do NOT run `gh pr merge` while the final quality gate is failing.
+>    # On failure, post/comment a
+>    # `FINAL_QUALITY_GATE_FAILED` block that includes the command plus one finding
+>    # record with `crate`, `file`, `line`, and `rule` fields (use `unknown` only when
+>    # the tool output genuinely omits a field), then return to the fix/recommit/retry
+>    # loop and rerun the full suite plus final quality gate before merge.
+>    if [ -n "${AUTOSPEC_FINAL_QUALITY_COMMAND:-}" ]; then
+>      sh -lc "$AUTOSPEC_FINAL_QUALITY_COMMAND" || {
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=AUTOSPEC_FINAL_QUALITY_COMMAND crate=unknown file=unknown line=unknown rule=unknown"
+>        exit 1
+>      }
+>    fi
+>    if [ -f Cargo.toml ]; then
+>      if ! command -v cargo >/dev/null 2>&1; then
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-metadata crate=unknown file=Cargo.toml line=1 rule=cargo-unavailable"
+>        exit 1
+>      fi
+>      if ! cargo metadata --no-deps --format-version=1 >/tmp/autospec-cargo-metadata.json 2>/tmp/autospec-cargo-metadata.err; then
+>        _metadata_err=$(tr '
+' ' ' </tmp/autospec-cargo-metadata.err | sed 's/[[:space:]][[:space:]]*/ /g; s/^ //; s/ $//' | cut -c1-500)
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-metadata crate=unknown file=Cargo.toml line=1 rule=${_metadata_err:-metadata-failed}"
+>        exit 1
+>      fi
+>      if ! cargo clippy --workspace --all-targets -- -D warnings >/tmp/autospec-final-quality-clippy.log 2>&1; then
+>        # Preserve raw clippy output and summarize the first diagnostic in a stable schema for reviewers.
+>        _crate=$(jq -r '.packages[0].name // "unknown"' /tmp/autospec-cargo-metadata.json 2>/dev/null || printf 'unknown')
+>        _location=$(grep -m1 -E '^[[:space:]]*-->' /tmp/autospec-final-quality-clippy.log | sed -E 's/^[[:space:]]*-->[[:space:]]*//' || true)
+>        _file=$(printf '%s' "$_location" | awk -F: '{print $1}')
+>        _line=$(printf '%s' "$_location" | awk -F: '{print $2}')
+>        _rule=$(grep -m1 -Eo 'clippy::[A-Za-z0-9_]+' /tmp/autospec-final-quality-clippy.log || true)
+>        if [ -z "$_rule" ]; then _rule=$(grep -m1 -E 'warning:|error:' /tmp/autospec-final-quality-clippy.log | sed 's/^ *//' | cut -c1-200 || true); fi
+>        gh issue comment <ISSUE> --body "FINAL_QUALITY_GATE_FAILED command=cargo-clippy crate=${_crate:-unknown} file=${_file:-unknown} line=${_line:-unknown} rule=${_rule:-unknown}"
+>        exit 1
+>      fi
+>    fi
 >    gh pr merge <PR> --admin --squash --delete-branch
+>    "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} \
+>      --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" \
+>      --state merged --branch "<BRANCH>" --pr "<PR>" || true
 >    case "$_notify_fired" in *:merged:*) ;; *) _notify_fired="${_notify_fired}:merged:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: merged" "PR #<PR> merged on {repo}" || true ;; esac
 >    ```
->    The block ends with the admin-merge; merge auto-closes the issue.
+>    The block ends with the admin-merge and merged-state claim release; merge auto-closes the issue.
 >    ```bash
 >    # Stop-sentinel: abort if an immediate stop flag is present after this step.
 >    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
@@ -1124,7 +1329,7 @@ inline label-swap path below.
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
 >    Fire the terminal failure notification: `case "$_notify_fired" in *:failed:*) ;; *) _notify_fired="${_notify_fired}:failed:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: failed" "Implementation failed on {repo}" || true ;; esac`
 >    Cleanup single-fetch body temp file on terminal failure: `rm -f "/tmp/issue-<ISSUE>-body.md" || true`
-> 10. Cleanup: cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force
+> 10. Cleanup: run `autospec runtime env down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" --purge-maven`; then run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-runtime-worktree-cleanup.sh" /tmp/wt-<BRANCH>`; only after both succeed, run `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`.
 > 11. Report: PR number, outcome, one-paragraph summary.
 >
 > Hard rules: NEVER push to main, force-push, bypass hooks, or touch the umbrella issue. gh CLI only.
@@ -1137,6 +1342,49 @@ inline label-swap path below.
 Capture the agent ID / log path for monitoring.
 
 If your harness lacks background delegation: open a separate terminal/tmux pane, run the monitor prompt in a fresh session there, and have it write progress to a logfile that Phase 5 can tail.
+
+### Running concurrent workers
+
+autospec-run is designed for concurrent operation across separate harness sessions (e.g., two Claude Code sessions in different terminals, or two Codex CLI processes). Each session runs an independent monitor. Three layers enforce safety:
+
+1. **Atomic claim** — `autospec claim acquire` check-and-swaps `auto-implement → in-progress-by-bot` plus writes an `autospec-run-state` GitHub comment. The **GitHub comment is the cross-machine source of truth**, not the local heartbeat.
+2. **Worktree isolation** — each issue gets its own `/tmp/wt-<branch>` so two workers never share a worktree.
+3. **Per-session lock** — the session-lock (see above) ensures a single harness session never runs two concurrent monitors; separate sessions run independently by design.
+
+To launch a second concurrent worker:
+
+```bash
+# Terminal 1 — first worker (already running)
+AUTOSPEC_WORKER_ID="$(hostname):user:shell:$$" /autospec-run
+
+# Terminal 2 — second worker (fresh session, distinct worker id)
+AUTOSPEC_WORKER_ID="$(hostname):user:shell:$$" /autospec-run
+```
+
+Each session derives its own `AUTOSPEC_WORKER_ID` if not overridden; the default form is `host:user:harness:pid`. Set it explicitly when two sessions run on the same host to guarantee uniqueness.
+
+**Watchdog tuning for long concurrent runs.** The watchdog cross-checks the GitHub run-state comment before releasing any `claimed` heartbeat, so a live sibling's claim is never reclaimed. The tunable env vars (set in every concurrent terminal):
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | `0` (disabled) | Repo-wide active-worker cap. When active `in-progress-by-bot` issues meet the cap, `autospec queue ready` returns an empty `.batch` while still reporting `.ready`. Use this to throttle one workstation or a cluster. |
+| `AUTOSPEC_RUN_ONLY_ISSUES` | unset (unconstrained) | Space-separated issue-number allowlist. When set and non-empty, `autospec queue ready` scopes `.ready`/`.blocked`/`.batch` to only those issue numbers — set by the autonomous conductor's dispatch-time provenance split so the operator and self-originated batches each drain their own subset. Unset or empty keeps the full-queue scan. |
+| `AUTOSPEC_CLAIM_LEASE_SECONDS` | `10800` | Cross-machine claim lease TTL written into the GitHub run-state comment and used by `autospec claim acquire` stale-reclaim decisions. |
+| `AUTOSPEC_CLAIM_SETTLE_SECONDS` | `0.2` | Short post-upsert readback delay so simultaneous comment creates converge before a worker reports claim success. |
+| `AUTOSPEC_CLAIM_CONFIRM_READS` | `5` | Number of settled lowest-lock readbacks required before `autospec claim acquire` reports claim success. |
+| `AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS` | `1800` | Minimum age before a `claimed` heartbeat triggers the GitHub cross-check. Set higher (e.g., `3600`) for hosts with slow worktree setup. |
+| `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | `10800` | Legacy fallback for claim lease age when `AUTOSPEC_CLAIM_LEASE_SECONDS` is unset; also used by watchdog stale cleanup. |
+| `AUTOSPEC_WATCHDOG_STALE_SECS` | `1800` | Age at which a heartbeat is considered stale for nudging. |
+
+If a cross-check GitHub API call fails (offline / rate-limited), the watchdog treats the claim as live and skips the reclaim — fail-safe by design.
+
+Recommended starting caps:
+
+| Deployment | `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | `AUTOSPEC_BATCH_SIZE` | `AUTOSPEC_CLAIM_LEASE_SECONDS` |
+|---|---:|---:|---:|
+| 10 workers | `6` | `1` | `10800` |
+| 25 workers | `12` | `1` | `10800` |
+| 50 workers | `20` | `1` | `14400` |
 
 ## Phase 5 — Periodic status updates
 
@@ -1196,6 +1444,7 @@ bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-write-run-summar
   --elapsed "$ELAPSED_HHMM" \
   --done-challenge-file "$DONE_CHALLENGE_FILE" \
   --next-steps-file "$NEXT_STEPS_FILE" \
+  --quality-audit-json ".autospec/repo-quality-audit.json" \
   --output ".autospec/run-summary.md"
 ```
 
@@ -1220,7 +1469,19 @@ Runs after the last issue in the batch closes/merges (queue drains, `ALL_DONE`),
 - `~/.autospec/no-review.flag` exists, OR
 - `--no-postreview` was passed to autospec-run.
 
-Otherwise run the bounded loop:
+Otherwise run the bounded loop. At closeout, also run the deterministic gap miner against available run evidence (review verdicts, fix commits, CI blockers, and QA/scope misses) so repeated misses become deduped `gap-remediation` issues and repeat counts land in `docs/memory/autospec-gap-ledger.md`:
+
+```bash
+if [ -s "${AUTOSPEC_RUN_GAP_EVENTS:-}" ]; then
+  bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-gap-miner.sh" \
+    --input "${AUTOSPEC_RUN_GAP_EVENTS}" \
+    --ledger docs/memory/autospec-gap-ledger.md \
+    --repo "${AUTOSPEC_REPO:-}" \
+    --file
+fi
+```
+
+Then continue the bounded Phase 5.5 loop:
 
 ```bash
 BATCH_START_DATE="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-batch-start.sh" --read)"
@@ -1240,10 +1501,11 @@ Loop (`round = 1 … MAX`):
    else
      REVIEW_SINCE="${BATCH_START_DATE}"  # round 1: full batch window
    fi
-   /autospec-review --remediation --since "${REVIEW_SINCE}" --emit-gaps "${GAPS_FILE}"
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/invoke-review.sh" \
+     --remediation --since "${REVIEW_SINCE}" --emit-gaps "${GAPS_FILE}"
    ```
 
-   **Round 1** keeps the full `BATCH_START_DATE` batch window — this preserves the per-PR-LGTM-misses-integration value (the broad pass catches cross-PR integration gaps the per-PR LGTMs missed). **Round ≥2** scopes `--since` to ONLY the newly-filed gap PRs from the prior round (`GAP_ROUND_SINCE`, the timestamp captured just before the prior round's gap PRs began merging — see step 4), so the re-review doesn't re-scan the entire already-reviewed batch, only the freshly-shipped gap remediations. On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
+   **Harness-neutral invocation:** `invoke-review.sh` detects the active harness (Claude Code / Codex CLI / OpenCode) via `autospec-harness-detect.sh` and dispatches `/autospec-review` using the correct per-harness argv form. If the review backend is unavailable it emits `code_health:phase55_broad_review_backend_unavailable` to stderr and appends a visible diagnostic gap to `GAPS_FILE` — it never silently produces an empty gap file that would look like a clean pass. **Round 1** keeps the full `BATCH_START_DATE` batch window — this preserves the per-PR-LGTM-misses-integration value (the broad pass catches cross-PR integration gaps the per-PR LGTMs missed). **Round ≥2** scopes `--since` to ONLY the newly-filed gap PRs from the prior round (`GAP_ROUND_SINCE`, the timestamp captured just before the prior round's gap PRs began merging — see step 4), so the re-review doesn't re-scan the entire already-reviewed batch, only the freshly-shipped gap remediations. On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
 1b. **Docs-completeness dimension** (spec §D6 row 2 — runs only on round 1, after the broad review emits `${GAPS_FILE}`): the gap-remediation review also audits documentation completeness for the work shipped during this batch window. Every feature shipped in the window (scoped by `run-batch-start.sh --read`) must have a page for every configured audience (the `documentation.audiences` from #917's doc config), and there must be no outstanding `visual_stale` / `example_stale` drift signals (`check-doc-drift.sh`). Run the deterministic helper and **append** its gaps onto the existing `${GAPS_FILE}` so they file, dedupe, and converge through the SAME gap-remediation machinery used in step 2 (do NOT build a parallel loop):
 
    ```bash
@@ -1323,6 +1585,54 @@ Loop (`round = 1 … MAX`):
 **Termination guarantees:** convergence (0 survivors) ends the loop immediately; the `dedupe_key` prevents re-filing the same gap across rounds; the hard cap `AUTOSPEC_GAP_MAX_ROUNDS` (default 2) stops the loop and surfaces any remainder to the operator.
 
 **Feed Phase 6:** report (a) gaps closed this phase, (b) findings the filter suppressed, and (c) gaps still open after the cap. Failures from `/autospec-review` or the driver log a warning but do NOT fail the overall run.
+
+## Phase 5.6 — Repo quality audit
+
+Run the shared read-only repository quality audit after Phase 5.5 converges or
+hits its cap, before Phase 6 writes the final run summary:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-quality-audit.sh" \
+  --repo . \
+  --json ".autospec/repo-quality-audit.json" \
+  --markdown ".autospec/repo-quality-audit.md" \
+  ${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:+--file-issues}
+```
+
+The audit writes structured findings classified as `app-follow-up`,
+`autospec-process-gap`, `inherited-accepted-debt`, or
+`current-branch-regression`. Probes cover dirty git status, package-manager
+scripts, runtime engine compatibility, typecheck/lint/test availability, route
+coverage, design/template guards, dependency audit readiness,
+security-sensitive storage, focused/skipped tests, large files, TypeScript
+`any` usage, and debug logging hotspots. When
+`AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES=1` and `gh` is available, the helper may
+file deduplicated `quality-audit` follow-up issues; otherwise it records
+unfiled residual risks in the JSON/Markdown artifacts. Failures of the audit
+helper should be reported as a warning in Phase 6, not hidden.
+
+## Advisor escalation
+
+A bounded hard decision may be escalated to a harness-native TIER_A **advisor** that returns advice only. This is the [advisor strategy](https://claude.com/blog/the-advisor-strategy): a cheap executor runs the loop and pulls in the strong model only at the exact hard moment. The advisor never calls tools and produces no user-facing output.
+
+Configured by the `advisor:` block in `.autospec/autospec.yml` — a single `policy: auto | on | off` plus a budget, NOT per-gate levers. **You never enumerate gates**; `advisor-escalate.sh precheck` resolves everything and returns `DISABLED` (exit 8) when a gate is not active.
+
+**Self-governance (`policy: auto`, the default).** Autospec decides which gates are active, like an architect adjusting a standing order from results. The active set is seeded at the low-risk `impl-haiku` gate and self-tuned by `advisor-govern.sh`: it promotes the next gate in a fixed safety order (`impl-haiku → retry → reviewer → impl-decision`) only when the run's quality ≥ baseline AND cost ≤ baseline over a minimum-sample floor, and retracts the last-added gate on regression (never below the seed). `policy: on` activates every gate within budget; `policy: off` is inert.
+
+**Governance tick (run once during the end-of-run sweep, `policy: auto` only).** Call `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/advisor-sweep-tick.sh --main-telemetry <the run's telemetry jsonl> --json`. It observes the batch's LGTM-first-pass rate + cost/issue from telemetry (`advisor-observe.sh`), freezes a pre-advisor **baseline snapshot** the first time the advisor is active, and thereafter promotes/retracts the active gate set against that baseline via `advisor-govern.sh` — so the set self-adjusts before the next run without any operator input. It is fully fail-safe: not-`auto`, no telemetry, or no reviewer signal → a logged no-op. Inspect the telemetry behind a decision with `advisor-report.sh`.
+
+**Protocol (every gate):**
+
+1. Write the decision-scoped question to a temp file and the minimal relevant context to a second temp file. Do NOT dump the whole issue/diff — a bloated payload inflates `tokens_in` and erases the cost win.
+2. Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/advisor-escalate.sh --phase precheck --issue <N> --repo <R> --gate <id> --question-file <q> --context-file <c> --json`. A non-zero exit (`7` cap-reached, `8` disabled) means skip escalation and proceed exactly as if no advisor exists.
+3. On `GO`, dispatch the advisor via the highest rung your context supports:
+   - (1) the native advisor tool if your harness exposes it; else
+   - (2) a read-only TIER_A subagent — Claude Code `Agent(model: opus)`, OpenCode `task` top-tier — this is the preferred path; else
+   - (3) the `cli_fallback` command from the precheck output (Codex `codex exec`; `claude -p` / `opencode run` are legacy). Use rung 3 only when your context lacks a subagent tool — e.g. a background-dispatched implementer does not inherit the `Agent` tool.
+   Prompt the advisor with the curated payload and: "Return advice only as one JSON object `{verdict, guidance, confidence}`. You have no tools and produce no user-facing output. guidance <= 700 tokens."
+4. Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/advisor-escalate.sh --phase record --issue <N> --repo <R> --gate <id> --response-file <resp> --json`. Act on the validated verdict: `plan`/`correction` → apply and continue; `stop` → soft-fail (return-to-queue + comment). An unparseable response is recorded as a fail-safe `stop`.
+
+**`reviewer` gate:** after the LGTM reviewer forms a verdict that is neither a clean LGTM nor a hard BLOCK (a borderline call), run the protocol with `--gate reviewer` to have the advisor uphold or refine the verdict before it is issued. This complements the existing reuse-BLOCK cheap-refute pass rather than replacing it.
 
 ## Constraints (apply throughout)
 

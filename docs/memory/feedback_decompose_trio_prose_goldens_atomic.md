@@ -9,7 +9,7 @@ metadata:
 
 When `/autospec-define` decomposes a spec, the ≤3-files-touched cap tempts it to
 split a skill change into "edit the trio prose" (issue X) and "regenerate the
-sha256 goldens" (issue X+1). This is WRONG: `scripts/validate.sh`'s
+sha256 goldens" (issue X+1). This is WRONG: `autospec validate`'s
 block-expansion golden gate + `check_lockstep` require the trio prose change and
 its regenerated goldens in the SAME commit, so the prose-only issue can never
 merge green on its own. The same applies to a trio whose new prose is gated by a

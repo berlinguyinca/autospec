@@ -150,6 +150,10 @@ test('skeleton shape is valid: per-audience maps present, empty prose, safe slug
   assert.equal(f.invariants, '');
   assert.equal(f.errors, '');
   assert.deepEqual(f.config_reference, { admin: '', developer: '' });
+  assert.deepEqual(f.algorithm, { developer: '', general: '' });
+  assert.deepEqual(f.config_profiles, { admin: [], developer: [] });
+  assert.deepEqual(f.settings, []);
+  assert.deepEqual(f.implementation_snippets, []);
   assert.equal(f.rationale, '');
   assert.deepEqual(f.depends_on, []);
   assert.ok(typeof f.title === 'string' && f.title.length > 0);

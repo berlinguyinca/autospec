@@ -237,12 +237,12 @@ EOF
     # The reference must use $REPO_ROOT (or the variable holding the repo root),
     # not $HOME, ~/.autospec, or AUTOSPEC_SCRIPTS_DIR (installed copies).
     # Check that every line referencing the expander uses REPO_ROOT.
+    executable_refs="$(grep -E '^[[:space:]]*[^#].*expand-skill-blocks\.sh' "$INSTALL_SH")"
+    [ -n "$executable_refs" ]
     while IFS= read -r line; do
         # Must contain REPO_ROOT (or equivalent repo-relative anchor).
-        if [[ "$line" =~ 'expand-skill-blocks.sh' ]]; then
-            [[ "$line" =~ 'REPO_ROOT' ]] || [[ "$line" =~ 'SCRIPT_DIR' ]]
-        fi
-    done < <(grep 'expand-skill-blocks.sh' "$INSTALL_SH")
+        [[ "$line" =~ 'REPO_ROOT' ]] || [[ "$line" =~ 'SCRIPT_DIR' ]]
+    done <<< "$executable_refs"
 }
 
 # ─── test 6: real end-to-end via a fixture skill with a marker ────────────────
@@ -343,6 +343,22 @@ EOF
         [ "$status" -eq 0 ]
         [ "$output" -gt 0 ]
     done
+}
+
+@test "install update removes the retired shell safety writer from an existing runtime" {
+    local scripts_dir="$HOME/.autospec/scripts"
+    local retired="$scripts_dir/apply-safety-review.sh"
+    mkdir -p "$scripts_dir"
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$retired"
+    chmod +x "$retired"
+
+    run env \
+        CLAUDE_CONFIG_DIR="$HOME/.claude" \
+        AUTOSPEC_SCRIPTS_DIR="$scripts_dir" \
+        AUTOSPEC_SCHEMAS_DIR="$HOME/.autospec/schemas" \
+        bash "$INSTALL_SH" --skill autospec-classify --harness claude --update
+    [ "$status" -eq 0 ]
+    [ ! -e "$retired" ]
 }
 
 # ─── test 8: NEGATIVE — codex/opencode member expansion failure aborts loudly ─

@@ -12,7 +12,7 @@ teardown() {
 }
 
 write_mock_probe() {
-    cat > "$TEST_TMPDIR/list-ready-issues.sh" <<'EOF'
+    cat > "$TEST_TMPDIR/autospec" <<'EOF'
 #!/usr/bin/env bash
 repo=""
 while [ $# -gt 0 ]; do
@@ -31,7 +31,7 @@ case "$repo" in
     ;;
 esac
 EOF
-    chmod +x "$TEST_TMPDIR/list-ready-issues.sh"
+    chmod +x "$TEST_TMPDIR/autospec"
 }
 
 write_fleet_config() {
@@ -71,7 +71,7 @@ YAML
     run bash "$FLEET_RUN" --dry-run --once \
         --config "$TEST_TMPDIR/fleet.yml" \
         --node-config "$TEST_TMPDIR/fleet-node.yml" \
-        --list-ready-bin "$TEST_TMPDIR/list-ready-issues.sh"
+        --queue-bin "$TEST_TMPDIR/autospec"
 
     [ "$status" -eq 0 ]
     [[ "$output" == *"/autospec-run --profile qwen3-32b-laptop"* ]]
@@ -87,7 +87,7 @@ YAML
     run bash "$FLEET_RUN" --dry-run --once \
         --config "$TEST_TMPDIR/fleet.yml" \
         --node-config "$TEST_TMPDIR/fleet-node.yml" \
-        --list-ready-bin "$TEST_TMPDIR/list-ready-issues.sh"
+        --queue-bin "$TEST_TMPDIR/autospec"
 
     [ "$status" -eq 0 ]
     count="$(printf '%s\n' "$output" | grep -c '/autospec-run --profile')"
@@ -108,7 +108,7 @@ YAML
     run bash "$FLEET_RUN" --dry-run --once \
         --config "$TEST_TMPDIR/fleet.yml" \
         --node-config "$TEST_TMPDIR/fleet-node.yml" \
-        --list-ready-bin "$TEST_TMPDIR/list-ready-issues.sh"
+        --queue-bin "$TEST_TMPDIR/autospec"
 
     [ "$status" -eq 0 ]
     [ -z "$output" ]

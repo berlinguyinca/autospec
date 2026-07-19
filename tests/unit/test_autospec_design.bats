@@ -156,22 +156,22 @@ teardown() {
 # ---- validate.sh wiring (issue #573) -------------------------------------
 
 @test "validate.sh: check_startup_preflight enumerates autospec-design" {
-    sed -n '/^check_startup_preflight()/,/^}/p' "$REPO_ROOT/scripts/validate.sh" \
+    sed -n '/^check_startup_preflight()/,/^}/p' "$REPO_ROOT/autospec validate" \
         | grep -q 'autospec-design'
 }
 
 @test "validate.sh: check_codex_skills_install enumerates autospec-design" {
-    sed -n '/^check_codex_skills_install()/,/^}/p' "$REPO_ROOT/scripts/validate.sh" \
+    sed -n '/^check_codex_skills_install()/,/^}/p' "$REPO_ROOT/autospec validate" \
         | grep -q 'autospec-design'
 }
 
 @test "validate.sh: check_shared_script_install enumerates autospec-design" {
-    sed -n '/^check_shared_script_install()/,/^}/p' "$REPO_ROOT/scripts/validate.sh" \
+    sed -n '/^check_shared_script_install()/,/^}/p' "$REPO_ROOT/autospec validate" \
         | grep -q 'autospec-design'
 }
 
 @test "validate.sh: check_subagent_model_tier has autospec-design case branch with expected_a=2 expected_b=0" {
-    block="$(sed -n '/^check_subagent_model_tier()/,/^}/p' "$REPO_ROOT/scripts/validate.sh")"
+    block="$(sed -n '/^check_subagent_model_tier()/,/^}/p' "$REPO_ROOT/autospec validate")"
     # Capture from "autospec-design)" up to and including the ";;" terminator.
     case_body="$(printf '%s\n' "$block" \
         | awk '/autospec-design)/{f=1} f{print; if (/;;/) exit}')"
@@ -181,12 +181,12 @@ teardown() {
 }
 
 @test "validate.sh: autospec-design appears in at least 4 hardcoded skill enumerations" {
-    count="$(grep -c 'autospec-design' "$REPO_ROOT/scripts/validate.sh")"
+    count="$(grep -c 'autospec-design' "$REPO_ROOT/autospec validate")"
     [ "$count" -ge 4 ]
 }
 
-@test "validate.sh: bash scripts/validate.sh exits 0 against current tree" {
-    run bash "$REPO_ROOT/scripts/validate.sh"
+@test "validate.sh: autospec validate exits 0 against current tree" {
+    run bash "$REPO_ROOT/autospec validate"
     [ "$status" -eq 0 ]
 }
 

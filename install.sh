@@ -14,7 +14,7 @@
 #   ./install.sh --help                          # show this help
 #
 # Flags:
-#   --skill   one of: autospec | autospec-release | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | autospec-design | autospec-fleet | autospec-qa | autospec-playwright | all
+#   --skill   one of: autospec | autospec-release | autospec-split | autospec-define | autospec-run | autospec-review | autospec-classify | autospec-listen | autospec-story | autospec-stop | autospec-sweep | autospec-design | autospec-fleet | autospec-qa | autospec-playwright | autospec-db-doctor | all
 #             (default: all)
 #   --harness one of: claude | opencode | codex | all
 #             (default: all)
@@ -23,8 +23,11 @@
 #
 # Honors:
 #   AUTOSPEC_NO_STAR_PROMPT=1  skip the optional GitHub star prompt.
-#   AUTOSPEC_SKIP_SYSTEM_TOOLS=1  skip best-effort CLI dependency installs.
+#   AUTOSPEC_NO_DB_PROMPT=1  skip the optional autospec-db prompt.
+#   AUTOSPEC_INSTALL_DB=1|0  force install/update or skip the optional autospec-db module.
+#   AUTOSPEC_SKIP_SYSTEM_TOOLS=1  skip CLI dependency install attempts (verification still runs).
 #   AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1  skip peer ecosystem bootstrap.
+#   AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1  skip claude/codex/opencode runtime aliases.
 #
 # Exits non-zero on any sub-installer failure; reports per-pair status.
 
@@ -46,10 +49,16 @@ SUPERPOWERS_REMOTE="${SUPERPOWERS_REMOTE:-https://github.com/obra/superpowers.gi
 SUPERPOWERS_CODEX_SKILLS_DIR="${SUPERPOWERS_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
 SUPERPOWERS_OPENCODE_PLUGIN="${SUPERPOWERS_OPENCODE_PLUGIN:-superpowers@git+https://github.com/obra/superpowers.git}"
 OPENCODE_CONFIG_ROOT="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
-AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-git bash curl jq yq gh node npm bun bats codex claude opencode omx omc oh-my-opencode mempalace ajv}"
+AUTOSPEC_REQUIRED_SYSTEM_TOOLS="${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-git bash curl cargo python3 gh jq}"
+AUTOSPEC_HARNESS_TOOLS="${AUTOSPEC_HARNESS_TOOLS:-codex claude opencode}"
+AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-yq node npm bun bats omx omc oh-my-opencode mempalace ajv}"
 OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"
 OH_MY_OPENCODE_PACKAGE="${OH_MY_OPENCODE_PACKAGE:-oh-my-opencode}"
 OH_MY_CLAUDE_PACKAGE="${OH_MY_CLAUDE_PACKAGE:-oh-my-claude-sisyphus}"
+ENSURE_TOOL_SCRIPT="$REPO_ROOT/skills/autospec-shared/scripts/ensure-tool.sh"
+DEPENDENCIES_PRESENT=""
+DEPENDENCIES_INSTALLED=""
+DEPENDENCIES_OPTIONAL_MISSING=""
 
 # Auto-discover skills from the repo by walking skills/*/install.sh. Earlier
 # this was a hardcoded list, which silently dropped any new skill that didn't
@@ -88,6 +97,391 @@ run_or_report() {
         info "$description"
         "$@"
     fi
+}
+
+ensure_autospec_bin_path() {
+    autospec_bin_dir="$HOME/.autospec/bin"
+    autospec_env_file="$HOME/.autospec/env"
+    autospec_env_line='. "$HOME/.autospec/env"'
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] ensure_autospec_bin_path: would create $autospec_bin_dir and $autospec_env_file"
+        info "[dry-run] ensure_autospec_bin_path: would source $autospec_env_file from ~/.zshrc and ~/.bashrc"
+        return 0
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    cat > "$autospec_env_file" <<'EOF'
+# autospec runtime command path
+AUTOSPEC_BIN_DIR="$HOME/.autospec/bin"
+case ":$PATH:" in
+    *":$AUTOSPEC_BIN_DIR:"*) ;;
+    *) export PATH="$AUTOSPEC_BIN_DIR:$PATH" ;;
+esac
+
+# autospec-db telemetry: guarded db.env source (absent file = no-op) plus
+# yaml-derived plumbing envs from the .autospec/autospec.yml `telemetry:`
+# block (docs/contracts/autospec-events-v1.md §Configuration surface).
+# A pre-set env always wins over the yaml-derived value.
+[ -f "$HOME/.autospec/db.env" ] && . "$HOME/.autospec/db.env"
+_autospec_telemetry_cfg="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/telemetry-config.sh"
+if [ -f "$_autospec_telemetry_cfg" ]; then
+    if [ -z "${AUTOSPEC_DB_DISABLE:-}" ]; then
+        _autospec_telemetry_enabled="$(bash "$_autospec_telemetry_cfg" --key enabled 2>/dev/null || printf 'true')"
+        [ "$_autospec_telemetry_enabled" = "false" ] && export AUTOSPEC_DB_DISABLE=1
+        unset _autospec_telemetry_enabled
+    fi
+    export AUTOSPEC_DB_HOST_LABEL="$(bash "$_autospec_telemetry_cfg" --key host_label 2>/dev/null || printf '')"
+    export AUTOSPEC_DB_SPOOL_MAX_BYTES="$(bash "$_autospec_telemetry_cfg" --key spool_max_bytes 2>/dev/null || printf '10485760')"
+fi
+unset _autospec_telemetry_cfg
+EOF
+
+    ensure_line_in_file "$HOME/.zshrc" "$autospec_env_line"
+    ensure_line_in_file "$HOME/.bashrc" "$autospec_env_line"
+    info "ensure_autospec_bin_path: $autospec_bin_dir is sourced via ~/.autospec/env"
+}
+
+write_autonomous_operator_wrapper() {
+    target="$1"
+    subcommand="$2"
+    rust_subcommand="$subcommand"
+
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -eu'
+        case "$subcommand" in
+            ""|start|status|list|timeline|monitor|supervise|logs|watch|cleanup|stop|restart)
+                printf '%s\n' 'if command -v autospec >/dev/null 2>&1; then'
+                if [ -n "$rust_subcommand" ]; then
+                    printf '%s\n' '    exec autospec autonomous '"$rust_subcommand"' "$@"'
+                else
+                    printf '%s\n' '    exec autospec autonomous "$@"'
+                fi
+                printf '%s\n' 'fi'
+                ;;
+        esac
+        if [ -n "$subcommand" ]; then
+            printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh" '"$subcommand"' "$@"'
+        else
+            printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh" "$@"'
+        fi
+    } > "$target"
+    chmod +x "$target"
+}
+
+autonomous_operator_wrapper_exec_target() {
+    wrapper="$1"
+    [ -f "$wrapper" ] || return 1
+    sed -n 's/^exec "\([^"]*\)".*/\1/p; s/^exec \([^ "$][^ ]*\).*/\1/p' "$wrapper" | head -n 1
+}
+
+autonomous_operator_wrapper_needs_heal() {
+    wrapper="$1"
+    exec_target="$(autonomous_operator_wrapper_exec_target "$wrapper" 2>/dev/null || true)"
+    [ -n "$exec_target" ] || return 1
+    case "$exec_target" in
+        /*)
+            case "$exec_target" in
+                "$HOME/.autospec/"*)
+                    [ -e "$exec_target" ] || return 0
+                    ;;
+                *)
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
+heal_autonomous_operator_wrappers() {
+    autospec_bin_dir="$HOME/.autospec/bin"
+    [ -d "$autospec_bin_dir" ] || return 0
+
+    healed=0
+    for command in autospec-autonomous autospec-autonomous-start autospec-autonomous-status autospec-autonomous-list autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-supervise autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-cleanup autospec-autonomous-stop autospec-autonomous-restart; do
+        target="$autospec_bin_dir/$command"
+        [ -f "$target" ] || continue
+        if autonomous_operator_wrapper_needs_heal "$target"; then
+            old_target="$(autonomous_operator_wrapper_exec_target "$target" 2>/dev/null || true)"
+            subcommand="${command#autospec-autonomous-}"
+            if [ "$subcommand" = "$command" ]; then
+                subcommand=""
+            fi
+            write_autonomous_operator_wrapper "$target" "$subcommand"
+            info "heal_autonomous_operator_wrappers: healed $target (old exec target: ${old_target:-unknown})"
+            healed=$((healed + 1))
+        fi
+    done
+
+    if [ "$healed" -gt 0 ]; then
+        info "heal_autonomous_operator_wrappers: healed $healed autonomous wrapper(s)"
+    fi
+}
+
+install_autonomous_operator_commands() {
+    autospec_bin_dir="$HOME/.autospec/bin"
+    autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+    launcher="$autospec_scripts_dir/autospec-autonomous.sh"
+    canonical_launcher="$HOME/.autospec/scripts/autospec-autonomous.sh"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] install_autonomous_operator_commands: would install autospec-autonomous command wrappers in $autospec_bin_dir"
+        return 0
+    fi
+
+    case "$autospec_scripts_dir/" in
+        "$HOME/.autospec/"*) ;;
+        *)
+            warn "install_autonomous_operator_commands: ignoring non-persistent AUTOSPEC_SCRIPTS_DIR=$autospec_scripts_dir for wrapper exec target; wrappers resolve at runtime via \${AUTOSPEC_SCRIPTS_DIR:-\$HOME/.autospec/scripts}"
+            launcher="$canonical_launcher"
+            ;;
+    esac
+
+    if [ ! -f "$launcher" ]; then
+        warn "install_autonomous_operator_commands: launcher not present yet at $launcher; writing runtime-resolving wrappers anyway"
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    heal_autonomous_operator_wrappers
+    [ -f "$launcher" ] && chmod +x "$launcher"
+    for command in autospec-autonomous autospec-autonomous-start autospec-autonomous-status autospec-autonomous-list autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-supervise autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-cleanup autospec-autonomous-stop autospec-autonomous-restart; do
+        target="$autospec_bin_dir/$command"
+        subcommand="${command#autospec-autonomous-}"
+        if [ "$subcommand" = "$command" ]; then
+            subcommand=""
+        fi
+        write_autonomous_operator_wrapper "$target" "$subcommand"
+    done
+    info "install_autonomous_operator_commands: installed autonomous command wrappers in $autospec_bin_dir"
+}
+
+install_autospec_runtime_binary() {
+    cargo_target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+    runtime_source="$cargo_target_dir/release/autospec"
+    runtime_target="$HOME/.autospec/bin/autospec"
+    autospec_bin_dir="$HOME/.autospec/bin"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] install_autospec_runtime_binary: cargo build --release -p autospec-cli (from $REPO_ROOT)"
+        info "[dry-run] install_autospec_runtime_binary: install $runtime_source -> $HOME/.autospec/bin/autospec"
+        return 0
+    fi
+
+    info "install_autospec_runtime_binary: building autospec-cli release binary"
+    # Test and automation callers often override HOME to isolate install state.
+    # cargo is normally a rustup shim under the invoking user's ~/.cargo, so
+    # preserve that discovered toolchain location when HOME no longer points
+    # to the account that owns it. Explicit CARGO_HOME/RUSTUP_HOME always win.
+    if [ -z "${CARGO_HOME:-}" ] || [ -z "${RUSTUP_HOME:-}" ]; then
+        cargo_bin="$(command -v cargo 2>/dev/null || true)"
+        case "$cargo_bin" in
+            */.cargo/bin/cargo)
+                rustup_owner_home="${cargo_bin%/.cargo/bin/cargo}"
+                if [ -z "${CARGO_HOME:-}" ] && [ -d "$rustup_owner_home/.cargo" ]; then
+                    CARGO_HOME="$rustup_owner_home/.cargo"
+                    export CARGO_HOME
+                fi
+                if [ -z "${RUSTUP_HOME:-}" ] && [ -d "$rustup_owner_home/.rustup" ]; then
+                    RUSTUP_HOME="$rustup_owner_home/.rustup"
+                    export RUSTUP_HOME
+                fi
+                ;;
+        esac
+    fi
+    (
+        cd "$REPO_ROOT"
+        cargo build --release -p autospec-cli
+    )
+    if [ ! -f "$runtime_source" ]; then
+        err "install_autospec_runtime_binary: build did not produce $runtime_source"
+        return 1
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    runtime_temporary="$(mktemp "$autospec_bin_dir/.autospec.XXXXXX")"
+    if ! cp "$runtime_source" "$runtime_temporary"; then
+        rm -f "$runtime_temporary"
+        return 1
+    fi
+    if ! chmod +x "$runtime_temporary"; then
+        rm -f "$runtime_temporary"
+        return 1
+    fi
+    if ! mv "$runtime_temporary" "$runtime_target"; then
+        rm -f "$runtime_temporary"
+        return 1
+    fi
+    info "install_autospec_runtime_binary: installed $runtime_target"
+}
+
+write_agent_env_wrapper() {
+    target="$1"
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'set -eu'
+        printf '%s\n' 'exec "${AUTOSPEC_BIN:-$HOME/.autospec/bin/autospec}" runtime env "$@"'
+    } > "$target"
+    chmod +x "$target"
+}
+
+install_agent_env_commands() {
+    autospec_bin_dir="$HOME/.autospec/bin"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] install_agent_env_commands: would install agent-env/autospec-env wrappers in $autospec_bin_dir"
+        return 0
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    for command in agent-env autospec-env; do
+        write_agent_env_wrapper "$autospec_bin_dir/$command"
+    done
+    info "install_agent_env_commands: installed agent-env/autospec-env wrappers in $autospec_bin_dir"
+}
+
+_AGENT_ENV_ALIAS_MARKER_START="# >>> autospec isolated runtime aliases >>>"
+_AGENT_ENV_ALIAS_MARKER_END="# <<< autospec isolated runtime aliases <<<"
+
+generated_harness_section() {
+    format="$1"
+    section="$2"
+    generated="$REPO_ROOT/templates/generated/harness-runtime-aliases.$format"
+    awk -v start="# BEGIN AUTOSPEC $section" -v end="# END AUTOSPEC $section" '
+        $0 == start { capture=1; next }
+        $0 == end { exit }
+        capture { print }
+    ' "$generated"
+}
+
+agent_env_alias_block() {
+    format="${1:-sh}"
+    cat <<EOF
+$_AGENT_ENV_ALIAS_MARKER_START
+# Wrap agent harnesses in manifest-driven isolated runtime environments.
+# Bypass for one command with: AUTOSPEC_ENV_DISABLE=1 claude
+if command -v autospec-env >/dev/null 2>&1; then
+EOF
+    generated_harness_section "$format" "RUNTIME ALIASES"
+    cat <<EOF
+fi
+$_AGENT_ENV_ALIAS_MARKER_END
+EOF
+}
+
+install_agent_env_alias_block() {
+    rc="$1"
+    format="${2:-sh}"
+    block_file="$(mktemp)"
+    tmp_file="$(mktemp)"
+    agent_env_alias_block "$format" > "$block_file"
+    [ -f "$rc" ] || touch "$rc"
+    if grep -qF "$_AGENT_ENV_ALIAS_MARKER_START" "$rc"; then
+        awk -v s="$_AGENT_ENV_ALIAS_MARKER_START" -v e="$_AGENT_ENV_ALIAS_MARKER_END" -v bf="$block_file" '
+            $0 == s {
+                while ((getline line < bf) > 0) print line
+                close(bf)
+                in_block=1
+                next
+            }
+            $0 == e { in_block=0; next }
+            !in_block { print }
+            END { if (in_block) print e }
+        ' "$rc" > "$tmp_file"
+    else
+        cat "$rc" > "$tmp_file"
+        {
+            [ -s "$tmp_file" ] && echo ""
+            cat "$block_file"
+        } >> "$tmp_file"
+    fi
+    mv "$tmp_file" "$rc"
+    rm -f "$block_file"
+}
+
+install_agent_env_aliases() {
+    if [ "${AUTOSPEC_SKIP_AGENT_ENV_ALIASES:-0}" = "1" ]; then
+        info "install_agent_env_aliases: skipped by AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1"
+        return 0
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] install_agent_env_aliases: would prompt before registering claude/codex/opencode aliases in ~/.bashrc and ~/.zshrc"
+        return 0
+    fi
+
+    answer=""
+    info ""
+    info "autospec isolated runtime aliases"
+    info "  Registers claude/codex/opencode shell aliases that wrap each harness in autospec-env session."
+    info "  Claude will run with --dangerously-skip-permissions; Codex will run with --yolo."
+    info "  Bypass one command with: AUTOSPEC_ENV_DISABLE=1 claude"
+    if { exec 3<>/dev/tty; } 2>/dev/null; then
+        printf '  Install isolated runtime aliases? [n/Y] ' >&3
+        read -r answer <&3 || { exec 3>&-; return 0; }
+        exec 3>&-
+    else
+        [ -t 0 ] && [ -t 1 ] || {
+            info "install_agent_env_aliases: no TTY available; skipping alias registration"
+            return 0
+        }
+        printf '  Install isolated runtime aliases? [n/Y] '
+        read -r answer || return 0
+    fi
+
+    case "$answer" in
+        n|N|no|NO|No)
+            info "install_agent_env_aliases: skipped by user"
+            return 0
+            ;;
+    esac
+
+    install_agent_env_alias_block "$HOME/.bashrc"
+    install_agent_env_alias_block "$HOME/.zshrc"
+    info "install_agent_env_aliases: registered claude/codex/opencode runtime aliases in ~/.bashrc and ~/.zshrc"
+}
+
+write_scanner_shim() {
+    target="$1"
+    skill="$2"
+
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' '# autospec premerge-gate scanner shim (installed by install.sh).'
+        printf '%s\n' '# The gate (autonomous-premerge-gate.sh) resolves this scanner with'
+        printf '%s\n' '# `command -v`; the real scanner is a harness skill, not a PATH command, so'
+        printf '%s\n' '# this shim runs it headlessly via omx (parity with the drain wrapper) and'
+        printf '%s\n' '# streams findings to stdout. It deliberately does NOT set'
+        printf '%s\n' '# AUTOSPEC_*_PRESENT_OVERRIDE, which would fake presence and skip the scan.'
+        printf '%s\n' 'set -eu'
+        printf '%s\n' 'REPO_DIR="${AUTOSPEC_REPO_DIR:-$PWD}"'
+        printf '%s\n' 'if ! command -v omx >/dev/null 2>&1; then'
+        printf '    echo "%s: omx not found on PATH; cannot invoke the %s skill" >&2\n' "$skill" "$skill"
+        printf '%s\n' '    exit 2'
+        printf '%s\n' 'fi'
+        # omx exec wraps `codex exec [OPTIONS] [PROMPT]`: fold any gate args (e.g.
+        # --branch <b>) INTO the single prompt so codex does not reject them as
+        # unknown options (which would silently empty the scan).
+        printf "PROMPT='\$%s'\n" "$skill"
+        printf '%s\n' 'if [ "$#" -gt 0 ]; then'
+        printf '%s\n' '    PROMPT="$PROMPT $*"'
+        printf '%s\n' 'fi'
+        printf '%s\n' 'exec omx exec --cd "$REPO_DIR" --dangerously-bypass-approvals-and-sandbox "$PROMPT"'
+    } > "$target"
+    chmod +x "$target"
+}
+
+install_scanner_shims() {
+    autospec_bin_dir="$HOME/.autospec/bin"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] install_scanner_shims: would install autospec-qa/autospec-secaudit premerge-gate shims in $autospec_bin_dir"
+        return 0
+    fi
+
+    mkdir -p "$autospec_bin_dir"
+    write_scanner_shim "$autospec_bin_dir/autospec-qa" "autospec-qa"
+    write_scanner_shim "$autospec_bin_dir/autospec-secaudit" "autospec-secaudit"
+    info "install_scanner_shims: installed premerge-gate scanner shims (autospec-qa, autospec-secaudit) in $autospec_bin_dir"
 }
 
 offer_gitignore() {
@@ -162,23 +556,194 @@ check_codex() {
     return 0
 }
 
-ensure_system_tools() {
-    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" = "1" ]; then
-        info "ensure_system_tools: skipped by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
-        return 0
-    fi
-    ensure_tool="$REPO_ROOT/skills/autospec-shared/scripts/ensure-tool.sh"
-    if [ ! -f "$ensure_tool" ]; then
-        warn "ensure_system_tools: $ensure_tool missing; skipping"
-        return 0
-    fi
-    for tool in $AUTOSPEC_SYSTEM_TOOLS; do
-        if [ "$DRY_RUN" -eq 1 ]; then
-            info "[dry-run] ensure_system_tools: would ensure $tool"
-        else
-            bash "$ensure_tool" "$tool" || true
+record_dependency() {
+    dependency_bucket="$1"
+    dependency_name="$2"
+    case "$dependency_bucket" in
+        DEPENDENCIES_PRESENT) dependency_values="$DEPENDENCIES_PRESENT" ;;
+        DEPENDENCIES_INSTALLED) dependency_values="$DEPENDENCIES_INSTALLED" ;;
+        DEPENDENCIES_OPTIONAL_MISSING) dependency_values="$DEPENDENCIES_OPTIONAL_MISSING" ;;
+        *) err "unknown dependency result bucket: $dependency_bucket"; return 1 ;;
+    esac
+    case " $dependency_values " in
+        *" $dependency_name "*) return 0 ;;
+    esac
+    dependency_values="${dependency_values:+$dependency_values }$dependency_name"
+    case "$dependency_bucket" in
+        DEPENDENCIES_PRESENT) DEPENDENCIES_PRESENT="$dependency_values" ;;
+        DEPENDENCIES_INSTALLED) DEPENDENCIES_INSTALLED="$dependency_values" ;;
+        DEPENDENCIES_OPTIONAL_MISSING) DEPENDENCIES_OPTIONAL_MISSING="$dependency_values" ;;
+    esac
+}
+
+refresh_dependency_path() {
+    windows_path=""
+    windows_shell=""
+    for windows_shell_candidate in powershell.exe pwsh.exe; do
+        if command_present "$windows_shell_candidate"; then
+            windows_shell="$windows_shell_candidate"
+            break
         fi
     done
+    if [ -n "$windows_shell" ] && command_present cygpath; then
+        windows_path="$($windows_shell -NoProfile -NonInteractive -Command \
+            '$machine = [Environment]::GetEnvironmentVariable("Path", "Machine"); $user = [Environment]::GetEnvironmentVariable("Path", "User"); @($machine, $user) -join ";"' \
+            2>/dev/null | tr -d '\r' || true)"
+        if [ -n "$windows_path" ]; then
+            windows_unix_path="$(cygpath --unix --path "$windows_path" 2>/dev/null || true)"
+            if [ -n "$windows_unix_path" ]; then
+                PATH="$PATH:$windows_unix_path"
+            fi
+        fi
+    fi
+    for dependency_bin in "$HOME/.cargo/bin" "$HOME/.autospec/bin"; do
+        [ -d "$dependency_bin" ] || continue
+        case ":$PATH:" in
+            *":$dependency_bin:"*) ;;
+            *) PATH="$dependency_bin:$PATH" ;;
+        esac
+    done
+    export PATH
+    hash -r 2>/dev/null || true
+}
+
+ensure_python3_alias() {
+    command_present python3 && return 0
+    command_present python || return 0
+    python -c 'import sys; raise SystemExit(sys.version_info.major != 3)' >/dev/null 2>&1 || return 0
+
+    python3_alias_dir="$HOME/.autospec/bin"
+    python3_alias="$python3_alias_dir/python3"
+    mkdir -p "$python3_alias_dir"
+    python3_alias_tmp="$(mktemp "$python3_alias_dir/.python3.XXXXXX")"
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'exec python "$@"'
+    } > "$python3_alias_tmp"
+    chmod +x "$python3_alias_tmp"
+    mv "$python3_alias_tmp" "$python3_alias"
+    refresh_dependency_path
+}
+
+attempt_tool_install() {
+    tool="$1"
+    missing_bucket="$2"
+
+    if command_present "$tool"; then
+        record_dependency DEPENDENCIES_PRESENT "$tool"
+        return 0
+    fi
+    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" != "1" ] && [ -f "$ENSURE_TOOL_SCRIPT" ]; then
+        bash "$ENSURE_TOOL_SCRIPT" "$tool" || true
+        refresh_dependency_path
+        if [ "$tool" = "python3" ]; then
+            ensure_python3_alias
+        fi
+    fi
+    if command_present "$tool"; then
+        record_dependency DEPENDENCIES_INSTALLED "$tool"
+    elif [ -n "$missing_bucket" ]; then
+        record_dependency "$missing_bucket" "$tool"
+    fi
+}
+
+report_dependency_install_context() {
+    package_manager=""
+    for candidate in brew apt-get dnf yum pacman apk winget choco scoop; do
+        if command_present "$candidate"; then
+            package_manager="$candidate"
+            break
+        fi
+    done
+    if [ -z "$package_manager" ]; then
+        err "no supported package manager was available (brew/apt-get/dnf/yum/pacman/apk/winget/choco/scoop)"
+        return 0
+    fi
+
+    case "$package_manager" in
+        apt-get|dnf|yum|pacman|apk)
+            if [ "$(id -u 2>/dev/null || printf '1')" != "0" ] && ! command_present sudo; then
+                err "$package_manager needs root privileges, but sudo is unavailable"
+                return 0
+            fi
+            ;;
+    esac
+    err "automatic installation through $package_manager finished, but required commands are still unavailable"
+    err "check package repositories, network access, and privilege prompts above"
+}
+
+verify_required_system_tools() {
+    missing_required=""
+    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
+        if ! command_present "$tool"; then
+            missing_required="${missing_required:+$missing_required }$tool"
+        fi
+    done
+    if [ -z "$missing_required" ]; then
+        return 0
+    fi
+
+    err "required missing: $missing_required"
+    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" = "1" ]; then
+        err "automatic installation was disabled by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
+    elif [ ! -f "$ENSURE_TOOL_SCRIPT" ]; then
+        err "dependency installer is missing: $ENSURE_TOOL_SCRIPT"
+    else
+        report_dependency_install_context
+    fi
+    err "install the missing commands and rerun: bash install.sh --skill $SKILL_ARG --harness $HARNESS_ARG"
+    return 1
+}
+
+ensure_required_system_tools() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] ensure_required_system_tools: would ensure and verify $AUTOSPEC_REQUIRED_SYSTEM_TOOLS"
+        return 0
+    fi
+    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
+        attempt_tool_install "$tool" ""
+    done
+    verify_required_system_tools
+}
+
+ensure_system_tools() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        for tool in $AUTOSPEC_SYSTEM_TOOLS $AUTOSPEC_HARNESS_TOOLS; do
+            info "[dry-run] ensure_system_tools: would ensure $tool"
+        done
+        return 0
+    fi
+    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" = "1" ]; then
+        info "ensure_system_tools: install attempts skipped by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
+    elif [ ! -f "$ENSURE_TOOL_SCRIPT" ]; then
+        warn "ensure_system_tools: $ENSURE_TOOL_SCRIPT missing; recording unavailable optional tools"
+    fi
+    for tool in $AUTOSPEC_SYSTEM_TOOLS $AUTOSPEC_HARNESS_TOOLS; do
+        attempt_tool_install "$tool" DEPENDENCIES_OPTIONAL_MISSING
+    done
+}
+
+verify_harness_tools() {
+    [ "$DRY_RUN" -eq 1 ] && return 0
+    for tool in $AUTOSPEC_HARNESS_TOOLS; do
+        command_present "$tool" && return 0
+    done
+    err "required harness missing: $AUTOSPEC_HARNESS_TOOLS"
+    err "install at least one supported harness and rerun: bash install.sh --skill $SKILL_ARG --harness $HARNESS_ARG"
+    return 1
+}
+
+print_dependency_summary() {
+    info ""
+    info "Dependency summary:"
+    info "  present:          ${DEPENDENCIES_PRESENT:-none}"
+    info "  installed:        ${DEPENDENCIES_INSTALLED:-none}"
+    info "  optional missing: ${DEPENDENCIES_OPTIONAL_MISSING:-none}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "  required missing: not verified (dry-run)"
+    else
+        info "  required missing: none"
+    fi
 }
 
 install_npm_ecosystem_package() {
@@ -427,6 +992,98 @@ bootstrap_turbo() {
     fi
 }
 
+install_db_module() {
+    db_installer_tmp="$(mktemp -t autospec-db-install.XXXXXX)"
+    if curl -fsSL https://raw.githubusercontent.com/berlinguyinca/autospec-db/main/install.sh -o "$db_installer_tmp" \
+            && bash "$db_installer_tmp"; then
+        rm -f "$db_installer_tmp"
+        info "autospec-db installer completed."
+    else
+        rm -f "$db_installer_tmp"
+        warn "autospec-db installer failed; continuing"
+    fi
+}
+
+maybe_prompt_db_module() {
+    # Keep scripted installs quiet: no prompt during CI, dry-run, non-TTY, or opt-out.
+    [ "$DRY_RUN" -eq 0 ] || return 0
+
+    if [ "${AUTOSPEC_INSTALL_DB:-}" = "0" ]; then
+        return 0
+    fi
+
+    autospec_db_env="$HOME/.autospec/db.env"
+    autospec_db_conf="$HOME/.autospec/db.conf"
+    autospec_db_dir="$HOME/.autospec/autospec-db"
+
+    autospec_db_installed=0
+    if [ -f "$autospec_db_env" ] || [ -d "$autospec_db_dir" ]; then
+        autospec_db_installed=1
+    fi
+
+    if [ "${AUTOSPEC_INSTALL_DB:-}" = "1" ]; then
+        install_db_module
+        return 0
+    fi
+
+    # yaml-first gate (#1776 resolver): telemetry.install.db_module in
+    # .autospec/autospec.yml, with AUTOSPEC_INSTALL_DB_MODULE as the
+    # resolver's own env override and legacy AUTOSPEC_INSTALL_DB (checked
+    # above) taking precedence over both. Built-in default is "prompt".
+    # Resolver script absent -> byte-identical legacy behavior (fall
+    # through to the installed/prompt logic below). AUTOSPEC_TELEMETRY_CONFIG_SH
+    # overrides the resolver path (test hatch only).
+    db_module_telemetry_config_sh="${AUTOSPEC_TELEMETRY_CONFIG_SH:-$REPO_ROOT/skills/autospec-shared/scripts/telemetry-config.sh}"
+    if [ -f "$db_module_telemetry_config_sh" ]; then
+        db_module_mode="$(bash "$db_module_telemetry_config_sh" --key install.db_module 2>/dev/null || printf 'prompt')"
+        case "$db_module_mode" in
+            never)
+                return 0
+                ;;
+            always)
+                install_db_module
+                return 0
+                ;;
+        esac
+    fi
+
+    if [ "$autospec_db_installed" -eq 1 ]; then
+        install_db_module
+        return 0
+    fi
+
+    if [ -f "$autospec_db_conf" ] && [ ! -f "$autospec_db_env" ]; then
+        info "autospec-db configuration is present at ~/.autospec/db.conf but ~/.autospec/db.env is missing. Finish configuration, then re-run the autospec-db installer."
+        return 0
+    fi
+
+    [ "$UPDATE" -eq 0 ] || return 0
+    [ "${AUTOSPEC_NO_DB_PROMPT:-0}" != "1" ] || return 0
+    [ "${CI:-}" = "" ] || return 0
+
+    answer=""
+    if { exec 3<>/dev/tty; } 2>/dev/null; then
+        info ""
+        printf 'Install the optional database telemetry module (autospec-db)? [y/N] ' >&3
+        read -r answer <&3 || { exec 3>&-; return 0; }
+        exec 3>&-
+    else
+        [ -t 0 ] && [ -t 1 ] || return 0
+        info ""
+        printf 'Install the optional database telemetry module (autospec-db)? [y/N] '
+        read -r answer || return 0
+    fi
+
+    case "$answer" in
+        y|Y|yes|YES|Yes)
+            install_db_module
+            ;;
+        *)
+            info "Skipping optional autospec-db telemetry module."
+            ;;
+    esac
+}
+
 maybe_prompt_star() {
     # Keep scripted installs quiet: no prompt during updates, CI, or when opted out.
     [ "$UPDATE" -eq 0 ] || return 0
@@ -584,13 +1241,12 @@ install_rollover_block() {
     # PreCompact hook can `python3 -m autospec_context_monitor`.
     install_context_monitor_pkg
 
-    local bash_block
+    local bash_block bash_wrappers
+    bash_wrappers="$(generated_harness_section sh "ROLLOVER WRAPPERS")"
     bash_block="$_ROLLOVER_MARKER_START
 export AUTOSPEC_AUTO_ROLLOVER=1
 if [ \"\${AUTOSPEC_AUTO_ROLLOVER:-0}\" = \"1\" ] && command -v autospec-session >/dev/null 2>&1; then
-    claude()   { autospec-session claude \"\$@\"; }
-    codex()    { autospec-session codex \"\$@\"; }
-    opencode() { autospec-session opencode \"\$@\"; }
+$bash_wrappers
 fi
 $_ROLLOVER_MARKER_END"
 
@@ -610,12 +1266,12 @@ $_ROLLOVER_MARKER_END"
         if grep -qF "$_ROLLOVER_MARKER_START" "$fish_config"; then
             info "  auto-rollover block already present in $fish_config (skipping)"
         else
+            local fish_wrappers
+            fish_wrappers="$(generated_harness_section fish "ROLLOVER WRAPPERS")"
             printf '\n%s\n' "$_ROLLOVER_MARKER_START
 set -x AUTOSPEC_AUTO_ROLLOVER 1
 if test \"\$AUTOSPEC_AUTO_ROLLOVER\" = \"1\"; and command -v autospec-session >/dev/null 2>&1
-    function claude; autospec-session claude \$argv; end
-    function codex; autospec-session codex \$argv; end
-    function opencode; autospec-session opencode \$argv; end
+$fish_wrappers
 end
 $_ROLLOVER_MARKER_END" >> "$fish_config"
             info "  auto-rollover block added to $fish_config"
@@ -769,6 +1425,13 @@ while [ $# -gt 0 ]; do
     shift
 done
 
+# Hook-only setup owns just the Claude configuration file; it must not trigger
+# the full installer or require an available Rust toolchain.
+if [ "$HOOK_MODE_ARG" = "claude" ]; then
+    install_hook_mode_claude
+    exit 0
+fi
+
 # Validate --skill against the auto-discovered ALL_SKILLS list (#705 follow-up).
 # Previously the validator carried its own hardcoded skill names; the
 # discovery from #705 fixed `ALL_SKILLS=` but the validator still rejected
@@ -893,6 +1556,16 @@ copy_repo_scripts() {
             cp "$f" "$autospec_scripts_dir/"
         done
     done
+    # Explicitly remove retired runtime authority on update. A glob copy alone
+    # cannot delete files that disappeared from the checkout, leaving an old
+    # shell safety writer available to installed callers after the Rust cutover.
+    retired_safety_writer="$autospec_scripts_dir/apply-safety-review.sh"
+    if [ -e "$retired_safety_writer" ]; then
+        rm -f "$retired_safety_writer" || {
+            warn "copy_repo_scripts: could not remove retired safety writer"
+            return 1
+        }
+    fi
     # Restore +x on shell scripts and mjs files (cp may strip bits on some platforms).
     find "$autospec_scripts_dir" -maxdepth 1 \( -name '*.sh' -o -name '*.mjs' \) -exec chmod +x {} \;
     info "copy_repo_scripts: copied repo-root scripts to $autospec_scripts_dir/"
@@ -917,13 +1590,13 @@ copy_runtime_skill_scripts() {
     runtime_skill_scripts="\
 skills/autospec-run/scripts/autospec-run-session-lock.sh::autospec-run-session-lock.sh \
 skills/autospec-run/scripts/autospec-run-status.sh::autospec-run-status.sh \
-skills/autospec-run/scripts/claim-issue.sh::claim-issue.sh \
+skills/autospec-run/scripts/invoke-review.sh::invoke-review.sh \
 skills/autospec-run/scripts/fab-completeness.sh::fab-completeness.sh \
 skills/autospec-run/scripts/fab-route.sh::fab-route.sh \
-skills/autospec-run/scripts/list-ready-issues.sh::list-ready-issues.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
-skills/autospec-run/scripts/release-issue.sh::release-issue.sh \
+skills/autospec-run/scripts/run-groom-preflight.sh::run-groom-preflight.sh \
 skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \
+skills/autospec-compose-normalize/scripts/workflow-guard.sh::autospec-compose-normalize-guard.sh \
 skills/autospec-doc/scripts/doc-orchestrator-entry.mjs::doc-orchestrator.mjs \
 skills/autospec-harmonize/scripts/harmonize.sh::harmonize.sh \
 skills/autospec-harmonize/scripts/design-discover.sh::design-discover.sh \
@@ -971,7 +1644,7 @@ skills/autospec-doc/scripts/gen-llms-full.mjs \
 skills/autospec-doc/scripts/verify-examples.mjs"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] copy_runtime_skill_scripts: would copy 10 per-skill runtime scripts to $autospec_scripts_dir/"
+        info "[dry-run] copy_runtime_skill_scripts: would copy 11 per-skill runtime scripts to $autospec_scripts_dir/"
         info "[dry-run] copy_runtime_skill_scripts: would copy autospec-doc module closure to $(dirname "$autospec_scripts_dir")/skills/autospec-doc/scripts/"
         info "[dry-run] copy_runtime_skill_scripts: would mirror shared scripts to $(dirname "$autospec_scripts_dir")/skills/autospec-shared/scripts/"
         return 0
@@ -1110,7 +1783,7 @@ copy_runtime_subdirs() {
     runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] copy_runtime_subdirs: would copy runtime libs + scripts/explore-research/ to $autospec_scripts_dir/"
+        info "[dry-run] copy_runtime_subdirs: would copy runtime libs + harness table + scripts/explore-research/ to $autospec_scripts_dir/"
         return 0
     fi
 
@@ -1125,6 +1798,10 @@ copy_runtime_subdirs() {
         fi
     done
 
+    harness_config_dir="${AUTOSPEC_CONFIG_DIR:-$HOME/.autospec/config}"
+    mkdir -p "$harness_config_dir"
+    cp "$REPO_ROOT/config/harness-runtime-aliases.tsv" "$harness_config_dir/"
+
     if [ -d "$REPO_ROOT/scripts/explore-research" ]; then
         mkdir -p "$autospec_scripts_dir/explore-research"
         cp -R "$REPO_ROOT/scripts/explore-research/." "$autospec_scripts_dir/explore-research/"
@@ -1132,7 +1809,7 @@ copy_runtime_subdirs() {
     else
         warn "copy_runtime_subdirs: $REPO_ROOT/scripts/explore-research not found; skipping"
     fi
-    info "copy_runtime_subdirs: copied runtime libs + explore-research to $autospec_scripts_dir/"
+    info "copy_runtime_subdirs: copied runtime libs + harness table + explore-research to $autospec_scripts_dir/"
 }
 
 # Integration bootstrap: pull autospec (if --update) + turbo, before per-skill installers run.
@@ -1142,7 +1819,15 @@ copy_repo_scripts
 copy_runtime_subdirs
 copy_runtime_skill_scripts
 copy_schemas
+ensure_autospec_bin_path
+ensure_required_system_tools
+install_autonomous_operator_commands
+install_autospec_runtime_binary
+install_agent_env_commands
+install_agent_env_aliases
+install_scanner_shims
 ensure_system_tools
+verify_harness_tools
 bootstrap_peer_ecosystems
 bootstrap_turbo
 check_codex
@@ -1244,6 +1929,7 @@ $_skill_src_dir/codex/prompt.md|$_codex_dir/prompts/$skill.md"
 done
 
 succeeded=$((total - failures))
+print_dependency_summary
 info ""
 info "Suite install summary: $succeeded/$total pairs OK ($failures failed)"
 
@@ -1254,10 +1940,7 @@ if [ "$DISABLE_AUTO_ROLLOVER" -eq 1 ]; then
     remove_rollover_block
     exit 0
 fi
-if [ "$HOOK_MODE_ARG" = "claude" ]; then
-    install_hook_mode_claude
-    exit 0
-fi
 prompt_user_for_auto_rollover
+maybe_prompt_db_module
 maybe_prompt_star
 exit 0

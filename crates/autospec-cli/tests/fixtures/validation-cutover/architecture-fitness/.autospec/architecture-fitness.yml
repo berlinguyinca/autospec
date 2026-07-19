@@ -1,0 +1,4 @@
+fitness_functions:
+  fixture:
+    threshold: 1
+    gate: true

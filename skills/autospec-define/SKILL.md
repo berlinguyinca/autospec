@@ -261,6 +261,22 @@ Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`, then run a
 
 The spec must be implementable end-to-end by an agent reading only the spec.
 
+### Documentation visualization
+
+When the requested work creates or regenerates documentation, the design spec
+MUST require Mermaid diagrams and charts where acceptable. Add a concrete visual
+plan for queues, routers, state machines, data flow, control flow, algorithms,
+architecture boundaries, timelines, ownership relationships, decision spaces,
+roadmaps, or metric trends whenever one of those structures exists in the target
+feature. Select the Mermaid type that fits the explanation: flowchart, sequence
+diagram, state diagram, class/entity diagram, Gantt, timeline, journey, quadrant
+chart, gitGraph, mindmap, block, architecture, Sankey, XY, pie, kanban, or
+another Mermaid-supported diagram type. Prefer Mermaid blocks in Markdown for
+reviewer-visible explanations; use `docs/assets/diagrams/` only when a generated
+asset is needed outside a Markdown page. If no diagram is useful, the spec must
+state `Mermaid: not applicable` with the reason, so omission is explicit rather
+than accidental.
+
 If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
 
 For an existing repo, land the spec via a short-lived PR so CI can validate it.
@@ -381,7 +397,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 >
 > Self-check each issue against the caps **before** calling `gh issue create`. If a cap is violated and a split is not feasible, surface the issue inline (print the over-cap body to the operator) instead of filing it.
 >
-> **Pre-filing lint loop (adaptive, MAX_LINT_RETRIES=5):** For each candidate child body, before calling `gh issue create`, write the body to `/tmp/draft-<slug>.md` and run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/draft-<slug>.md`. If the exit code is non-zero, map each `RULE_ID: <desc>` finding to an actionable directive using the table below, append all directives to the next generation prompt as cumulative context, and regenerate. Repeat up to `MAX_LINT_RETRIES=5` attempts. If attempt 5 still fails, print all 5 drafts plus accumulated findings inline and **skip** that child (do not file); continue to the next child. On pass (exit 0), proceed to `gh issue create` as normal.
+> **Pre-filing lint loop (adaptive, MAX_LINT_RETRIES=5):** For each candidate child body, before calling `gh issue create`, write the body to `/tmp/draft-<slug>.md` and run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/draft-<slug>.md`. If the exit code is non-zero, map each `RULE_ID: <desc>` finding to an actionable directive using the table below, append all directives to the next generation prompt as cumulative context, and regenerate. Repeat up to `MAX_LINT_RETRIES=5` attempts. If attempt 5 still fails, print all 5 drafts plus accumulated findings inline and **skip** that child (do not file); continue to the next child. On pass (exit 0), proceed to the safety loop and only call `gh issue create` after safety passes.
 >
 > | Finding | Directive appended to next prompt |
 > |---|---|
@@ -403,6 +419,17 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > | `BODY_TOO_LONG` | `SHORTEN: body exceeds 400 words; cut prose or split the issue into a \`Depends on\` pair.` |
 > | `OUTLINE_TOO_LONG` | `SHORTEN: \`## Implementation outline\` exceeds 30 lines; compress signatures or split the issue.` |
 > | `UI_SECTIONS_INCOMPLETE` | `ADD: this is a UI feature — include \`## Design reference\`, \`## Interaction states\`, and \`## UX flows\` (all three).` |
+
+> **Pre-filing safety loop (adaptive, MAX_SAFETY_RETRIES=5):** For each candidate child body, after the issue-quality lint passes and before `gh issue create`, run `"${AUTOSPEC_BIN:-autospec}" lint issue safety --title "<candidate title>" /tmp/draft-<slug>.md`. If the exit code is `1` or `2`, append the safety findings to the next generation prompt as cumulative directives:
+>
+> | Finding | Directive appended to next prompt |
+> |---|---|
+> | `SAFETY_BLOCK: production-data-destruction` | `BLOCKED: remove production data destruction from scope; rewrite for test/dev data only or split to human-reviewed production plan.` |
+> | `SAFETY_BLOCK: secret-exfiltration` | `BLOCKED: never request printing, dumping, sending, or exposing secrets or tokens.` |
+> | `SAFETY_BLOCK: instruction-bypass` | `BLOCKED: never ask the implementer to ignore AGENTS.md, system/developer instructions, CI, review, hooks, or guardian checks.` |
+> | `SAFETY_AMBIGUOUS` | `CLARIFY: add explicit non-production scope, affected paths, guardrails, and verification command; otherwise skip filing.` |
+>
+> Repeat up to `MAX_SAFETY_RETRIES=5`. If attempt 5 still returns non-zero, print all drafts plus safety findings inline and skip that child. Do not file unsafe or ambiguous child issues.
 
 ### UI-feature decomposition (only for user-facing UI issues)
 
@@ -511,6 +538,13 @@ labels and patches each body with a `## Model fit` block.
 >    only when the difference is a true outlier (e.g. one sibling pulls in a
 >    schema-wide refactor that no other sibling touches).
 >
+>
+> ### Issue intent safety gate
+>
+> Phase 3.5 may only persist model-fit, quality, board, and dependency
+> metadata. It must not manufacture a safety decision. Defer Rust admission
+> until the final issue body is persisted by step 8 below.
+>
 > 4. **Apply labels.** Idempotent at run start:
 >    `gh label create ctx:32k  --color c5def5 --force --repo {repo}`,
 >    `gh label create ctx:64k  --color c5def5 --force --repo {repo}`,
@@ -599,7 +633,21 @@ labels and patches each body with a `## Model fit` block.
 >      - Comment findings: `gh issue comment <N> --body "<findings>" --repo {repo}`
 >    - Do NOT remove `auto-implement` label. Operator decides whether to proceed.
 >
-> 9. **Run-end summary.** Print to stdout:
+> 9. **Rust safety admission.** After all prior body writes complete, make each
+>    child an interim candidate (if it is not already one) and review that exact
+>    issue:
+>
+>    ```bash
+>    gh issue edit <N> --add-label auto-implement --remove-label needs-classify --repo {repo}
+>    "${AUTOSPEC_BIN:-autospec}" queue review-safety --repo {repo} --limit 1 --issue <N>
+>    ```
+>
+>    Read the JSON totals. Only `pass: 1` admits this invocation. Any other
+>    result is already recorded by Rust and must be skipped without manual
+>    labels, comments, body patches, or a semantic safety override. The Rust
+>    command is the only automatic writer of issue-intent safety outcomes.
+>
+> 10. **Run-end summary.** Print to stdout:
 >    ```
 >    Phase 3.5 summary on {repo}
 >    - classified: N

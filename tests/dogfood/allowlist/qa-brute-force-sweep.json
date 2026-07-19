@@ -1,1 +1,68 @@
-[]
+[
+  {
+    "file": "crates/autospec-cli/src/commands/queue.rs",
+    "function": "read_issue",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "The GitHub query is one fixed argument vector; the heuristic counts its JSON projection punctuation as repeated branches despite no repeated control flow."
+  },
+  {
+    "file": "crates/autospec-cli/tests/claim_commands.rs",
+    "function": "autospec",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test-only command factory and its assertion fixtures contain command-output strings, not domain representation logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/cli_commands.rs",
+    "function": "autospec",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "The test helper asserts command output, not a domain representation; this inherited file-scoped heuristic result remains intentionally allowlisted."
+  },
+  {
+    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
+    "function": "workspace_root",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This integration test reads Rust source to prohibit legacy foreground launch authority; its substring assertions do not encode domain representation logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
+    "function": "executor_result_rejects_malformed_protocol_input_without_mutating_claim_state",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "This test supplies malformed CLI argument matrices; its repeated fixture rows are data, not production dispatch logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/autonomous_conductor_status.rs",
+    "function": "status_json_and_timeline_render_normalized_conductor_state",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test asserts rendered CLI status text and timeline wording; substring checks inspect presentation output, not domain representation logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/autonomous_drain_commands.rs",
+    "function": "workspace_root",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This integration test reads Rust source and asserts command output; std::time plus substring assertions trigger the file-scoped heuristic without encoding domain logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/autonomous_resilience_commands.rs",
+    "function": "help_section_first_line",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This helper parses a labeled CLI help section; its string operations inspect presentation structure rather than encode domain logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/runtime_commands.rs",
+    "function": "autospec",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test-only command factory selects the compiled CLI; the file-scoped substring heuristic does not represent domain logic."
+  },
+  {
+    "file": "crates/autospec-core/src/validation/structural.rs",
+    "function": "run",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "The structural validator scans static skill text for required contract vocabulary; it does not encode runtime domain meaning from free-form names."
+  },
+  {
+    "file": "crates/autospec-core/tests/explore_specialists.rs",
+    "function": "trading_manifest_records_file_line_evidence_and_ranked_specialist",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test asserts typed specialist evidence; std::time plus substring assertions trigger the file-scoped heuristic without implementing domain logic."
+  }
+]

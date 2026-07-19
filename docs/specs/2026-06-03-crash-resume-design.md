@@ -139,7 +139,7 @@ scripts/
   autospec-supervisor.sh             # NEW (child 2): boot entrypoint that invokes /autospec-resume
   autospec-supervisor-install.sh     # NEW (child 2): launchd | systemd | @reboot cron install/uninstall
   autospec-watchdog.sh               # EXTEND (child 3): orphaned /tmp/wt-* GC pass
-scripts/validate.sh                  # EXTEND: structural checks for all of the above
+autospec validate                  # EXTEND: structural checks for all of the above
 tests/resume/                        # bats fixtures with PATH-shadow gh/launchctl/systemctl mocks
 ```
 
@@ -258,7 +258,7 @@ before each auto-resume relaunch; reset to 0 when a batch makes forward progress
 This repo has no language test runner; validation is shell + bats with
 PATH-shadow subprocess mocks (per AGENTS.md). Plan:
 
-- **`scripts/validate.sh` structural checks:** `skills/autospec-resume/` exists
+- **`autospec validate` structural checks:** `skills/autospec-resume/` exists
   with the lock-step trio + `install.sh`/`uninstall.sh`/`README.md`/per-skill
   `validate.sh`; the trio passes `check_lockstep`; SKILL.md carries the
   `## Startup self-update` section, the harness-detection / Subagent-model-tier
@@ -329,7 +329,7 @@ bats test that a two-repo registry resumes exactly the repos with open run-state
 - [ ] Consecutive auto-resume attempts capped at `AUTOSPEC_RESUME_MAX_ATTEMPTS`
   (default 3); at the cap, halt + surface; counter resets on forward progress
   (any issue `merged`) (bats).
-- [ ] `scripts/validate.sh` extended with structural + bash-syntax checks for
+- [ ] `autospec validate` extended with structural + bash-syntax checks for
   the new skill, registry, supervisor, and GC scripts; full `validate.sh`
   passes.
 

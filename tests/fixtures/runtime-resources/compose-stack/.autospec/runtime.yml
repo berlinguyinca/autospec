@@ -1,0 +1,14 @@
+version: 2
+default_mode: local
+modes:
+  local:
+    command: sh -c 'true'
+resources:
+  compose:
+    files: [compose.yaml]
+    exports:
+      - service: web
+        target: 8080
+        protocol: http
+        env: STACK_URL
+        value: url

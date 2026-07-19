@@ -1,80 +1,77 @@
 # Contributing
 
-This repository stores portable Codex skills.
+AutoSpec welcomes focused contributions that make the workflow easier to understand, safer to run, or easier to validate.
 
-## Skill Requirements
+## Good First Contributions
 
-- Use lowercase hyphenated skill names.
-- Keep each skill in `skills/<skill-name>/`.
-- Include exactly one required `SKILL.md` per skill.
-- Keep the frontmatter `name` aligned with the folder name.
-- Keep descriptions focused on when Codex should use the skill.
-- Do not commit private credentials, local data, generated caches, or virtual environments.
+- Fix unclear docs.
+- Improve `examples/hello-autospec/`.
+- Add validation coverage for an existing script.
+- Tighten an error message.
+- Improve install or quickstart diagnostics.
 
-## Preferred Structure
+Avoid opening a first PR that adds broad autonomy, new dependencies, or large prompt rewrites.
 
-```text
-skills/<skill-name>/
-  SKILL.md
-  agents/openai.yaml
-  scripts/
-  references/
-  assets/
-```
-
-Only include optional directories when they are useful.
-
-## Review Checklist
-
-- Skill has a clear trigger.
-- Instructions are actionable and not project-specific unless intentionally scoped.
-- Helper scripts have been syntax-checked or run in dry-run mode.
-- Large examples or templates are moved out of `SKILL.md`.
-- README and `SKILLS.md` are updated.
-
-## Testing
-
-Every PR is expected to leave the test suite green. The recommended local
-loop is:
-
-1. **Bootstrap** — install the dev dependencies (`bats`, `gh`, `jq`,
-   `python3`, etc.) once per machine:
-
-   ```bash
-   bash scripts/dev-bootstrap.sh
-   ```
-
-2. **Run the suites** — fast unit + smoke tests plus the repo-wide
-   validator:
-
-   ```bash
-   bats tests/unit tests/smoke && scripts/validate.sh
-   ```
-
-   The `bats` run is well under a minute on commodity hardware. E2E
-   tests (`tests/e2e/*.bats`) are opt-in: they create throwaway gh
-   repos and should only run when the GitHub credentials in the
-   environment are willing to absorb the side-effect.
-
-3. **Validate before pushing** — `scripts/validate.sh` enforces the
-   lock-step body rule across every multi-harness skill plus the
-   self-update / model-tier invariants. Treat a non-zero exit as a
-   blocker.
-
-### Updating goldens
-
-Several tests compare subagent output against committed golden files
-under `tests/golden/`. When a deliberate body change makes a golden go
-stale, regenerate it via:
+## Local Setup
 
 ```bash
-tests/refresh-goldens.sh
+git clone https://github.com/berlinguyinca/autospec.git
+cd autospec
+bash install.sh --skill all --harness all
+autospec validate --fast
 ```
 
-The script pairs each fixture in `tests/fixtures/` with its target
-golden in `tests/golden/` and prints the manual subagent-capture step a
-maintainer is expected to run (per spec §6.4 the loop is intentionally
-manual). Replay the fixture through the corresponding skill, capture
-the output, and replace the golden file in-place. Commit the diff
-alongside the body change that motivated the refresh — never commit a
-stale golden.
+The installer ensures Bash, Git, curl, Cargo/Rust, Python 3, `gh`, and `jq`, plus
+at least one of Codex CLI, Claude Code, or OpenCode. Linux system packages may
+prompt through `sudo`; root installs do not use sudo. Set
+`AUTOSPEC_SKIP_SYSTEM_TOOLS=1` to suppress package changes while retaining the
+required-command checks.
+
+Optional tools such as `bats`, `ajv`, `yq`, Bun, and browser automation unlock
+deeper validation without blocking the core install.
+
+## Development Rules
+
+- Use conventional commits: `feat:`, `fix:`, `docs:`, `test:`, `refactor:`, `chore:`.
+- Keep diffs small, reviewable, and reversible.
+- Do not commit credentials, private data, generated caches, or virtual environments.
+- Do not bypass hooks with `--no-verify`.
+- Update docs for public behavior changes.
+- Add or update validation when changing scripts or workflow behavior.
+
+## Skill Lock-Step Rule
+
+Many skills are mirrored across harnesses:
+
+```text
+skills/<name>/SKILL.md
+skills/<name>/codex/prompt.md
+skills/<name>/opencode/agent.md
+```
+
+When editing a multi-harness skill, keep the bodies identical except for frontmatter. `autospec validate` enforces this.
+
+## Validation
+
+Run the relevant focused test first, then the repo validator:
+
+```bash
+autospec validate --fast
+bash scripts/validate-launch-readiness.sh
+```
+
+Before a release or broad workflow change, run:
+
+```bash
+autospec validate
+```
+
+E2E tests may create throwaway GitHub resources and should only run with credentials that are safe for that purpose.
+
+## Pull Request Checklist
+
+- Explain the user-facing result.
+- List validation commands and outcomes.
+- Call out likely hidden failure.
+- Keep unrelated cleanup out of the PR.
+- For docs-only changes, still run the launch-readiness or docs-relevant validator.

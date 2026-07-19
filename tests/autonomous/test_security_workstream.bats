@@ -1,0 +1,195 @@
+#!/usr/bin/env bats
+# Contract tests for issue #1537 proactive security/compliance workstream.
+
+setup() {
+    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+    SCRIPT="$REPO_ROOT/scripts/security-workstream.sh"
+    WORK="$(mktemp -d -t security-workstream.XXXXXX)"
+}
+
+teardown() {
+    [ -d "${WORK:-}" ] && rm -rf "$WORK"
+}
+
+@test "scan: ranks SAST, secret, unsafe, and CVE findings by exploitability and exposure" {
+    cat > "$WORK/raw.jsonl" <<'JSONL'
+{"gap_id":"G1","dimension":"secrets","severity":"must-fix","file":"app/config.env","line":3,"title":"Hardcoded API token","body":"Remove and rotate credential","dedupe_key":"sec-secret"}
+{"gap_id":"G2","dimension":"cve","severity":"nice-to-have","file":"Cargo.lock","line":0,"title":"CVE-2026-0001 in transitive package","body":"Upgrade when available","dedupe_key":"sec-cve"}
+JSONL
+    mkdir -p "$WORK/src"
+    cat > "$WORK/src/main.rs" <<'RS'
+fn main() { unsafe { std::ptr::read(0 as *const i32); } }
+RS
+
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/ranked.jsonl"
+    [ "$status" -eq 0 ]
+    [ -f "$WORK/ranked.jsonl" ]
+    first_priority="$(head -n1 "$WORK/ranked.jsonl" | jq -r '.priority')"
+    [ "$first_priority" = "P0" ]
+    grep -q '"dimension":"unsafe"' "$WORK/ranked.jsonl"
+    grep -q '"severity_rank"' "$WORK/ranked.jsonl"
+}
+
+@test "rank: detects Rust unsafe syntax without flagging prose or command payloads" {
+    : > "$WORK/raw.jsonl"
+    mkdir -p "$WORK/src"
+    printf '%s\n' 'const NOTE: &str = "unsafe operations require review";' > "$WORK/src/prose.rs"
+    printf '%s\n' 'let command = "echo unsafe";' > "$WORK/src/command.rs"
+    printf '%s\n' 'let payload = "unsafe {";' > "$WORK/src/string-payload.rs"
+    printf '%s\n' 'const RAW: &str = r#"unsafe {"#;' > "$WORK/src/raw-string-payload.rs"
+    printf '%s\n' '// unsafe fn documentation only' > "$WORK/src/comment.rs"
+    printf '%s\n' 'fn read(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$WORK/src/unsafe.rs"
+    printf '%s\n' 'unsafe' '{' '    external_call();' '}' > "$WORK/src/multiline.rs"
+    printf '%s\n' 'unsafe /* FFI boundary */ {' '    external_call();' '}' > "$WORK/src/comment-separated.rs"
+    printf '%s\n' '#[unsafe(no_mangle)]' 'pub extern "C" fn exported() {}' > "$WORK/src/unsafe-attribute.rs"
+    printf '%s\n' '// autospec:unsafe-reviewed: security review #2004; invariant: the FFI boundary accepts only a fixed signal number.' 'unsafe { external_call(); }' > "$WORK/src/reviewed.rs"
+    printf '%s\n' '// autospec:unsafe-reviewed: security review #2004' 'unsafe { external_call(); }' > "$WORK/src/missing-invariant.rs"
+    printf '%s\n' '// autospec:unsafe-reviewed: security review #2004; invariant: arbitrary code is safe.' 'unsafe { reviewed(); } unsafe { unreviewed(); }' > "$WORK/src/multiple.rs"
+    mkdir -p "$WORK/crates/autospec-cli/src/commands/runtime"
+    cat > "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+#[cfg(unix)]
+extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+fn install_signal_handlers() {
+    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/ranked.jsonl"
+    [ "$status" -eq 0 ]
+    unsafe_count="$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/ranked.jsonl")"
+    [ "$unsafe_count" -eq 8 ]
+    jq -e 'select(.dimension == "unsafe" and .file == "src/unsafe.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/multiline.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/comment-separated.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/unsafe-attribute.rs" and .line == 1)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/missing-invariant.rs" and .line == 2)' "$WORK/ranked.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/reviewed.rs" and .line == 2)' "$WORK/ranked.jsonl" >/dev/null
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "src/multiple.rs")] | length' "$WORK/ranked.jsonl")" -eq 2 ]
+    ! jq -e 'select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")' "$WORK/ranked.jsonl" >/dev/null
+
+    cat >> "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+
+fn duplicated_signal_registration() {
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/duplicated.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/duplicated.jsonl")" -eq 2 ]
+
+    cat > "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+const DECLARATION: &str = r#"extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}"#;
+
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "abort"]
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+fn install_signal_handlers() {
+    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/spoofed.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/spoofed.jsonl")" -eq 1 ]
+
+    cat > "$WORK/crates/autospec-cli/src/commands/runtime/env.rs" <<'RS'
+#[link(name = "m")]
+#[cfg(unix)]
+extern "C" {
+    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
+}
+
+fn install_signal_handlers() {
+    RECEIVED_SIGNAL.store(0, Ordering::Relaxed);
+    unsafe {
+        signal(2, record_signal);
+        signal(15, record_signal);
+    }
+}
+RS
+    run bash "$SCRIPT" rank --findings "$WORK/raw.jsonl" --root "$WORK" --out "$WORK/attributed.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/attributed.jsonl")" -eq 1 ]
+}
+
+@test "issue filing: high-severity findings produce lint-clean remediation issues" {
+    cat > "$WORK/ranked.jsonl" <<'JSONL'
+{"gap_id":"G1","dimension":"secrets","severity":"must-fix","priority":"P0","severity_rank":100,"exploitability":5,"exposure":5,"file":"app/config.env","line":3,"title":"Hardcoded API token","body":"Remove the token and rotate the credential.","dedupe_key":"sec-secret","remediation":"Remove the committed token, rotate it, and add a regression scan."}
+JSONL
+
+    run bash "$SCRIPT" propose-issue --findings "$WORK/ranked.jsonl" --out "$WORK/issues"
+    [ "$status" -eq 0 ]
+    [ -f "$WORK/issues/p0-hardcoded-api-token.md" ]
+    body="$(cat "$WORK/issues/p0-hardcoded-api-token.md")"
+    [[ "$body" == *"auto-implement"* ]]
+    [[ "$body" == *"priority:high"* ]]
+    [[ "$body" == *"sec-secret"* ]]
+    run bash "$REPO_ROOT/scripts/lint-issue.sh" "$WORK/issues/p0-hardcoded-api-token.md"
+    [ "$status" -eq 0 ]
+}
+
+@test "headers: dashboard baseline gates missing CSP, HSTS, nosniff, referrer policy, and frame-ancestors" {
+    cat > "$WORK/headers-ok.txt" <<'HEADERS'
+Content-Security-Policy: default-src 'self'; frame-ancestors 'none'
+Strict-Transport-Security: max-age=31536000; includeSubDomains
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+HEADERS
+    run bash "$SCRIPT" check-headers --headers-file "$WORK/headers-ok.txt"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"security header baseline passed"* ]]
+
+    cat > "$WORK/headers-bad.txt" <<'HEADERS'
+Content-Security-Policy: default-src 'self'
+X-Content-Type-Options: sniff
+HEADERS
+    run bash "$SCRIPT" check-headers --headers-file "$WORK/headers-bad.txt"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"missing Strict-Transport-Security"* ]]
+    [[ "$output" == *"missing frame-ancestors"* ]]
+    [[ "$output" == *"X-Content-Type-Options must be nosniff"* ]]
+}
+
+@test "verifier gate: security fixes cannot self-approve and sensitive domains require human review" {
+    cat > "$WORK/fix-plan.json" <<'JSON'
+{"author":"autospec-bot","verifier":"autospec-bot","touched_domains":["secrets"],"evidence":"bash scripts/security-workstream.sh check-headers --headers-file headers.txt"}
+JSON
+    run bash "$SCRIPT" verifier-gate --plan "$WORK/fix-plan.json"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"independent verifier required"* ]]
+    [[ "$output" == *"human gate required: secrets"* ]]
+
+    cat > "$WORK/fix-plan-ok.json" <<'JSON'
+{"author":"autospec-bot","verifier":"security-reviewer","human_approved_by":"maintainer","touched_domains":["secrets"],"evidence":"bash scripts/security-workstream.sh rank --findings scan.jsonl --out ranked.jsonl"}
+JSON
+    run bash "$SCRIPT" verifier-gate --plan "$WORK/fix-plan-ok.json"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"security verifier gate passed"* ]]
+}
+
+@test "direct Rust validation gates the autonomous security workstream suite" {
+    catalog="$REPO_ROOT/crates/autospec-core/src/validation/catalog.rs"
+    grep -q '"check_autonomous_phase2_suite"' "$catalog"
+    grep -q 'BatsDirectory("tests/autonomous")' "$catalog"
+    [ -f "$REPO_ROOT/tests/autonomous/test_security_workstream.bats" ]
+    grep -q 'schedule:' "$REPO_ROOT/.github/workflows/security-workstream.yml"
+    grep -q 'pull_request:' "$REPO_ROOT/.github/workflows/security-workstream.yml"
+}

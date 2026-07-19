@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Autospec Implementation Recipe",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "summary",
+    "category",
+    "applies_to_rules",
+    "applies_to_capabilities",
+    "repo_conditions",
+    "risk",
+    "implementation",
+    "test_plan",
+    "validation",
+    "docs",
+    "metadata",
+    "acceptance_criteria",
+    "stuck_if"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "title": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string"
+    },
+    "applies_to_rules": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "applies_to_capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "repo_conditions": {
+      "type": "object"
+    },
+    "risk": {
+      "type": "object",
+      "required": [
+        "level",
+        "requires_human_guidance",
+        "requires_architecture_review"
+      ]
+    },
+    "implementation": {
+      "type": "object",
+      "required": [
+        "mode",
+        "allowed_paths",
+        "forbidden_paths",
+        "max_files_changed",
+        "max_lines_changed",
+        "expected_files"
+      ]
+    },
+    "test_plan": {
+      "type": "object"
+    },
+    "validation": {
+      "type": "object"
+    },
+    "docs": {
+      "type": "object"
+    },
+    "metadata": {
+      "type": "object"
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "stuck_if": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

@@ -76,7 +76,7 @@ beyond the counter file, so it is unit-testable.
 - [ ] With `~/.autospec/explore-on-drain.flag` present and cycles < cap, prints `chain`.
 - [ ] At cap, prints `stop` and does not increment past cap.
 - [ ] `tests/explore-on-drain.bats` passes.
-- [ ] `scripts/validate.sh` passes (trio goldens regenerated).
+- [ ] `autospec validate` passes (trio goldens regenerated).
 
 ---
 
@@ -128,7 +128,7 @@ boundaries, so subprocess mocks ARE allowed (per
 - [ ] With a mocked `osascript` on PATH, `notify.sh "t" "b"` invokes it once with the title+body.
 - [ ] With no notifier and `AUTOSPEC_NOTIFY` unset, `notify.sh` prints `notify: t — b` and exits 0.
 - [ ] `tests/notify.bats` passes.
-- [ ] `scripts/validate.sh` passes.
+- [ ] `autospec validate` passes.
 
 ---
 

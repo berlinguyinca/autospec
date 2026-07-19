@@ -14,12 +14,15 @@ teardown() {
     rm -rf "$TEST_TMP"
 }
 
-@test "autospec-run installer installs distributed coordinator helpers" {
+@test "autospec-run installer leaves queue policy to the Rust control plane" {
     run bash "$INSTALLER" --harness codex
 
     [ "$status" -eq 0 ]
-    for helper in run-state.sh list-ready-issues.sh claim-issue.sh release-issue.sh heartbeat-write.sh heartbeat-read.sh autospec-usage-limit.sh; do
+    for helper in heartbeat-write.sh heartbeat-read.sh autospec-usage-limit.sh; do
         [ -f "$HOME/.autospec/scripts/$helper" ]
         [ -x "$HOME/.autospec/scripts/$helper" ]
+    done
+    for removed in run-state.sh claim-issue.sh release-issue.sh issue-safety-gate.sh list-ready-issues.sh; do
+        [ ! -e "$HOME/.autospec/scripts/$removed" ]
     done
 }

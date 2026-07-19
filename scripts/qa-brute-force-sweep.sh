@@ -32,6 +32,7 @@
 set -eu
 
 REPO_DIR="${REPO_DIR:-$(pwd)}"
+REPO_DIR="$(cd "$REPO_DIR" && pwd -P)"
 VERDICT_FILE="${VERDICT_FILE:-$REPO_DIR/.autospec/qa-verdict.json}"
 
 mkdir -p "$(dirname "$VERDICT_FILE")"
@@ -43,10 +44,26 @@ mkdir -p "$(dirname "$VERDICT_FILE")"
 DIRECTIVE_STRING_MATCH='Replace substring checks with the proper domain primitive (SMARTS/AST/parsed URL/IP/date/schema). Substring-on-name is brittle to synonyms, locants, salt forms, escaping, and case.'
 DIRECTIVE_REPEATED_STRUCTURE='Extract the N branches into a table + single dispatcher loop. In Python use a list of tuples or dict; in Java/Scala use a Map/sealed-trait registry; in Rust use a &[(predicate, value)] slice; in Go use a []struct{...} table. Each new entry should be one row, not a ~10-line block.'
 
+# origin:self provenance (issue #1744): idempotent, best-effort label
+ensure_origin_self_label() {
+    gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
+}
+
 emit_finding() {
     local file="$1" lang="$2" rule_id="$3" line="$4" func="$5"
+    file="$(relative_repo_path "$file")"
     printf '{"category":"code_health:brute_force_string_heuristics","rule_id":"%s","language":"%s","file":"%s","function":"%s","line":%s}\n' \
         "$rule_id" "$lang" "$file" "$func" "$line" >> "$VERDICT_FILE"
+}
+
+relative_repo_path() {
+    local file="$1"
+    local physical
+    physical="$(cd "$(dirname "$file")" && pwd -P)/$(basename "$file")"
+    case "$physical" in
+        "$REPO_DIR"/*) printf '%s\n' "${physical#"$REPO_DIR"/}" ;;
+        *) printf '%s\n' "$file" ;;
+    esac
 }
 
 file_issue() {
@@ -55,14 +72,17 @@ file_issue() {
     title="code_health: rewrite brute-force string heuristics in $file ($rule_id)"
     body=$(printf 'Detected %s in `%s` (%s)\n\nFunction/method: `%s`\nLine: %s\n\nDirective (verbatim from AGENTS.md):\n\n> %s\n\nLanguage: %s\n' \
         "$rule_id" "$file" "$lang" "$func" "$line" "$directive" "$lang")
+    ensure_origin_self_label
     gh issue create \
         --title "$title" \
         --body "$body" \
-        --label "auto-implement,autospec:v2-flow" >/dev/null 2>&1 || \
+        --label "auto-implement,autospec:v2-flow" \
+        --label origin:self >/dev/null 2>&1 || \
         gh issue create \
         --title "$title" \
         --body "$body" \
-        --label "auto-implement,autospec:v2-flow" || true
+        --label "auto-implement,autospec:v2-flow" \
+        --label origin:self || true
 }
 
 # Returns 0 if file contains a proper-rep library import for its language.

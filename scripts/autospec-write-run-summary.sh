@@ -55,6 +55,8 @@ Options:
   --elapsed <HH:MM>         elapsed wall-clock time (defaults: "")
   --next-steps-file <file>  file with markdown for the ## Next steps section
                             (defaults to "- (none — converged)" when empty/missing)
+  --quality-audit-json <file>
+                            repo quality audit JSON from repo-quality-audit.sh
   --output <path>           output markdown path (REQUIRED)
   --sha <sha>               HEAD SHA override (defaults: git rev-parse HEAD)
   --branch <name>           branch override (defaults: git symbolic-ref HEAD)
@@ -70,6 +72,7 @@ ARCHIVED_INPUT=""
 DONE_CHALLENGE_FILE=""
 ELAPSED=""
 NEXT_STEPS_FILE=""
+QUALITY_AUDIT_JSON=""
 OUTPUT=""
 SHA_OVERRIDE=""
 BRANCH_OVERRIDE=""
@@ -84,6 +87,7 @@ while [ $# -gt 0 ]; do
         --done-challenge-file) DONE_CHALLENGE_FILE="${2:-}"; shift 2 ;;
         --elapsed) ELAPSED="${2:-}"; shift 2 ;;
         --next-steps-file) NEXT_STEPS_FILE="${2:-}"; shift 2 ;;
+        --quality-audit-json) QUALITY_AUDIT_JSON="${2:-}"; shift 2 ;;
         --output) OUTPUT="${2:-}"; shift 2 ;;
         --sha) SHA_OVERRIDE="${2:-}"; shift 2 ;;
         --branch) BRANCH_OVERRIDE="${2:-}"; shift 2 ;;
@@ -192,6 +196,73 @@ else
     NEXT_STEPS_BODY="- (none — converged)"
 fi
 
+QUALITY_AUDIT_BODY="(not run)"
+if [ -n "$QUALITY_AUDIT_JSON" ] && [ -f "$QUALITY_AUDIT_JSON" ] \
+    && command -v jq >/dev/null 2>&1; then
+    QA_STATUS=$(jq -r '.status // "unknown"' "$QUALITY_AUDIT_JSON" 2>/dev/null || echo "unknown")
+    QA_FINDINGS=$(jq -r '.summary.total_findings // 0' "$QUALITY_AUDIT_JSON" 2>/dev/null || echo 0)
+    QA_SUPPRESSED=$(jq -r '.summary.suppressed_findings // 0' "$QUALITY_AUDIT_JSON" 2>/dev/null || echo 0)
+    QA_ISSUES=$(jq -r '.summary.issue_links // 0' "$QUALITY_AUDIT_JSON" 2>/dev/null || echo 0)
+    QA_RISKS=$(jq -r '.summary.unfiled_residual_risks // 0' "$QUALITY_AUDIT_JSON" 2>/dev/null || echo 0)
+    QUALITY_AUDIT_BODY=$(mktemp "${TMPDIR:-/tmp}/autospec-quality-audit.XXXXXX")
+    {
+        printf -- '- Status: %s\n' "$QA_STATUS"
+        printf -- '- Findings: %s\n' "$QA_FINDINGS"
+        printf -- '- Suppressed findings: %s\n' "$QA_SUPPRESSED"
+        printf -- '- Filed issues: %s\n' "$QA_ISSUES"
+        printf -- '- Unfiled residual risks: %s\n' "$QA_RISKS"
+        printf '\n### Runtime and engines\n\n'
+        if jq -e '.runtime' "$QUALITY_AUDIT_JSON" >/dev/null 2>&1; then
+            jq -r '
+              "- node: " + (.runtime.node.version // "unavailable") + " (engine: " + (.runtime.node.engine // "not configured") + ", status: " + (.runtime.node.status // "unknown") + ")",
+              "- npm: " + (.runtime.package_managers.npm.version // "unavailable") + " (engine: " + (.runtime.package_managers.npm.engine // "not configured") + ", status: " + (.runtime.package_managers.npm.status // "unknown") + ")",
+              "- pnpm: " + (.runtime.package_managers.pnpm.version // "unavailable") + " (engine: " + (.runtime.package_managers.pnpm.engine // "not configured") + ", status: " + (.runtime.package_managers.pnpm.status // "unknown") + ")",
+              "- yarn: " + (.runtime.package_managers.yarn.version // "unavailable") + " (engine: " + (.runtime.package_managers.yarn.engine // "not configured") + ", status: " + (.runtime.package_managers.yarn.status // "unknown") + ")"
+            ' "$QUALITY_AUDIT_JSON" 2>/dev/null
+        else
+            printf '(not recorded)\n'
+        fi
+        printf '\n### Artifacts\n\n'
+        if ! jq -r '.artifacts // {} | to_entries[]? | "- " + .key + ": `" + (.value|tostring) + "`"' "$QUALITY_AUDIT_JSON" 2>/dev/null \
+            | grep -q '^-' ; then
+            printf '(none)\n'
+        else
+            jq -r '.artifacts // {} | to_entries[]? | "- " + .key + ": `" + (.value|tostring) + "`"' "$QUALITY_AUDIT_JSON" 2>/dev/null
+        fi
+        printf '\n### Verification lanes\n\n'
+        if jq -e '.verification.lanes' "$QUALITY_AUDIT_JSON" >/dev/null 2>&1; then
+            jq -r '
+              .verification.lanes
+              | to_entries[]
+              | "- " + .key + ": " + (.value.status // "unknown") + (if .value.command then " (`" + .value.command + "`)" else "" end)
+            ' "$QUALITY_AUDIT_JSON" 2>/dev/null
+        else
+            printf '(not recorded)\n'
+        fi
+        printf '\n### Issue links\n\n'
+        if ! jq -r '.issue_links[]? | "- " + (.title // "quality audit issue") + " — " + (.url // "")' "$QUALITY_AUDIT_JSON" 2>/dev/null \
+            | grep -q '^-' ; then
+            printf '(none)\n'
+        else
+            jq -r '.issue_links[]? | "- " + (.title // "quality audit issue") + " — " + (.url // "")' "$QUALITY_AUDIT_JSON" 2>/dev/null
+        fi
+        printf '\n### Suppressed findings\n\n'
+        if ! jq -r '.suppressed[]? | "- " + (.title // "suppressed finding") + " (`" + (.dedupe_key // "unknown") + "`)"' "$QUALITY_AUDIT_JSON" 2>/dev/null \
+            | grep -q '^-' ; then
+            printf '(none)\n'
+        else
+            jq -r '.suppressed[]? | "- " + (.title // "suppressed finding") + " (`" + (.dedupe_key // "unknown") + "`)"' "$QUALITY_AUDIT_JSON" 2>/dev/null
+        fi
+        printf '\n### Residual risks\n\n'
+        if ! jq -r '.residual_risks[]? | "- " + .' "$QUALITY_AUDIT_JSON" 2>/dev/null \
+            | grep -q '^-' ; then
+            printf '(none)\n'
+        else
+            jq -r '.residual_risks[]? | "- " + .' "$QUALITY_AUDIT_JSON" 2>/dev/null
+        fi
+    } > "$QUALITY_AUDIT_BODY"
+fi
+
 # Ensure the output directory exists.
 OUT_DIR=$(dirname "$OUTPUT")
 mkdir -p "$OUT_DIR" || { echo "ERROR: cannot create $OUT_DIR" >&2; exit 2; }
@@ -234,10 +305,20 @@ TMP="${OUTPUT}.tmp.$$"
     fi
     printf '\n## Done challenge\n\n'
     printf '%s\n' "$DONE_CHALLENGE_BODY"
+    printf '\n## Repo quality audit\n\n'
+    if [ -f "$QUALITY_AUDIT_BODY" ]; then
+        cat "$QUALITY_AUDIT_BODY"
+    else
+        printf '%s\n' "$QUALITY_AUDIT_BODY"
+    fi
     printf '\n## Next steps\n\n'
     printf '%s\n' "$NEXT_STEPS_BODY"
 } > "$TMP" || { rm -f "$TMP"; echo "ERROR: write failed" >&2; exit 2; }
 
 mv -f "$TMP" "$OUTPUT" || { rm -f "$TMP"; echo "ERROR: mv failed" >&2; exit 2; }
+
+if [ -f "$QUALITY_AUDIT_BODY" ]; then
+    rm -f "$QUALITY_AUDIT_BODY"
+fi
 
 exit 0

@@ -85,5 +85,5 @@ Both bugs would have been invisible without running install.sh against a real `~
 - Do NOT regrow forks. Zero-fork shape is final. If a future requirement seems to demand a fork, name the consumer first per [[feedback_roi_check_new_components]].
 - The `autospec:v2-flow` label is canonical across `/autospec-define`, `/autospec-run` SKILL.md routing block, and `phase4-implementer.md`. Renaming requires updating all three.
 - Phase 4 implementer prompt is intentionally self-contained (no Skill tool calls from subagent). Don't "improve" it by extracting steps into other skills — that's the whole point of zero-fork.
-- Lock-step sync after every SKILL.md edit: `body=$(awk '/^---$/{c++; next} c>=2' SKILL.md); printf '%s\n' "$body" > codex/prompt.md; { print frontmatter; printf '%s\n' "$body"; } > opencode/agent.md`. Then `bash scripts/validate.sh`.
+- Lock-step sync after every SKILL.md edit: `body=$(awk '/^---$/{c++; next} c>=2' SKILL.md); printf '%s\n' "$body" > codex/prompt.md; { print frontmatter; printf '%s\n' "$body"; } > opencode/agent.md`. Then `autospec validate`.
 - All install tests are self-contained and use tmpdirs (no real `~/.claude` or `~/.turbo` touched). Run with `bash tests/install/test_*.sh`.

@@ -43,7 +43,7 @@ USE_SYMLINK=0
 DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
-SHARED_SCRIPT_FILES="autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
+SHARED_SCRIPT_FILES="autospec-runtime-config.sh autospec-usage-limit.sh autospec-stop.sh autospec-watchdog.sh autospec-watchdog.ps1 lint-implementation.sh lint-issue.sh listener-match.sh sizing-check.sh ci-wait.sh ci-wait-poll.sh ci-wait-cleanup.sh ci-status-compare.sh gen-implementer-prompt.sh gen-reviewer-prompt.sh"
 
 # ---------- helpers --------------------------------------------------------
 
@@ -275,7 +275,7 @@ install_shared_scripts
 
 info ""
 info "autospec-run skill helper scripts:"
-SKILL_SCRIPT_FILES="heartbeat-write.sh heartbeat-read.sh run-state.sh list-ready-issues.sh claim-issue.sh release-issue.sh autospec-run-session-lock.sh fab-route.sh fab-completeness.sh"
+SKILL_SCRIPT_FILES="heartbeat-write.sh heartbeat-read.sh autospec-run-status.sh autospec-run-session-lock.sh fab-route.sh fab-completeness.sh"
 for rel in $SKILL_SCRIPT_FILES; do
     skill_scripts_src=""
     if [ -d "$SKILL_DIR/scripts" ]; then

@@ -285,7 +285,7 @@ And rejects:
 
 ### 9.4 Validator extension
 
-`scripts/validate.sh` extensions:
+`autospec validate` extensions:
 - `check_required_files` adds `autospec-stop` to the list (so the new
   skill's full scaffold presence is enforced).
 - New `check_stop_mode_section` asserts every multi-harness skill's

@@ -1,0 +1,160 @@
+[
+  {
+    "id": "v61-recovery-public-launch-validation",
+    "title": "V61 Recovery: Public Launch Validation",
+    "version": "V61",
+    "dependencies": [],
+    "status": "completed",
+    "priority": 0,
+    "acceptance_criteria": [
+      "Full validation passes in a git-worktree-capable environment",
+      "Public launch gate prints AUTOSPEC_PUBLIC_LAUNCH_READY=true",
+      "Stale QA verdict is superseded or regenerated"
+    ],
+    "validation_command": "autospec validate && bash scripts/validate-public-launch-readiness.sh"
+  },
+  {
+    "id": "v62-rust-core-workspace",
+    "title": "Rust Core Workspace Recovery",
+    "version": "V62",
+    "dependencies": ["v61-recovery-public-launch-validation"],
+    "status": "completed",
+    "priority": 1,
+    "acceptance_criteria": ["Cargo workspace exists", "autospec CLI binary builds", "cargo fmt/clippy/test pass"],
+    "validation_command": "cargo fmt --check && cargo clippy --all-targets --all-features && cargo test --all"
+  },
+  {
+    "id": "v63-spec-metadata-parser",
+    "title": "Spec Metadata And Parser",
+    "version": "V63",
+    "dependencies": ["v62-rust-core-workspace"],
+    "status": "completed",
+    "priority": 2,
+    "acceptance_criteria": ["Spec parser loads markdown specs", "Metadata schema validates", "Invalid specs produce structured errors"],
+    "validation_command": "cargo test --all spec_metadata"
+  },
+  {
+    "id": "v64-dependency-graph-ordering",
+    "title": "Dependency Graph And Execution Ordering",
+    "version": "V64",
+    "dependencies": ["v63-spec-metadata-parser"],
+    "status": "completed",
+    "priority": 3,
+    "acceptance_criteria": ["Acyclic graphs produce stable order", "Cycles fail with diagnostics", "execution-order.json can be generated"],
+    "validation_command": "cargo test --all dependency_graph"
+  },
+  {
+    "id": "v65-spec-state-validation",
+    "title": "Spec State And Validation Framework",
+    "version": "V65",
+    "dependencies": ["v64-dependency-graph-ordering"],
+    "status": "completed",
+    "priority": 4,
+    "acceptance_criteria": ["Spec state transitions are enforced", "Deferred/superseded specs are modeled", "Validation registry executes configured gates"],
+    "validation_command": "cargo test --all spec_state validation_registry"
+  },
+  {
+    "id": "v66-autonomous-execution-queue",
+    "title": "Autonomous Execution Queue",
+    "version": "V66",
+    "dependencies": ["v65-spec-state-validation"],
+    "status": "completed",
+    "priority": 5,
+    "acceptance_criteria": ["Queue is resumable", "Failures are classified", "Handoff files and final run reports are generated"],
+    "validation_command": "cargo test --all execution_queue"
+  },
+  {
+    "id": "v67-agent-integration-contracts",
+    "title": "Agent Integration Contracts",
+    "version": "V67",
+    "dependencies": ["v66-autonomous-execution-queue"],
+    "status": "completed",
+    "priority": 6,
+    "acceptance_criteria": ["Codex/Claude/Fable/generic handoff prompts exist", "Agent outputs normalize to one schema", "Safe mode blocks destructive operations"],
+    "validation_command": "cargo test --all agent_contracts && autospec validate --fast"
+  },
+  {
+    "id": "v68-evidence-release-reporting",
+    "title": "Evidence And Release Reporting",
+    "version": "V68",
+    "dependencies": ["v65-spec-state-validation", "v67-agent-integration-contracts"],
+    "status": "completed",
+    "priority": 7,
+    "acceptance_criteria": ["Evidence bundles capture logs/tests/docs/release state", "Reports render markdown and JSON", "Spec coverage validation exists"],
+    "validation_command": "cargo test --all evidence release_report"
+  },
+  {
+    "id": "v69-cli-productization",
+    "title": "CLI Productization",
+    "version": "V69",
+    "dependencies": ["v68-evidence-release-reporting"],
+    "status": "completed",
+    "priority": 8,
+    "acceptance_criteria": ["All required autospec commands exist", "JSON mode works where specified", "CLI docs and tests cover each command"],
+    "validation_command": "cargo test --all cli && cargo run --bin autospec -- --help"
+  },
+  {
+    "id": "v70-documentation-hardening",
+    "title": "Documentation Hardening",
+    "version": "V70",
+    "dependencies": ["v69-cli-productization"],
+    "status": "completed",
+    "priority": 9,
+    "acceptance_criteria": ["CLI reference exists", "Docs match commands", "Known limitations and safety docs are current"],
+    "validation_command": "bash scripts/validate-launch-readiness.sh && autospec validate --fast"
+  },
+  {
+    "id": "v71-demo-launch-assets",
+    "title": "Demo And Launch Assets",
+    "version": "V71",
+    "dependencies": ["v70-documentation-hardening", "v72-trust-safety-hardening"],
+    "status": "completed",
+    "priority": 11,
+    "acceptance_criteria": ["Deterministic demo runs", "Showcase report generated", "Screenshots/social placeholders replaced or explicitly deferred"],
+    "validation_command": "autospec showcase --demo examples/hello-autospec --json"
+  },
+  {
+    "id": "v72-trust-safety-hardening",
+    "title": "Trust And Safety Hardening",
+    "version": "V72",
+    "dependencies": ["v69-cli-productization"],
+    "status": "completed",
+    "priority": 10,
+    "acceptance_criteria": ["Safe mode blocks destructive actions", "Secret redaction exists", "Audit trail records human checkpoints"],
+    "validation_command": "cargo test --all safety audit"
+  },
+  {
+    "id": "v73-metrics-growth-tooling",
+    "title": "Metrics And Growth Tooling",
+    "version": "V73",
+    "dependencies": ["v71-demo-launch-assets"],
+    "status": "completed",
+    "priority": 12,
+    "acceptance_criteria": ["growth-report command exists", "No hidden telemetry", "Outreach trackers are file-based and opt-in"],
+    "validation_command": "autospec growth-report --json"
+  },
+  {
+    "id": "v74-final-release-candidate",
+    "title": "Final Release Candidate",
+    "version": "V74",
+    "dependencies": [
+      "v61-recovery-public-launch-validation",
+      "v62-rust-core-workspace",
+      "v63-spec-metadata-parser",
+      "v64-dependency-graph-ordering",
+      "v65-spec-state-validation",
+      "v66-autonomous-execution-queue",
+      "v67-agent-integration-contracts",
+      "v68-evidence-release-reporting",
+      "v69-cli-productization",
+      "v70-documentation-hardening",
+      "v71-demo-launch-assets",
+      "v72-trust-safety-hardening",
+      "v73-metrics-growth-tooling"
+    ],
+    "status": "completed",
+    "priority": 13,
+    "acceptance_criteria": ["All gates pass", "Release candidate report exists", "AUTOSPEC_PUBLIC_LAUNCH_READY=true"],
+    "validation_command": "cargo fmt --check && cargo clippy --all-targets --all-features && cargo test --all && autospec validate && bash scripts/validate-public-launch-readiness.sh"
+  }
+]

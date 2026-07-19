@@ -13,7 +13,7 @@ profile_override=""
 parallel_override=""
 dry_run=0
 once=0
-list_ready_bin="${AUTOSPEC_FLEET_LIST_READY:-}"
+queue_bin="${AUTOSPEC_FLEET_QUEUE_BIN:-${AUTOSPEC_QUEUE_BIN:-${AUTOSPEC_BIN:-}}}"
 
 usage() {
     cat <<'EOF'
@@ -60,7 +60,7 @@ node_allows_profile() {
 queue_has_work() {
     local repo="$1"
     local probe_json
-    probe_json="$("$list_ready_bin" --repo "$repo" --batch-size 1)" || return 1
+    probe_json="$("$queue_bin" queue ready --repo "$repo" --batch-size 1)" || return 1
     [ "$(printf '%s\n' "$probe_json" | jq '.batch | length')" -gt 0 ]
 }
 
@@ -74,8 +74,8 @@ while [ $# -gt 0 ]; do
         --profile=*) profile_override="${1#--profile=}" ;;
         --parallel) shift; [ $# -gt 0 ] || fail "--parallel requires a number"; parallel_override="$1" ;;
         --parallel=*) parallel_override="${1#--parallel=}" ;;
-        --list-ready-bin) shift; [ $# -gt 0 ] || fail "--list-ready-bin requires a path"; list_ready_bin="$1" ;;
-        --list-ready-bin=*) list_ready_bin="${1#--list-ready-bin=}" ;;
+        --queue-bin) shift; [ $# -gt 0 ] || fail "--queue-bin requires a path"; queue_bin="$1" ;;
+        --queue-bin=*) queue_bin="${1#--queue-bin=}" ;;
         --dry-run) dry_run=1 ;;
         --once) once=1 ;;
         -h|--help) usage; exit 0 ;;
@@ -86,11 +86,14 @@ done
 
 [ -f "$config" ] || fail "config not found: $config"
 [ -z "$node_config" ] || [ -f "$node_config" ] || fail "node config not found: $node_config"
-if [ -z "$list_ready_bin" ]; then
-    list_ready_bin="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/list-ready-issues.sh"
+if [ -z "$queue_bin" ] && [ -x "$repo_root/target/debug/autospec" ]; then
+    queue_bin="$repo_root/target/debug/autospec"
 fi
-[ -x "$list_ready_bin" ] || list_ready_bin="$repo_root/skills/autospec-run/scripts/list-ready-issues.sh"
-[ -x "$list_ready_bin" ] || fail "list-ready-issues.sh not found or not executable"
+if [ -z "$queue_bin" ] && command -v autospec >/dev/null 2>&1; then
+    queue_bin="$(command -v autospec)"
+fi
+[ -n "$queue_bin" ] && { [ -x "$queue_bin" ] || command -v "$queue_bin" >/dev/null 2>&1; } \
+    || fail "autospec queue binary not found or not executable"
 
 bash "$script_dir/fleet-config-lint.sh" --config "$config" ${node_config:+--node-config "$node_config"} >/dev/null
 command -v jq >/dev/null 2>&1 || fail "jq is required"

@@ -10,6 +10,15 @@ name: autospec-doc-drift
 # Runs check-doc-drift.sh --pr <N> against the PR diff. The gate exits non-zero
 # when source changes are not covered by a doc scope (drift), failing the job.
 #
+# The doc-drift job is SKIPPED on autospec's own repository (see the job-level
+# `if:` below). This template is meant for downstream consumer apps; autospec's
+# own repo does not comprehensively annotate its internal tooling
+# (scripts/, skills/*/tests/, *.bats) with `<!-- autospec-doc-scope -->`, so the
+# gate would report `missing_scope` on nearly every source PR — pure noise that
+# masks genuine drift findings (issue #1362). The guard only ever matches
+# `berlinguyinca/autospec`; a consumer's copy keeps running because its
+# repository name differs. (Issue #1362 option 1.)
+#
 # Part of epic #1280 / #1287.
 
 on:
@@ -22,9 +31,13 @@ concurrency:
 permissions:
   contents: read
   pull-requests: read
+  issues: write
 
 jobs:
   doc-drift:
+    # Skip in autospec's own repo (issue #1362): the doc-scope discipline is for
+    # downstream consumer repos. Consumer copies still run (their repo name differs).
+    if: ${{ github.repository != 'berlinguyinca/autospec' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -37,20 +50,18 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Run doc-drift gate
+      - name: Run documentation freshness tier
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           AUTOSPEC_SCRIPTS_PATH="${HOME}/.autospec/scripts"
-          # Resolve check-doc-drift.sh. In a CONSUMER repo the installer
-          # sed-substitutes AUTOSPEC_SCRIPTS_PATH above to the installed scripts
-          # dir, where the script exists. In autospec's OWN repo CI the scripts
-          # are not installed at ~/.autospec/scripts, so fall back to the repo's
-          # checked-out copy. The fallback path does not exist in a consumer repo
-          # (no autospec skills/ tree), so it is only ever taken here.
-          DRIFT_SCRIPT="${AUTOSPEC_SCRIPTS_PATH}/check-doc-drift.sh"
-          if [ ! -f "$DRIFT_SCRIPT" ]; then
-            DRIFT_SCRIPT="skills/autospec-shared/scripts/check-doc-drift.sh"
+          # Resolve the composite freshness tier. In a CONSUMER repo the
+          # installer sed-substitutes AUTOSPEC_SCRIPTS_PATH above to the
+          # installed scripts dir. In autospec's OWN repo CI, fall back to the
+          # checked-out shared script and its sibling autospec-doc engines.
+          FRESHNESS_SCRIPT="${AUTOSPEC_SCRIPTS_PATH}/doc-freshness-tier.sh"
+          if [ ! -f "$FRESHNESS_SCRIPT" ]; then
+            FRESHNESS_SCRIPT="skills/autospec-shared/scripts/doc-freshness-tier.sh"
           fi
-          bash "$DRIFT_SCRIPT" --pr "${{ github.event.pull_request.number }}"
+          bash "$FRESHNESS_SCRIPT" --pr "${{ github.event.pull_request.number }}" --repo-root "$PWD"

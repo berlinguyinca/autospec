@@ -1,0 +1,4 @@
+// Template: walk tutorial steps and capture screenshots for docs.
+test('tutorial capture', async ({ page }) => {
+  await page.screenshot({ path: 'artifacts/tutorials/step-01.png', fullPage: true });
+});

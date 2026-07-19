@@ -1,0 +1,13 @@
+services:
+  web:
+    image: ${FORTY_STACK_IMAGE:?FORTY_STACK_IMAGE is required}
+    networks:
+      - isolated
+    volumes:
+      - data:/var/cache/nginx
+
+networks:
+  isolated: {}
+
+volumes:
+  data: {}

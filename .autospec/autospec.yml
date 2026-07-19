@@ -15,7 +15,7 @@ project:
       - 'github-cli'
       - 'multi-harness-skill'
     commands:
-      test: 'bash scripts/validate.sh && bats tests/unit tests/smoke'
+      test: 'autospec validate && bats tests/unit tests/smoke'
       e2e: 'GH_CONFIG_DIR="$(mktemp -d)" E2E=0 AUTOSPEC_RUN_LIVE_COORDINATION_E2E=0 bats tests/e2e'
       deploy: 'true'
   questions:
@@ -63,6 +63,56 @@ continuous_improvement:
     create_or_update_specs: true
     file_issues: true
     route_fixes_via_autospec_run: true
+autonomous:
+  repo_dir: auto
+  repo: auto
+  heartbeat_dir: auto
+  concurrency:
+    batch_size: auto
+    max_concurrent_repo_workers: auto
+  claims:
+    lease_seconds: 10800
+    settle_seconds: 0.2
+    confirm_reads: 5
+  watchdog:
+    heartbeat_dir: auto
+    repo: auto
+    stale_secs: 1800
+    reclaim_secs: 10800
+    claimed_timeout_secs: 1800
+    nudge_cooldown_secs: 900
+    state_file: auto
+    gc_dir: /tmp
+    gc_heartbeat_fresh_secs: 1800
+  drain:
+    stall_secs: 1800
+    poll_secs: 15
+# Advisor pattern: a cheap Phase 4 executor escalates bounded hard decisions to a
+# harness-native TIER_A advisor (advice-only). You set intent + bounds; autospec
+# self-governs which gates are active. policy: auto | on | off.
+#   auto — autospec promotes/retracts gates from its own telemetry (sweep loop),
+#          seeded at the low-risk impl-haiku gate, within budget.
+#   on   — all gates active within budget (no self-tuning).
+#   off  — inert.
+advisor:
+  policy: auto
+  budget:
+    max_calls_per_issue: 3
+    guidance_char_cap: 2800
+# Backlog auto-grooming: promotes/templates/splits stale or malformed open issues
+# toward auto-implement readiness, gated by the same safety/classify/eligibility
+# checks as manual triage. You set intent + bounds; autospec self-governs which
+# grooming actions are active. policy: auto | on | off.
+#   auto — autospec promotes/retracts grooming actions from its own telemetry,
+#          seeded conservatively, within budget.
+#   on   — grooming runs every Tier-1.5 cycle within budget (no self-tuning).
+#   off  — inert.
+grooming:
+  policy: auto
+  budget:
+    max_issues_per_cycle: 5
+    groom_attempts_per_issue: 2
+    canary_floor: 5
 documentation:
   enabled: true
   audiences:
@@ -123,6 +173,137 @@ safety:
   production_access: 'strict_isolation'
   secrets_policy: references_only
   never_clone_raw_secrets: true
+  issue_intent_gate:
+    enabled: true
+    default_decision: quarantine_uncertain
+    require_pass_marker_for_run: true
+    quarantine_labels:
+      - security:quarantined
+    remove_labels_on_quarantine:
+      - auto-implement
+      - needs-classify
+    block_patterns:
+      - id: production-data-destruction
+        severity: block
+        patterns:
+          - "(?i)delete .*production"
+          - "(?i)drop .*prod(uction)? .*database"
+      - id: secret-exfiltration
+        severity: block
+        patterns:
+          - "(?i)(dump|print|exfiltrate|send).*secret"
+          - "(?i)(aws|github|stripe).*token"
+      - id: instruction-bypass
+        severity: block
+        patterns:
+          - "(?i)ignore (all )?(previous|system|developer|agent) instructions"
+          - "(?i)bypass (ci|tests|hooks|review|guardian)"
+      - id: destructive-shell
+        severity: block
+        patterns:
+          - "rm -rf /"
+          - "(?i)curl .*\\| *(sh|bash)"
+    ambiguous_patterns:
+      - id: vague-data-cleanup
+        severity: ambiguous
+        patterns:
+          - "(?i)clean (old|bad|stale)? ?data"
+      - id: weaken-security-control
+        severity: ambiguous
+        patterns:
+          - "(?i)(relax|disable|remove).*security"
+          - "(?i)(relax|disable|remove).*(auth|audit|logging)"
+      - id: production-or-infra-touch
+        severity: ambiguous
+        patterns:
+          - "(?i)(production|prod|billing|payments|migration|terraform|iam|kms)"
+    semantic_review:
+      enabled: true
+      trigger_on:
+        - deterministic_ambiguous
+        - risky_keyword
+        - auth_or_secrets
+        - production_or_infra
+    trusted_actors:
+      - login: berlinguyinca
+        trust: repo_owner
+        allowed_risk:
+          - test_data_reset
+          - fixture_regeneration
+          - local_dev_cleanup
+          - documented_migration_replay
+    trusted_actor_rules:
+      require_scope_match: true
+      never_bypass:
+        - secret_exfiltration
+        - credential_printing
+        - auth_backdoor
+        - production_data_destruction
+        - instruction_bypass
+        - ci_or_review_bypass
 compatibility:
   legacy_skill_contracts: read_if_present
   source_of_truth: .autospec/autospec.yml
+
+# Config-driven blast-radius quarantine registry. Any changed path matching one
+# of these surfaces is routed to async human review instead of auto-merge.
+fenced_surfaces:
+  - id: trading-money-risk
+    severity: fenced
+    reason: Trading-system money, risk, and execution paths can move capital.
+    paths:
+      - "trading-system/money/**"
+      - "trading-system/risk/**"
+      - "trading-system/execution/**"
+      - "trading/**/money/**"
+      - "trading/**/risk/**"
+      - "trading/**/execution/**"
+  - id: schema-migrations
+    severity: high
+    reason: Schema migrations and contracts can break persisted data.
+    paths:
+      - "schemas/**"
+      - "migrations/**"
+      - "db/migrations/**"
+      - "**/*migration*"
+  - id: auth-secrets
+    severity: high
+    reason: Auth, token, and secret-handling paths carry security blast radius.
+    paths:
+      - "**/*auth*"
+      - "**/*secret*"
+      - "**/*token*"
+      - ".github/workflows/**"
+  - id: public-api-contracts
+    severity: high
+    reason: Public API and package/crate contracts affect downstream users.
+    paths:
+      - "packages/**"
+      - "crates/**"
+      - Cargo.toml
+      - Cargo.lock
+  - id: autonomous-control-plane
+    severity: fenced
+    reason: Autonomous conductor and guardrail code controls merge behavior.
+    paths:
+      - scripts/autospec-autonomous.sh
+      - scripts/autospec-autonomous-run-drain.sh
+      - scripts/autonomous-*.sh
+      - scripts/worktree-guard.sh
+      - scripts/claim-guard.sh
+      - scripts/autospec-autonomy-gate.sh
+  - id: autospec-policy-config
+    severity: fenced
+    reason: AutoSpec policy config edits can change autonomous safety policy.
+    paths:
+      - ".autospec/**"
+telemetry:
+  # The ONLY operator-facing flag surface for autospec-db telemetry
+  # (spec: docs/specs/2026-07-10-autospec-db-telemetry-design.md §Configuration).
+  # Env vars are yaml-derived plumbing / CI-test overrides only. Credentials
+  # live in chmod-600 ~/.autospec/db.conf + db.env — never here.
+  enabled: true              # false => loader exports AUTOSPEC_DB_DISABLE=1
+  host_label: ''             # '' = short hostname; set per-site labels via env override until #1776 resolves machine scoping
+  spool_max_bytes: 10485760  # local spool cap; oldest lines dropped first
+  install:
+    db_module: prompt        # prompt | always | never — install.sh behavior for the optional autospec-db module

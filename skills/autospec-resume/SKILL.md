@@ -67,7 +67,7 @@ Dispatches directly to `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/r
 
 ## Auto-resume contract (enforced by the helper)
 
-- **No second lock / idempotency.** Resume relaunches the *run*; the relaunched monitor claims issues through the **existing** GitHub CAS lock-comment (`run-state.sh`, lowest-comment-id wins, loser self-cleans). Resume itself never writes a run-state comment and never adds any new lock. Two concurrent resumes (supervisor + human, or two hosts) converge to exactly one claim per issue at the existing CAS boundary.
+- **No second lock / idempotency.** Resume relaunches the *run*; the relaunched monitor reads the existing GitHub CAS lock-comment through `autospec claim state read` (lowest-comment-id wins, loser self-cleans). Resume itself never writes a run-state comment and never adds any new lock. Two concurrent resumes (supervisor + human, or two hosts) converge to exactly one claim per issue at the existing CAS boundary.
 - **Pre-conditions (ALL required, else exit 0, no relaunch):** (a) ≥1 issue with run-state labeled `in-progress-by-bot` whose heartbeat step ∉ {`merged`,`failed`}; (b) no `~/.autospec/stop.flag`; (c) no issue labeled `paused-by-user`; (d) not all issues closed.
 - **Crash-vs-live.** Treat an issue as crashed (eligible) only when its age, computed from run-state **server** `updated_at` (never a local clock — mirrors `autospec-watchdog.sh:386-405`), satisfies `step=claimed && age>=300` OR `age>=10800`. Otherwise assume a live/slow worker elsewhere and do **not** steal.
 - **Cross-host.** `--resume-partial` re-attaches `/tmp/wt-<branch>` only when `heartbeat.host == $(hostname)`; cross-host or missing `host` MUST clean-restart off `origin/main` (the crashed worktree is on a dead machine's local `/tmp`).

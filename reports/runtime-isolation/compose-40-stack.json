@@ -1,0 +1,375 @@
+{
+  "stack_count": 40,
+  "peak_containers": 40,
+  "startup_duration_ms": 29856,
+  "teardown_duration_ms": 59222,
+  "collisions": 0,
+  "retry_exhaustions": 0,
+  "leaked_resources": 0,
+  "cleanup_errors": 0,
+  "reference_count_survival": true,
+  "provisioning_recovery": true,
+  "teardown_recovery": true,
+  "rows": [
+    {
+      "environment_id": "worktree-01-7a7138e785340e78",
+      "compose_project": "agent_worktree-01-7a7138e785340e78",
+      "container_id": "beec3c908d7b3db9275b6b23fcd3e526801248f2b1e37676a8912682999241af",
+      "network_id": "358ea2c1e8bdceee7b96c8ecad6083b5753359dcab09aaa7960daa2bb3c8c26b",
+      "volume_id": "agent_worktree-01-7a7138e785340e78_data",
+      "host_port": 32775,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-02-be44c9862818399b",
+      "compose_project": "agent_worktree-02-be44c9862818399b",
+      "container_id": "492edc36b1ff14e8feeb6361f7fc9a1fba42f680012e4166195d8e4f206edcfe",
+      "network_id": "4458af4321b97f0db05620d0eeb511564b73437dffb03c8ec2d0f0aa04f67337",
+      "volume_id": "agent_worktree-02-be44c9862818399b_data",
+      "host_port": 32771,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-03-83ac784b120af630",
+      "compose_project": "agent_worktree-03-83ac784b120af630",
+      "container_id": "9ba279c03f7174d2213058c8ce29619ea1a37952906c797c6edcdf340acd2189",
+      "network_id": "e9d0bd14df1ca7e9e77ef279df9fd1a0a8192c4e44450fba4f6319658b3235de",
+      "volume_id": "agent_worktree-03-83ac784b120af630_data",
+      "host_port": 32799,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-04-104573fe8c540ea8",
+      "compose_project": "agent_worktree-04-104573fe8c540ea8",
+      "container_id": "c6c5900de212796f7f592bb6802737a63b482b545cbaa669663991cac0ef6cb3",
+      "network_id": "6be82331729878d1c444f2f0db59e6c1b428b593b1b2640743e16092ed58f5c6",
+      "volume_id": "agent_worktree-04-104573fe8c540ea8_data",
+      "host_port": 32795,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-05-b4ca2887ab18700d",
+      "compose_project": "agent_worktree-05-b4ca2887ab18700d",
+      "container_id": "5419d7f50f73f31efd9c359e538a3a74c32024c77fc68944e6b181088140dc8b",
+      "network_id": "65c1343daf73cf3ea5d59efbc50f6e5cd6db4214472ac5ab4ae4a10eb68255ec",
+      "volume_id": "agent_worktree-05-b4ca2887ab18700d_data",
+      "host_port": 32774,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-06-173aa7da3d2cabf0",
+      "compose_project": "agent_worktree-06-173aa7da3d2cabf0",
+      "container_id": "b78842fb9cda0ec92cba90c3f2f606a6ed3508abf9dcd75236ffad6e4e70c0df",
+      "network_id": "decf48f7901d57c86a1d788d71d0de62273d02284d9b2be0f164de05f31bf411",
+      "volume_id": "agent_worktree-06-173aa7da3d2cabf0_data",
+      "host_port": 32801,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-07-755dbb27f40eb831",
+      "compose_project": "agent_worktree-07-755dbb27f40eb831",
+      "container_id": "b8be1514bf163e9202da1b8a6efc849483c6909614b02d18c14666b6a5a8352d",
+      "network_id": "d47f87197f45be5e2f61adef46299665b069769c4800158ad0591e83fec78737",
+      "volume_id": "agent_worktree-07-755dbb27f40eb831_data",
+      "host_port": 32784,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-08-3ae249765a26d7e4",
+      "compose_project": "agent_worktree-08-3ae249765a26d7e4",
+      "container_id": "fbe94f9d9eb2ca1958d6cb39ab1743a95428528a5dc0339017c84fb1c3edc120",
+      "network_id": "f249960f65f4dd2fcb3b3fd1f1f72e1c23ca1415f3fdae3ae90ce5f6116f7895",
+      "volume_id": "agent_worktree-08-3ae249765a26d7e4_data",
+      "host_port": 32797,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-09-fbdbfef716a47017",
+      "compose_project": "agent_worktree-09-fbdbfef716a47017",
+      "container_id": "97dedf29e2b8286de16a5fdc3942c2b75749a978bf2bc72e07125f8bb9a90b37",
+      "network_id": "fe8693779e6a68b0f995756f3f592a41f6af75917a3db3f1f11280fa175bd926",
+      "volume_id": "agent_worktree-09-fbdbfef716a47017_data",
+      "host_port": 32805,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-10-39fe85624bda6bf9",
+      "compose_project": "agent_worktree-10-39fe85624bda6bf9",
+      "container_id": "396bef4cbb684dfd928ff46d8c5da100235d2ef5bf0be4ad46512c568d5dd9da",
+      "network_id": "c0a193093b8648714419d7f9611c845e46f2ddb1760d9821d9798354010e31fd",
+      "volume_id": "agent_worktree-10-39fe85624bda6bf9_data",
+      "host_port": 32776,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-11-11d9b0be574f0e7b",
+      "compose_project": "agent_worktree-11-11d9b0be574f0e7b",
+      "container_id": "8b50ea9cbf26423c0a80c6e34d99988477e70531648a35f2071de0d6ec24b821",
+      "network_id": "0d57250c6e2e4e11c8a532070f57ff6eb2ea847b662a39eece1ac2f46fb277cb",
+      "volume_id": "agent_worktree-11-11d9b0be574f0e7b_data",
+      "host_port": 32788,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-12-68744a7ed1ad20f5",
+      "compose_project": "agent_worktree-12-68744a7ed1ad20f5",
+      "container_id": "0cb03aaf095f7406202ad6bf858c36573639c52e704ab9e280f3aa2114764ce2",
+      "network_id": "6638f096c9cbd3acfc6493d003f85aa4a13e7e310c8f924c7d49507947c61c94",
+      "volume_id": "agent_worktree-12-68744a7ed1ad20f5_data",
+      "host_port": 32769,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-13-360fe9aafc6c3f7f",
+      "compose_project": "agent_worktree-13-360fe9aafc6c3f7f",
+      "container_id": "f0ae234f63b94bc003e0648a09c99b4986547666def335a2ab04705524f69cdf",
+      "network_id": "45a79319741acf3b809afcb9c3a6f64e7b098107894d4617697883f668e18268",
+      "volume_id": "agent_worktree-13-360fe9aafc6c3f7f_data",
+      "host_port": 32802,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-14-4525dcd1e3a9e7b5",
+      "compose_project": "agent_worktree-14-4525dcd1e3a9e7b5",
+      "container_id": "2f6d8624de798875c0be336441bfc48c2813f421f477f3ac79890798bbd66ef8",
+      "network_id": "574c26377b6968a6e054b956c627ead982b237dfa2b083d4c411df6db34d1f78",
+      "volume_id": "agent_worktree-14-4525dcd1e3a9e7b5_data",
+      "host_port": 32772,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-15-84f5a476c0679042",
+      "compose_project": "agent_worktree-15-84f5a476c0679042",
+      "container_id": "a4bbf3171322a506e17028ab3912540f86dcfa9fabffd29c8ae8be7112a667fc",
+      "network_id": "915669e8d60fd631f45dc3e2bc496a2d2512fdf7980aed01a24a89d7631634c5",
+      "volume_id": "agent_worktree-15-84f5a476c0679042_data",
+      "host_port": 32807,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-16-eb6140060ea7883a",
+      "compose_project": "agent_worktree-16-eb6140060ea7883a",
+      "container_id": "ab428b7f2e7118deac90031073e71c1735c0dbf5242d3afb84d2bc8df0aff82c",
+      "network_id": "5e707e26efbf68880a71fa7584d7c54391cf917e3f236d9381103d6a8c775298",
+      "volume_id": "agent_worktree-16-eb6140060ea7883a_data",
+      "host_port": 32792,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-17-2ec275c33581392b",
+      "compose_project": "agent_worktree-17-2ec275c33581392b",
+      "container_id": "7356e697febaa8589c80155540d0cf7fe9415f0f801497e59ccafde2f975021e",
+      "network_id": "69f5f08392ebd1b2b8839be30882fec484f4c4fd9d9431f2004cce3ce7b1e6ef",
+      "volume_id": "agent_worktree-17-2ec275c33581392b_data",
+      "host_port": 32779,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-18-4371c0e65c1e49d2",
+      "compose_project": "agent_worktree-18-4371c0e65c1e49d2",
+      "container_id": "2283452d7bf2eb9ad15e1d0154b9cfa5286b2be938f98500e6634ff4f918d922",
+      "network_id": "11b50686cd23844386015ebac080c99fa3660f72c4d50dd4c00135bd24f195f8",
+      "volume_id": "agent_worktree-18-4371c0e65c1e49d2_data",
+      "host_port": 32806,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-19-ad12a4f1ff2a9140",
+      "compose_project": "agent_worktree-19-ad12a4f1ff2a9140",
+      "container_id": "a4f91efbbd10e64631b9ad70934854f14926128eaa9b47308bcfc7139df747a8",
+      "network_id": "fe58fd0717b6a13d612012217befa1521c7287f046aebd4c0c513e17d240fbb5",
+      "volume_id": "agent_worktree-19-ad12a4f1ff2a9140_data",
+      "host_port": 32770,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-20-4579ddc7543c6adf",
+      "compose_project": "agent_worktree-20-4579ddc7543c6adf",
+      "container_id": "259fa9cb562ae99cf6c2a4344cb00ce903745f744f5f284c6119897c2636e3b3",
+      "network_id": "d92bd4e8086cc230693c5ae1774c444131bf7d5b69c92ba9be6199e9fbbfabe0",
+      "volume_id": "agent_worktree-20-4579ddc7543c6adf_data",
+      "host_port": 32798,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-21-2e3026a3788f1043",
+      "compose_project": "agent_worktree-21-2e3026a3788f1043",
+      "container_id": "e1897f9e467da8296adc922d9a9ddacbfbed07652682945f8ed7df6528e283cd",
+      "network_id": "b030f0c2011ef516ca84d410b191966741d2016c2cd4dadd5663972dd1acd68d",
+      "volume_id": "agent_worktree-21-2e3026a3788f1043_data",
+      "host_port": 32785,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-22-b0127aaa73729afd",
+      "compose_project": "agent_worktree-22-b0127aaa73729afd",
+      "container_id": "3bc75449f350e6f7b7eb0a108fd1a10871f9dad21bc1c776f4517d62ef8da234",
+      "network_id": "b1260eab35c807cb96b9f59f11707feb95c28b53d23f94e847c74c80d39c4d38",
+      "volume_id": "agent_worktree-22-b0127aaa73729afd_data",
+      "host_port": 32786,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-23-2efe9bc6dd410a92",
+      "compose_project": "agent_worktree-23-2efe9bc6dd410a92",
+      "container_id": "6ffc0b3c19a5456bf3189ba61db48e9a2d587e4eb4354598cc6236c8abf70022",
+      "network_id": "7f36abc4b8da137b86e3de295f376abae57f63e40b995571ae9d232cdbd3ee9a",
+      "volume_id": "agent_worktree-23-2efe9bc6dd410a92_data",
+      "host_port": 32773,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-24-94a052d38d714d8d",
+      "compose_project": "agent_worktree-24-94a052d38d714d8d",
+      "container_id": "bded31bf23e4b05f508b1b64d0e35c4d7054e7ed136c7f8d5da9d02fc63bde4d",
+      "network_id": "057cacfea7ff72a26c51b04148d279a175106d6f0b21d39d8cc4692011faf205",
+      "volume_id": "agent_worktree-24-94a052d38d714d8d_data",
+      "host_port": 32800,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-25-652067e94defcdc3",
+      "compose_project": "agent_worktree-25-652067e94defcdc3",
+      "container_id": "35fd9297bfe86e323ee24ff434e848bfba1e7ef66198a2acbd73b71599222bbc",
+      "network_id": "122b0890a7d664cdb5a87126afe1be8fcd6c645d97449475d08a7478018f40fc",
+      "volume_id": "agent_worktree-25-652067e94defcdc3_data",
+      "host_port": 32794,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-26-869d3d43f1cfdd52",
+      "compose_project": "agent_worktree-26-869d3d43f1cfdd52",
+      "container_id": "8824f06d0b1739f4559cdd4ace9f5e4258a0f09032b6d399fbf73416a2cc568d",
+      "network_id": "f467aabb1586c73903cbde0ead21ecb1a75a2f3c903bbd8fa1e966290c178d8d",
+      "volume_id": "agent_worktree-26-869d3d43f1cfdd52_data",
+      "host_port": 32780,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-27-73a48bdccc29fdf3",
+      "compose_project": "agent_worktree-27-73a48bdccc29fdf3",
+      "container_id": "a2ee14aa59a96520f601f3b3d07e3e15b8b150763f29daaa1373e149b485aa43",
+      "network_id": "c492cecf5c28168fd51fcd6360e18d9f051920f007975d5293f52a749fc74bb8",
+      "volume_id": "agent_worktree-27-73a48bdccc29fdf3_data",
+      "host_port": 32790,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-28-06dec7d8fcefab8b",
+      "compose_project": "agent_worktree-28-06dec7d8fcefab8b",
+      "container_id": "9a5555376c639dbe810f2159a8705af9c952eaebf66870a07d68b1b2c8304eba",
+      "network_id": "0ed7341e137db1fa7e00a931658cb4f309cd46e1a99f969b978db08f1279a68c",
+      "volume_id": "agent_worktree-28-06dec7d8fcefab8b_data",
+      "host_port": 32791,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-29-cdcf16df5afda4f1",
+      "compose_project": "agent_worktree-29-cdcf16df5afda4f1",
+      "container_id": "81f9e0e9a881db3ee71ff39e9446b9f43ba52a6f5f2c21c757795a00abef1927",
+      "network_id": "684becb38785791b72d5e977b7f24061a45519c94ed5f55de6378a1ad48321c9",
+      "volume_id": "agent_worktree-29-cdcf16df5afda4f1_data",
+      "host_port": 32768,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-30-3914ff8dd82df745",
+      "compose_project": "agent_worktree-30-3914ff8dd82df745",
+      "container_id": "160a1de40190e9cae1ecdb572ffddc7bc7d42d7ecedf3966f8bdbd6c1c5e2ccf",
+      "network_id": "cc0702e016b9135e1f37ee52c920a88c0fa4f4a852455b92cbdbdc7f2f56d6d4",
+      "volume_id": "agent_worktree-30-3914ff8dd82df745_data",
+      "host_port": 32781,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-31-4155bd8116669b29",
+      "compose_project": "agent_worktree-31-4155bd8116669b29",
+      "container_id": "c562a2880ae8e16e78458e31f678e4818bc902008233a1c1e0b3af4e2a488fe7",
+      "network_id": "3008a792cdd58b49b8705126e3eb2ff195f32fb5f55aa53eede0f29fd35b7892",
+      "volume_id": "agent_worktree-31-4155bd8116669b29_data",
+      "host_port": 32783,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-32-d3dd8aaad7b398ff",
+      "compose_project": "agent_worktree-32-d3dd8aaad7b398ff",
+      "container_id": "68492af204ffe9a9ea52de570974316423670de31aa93f5dd5263f074b793ba2",
+      "network_id": "2f340b14051df7f92130089e455170cbfffc17e794b89bb006734533155a695e",
+      "volume_id": "agent_worktree-32-d3dd8aaad7b398ff_data",
+      "host_port": 32796,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-33-86bceafef9a7d16b",
+      "compose_project": "agent_worktree-33-86bceafef9a7d16b",
+      "container_id": "1cd37c85fc798ab27a644a82811e5115f69cf40a18ac9e828765f1302d333eb7",
+      "network_id": "c47b5fb919a2842dc867fa110f0131bdbadb6afdc1d567ff65d77d3c968e615d",
+      "volume_id": "agent_worktree-33-86bceafef9a7d16b_data",
+      "host_port": 32804,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-34-906bd088055731fc",
+      "compose_project": "agent_worktree-34-906bd088055731fc",
+      "container_id": "8622e721090b21bdae2fa8b7e54c59877dce4d61bb708451a827b4572adc8d3d",
+      "network_id": "0d8be1159659992c9b986d2aafb202285fa3c7dd10ef388bbe57a6024c7f73ad",
+      "volume_id": "agent_worktree-34-906bd088055731fc_data",
+      "host_port": 32787,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-35-c983562b75b8c307",
+      "compose_project": "agent_worktree-35-c983562b75b8c307",
+      "container_id": "1ab6cb20b77ff5e6918126b25fb2f96410bbbdbc143fe68e5e32580a7c687d12",
+      "network_id": "c102f583f41cedc332ba1c46f7fe3a08a3db8fc7285dcbfb80fae42ccfe0e634",
+      "volume_id": "agent_worktree-35-c983562b75b8c307_data",
+      "host_port": 32777,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-36-1d71605f23a6447c",
+      "compose_project": "agent_worktree-36-1d71605f23a6447c",
+      "container_id": "4ba742a5d724ead881939b6536f59abd370a4bc9931713458e480dc588a9fa50",
+      "network_id": "c5cd6b2559740753e4b8e8417424ee6eb901977353b84abffbb3709d45ba864b",
+      "volume_id": "agent_worktree-36-1d71605f23a6447c_data",
+      "host_port": 32789,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-37-44bb64e9a9a38235",
+      "compose_project": "agent_worktree-37-44bb64e9a9a38235",
+      "container_id": "2b0fd3038e35bf9c96dab93419e1bfbdcc23a5d08cba1b3829771f68c8469955",
+      "network_id": "82b6ebd76c4c0cd8878469cc22f47fedacc04e07d63d76d357194ba535c96a6d",
+      "volume_id": "agent_worktree-37-44bb64e9a9a38235_data",
+      "host_port": 32782,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-38-0022866cf592ff3a",
+      "compose_project": "agent_worktree-38-0022866cf592ff3a",
+      "container_id": "08b2874c227c6398207751481f35ba6a8c3e854346dd378333706585a5626e0c",
+      "network_id": "daaf263a9066b248db7c1be47f0c9c8db84a1fa7779765ea30da994eff999c14",
+      "volume_id": "agent_worktree-38-0022866cf592ff3a_data",
+      "host_port": 32803,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-39-03b8a3553633a549",
+      "compose_project": "agent_worktree-39-03b8a3553633a549",
+      "container_id": "4716a437040910b782aa3e185b59381029fd2cb2bb15c7571175528232754553",
+      "network_id": "122e1bb2ab835bc01f3d249d3ca8c83d382efcc51e9ac8aaaa8f4e358dc06adc",
+      "volume_id": "agent_worktree-39-03b8a3553633a549_data",
+      "host_port": 32793,
+      "http_status": 200
+    },
+    {
+      "environment_id": "worktree-40-c912c7fac7e50bf3",
+      "compose_project": "agent_worktree-40-c912c7fac7e50bf3",
+      "container_id": "07cdcc722df3c8c7aa22dfce74be5a694756bee7c21dcbc29413714f072862ae",
+      "network_id": "32712f4ee372707fd8108c1062ab060de90ffbc2d51696e7e275f80ac4f1b619",
+      "volume_id": "agent_worktree-40-c912c7fac7e50bf3_data",
+      "host_port": 32778,
+      "http_status": 200
+    }
+  ]
+}

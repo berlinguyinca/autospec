@@ -134,7 +134,7 @@ call, or into GitHub replication-lag elimination (all out of scope below).
 | `skills/autospec-run/scripts/run-state.sh` | run-state lock-comment read/upsert/clear over `gh api .../comments` | Make `state_comment_ids` / `state_comment_id` / `state_comment_body` sort by **numeric comment id ascending** (deterministic earliest-id), not array order. Add an `--expect-worker` guard for safe reclaim. |
 | `skills/autospec-run/scripts/claim-issue.sh` | CAS claim: label swap → upsert run-state → read-back verify; returns win/lose JSON + exit 0/2 | Add earliest-comment-id tiebreak (loser self-deletes its own losing comment); add cross-machine stale-lease reclaim keyed on server-side `updated_at`. Keep exit-0/exit-2 contract. |
 | `skills/autospec-run/SKILL.md` (+ `opencode/agent.md`, `codex/prompt.md`) | hot monitor loop | Delete the inline blind label-swap (lines 479–496 / mirrors); **redirect to `claim-issue.sh`** as the sole claim path; branch on its exit code. Byte-identical across the trio (lock-step). |
-| `scripts/validate.sh` | shell-only validation gate | New `check_claim_cas_guard` (fails if any harness file contains the unguarded check-then-act add-label pattern not wrapped in a CAS read-back path); lock-step diff already covered by `check_lockstep`; `bash -n` on both scripts; file-presence. |
+| `autospec validate` | shell-only validation gate | New `check_claim_cas_guard` (fails if any harness file contains the unguarded check-then-act add-label pattern not wrapped in a CAS read-back path); lock-step diff already covered by `check_lockstep`; `bash -n` on both scripts; file-presence. |
 
 `AUTOSPEC_SCRIPTS_DIR` resolution and the `[ -x "$COORD_CLAIM" ] || COORD_CLAIM=skills/...` fallback (AGENTS.md 356–362) are reused unchanged so the
 installed copy is preferred and the in-repo copy is the fallback.
@@ -244,7 +244,7 @@ is not.
 
 ## Testing (validation-via-shell only)
 
-No language test runner. Every change ships a `scripts/validate.sh` extension
+No language test runner. Every change ships a `autospec validate` extension
 that passes after the change:
 
 1. **`check_claim_cas_guard` (new).** Fails if any of the three harness files
@@ -322,7 +322,7 @@ above). Therefore:
       false win.
 - [ ] Heartbeat schema `{"issue","branch","step","ts","pr","repo"}` and
       `in-progress-by-bot` label semantics are unchanged.
-- [ ] `scripts/validate.sh` gains `check_claim_cas_guard` which fails on the
+- [ ] `autospec validate` gains `check_claim_cas_guard` which fails on the
       unguarded check-then-act pattern, plus the two mocked-`gh` simulations;
       `validate.sh` passes end-to-end after the change.
 - [ ] The 300s watchdog claimed-timeout is untouched.
@@ -362,7 +362,7 @@ Ordered children (each ≤3 files, harness trio byte-identical where touched):
    `run-state.sh`. Depends-on: #2.
 4. **`validate.sh` guard + lock-step propagation.** Add `check_claim_cas_guard`
    + the two mocked-`gh` contended/reclaim simulations; confirm `check_lockstep`
-   covers the new claim prose. Files: `scripts/validate.sh` (+ any mock
+   covers the new claim prose. Files: `autospec validate` (+ any mock
    fixtures). Depends-on: #1, #2, #3.
 
 ## Autonomous assumptions

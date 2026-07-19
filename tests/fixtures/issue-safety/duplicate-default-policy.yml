@@ -1,0 +1,7 @@
+safety:
+  issue_intent_gate:
+    block_patterns:
+      - id: production-data-destruction
+        patterns:
+          - "(?i)delete .*production"
+          - "(?i)drop .*prod(uction)? .*database"

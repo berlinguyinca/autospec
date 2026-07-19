@@ -1,0 +1,21 @@
+id: pretty-rendering-viewers
+title: Pretty rendering viewers shell
+category: nlai
+summary: Pretty rendering viewers shell
+source_rules:
+  - required_pretty_human_output
+source_baselines:
+  - nlai
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: component
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

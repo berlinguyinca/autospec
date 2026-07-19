@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://autospec.local/schemas/autospec-execution-order.schema.json",
+  "title": "AutoSpec Execution Order",
+  "type": "array",
+  "items": {
+    "type": "string",
+    "pattern": "^v[0-9]+-[a-z0-9-]+$"
+  },
+  "uniqueItems": true
+}

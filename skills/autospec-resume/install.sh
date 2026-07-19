@@ -38,7 +38,7 @@ DRY_RUN=0
 UPDATE_MODE=0
 TMP_FETCH_DIR=""
 # Repo-root scripts/ helpers this skill needs at runtime.
-SHARED_SCRIPT_FILES="autospec-run-registry.sh run-state.sh heartbeat-read.sh heartbeat-write.sh autospec-stop.sh"
+SHARED_SCRIPT_FILES="autospec-run-registry.sh heartbeat-read.sh heartbeat-write.sh autospec-stop.sh"
 # Per-skill scripts/ helpers (skills/autospec-resume/scripts/).
 SKILL_SCRIPT_FILES="resume-scan.sh resume-attempts.sh"
 
@@ -95,9 +95,9 @@ fetch_source_files() {
     done
     mkdir -p "$TMP_FETCH_DIR/repo-scripts"
     for rel in $SHARED_SCRIPT_FILES; do
-        # run-state.sh / heartbeat-*.sh live under skills/autospec-run/scripts/.
+        # heartbeat-*.sh live under skills/autospec-run/scripts/.
         case "$rel" in
-            run-state.sh|heartbeat-read.sh|heartbeat-write.sh)
+            heartbeat-read.sh|heartbeat-write.sh)
                 src_url="$RAW_REPO_BASE/skills/autospec-run/scripts/$rel" ;;
             *)
                 src_url="$RAW_REPO_BASE/scripts/$rel" ;;
@@ -133,7 +133,7 @@ install_runtime_scripts() {
         src=""
         if [ -n "$checkout_root" ]; then
             case "$rel" in
-                run-state.sh|heartbeat-read.sh|heartbeat-write.sh)
+                heartbeat-read.sh|heartbeat-write.sh)
                     src="$checkout_root/skills/autospec-run/scripts/$rel" ;;
                 *)
                     src="$checkout_root/scripts/$rel" ;;

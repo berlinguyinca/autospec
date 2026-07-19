@@ -286,7 +286,7 @@ Opt-in GitHub integration test:
 Verification commands:
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 bats tests/unit/test_autospec_fleet_config.bats
 bats tests/unit/test_autospec_fleet_scheduler.bats
 ```

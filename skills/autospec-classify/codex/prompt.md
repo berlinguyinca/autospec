@@ -65,7 +65,6 @@ This workflow assumes a small set of capabilities. Map each one to your harness'
 
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work and Tier B (cheaper model + medium thinking) for implementation work. This skill's per-issue classification is **deterministic-first**: the deterministic rubric runs with no LLM call, and only ambiguous issues escalate to a single Tier-B LLM tie-breaker — never Tier A. The orchestrator keeps the user's invoked model. Fall back UP the tier on quota/capacity or other unavailability by retrying the same subagent with the stronger tier while preserving parent context.
 
-
 ## Harness detection (run once at skill start, before Phase 0)
 
 Detect your harness by checking available tools before any phase:
@@ -115,18 +114,30 @@ Prepend the output block (if non-empty) to your working context. This surfaces l
    - Filter out any issue whose labels include `type:tracker`.
    - Apply the `--issues` filter if provided.
 
+### Issue intent safety gate
+
+The classifier may persist model-fit and quality metadata, but it must never
+author an automatic safety decision. After the final body is persisted, the
+Rust queue command is the only authority for an admission pass, ambiguity, or
+block.
+
 ### Label transition for `needs-classify` issues
 
-For every issue in the candidate set whose labels include
-`needs-classify`, after Step 4 of the per-issue procedure (the label
-application step) ALSO perform the following transition:
+For every issue in the candidate set whose labels include `needs-classify`, run
+the Rust admission only after Steps 2–6 of the per-issue procedure have
+persisted the final body. First make the issue an interim queue candidate, then
+review that exact issue:
 
-- `gh issue edit <N> --add-label auto-implement --remove-label needs-classify --repo {repo}`
+```bash
+gh issue edit <N> --add-label auto-implement --remove-label needs-classify --repo {repo}
+"${AUTOSPEC_BIN:-autospec}" queue review-safety --repo {repo} --limit 1 --issue <N>
+```
 
-This moves the listener-filed issue from the `needs-classify` bucket
-into the implementation queue. Issues that were already labeled
-`auto-implement` (and not `needs-classify`) are re-classified in place;
-their labels do not change beyond the `ctx:*` / `reasoning:*` additions.
+Read the command's JSON totals. Only `pass: 1` admits this invocation. Any
+other result is already recorded by Rust and must be skipped without a prompt,
+shell, or semantic reviewer changing labels, comments, or issue body. Issues
+already carrying `auto-implement` are re-classified in place, then receive the
+same exact review after their final body is persisted.
 
 ## Rubric
 
@@ -270,6 +281,13 @@ For each candidate issue:
      - Comment findings: `gh issue comment <N> --body "<findings>" --repo {repo}`
    - Do NOT remove `auto-implement` label. Operator decides whether to proceed.
    - Skip in `--dry-run`.
+
+7. **Rust safety admission.** After every model-fit and quality-body write has
+   completed, admit the exact issue with the command in
+   [Label transition for `needs-classify` issues](#label-transition-for-needs-classify-issues).
+   For an issue already carrying `auto-implement`, do not change ordinary
+   labels first; invoke the same exact command. Only a JSON `pass: 1` result is
+   eligible for later implementation work.
 
 ## Sibling normalization (forward reference)
 

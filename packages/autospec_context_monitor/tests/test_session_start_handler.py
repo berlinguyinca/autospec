@@ -94,3 +94,33 @@ def test_install_sh_registers_session_start():
             "autospec_context_monitor" in cmd and "SessionStart" in cmd
             for cmd in sess_cmds
         ), f"SessionStart hook must invoke autospec_context_monitor; got: {sess_entries}"
+
+
+@pytest.mark.skipif(not _INSTALL_SH.exists(), reason="install.sh not found")
+def test_install_hook_mode_does_not_require_cargo(tmp_path):
+    """Hook-only installation exits before any Rust runtime build."""
+    marker = tmp_path / "cargo-invoked"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_cargo = bin_dir / "cargo"
+    fake_cargo.write_text(
+        "#!/usr/bin/env sh\nprintf invoked > \"$CARGO_MARKER\"\nexit 91\n",
+        encoding="utf-8",
+    )
+    fake_cargo.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path),
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "CARGO_MARKER": str(marker),
+    }
+    result = subprocess.run(
+        ["bash", str(_INSTALL_SH), "--hook-mode", "claude"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not marker.exists(), "hook-only installation must not invoke cargo"

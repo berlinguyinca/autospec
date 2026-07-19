@@ -5,7 +5,7 @@ Improve the decomposer prompt for better issue quality.
 ## Acceptance criteria
 
 - [ ] `bash scripts/lint-issue.sh tests/fixtures/issue-quality/good.md` exits 0.
-- [ ] `scripts/validate.sh` exits 0.
+- [ ] `autospec validate` exits 0.
 
 ## Verification
 

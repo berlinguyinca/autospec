@@ -1,0 +1,6 @@
+safety:
+  issue_intent_gate:
+    block_patterns:
+      - id: broken
+        patterns:
+          - [

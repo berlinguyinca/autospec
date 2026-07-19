@@ -9,6 +9,17 @@
 - **Lock-step rule** (per `CONTRIBUTING.md`): every multi-harness skill keeps `SKILL.md` / `opencode/agent.md` / `codex/prompt.md` bodies identical; only frontmatters differ.
 - **Validation in lieu of code tests**: this repo has no language-level test runner. Validation is via shell scripts that check lock-step diffs, frontmatter parsing, `bash -n` on install scripts, and file presence. Each PR adds or extends a validation script that passes after the change.
 
+## Runtime resource isolation
+
+- Use `autospec runtime env up|status|down|exec|session|gc|normalize-compose` for every
+  manifest-v2 stack; use `down --purge-maven` only for the guarded Maven 4 prefix.
+- `AUTOSPEC_MAVEN_ISOLATION=off`, `AUTOSPEC_COMPOSE_ISOLATION=off`, and
+  `AUTOSPEC_ENV_DISABLE=1` export `AUTOSPEC_ISOLATION_BYPASSED=1`; never call the resulting
+  isolation evidence verified.
+- Runtime state is private on Unix (`0700` directories and `0600` files). Treat
+  `RUNTIME_STATE_SYMLINK_REJECTED` and ownership ambiguity as fail-closed recovery signals;
+  never delete an environment or session root manually.
+
 ## Subagent model selection (two-tier, cost-aware)
 
 When the workflow dispatches a subagent, choose tier based on the **type of work**, not by phase number alone. Two tiers:
@@ -95,7 +106,7 @@ top GPT" at call time so the skill survives model-family churn.
 
 Admin-merge `auto-implement` PRs (`gh pr merge <#> --admin --squash --delete-branch`) when:
 - The full target-repo validation/test suite has passed locally after the branch is current with `main`.
-- All required CI checks pass (slow optional checks pending is acceptable only after the full local suite is green).
+- All **non-advisory** required CI checks pass — checks matching `AUTOSPEC_PR_ADVISORY_CHECKS` (default `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`; e.g. self-hosted TeamCity) are advisory and may be pending **or failing** once the full local suite is green.
 - The self-review subagent returned `LGTM`.
 - PR closes an `auto-implement` issue from a `feat/*` branch.
 
@@ -142,7 +153,7 @@ from `main` at most once per 24 hours (fail-open: any network or install error l
 `WARN:` line and continues). Set `AUTOSPEC_NO_SELF_UPDATE=1` to skip. The canonical
 bash block lives in `skills/autospec/SKILL.md` (`## Startup self-update` section) and
 is mirrored byte-identically (modulo `SKILL_NAME=`) across all multi-harness skill trios.
-`scripts/validate.sh` (`check_startup_preflight`) enforces byte-identity.
+`autospec validate` (`check_startup_preflight`) enforces byte-identity.
 
 ## Small-LLM target
 
@@ -252,7 +263,7 @@ tradeoff across the skill family.
 
 Each skill's `## Required capabilities & harness adapter` table carries a
 **Subagent dispatch policy** row pointing back to this matrix; the
-`scripts/validate.sh::check_agents_md_subagent_matrix` gate enforces lockstep
+`autospec validate::check_agents_md_subagent_matrix` gate enforces lockstep
 across every adapter trio.
 
 ## Implementation-quality contract
@@ -363,7 +374,7 @@ appended to the PR body and printed to the monitor log. It is the structured,
 result-first summary the merge-gate and the done-challenge consume as *evidence*.
 Keep it terse: a tight body, long only where a claim genuinely needs it.
 
-Required fields (exact field names are gated by `scripts/validate.sh`):
+Required fields (exact field names are gated by `autospec validate`):
 
 - **Result** — one line, outcome first (what shipped), not a narration of the
   agent's own process. Open with the result, not "I'll" / "Let me".
@@ -521,6 +532,12 @@ git worktree prune
 
 Never leave stale worktrees; the watchdog GC (`scripts/autospec-watchdog.sh`)
 sweeps orphans as a safety net, but proactive cleanup is required.
+
+The watchdog cross-checks the GitHub `autospec-run-state` comment before releasing
+any `claimed` heartbeat — a live sibling's claim is never reclaimed on local age
+alone. The default `claimed` threshold is **1800s**; override with
+`AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS`. See SKILL.md §"Running concurrent workers"
+for the full concurrency model and tuning table.
 
 ### Pointer to enforcement tool
 

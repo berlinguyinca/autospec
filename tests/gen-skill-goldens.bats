@@ -82,6 +82,12 @@ teardown() {
     [ "$status" -eq 2 ]
 }
 
+@test "shared skill smoke path delegates to golden regenerator" {
+    run bash "$REPO_ROOT/skills/autospec-shared/scripts/gen-skill-goldens.sh" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Usage:"* ]]
+}
+
 # --- usage: --help exits 0 and prints Usage ---
 @test "--help prints Usage and exits 0" {
     run bash "$SCRIPT" --help

@@ -46,6 +46,20 @@ or offline hosts continue with warnings; use `AUTOSPEC_SKIP_SYSTEM_TOOLS=1` or
 
 ## Skills
 
+## Worktree runtime resources
+
+The generated installer exposes one Rust-owned runtime contract to every harness. Use
+`autospec runtime env up|status|down|exec|session|gc|normalize-compose`; the guarded Maven
+cleanup is `down --purge-maven`. A `version: 2` manifest gives linked worktrees distinct Maven
+4 repositories, Compose projects, containers, networks, volumes, URLs, and host ports.
+
+`AUTOSPEC_MAVEN_ISOLATION=off`, `AUTOSPEC_COMPOSE_ISOLATION=off`, and
+`AUTOSPEC_ENV_DISABLE=1` are explicit opt-outs. They export
+`AUTOSPEC_ISOLATION_BYPASSED=1`, so reports must downgrade verified isolation claims.
+Recovery is fail-closed: ownership ambiguity is retained for `gc`, live sessions preserve
+the stack, and `RUNTIME_STATE_SYMLINK_REJECTED` blocks cleanup through a symlink. Unix state
+directories use `0700`; authoritative files use `0600`.
+
 ### `/autospec-define`
 
 <!-- autospec-doc-scope:
@@ -263,8 +277,23 @@ Maps repo slugs to local paths. See `examples/project-map.yml`.
 | `auto-implement` | Ready for the monitor to pick up |
 | `in-progress-by-bot` | Claimed by an active monitor worker |
 | `needs-classify` | Filed by listener; needs `ctx:*` + `reasoning:*` labels |
+| `safety:reviewed` | Issue has a passing issue-intent safety review |
+| `autospec:needs-human` | Issue has an ambiguous safety review and cannot be claimed until a human resolves it |
+| `security:quarantined` | Issue has a blocking safety review; autospec-run refuses it until a human edits and reclassifies |
 | `ctx:32k` / `ctx:64k` / `ctx:120k` | Model context budget hint |
 | `reasoning:standard` / `reasoning:deep` | Reasoning tier hint |
+
+### Rust safety review
+
+After an issue receives `auto-implement`, run
+`autospec queue review-safety --repo OWNER/REPO --limit 1 --issue N` to review that exact issue.
+Only Rust writes the safety decision, labels, and review block: a pass adds `safety:reviewed`, while
+an ambiguous or blocking result remains unclaimable under `autospec:needs-human` or
+`security:quarantined`.
+
+Automated filers first add interim `auto-implement` and then call that exact Rust
+command; they never create the safety result themselves. Applied grooming retries
+a bounded set of interim issues on the next cycle when a review command fails.
 
 ## Docs amendment
 

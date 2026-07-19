@@ -76,6 +76,28 @@ die() {
 
 emit() { printf '%s\n' "$*" >&2; }
 
+# Telemetry (issue #1774): fire-and-forget `claim` event at acquire/release
+# outcomes. Guarded source (absent shim/binary/DSN is a silent no-op) and
+# wrapped so nothing here can ever alter this script's exit code — the
+# claim lease decision is authoritative, telemetry is best-effort.
+emit_claim_event() {
+    _cg_conflict="$1"; shift
+    _cg_surface="$*"
+    # The whole source+emit block is wrapped in `{ ... } || true` (mirroring
+    # grow-define-file-issues.sh) so that even a present-but-BROKEN shim —
+    # whose `.` source returns non-zero under this script's `set -e` — can
+    # never alter the caller's exit code.
+    {
+        _cg_h="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+        if [ -f "$_cg_h/emit-event.sh" ]; then
+            # shellcheck source=/dev/null
+            . "$_cg_h/emit-event.sh"
+            emit_event claim surface="$_cg_surface" conflict="$_cg_conflict"
+        fi
+    } || true
+    return 0
+}
+
 now_iso() { date -u +'%Y-%m-%dT%H:%M:%SZ'; }
 now_epoch() { date -u +%s; }
 
@@ -412,6 +434,7 @@ cmd_acquire() {
         host="$(jq -r '.host // empty' "$cf" 2>/dev/null || true)"
         branch="$(jq -r '.branch // empty' "$cf" 2>/dev/null || true)"
         emit "code_health:claim_conflict key=$conflict_key owner_session=$owner host=$host branch=$branch"
+        emit_claim_event true "$@"
         if [ "$MODE" = "strict" ]; then
             exit 6
         fi
@@ -420,6 +443,7 @@ cmd_acquire() {
         exit 0
     fi
 
+    emit_claim_event false "$@"
     exit 0
 }
 
@@ -494,6 +518,7 @@ cmd_release() {
                 drop_key "$k"
             fi
         done
+        emit_claim_event false "$@"
         exit 0
     fi
 
@@ -509,6 +534,7 @@ cmd_release() {
             fi
         done
     fi
+    emit_claim_event false all
     exit 0
 }
 

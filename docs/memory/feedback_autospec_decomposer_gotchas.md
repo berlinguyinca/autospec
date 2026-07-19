@@ -10,7 +10,7 @@ When the autospec Phase 3 decomposer (or you, manually) splits a "new multi-harn
 
 ## Trap 1 — `discover_skills` is auto-discovery; the first issue MUST land structurally complete
 
-`scripts/validate.sh` discovers any subdir of `skills/` that has all 3 trio files: `SKILL.md`, `opencode/agent.md`, `codex/prompt.md`. The instant the third file exists, validate.sh starts running these checks against the skill's SKILL.md:
+`autospec validate` discovers any subdir of `skills/` that has all 3 trio files: `SKILL.md`, `opencode/agent.md`, `codex/prompt.md`. The instant the third file exists, validate.sh starts running these checks against the skill's SKILL.md:
 - `## Self-update mode` heading present
 - `**Model tier:** Tier A (spec work)` or `**Model tier:** Tier B (implementation work)` directive present at least once
 - A `| Subagent model tier |` row inside the harness adapter table
@@ -21,7 +21,7 @@ How to apply: When decomposing a new-skill feature, the **first** child issue MU
 
 ## Trap 2 — `codex/prompt.md` needs a leading blank line for lockstep
 
-`check_lockstep` in scripts/validate.sh diffs `strip_body(SKILL.md)` against `cat codex/prompt.md`. `strip_body` strips the YAML frontmatter (lines between the two `---`) but PRESERVES the blank line that follows the closing `---`. So:
+`check_lockstep` in autospec validate diffs `strip_body(SKILL.md)` against `cat codex/prompt.md`. `strip_body` strips the YAML frontmatter (lines between the two `---`) but PRESERVES the blank line that follows the closing `---`. So:
 
 - SKILL.md after frontmatter strip: `\n# autospec-listen ...` (leading blank)
 - codex/prompt.md must start with: `\n# autospec-listen ...` (leading blank)
@@ -45,7 +45,7 @@ How to apply: In every process(ISSUE) dispatch that targets a SKILL.md file, pre
 ⚠️ LOCK-STEP RULE: After editing skills/<name>/SKILL.md, you MUST also:
   1. Write raw body (SKILL.md with frontmatter stripped) to skills/<name>/codex/prompt.md
   2. Keep skills/<name>/opencode/agent.md frontmatter intact, replace its body with the same raw body
-Run `bash scripts/validate.sh` to verify before committing. Fix any diff before proceeding.
+Run `autospec validate` to verify before committing. Fix any diff before proceeding.
 ```
 
 This applies even for simple text changes (adding a section, replacing a string pattern) — the trio must stay in sync or CI fails.

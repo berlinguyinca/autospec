@@ -1,11 +1,18 @@
 #!/usr/bin/env bats
 # tests/explore/test_explore_self_leverage.bats — bats suite for the
-# self-leverage researcher (Issue B2).
+# self-leverage researcher (Issue B2; precision refinement 2026-06-26).
+#
+# New contract (precision refinement): self-leverage scans ONLY executable
+# scripts for real `read -p`/`-rp` PROMPT statements — never markdown prose,
+# never bare `read -r`, never comment/help-text token mentions. Each proposal
+# carries a kind=present gap_check the aggregator re-confirms.
 #
 # Asserts:
-#   1. Flags a seeded human-in-loop point that is low-stakes (should auto-resolve).
-#   2. Does NOT flag an already-auto-resolved point (legitimate operator action).
-#   3. Well-formed JSON from an empty repo.
+#   1. Does NOT flag human-in-loop PROSE in a SKILL.md (the old false-positive).
+#   2. Flags a real `read -p` prompt in a script, with a present gap_check.
+#   3. Does NOT flag a destructive `read -p` (OPERATOR_LEGIT filters it).
+#   4. Does NOT flag a bare `read -r` / comment mention of --interactive.
+#   5. Well-formed JSON from an empty repo.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -38,18 +45,18 @@ for p in d["proposals"]:
 '
 }
 
-# ── 1. Flags a seeded human-in-loop point ────────────────────────────────
+proposal_count() {
+    printf '%s' "$1" | python3 -c 'import json,sys; print(len(json.load(sys.stdin)["proposals"]))'
+}
 
-@test "self-leverage: flags a low-stakes 'operator must' step in skill prose" {
+# ── 1. Does NOT flag human-in-loop PROSE (the eliminated false positive) ──
+
+@test "self-leverage: does NOT flag human-in-loop prose in a SKILL.md" {
     mkdir -p skills/my-skill
-    # A SKILL.md with a low-stakes "operator must" intervention that is NOT
-    # a run/defer/refine/destructive action — should be flagged.
+    # Prose describing a human-in-loop step. Under the old behavior this was
+    # flagged (a false positive — prose is not code); now prose is never scanned.
     cat > skills/my-skill/SKILL.md <<'EOF'
 # my-skill
-
-## Usage
-
-Run the skill with `/my-skill`.
 
 ## Steps
 
@@ -57,87 +64,71 @@ Run the skill with `/my-skill`.
 2. The operator must manually confirm the config file path before proceeding.
 3. Continue with the rest of the process.
 EOF
-    git add -A && git commit -q -m "seed human-in-loop step"
+    git add -A && git commit -q -m "seed prose intervention"
     run bash "$REPO_ROOT/scripts/explore-research/self-leverage.sh"
     [ "$status" -eq 0 ]
     assert_well_formed "$output"
-    [[ "$output" == *"self-leverage"* ]]
-    # Must have at least one proposal flagging this intervention.
-    proposal_count=$(printf '%s' "$output" | python3 -c '
-import json, sys
-d = json.load(sys.stdin)
-print(len(d["proposals"]))
-')
-    [ "$proposal_count" -gt 0 ]
+    [ "$(proposal_count "$output")" -eq 0 ]
 }
 
-@test "self-leverage: flags a low-stakes 'manually' intervention in a script" {
+# ── 2. Flags a real read -p prompt in a script, with a present gap_check ──
+
+@test "self-leverage: flags a real read -p prompt in a script" {
     mkdir -p scripts
-    # A script with a read prompt that is not for a destructive action.
     cat > scripts/helper.sh <<'EOF'
 #!/usr/bin/env bash
-# Collect configuration
-echo "Please enter the config name:"
-read -r config_name
+read -p "Enter the config name: " config_name
 echo "Using config: $config_name"
 EOF
-    git add -A && git commit -q -m "seed script with read prompt"
+    git add -A && git commit -q -m "seed read -p prompt"
     run bash "$REPO_ROOT/scripts/explore-research/self-leverage.sh"
     [ "$status" -eq 0 ]
     assert_well_formed "$output"
-    [[ "$output" == *"self-leverage"* ]]
-    proposal_count=$(printf '%s' "$output" | python3 -c '
+    [ "$(proposal_count "$output")" -gt 0 ]
+    # Each proposal must carry a kind=present gap_check pointing at the script.
+    printf '%s' "$output" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
-print(len(d["proposals"]))
-')
-    [ "$proposal_count" -gt 0 ]
+p = d["proposals"][0]
+gc = p.get("gap_check", {})
+assert gc.get("kind") == "present", gc
+assert gc.get("haystack") == "scripts/helper.sh", gc
+assert "scripts/helper.sh" in p["title"], p["title"]
+'
 }
 
-# ── 2. Does NOT flag already-auto-resolved / legitimate operator points ───
+# ── 3. Does NOT flag a destructive read -p (OPERATOR_LEGIT filters it) ────
 
-@test "self-leverage: does not flag a legitimate destructive operator confirmation" {
-    mkdir -p skills/deploy-skill
-    # A SKILL.md where the confirmation is for a destructive/irreversible action —
-    # this is legitimately operator-facing and must NOT be flagged.
-    cat > skills/deploy-skill/SKILL.md <<'EOF'
-# deploy-skill
-
-## Steps
-
-1. Validate the build.
-2. Operator must confirm: this action will push --force to main (irreversible).
-3. Execute the deployment.
+@test "self-leverage: does not flag a destructive read -p confirmation" {
+    mkdir -p scripts
+    cat > scripts/deploy.sh <<'EOF'
+#!/usr/bin/env bash
+read -p "Confirm: this will push --force to main (irreversible)? " ok
 EOF
-    git add -A && git commit -q -m "seed destructive confirmation"
+    git add -A && git commit -q -m "seed destructive read -p"
     run bash "$REPO_ROOT/scripts/explore-research/self-leverage.sh"
     [ "$status" -eq 0 ]
     assert_well_formed "$output"
-    [[ "$output" == *"self-leverage"* ]]
-    # The irreversible/destructive confirmation must NOT be in proposals.
-    # (The SUT's OPERATOR_LEGIT regex filters it out.)
     [[ "$output" != *"push --force"* ]]
+    [ "$(proposal_count "$output")" -eq 0 ]
 }
 
-@test "self-leverage: does not flag a 'run/defer/refine' operator prompt" {
-    mkdir -p skills/autospec-run
-    cat > skills/autospec-run/SKILL.md <<'EOF'
-# autospec-run
+# ── 4. Does NOT flag bare read -r or a comment mention of --interactive ───
 
-## Operator prompts
-
-- run: proceed with the current implementation plan
-- defer: skip this issue for now
-- refine: revise the plan before implementing
+@test "self-leverage: does not flag bare read -r or a comment token" {
+    mkdir -p scripts
+    cat > scripts/loop.sh <<'EOF'
+#!/usr/bin/env bash
+# supports --interactive mode and AskUserQuestion in docs
+while IFS= read -r line; do
+    echo "$line"
+done < input.txt
 EOF
-    git add -A && git commit -q -m "seed run/defer/refine prompts"
+    git add -A && git commit -q -m "seed bare read -r"
     run bash "$REPO_ROOT/scripts/explore-research/self-leverage.sh"
     [ "$status" -eq 0 ]
     assert_well_formed "$output"
-    [[ "$output" == *"self-leverage"* ]]
-    # run/defer/refine are legitimate; none of these keyword lines should appear
-    # in proposal evidence as a flagged item.
-    # We just check the script exits cleanly with well-formed output.
+    [ "$(proposal_count "$output")" -eq 0 ]
 }
 
 # ── 3. Well-formed JSON from an empty repo ────────────────────────────────

@@ -361,6 +361,22 @@ Run a structured brainstorm — one question at a time, get explicit approval af
 
 Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`. Self-review for placeholders, contradictions, ambiguity, and scope. Then run a critical improvement check: ask "What else could fail even if this spec and its obvious tests pass, and how could this be better?" Add the highest-risk answer to Testing, Acceptance Criteria, or Review counter-team. For app/UI work, explicitly consider mocked-vs-deployed behavior, backend fallbacks, user-visible outcomes, and no-mock smoke coverage. The spec must be implementable end-to-end by an agent reading only the spec.
 
+### Documentation visualization
+
+When the requested work creates or regenerates documentation, the design spec
+MUST require Mermaid diagrams and charts where acceptable. Add a concrete visual
+plan for queues, routers, state machines, data flow, control flow, algorithms,
+architecture boundaries, timelines, ownership relationships, decision spaces,
+roadmaps, or metric trends whenever one of those structures exists in the target
+feature. Select the Mermaid type that fits the explanation: flowchart, sequence
+diagram, state diagram, class/entity diagram, Gantt, timeline, journey, quadrant
+chart, gitGraph, mindmap, block, architecture, Sankey, XY, pie, kanban, or
+another Mermaid-supported diagram type. Prefer Mermaid blocks in Markdown for
+reviewer-visible explanations; use `docs/assets/diagrams/` only when a generated
+asset is needed outside a Markdown page. If no diagram is useful, the spec must
+state `Mermaid: not applicable` with the reason, so omission is explicit rather
+than accidental.
+
 If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
 
 For an existing repo, land the spec via a short-lived PR so CI can validate it:
@@ -411,7 +427,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 >
 > Self-check each issue against the caps **before** calling `gh issue create`. If a cap is violated and a split is not feasible, surface the issue inline (print the over-cap body to the operator) instead of filing it.
 >
-> **Pre-filing lint loop (adaptive, MAX_LINT_RETRIES=5):** For each candidate child body, before calling `gh issue create`, write the body to `/tmp/draft-<slug>.md` and run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/draft-<slug>.md`. If the exit code is non-zero, map each `RULE_ID: <desc>` finding to an actionable directive using the table below, append all directives to the next generation prompt as cumulative context, and regenerate. Repeat up to `MAX_LINT_RETRIES=5` attempts. If attempt 5 still fails, print all 5 drafts plus accumulated findings inline and **skip** that child (do not file); continue to the next child. On pass (exit 0), proceed to `gh issue create` as normal.
+> **Pre-filing lint loop (adaptive, MAX_LINT_RETRIES=5):** For each candidate child body, before calling `gh issue create`, write the body to `/tmp/draft-<slug>.md` and run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-issue.sh" /tmp/draft-<slug>.md`. If the exit code is non-zero, map each `RULE_ID: <desc>` finding to an actionable directive using the table below, append all directives to the next generation prompt as cumulative context, and regenerate. Repeat up to `MAX_LINT_RETRIES=5` attempts. If attempt 5 still fails, print all 5 drafts plus accumulated findings inline and **skip** that child (do not file); continue to the next child. On pass (exit 0), proceed to the safety loop and only call `gh issue create` after safety passes.
 >
 > | Finding | Directive appended to next prompt |
 > |---|---|
@@ -425,6 +441,17 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > | `SMOKE_MULTI_LINE: N lines` | `COLLAPSE: Primary smoke test must be exactly one command line. Use \`&&\` to chain or move setup to Operator/full verification.` |
 > | `SMOKE_PLACEHOLDER: contains "<TODO>"` | `RESOLVE: Replace placeholders \`<TODO>/TBD/XXX/...\` with the actual command before filing.` |
 > | `SMOKE_NOT_FENCED` | `ADD: Primary smoke test section must contain exactly one fenced code block.` |
+
+> **Pre-filing safety loop (adaptive, MAX_SAFETY_RETRIES=5):** For each candidate child body, after the issue-quality lint passes and before `gh issue create`, run `"${AUTOSPEC_BIN:-autospec}" lint issue safety --title "<candidate title>" /tmp/draft-<slug>.md`. If the exit code is `1` or `2`, append the safety findings to the next generation prompt as cumulative directives:
+>
+> | Finding | Directive appended to next prompt |
+> |---|---|
+> | `SAFETY_BLOCK: production-data-destruction` | `BLOCKED: remove production data destruction from scope; rewrite for test/dev data only or split to human-reviewed production plan.` |
+> | `SAFETY_BLOCK: secret-exfiltration` | `BLOCKED: never request printing, dumping, sending, or exposing secrets or tokens.` |
+> | `SAFETY_BLOCK: instruction-bypass` | `BLOCKED: never ask the implementer to ignore AGENTS.md, system/developer instructions, CI, review, hooks, or guardian checks.` |
+> | `SAFETY_AMBIGUOUS` | `CLARIFY: add explicit non-production scope, affected paths, guardrails, and verification command; otherwise skip filing.` |
+>
+> Repeat up to `MAX_SAFETY_RETRIES=5`. If attempt 5 still returns non-zero, print all drafts plus safety findings inline and skip that child. Do not file unsafe or ambiguous child issues.
 
 ### Small-LLM friendliness (applies to every child issue)
 
@@ -485,6 +512,13 @@ labels and patches each body with a `## Model fit` block.
 >    single profile across the whole group. Override individual classifications
 >    only when the difference is a true outlier (e.g. one sibling pulls in a
 >    schema-wide refactor that no other sibling touches).
+>
+>
+> ### Issue intent safety gate
+>
+> Phase 3.5 may only persist model-fit, quality, board, and dependency
+> metadata. It must not manufacture a safety decision. Defer Rust admission
+> until the final issue body is persisted by step 8 below.
 >
 > 4. **Apply labels.** Idempotent at run start:
 >    `gh label create ctx:32k  --color c5def5 --force --repo {repo}`,
@@ -574,7 +608,21 @@ labels and patches each body with a `## Model fit` block.
 >      - Comment findings: `gh issue comment <N> --body "<findings>" --repo {repo}`
 >    - Do NOT remove `auto-implement` label. Operator decides whether to proceed.
 >
-> 9. **Run-end summary.** Print to stdout:
+> 9. **Rust safety admission.** After all prior body writes complete, make each
+>    child an interim candidate (if it is not already one) and review that exact
+>    issue:
+>
+>    ```bash
+>    gh issue edit <N> --add-label auto-implement --remove-label needs-classify --repo {repo}
+>    "${AUTOSPEC_BIN:-autospec}" queue review-safety --repo {repo} --limit 1 --issue <N>
+>    ```
+>
+>    Read the JSON totals. Only `pass: 1` admits this invocation. Any other
+>    result is already recorded by Rust and must be skipped without manual
+>    labels, comments, body patches, or a semantic safety override. The Rust
+>    command is the only automatic writer of issue-intent safety outcomes.
+>
+> 10. **Run-end summary.** Print to stdout:
 >    ```
 >    Phase 3.5 summary on {repo}
 >    - classified: N
@@ -885,11 +933,12 @@ Pass the following prompt verbatim to each background subagent:
 >    ```
 >    <!-- worktree-ladder:end -->
 >    On the `open-pr` path the verification bar EQUALS fresh work — full tests + the standard review loop, never a blind merge. Cleanup is identical for every path: after the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`; never delete un-pushed work before merge.
+<!-- autospec-block:runtime-resource-preflight -->
 > 2. TDD per AGENTS.md: failing test first → implement → refactor → commit. NO DB/external mocks. Follow file paths and signatures from the issue body verbatim.
 > 3. **Full test suite gate.** Run the target repo's full validation/test suite, not only the Primary smoke test. Command resolution order:
 >    1. If `AUTOSPEC_FULL_TEST_COMMAND` is set, run `bash -lc "$AUTOSPEC_FULL_TEST_COMMAND"`.
 >    2. Else run every command listed under the issue's **Operator/full verification** section.
->    3. Else run the repo-standard full suite: `bash scripts/validate.sh` when present; otherwise use the ecosystem default (`npm test`, `pytest`, `go test ./...`, `cargo test`, `mvn test`, etc.).
+>    3. Else run the repo-standard full suite: `autospec validate` when present; otherwise use the ecosystem default (`npm test`, `pytest`, `go test ./...`, `cargo test`, `mvn test`, etc.).
 >    If the full suite fails, fix the failure, recommit, rerun the full suite, and repeat. Do NOT dispatch LGTM review while the full suite is failing. Do NOT run `gh pr merge` while the full suite is failing. Record the exact full-suite command and passing output summary in the PR comment or final report.
 > 3b. <!-- docs-drift-gate:begin -->
 > ## Docs drift gate
@@ -922,7 +971,7 @@ Pass the following prompt verbatim to each background subagent:
 >          const flag = process.env.AUTOSPEC_WITH_DOCS === '1';
 >          const { generate } = resolveAutoRegenerate({ config: cfg, issueBody: body, withDocsFlag: flag });
 >          process.stdout.write(generate ? '1' : '0');
->          __REGEN_EOF__
+> __REGEN_EOF__
 >          )
 >          if [ "${_REGEN:-0}" = "1" ]; then
 >            # auto_regenerate is ON — run the regenerate self-heal path.
@@ -991,6 +1040,21 @@ Pass the following prompt verbatim to each background subagent:
 >        fi
 >        det_exit=$?
 >
+>      Reuse lens (issues #1439/#1440/#1442): when armed, extract the reuse-triage
+>      RULE_IDs from the deterministic findings so the reviewer prompt receives the
+>      build-vs-buy block. Flag-OFF or no reuse hits → `_reuse_flags_file` stays empty
+>      → the reviewer prompt is byte-identical to today (the `${_reuse_flags_file:+…}`
+>      expansion below adds nothing):
+>        ```bash
+>        _reuse_flags_file=""
+>        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ -f /tmp/guardian-<PR>.md ]; then
+>          _reuse_candidate=$(mktemp -t autospec-reuse-flags-XXXXXX)
+>          grep -E '^(REINVENT_REPO_UTIL|NEW_DEP_UNJUSTIFIED|NEW_ABSTRACTION_SINGLE_CALLER):' \
+>            /tmp/guardian-<PR>.md > "$_reuse_candidate" 2>/dev/null || true
+>          if [ -s "$_reuse_candidate" ]; then _reuse_flags_file="$_reuse_candidate"; fi
+>        fi
+>        ```
+>
 >      **Model tier:** `TIER_B` for ALL issues — including `regression` and `priority:high`. The single fused reviewer carries the regression gap-check (see brief below), so no second Tier-A pass is dispatched. **Escape hatch:** `AUTOSPEC_REVIEWER_TIER` overrides the reviewer tier — unset (or any value other than `opus`) → `TIER_B` (sonnet); set `AUTOSPEC_REVIEWER_TIER=opus` to restore `TIER_A` for the reviewer. Silently fall back to `TIER_A` if `TIER_B` is unavailable.
 >
 >      **Assemble reviewer prompt** — call `gen-reviewer-prompt.sh` to compose the combined prompt (static cached prefix + dynamic suffix):
@@ -1008,7 +1072,8 @@ Pass the following prompt verbatim to each background subagent:
 >        --issue-body "/tmp/issue-<ISSUE>-body.md" \
 >        --prev-findings "/tmp/guardian-<PR>.md" \
 >        --issue-labels "<ISSUE_LABELS>" \
->        --repo "<REPO>")
+>        --repo "<REPO>" \
+>        ${_reuse_flags_file:+--reuse-flags "$_reuse_flags_file"})
 >      ```
 >      Pass `combined_reviewer_prompt` as the reviewer subagent prompt. The static cached prefix is framed by `<!-- CACHE BOUNDARY -->` markers; pass it with `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache can reuse it across inner-loop iterations.
 >
@@ -1034,11 +1099,25 @@ Pass the following prompt verbatim to each background subagent:
 >        > 6. Check correctness, edge cases, missing tests, AGENTS.md compliance (TDD, no mocks, conventional commits), whether every new code unit exists for a concrete issue/spec requirement rather than convenience, and whether deprecated routes, caches, buckets, stores, workers, config keys, UI paths, docs, specs, tests, or fixtures were removed instead of revived to make tests pass.
 >        > 7. Collect findings as a numbered list.
 >        > 8. Critical self-question before LGTM: "What else could still pass here while the real user workflow fails, and how could this be better?" Check especially mocked-vs-deployed behavior, external service assumptions, fallback paths, user-visible outcomes, and missing no-mock smoke coverage. If the answer is actionable inside the issue scope, emit it as a finding or required test.
+
+>        > 8a. **data-scope invariant lens (diagnostic/filter endpoints):** When the issue touches endpoints, dashboards, reports, or diagnostics that accept optional job/sample/filter parameters, verify filters never widen to unrelated records. empty optional filters reject unless documented as a deliberate all-records mode. Require concrete evidence for `job-only`, `sample-only`, `job+sample`, `unsupported-filter`, and `empty-filter` paths; unsupported-filter and empty-filter cases must prove rejection or a documented scoped response, not silent broadening.
 >        > 9. **Regression gap-check (MANDATORY for `regression`/`priority:high` issues; skip otherwise):** ask "would the reviewer have caught the original gap?" If the fused review as written would NOT have caught the gap this regression closes, add the missing checklist item(s) to `reports/autospec-review/reviewer-lessons.md` (one entry per item, with parent `gap_id` and date) and apply those new checks to this diff before issuing the verdict. This folds the former second-pass regression meta-review into this single reviewer pass — the reviewer-lessons write-path is preserved here; there is no second Tier-A dispatch.
 >        >
 >        > **Hard limit:** max **25 tool calls total** (Parts 1 + 2 combined). If budget exhausted, append `RULE_ID:OUT_OF_SCOPE: reviewer budget exhausted; PR needs human review` and proceed to verdict.
 >        >
->        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings.
+>        > **Simplicity axis is ADVISE-only (anti-gold-plating):** the reuse / build-vs-buy / "how could this be better?" axis may argue only toward *less* code — reuse a named existing util (`scripts/lib/`, repo source), adopt a named library, or delete an unneeded abstraction — and only when tied to a named acceptance criterion. It may NEVER emit a `BLOCK` that demands *more* code, a new abstraction, or speculative generality; such suggestions are at most `ADVISE` and never halt the commit. Every reuse verdict must name the matched util or library (evidence-bound), never assert a match from belief.
+>        >
+>        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings. A reuse `BLOCK` is provisional until it survives the refute pass below.
+>
+>      **Reuse-BLOCK refute pass (before consuming the verdict):** If the findings list contains a build-vs-buy / reuse `BLOCK`, do NOT halt on it yet. Dispatch a **cheap refute pass** — one short `TIER_B` second voter (≤5 tool calls) whose only job is to *kill* the BLOCK: `rg`-search the repo for the named util/library and confirm the claimed reuse target actually exists, is reachable, and fits this call site. **Majority rules:** keep the BLOCK only if the refuter also upholds it; if the refuter refutes it (the named target is absent, unreachable, or ill-fitting), demote that BLOCK to `ADVISE`, drop it from the blocking findings, and continue. If demotion leaves no remaining blocking findings, treat the verdict as `LGTM`. This keeps a hallucinated "library exists" from stalling the merge (`feedback_llm_validator_adaptive_retry`). **Record the outcome of this reuse `BLOCK` decision to the reuse-lens ledger HERE** (issue #1442) — at the decision point, so precision = upheld ÷ total is computed only over real reuse BLOCKs and never from phantom rows on clean passes. Set `_reuse_block_raised=1`, `_reuse_trigger` to the flagged RULE_ID, and `_reuse_upheld=true` when the refuter upheld the BLOCK or `_reuse_upheld=false` when it was refuted/demoted-to-ADVISE, then:
+>        ```bash
+>        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ "${_reuse_block_raised:-0}" = "1" ]; then
+>          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/interrogation-ledger.sh" record \
+>            --issue "<ISSUE>" --pr "<PR>" --trigger "${_reuse_trigger:-REINVENT_REPO_UTIL}" \
+>            --verdict BLOCK --upheld "${_reuse_upheld:-true}" \
+>          || true  # write failure is best-effort; never blocks the PR
+>        fi
+>        ```
 >
 >      If `LGTM` && det_exit == 0:
 >        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
@@ -1049,6 +1128,9 @@ Pass the following prompt verbatim to each background subagent:
 >            --dispatch-id "<DISPATCH_ID>-reviewer" --role reviewer --issue "<ISSUE>" \
 >            --tokens-json ".autospec/tokens-<ISSUE>-reviewer.json"
 >        fi
+>        # Reuse-lens verdict is recorded at the refute-pass decision point above
+>        # (issue #1442), not here — recording in this LGTM-only branch produced
+>        # phantom BLOCK rows on clean passes and never recorded upheld BLOCKs.
 >        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
 >        # On relaunch: run ci-wait-poll.sh <PR>; break SUCCESS if exit 0 (pass)
 >        break SUCCESS only if the full suite passed and required checks pass.
@@ -1092,7 +1174,7 @@ Pass the following prompt verbatim to each background subagent:
 >    rm -f "/tmp/issue-<ISSUE>-body.md" || true
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
 >    Cleanup single-fetch body temp file on terminal failure: `rm -f "/tmp/issue-<ISSUE>-body.md" || true`
-> 10. Cleanup: cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force
+> 10. Cleanup: run `autospec runtime env down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" --purge-maven`; then run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-runtime-worktree-cleanup.sh" /tmp/wt-<BRANCH>`; only after both succeed, run `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`.
 > 11. Report: PR number, outcome, one-paragraph summary.
 >
 > Hard rules: NEVER push to main, force-push, bypass hooks, or touch the umbrella issue. gh CLI only.

@@ -32,7 +32,7 @@ The section contains a small bash block (≤30 lines) the harness executes
 at startup. The block is byte-identical across all multi-harness skills
 (only the hard-coded `SKILL_NAME` differs) and **lock-stepped** across the trio
 files (`SKILL.md` / `opencode/agent.md` / `codex/prompt.md`) per the
-existing repo invariant (`scripts/validate.sh:44`).
+existing repo invariant (`autospec validate:44`).
 
 No new shared script, no on-the-fly fetched bootstrap. Inline keeps each
 SKILL.md self-contained, which matches how harnesses load skills and how
@@ -242,7 +242,7 @@ Notes:
 ## 7. Testing
 
 Per AGENTS.md: "validation in lieu of code tests" — bats-core for shell
-behavior, lock-step diff in `scripts/validate.sh`, e2e against a real gh
+behavior, lock-step diff in `autospec validate`, e2e against a real gh
 clone for the integration path. No service mocks.
 
 ### 7.1 Unit (bats)
@@ -281,7 +281,7 @@ This test piggybacks on the existing e2e workflow gating
 
 ### 7.3 Validator extension
 
-`scripts/validate.sh` grows one new check, `check_startup_preflight`,
+`autospec validate` grows one new check, `check_startup_preflight`,
 that asserts:
 
 - Every multi-harness skill's `SKILL.md` has a `## Startup self-update`
@@ -317,7 +317,7 @@ Children (each ≤400 words, ≤3 files, ≤30-line outline):
 | 4  | Mirror preflight to `autospec-run` trio                                 | 3 (trio)                         | 2           |
 | 5  | Mirror preflight to `autospec-listen` trio                              | 3 (trio)                         | 2           |
 | 6  | Mirror preflight to `autospec-classify` trio                            | 3 (trio)                         | 2           |
-| 7  | Extend `scripts/validate.sh` with `check_startup_preflight`             | 1                                | 6           |
+| 7  | Extend `autospec validate` with `check_startup_preflight`             | 1                                | 6           |
 | 8  | Bats unit tests for preflight (rate-limit, opt-out, fail-open, lock)    | 1                                | 2           |
 | 9  | Bats e2e test (parent SHA → invoke → verify update applies)             | 1                                | 6           |
 | 10 | Doc updates: `README.md` + `AGENTS.md` (auto-update behavior)           | 2                                | 6           |

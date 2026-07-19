@@ -1,0 +1,68 @@
+# Autospec Command Index
+
+All commands are operator-invoked local commands. No GitHub Actions, cron, or scheduler is used.
+
+| Command | Purpose | Dry-run | Confirm | Writes local files? | Writes GitHub? | Primary reports | Next command |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `scripts/autospec-start.sh` | Recommend the right entry flow | yes | accepted | reports only | no | `.autospec/reports/start-plan.md` | onboarding or bootstrap |
+| `scripts/autospec-preflight.sh` | Check local environment readiness | yes/default | n/a | reports | no | `.autospec/reports/preflight.md` | MVP smoke |
+| `scripts/autospec-mvp-smoke.sh` | Run safe local MVP smoke checks | yes/default | n/a | reports | no | `.autospec/reports/mvp-smoke.md` | fix blockers or MVP status |
+| `scripts/autospec-command-audit.sh` | Audit command consistency | yes/default | n/a | reports | no | `.autospec/reports/command-audit.md` | update command docs |
+| `autospec explore verifier-outcome --tier <NAME> --cycle <N> --artifact <PATH>` | Render sealed `NotRun`/`Failed`/`Verified` discovery verifier outcome JSON | n/a | n/a | no | no | stdout JSON | autonomous discovery status |
+| `scripts/autospec-report-index.sh` | Index generated reports | yes/default | n/a | reports | no | `.autospec/reports/REPORT_INDEX.md` | MVP status |
+| `scripts/autospec-validate-state.sh` | Validate generated state/report artifacts | yes/default | n/a | reports | no | `.autospec/reports/state-validation.md` | sensitive audit |
+| `scripts/autospec-sensitive-output-audit.sh` | Scan generated Autospec outputs for secrets | yes/default | n/a | reports | no | `.autospec/reports/sensitive-output-audit.md` | fix leaks |
+| `scripts/autospec-recovery-status.sh` | Show locks, runs, stuck handovers, and recovery path | yes/default | n/a | reports | no | `.autospec/reports/recovery-status.md` | resume/cleanup/status |
+| `scripts/autospec-clean-generated-reports.sh` | Clean generated report artifacts only | yes | yes | reports | no | `.autospec/reports/clean-generated-reports.md` | rerun reports |
+| `scripts/autospec-onboard-existing-repo.sh` | Read-first existing repo onboarding | yes | yes | metadata/reports | no | `.autospec/reports/onboarding-result.md` | `autospec-constitution-audit.sh` |
+| `scripts/autospec-bootstrap-new-project.sh` | Metadata-first new project bootstrap | yes | yes | metadata/specs | no | `.autospec/reports/bootstrap-result.md` | scaffold generators |
+| `scripts/autospec-constitution-audit.sh` | Structured policy audit | yes/default | n/a | reports/state | no | `.autospec/reports/constitution-audit.md` | `autospec-audit-to-backlog.sh` |
+| `scripts/autospec-audit-to-backlog.sh` | Convert audit output to v3 backlog plan/publishing | yes | yes | reports/ledger | confirm may call GitHub issue publishing | `.autospec/reports/audit-to-backlog-result.md` | `autospec-autonomy-status.sh` |
+| `scripts/autospec-generate-ai-nlai-scaffold.sh` | Generate AI/NLAI specs and v3 issue drafts | yes | yes | specs/issues | no | `.autospec/reports/ai-nlai-scaffold-result.md` | audit-to-backlog |
+| `scripts/autospec-generate-product-baseline-scaffold.sh` | Generate product baseline specs/issues | yes | yes | specs/issues | no | `.autospec/reports/product-baseline-scaffold-result.md` | audit-to-backlog |
+| `scripts/autospec-recipe-index.sh` | Load worker capabilities and implementation recipes | yes/default | n/a | reports/state/recipes | no | `.autospec/reports/implementation-recipes.md` | rule-to-recipe plan |
+| `scripts/autospec-detect-stack-profile.sh` | Detect target stack confidence for safe scaffolding | yes/default | n/a | reports/state | no | `.autospec/reports/stack-profile.md` | rule-to-recipe plan |
+| `scripts/autospec-rule-to-recipe-plan.sh` | Map failed rules to bounded recipes | yes/default | n/a | reports/state | no | `.autospec/reports/rule-to-recipe-plan.md` | patch plan |
+| `scripts/autospec-decompose-implementation.sh` | Split large recipe-backed requirements into smaller local issue drafts | yes/default | n/a | reports/backlog | no | `.autospec/reports/decomposition-plan.md` | patch plan |
+| `scripts/autospec-build-patch-plan.sh` | Build the canonical patch contract before recipe execution | yes/default | n/a | reports/state | no | `.autospec/reports/patch-plan.md` | worker-one |
+| `scripts/autospec-apply-template.sh` | Apply Autospec templates without overwriting unsafe files | yes/default | yes | generated files only with confirm | no | `.autospec/reports/template-apply-result.md` | rule recheck |
+| `scripts/autospec-generate-evidence-tests.sh` | Generate bounded evidence test scaffolds where supported | yes/default | yes | test scaffold only with confirm | no | `.autospec/reports/evidence-test-generation-result.md` | rule recheck |
+| `scripts/autospec-rule-recheck.sh` | Re-evaluate relevant rules after recipe-backed work | yes/default | n/a | reports/state | no | `.autospec/reports/rule-recheck.md` | verifier |
+| `scripts/autospec-autonomy-v2-status.sh` | Summarize capabilities, recipes, stack, rule-to-recipe coverage, and recent executions | yes/default | n/a | reports | no | `.autospec/reports/autonomy-v2-status.md` | supervisor |
+| `scripts/autospec-runtime-adapter-index.sh` | Load runtime adapters and map them to detected stacks | yes/default | n/a | reports/state/adapters | no | `.autospec/reports/runtime-adapters.md` | feature slices |
+| `scripts/autospec-feature-slice-index.sh` | Load bounded target-app feature slices | yes/default | n/a | reports/state/feature-slices | no | `.autospec/reports/feature-slices.md` | runtime plan |
+| `scripts/autospec-runtime-implementation-plan.sh` | Plan safe runtime shell/partial generation for recognized stacks | yes/default | n/a | reports/state | no | `.autospec/reports/runtime-implementation-plan.md` | runtime generator |
+| `scripts/autospec-generate-runtime-feature.sh` | Generate bounded runtime feature slices for supported adapters | yes/default | yes | generated runtime files with confirm | no | `.autospec/reports/runtime-generation-result.md` | metadata sync |
+| `scripts/autospec-generate-playwright-evidence.sh` | Generate Playwright evidence tests for runtime shells when Playwright exists | yes/default | yes | test files with confirm | no | `.autospec/reports/playwright-generation-result.md` | runtime verification |
+| `scripts/autospec-sync-runtime-metadata.sh` | Sync generated runtime features into Autospec metadata registries | yes/default | yes | state files with confirm | no | `.autospec/reports/runtime-metadata-sync.md` | runtime verification |
+| `scripts/autospec-verify-runtime-feature.sh` | Verify runtime feature generated files, metadata, tests, and claim honesty | yes/default | n/a | reports | no | `.autospec/reports/runtime-feature-verification.md` | verifier |
+| `scripts/autospec-runtime-feature-status.sh` | Summarize supported adapters, generated shells, blocked features, evidence, and next commands | yes/default | n/a | reports | no | `.autospec/reports/runtime-feature-status.md` | MVP status |
+| `scripts/autospec-supervisor-cycle.sh` | Run one bounded autonomous cycle | yes | yes | reports/state/worker branch as configured | confirm may use GitHub | `.autospec/reports/supervisor-cycle-result.md` | verifier |
+| `scripts/autospec-verify-worker-pr.sh` | Independently verify worker output | yes | yes | reports/state | confirm may comment only | `.autospec/reports/verifier-report.md` | promotion gate |
+| `scripts/autospec-promote-pr.sh` | Mark verifier-passed PR ready for human review | yes | yes | reports/state | confirm may label/comment | `.autospec/reports/promotion-result.md` | human review |
+| `scripts/autospec-autonomy-status.sh` | Summarize autonomy state | yes/default | n/a | reports | no | `.autospec/reports/autonomy-status.md` | recommended command |
+| `scripts/autospec-mvp-status.sh` | Summarize MVP readiness | yes/default | n/a | reports | no | `.autospec/reports/mvp-status.md` | hardening |
+| `scripts/autospec-spec-coverage.sh` | Map original Constitution vision to implementation/scaffold/validation/deferred evidence | yes | yes | reports/spec coverage backlog | no | `.autospec/reports/spec-coverage.md` | fix gaps or release smoke |
+| `scripts/autospec-spec-implementation-sweep.sh` | Classify spec coverage gaps into safe engine/check/scaffold/template/runbook/fixture work | yes/default | local only | reports | no | `.autospec/reports/spec-implementation-sweep-plan.md` | doctrine audit |
+| `scripts/autospec-architecture-governance.sh` | Audit ADRs, architecture maps, pattern rationale, and impact analysis | yes/default | n/a | reports/state | no | `.autospec/reports/architecture-governance.md` | doctrine issue plan |
+| `scripts/autospec-ui-ux-audit.sh` | Audit UI surface, tokens, responsive/accessibility/evidence, pretty output, and raw JSON policy | yes/default | n/a | reports/state | no | `.autospec/reports/ui-ux-audit.md` | doctrine audit |
+| `scripts/autospec-playwright-evidence-audit.sh` | Audit Playwright config, viewport matrix, screenshots, visual/accessibility/tutorial/diagnostic flows | yes/default | n/a | reports/state | no | `.autospec/reports/playwright-evidence-audit.md` | doctrine audit |
+| `scripts/autospec-doc-artifact-audit.sh` | Audit README, user docs, in-app/RAG-ready docs, tutorials, PDFs, screencasts, TTS, and drift | yes/default | n/a | reports/state | no | `.autospec/reports/doc-artifact-audit.md` | doctrine audit |
+| `scripts/autospec-reporting-analytics-audit.sh` | Audit metrics, reports, exports, chart libraries, visualization policy, and statistics | yes/default | n/a | reports/state | no | `.autospec/reports/reporting-analytics-audit.md` | doctrine audit |
+| `scripts/autospec-ai-platform-audit.sh` | Audit AI provider, RAG, MCP, token/cost tracking, dashboards, budgets, audit logs, and citations | yes/default | n/a | reports/state | no | `.autospec/reports/ai-platform-audit.md` | doctrine audit |
+| `scripts/autospec-nlai-audit.sh` | Audit NLAI capability registry, data/SQL/file/report/workflow tools, permissions, and explainability | yes/default | n/a | reports/state | no | `.autospec/reports/nlai-audit.md` | doctrine audit |
+| `scripts/autospec-diagnostics-audit.sh` | Audit health/status/logs/metrics/traces, white-screen diagnostics, MCP diagnostics, and safe remediation | yes/default | n/a | reports/state | no | `.autospec/reports/diagnostics-audit.md` | doctrine audit |
+| `scripts/autospec-dependency-governance.sh` | Audit manifests, lockfiles, library sprawl, migration docs, and dependency policy | yes/default | n/a | reports/state | no | `.autospec/reports/dependency-governance.md` | modernization plan |
+| `scripts/autospec-modernization-plan.sh` | Generate local modernization plan/backlog without updating dependencies | yes/default | n/a | reports/backlog | no | `.autospec/reports/modernization-plan.md` | human review |
+| `scripts/autospec-security-privacy-audit.sh` | Audit threat model, secrets policy, permission model, audit logs, PII, retention, privacy/security review | yes/default | n/a | reports/state | no | `.autospec/reports/security-privacy-audit.md` | doctrine audit |
+| `scripts/autospec-doctrine-audit.sh` | Run doctrine audits and generate local doctrine issue drafts | yes/default | n/a | reports/state/backlog | no | `.autospec/reports/doctrine-audit.md` | spec coverage |
+| `scripts/autospec-red-row-burndown.sh` | Classify critical/high red rows from MVP/spec/doctrine reports into local backlog | yes/default | local only | reports/backlog | no | `.autospec/reports/red-row-burndown-plan.md` | release candidate gate |
+| `scripts/autospec-cross-repo-compatibility.sh` | Validate engine, Constitution, and Baseline compatibility without modifying sibling repos | yes/default | n/a | reports | no | `.autospec/reports/cross-repo-compatibility.md` | check-type coverage |
+| `scripts/autospec-check-type-coverage.sh` | Report implementation/test/docs coverage for rule check types | yes/default | n/a | reports | no | `.autospec/reports/check-type-coverage.md` | template coverage |
+| `scripts/autospec-template-coverage.sh` | Report template/scaffold completeness and local follow-up drafts | yes/default | n/a | reports/backlog | no | `.autospec/reports/template-coverage.md` | command contract |
+| `scripts/autospec-command-contract-check.sh` | Check command help, dry-run/confirm, reports, runbook coverage, and write safety | yes/default | n/a | reports | no | `.autospec/reports/command-contract-check.md` | report quality |
+| `scripts/autospec-report-quality.sh` | Audit generated Markdown/JSON reports for readability, parseability, and sensitive output | yes/default | n/a | reports | no | `.autospec/reports/report-quality.md` | release candidate gate |
+| `scripts/autospec-release-candidate-gate.sh` | Final local MVP release-candidate gate | yes/default | n/a | reports | no | `.autospec/reports/release-candidate-gate.md` | dogfood RC |
+| `scripts/autospec-dogfood-rc.sh` | Run the release-candidate flow against Autospec itself with local sibling policies | yes/default | n/a | reports | no | `.autospec/reports/dogfood-rc.md` | fix RC blockers |
+
+Dry-run remains the default where a command has side effects. Confirm is required for GitHub writes.

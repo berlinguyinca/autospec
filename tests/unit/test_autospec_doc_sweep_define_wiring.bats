@@ -44,6 +44,6 @@ setup() {
 }
 
 @test "both trios pass validate.sh lock-step (byte-identical below adapter headers)" {
-  run bash "$REPO_ROOT/scripts/validate.sh"
+  run bash "$REPO_ROOT/autospec validate"
   [ "$status" -eq 0 ]
 }

@@ -167,7 +167,7 @@ reset the rate-limit state.
 - New skill family `autospec-continue` ships per the scaffold; passes
   `check_lockstep`.
 - `scripts/extract-conversational-recommendation.sh` ships executable.
-- `scripts/validate.sh` gains `check_autospec_continue_contract()`
+- `autospec validate` gains `check_autospec_continue_contract()`
   enforcing trio lockstep + helper presence + bats suite.
 - All bats fixtures pass.
 - End-to-end test: a fixture conversation file whose last "assistant"
@@ -194,7 +194,7 @@ Aiming for 4 children plus an umbrella, sized per the small-LLM rule.
    `--lens-mode`, `--from-message` flags. Depends on B. Files: 2.
 4. **Issue D — rate limit + validate.sh check + e2e**: rate-limit
    bookkeeping (`~/.autospec/continue-history.json`), runaway protection,
-   `check_autospec_continue_contract()` in `scripts/validate.sh`, and the
+   `check_autospec_continue_contract()` in `autospec validate`, and the
    end-to-end bats fixture. Depends on C. Files: 2.
 
 Total: 4 children + 1 umbrella. Each child is well under the autospec

@@ -248,6 +248,8 @@ while [ "$_i" -lt "$_gap_count" ]; do
   # Ensure labels exist (idempotent, mirror classify idiom).
   _gh_label_create gap-remediation --color d4c5f9 --force >/dev/null 2>&1 || true
   _gh_label_create priority:high   --color e11d21 --force >/dev/null 2>&1 || true
+  # origin:self provenance (issue #1785): idempotent, best-effort label
+  _gh_label_create origin:self      --color 8250df --force >/dev/null 2>&1 || true
 
   # File the issue, retry once on failure (per spec error handling).
   _url=""
@@ -257,7 +259,7 @@ while [ "$_i" -lt "$_gap_count" ]; do
     _url="$(_gh_issue_create \
       --title "$_title" \
       --body "$_issue_body" \
-      --label "auto-implement,gap-remediation,priority:high" 2>/dev/null || true)"
+      --label "auto-implement,gap-remediation,priority:high,origin:self" 2>/dev/null || true)"
     [ -n "$_url" ] && break
   done
 

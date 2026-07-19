@@ -1,0 +1,22 @@
+id: mcp-diagnostics-shell
+title: MCP diagnostics shell
+category: ai
+summary: MCP diagnostics shell
+source_rules:
+  - required_mcp_registry
+source_baselines:
+  - ai
+  - diagnostics
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: route
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

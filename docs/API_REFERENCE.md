@@ -4,7 +4,7 @@
 > *Per-symbol reference for all public CLI surfaces and shared scripts.*
 
 <!-- autospec-doc-scope:
-  src: ["bootstrap.ps1", "scripts/**/*.sh", "scripts/**/*.mjs", "scripts/**/*.ps1", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh", "install.sh", "skills/*/install.sh", "tests/ship-completeness.bats"]
+  src: ["bootstrap.ps1", "scripts/**/*.sh", "scripts/**/*.mjs", "scripts/**/*.ps1", "skills/autospec-shared/scripts/**/*.mjs", "skills/autospec-shared/scripts/**/*.sh", "skills/autospec-doc/scripts/*.mjs", "install.sh", "skills/*/install.sh", "tests/ship-completeness.bats"]
   reason: "API reference for all autospec shared scripts, their shipping path, and the ship-completeness guard"
   mismatch_action: warn
   generated: true
@@ -57,6 +57,37 @@ Usage: heartbeat-read.sh [--issue <N>] [--repo <owner/repo>]
 Without `--issue`: prints all heartbeat file paths in the repo's subdir (one per line).
 With `--issue`: prints the JSON content of that heartbeat, or empty if not found.
 
+### `worktree-guard.sh`
+
+<!-- autospec-doc-scope:
+  src: ["scripts/worktree-guard.sh", "skills/autospec-run/prompts/phase4-implementer.md"]
+  reason: "Public worktree guard and Phase 4 implementer base-branch contract"
+  mismatch_action: warn
+-->
+
+Enforces Phase 4 linked-worktree safety before agents edit or commit. The `assert`
+subcommand refuses the primary checkout, dirty worktrees, and stale bases under
+`--strict-base`; `resolve-branch` returns the PR-aware ladder verdict; `create`
+creates or adopts the per-issue linked worktree.
+
+```
+Usage: worktree-guard.sh assert [--base <ref>] [--strict-base]
+       worktree-guard.sh resolve-branch --branch <B> --repo <O/R>
+       worktree-guard.sh resolve-base [--base <ref>] [--pr-base]
+       worktree-guard.sh create --branch <B> [--base <ref>] [--path <P>] [--adopt]
+Env:   AUTOSPEC_BASE_BRANCH   default base branch/ref when --base is omitted
+Config: .autospec/autospec.yml git.base_branch is used when AUTOSPEC_BASE_BRANCH is unset
+```
+
+Base precedence is `--base`, then `AUTOSPEC_BASE_BRANCH`, then
+`.autospec/autospec.yml` `git.base_branch`, then `origin/main`. Plain branch
+names such as `master_ai` or `release/2026` resolve to `origin/<branch>`;
+`origin/<branch>` and `refs/remotes/origin/<branch>` remain remote refs. If no
+explicit/env/config base is set and `origin/main` is absent, the guard falls
+back to `gh repo view --json defaultBranchRef`. `resolve-base --pr-base` emits
+the branch name suitable for `gh pr create --base`, so prompt snippets do not
+duplicate the base-selection parser.
+
 ### `lint-issue.sh`
 
 Quality-gate for GitHub issue bodies before they enter the `auto-implement` queue.
@@ -67,6 +98,34 @@ Usage: bash lint-issue.sh <issue-number> [--repo <owner/repo>]
 ```
 
 Exit: 0 = pass, 1 = fail with diagnostics.
+
+### `autospec lint issue safety`
+
+Issue-intent safety gate for GitHub issue bodies before they enter the `auto-implement` queue.
+
+Usage:
+`autospec lint issue safety [--json] [--actor LOGIN] [--title TITLE] [--config PATH] <body-file>`
+
+Exit codes: `0=SAFETY_PASS`, `1=SAFETY_AMBIGUOUS`, `2=SAFETY_BLOCK`, `64=usage error`.
+
+The built-in safety policy is evaluated natively in Rust. A config file may add trusted
+actors for the scoped test-reset exception; duplicate built-in patterns are harmless.
+An unsupported custom regex returns the fail-closed `invalid-policy-regex` block rather
+than being ignored.
+
+### `autospec queue ready`
+
+Rust-owned, fail-closed selection of issues that are safe for an autospec worker to
+claim. It returns one JSON document with `ready`, `blocked`, `claimed`, `conflicts`,
+`worker_cap`, and `batch` arrays/objects in stable issue-number order. Missing safety
+review, dependency, pull-request, claim, or path-conflict evidence blocks an issue
+rather than selecting it optimistically.
+
+Usage:
+`autospec queue ready [--repo OWNER/REPO] [--batch-size N]`
+
+`AUTOSPEC_QUEUE_BIN` overrides the executable used by shell orchestration fixtures;
+it must expose this full Rust command, not a legacy helper script.
 
 ### `lint-implementation.sh`
 
@@ -360,9 +419,10 @@ Exit: always 0 (best-effort; never blocks the caller).
 Best-effort idempotent installer for autospec's required and recommended CLI
 deps via a platform fallback chain (brew / apt/dnf/yum/pacman/apk /
 winget/choco/scoop / npm / pipx / uv / pip). Baked-in tool table: `ajv`,
-`bash`, `bats`, `bun`, `claude`, `codex`, `curl`, `gh`, `git`, `jq`,
-`mempalace`, `node`, `npm`, `omc`, `omx`, `oh-my-opencode`, `opencode`,
-`pipx`, `python3`, `uv`, `yq`.
+`bash`, `bats`, `bun`, `cargo`, `claude`, `codex`, `curl`, `gh`, `git`,
+`gitleaks`, `jq`, `license-checker`, `mempalace`, `node`, `npm`, `omc`,
+`omx`, `oh-my-opencode`, `opencode`, `pipx`, `python3`, `rustc`, `semgrep`,
+`trivy`, `uv`, `yq`.
 
 ```
 Usage: bash ensure-tool.sh <tool>
@@ -445,6 +505,22 @@ Generates `llms.txt` (≤200 lines index) and `llms-full.txt` (full concatenated
 ```
 Usage: bash gen-llms-txt.sh --repo-root <dir> [--cluster-json <file>]
 ```
+
+
+### `autospec-doc` internals
+
+<!-- autospec-doc-scope:
+  src: ["skills/autospec-doc/*.md", "skills/autospec-doc/codex/prompt.md", "skills/autospec-doc/opencode/agent.md", "skills/autospec-doc/scripts/*.mjs", "skills/autospec-doc/tests/*.test.mjs", "tests/fixtures/skill-goldens/autospec-doc.*.sha256"]
+  reason: "autospec-doc skill authoring contract, per-audience generator internals, grounding tests, and lock-step goldens"
+  mismatch_action: warn
+  generated: false
+-->
+
+`autospec-doc` owns the per-audience feature inventory model and renderer. Its
+feature skeleton includes algorithm, config profile, settings, and grounded
+implementation-snippet fields; generated developer docs render real source-line
+fragments and the docs-as-tests verifier rejects snippets that diverge from the
+recorded `source_path:start-end` range.
 
 ### `check-doc-drift.sh`
 
@@ -529,10 +605,10 @@ Extends the Phase 4 self-heal loop classifier with doc-drift categories:
 `failing_doc_drift`, `missing_doc_scope`, `failing_visual_stale`, `failing_ai_review_stale`,
 `failing_manifest_stale`.
 
-## Validation (`scripts/validate.sh`)
+## Validation (`autospec validate`)
 
 <!-- autospec-doc-scope:
-  src: ["scripts/validate.sh"]
+  src: ["autospec validate"]
   reason: "Operator reference for validate.sh checks"
   mismatch_action: warn
   generated: true
@@ -541,7 +617,7 @@ Extends the Phase 4 self-heal loop classifier with doc-drift categories:
 Repository-wide invariant checker. Run before every PR merge.
 
 ```
-Usage: bash scripts/validate.sh
+Usage: autospec validate
 ```
 
 Exit: 0 = all checks pass, non-zero = first failure with diagnostic.

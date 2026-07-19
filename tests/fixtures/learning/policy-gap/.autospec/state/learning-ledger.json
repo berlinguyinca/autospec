@@ -1,0 +1,18 @@
+{
+  "entries": [
+    {
+      "category": "policy",
+      "evidence": [
+        "rule_gap"
+      ],
+      "frequency": 1,
+      "id": "learn-policy-gap",
+      "lesson_type": "policy_gap",
+      "schema": 1,
+      "source": "policy",
+      "status": "candidate",
+      "summary": "Policy gap"
+    }
+  ],
+  "schema": 1
+}

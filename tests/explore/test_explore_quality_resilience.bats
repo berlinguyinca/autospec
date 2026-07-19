@@ -6,7 +6,7 @@
 #   1. Each of the four lenses emits well-formed proposals when fed a fixture
 #      repo that tickles its heuristic.
 #   2. Assertion-free-test detection fires on a seeded bats file with no asserts.
-#   3. Invariant/guard coverage fires on a seeded validate.sh gap.
+#   3. Invariant/guard coverage fires on a seeded direct-validation gap.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -49,15 +49,14 @@ for p in d["proposals"]:
 @test "quality-resilience: assertion-free bats file is flagged" {
     mkdir -p tests
     # A bats file with @test blocks but zero assert_* calls.
-    cat > tests/no_asserts.bats <<'EOF'
-#!/usr/bin/env bats
-@test "does something" {
-    run echo hello
-}
-@test "does something else" {
-    run ls /
-}
-EOF
+    printf '%s\n' \
+        '#!/usr/bin/env bats' \
+        '@test "does something" {' \
+        '    run echo hello' \
+        '}' \
+        '@test "does something else" {' \
+        '    run ls /' \
+        '}' > tests/no_asserts.bats
     git add -A && git commit -q -m "seed assertion-free bats"
     run bash "$REPO_ROOT/scripts/explore-research/quality-resilience.sh"
     [ "$status" -eq 0 ]
@@ -76,15 +75,14 @@ EOF
 #!/usr/bin/env bash
 make_slug() { echo "$1" | tr ' ' '-'; }
 EOF
-    cat > tests/test_slug.bats <<'EOF'
-#!/usr/bin/env bats
-source src/helper.sh
-@test "slug matches" {
-    expected=$(make_slug "hello world")
-    run make_slug "hello world"
-    assert_output "$expected"
-}
-EOF
+    printf '%s\n' \
+        '#!/usr/bin/env bats' \
+        'source src/helper.sh' \
+        '@test "slug matches" {' \
+        '    expected=$(make_slug "hello world")' \
+        '    run make_slug "hello world"' \
+        '    assert_output "$expected"' \
+        '}' > tests/test_slug.bats
     git add -A && git commit -q -m "seed self-consistent fixture"
     run bash "$REPO_ROOT/scripts/explore-research/quality-resilience.sh"
     [ "$status" -eq 0 ]
@@ -94,24 +92,18 @@ EOF
 
 # ── Lens (b): invariant without matching test ─────────────────────────────
 
-@test "quality-resilience: validate.sh check_fn without bats coverage is flagged" {
-    mkdir -p scripts tests
-    # A validate.sh with a check_ function that has no matching bats test.
-    cat > scripts/validate.sh <<'EOF'
-#!/usr/bin/env bash
-check_zzzunique_invariant_xyz() {
-    # assert something important
-    echo "checking..."
-}
-check_zzzunique_invariant_xyz
+@test "quality-resilience: direct validation check without bats coverage is flagged" {
+    mkdir -p crates/autospec-core/src/validation tests
+    cat > crates/autospec-core/src/validation/catalog.rs <<'EOF'
+const IDS: &[&str] = ["check_zzzunique_invariant_xyz"];
 EOF
-    git add -A && git commit -q -m "seed validate.sh gap"
+    git add -A && git commit -q -m "seed direct validation gap"
     run bash "$REPO_ROOT/scripts/explore-research/quality-resilience.sh"
     [ "$status" -eq 0 ]
     assert_well_formed "$output"
     [[ "$output" == *"quality-resilience"* ]]
     # Lens (b) should flag the uncovered invariant.
-    [[ "$output" == *"zzzunique_invariant_xyz"* || "$output" == *"validate.sh"* ]]
+    [[ "$output" == *"zzzunique_invariant_xyz"* || "$output" == *"direct validation"* ]]
 }
 
 # ── Lens (c): lockfile without trap cleanup ────────────────────────────────

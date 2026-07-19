@@ -463,7 +463,7 @@ opencode/agent.md}`:
    appends to `reports/autospec-review/reviewer-lessons.md`.
 3. **Post-batch audit phase (Phase 6).** As described in §8.
 
-`scripts/validate.sh` extended with:
+`autospec validate` extended with:
 
 - `check_autospec_run_priority_sort_lockstep` — byte-identity across
   the trio for the new sort block.
@@ -488,8 +488,8 @@ Branch `feat/autospec-review` against `github.com/berlinguyinca/autospec`:
 3. Modify `skills/autospec-run/` (§9) for priority sort + Tier-A
    escalation + Phase 6 trigger.
 4. Update `SKILLS.md`, `README.md`.
-5. Extend `scripts/validate.sh` with the four new checks.
-6. Run `bash scripts/validate.sh` — must pass.
+5. Extend `autospec validate` with the four new checks.
+6. Run `autospec validate` — must pass.
 7. Open one PR (skill is small; bigger churn would warrant split).
 
 **Phase B — First run on chem-evidence.**
@@ -549,7 +549,7 @@ diff <(awk '/^---$/{c++; next} c>=2' skills/autospec-run/SKILL.md) \
      <(awk '/^---$/{c++; next} c>=2' skills/autospec-run/opencode/agent.md)
 ```
 
-`scripts/validate.sh` must enforce both.
+`autospec validate` must enforce both.
 
 ## 12. Open follow-ups (out of scope for this PR)
 

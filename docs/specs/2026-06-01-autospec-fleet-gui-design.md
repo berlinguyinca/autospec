@@ -61,7 +61,7 @@ config file already contains keys the GUI doesn't know about.
 - New `scripts/fleet-gui.sh` backend launcher (Python stdlib http.server).
 - New `gui/index.html` single-file frontend (vanilla JS, no framework).
 - New `tests/fleet/test_fleet_gui.bats` covering backend endpoints.
-- `scripts/validate.sh` learns a `check_fleet_gui_subcommand_lockstep()`.
+- `autospec validate` learns a `check_fleet_gui_subcommand_lockstep()`.
 
 ## Out of scope
 
@@ -195,7 +195,7 @@ skills/autospec-fleet/gui/index.html          # ~250 LOC HTML + inline JS + CSS
 skills/autospec-fleet/SKILL.md                # +20 lines: gui subcommand
 skills/autospec-fleet/codex/prompt.md         # lockstep mirror
 skills/autospec-fleet/opencode/agent.md       # lockstep mirror
-scripts/validate.sh                            # +check_fleet_gui_subcommand_lockstep
+autospec validate                            # +check_fleet_gui_subcommand_lockstep
 tests/fleet/test_fleet_gui.bats               # 5 tests
 ```
 
@@ -220,14 +220,14 @@ self-contained per the small-LLM sizing rule.
    lists via curl; assert the on-disk YAML is one of the two valid full
    shapes (no half-written file, no JSON-corrupted YAML).
 
-`scripts/validate.sh`: `check_fleet_gui_subcommand_lockstep()` asserts the
+`autospec validate`: `check_fleet_gui_subcommand_lockstep()` asserts the
 literal line `/autospec-fleet gui` appears in all three adapter files
 (SKILL.md, codex/prompt.md, opencode/agent.md).
 
 ## Acceptance criteria
 
 - [ ] `/autospec-fleet gui` is documented in all three lockstep adapter files.
-- [ ] `bash scripts/validate.sh` passes (including new lockstep check).
+- [ ] `autospec validate` passes (including new lockstep check).
 - [ ] `bats tests/fleet/test_fleet_gui.bats` passes (all 5 tests).
 - [ ] `gh repo list` repos appear in `/api/repos` sorted by `pushedAt` desc.
 - [ ] Saving the GUI writes back to `autospec-fleet.yml`, preserves
@@ -258,7 +258,7 @@ Environment variable: `AUTOSPEC_GUI_IDLE_SECS` — idle timeout in seconds (defa
 ## Operator / full verification
 
 ```bash
-bash scripts/validate.sh
+autospec validate
 bats tests/fleet/test_fleet_gui.bats
 # Manual smoke:
 cd /tmp/empty-fleet-dir && bash /path/to/skills/autospec-fleet/scripts/fleet-gui.sh

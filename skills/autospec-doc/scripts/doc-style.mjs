@@ -2,7 +2,7 @@
 //
 // Single source of truth for the light-blue palette preset.
 // ALL six hex constants live ONLY here — no other file may hardcode them.
-// scripts/validate.sh enforces single-source via check_palette_single_source().
+// autospec validate enforces single-source via check_palette_single_source().
 //
 // Exports:
 //   PALETTE          — { background, primary, secondary, accent, line, text }
@@ -288,7 +288,7 @@ function extractStateChain(body) {
   for (let i = 0; i < best.length - 1; i++) {
     const from = best[i];
     const to = best[i + 1];
-    const key = `${from} ${to}`;
+    const key = `${from}\u0000${to}`;
     if (seen.has(key)) continue;
     seen.add(key);
     pairs.push({ from, to });

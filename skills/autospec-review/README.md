@@ -11,5 +11,10 @@ full design.
 
     /autospec-review [--spec PATH] [--profile NAME] [--dry-run]
                      [--no-autoreview] [--since DATE]
+                     [--remediation] [--emit-gaps PATH] [--reasoning-trial]
 
 See SKILL.md for full flag semantics and triggering rules.
+
+`--reasoning-trial` is an opt-in remediation hardening pass for high-uncertainty
+findings. Candidate gaps must carry a repo-local falsifier probe; the helper
+records replayable JSONL events and emits only survivors for filing.

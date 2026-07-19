@@ -7,6 +7,10 @@ running for weeks." Builds on `docs/AUTONOMY-CHARTER.md`,
 `docs/memory/project_babysit_tax_autonomy_charter.md`, and the existing
 `autospec-explore` / `autospec-run` engines.
 
+## Phase-4 supersession note (2026-07-06)
+
+`docs/specs/2026-07-06-autospec-autonomous-platform-design.md` is the current source of record for never-idle/never-ask semantics. It supersedes this Phase-1 document wherever Phase 1 describes dry-cycle park/notify, a blocking notify-operator halt, or a startup `AskUserQuestion` gate. The reconciled behavior is: dry backlog descends to value-ranked discovery and quality/surface/RAG floors; below `AUTOSPEC_VALUE_FLOOR` the conductor enters idle-rescan rather than convergence-stop; fenced or failed work is quarantined asynchronously and the loop continues; resource/spend/operator-control park remains authoritative and distinct from convergence-stop.
+
 ## Goal
 
 Ship a top-level skill `/autospec-autonomous` (plus its calibration companion
@@ -136,13 +140,20 @@ no-op on clean installs (`feedback_installer_excludes_runtime_libs`):
   `--priorities` + `autospec:steer` (which already deliver steering today). If the
   delta is only "rank slightly differently," cut it (`feedback_roi_check_new_components`).
 
+## Value-gated prioritization model
+
+The conductor's cross-workstream queue uses a SAFe WSJF-inspired score, with Cost of Delay represented by severity, value, and confidence signals and divided by implementation size/risk: `Priority = (Severity × Value × Confidence × Reversibility) / (Effort × BlastRadius)`. This keeps the waterfall aligned with SAFe WSJF / Cost of Delay guidance while adding autospec-specific safety divisors: high blast-radius or fenced changes route to a human gate, and candidates below the value floor idle for a re-scan instead of manufacturing low-value work.
+
+Recently touched files receive deterministic score decay so the conductor does not ping-pong A→B→A across adjacent cycles. The daily digest includes the ranked queue and considered-and-skipped reasons when a value queue has been produced.
+
 ## The priority waterfall
 
-One **cycle** = evaluate tiers top-down, execute the first tier that has work,
+One **cycle** = evaluate tiers top-down, execute the highest-value available work,
 then loop. A tier is "dry" when it yields zero *new, shippable* items (after the
-existing explore dedup + dry-well guard). Escalation to the next tier requires
-`AUTOSPEC_AUTO_DRY_CYCLES` (default 2) consecutive dry cycles, so a single empty
-pass doesn't prematurely jump to competitor research.
+existing explore dedup + dry-well guard). Phase 4 keeps dry counts as
+observability, but a dry count no longer parks the conductor: it descends through
+discovery and the quality/surface/RAG floors, then idles on a re-scan heartbeat
+when the best candidate is below `AUTOSPEC_VALUE_FLOOR`.
 
 | Tier | Source | Engine | PR base |
 |---|---|---|---|
@@ -196,8 +207,7 @@ grounded in a model of the operator's past behavior.
 
 At skill start the conductor accepts free-text priorities:
 `/autospec-autonomous --priorities "refine UX; add multi-user accounts; polish dashboards"`
-(or, first run with none supplied, it asks once via `AskUserQuestion` — the only
-startup gate — then proceeds). Priorities persist to
+(or, first run with none supplied, it infers priorities from `autonomous-priorities.md`, the operator persona, and control labels without `AskUserQuestion`). Priorities persist to
 `~/.autospec/autonomous-priorities.md` (operator-editable mid-run; also
 appendable via an `autospec:steer` issue). They are **high-weight directives**
 that bias discovery and ranking across every tier — a discovery proposal aligned
@@ -422,13 +432,15 @@ and biases discovery toward sources that historically merge clean.
 **Main-health gate.** Because Tier-1 work auto-merges to `main` unattended, a bad
 PR slipping the gates would poison every later cycle. After each main merge the
 conductor confirms `main` CI is green (via the existing `ci-wait.sh`); if `main`
-goes red, it **halts further Tier-1 merges**, files an `autospec:needs-human`
-fix issue, notifies, and continues only sandbox tiers until `main` is green again.
+goes red, it **halts further Tier-1 main merges**, files an `autospec:needs-human`
+fix issue, notifies asynchronously, and continues only safe sandbox/non-main tiers
+until `main` is green again.
 
-**Lifetime.** No cumulative cost or time kill-switch (operator decision
-2026-06-25): the loop runs forever, parking only on the 90% usage governor and
-resuming on reset; it ends only on `autospec:stop` or an unrecoverable crash.
-The per-cycle autonomy-gate cost caps still apply per cycle.
+**Lifetime.** Phase 4 adopts the authoritative cumulative spend kill-switch and
+usage governor: never-idle forbids convergence-stop for lack of work, but resource
+park remains valid at usage/spend/operator-control boundaries. The loop resumes on
+reset and ends only on `autospec:stop` or an unrecoverable crash. The per-cycle
+autonomy-gate cost caps still apply per cycle.
 
 **Sandbox drift reporting.** A single long-lived sandbox (operator decision). The
 daily digest reports merge-base distance to `main` (commits/files behind) and a
@@ -444,13 +456,14 @@ statement when absent), constrained by the existing internet allowlist.
 
 ## Safety & autonomy-gate integration
 
-Every would-have-asked decision still routes through
-`autospec-autonomy-gate.sh --check all`; the conductor weakens nothing. It pauses
-(not parks) and surfaces a confirmation only for the Charter's hard boundary:
-irreversible destructive remote ops, force-push to a protected branch,
-out-of-scope file changes, cost over the aggressive caps, or a genuine
-no-clear-winner fork. Self-generated work is sandboxed, so the highest-risk path
-(unreviewed feature code on `main`) is structurally avoided.
+Every would-have-asked decision is evaluated by deterministic gates and out-of-band
+control labels; the conductor weakens nothing and does not prompt. Hard-boundary
+violations (irreversible destructive remote ops, force-push to a protected branch,
+out-of-scope file changes, cost over caps, or no-clear-winner forks) are quarantined
+to `autospec:needs-human` and the loop continues with the next safe item, unless a
+resource/control park condition is explicitly tripped. Self-generated work is
+sandboxed, so the highest-risk path (unreviewed feature code on `main`) is
+structurally avoided.
 
 Worktree isolation: the conductor asserts `worktree-guard.sh assert` before any
 commit, per the explore sandbox contract and
@@ -488,8 +501,8 @@ Fixtures materialized at runtime or `git add -f`'d, never left gitignored
 checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
 
 - `tests/autonomous/test_waterfall.bats` — tier selection: backlog present →
-  Tier 1; backlog empty + 1 dry cycle → still Tier 1 (no premature jump);
-  2 dry cycles → Tier 2; etc.; Tier 0 always preempts.
+  Tier 1; backlog empty records dry observability then descends to Tier 1.5/Tier 2;
+  below `AUTOSPEC_VALUE_FLOOR` → idle-rescan; Tier 0 always preempts.
 - `tests/autonomous/test_control_channel.bats` — each reserved label maps to its
   command; `:steer` body becomes a directive + label removed; metachar-safe
   label parsing.
@@ -513,7 +526,7 @@ checks write a real temp file first (`feedback_bash32_process_sub_test_file`).
   conductor; stale-heartbeat lock is reclaimable but a live one is not; resume
   restores waterfall position; per-issue failure cap → `autospec:needs-human`;
   main red → Tier-1 merges halt, sandbox tiers continue; ledger consulted/fed.
-- `scripts/validate.sh` — trio goldens regenerated;
+- `autospec validate` — trio goldens regenerated;
   `check_autospec_autonomous_contract` gate added.
 
 ## Decomposition — phase-structured (post-review)
@@ -591,7 +604,7 @@ issue (`feedback_decompose_trio_prose_goldens_atomic`).
   `/autospec-qa` + `/autospec-secaudit` pre-merge gate with severity-gated
   fix-and-recheck; (f) crash over weeks → durable run-state + `/autospec-resume`;
   (g) double-run → single-instance lock; (h) spinning on broken work → per-issue
-  failure cap → quarantine; (i) bad PR poisoning `main` → main-health gate halts
+  failure cap → quarantine; (i) bad PR poisoning `main` → main-health gate quarantines
   Tier-1 merges on red; (j) re-proposing rejected work → outcome-ledger; (k) IP
   risk in competitor RE → clean-room behavior-only + secaudit IP check.
 - **On merge:** add `/autospec-autonomous` and `/autospec-persona` to the skill

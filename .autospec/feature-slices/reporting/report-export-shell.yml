@@ -1,0 +1,21 @@
+id: report-export-shell
+title: Report export shell
+category: reporting
+summary: Report export shell
+source_rules:
+  - required_csv_pdf_exports
+source_baselines:
+  - reporting
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: route
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

@@ -150,7 +150,7 @@ is_shipped() {
   # ~/.autospec/scripts; they run from a repo checkout, not the installed scripts dir):
   #   - skills/autospec-test/scripts/run-gate.sh: the autospec-test target-repo gate, an
   #     opt-in that runs from the target repo checkout.
-  #   - scripts/validate.sh: the lock-step / full-suite validator. In autospec-run /
+  #   - autospec validate: the lock-step / full-suite validator. In autospec-run /
   #     autospec / autospec-sweep it is "the repo-standard full suite ... when present",
   #     i.e. the TARGET repo's own validate.sh; in autospec-explore it is this repo's
   #     own lock-step gate run from the autospec checkout. It is never copied to

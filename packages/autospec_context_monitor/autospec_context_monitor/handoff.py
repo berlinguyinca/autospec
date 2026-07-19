@@ -7,7 +7,8 @@ Provides:
 
 The caller is responsible for passing the ``since`` timestamp (e.g.
 ``time.time()`` captured just before issuing the ``/create-handoff`` command)
-so that pre-existing files are correctly ignored.
+so that pre-existing files are correctly ignored, modulo a tiny filesystem
+timestamp-granularity slop.
 """
 from __future__ import annotations
 
@@ -18,6 +19,10 @@ from pathlib import Path
 
 # Minimum byte-size for a handoff to be considered non-trivial.
 _MIN_SIZE = 200
+# Filesystems and wall-clock reads can disagree by a few milliseconds in fast
+# same-process handoff flows. Keep stale-file filtering strict beyond that
+# timestamp granularity window.
+_MTIME_SLOP_SECONDS = 0.01
 
 # Required headings (case-insensitive multiline match).
 _REQUIRED_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
@@ -66,6 +71,10 @@ def validate_handoff(path: Path) -> tuple[bool, list[str]]:
     return (len(missing) == 0), missing
 
 
+def _is_fresh_handoff(path: Path, since: float) -> bool:
+    return path.stat().st_mtime >= since - _MTIME_SLOP_SECONDS
+
+
 class HandoffTimeoutError(TimeoutError):
     """Raised when no handoff file appears within the allowed timeout."""
 
@@ -80,7 +89,8 @@ def check_handoff(repo_root: Path, since: float) -> Path | None:
 
     Args:
         repo_root: Root directory of the repository (contains ``.turbo/``).
-        since:     POSIX timestamp; only files with ``st_mtime > since`` match.
+        since:     POSIX timestamp; only files newer than the cutoff, allowing
+                   a tiny filesystem timestamp slop, match.
 
     Returns:
         The newest matching handoff :class:`~pathlib.Path`, or ``None`` when no
@@ -90,9 +100,7 @@ def check_handoff(repo_root: Path, since: float) -> Path | None:
     if not handoff_dir.exists():
         return None
     today_glob = f"{date.today().isoformat()}-*.md"
-    candidates = [
-        p for p in handoff_dir.glob(today_glob) if p.stat().st_mtime > since
-    ]
+    candidates = [p for p in handoff_dir.glob(today_glob) if _is_fresh_handoff(p, since)]
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
@@ -112,8 +120,9 @@ def wait_for_handoff(
 
     Args:
         repo_root: Root directory of the repository (contains ``.turbo/``).
-        since:     POSIX timestamp (e.g. from :func:`time.time`).  Only files
-                   with ``st_mtime > since`` are considered.
+        since:     POSIX timestamp (e.g. from :func:`time.time`). Only files
+                   newer than the cutoff, allowing a tiny filesystem timestamp
+                   slop, are considered.
         timeout:   Maximum number of seconds to wait (default 180).
         poll:      Polling interval in seconds (default 1.0).
 
@@ -134,7 +143,7 @@ def wait_for_handoff(
             candidates = [
                 p
                 for p in handoff_dir.glob(today_glob)
-                if p.stat().st_mtime > since
+                if _is_fresh_handoff(p, since)
             ]
             if candidates:
                 return max(candidates, key=lambda p: p.stat().st_mtime)

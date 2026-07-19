@@ -51,6 +51,7 @@ SPECIALISTS_ARG=""
 AUTONOMOUS=0
 QA_GATE=0
 QA_GATE_PASS_ON_PARTIAL=0
+ONCE=0
 SKIP_INITIAL_HANDOFF="${AUTOSPEC_EXPLORE_SKIP_INITIAL_HANDOFF:-0}"
 HANDOFF_TIMEOUT_SEC="${AUTOSPEC_EXPLORE_HANDOFF_TIMEOUT_SEC:-900}"
 PROMPT=""
@@ -81,6 +82,15 @@ Options:
                               output is byte-unchanged without this flag).
   --qa-gate-pass-on-partial   Treat a PARTIAL gate verdict as PASS (default
                               PARTIAL blocks, matching QA's PARTIAL!=PASS rule).
+  --once                      Run exactly ONE research pass over the resolved
+                              --research-sources, emit a yield JSON
+                              {tier,proposals_seen,new_candidates,filed,dry,reason,candidates}
+                              to stdout, then return. Never enters the perpetual
+                              loop; never calls the drain command. dry=true when
+                              new_candidates==0 after dedup. Test hook:
+                              AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD (overrides the
+                              explore-research-cycle.sh call; must write JSON
+                              to \$AUTOSPEC_EXPLORE_ONCE_OUT).
   --no-initial-handoff        Skip startup /autospec-refine and /autospec-define
                               handoffs; run only the explore research loop.
   --handoff-timeout-sec N     Timeout for startup handoffs (default 900; env:
@@ -105,6 +115,7 @@ while [ "$#" -gt 0 ]; do
         --autonomous)            AUTONOMOUS=1 ;;
         --qa-gate)               QA_GATE=1 ;;
         --qa-gate-pass-on-partial) QA_GATE_PASS_ON_PARTIAL=1 ;;
+        --once)                  ONCE=1 ;;
         --no-initial-handoff)    SKIP_INITIAL_HANDOFF=1 ;;
         --handoff-timeout-sec)   shift; HANDOFF_TIMEOUT_SEC="$1" ;;
         -h|--help)               usage; exit 0 ;;
@@ -116,9 +127,16 @@ while [ "$#" -gt 0 ]; do
 done
 
 if [ -z "$PROMPT" ]; then
-    echo "autospec-explore: missing initial prompt" >&2
-    usage
-    exit 2
+    if [ "$ONCE" -eq 1 ]; then
+        # --once discovery sweeps are prompt-less by design (conductor Tier
+        # 2/4 invocations never supply an initial prompt). Default to a
+        # generic repo-discovery seed instead of hard-failing (issue #1625).
+        PROMPT="Discover the highest-value defects and improvements in this repository."
+    else
+        echo "autospec-explore: missing initial prompt" >&2
+        usage
+        exit 2
+    fi
 fi
 
 # Budget hours → seconds for the shared loop driver env contract.
@@ -258,6 +276,343 @@ _explore_run_handoff() {
     return "$rc"
 }
 
+# ── --once: single-cycle no-loop mode (F1). ────────────────────────────────────
+# Runs exactly ONE research pass, emits a yield JSON with candidate issue details, and returns.
+# Never enters the perpetual loop; never calls invoke_drain; never creates a
+# sandbox branch. The conductor calls this per cycle and counts consecutive
+# dry=true results for tier escalation (F2).
+#
+# Output JSON keys:
+#   tier            "competitor" when sources include "internet", else "local"
+#   proposals_seen  proposals_total from the research cycle (pre-dedup)
+#   new_candidates  proposals surviving dedup + recent-title filter (post-dedup)
+#   filed           issues actually created via gh issue create
+#   dry             true when new_candidates==0 after dedup
+#   reason          human-readable summary string
+#   candidates      machine-readable issue objects with title, body, labels,
+#                   severity, ROI score, evidence, source, and confidence
+#
+# Test hook: AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD — when set, runs instead of the
+# real explore-research-cycle.sh call. The mock receives AUTOSPEC_EXPLORE_ONCE_OUT
+# (the output JSON path) and AUTOSPEC_EXPLORE_ONCE_SOURCES (the resolved sources)
+# as env vars and must write valid research-cycle JSON to that path.
+if [ "$ONCE" -eq 1 ]; then
+    # --once is a non-interactive autonomous atomic (the conductor's per-cycle
+    # discovery unit). Force the autonomous flag so the cycle's fail-closed verify
+    # reliably applies here — a --once pass that cannot verify must file ZERO
+    # rather than auto-ship unverified proposals, regardless of inherited env.
+    export AUTOSPEC_EXPLORE_AUTONOMOUS=1
+
+    # Determine tier from the resolved source set.
+    _once_tier="local"
+    if printf '%s\n' "$RESEARCH_SOURCES" | tr ',' '\n' | grep -qx 'internet'; then
+        _once_tier="competitor"
+    fi
+
+    _once_dir=".autospec/explore-once-$$"
+    mkdir -p "$_once_dir"
+    _once_out="$_once_dir/research.json"
+
+    # Run the single research cycle pass (full stage: dedup + verify + rank).
+    if [ -n "${AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD:-}" ]; then
+        AUTOSPEC_EXPLORE_ONCE_OUT="$_once_out" \
+        AUTOSPEC_EXPLORE_ONCE_SOURCES="$RESEARCH_SOURCES" \
+            bash -c "$AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD" \
+            > "$_once_dir/research.log" 2>&1 || true
+    else
+        bash "$SCRIPT_DIR/explore-research-cycle.sh" \
+            --max-issues-per-round "$MAX_ISSUES_PER_ROUND" \
+            --research-sources "$RESEARCH_SOURCES" \
+            --out "$_once_out" \
+            > "$_once_dir/research.log" 2>&1 || true
+    fi
+
+    # Extract the pre-dedup count and render the post-verify survivors into the
+    # conductor-facing candidate issue contract. Keep this derivation in one
+    # Python pass so body text, labels, evidence, and ROI score stay in sync with
+    # the exact proposals that will be filed.
+    _once_seen=0
+    _once_candidates="$_once_dir/candidates.json"
+    printf '%s\n' '[]' > "$_once_candidates"
+    if [ -f "$_once_out" ]; then
+        python3 - "$_once_out" "$_once_candidates" "$_once_tier" "$RESEARCH_SOURCES" <<'PY'
+import json, sys
+
+src_path, out_path, tier, sources = sys.argv[1:5]
+try:
+    data = json.load(open(src_path))
+except Exception:
+    data = {}
+
+def ctx_label(complexity):
+    return {"small": "ctx:32k", "medium": "ctx:64k", "large": "ctx:120k"}.get(
+        str(complexity or "").lower(), "ctx:64k"
+    )
+
+def reasoning_label(severity, complexity):
+    sev = str(severity or "feature").lower()
+    comp = str(complexity or "medium").lower()
+    if sev in ("silent-wrong", "correctness", "stability") or comp == "large":
+        return "reasoning:deep"
+    if sev == "nicety":
+        return "reasoning:shallow"
+    return "reasoning:medium"
+
+def clean_text(value, default=""):
+    value = default if value is None else value
+    return str(value).replace("\r", "").strip()
+
+candidates = []
+for proposal in data.get("proposals", []) or []:
+    title = clean_text(proposal.get("title"))
+    if not title:
+        continue
+    evidence = clean_text(proposal.get("evidence"))
+    severity = clean_text(proposal.get("severity"), "feature") or "feature"
+    complexity = clean_text(proposal.get("estimated_complexity"), "medium").lower() or "medium"
+    if complexity not in ("small", "medium", "large"):
+        complexity = "medium"
+    source = clean_text(proposal.get("source"), "unknown") or "unknown"
+    named_consumer = clean_text(proposal.get("named_consumer"))
+    try:
+        confidence = max(0.0, min(1.0, float(proposal.get("confidence", 0.5))))
+    except Exception:
+        confidence = 0.5
+    try:
+        roi_score = float(proposal.get("score", confidence))
+    except Exception:
+        roi_score = confidence
+    ctx = ctx_label(complexity)
+    reasoning = reasoning_label(severity, complexity)
+    labels = [
+        "auto-implement",
+        ctx,
+        reasoning,
+        "explore",
+    ]
+    body = "\n".join([
+        "Auto-filed by /autospec-explore --once (single-cycle discovery).",
+        "",
+        "## Goal",
+        f"Resolve the verified discovery candidate `{title}` using the evidence from `{source}`.",
+        "",
+        "## Discovery candidate",
+        f"- Tier: {tier}",
+        f"- Source: {source}",
+        f"- Research sources: {sources}",
+        f"- Severity: {severity}",
+        f"- Estimated complexity: {complexity}",
+        f"- Confidence: {confidence:.2f}",
+        f"- ROI score: {roi_score:.4f}",
+        f"- Named consumer: {named_consumer or 'n/a'}",
+        "",
+        "## Evidence",
+        evidence or "n/a",
+        "",
+        "## Verification",
+        "Adversarial verify: passed before filing by the explore research-cycle finalize gate.",
+        "ROI gate: passed (candidate survived severity-first rank).",
+        "",
+        "## Model fit",
+        f"- {ctx}",
+        f"- {reasoning}",
+        "",
+        "## Acceptance criteria",
+        f"- [ ] The PR references `{title[:55]}` in its closeout artifacts.",
+        "- [ ] The implementation cites `Adversarial verify` evidence before editing.",
+        "- [ ] `autospec validate` passes after the change.",
+        "",
+        "### Primary smoke test (inner loop)",
+        "```bash",
+        "autospec validate",
+        "```",
+    ])
+    candidates.append({
+        "title": title,
+        "body": body,
+        "severity": severity,
+        "labels": labels,
+        "roi_score": round(roi_score, 4),
+        "evidence": evidence,
+        "source": source,
+        "estimated_complexity": complexity,
+        "confidence": round(confidence, 4),
+        "named_consumer": named_consumer,
+    })
+
+with open(out_path, "w") as fh:
+    json.dump(candidates, fh, separators=(",", ":"))
+    fh.write("\n")
+PY
+        _once_seen="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('proposals_total', 0))" "$_once_out" 2>/dev/null || echo 0)"
+    fi
+    _once_new="$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$_once_candidates" 2>/dev/null || echo 0)"
+    # Did the cycle fail closed (autonomous + no skeptic verdicts)? This is
+    # distinct from a genuine dry well — surfacing it stops the conductor from
+    # misreading "verify unavailable" as "repo exhausted".
+    _once_failclosed=false
+    if [ -f "$_once_out" ]; then
+        _once_failclosed="$(python3 -c "
+import json, sys
+try:
+    print('true' if json.load(open(sys.argv[1])).get('failclosed') else 'false')
+except Exception:
+    print('false')
+" "$_once_out" 2>/dev/null)" || _once_failclosed=false
+    fi
+    case "$_once_failclosed" in true|false) ;; *) _once_failclosed=false ;; esac
+
+    # Ensure numeric defaults
+    case "$_once_seen" in ''|*[!0-9]*) _once_seen=0 ;; esac
+    case "$_once_new"  in ''|*[!0-9]*) _once_new=0  ;; esac
+
+    # dry=true when no new candidates survive dedup.
+    _once_dry="false"
+    if [ "$_once_new" -eq 0 ]; then
+        _once_dry="true"
+    fi
+
+    # File surviving candidates as issues (best-effort; never blocks the mode).
+    _once_filed=0
+    if [ "$_once_new" -gt 0 ] && [ -f "$_once_candidates" ] && command -v gh >/dev/null 2>&1; then
+        _once_filed="$(python3 - "$_once_candidates" <<'PY'
+import json, os, subprocess, sys
+try:
+    candidates = json.load(open(sys.argv[1]))
+except Exception:
+    candidates = []
+count = 0
+
+def rust_safety_pass(issue_url):
+    issue_number = str(issue_url or "").strip().rstrip("/").rsplit("/", 1)[-1]
+    if not issue_number.isdigit() or int(issue_number) <= 0:
+        return False
+    repo = str(os.environ.get("GITHUB_REPOSITORY", "")).strip()
+    if not repo:
+        repo_lookup = subprocess.run(
+            ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        repo = repo_lookup.stdout.strip()
+    if not repo:
+        return False
+    review = subprocess.run(
+        [
+            os.environ.get("AUTOSPEC_BIN", "autospec"),
+            "queue", "review-safety", "--repo", repo,
+            "--limit", "1", "--issue", issue_number,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    if review.returncode != 0:
+        return False
+    try:
+        return int(json.loads(review.stdout).get("pass", 0)) == 1
+    except Exception:
+        return False
+
+label_meta = {
+    "auto-implement": ("0e8a16", "Autospec autonomous implementation issue"),
+    "ctx:32k": ("5319e7", "Small-context implementation fit"),
+    "ctx:64k": ("5319e7", "Medium-context implementation fit"),
+    "ctx:120k": ("5319e7", "Large-context implementation fit"),
+    "reasoning:shallow": ("c5def5", "Shallow reasoning implementation fit"),
+    "reasoning:medium": ("c5def5", "Medium reasoning implementation fit"),
+    "reasoning:deep": ("c5def5", "Deep reasoning implementation fit"),
+    "explore": ("8250df", "Discovered by autospec-explore"),
+}
+for candidate in candidates:
+    title = str(candidate.get("title", "")).strip()
+    body = str(candidate.get("body", ""))
+    labels = candidate.get("labels", []) or []
+    if not title:
+        continue
+    for label in labels:
+        label = str(label).strip()
+        if not label:
+            continue
+        color, desc = label_meta.get(label, ("ededed", "Autospec generated label"))
+        subprocess.run(
+            ["gh", "label", "create", label, "--color", color, "--description", desc, "--force"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    cmd = ["gh", "issue", "create", "--title", title, "--body", body]
+    for label in labels:
+        label = str(label).strip()
+        if label:
+            cmd.extend(["--label", label])
+    try:
+        created = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=True,
+        )
+        if rust_safety_pass(created.stdout):
+            count += 1
+    except Exception:
+        pass
+print(count)
+PY
+)" || _once_filed=0
+    fi
+
+    # Compose the reason string. A fail-closed pass is NOT a dry well — report it
+    # distinctly and emit the observable code_health signal so the inert-gate
+    # state is never silent.
+    if [ "$_once_failclosed" = "true" ]; then
+        _once_reason="verify-unavailable-failclosed"
+        _once_verifier_outcome="$(autospec explore verifier-outcome --tier "$_once_tier" --cycle 1 --artifact "$_once_out" 2>/dev/null || true)"
+        if [ -z "$_once_verifier_outcome" ]; then
+            _once_verifier_outcome='{"outcome":"NotRun","reason":"missing_AUTOSPEC_EXPLORE_VERIFY_CMD","sealed":true,"dry":false,"may_mutate_github":false}'
+        fi
+        echo "code_health:explore_verify_unavailable_failclosed (--once filed 0: autonomous run with no skeptic verdicts; wire AUTOSPEC_EXPLORE_VERIFY_CMD to verify + file)" >&2
+    elif [ "$_once_dry" = "true" ]; then
+        _once_reason="no new candidates after dedup"
+        _once_verifier_outcome="null"
+    else
+        _once_reason="filed $_once_filed of $_once_new candidates from $_once_tier research pass"
+        _once_verifier_outcome="null"
+    fi
+
+    # Emit the yield JSON. The legacy 6 keys remain stable; `candidates` is the
+    # machine-readable single-cycle issue list consumed by autonomous discovery.
+    python3 - "$_once_tier" "$_once_seen" "$_once_new" "$_once_filed" "$_once_dry" "$_once_reason" "$_once_candidates" "$_once_verifier_outcome" <<'PY'
+import json, sys
+_, tier, seen, new, filed, dry, reason, candidates_path, verifier_outcome_raw = sys.argv
+try:
+    candidates = json.load(open(candidates_path))
+except Exception:
+    candidates = []
+try:
+    verifier_outcome = json.loads(verifier_outcome_raw)
+except Exception:
+    verifier_outcome = None
+payload = {
+    "tier": tier,
+    "proposals_seen": int(seen),
+    "new_candidates": int(new),
+    "filed": int(filed),
+    "dry": dry == "true",
+    "reason": reason,
+    "candidates": candidates,
+}
+if verifier_outcome is not None:
+    payload["verifier_outcome"] = verifier_outcome
+print(json.dumps(payload, separators=(",", ":")))
+PY
+    exit 0
+fi
+
 # ── Domain-specialist roster discovery + autonomy detection (Issue E2). ────────
 # Mark the run autonomous when --autonomous was passed OR no interactive TTY is
 # attached; the research cycle then auto-selects the top-N specialists in
@@ -271,10 +626,10 @@ fi
 # need no scan.
 case "$SPECIALISTS_MODE" in
     discover|ask)
-        if [ -x "$SCRIPT_DIR/explore-specialist-scan.sh" ]; then
-            AUTOSPEC_NUM_SPECIALISTS="$NUM_SPECIALISTS" \
-                bash "$SCRIPT_DIR/explore-specialist-scan.sh" >/dev/null 2>&1 || true
-        fi
+        autospec explore specialists \
+            --repo-dir "$REPO_ROOT" \
+            --num-specialists "$NUM_SPECIALISTS" \
+            >/dev/null 2>&1 || true
         ;;
 esac
 
@@ -437,6 +792,23 @@ invoke_drain() {
 }
 
 # >>> explore-spec-first-filing >>>  (issue #1102 — extracted for bats coverage)
+# Review a newly filed interim issue through the Rust-only safety authority.
+# Returns success only when that exact review reports one newly admitted pass.
+_explore_review_exact_issue() {
+    local issue_num="$1" repo review_out review_pass
+    case "$issue_num" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    repo="${GITHUB_REPOSITORY:-}"
+    if [ -z "$repo" ]; then
+        repo="$(gh repo view --json nameWithOwner --jq '.nameWithOwner' 2>/dev/null)" || return 1
+    fi
+    [ -n "$repo" ] || return 1
+    review_out="$("${AUTOSPEC_BIN:-autospec}" queue review-safety --repo "$repo" --limit 1 --issue "$issue_num" 2>/dev/null)" || return 1
+    review_pass="$(printf '%s' "$review_out" | jq -r '.pass // 0' 2>/dev/null)" || return 1
+    [ "$review_pass" = "1" ]
+}
+
 # Raw per-round filing: turn the ranked proposals into bare auto-implement
 # issues via `gh issue create`. Used as the FALLBACK path only, when the
 # spec-first /autospec-define handoff is unavailable or fails. Reads the
@@ -479,20 +851,27 @@ for p in d.get('proposals', []):
 Source: research cycle ($RESEARCH_SOURCES).
 
 $marker"
+        # origin:self provenance (issue #1745): idempotent, best-effort label
+        # auto-creation — a create/exists failure never blocks filing.
+        gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
         issue_url=""
-        issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement 2>/dev/null)" || issue_url=""
+        issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement --label origin:self 2>/dev/null)" || issue_url=""
         if [ -z "$issue_url" ]; then
             # Retry with stderr visible (gh diagnostics no longer suppressed);
             # stdout (the issue URL) is still captured into issue_url.
-            issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement)" || issue_url=""
+            issue_url="$(gh issue create --title "$title" --body "$body" --label auto-implement --label origin:self)" || issue_url=""
         fi
         [ -z "$issue_url" ] && continue
-        issues_filed=$((issues_filed + 1))
         # Extract trailing issue number from the returned URL.
         issue_num="$(printf '%s' "$issue_url" | sed -E 's#.*/([0-9]+)[[:space:]]*$#\1#')"
         case "$issue_num" in
             ''|*[!0-9]*) issue_num=0 ;;
         esac
+        if ! _explore_review_exact_issue "$issue_num"; then
+            echo "code_health:explore_rust_safety_unconfirmed issue=${issue_num:-unknown}" >&2
+            continue
+        fi
+        issues_filed=$((issues_filed + 1))
         # Record a pending ledger entry for the filed issue (best-effort).
         if [ "$issue_num" -gt 0 ]; then
             filed_issue_nums="$filed_issue_nums $issue_num"

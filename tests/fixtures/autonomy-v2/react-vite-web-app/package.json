@@ -1,0 +1,14 @@
+{
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "react": "latest",
+    "typescript": "latest"
+  },
+  "devDependencies": {
+    "@playwright/test": "latest",
+    "vite": "latest"
+  },
+  "scripts": {
+    "test": "vitest"
+  }
+}

@@ -1,0 +1,22 @@
+id: in-app-docs-center
+title: In-app documentation center
+category: product
+summary: In-app documentation center
+source_rules:
+  - required_in_app_documentation
+source_baselines:
+  - docs
+  - product
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: route
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

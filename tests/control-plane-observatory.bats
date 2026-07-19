@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+if [ -z "${BATS_VERSION:-}" ]; then
+  exec bats "$0" "$@"
+fi
+
+REPO_ROOT="${BATS_TEST_DIRNAME}/.."
+SCRIPT="$REPO_ROOT/scripts/autospec-control-plane.sh"
+
+setup() {
+  TEST_TMP="$(mktemp -d)"
+  GH_LOG="$TEST_TMP/gh.log"
+  OUTPUT="$TEST_TMP/observatory-dry-run.txt"
+  mkdir -p "$TEST_TMP/bin"
+  cat > "$TEST_TMP/bin/gh" <<'GH'
+#!/usr/bin/env bash
+printf 'gh %s\n' "$*" >> "$GH_LOG"
+exit 42
+GH
+  chmod +x "$TEST_TMP/bin/gh"
+  export GH_LOG
+  export PATH="$TEST_TMP/bin:$PATH"
+  bash "$SCRIPT" bootstrap --dry-run \
+    --owner berlinguyinca \
+    --governance-repo autospec-governance \
+    --observatory-repo autospec-observatory > "$OUTPUT"
+}
+
+teardown() {
+  rm -rf "$TEST_TMP"
+}
+
+assert_contains() {
+  local needle="$1"
+  grep -Fq -- "$needle" "$OUTPUT" || {
+    printf 'missing expected text: %s\n' "$needle" >&2
+    printf '%s\n' '--- dry-run output ---' >&2
+    cat "$OUTPUT" >&2
+    return 1
+  }
+}
+
+@test "dry-run emits observatory app package migration docs and compose scaffold" {
+  grep -Fq -- "observatory_repo: autospec-observatory" "$OUTPUT"
+  assert_contains "autospec-observatory/apps/api"
+  assert_contains "autospec-observatory/apps/web"
+  assert_contains "autospec-observatory/packages/event-schema"
+  assert_contains "autospec-observatory/packages/db"
+  assert_contains "autospec-observatory/packages/ui"
+  assert_contains "autospec-observatory/migrations"
+  assert_contains "autospec-observatory/docs"
+  assert_contains "autospec-observatory/docker-compose.yml"
+  [[ ! -s "$GH_LOG" ]]
+}
+
+@test "dry-run renders offline-safe observatory seed files" {
+  grep -Fq -- "--- autospec-observatory/docker-compose.yml ---" "$OUTPUT"
+  assert_contains "postgres:16"
+  assert_contains "observatory-postgres"
+  if grep -Fq -- "POSTGRES_PASSWORD" "$OUTPUT"; then
+    printf 'dry-run output must not include a password environment key\n' >&2
+    return 1
+  fi
+  literal_db_password="$(printf '%s_%s_%s' autospec dev only)"
+  if grep -Fq -- "$literal_db_password" "$OUTPUT"; then
+    printf 'dry-run output must not include a literal database password
+' >&2
+    return 1
+  fi
+  assert_contains "--- autospec-observatory/apps/api/README.md ---"
+  assert_contains "POST /v1/events/batch"
+  assert_contains "API-key authenticated"
+  assert_contains "--- autospec-observatory/apps/web/README.md ---"
+  assert_contains "10-second polling"
+  assert_contains "--- autospec-observatory/packages/event-schema/README.md ---"
+  assert_contains "privacy_tier"
+  assert_contains "--- autospec-observatory/migrations/README.md ---"
+  assert_contains "deterministic Postgres migration seeds"
+  assert_contains "--- autospec-observatory/migrations/001_create_orgs.sql ---"
+  assert_contains "--- autospec-observatory/migrations/004_create_events.sql ---"
+}

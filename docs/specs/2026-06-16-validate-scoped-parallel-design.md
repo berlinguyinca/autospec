@@ -2,7 +2,7 @@
 
 ## Summary
 
-`scripts/validate.sh` has **93 `check_*` functions** and ~30 inline `bats`
+`autospec validate` has **93 `check_*` functions** and ~30 inline `bats`
 suites and runs **all of them unconditionally** — a measured **382s
 (6m22s) clean wall-time, ~73% CPU (serial subprocess fan-out, not LLM)**.
 Every per-issue autospec-run implementer pays the full matrix for even a
@@ -47,7 +47,7 @@ tests."
 ## Architecture
 
 ```
-scripts/validate.sh
+autospec validate
   main()  ← gains arg parsing: --changed[=<base>] | --since <ref> | --jobs N
         │
    no flags → current behavior (ALL checks, serial)  [UNCHANGED — merge gate]
@@ -69,7 +69,7 @@ scripts/validate.sh
   `tests/fixtures/skill-goldens/X.*`; researcher checks ← `scripts/explore-research/**`.
 - **Fail-safe default:** any check not in the mapping, and any check whose input
   globs include a broad/shared path that changed (`AGENTS.md`, `scripts/lib/**`,
-  `scripts/validate.sh` itself, `scripts/expand-skill-blocks.sh`), is in the
+  `autospec validate` itself, `scripts/expand-skill-blocks.sh`), is in the
   **ALWAYS-RUN** set — `--changed` NEVER silently skips a check whose
   correctness could depend on a shared input. When the changed set touches a
   shared input, `--changed` degrades to (close to) the full run and says so.
@@ -88,7 +88,7 @@ scripts/validate.sh
 ## Adoption (who calls the fast path)
 
 - The merge/CI gate and the Phase 4 **final pre-merge** full-suite gate keep
-  calling bare `bash scripts/validate.sh` (full, serial) — unchanged.
+  calling bare `autospec validate` (full, serial) — unchanged.
 - A follow-up (out of scope here, noted) can teach the autospec-run inner loop
   to use `--changed --jobs` for the *iterative* checks while keeping the full
   run as the pre-merge gate. This spec only ships the capability + tests; it
@@ -108,7 +108,7 @@ scripts/validate.sh
 
 ## Acceptance
 
-- [ ] `scripts/validate.sh` accepts `--changed[=<base>]`, `--since <ref>`, and
+- [ ] `autospec validate` accepts `--changed[=<base>]`, `--since <ref>`, and
       `--jobs N`; bare invocation is byte-for-byte unchanged (full, serial).
 - [ ] `scripts/lib/validate-affected.sh` maps checks → input globs with a
       fail-safe ALWAYS-RUN set (shared inputs `AGENTS.md`, `scripts/lib/**`,
@@ -120,7 +120,7 @@ scripts/validate.sh
       dirs and deterministic sorted failure output; same pass/fail verdict as
       serial.
 - [ ] `tests/validate-scoped.bats` + `tests/validate-parallel.bats` pass;
-      `bash scripts/validate.sh` (full) is green and unchanged.
+      `autospec validate` (full) is green and unchanged.
 
 ## Decomposition into child issues
 

@@ -1,0 +1,19 @@
+services:
+  web:
+    image: public.ecr.aws/docker/library/python:3.9
+    command:
+      - python
+      - -m
+      - http.server
+      - "8080"
+    volumes:
+      - cache:/var/cache/autospec
+      - /var/lib/autospec-anonymous
+    networks:
+      - private
+
+networks:
+  private: {}
+
+volumes:
+  cache: {}

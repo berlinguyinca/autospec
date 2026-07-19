@@ -1,0 +1,12 @@
+version: 1
+name: companion-stacks
+default_mode: go-modules
+modes:
+  go-modules:
+    command: npm run dev
+    env:
+      RUNTIME_PROFILE: go-modules
+  flasheic:
+    command: npm run dev
+    env:
+      RUNTIME_PROFILE: flasheic

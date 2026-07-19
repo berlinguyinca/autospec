@@ -148,8 +148,22 @@ emit_classify_json() {
     trigger_json="null"; [ -n "$trigger" ] && trigger_json="\"$trigger\""
     chain_json="null"; [ -n "$chain" ] && chain_json="\"$chain\""
     gate_json="null"; [ -n "$gate" ] && gate_json="\"$gate\""
-    printf '{"match":%s,"skill":%s,"trigger":%s,"intent":"%s","confidence":%s,"autonomous":%s,"chain":%s,"gate":%s}\n' \
-        "$match" "$skill_json" "$trigger_json" "$intent" "$conf" "$autonomous" "$chain_json" "$gate_json"
+    json_string() {
+        if [ -n "$1" ]; then
+            printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"
+        else
+            printf 'null'
+        fi
+    }
+    plan_path_json="$(json_string "${AUTOSPEC_LISTENER_PLAN_PATH:-}")"
+    source_spec_path_json="$(json_string "${AUTOSPEC_LISTENER_SOURCE_SPEC_PATH:-}")"
+    repo_json="$(json_string "${AUTOSPEC_LISTENER_REPO:-}")"
+    branch_json="$(json_string "${AUTOSPEC_LISTENER_BRANCH:-}")"
+    base_json="$(json_string "${AUTOSPEC_LISTENER_BASE:-}")"
+    ts_json="$(json_string "${AUTOSPEC_LISTENER_PLAN_TS:-}")"
+    printf '{"match":%s,"skill":%s,"trigger":%s,"intent":"%s","confidence":%s,"autonomous":%s,"chain":%s,"gate":%s,"plan_path":%s,"source_spec_path":%s,"repo":%s,"branch":%s,"base":%s,"plan_ts":%s}\n' \
+        "$match" "$skill_json" "$trigger_json" "$intent" "$conf" "$autonomous" "$chain_json" "$gate_json" \
+        "$plan_path_json" "$source_spec_path_json" "$repo_json" "$branch_json" "$base_json" "$ts_json"
 }
 
 # Autonomous-phrase detection (issue #662): scan the lowercased text for
@@ -163,6 +177,96 @@ is_autonomous_phrase() {
     printf '%s' "$needle" | grep -qE 'automatically|just do it|no confirmation|non-interactive|non interactive|go autonomous|autonomous mode|run autonomously|without asking|without confirmation' \
         && return 0
     return 1
+}
+
+# One-turn listener escape for routes that were offered with
+# "say plain to opt out".
+is_listener_escape() {
+    text="$1"
+    case "$text" in
+        plain|no|"no workflow"|"just chat"|"do not implement"|stop|cancel) return 0 ;;
+    esac
+    return 1
+}
+
+# Post-approval autospec handoff state is supplied by the listener/wrapper from
+# recent conversation memory. The classifier stays deterministic and stateless;
+# these env vars make the handoff decision testable without a live harness.
+has_post_approval_state() {
+    [ -n "${AUTOSPEC_LISTENER_APPROVED_SPEC_PATH:-}" ] \
+        || [ -n "${AUTOSPEC_LISTENER_PLAN_PATH:-}" ] \
+        || [ "${AUTOSPEC_LISTENER_AUTOSPEC_REQUESTED:-0}" = "1" ] \
+        || [ "${AUTOSPEC_LISTENER_AUTONOMOUS_REQUESTED:-0}" = "1" ]
+}
+
+has_plan_exit_ready_state() {
+    { [ "${AUTOSPEC_LISTENER_PLAN_EXIT_READY:-0}" = "1" ] \
+        || [ "${AUTOSPEC_LISTENER_PLAN_EXIT_READY:-}" = "true" ]; } \
+        && { [ -n "${AUTOSPEC_LISTENER_PLAN_PATH:-}" ] \
+            || [ -n "${AUTOSPEC_LISTENER_PLAN_ARTIFACT:-}" ]; }
+}
+
+is_blocked_plan_exit() {
+    text="$1"
+    case "${AUTOSPEC_LISTENER_PLAN_EXIT_BLOCKED:-0}" in
+        1|true|TRUE|yes|YES) return 0 ;;
+    esac
+    case "$text" in
+        *blocked*|*"missing requirement"*|*"missing requirements"*|*ambiguous*|*ambiguity*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+requires_destructive_approval() {
+    text="$1"
+    case "${AUTOSPEC_LISTENER_PLAN_DESTRUCTIVE:-0}" in
+        1|true|TRUE|yes|YES) return 0 ;;
+    esac
+    case "$text" in
+        *destructive*|*production*|*credential*|*credentials*|*irreversible*|*"requires approval"*|*"explicit approval"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+is_approval_phrase() {
+    text="$1"
+    case "$text" in
+        "looks good"|"looks good to me"|approved|approve|yes|yep|ok|okay|go|continue|proceed|"go ahead"|"do it"|"ship it")
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+is_execution_choice_prompt() {
+    text="$1"
+    case "$text" in
+        *"subagent-driven"*|*"inline execution"*|*"choose execution"*|*"choose how to execute"*|*"execution choice"*|*"how to execute it"*)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+is_conceptual_plan_question() {
+    text="$1"
+    for q in why what how when "should we" "could we" "would it" "what are" "what is"; do
+        case "$text" in
+            "$q "*|"$q"|*"$q "*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+has_open_auto_implement_hint() {
+    case "${AUTOSPEC_LISTENER_AUTO_IMPLEMENT_OPEN:-0}" in
+        ''|0|false|False|FALSE) return 1 ;;
+        *) return 0 ;;
+    esac
 }
 
 # Whole-word match of a single token in the (already lower-cased) needle.
@@ -237,6 +341,13 @@ is_imperative() {
             *"$art"*) return 1 ;;
         esac
     done
+    # Descriptive references to the system should not route merely because the
+    # word "autospec" appears.
+    case "$text" in
+        *"the autospec"*|*"this autospec"*|*"that autospec"*|*"an autospec"*|*"autospec plan"*|*"autospec spec"*)
+            return 1
+            ;;
+    esac
 
     # Suppressor 5: explore/discover read-and-understand idioms (D4, issue #909).
     # Reinforces the question/negation/past groups for the explore verb. These
@@ -265,6 +376,55 @@ classify_phrase() {
     is_auto="false"
     if is_autonomous_phrase "$text_lc"; then
         is_auto="true"
+    fi
+
+    # Completed Plan-mode exit handoff (issue #1462). Harness/workflow state
+    # can say a saved implementation plan is ready even when the visible text is
+    # only a generic execution-choice prompt. Route that directly into autospec
+    # unless the same turn is an opt-out, blocked plan, conceptual question, or
+    # destructive/credential-gated approval boundary.
+    if has_plan_exit_ready_state; then
+        if is_listener_escape "$text_lc" \
+            || is_blocked_plan_exit "$text_lc" \
+            || requires_destructive_approval "$text_lc"; then
+            emit_classify_json false "" "" none 0 false "" ""
+            return 0
+        fi
+        trigger="plan_exit_ready"
+        if is_approval_phrase "$text_lc"; then
+            trigger="plan_approved_ready"
+        elif is_conceptual_plan_question "$text_lc" && ! is_execution_choice_prompt "$text_lc"; then
+            emit_classify_json false "" "" none 0 false "" ""
+            return 0
+        fi
+        if has_open_auto_implement_hint; then
+            emit_classify_json true autospec-run "$trigger" imperative 0.9 false "" ""
+        else
+            emit_classify_json true autospec "$trigger" imperative 0.9 true "" ""
+        fi
+        return 0
+    fi
+
+    # Post-approval execution-ready handoff (issue #1461). When a wrapper has
+    # recorded an approved spec/plan or prior autospec/autonomous request in the
+    # thread, plain approval should route directly into autospec execution
+    # instead of asking the user to choose an execution mode.
+    if has_post_approval_state && is_approval_phrase "$text_lc"; then
+        if is_listener_escape "$text_lc" || ! is_imperative "$text_lc"; then
+            emit_classify_json false "" "" none 0 false "" ""
+            return 0
+        fi
+        if has_open_auto_implement_hint; then
+            emit_classify_json true autospec-run post_approval_execution_ready imperative 0.85 false "" ""
+        else
+            emit_classify_json true autospec post_approval_execution_ready imperative 0.85 true "" ""
+        fi
+        return 0
+    fi
+
+    if is_listener_escape "$text_lc"; then
+        emit_classify_json false "" "" none 0 false "" ""
+        return 0
     fi
 
     # Back-compat: explicit "file an issue" / "write a spec" phrases are

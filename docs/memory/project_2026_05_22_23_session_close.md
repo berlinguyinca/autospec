@@ -48,7 +48,7 @@ Single session (with several user-pause/resume cycles) shipped **~105 PRs** acro
 
 ## CI state
 
-GitHub Actions DISABLED on autospec self via PR #481 (removed `validate.yml`, `autospec-doc-drift.yml`, `autospec-self-enforce.yml`, `e2e.yml`). Two CD workflows added later (`release-cli.yml` for D3 npm publish, `pages.yml` for D4 landing site) — those are deploy, not gate-CI. Local pre-commit hooks + on-demand `bash scripts/validate.sh` remain functional. GitGuardian (external app) still runs.
+GitHub Actions DISABLED on autospec self via PR #481 (removed `validate.yml`, `autospec-doc-drift.yml`, `autospec-self-enforce.yml`, `e2e.yml`). Two CD workflows added later (`release-cli.yml` for D3 npm publish, `pages.yml` for D4 landing site) — those are deploy, not gate-CI. Local pre-commit hooks + on-demand `autospec validate` remain functional. GitGuardian (external app) still runs.
 
 ## Trackers closed
 

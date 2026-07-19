@@ -111,6 +111,20 @@ remove_path() {
     fi
 }
 
+remove_marked_block() {
+    target="$1"
+    start="$2"
+    end="$3"
+    [ -f "$target" ] || return 0
+    temporary="$(mktemp)"
+    awk -v start="$start" -v end="$end" '
+        $0 == start { skip=1; next }
+        $0 == end { skip=0; next }
+        !skip { print }
+    ' "$target" > "$temporary"
+    mv "$temporary" "$target"
+}
+
 info ""
 info "autospec suite uninstaller"
 info "  skills:   $SKILLS_TO_RUN"
@@ -134,6 +148,14 @@ for skill in $SKILLS_TO_RUN; do
     done
     info ""
 done
+
+if [ "$SKILL_ARG" = "all" ] && [ "$HARNESS_ARG" = "all" ]; then
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.config/fish/config.fish"; do
+        remove_marked_block "$rc" "# >>> autospec isolated runtime aliases >>>" "# <<< autospec isolated runtime aliases <<<"
+        remove_marked_block "$rc" "# >>> autospec auto-rollover >>>" "# <<< autospec auto-rollover <<<"
+    done
+    remove_path "$HOME/.autospec/config/harness-runtime-aliases.tsv"
+fi
 
 info ""
 info "Suite uninstall summary: removed=$removed, already-absent=$missing"

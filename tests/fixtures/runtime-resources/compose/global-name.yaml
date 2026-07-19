@@ -1,0 +1,4 @@
+services: {}
+networks:
+  private:
+    name: global-network

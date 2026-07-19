@@ -1,0 +1,4 @@
+---
+name: one
+---
+Shared body.

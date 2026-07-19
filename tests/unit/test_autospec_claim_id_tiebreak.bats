@@ -3,7 +3,7 @@
 #
 # Proves the lock comment is selected by lowest numeric id (the CAS
 # linearization point), never by API/array order:
-#   (a) run-state.sh `read` returns the body of the lowest id (100), not array order;
+#   (a) `autospec claim state read` returns the body of the lowest id (100), not array order;
 #   (b) the worker owning the higher id (101) loses, exits 2 `claim_lost`,
 #       and DELETEs only its own (101) comment — never the winner's (100);
 #   (c) dedup never DELETEs the lowest id (100).
@@ -11,13 +11,12 @@
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    SCRIPT="$REPO_ROOT/skills/autospec-run/scripts/run-state.sh"
-    CLAIM="$REPO_ROOT/skills/autospec-run/scripts/claim-issue.sh"
+    AUTOSPEC="$REPO_ROOT/target/debug/autospec"
     TEST_TMP="$(mktemp -d)"
     LABELS="$TEST_TMP/labels.txt"
     COMMENTS="$TEST_TMP/comments.json"
     CALLS="$TEST_TMP/calls.log"
-    printf 'auto-implement\nctx:32k\n' > "$LABELS"
+    printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
     printf '[]\n' > "$COMMENTS"
 
     # Shared PATH-shadow gh stub (see tests/fixtures/gh-mock/gh).
@@ -34,6 +33,14 @@ setup() {
 
 teardown() {
     rm -rf "$TEST_TMP"
+}
+
+claim_state() {
+    "$AUTOSPEC" claim state "$@"
+}
+
+claim_acquire() {
+    "$AUTOSPEC" claim acquire "$@"
 }
 
 # Seed two marked lock comments in DESCENDING array order so a naive
@@ -55,15 +62,15 @@ JSON
 
 @test "read returns the body of the lowest id, not array order" {
     seed_descending_array_order
-    run bash "$SCRIPT" read --issue 42 --repo testorg/testrepo
+    run claim_state read --issue 42 --repo testorg/testrepo
     [ "$status" -eq 0 ]
-    [[ "$output" == *'"worker_id": "worker-a"'* ]]
-    [[ "$output" != *'"worker_id": "worker-b"'* ]]
+    [[ "$output" == *'"worker_id":"worker-a"'* ]]
+    [[ "$output" != *'"worker_id":"worker-b"'* ]]
 }
 
 @test "dedup keeps the lowest id (100) and deletes the higher (101)" {
     seed_descending_array_order
-    run bash "$SCRIPT" upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state worktree_ready
+    run claim_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state worktree_ready
     [ "$status" -eq 0 ]
 
     # exactly one marked comment survives
@@ -84,12 +91,12 @@ JSON
     # lost. worker-b must DELETE only its OWN comment (101), never the winner's
     # lowest id (100).
     seed_descending_array_order
-    printf 'auto-implement\nctx:32k\n' > "$LABELS"
+    printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
 
-    AUTOSPEC_TEST_FORCE_OWNER=worker-a run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id worker-b
+    AUTOSPEC_TEST_FORCE_OWNER=worker-a run claim_acquire --issue 42 --repo testorg/testrepo --worker-id worker-b
     [ "$status" -eq 2 ]
-    [[ "$output" == *'"claimed": false'* ]]
-    [[ "$output" == *'"reason": "claim_lost"'* ]]
+    [[ "$output" == *'"claimed":false'* ]]
+    [[ "$output" == *'"reason":"claim_lost"'* ]]
     # loser self-deletes its OWN comment (101) ...
     grep -q 'api repos/testorg/testrepo/issues/comments/101 -X DELETE' "$CALLS"
     # ... and never the winner's lowest id (100)
@@ -120,12 +127,12 @@ JSON
   }
 ]
 JSON
-    printf 'auto-implement\nctx:32k\n' > "$LABELS"
+    printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
 
-    AUTOSPEC_TEST_FORCE_OWNER=winner-a run bash "$CLAIM" --issue 42 --repo testorg/testrepo --worker-id 'mac.lan:bob:monitor:1'
+    AUTOSPEC_TEST_FORCE_OWNER=winner-a run claim_acquire --issue 42 --repo testorg/testrepo --worker-id 'mac.lan:bob:monitor:1'
     [ "$status" -eq 2 ]
-    [[ "$output" == *'"claimed": false'* ]]
-    [[ "$output" == *'"reason": "claim_lost"'* ]]
+    [[ "$output" == *'"claimed":false'* ]]
+    [[ "$output" == *'"reason":"claim_lost"'* ]]
     # loser self-deletes its OWN comment (101) ...
     grep -q 'api repos/testorg/testrepo/issues/comments/101 -X DELETE' "$CALLS"
     # ... and NEVER the near-collision's (102), even though `.` regex-matches `X`
@@ -149,7 +156,7 @@ JSON
   }
 ]
 JSON
-    run bash "$SCRIPT" read --issue 42 --repo testorg/testrepo
+    run claim_state read --issue 42 --repo testorg/testrepo
     [ "$status" -eq 0 ]
-    [[ "$output" == *'"worker_id": "worker-a"'* ]]
+    [[ "$output" == *'"worker_id":"worker-a"'* ]]
 }

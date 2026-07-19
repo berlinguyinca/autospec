@@ -156,7 +156,13 @@ heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] --repo <o
    `Peer-review: codex not on PATH, skipping` and proceed.
 6. **Adaptive retry:** on a blocking finding, re-run the implement step with the
    corrective directive(s) accumulated as cumulative context, up to
-   `MAX_IMPL_RETRIES`. On exhaustion, comment
+   `MAX_IMPL_RETRIES`. On the **second or later** retry of the *same* RULE_ID,
+   before re-running, run the `## Advisor escalation` protocol (from
+   `autospec-run/SKILL.md`) with `--gate retry` — send the stuck RULE_ID plus the
+   failing finding as the question. Inject a returned `plan`/`correction` as an
+   additional corrective directive for this retry instead of blindly re-running the
+   same tier; on `stop` (or cap-reached / disabled), fall back to the normal
+   retry/exhaustion behavior. On exhaustion, comment
    `Implementer hit max retries; manual intervention needed`, release the
    lock-label, and stop.
 
@@ -168,7 +174,7 @@ Immediately before `gh pr create`, then before `gh pr merge`:
    return `CLOSED` via `gh issue view <N> --json state --jq .state`. If any dep
    is not merged, do NOT open the PR; comment which dep blocks and exit.
 2. **Full test suite gate:** the repo's full validation/test suite (default
-   `bash scripts/validate.sh`, override `AUTOSPEC_FULL_TEST_COMMAND`) MUST pass
+   `autospec validate`, override `AUTOSPEC_FULL_TEST_COMMAND`) MUST pass
    before LGTM review and again immediately before admin-merge. A failing suite
    blocks both review and merge — fix, recommit, rerun, repeat. Record the exact
    command and passing summary as merge evidence.

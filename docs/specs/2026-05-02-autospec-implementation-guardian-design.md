@@ -303,7 +303,7 @@ returning:
 - `skills/autospec-run/codex/prompt.md` — lock-step.
 - `skills/autospec-run/opencode/agent.md` — lock-step.
 
-`scripts/validate.sh` extended with `check_lint_implementation_helpers`
+`autospec validate` extended with `check_lint_implementation_helpers`
 and `check_phase4_guardian_block_lockstep` to enforce byte-identity.
 
 ### 5.3 AGENTS.md additions
@@ -430,7 +430,7 @@ epic** along this dependency graph:
 | 7 | Wire guardian dispatch block into `skills/autospec-run/SKILL.md` Phase 4 (lock-step trio) | 64k | medium | 1, 3 |
 | 8 | Add `tests/unit/test_phase4_guardian_trio.bats` (byte-identity across 6 trio files) | 32k | shallow | 6, 7 |
 | 9 | Add `tests/unit/test_agents_md_guardian_contract.bats` | 32k | shallow | 1 |
-| 10 | Update `scripts/validate.sh` with `check_lint_implementation_helpers` + `check_phase4_guardian_block_lockstep` | 32k | medium | 3, 6, 7 |
+| 10 | Update `autospec validate` with `check_lint_implementation_helpers` + `check_phase4_guardian_block_lockstep` | 32k | medium | 3, 6, 7 |
 
 (`tests/integration/test_guardian_flow.sh` folds into #5 to stay under
 the 3-files-touched cap.)

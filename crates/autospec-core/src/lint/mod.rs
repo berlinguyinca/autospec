@@ -1,0 +1,719 @@
+//! Deterministic issue-body lint rules shared with the shell autospec linter.
+
+pub mod diff;
+pub mod implementation;
+
+pub use diff::{parse_unified_diff, DiffFile, DiffHunk, DiffLine, DiffLineKind, UnifiedDiff};
+pub use implementation::{
+    directive_for, lint_implementation, ImplementationLintContext, ImplementationLintFinding,
+    ImplementationLintOptions, ImplementationLintResult, ImplementationLintRule,
+    ImplementationLintSeverity, RepositoryIndex,
+};
+
+use std::collections::BTreeSet;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueQualityRule {
+    GoalNotOneSentence,
+    GoalVague,
+    GoalHedge,
+    AcEmpty,
+    AcProse,
+    AcSubjective,
+    AcTooLong,
+    SmokeNotFenced,
+    SmokePlaceholder,
+    SmokeMultiLine,
+    MissingSectionFilesToRead,
+    MissingSectionImplOutline,
+    MissingSectionTests,
+    DepsMalformed,
+    TooManyFiles,
+    BodyTooLong,
+    OutlineTooLong,
+    UiSectionsIncomplete,
+}
+
+impl IssueQualityRule {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::GoalNotOneSentence => "GOAL_NOT_ONE_SENTENCE",
+            Self::GoalVague => "GOAL_VAGUE",
+            Self::GoalHedge => "GOAL_HEDGE",
+            Self::AcEmpty => "AC_EMPTY",
+            Self::AcProse => "AC_PROSE",
+            Self::AcSubjective => "AC_SUBJECTIVE",
+            Self::AcTooLong => "AC_TOO_LONG",
+            Self::SmokeNotFenced => "SMOKE_NOT_FENCED",
+            Self::SmokePlaceholder => "SMOKE_PLACEHOLDER",
+            Self::SmokeMultiLine => "SMOKE_MULTI_LINE",
+            Self::MissingSectionFilesToRead => "MISSING_SECTION_FILES_TO_READ",
+            Self::MissingSectionImplOutline => "MISSING_SECTION_IMPL_OUTLINE",
+            Self::MissingSectionTests => "MISSING_SECTION_TESTS",
+            Self::DepsMalformed => "DEPS_MALFORMED",
+            Self::TooManyFiles => "TOO_MANY_FILES",
+            Self::BodyTooLong => "BODY_TOO_LONG",
+            Self::OutlineTooLong => "OUTLINE_TOO_LONG",
+            Self::UiSectionsIncomplete => "UI_SECTIONS_INCOMPLETE",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueLintFinding {
+    pub rule: IssueQualityRule,
+    pub message: String,
+}
+
+impl IssueLintFinding {
+    fn new(rule: IssueQualityRule, message: impl Into<String>) -> Self {
+        Self {
+            rule,
+            message: message.into(),
+        }
+    }
+
+    pub fn rule_id(&self) -> &'static str {
+        self.rule.id()
+    }
+}
+
+/// Lint an issue body using the same ordered policy as `scripts/lint-issue.sh`.
+///
+/// This function is deliberately pure: callers provide the body and receive every
+/// finding in shell order, with no file-system or process dependency.
+pub fn lint_issue_body(body: &str) -> Vec<IssueLintFinding> {
+    let document = IssueDocument::parse(body);
+    let mut findings = Vec::new();
+
+    check_goal(&document, &mut findings);
+    check_acceptance_criteria(&document, &mut findings);
+    check_primary_smoke(&document, &mut findings);
+    check_sections(&document, &mut findings);
+    check_files_touched(&document, &mut findings);
+    check_body_size(&document, &mut findings);
+    check_outline_size(&document, &mut findings);
+    check_ui_sections(&document, &mut findings);
+
+    findings
+}
+
+struct IssueDocument<'a> {
+    source: &'a str,
+    lines: Vec<&'a str>,
+}
+
+impl<'a> IssueDocument<'a> {
+    fn parse(source: &'a str) -> Self {
+        Self {
+            source,
+            lines: source.lines().collect(),
+        }
+    }
+
+    /// Mirrors the shell `extract_section` helper: the heading itself must be an
+    /// exact line, and content ends only at the next `## ` heading.
+    fn section(&self, heading: &str) -> Option<Vec<&'a str>> {
+        let start = self.lines.iter().position(|line| *line == heading)? + 1;
+        let end = self.lines[start..]
+            .iter()
+            .position(|line| line.starts_with("## "))
+            .map_or(self.lines.len(), |offset| start + offset);
+        Some(self.lines[start..end].to_vec())
+    }
+
+    /// Mirrors `extract_subsection`: the requested text may occur anywhere in
+    /// its heading line, and any line beginning with `##` ends the subsection.
+    fn subsection(&self, heading: &str) -> Option<Vec<&'a str>> {
+        let start = self.lines.iter().position(|line| line.contains(heading))? + 1;
+        let end = self.lines[start..]
+            .iter()
+            .position(|line| line.starts_with("##"))
+            .map_or(self.lines.len(), |offset| start + offset);
+        Some(self.lines[start..end].to_vec())
+    }
+
+    /// Required heading checks accept trailing shell whitespace but no indent.
+    fn has_heading(&self, heading: &str) -> bool {
+        self.lines.iter().any(|line| {
+            line.strip_prefix(heading)
+                .is_some_and(|suffix| suffix.chars().all(char::is_whitespace))
+        })
+    }
+}
+
+fn check_goal(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
+    let Some(goal) = document.section("## Goal") else {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::GoalNotOneSentence,
+            "Goal section is empty or missing",
+        ));
+        return;
+    };
+    let nonempty_lines = goal
+        .iter()
+        .copied()
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if nonempty_lines.is_empty() {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::GoalNotOneSentence,
+            "Goal section is empty or missing",
+        ));
+        return;
+    }
+
+    let text = collapse_lines(&nonempty_lines);
+    let sentence_count = count_sentence_terminals(&text);
+    let word_count = text.split_whitespace().count();
+    if sentence_count > 2 || word_count > 30 {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::GoalNotOneSentence,
+            format!(
+                "Goal must be at most 2 sentences and 30 words; found {sentence_count} sentence(s) and {word_count} word(s)"
+            ),
+        ));
+    }
+
+    if !has_concrete_goal_object(&text) {
+        if let Some(vague) = first_word_match(
+            &text,
+            &[
+                "improve", "enhance", "optimize", "polish", "simplify", "refactor", "harden",
+            ],
+        ) {
+            findings.push(IssueLintFinding::new(
+                IssueQualityRule::GoalVague,
+                format!(
+                    "Bare vague verb '{vague}' used without a concrete object (path, backtick term, number, or UPPER_SNAKE label)"
+                ),
+            ));
+        }
+    }
+
+    if let Some(hedge) = first_word_match(&text, &["should", "might", "could try", "try to"]) {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::GoalHedge,
+            format!("Hedging word '{hedge}' found in Goal section; state the outcome flatly"),
+        ));
+    }
+}
+
+fn check_acceptance_criteria(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
+    let ac = document
+        .section("## Acceptance criteria")
+        .filter(|lines| !section_command_output(lines).is_empty())
+        .or_else(|| document.section("## Acceptance Criteria"))
+        .unwrap_or_default();
+    let lines = ac
+        .into_iter()
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::AcEmpty,
+            "Acceptance criteria section has no checkbox items (section missing or empty)",
+        ));
+        return;
+    }
+
+    if lines.iter().all(|line| !starts_with_checkbox(line)) {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::AcEmpty,
+            "Acceptance criteria section has no '- [ ]' checkbox items",
+        ));
+        return;
+    }
+
+    for (index, line) in lines.iter().enumerate() {
+        let line_number = index + 1;
+        if !is_checkbox_with_content(line) {
+            findings.push(IssueLintFinding::new(
+                IssueQualityRule::AcProse,
+                format!(
+                    "AC line {line_number} is not a checkbox ('- [ ]' with content required): {}",
+                    first_chars(line, 60)
+                ),
+            ));
+            continue;
+        }
+
+        if let Some(subjective) = first_word_match(
+            line,
+            &[
+                "looks",
+                "feels",
+                "seems",
+                "nice",
+                "clean",
+                "elegant",
+                "appropriate",
+            ],
+        ) {
+            findings.push(IssueLintFinding::new(
+                IssueQualityRule::AcSubjective,
+                format!(
+                    "AC item {line_number} contains subjective word '{subjective}': {}",
+                    first_chars(line, 60)
+                ),
+            ));
+        }
+
+        let item_body = checkbox_item_body(line);
+        let item_length = item_body.chars().count();
+        if item_length > 120 {
+            findings.push(IssueLintFinding::new(
+                IssueQualityRule::AcTooLong,
+                format!(
+                    "AC item {line_number} is {item_length} chars (max 120): {}...",
+                    first_chars(item_body, 60)
+                ),
+            ));
+        }
+    }
+}
+
+fn check_primary_smoke(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
+    let smoke = document
+        .subsection("### Primary smoke test")
+        .filter(|lines| !section_command_output(lines).is_empty())
+        .or_else(|| document.section("## Verification"));
+    let Some(smoke) = smoke else {
+        return;
+    };
+    if section_command_output(&smoke).is_empty() {
+        return;
+    }
+
+    let Some(block) = first_fenced_block(&smoke) else {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::SmokeNotFenced,
+            "No fenced code block found under Primary smoke test heading",
+        ));
+        return;
+    };
+
+    if let Some(placeholder) = first_placeholder(&block) {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::SmokePlaceholder,
+            format!("Primary smoke test block contains placeholder '{placeholder}'"),
+        ));
+    }
+
+    let code_line_count = block
+        .iter()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.is_empty() && !trimmed.starts_with('#')
+        })
+        .count();
+    if code_line_count > 1 {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::SmokeMultiLine,
+            format!(
+                "Primary smoke test has {code_line_count} non-blank/non-comment lines (must be exactly 1; use '&&' to chain)"
+            ),
+        ));
+    }
+}
+
+fn check_sections(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
+    for (heading, rule, message) in [
+        (
+            "## Files to read first",
+            IssueQualityRule::MissingSectionFilesToRead,
+            "Body has no '## Files to read first' heading (implementer reads it)",
+        ),
+        (
+            "## Implementation outline",
+            IssueQualityRule::MissingSectionImplOutline,
+            "Body has no '## Implementation outline' heading (implementer reads it)",
+        ),
+        (
+            "## Tests required",
+            IssueQualityRule::MissingSectionTests,
+            "Body has no '## Tests required' heading (implementer reads it)",
+        ),
+    ] {
+        if !document.has_heading(heading) {
+            findings.push(IssueLintFinding::new(rule, message));
+        }
+    }
+
+    if document.has_heading("## Dependencies") {
+        if let Some(dependencies) = document.section("## Dependencies") {
+            if let Some(bad_dependency) = dependencies.into_iter().find(|line| {
+                !line.trim().is_empty() && *line != "none" && !is_dependency_line(line)
+            }) {
+                findings.push(IssueLintFinding::new(
+                    IssueQualityRule::DepsMalformed,
+                    format!(
+                        "Dependencies line must be 'Depends on issue #N' or 'none': {}",
+                        first_chars(bad_dependency, 60)
+                    ),
+                ));
+            }
+        }
+    }
+}
+
+fn check_files_touched(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
+    if !document.has_heading("## Files touched") {
+        return;
+    }
+    let Some(files) = document.section("## Files touched") else {
+        return;
+    };
+
+    let mut units = BTreeSet::new();
+    for line in files.into_iter().filter(|line| !line.trim().is_empty()) {
+        let Some(path) = normalize_file_token(line) else {
+            continue;
+        };
+        if is_derived_skill_golden(&path) {
+            continue;
+        }
+        units.insert(logical_file_unit(path));
+    }
+
+    if units.len() > 3 {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::TooManyFiles,
+            format!(
+                "Files touched lists {} logical units (max 3; trio members + derived goldens count as one); split the issue to stay small-LLM-sized",
+                units.len()
+            ),
+        ));
+    }
+}
+
+fn check_body_size(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
+    let word_count = document.source.split_whitespace().count();
+    if word_count > 400 {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::BodyTooLong,
+            format!(
+                "Body is {word_count} words (max 400); a small-LLM implementer cannot hold an over-long issue"
+            ),
+        ));
+    }
+}
+
+fn check_outline_size(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
+    if !document.has_heading("## Implementation outline") {
+        return;
+    }
+    let Some(outline) = document.section("## Implementation outline") else {
+        return;
+    };
+    let line_count = outline
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    if line_count > 30 {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::OutlineTooLong,
+            format!(
+                "Implementation outline has {line_count} non-blank lines (max 30); tighten or split"
+            ),
+        ));
+    }
+}
+
+fn check_ui_sections(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
+    let sections = [
+        "## Design reference",
+        "## Interaction states",
+        "## UX flows",
+    ];
+    let has_marker = document.lines.iter().any(|line| is_ui_feature_marker(line));
+    let has_sections = sections
+        .iter()
+        .map(|section| document.has_heading(section))
+        .collect::<Vec<_>>();
+    if !has_marker && has_sections.iter().all(|present| !present) {
+        return;
+    }
+
+    let missing = sections
+        .iter()
+        .zip(has_sections)
+        .filter_map(|(section, present)| (!present).then_some(format!(" '{section}'")))
+        .collect::<String>();
+    if !missing.is_empty() {
+        findings.push(IssueLintFinding::new(
+            IssueQualityRule::UiSectionsIncomplete,
+            format!(
+                "UI feature detected; missing required section(s):{missing} (UI issues need Design reference + Interaction states + UX flows)"
+            ),
+        ));
+    }
+}
+
+fn collapse_lines(lines: &[&str]) -> String {
+    lines
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn section_command_output(lines: &[&str]) -> String {
+    lines.join("\n").trim_end_matches('\n').to_owned()
+}
+
+fn count_sentence_terminals(text: &str) -> usize {
+    let chars = text.chars().collect::<Vec<_>>();
+    chars
+        .iter()
+        .enumerate()
+        .filter(|(index, character)| match character {
+            '?' | '!' => true,
+            '.' => chars.get(index + 1).is_none_or(|next| next.is_whitespace()),
+            _ => false,
+        })
+        .count()
+}
+
+fn has_concrete_goal_object(text: &str) -> bool {
+    has_backtick_span(text)
+        || has_standalone_number(text)
+        || text
+            .split(|character: char| !is_word_character(character))
+            .any(is_upper_snake_label)
+        || has_path_token(text)
+}
+
+fn has_backtick_span(text: &str) -> bool {
+    let mut remainder = text;
+    while let Some(open) = remainder.find('`') {
+        let after_open = &remainder[open + 1..];
+        let Some(close) = after_open.find('`') else {
+            return false;
+        };
+        if close > 0 {
+            return true;
+        }
+        remainder = &after_open[close + 1..];
+    }
+    false
+}
+
+fn has_standalone_number(text: &str) -> bool {
+    let mut characters = text.char_indices().peekable();
+    while let Some((start, character)) = characters.next() {
+        if !character.is_ascii_digit() {
+            continue;
+        }
+        let mut end = start + character.len_utf8();
+        while let Some(&(index, next)) = characters.peek() {
+            if !next.is_ascii_digit() {
+                break;
+            }
+            end = index + next.len_utf8();
+            characters.next();
+        }
+        if is_word_boundary(text, start, end) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_path_token(text: &str) -> bool {
+    text.as_bytes().iter().enumerate().any(|(index, byte)| {
+        (*byte == b'/'
+            && text[index + 1..]
+                .bytes()
+                .next()
+                .is_some_and(is_path_character))
+            || (*byte == b'*'
+                && text[index + 1..]
+                    .bytes()
+                    .next()
+                    .is_some_and(|next| next == b'.')
+                && text[index + 2..]
+                    .bytes()
+                    .next()
+                    .is_some_and(|next| next.is_ascii_alphabetic()))
+    })
+}
+
+fn is_upper_snake_label(token: &str) -> bool {
+    token.len() >= 2
+        && token.starts_with(|character: char| character.is_ascii_uppercase())
+        && token.chars().all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
+        })
+}
+
+fn is_path_character(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'/' | b'-')
+}
+
+fn first_word_match(text: &str, candidates: &[&str]) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let mut first = None;
+    for candidate in candidates {
+        let mut offset = 0;
+        while let Some(found) = lower[offset..].find(candidate) {
+            let start = offset + found;
+            let end = start + candidate.len();
+            if is_word_boundary(&lower, start, end) {
+                let value = text.get(start..end)?.to_owned();
+                if first
+                    .as_ref()
+                    .is_none_or(|(existing, _): &(usize, String)| start < *existing)
+                {
+                    first = Some((start, value));
+                }
+                break;
+            }
+            offset = end;
+        }
+    }
+    first.map(|(_, value)| value)
+}
+
+fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
+    let before = text[..start].chars().next_back();
+    let after = text[end..].chars().next();
+    !before.is_some_and(is_word_character) && !after.is_some_and(is_word_character)
+}
+
+fn is_word_character(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
+}
+
+fn starts_with_checkbox(line: &str) -> bool {
+    let Some(after_dash) = line.trim_start().strip_prefix('-') else {
+        return false;
+    };
+    after_dash.trim_start().starts_with("[ ]")
+}
+
+fn is_checkbox_with_content(line: &str) -> bool {
+    let Some(after_dash) = line.trim_start().strip_prefix('-') else {
+        return false;
+    };
+    let Some(after_box) = after_dash.trim_start().strip_prefix("[ ]") else {
+        return false;
+    };
+    after_box.chars().next().is_some_and(char::is_whitespace) && !after_box.trim().is_empty()
+}
+
+fn checkbox_item_body(line: &str) -> &str {
+    let without_dash = line.trim_start().strip_prefix('-').unwrap_or(line);
+    let without_box = without_dash
+        .trim_start()
+        .strip_prefix("[ ]")
+        .unwrap_or(without_dash);
+    without_box.trim_start()
+}
+
+fn first_fenced_block<'a>(lines: &[&'a str]) -> Option<Vec<&'a str>> {
+    let open = lines.iter().position(|line| line.starts_with("```"))?;
+    let rest = &lines[open + 1..];
+    let close = rest
+        .iter()
+        .position(|line| line.starts_with("```"))
+        .unwrap_or(rest.len());
+    Some(rest[..close].to_vec())
+}
+
+fn first_placeholder(lines: &[&str]) -> Option<String> {
+    let mut first = None;
+    for line in lines {
+        for placeholder in ["...", "<TODO>", "TBD", "XXX"] {
+            let position = if matches!(placeholder, "TBD" | "XXX") {
+                find_standalone_word(line, placeholder)
+            } else {
+                line.find(placeholder)
+            };
+            if let Some(position) = position {
+                let candidate = (position, placeholder);
+                if first
+                    .as_ref()
+                    .is_none_or(|(existing, _): &(usize, &str)| candidate.0 < *existing)
+                {
+                    first = Some(candidate);
+                }
+            }
+        }
+        if let Some((_, placeholder)) = first {
+            return Some(placeholder.to_owned());
+        }
+    }
+    None
+}
+
+fn find_standalone_word(text: &str, word: &str) -> Option<usize> {
+    let mut offset = 0;
+    while let Some(found) = text[offset..].find(word) {
+        let start = offset + found;
+        let end = start + word.len();
+        if is_word_boundary(text, start, end) {
+            return Some(start);
+        }
+        offset = end;
+    }
+    None
+}
+
+fn is_dependency_line(line: &str) -> bool {
+    let Some(number) = line.strip_prefix("Depends on issue #") else {
+        return false;
+    };
+    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn normalize_file_token(line: &str) -> Option<String> {
+    let line = line.trim();
+    let line = line
+        .strip_prefix('-')
+        .filter(|suffix| suffix.chars().next().is_some_and(char::is_whitespace))
+        .map_or(line, str::trim_start);
+    let path = line.trim().replace('`', "");
+    (!path.is_empty() && path.bytes().all(is_path_character)).then_some(path)
+}
+
+fn is_derived_skill_golden(path: &str) -> bool {
+    path.starts_with("tests/fixtures/skill-goldens/") && path.ends_with(".sha256")
+}
+
+fn logical_file_unit(path: String) -> String {
+    if path.starts_with("skills/")
+        && (path.ends_with("/SKILL.md")
+            || path.ends_with("/codex/prompt.md")
+            || path.ends_with("/opencode/agent.md"))
+    {
+        if let Some(skill) = path.split('/').nth(1) {
+            return format!("skills/{skill}/<trio>");
+        }
+    }
+    path
+}
+
+fn is_ui_feature_marker(line: &str) -> bool {
+    let mut remaining = line;
+    while let Some(open) = remaining.find("<!--") {
+        let marker = &remaining[open + "<!--".len()..];
+        if let Some(close) = marker.find("-->") {
+            if marker[..close].trim() == "ui-feature" {
+                return true;
+            }
+        }
+        // The shell regex searches each opener independently, including a
+        // syntactically nested marker after an earlier malformed comment.
+        remaining = marker;
+    }
+    false
+}
+
+fn first_chars(input: &str, max: usize) -> &str {
+    input
+        .char_indices()
+        .nth(max)
+        .map_or(input, |(index, _)| &input[..index])
+}

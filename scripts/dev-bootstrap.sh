@@ -92,7 +92,7 @@ main() {
     info "all required tools present"
     info ""
     info "next: run the test suite with:"
-    info "  bats tests/unit tests/smoke && scripts/validate.sh"
+    info "  bats tests/unit tests/smoke && autospec validate"
 }
 
 main "$@"

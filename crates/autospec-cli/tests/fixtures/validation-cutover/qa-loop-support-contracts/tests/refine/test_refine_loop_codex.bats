@@ -1,0 +1,1 @@
+@test "loop fixture" { true; }

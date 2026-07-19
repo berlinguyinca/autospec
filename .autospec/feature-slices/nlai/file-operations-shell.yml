@@ -1,0 +1,21 @@
+id: file-operations-shell
+title: File operations shell
+category: nlai
+summary: File operations shell
+source_rules:
+  - required_nlai_file_operations_for_file_apps
+source_baselines:
+  - nlai
+requires_adapter: true
+supported_adapters:
+  - react-vite
+  - nextjs-app-router
+  - nextjs-pages-router
+implementation_kind: route
+runtime_claim_level: shell
+risk_level: low
+not_in_scope:
+  - database migrations
+  - auth/security behavior changes
+  - dependency installation
+  - provider calls

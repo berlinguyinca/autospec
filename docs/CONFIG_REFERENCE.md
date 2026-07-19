@@ -1,26 +1,158 @@
 # autospec configuration reference
 
-The operator-relevant `AUTOSPEC_*` environment variables, grouped by area. (Internal
-plumbing vars such as `AUTOSPEC_SCRIPTS_DIR`, `AUTOSPEC_REPO_ROOT`, and test-only
-`AUTOSPEC_TEST_*` overrides are intentionally omitted.) Behavior toggles that are
-flag-files rather than env vars live in [`FLAGS.md`](FLAGS.md).
+The canonical operator configuration file is `.autospec/autospec.yml`. Runtime
+scripts read that file first, then fall back to legacy `AUTOSPEC_*` environment
+variables, then built-in or auto-discovered defaults. Use env vars only for
+one-off compatibility overrides when no config key is present.
 
-Set them in your shell, an `.env`, or inline for one run:
-```bash
-AUTOSPEC_BATCH_SIZE=1 /autospec-run        # one issue per subagent
+Behavior toggles that are flag-files rather than env vars live in [`FLAGS.md`](FLAGS.md).
+
+## Runtime resource isolation
+
+Manifest `version: 2` is the canonical repository configuration for worktree resources.
+`resources.maven.isolation: split-local` requires Maven 4 and owns only
+`<effective-local-repository>/autospec/<AGENT_ENV_ID>`. `resources.compose` declares `files`,
+`exports`, `preserve_volumes`, and exact `shared_resources`; every other Compose container,
+network, volume, project name, and published port is broker-owned.
+
+| Environment value | Effect |
+|---|---|
+| `AGENT_ENV_STATE_ROOT` | Overrides the private state root; Unix directories/files are forced to `0700`/`0600`. |
+| `AUTOSPEC_MAVEN_ISOLATION=off` | Bypasses Maven isolation and exports `AUTOSPEC_ISOLATION_BYPASSED=1`. |
+| `AUTOSPEC_COMPOSE_ISOLATION=off` | Bypasses Compose isolation and exports `AUTOSPEC_ISOLATION_BYPASSED=1`. |
+| `AUTOSPEC_ENV_DISABLE=1` | Bypasses broker provisioning for a direct child and exports `AUTOSPEC_ISOLATION_BYPASSED=1`. |
+
+An opt-out downgrades an isolation claim from verified. Cleanup rejects symlinked state or
+session roots with `RUNTIME_STATE_SYMLINK_REJECTED`; use `gc` or `down --purge-maven` rather
+than deleting state by hand. Compose migrations use `normalize-compose --check` followed by
+the fingerprint-bound `--apply` command.
+
+## Autonomous runtime
+
+```yaml
+autonomous:
+  concurrency:
+    batch_size: auto
+    max_concurrent_repo_workers: auto
+  claims:
+    lease_seconds: 10800
+    settle_seconds: 0.2
+    confirm_reads: 5
+  watchdog:
+    stale_secs: 1800
+    reclaim_secs: 10800
+    claimed_timeout_secs: 1800
+    nudge_cooldown_secs: 900
+  drain:
+    stall_secs: 1800
+    poll_secs: 15
 ```
+
+`auto` discovers a conservative local worker cap from CPU count, clamped to 1-4.
+For a larger workstation or cluster, set `max_concurrent_repo_workers` explicitly.
+
+| Config key | Legacy env fallback | Effect |
+|---|---|---|
+| `autonomous.repo_dir` | `AUTOSPEC_REPO_DIR` | Checkout used by autonomous drain commands. |
+| `autonomous.repo` | `AUTOSPEC_REPO` / `AUTOSPEC_WATCHDOG_REPO` | GitHub `owner/name` when not inferable. |
+| `autonomous.heartbeat_dir` | `AUTOSPEC_HEARTBEAT_DIR` / `AUTOSPEC_WATCHDOG_DIR` | Shared worker heartbeat root. |
+| `autonomous.concurrency.batch_size` | `AUTOSPEC_BATCH_SIZE` | Queue snapshot size requested by the conductor. |
+| `autonomous.concurrency.max_concurrent_repo_workers` | `AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS` | Repo-wide active worker cap. |
+| `autonomous.claims.lease_seconds` | `AUTOSPEC_CLAIM_LEASE_SECONDS` | Cross-machine claim lease TTL. |
+| `autonomous.claims.settle_seconds` | `AUTOSPEC_CLAIM_SETTLE_SECONDS` | Delay before confirming a GitHub claim. |
+| `autonomous.claims.confirm_reads` | `AUTOSPEC_CLAIM_CONFIRM_READS` | Claim ownership confirmation reads. |
+| `autonomous.watchdog.stale_secs` | `AUTOSPEC_WATCHDOG_STALE_SECS` | Heartbeat age before nudging. |
+| `autonomous.watchdog.reclaim_secs` | `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | Stale claim reclaim age. |
+| `autonomous.watchdog.claimed_timeout_secs` | `AUTOSPEC_WATCHDOG_CLAIMED_TIMEOUT_SECS` | Claimed-step release threshold. |
+| `autonomous.watchdog.nudge_cooldown_secs` | `AUTOSPEC_WATCHDOG_NUDGE_COOLDOWN_SECS` | Minimum time between watchdog nudges. |
+| `autonomous.watchdog.state_file` | `AUTOSPEC_WATCHDOG_STATE_FILE` | Nudge cooldown state file. |
+| `autonomous.watchdog.gc_dir` | `AUTOSPEC_WATCHDOG_GC_DIR` | Orphan worktree GC root. |
+| `autonomous.watchdog.gc_heartbeat_fresh_secs` | `AUTOSPEC_WATCHDOG_GC_HEARTBEAT_FRESH_SECS` | Fresh-heartbeat guard for GC. |
+| `autonomous.drain.stall_secs` | `AUTOSPEC_AUTONOMOUS_DRAIN_STALL_SECS` | No-output timeout for one drain run. |
+| `autonomous.drain.poll_secs` | `AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS` | Drain output poll interval. |
+
+### Repository-local Rust mainline health
+
+Rust autonomous health admission reads a separate, repository-owned file at
+`<checkout-root>/.autospec/autonomous.yml` on every `main-health` or
+`run-foreground` invocation. When `--repo-dir` names a subdirectory of a Git
+checkout, Rust resolves its checkout root first; outside Git it uses
+`<repo-dir>` literally. This is deliberately not `.autospec/autospec.yml`, and
+it is a strict supported subset rather than a general YAML policy file:
+
+```yaml
+main_health:
+  branch: master_ai
+  ignore_checks:
+    - "Unit Tests"
+```
+
+`main_health.branch` is optional and nonempty. The Rust CLI resolves a branch
+in this order: explicit `--branch`, then `main_health.branch`, then the GitHub
+default branch. `ignore_checks` is an optional list of nonempty, exact,
+case-sensitive check names. A matching health observation remains persisted as
+evidence but is marked advisory; it no longer blocks mainline health. Unmatched
+failed or pending checks remain required and block admission.
+
+A missing file preserves existing behavior. An unreadable file or malformed,
+duplicate, unknown, incorrectly indented, or wrongly typed field inside
+`main_health` fails closed with a diagnostic before foreground lease, queue,
+claim, state, or executor mutation. Rust does not read or export
+`AUTOSPEC_MAIN_HEALTH_*`; this setting does not relax premerge, safety, claims,
+or merge policy.
+
+### Self-originated integration branch
+
+Config contract for the autonomous self-originated integration-branch design
+(`docs/specs/2026-07-10-autonomous-integration-branch-design.md`). Resolved
+via `autospec_runtime_config_get` (`scripts/autospec-runtime-config.sh`), no
+legacy env fallback — these are new keys. The consumer scripts
+(`scripts/autonomous-integration-branch.sh`, the `self-originated` subcommand
+of `scripts/autonomous-guardrails.sh`) land in separate follow-up issues
+(#1740, #1742, and a conductor-wiring child); this section documents the
+config contract those consumers must honor once landed.
+
+```yaml
+autonomous:
+  self_originated:
+    integration_branch_prefix: "autospec/autonomous-"
+    max_open_prs: 20
+    max_age_days: 14
+    max_diff_lines: 5000
+    allow_direct_merge: false
+```
+
+| Config key | Type | Default | Consumer | Effect |
+|---|---|---|---|---|
+| `autonomous.self_originated.integration_branch_prefix` | string | `autospec/autonomous-` | `scripts/autonomous-integration-branch.sh` (`ensure`, `reset`) | Prefix used to derive the shared integration branch name from the parent branch. |
+| `autonomous.self_originated.max_open_prs` | int | `20` | `scripts/autonomous-integration-branch.sh status` | Cap on open worker PRs accumulated on the integration branch before the conductor parks self-originated tiers. |
+| `autonomous.self_originated.max_age_days` | int | `14` | `scripts/autonomous-integration-branch.sh status` | Cap on the integration branch's age before the conductor parks self-originated tiers. |
+| `autonomous.self_originated.max_diff_lines` | int | `5000` | `scripts/autonomous-integration-branch.sh status` | Cap on cumulative diff size vs. the parent before the conductor parks self-originated tiers. |
+| `autonomous.self_originated.allow_direct_merge` | bool | `false` | `scripts/autonomous-guardrails.sh self-originated` (premerge gate) | When `false`, a self-originated PR based directly on a protected parent branch is blocked (`block self_originated_direct_merge`) instead of merged; flipping to `true` requires a trusted-actor marker recorded in the same config commit that changes the value, so the bypass itself is attributable and reviewable, not a casual toggle. |
+
+Any of the three caps (`max_open_prs`, `max_age_days`, `max_diff_lines`) being
+exceeded parks only the self-originated tiers and sends a notification;
+operator-originated tiers keep draining unaffected. Provenance and roll-up
+state carry two GitHub labels: `origin:self` (issue was filed by the
+autonomous system itself) and `approved-by-operator` (a trusted-actor approval
+marker that flips an issue's provenance from `self` to `operator` pre-dispatch).
+
+The remaining tables list older operator-facing env knobs that do not yet have
+dedicated config keys.
+
+## Issue intent safety
+
+`safety.issue_intent_gate` configures deterministic issue screening. Missing or invalid config falls back to conservative built-in defaults. The built-in policy is evaluated natively in Rust: duplicate built-in entries are accepted, while a custom regex that the dependency-free evaluator cannot represent fails closed with `invalid-policy-regex` rather than being ignored. `trusted_actors` can pass scoped test/dev cleanup but cannot bypass secret exfiltration, production data destruction, instruction bypass, backdoors, or CI/review bypass. `autospec queue review-safety --limit N [--issue N]` and `autospec claim acquire` use this same policy; review requires an explicit positive bound, and `--issue N` targets one admitted issue without scanning the queue. Neither adds a configuration key.
 
 ## Core paths & repo
 | Var | Default | Effect |
 |---|---|---|
 | `AUTOSPEC_STATE_DIR` | `~/.autospec` | Root for run-state, heartbeats, flag files. |
 | `AUTOSPEC_DIR` | `~/.autospec` | Legacy alias for the state dir in some scripts. |
-| `AUTOSPEC_REPO` | gh context | `owner/name` slug when not inferable from the checkout. |
 
 ## Batch, caps & budgets
 | Var | Default | Effect |
 |---|---|---|
-| `AUTOSPEC_BATCH_SIZE` | `1` | Issues processed per subagent. `reasoning:deep` issues force-stay at 1. |
 | `AUTOSPEC_AUTONOMOUS_ISSUE_CAP` | (unset) | Max issues an autonomous run will process before stopping. |
 | `AUTOSPEC_AUTONOMOUS_TOKEN_CAP` | (unset) | Token ceiling for an autonomous run. |
 | `AUTOSPEC_LOOP_TOKEN_CAP` | (unset) | Token ceiling for loop entrypoints (`--loop`, explore). |
@@ -36,6 +168,13 @@ AUTOSPEC_BATCH_SIZE=1 /autospec-run        # one issue per subagent
 | `AUTOSPEC_HARNESS_DISPATCHER` | auto-detected | Force a harness dispatcher (claude/opencode/codex). |
 | `AUTOSPEC_NO_GUARDIAN` | (unset) | Disable the guardian RULE_ID pass (not recommended). |
 
+## Automation lifecycle toggles
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_NO_AUTOMERGE_SPEC` | `0` | Set to `1` to skip admin auto-merge for spec PRs; the skill pauses for a manual merge before continuing. |
+| `AUTOSPEC_NO_SELF_UPDATE` | `0` | Set to `1` to skip the once-per-24h startup self-update preflight for multi-harness skills. |
+| `AUTOSPEC_PR_ADVISORY_CHECKS` | `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS` or `^$` | Regex for PR check names/contexts treated as advisory during auto-merge; matching checks may be pending or failing once local validation is green. It is not consumed by Rust mainline health; `main_health.ignore_checks` does not alter premerge or auto-merge behavior. |
+
 ## Testing & QA
 | Var | Default | Effect |
 |---|---|---|
@@ -48,9 +187,13 @@ AUTOSPEC_BATCH_SIZE=1 /autospec-run        # one issue per subagent
 ## Crash-resume & watchdog
 | Var | Default | Effect |
 |---|---|---|
-| `AUTOSPEC_WATCHDOG_STALE_SECS` | (skill default) | Age after which a heartbeat is considered stale. |
-| `AUTOSPEC_WATCHDOG_RECLAIM_SECS` | (skill default) | Age after which a stale claim lease may be reclaimed. |
 | `AUTOSPEC_RESUME_COMMAND` | derived | Command the usage-limit supervisor relaunches on reset. |
+
+## Memory management
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_COMPRESS_THRESHOLD` | `5000` | LOC threshold passed to `mempalace-compress.sh`; below the threshold compression is a no-op. |
+| `AUTOSPEC_MINE_PR_HISTORY` | `0` | Set to `1` to enable bandwidth-heavy PR history mining during `auto-init-memory.sh`; off by default. |
 
 ## Security (autospec-secaudit)
 | Var | Default | Effect |

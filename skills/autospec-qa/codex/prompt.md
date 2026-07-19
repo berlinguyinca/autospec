@@ -153,7 +153,7 @@ harness exposes it, then stop. Do not run the QA audit.
 | --- | --- | --- | --- | --- |
 | Subagent model tier | Tier A: `opus` + ultrathink | Tier A: top-tier `task` + max reasoning | Tier A: current top GPT + `reasoning_effort=high` | Run inline, but keep the same report contract |
 <!-- autospec-block:harness-adapter-core -->
-| Browser/E2E execution | Playwright/browser tool or shell | Playwright/browser task | shell + browser when available | Mark UI-only checks NOT TESTED with blocker |
+| Browser/E2E execution | Playwright/browser tool or shell | Playwright/browser task | shell + browser when available | Use `browser-verified` / `fallback-smoke-only` / `not-run`; mark UI-only gaps with blocker |
 | Shell execution | Bash tool | shell tool | shell/apply_patch | Required for regeneration |
 
 **Model tier:** TIER_A for the spec audit and test-regeneration plan because
@@ -420,6 +420,25 @@ documentation_gate`, mirroring the no-mock smoke handling.
 `documentation:` config (orchestrator exits 2), the gate records an INFO log
 line — `docs: no documentation config found (exit 2), gate skipped` — and
 continues without emitting a finding. No other skip condition is permitted.
+
+## Repo quality audit
+
+After QA proof artifacts are written, run the shared read-only quality audit so
+the QA report carries repo-wide code-quality, verification, dependency, route,
+security, and maintainability gaps discovered during revalidation:
+
+```bash
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-quality-audit.sh" \
+  --repo . \
+  --json ".autospec/repo-quality-audit.json" \
+  --markdown ".autospec/repo-quality-audit.md" \
+  ${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:+--file-issues}
+```
+
+Include the audit `status`, filed issue links, suppressed findings, and unfiled
+residual risks in the final QA verdict. The helper is read-only with respect to
+source files; it only writes audit artifacts and optional deduplicated GitHub
+issues when operator policy permits issue creation.
 
 ## Evidence provenance gate
 

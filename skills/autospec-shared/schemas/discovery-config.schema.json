@@ -1,0 +1,19 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "autospec .autospec/autospec.yml discovery.* block",
+  "type": "object",
+  "properties": {
+    "enabled": { "type": "boolean" },
+    "seed_sources": { "type": "array", "items": { "type": "string" } },
+    "forbidden_classes": { "type": "array", "items": { "type": "string" } },
+    "max_new_sources_per_round": { "type": "integer", "minimum": 0 },
+    "userspace": {
+      "type": "object",
+      "properties": {
+        "opt_out": { "type": "boolean" }
+      }
+    },
+    "rate_limits": { "type": "object" }
+  },
+  "additionalProperties": true
+}

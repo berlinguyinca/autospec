@@ -1,0 +1,39 @@
+name: security-workstream
+
+on:
+  pull_request:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security-workstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch main for PR diff scans
+        run: git fetch origin main --depth=1
+      - name: Run proactive security scan
+        run: |
+          set -euo pipefail
+          mkdir -p .autospec/security
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            bash scripts/security-workstream.sh scan --mode pr --base origin/main --out .autospec/security/security-ranked.jsonl
+          else
+            bash scripts/security-workstream.sh scan --mode tree --out .autospec/security/security-ranked.jsonl
+          fi
+      - name: Enforce dashboard security headers
+        run: bash scripts/security-workstream.sh check-headers --headers-file docs/site/_headers
+      - name: Block P0/P1 security findings
+        run: |
+          set -euo pipefail
+          if grep -Eq '"priority":"P[01]"' .autospec/security/security-ranked.jsonl; then
+            cat .autospec/security/security-ranked.jsonl
+            exit 1
+          fi

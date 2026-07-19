@@ -52,3 +52,24 @@ SCRIPT="${BATS_TEST_DIRNAME}/../scripts/fab-route.sh"
   [ "$status" -eq 0 ]
   [ "$output" = "fab" ]
 }
+
+@test "growth:artifact routes to growth" {
+  run bash "$SCRIPT" --labels "auto-implement,growth:artifact,growth:content"
+  [ "$status" -eq 0 ]
+  [ "$output" = "growth" ]
+}
+
+@test "fab wins over growth when both present" {
+  run bash "$SCRIPT" --labels "growth:artifact,area:fab"
+  [ "$output" = "fab" ]
+}
+
+@test "growth:artifactx does not route to growth (whole-label)" {
+  run bash "$SCRIPT" --labels "growth:artifactx"
+  [ "$output" = "default" ]
+}
+
+@test "plain auto-implement still default" {
+  run bash "$SCRIPT" --labels "auto-implement,ctx:64k"
+  [ "$output" = "default" ]
+}

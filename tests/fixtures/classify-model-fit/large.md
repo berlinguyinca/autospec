@@ -10,7 +10,7 @@ Design and reconcile the cross-skill autospec-e2e-clone pipeline with the existi
 - `schemas/autospec-test-contract.schema.json`
 - `skills/autospec-shared/scripts/` (cross-skill shared)
 - `docs/specs/2026-05-22-autospec-tooling-optimization-design.md` §4
-- `scripts/validate.sh`
+- `autospec validate`
 - `tests/fixtures/gen-issue-skeleton/`
 
 ## Implementation scope
@@ -22,4 +22,4 @@ Design and reconcile the cross-skill autospec-e2e-clone pipeline with the existi
 ## Acceptance criteria
 
 - [ ] `ajv compile -s schemas/autospec-clone-contract.schema.json`
-- [ ] `bash scripts/validate.sh` passes
+- [ ] `autospec validate` passes

@@ -76,6 +76,20 @@ LAST_STEP="$3"
 
 FLAG_FILE="${HOME}/.autospec/stop.flag"
 
+emit_session_parked() {
+  park_outcome="$1"
+  park_detail="$2"
+  {
+    H="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
+    if [ -f "$H/emit-event.sh" ]; then
+      # shellcheck source=/dev/null
+      . "$H/emit-event.sh"
+      emit_event session.parked outcome="$park_outcome" detail="$park_detail"
+    fi
+  } || true
+  return 0
+}
+
 # ---------------------------------------------------------------------------
 # Check: only act on "immediate" stop
 # ---------------------------------------------------------------------------
@@ -93,6 +107,7 @@ if [ "$MODE" = "immediate" ]; then
     printf '[autospec-stop-check] WARN: autospec-stop.sh not found at %s; flag acknowledged\n' \
       "$STOP_SH" >&2
   fi
+  emit_session_parked "stop" "$LAST_STEP"
   exit 42
 fi
 

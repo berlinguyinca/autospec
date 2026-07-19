@@ -26,7 +26,7 @@ Child issues: #292 (AGENTS.md), #293 (validate.sh), #294 (autospec/SKILL.md), #2
 
 **What shipped:**
 - AGENTS.md: `### Harness detection protocol` subsection
-- scripts/validate.sh + tests/unit/test_harness_detection_block.bats: new check + dual-format acceptance
+- autospec validate + tests/unit/test_harness_detection_block.bats: new check + dual-format acceptance
 - 5 skills × 3 lock-step files each = 15 files updated with `## Harness detection` block + TIER_A/TIER_B refs
 
 **How to apply:** Feature is live. No further action needed.

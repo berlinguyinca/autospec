@@ -75,4 +75,4 @@ existing backup/restore and autospec-test rails.
 - `bats tests/unit/test_autospec_sweep_run.bats`
 - `bats tests/smoke/test_install_all_skills.bats`
 - `bash tests/install/test_gitignore_offer.sh`
-- `bash scripts/validate.sh`
+- `autospec validate`

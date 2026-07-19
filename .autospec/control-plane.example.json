@@ -1,0 +1,21 @@
+{
+  "owner": "berlinguyinca",
+  "governance": {
+    "repo": "autospec-governance",
+    "full_name": "berlinguyinca/autospec-governance",
+    "url": "https://github.com/berlinguyinca/autospec-governance",
+    "bootstrap_state": "created"
+  },
+  "observatory": {
+    "repo": "autospec-observatory",
+    "full_name": "berlinguyinca/autospec-observatory",
+    "url": "https://github.com/berlinguyinca/autospec-observatory",
+    "bootstrap_state": "created",
+    "endpoint": "https://observatory.example.invalid/v1/events/batch"
+  },
+  "bootstrap": {
+    "confirmed": true,
+    "completed_at": "2026-07-09T00:00:00Z",
+    "tool": "scripts/autospec-control-plane.sh bootstrap --confirm"
+  }
+}

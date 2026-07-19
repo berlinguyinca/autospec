@@ -1,0 +1,178 @@
+use std::process::Command;
+use std::{fs, path::Path};
+
+fn workspace_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root")
+}
+
+fn lifecycle(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_autospec"))
+        .args(["autonomous", "lifecycle", "decide"])
+        .args(args)
+        .output()
+        .expect("run lifecycle decision")
+}
+
+#[test]
+fn lifecycle_decide_serializes_ready_tier_one() {
+    let output = lifecycle(&["--repo", "test/repo", "--ready-tier", "1"]);
+
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"decision\":\"run\",\"tier\":\"1\"}\n"
+    );
+}
+
+#[test]
+fn lifecycle_decide_serializes_each_explicit_tier() {
+    for tier in ["1.5", "2", "3", "4", "5", "6", "7"] {
+        let output = lifecycle(&["--repo", "test/repo", "--ready-tier", tier]);
+        assert!(output.status.success(), "tier={tier}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("{{\"decision\":\"run\",\"tier\":\"{tier}\"}}\n")
+        );
+    }
+}
+
+#[test]
+fn lifecycle_decide_returns_nonzero_json_for_stop_and_claim_rejection() {
+    let stopped = lifecycle(&["--repo", "test/repo", "--stop", "immediate"]);
+    assert_eq!(stopped.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&stopped.stdout),
+        "{\"decision\":\"stop\",\"mode\":\"immediate\"}\n"
+    );
+
+    let rejected = lifecycle(&[
+        "--repo",
+        "test/repo",
+        "--claim-repo",
+        "other/repo",
+        "--claim-issue",
+        "41",
+        "--claim-worker",
+        "worker-a",
+        "--claim-branch",
+        "autonomous/issue-41",
+    ]);
+    assert_eq!(rejected.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8_lossy(&rejected.stdout),
+        "{\"decision\":\"reject\",\"reason\":\"cross_scope_claim\"}\n"
+    );
+}
+
+#[test]
+fn lifecycle_decide_rejects_typed_terminal_and_abandoned_claims() {
+    let terminal = lifecycle(&[
+        "--repo",
+        "test/repo",
+        "--claim-repo",
+        "test/repo",
+        "--claim-issue",
+        "41",
+        "--claim-worker",
+        "worker-a",
+        "--claim-branch",
+        "autonomous/issue-41",
+        "--claim-state",
+        "terminal",
+    ]);
+    assert_eq!(terminal.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8_lossy(&terminal.stdout),
+        "{\"decision\":\"reject\",\"reason\":\"terminal_claim\"}\n"
+    );
+
+    let abandoned = lifecycle(&[
+        "--repo",
+        "test/repo",
+        "--claim-repo",
+        "test/repo",
+        "--claim-issue",
+        "41",
+        "--claim-worker",
+        "worker-a",
+        "--claim-branch",
+        "autonomous/issue-41",
+        "--lease-age-sec",
+        "10801",
+    ]);
+    assert_eq!(abandoned.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8_lossy(&abandoned.stdout),
+        "{\"decision\":\"reject\",\"reason\":\"abandoned_lease\"}\n"
+    );
+}
+
+#[test]
+fn lifecycle_decide_serializes_health_budget_stale_and_idle_gates() {
+    let health = lifecycle(&["--repo", "test/repo", "--health", "wait"]);
+    assert_eq!(health.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&health.stdout),
+        "{\"decision\":\"park\",\"reason\":\"health_wait\"}\n"
+    );
+
+    let budget = lifecycle(&["--repo", "test/repo", "--budget", "hard"]);
+    assert_eq!(budget.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&budget.stdout),
+        "{\"decision\":\"park\",\"reason\":\"budget_hard_cap\"}\n"
+    );
+
+    let stale = lifecycle(&["--repo", "test/repo", "--lease-age-sec", "301"]);
+    assert_eq!(stale.status.code(), Some(3));
+    assert_eq!(
+        String::from_utf8_lossy(&stale.stdout),
+        "{\"decision\":\"reject\",\"reason\":\"stale_lease\"}\n"
+    );
+
+    let idle = lifecycle(&["--repo", "test/repo", "--ready-tier", "idle"]);
+    assert_eq!(idle.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&idle.stdout),
+        "{\"decision\":\"park\",\"reason\":\"idle_rescan\"}\n"
+    );
+}
+
+#[test]
+fn lifecycle_decide_rejects_malformed_and_repeated_flags() {
+    let malformed = lifecycle(&["--repo", "test/repo", "--health", "unknown"]);
+    assert_eq!(malformed.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("--health"));
+
+    let repeated = lifecycle(&[
+        "--repo",
+        "test/repo",
+        "--ready-tier",
+        "1",
+        "--ready-tier",
+        "2",
+    ]);
+    assert_eq!(repeated.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&repeated.stderr).contains("--ready-tier"));
+}
+
+#[test]
+fn autonomous_launch_source_has_no_shell_or_command_override_authority() {
+    let source =
+        fs::read_to_string(workspace_root().join("crates/autospec-cli/src/commands/autonomous.rs"))
+            .expect("read autonomous command source");
+
+    for forbidden in [
+        "Command::new(\"sh\")",
+        "AUTOSPEC_AUTONOMOUS_MONITOR_CMD",
+        "AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD",
+    ] {
+        assert!(
+            !source.contains(forbidden),
+            "autonomous launch retains legacy authority: {forbidden}"
+        );
+    }
+}

@@ -1,0 +1,140 @@
+# Companion Repository Map
+
+AutoSpec uses companion repositories in three different ways. This page is the
+canonical map for those relationships so operators can distinguish ordinary
+target repos from catalog inputs and governance proposals.
+
+## Target Repositories
+
+Target repositories are the repos where AutoSpec plans, files, implements, and
+validates work. The default single-repo path is `/autospec-define` followed by
+`/autospec-run`; the multi-repo path is `autospec-fleet`.
+
+`autospec-fleet` is a supervisor, not a replacement for `/autospec-run`:
+
+- fleet owns clone/sync, repo-level scheduling, node-local capacity, and
+  aggregate status;
+- `/autospec-run` owns issue claiming, implementation, review, CI waiting, merge
+  flow, and per-repo reporting;
+- GitHub Issues and `autospec-run-state` comments remain the shared queue and
+  lock layer across machines.
+
+Reference: `docs/specs/2026-05-28-autospec-fleet-design.md`.
+
+## Design Catalog
+
+`autospec-design` fetches vendor design language files from the public
+`berlinguyinca/awesome-design-md` catalog. It never vendors that catalog into
+this repository.
+
+Runtime access:
+
+- primary: `gh api repos/berlinguyinca/awesome-design-md/...`;
+- fallback: `curl` against `raw.githubusercontent.com`;
+- cache: `~/.autospec/design-cache/<vendor>/DESIGN.md`;
+- default cache TTL: 24 hours.
+
+Reference: `skills/autospec-design/scripts/fetch-design-md.sh`.
+
+## Companion Governance Proposals
+
+The V65 companion sync bridge is proposal-only. It can generate inventories,
+drift audits, compatibility checks, and manual patch bundles under
+`.autospec/companions/v65`, but it must not write to companion repositories or
+create companion PRs automatically.
+
+Reference: `scripts/autospec-v61-v70.py` action group for V65.
+
+## Current Gaps
+
+- There is no hosted control plane for companion repositories.
+- Fleet desired state can live in a Git control repository, but this repository
+  ships only schemas, examples, and local validation.
+- Companion governance is intentionally conservative until write bridges have
+  separate proof and approval gates.
+
+## Control Plane Governance Dry Run
+
+`autospec-control-plane bootstrap --dry-run` renders the proposed
+`autospec-governance` and `autospec-observatory` repository scaffolds for local
+inspection without creating GitHub repositories, committing files, pushing
+branches, or invoking `gh`.
+
+The governance portion prints the MVP policy repository layout from the
+sovereign control-plane design:
+
+- `policies/open-source-maintainer-default.yml` and the other default policy
+  packs;
+- reusable rule catalogs under `rules/` for QA, testing, documentation,
+  security, accessibility, performance, skill generation, and release readiness;
+- JSON schemas under `schemas/` for policies, rules, project classes, and
+  priority configuration;
+- project-class fixtures under `fixtures/projects/` for all six MVP classes
+  (`open-source`, `private-personal`, `private-company`, `client-project`,
+  `research`, and `sandbox`);
+- deterministic Bats validation placeholders under `tests/`;
+- authoring and operator docs under `docs/`.
+
+The rendered policy authoring contract is data-only: each policy pack declares a
+`policy_id`, `version`, `project_class`, `privacy_tier`, priority waterfall,
+merge rules, cost limits, evidence requirements, and referenced rule catalogs.
+Rule catalogs are YAML fixtures with deterministic check names; they are not
+executable policy scripts. The dry-run also emits `policy.schema.json` and
+`rule.schema.json` templates so companion-repository authors can validate policy
+shape before any hosted resolver exists.
+
+Example:
+
+```bash
+scripts/autospec-control-plane.sh bootstrap --dry-run \
+  --owner berlinguyinca \
+  --governance-repo autospec-governance
+```
+
+The observatory portion prints the SaaS-ready service scaffold paths from the
+sovereign control-plane design:
+
+- `autospec-observatory/apps/api/` and `apps/web/` README seed files for the
+  future API-key authenticated event ingestion service and operator UI;
+- `apps/web/src/App.tsx` with the operator UI shell pages: Live Fleet, Run
+  Timeline, Run Progress, Work Item Detail, Queue/Backlog, Failures/Blockers,
+  Workers/Agents, Policy Decision Inspector, and Cost/Duration/Outcome Reports.
+  The shell uses 10-second `poll_after_ms` polling, includes per-run progress
+  bars and a Run Progress detail panel with percent complete, phase/current item,
+  item elapsed time, queue counts, ETA, planned next step, and stale/error state;
+- `apps/api/src/auth/api-keys.ts` with the scoped API-key model. Keys include
+  `owner_org_id`, project and repository allow lists, `privacy_tier_limit`, and
+  the MVP scopes `events:write`, `events:read`, `projects:read`,
+  `projects:write`, `runs:read`, `costs:read`, and `admin:keys`;
+- `apps/api/src/routes.ts` with the v1 route list, including
+  `POST /v1/events`, `POST /v1/events/batch`, and
+  `GET /v1/runs/:id/progress`. Progress snapshots expose `progress_percent`,
+  `phase`, current item, queue counts, elapsed time, ETA, planned next step, and
+  `last_event_id`, and reads are scoped to the key's org/project boundaries;
+- `apps/api/src/reports.ts` with scaffolded report routes for Project weekly
+  summary, Client billing export, Open-source maintenance report, Agent
+  performance report, Cost anomaly report, Blocked work report, and Autonomous
+  ROI report. Report rows include `estimated_cost_usd`, `actual_cost_usd`,
+  `duration_ms`, `blocked_time_ms`, `status_outcome`, and `roi_summary`;
+- `apps/web/src/ReportFilters.tsx` with MVP operator filters for date range,
+  project classification, org/company, workspace, project, repo, operator,
+  worker, agent/harness/model, skill/workflow, policy version, privacy tier,
+  risk level, status/outcome, cost range, and duration range;
+- `apps/api/src/ingest/events.ts` and `packages/event-schema/src/events.ts`
+  with the scaffolded ingestion contract. Generated events require `event_id`,
+  `run_id`, `sequence`, timestamps, project/repository identifiers, and
+  privacy metadata. `ProgressUpdated` is part of the event type list and uses
+  the same dedupe and per-run sequence ordering rules as every other event.
+  Duplicate event_id is ignored; repeated sequences are stored once and
+  flagged, sequence gaps are exposed for UI review, and late events are stored
+  by both `occurred_at` and `received_at`;
+- shared package seed paths under `packages/event-schema/`, `packages/db/`, and
+  `packages/ui/`;
+- deterministic migration seeds for `orgs`, `projects`, `runs`, and `events`;
+- `docs/local-operations.md` for local operator notes;
+- `docker-compose.yml` with a local `postgres:16` service named
+  `observatory-postgres`.
+
+This command remains dry-run-only in the current MVP slice; observatory service
+startup, live API implementation, and client event emitters remain separate
+follow-up work.

@@ -16,7 +16,7 @@ setup() {
     cat > "$REPO_ROOT/AGENTS.md" <<'EOF'
 # AGENTS
 Edit scripts/refine-prompt.sh and tests/refine/test_refine_lenses.bats.
-Run scripts/validate.sh before commit.
+Run autospec validate before commit.
 EOF
     MEMORY_ROOT="$TEST_TMP/memory"
     mkdir -p "$MEMORY_ROOT"
@@ -40,7 +40,7 @@ read_refined() {
     local refined
     refined="$(read_refined)"
     [[ "$refined" == *"Repo grounding"* ]]
-    [[ "$refined" == *"scripts/refine-prompt.sh"* || "$refined" == *"scripts/validate.sh"* ]]
+    [[ "$refined" == *"scripts/refine-prompt.sh"* || "$refined" == *"autospec validate"* ]]
 }
 
 @test "clarity-ac lens disambiguates hedges and adds AC checkboxes" {
