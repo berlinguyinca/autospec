@@ -182,7 +182,10 @@ SLEEPSHIM
         if [ -n "${AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS:-}" ]; then
             printf 'export AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS=%s\n' "$(printf '%q' "$AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS")"
         fi
-        printf '%s\n' "$GATE_BLOCK" | sed -e 's/<PR>/123/g' -e 's/<issue>/311/g'
+        printf '%s\n' "$GATE_BLOCK" | sed \
+            -e 's/<PR>/123/g' \
+            -e 's/<issue>/311/g' \
+            -e 's#<repo>#test-owner/test-repo#g'
     } > "$runner"
     chmod +x "$runner"
 

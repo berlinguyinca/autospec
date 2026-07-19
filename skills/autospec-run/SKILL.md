@@ -1311,7 +1311,9 @@ do not fall back to an inline label-swap path.
 >    # so "merge without the fence check" requires deliberately bypassing the wrapper.
 >    # exit 0 = merged (allowed/overridden); 1 = quarantined (NOT merged); 2 = fail-closed error.
 >    # This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
->    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo {repo}; then
+>    if bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo {repo}; then
+>      :
+>    else
 >      _gm_rc=$?
 >      if [ "$_gm_rc" -eq 1 ]; then
 >        "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --state blocked --branch "<BRANCH>" --pr "<PR>" || true

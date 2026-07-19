@@ -541,7 +541,9 @@ fi
 # `gh pr merge --admin`. exit 1 = quarantined (NOT merged); exit 2 =
 # fail-closed error.
 # This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
-if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo {repo}; then
+if bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo <repo>; then
+    :
+else
     gm_rc=$?
     if [ "$gm_rc" -eq 1 ]; then
         echo "quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
