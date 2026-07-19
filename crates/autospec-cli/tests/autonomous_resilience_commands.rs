@@ -1444,6 +1444,87 @@ fn autonomous_start_parks_a_held_resilience_lease_without_operator_writes() {
 }
 
 #[test]
+fn autonomous_status_json_reports_unavailable_when_state_file_is_missing() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 99 repo=owner/repo\n[conductor] waterfall decision tier=4 action=run-explore-once-internet\n",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!("{}\n", logpath.display()),
+    );
+
+    let output = fixture.run_autonomous(&["status", "--repo", "owner/repo", "--json"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("status json");
+    assert_eq!(body["state_outcome"], "Unavailable");
+    assert_ne!(body["state_status"], "running");
+    assert_ne!(body["current_cycle"], "99");
+    assert_eq!(body["heartbeat_age_secs"], serde_json::Value::Null);
+}
+
+#[test]
+fn autonomous_status_json_reports_malformed_state_when_legacy_state_cannot_parse() {
+    let fixture = ResilienceFixture::new();
+    let legacy_root = fixture.root.join("legacy-state");
+    write_file(&legacy_root.join("owner_repo/state.json"), "{not-json}");
+
+    let output = fixture
+        .command()
+        .args(["status", "--repo", "owner/repo", "--json", "--repo-dir"])
+        .arg(&fixture.repo_dir)
+        .env("AUTOSPEC_HOST", "autospec-test-host")
+        .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &legacy_root)
+        .output()
+        .expect("run autonomous status against malformed legacy state");
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("status json");
+    assert_eq!(body["state_outcome"], "MalformedState");
+    assert_eq!(body["state_status"], serde_json::Value::Null);
+    assert_eq!(body["heartbeat_age_secs"], serde_json::Value::Null);
+}
+
+#[test]
+fn autonomous_status_json_reports_healthy_legacy_state_fields() {
+    let fixture = ResilienceFixture::new();
+    let legacy_root = fixture.root.join("legacy-state");
+    let heartbeat = now_secs().saturating_sub(4);
+    write_file(
+        &legacy_root.join("owner_repo/state.json"),
+        &format!(
+            r#"{{"status":"running","heartbeat_at":{heartbeat},"cycle":12,"current_cycle":13,"current_tier":"2","current_action":"run-explore-once","last_blocker":"none"}}"#
+        ),
+    );
+
+    let output = fixture
+        .command()
+        .args(["status", "--repo", "owner/repo", "--json", "--repo-dir"])
+        .arg(&fixture.repo_dir)
+        .env("AUTOSPEC_HOST", "autospec-test-host")
+        .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &legacy_root)
+        .output()
+        .expect("run autonomous status against healthy legacy state");
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("status json");
+    assert_eq!(body["state_outcome"], "Ok");
+    assert_eq!(body["state_status"], "running");
+    assert_eq!(body["last_cycle"], "12");
+    assert_eq!(body["current_cycle"], "13");
+    assert_eq!(body["current_tier"], "2");
+    assert_eq!(body["current_action"], "run-explore-once");
+    assert_eq!(body["last_blocker"], "none");
+    assert!(
+        body["heartbeat_age_secs"].as_u64().is_some(),
+        "heartbeat age should be derived from state heartbeat: {body}"
+    );
+}
+
+#[test]
 fn autonomous_status_reads_legacy_cycle_suffix_without_writing() {
     let fixture = ResilienceFixture::new();
     fixture.write_state(
