@@ -62,8 +62,25 @@ run_ledger() {
     [ "$status" -eq 0 ]
     tokens="$(printf '%s' "$output" | jq -r '.tokens')"
     issues="$(printf '%s' "$output" | jq -r '.issues')"
+    filed_issues="$(printf '%s' "$output" | jq -r '.filed_issues')"
+    budget_issues="$(printf '%s' "$output" | jq -r '.budget_issues')"
     [ "$tokens" -eq 100 ]
     [ "$issues" -eq 1 ]
+    [ "$filed_issues" -eq 1 ]
+    [ "$budget_issues" -eq 1 ]
+}
+
+@test "add: supports distinct filed and budget issue counters" {
+    run_ledger add --tokens 100 --filed-issues 5 --budget-issues 1
+    [ "$status" -eq 0 ]
+    tokens="$(printf '%s' "$output" | jq -r '.tokens')"
+    issues="$(printf '%s' "$output" | jq -r '.issues')"
+    filed_issues="$(printf '%s' "$output" | jq -r '.filed_issues')"
+    budget_issues="$(printf '%s' "$output" | jq -r '.budget_issues')"
+    [ "$tokens" -eq 100 ]
+    [ "$issues" -eq 1 ]
+    [ "$filed_issues" -eq 5 ]
+    [ "$budget_issues" -eq 1 ]
 }
 
 @test "add: repeated calls accumulate totals" {
@@ -110,6 +127,16 @@ run_ledger() {
     run_ledger add --tokens 100 --issues 1
     AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS=1000 \
     AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES=10 \
+    run_ledger check
+    [ "$status" -eq 0 ]
+    [ "$output" = "continue" ]
+}
+
+@test "check: issue cap uses budget_issues rather than filed_issues" {
+    run_ledger add --tokens 0 --filed-issues 5 --budget-issues 2
+    [ "$status" -eq 0 ]
+    AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS=1000 \
+    AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES=3 \
     run_ledger check
     [ "$status" -eq 0 ]
     [ "$output" = "continue" ]
@@ -216,14 +243,18 @@ run_ledger() {
 
 # ── reset ─────────────────────────────────────────────────────────────────────
 
-@test "reset: zeroes tokens and issues" {
-    run_ledger add --tokens 500 --issues 5
+@test "reset: zeroes tokens and issue counters" {
+    run_ledger add --tokens 500 --filed-issues 7 --budget-issues 5
     run_ledger reset
     run_ledger status
     tokens="$(printf '%s' "$output" | jq -r '.tokens')"
     issues="$(printf '%s' "$output" | jq -r '.issues')"
+    filed_issues="$(printf '%s' "$output" | jq -r '.filed_issues')"
+    budget_issues="$(printf '%s' "$output" | jq -r '.budget_issues')"
     [ "$tokens" -eq 0 ]
     [ "$issues" -eq 0 ]
+    [ "$filed_issues" -eq 0 ]
+    [ "$budget_issues" -eq 0 ]
 }
 
 @test "reset: after reset, check returns continue" {

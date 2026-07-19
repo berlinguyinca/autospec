@@ -794,8 +794,8 @@ fn emit(decision: Decision, spend: Option<&ResilienceSpend>) -> Result<(), Comma
 
 fn spend_json_suffix(spend: &ResilienceSpend) -> String {
     format!(
-        ",\"spend\":{{\"tokens\":{},\"filed_issues\":{},\"budget_issues\":{}}}",
-        spend.tokens, spend.filed_issues, spend.budget_issues
+        ",\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}}",
+        spend.tokens, spend.budget_issues, spend.filed_issues, spend.budget_issues
     )
 }
 

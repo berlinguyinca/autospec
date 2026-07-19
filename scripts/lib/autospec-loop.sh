@@ -2043,6 +2043,7 @@ fi'
 
         # ── Step 4 + 5: Tier-1 drain gated on premerge check ─────────────────
         local _work_done=0
+        local _filed_issues=0
         if [ "$_action" = "park" ]; then
             printf '[conductor] parking: %s\n' "$_reason" >&2
             _stop_reason="waterfall:park:${_reason}"
@@ -2280,6 +2281,7 @@ fi'
 
             if [ "$_promote_filed" -gt 0 ] 2>/dev/null || [ "$_promote_promoted" -gt 0 ] 2>/dev/null; then
                 _work_done=1
+                _filed_issues=$((_filed_issues + _promote_filed))
             else
                 _tier15_dry_cycles=$((_tier15_dry_cycles + 1))
                 printf '[conductor] Tier 1.5 dry (tier15-dry-cycles=%s)
@@ -2766,10 +2768,12 @@ EOF_PROV_BATCH
             local _arch_dry _arch_filed
             _arch_dry="$(printf '%s' "$_arch_out" | jq -r 'if has("dry") then .dry else true end' 2>/dev/null || echo 'true')"
             _arch_filed="$(printf '%s' "$_arch_out" | jq -r '.filed // 0' 2>/dev/null || echo 0)"
+            case "$_arch_filed" in ''|*[!0-9]*) _arch_filed=0 ;; esac
             printf '[conductor] Tier 3 architecture result: dry=%s filed=%s
 '                 "$_arch_dry" "$_arch_filed" >&2
             if [ "$_arch_dry" = "false" ] || { [ "$_arch_filed" -gt 0 ] 2>/dev/null; }; then
                 _work_done=1
+                _filed_issues=$((_filed_issues + _arch_filed))
             else
                 _tier3_dry_cycles=$((_tier3_dry_cycles + 1))
                 printf '[conductor] Tier 3 dry (tier3-dry-cycles=%s)
@@ -2904,6 +2908,7 @@ EOF_PROV_BATCH
                 local _explore_filed
                 _explore_filed="$(printf '%s' "$_explore_out" \
                     | jq -r '.filed // 0' 2>/dev/null || echo 0)"
+                case "$_explore_filed" in ''|*[!0-9]*) _explore_filed=0 ;; esac
 
                 if [ "$_explore_is_error" -eq 1 ]; then
                     printf '[conductor] Tier %s explore result: ERROR (exit=%s) — not a clean dry\n' \
@@ -2920,6 +2925,7 @@ EOF_PROV_BATCH
                     printf '[conductor] Tier %s filed %s candidate(s) — floating back to Tier 1\n' \
                         "$_tier" "$_explore_filed" >&2
                     _work_done=1
+                    _filed_issues=$((_filed_issues + _explore_filed))
                     # F3: track in-flight discovery issues so the main-merge
                     # refusal gate blocks Tier-1 drain until they are consumed.
                     if [ "$_explore_filed" -gt 0 ] 2>/dev/null; then
@@ -2976,10 +2982,12 @@ EOF_PROV_BATCH
             local _gd_dry _gd_filed
             _gd_dry="$(printf '%s' "$_gd_out" | jq -r 'if has("dry") then .dry else true end' 2>/dev/null || echo 'true')"
             _gd_filed="$(printf '%s' "$_gd_out" | jq -r '.filed // 0' 2>/dev/null || echo 0)"
+            case "$_gd_filed" in ''|*[!0-9]*) _gd_filed=0 ;; esac
             printf '[conductor] Tier G1 growth-define result: dry=%s filed=%s\n' \
                 "$_gd_dry" "$_gd_filed" >&2
             if [ "$_gd_dry" = "false" ] || { [ "$_gd_filed" -gt 0 ] 2>/dev/null; }; then
                 _work_done=1
+                _filed_issues=$((_filed_issues + _gd_filed))
             else
                 _tierg_dry_cycles=$((_tierg_dry_cycles + 1))
                 printf '[conductor] Tier G1 dry (tierg-dry-cycles=%s)\n' \
@@ -3093,7 +3101,8 @@ EOF_PROV_BATCH
             if [ "$_dry" != "1" ]; then
                 bash "$_spend" add \
                     --tokens 0 \
-                    --issues "$_work_done" \
+                    --filed-issues "$_filed_issues" \
+                    --budget-issues "$_work_done" \
                     2>/dev/null || true
             fi
             local _spend_check

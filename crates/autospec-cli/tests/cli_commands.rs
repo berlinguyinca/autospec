@@ -1727,7 +1727,8 @@ fn autonomous_status_reports_the_repo_scoped_resilience_spend_ledger() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout.contains("\"spend\":{\"tokens\":9,\"filed_issues\":7,\"budget_issues\":2}"));
+    assert!(stdout
+        .contains("\"spend\":{\"tokens\":9,\"issues\":2,\"filed_issues\":7,\"budget_issues\":2}"));
     assert!(
         !stdout.contains("1234"),
         "status must not display the legacy global spend file when policy uses a scoped ledger"
