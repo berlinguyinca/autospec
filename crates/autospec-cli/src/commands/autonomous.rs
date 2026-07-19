@@ -849,13 +849,11 @@ fn monitor(options: Options) -> Result<(), String> {
     let mut iteration = 0;
     loop {
         iteration += 1;
+        let snapshot = MonitorSnapshot::read(&options)?;
         if options.json {
-            println!(
-                "{{\"command\":\"autonomous\",\"subcommand\":\"monitor\",\"repo\":\"{}\",\"status\":\"ok\",\"action\":\"none\"}}",
-                json_escape(&options.repo)
-            );
+            println!("{}", snapshot.json());
         } else {
-            println!("autospec-monitor: ok repo={} action=none", options.repo);
+            snapshot.print();
         }
         if options.once || (options.iterations > 0 && iteration >= options.iterations) {
             break;
@@ -863,6 +861,338 @@ fn monitor(options: Options) -> Result<(), String> {
         thread::sleep(Duration::from_secs(options.interval_sec));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct MonitorSnapshot {
+    repo: String,
+    repo_dir: String,
+    pid: String,
+    logpath: String,
+    launch_argv: String,
+    stop_flag: PathBuf,
+    stop_mode: String,
+    run_mode: String,
+    state_status: String,
+    heartbeat_age_secs: Option<u64>,
+    current_cycle: String,
+    current_tier: String,
+    current_action: String,
+    tier_dry_result: Option<TierDryResult>,
+    discoveries: Vec<DiscoveryArtifact>,
+}
+
+#[derive(Debug, Clone)]
+struct TierDryResult {
+    tier: String,
+    dry: String,
+    filed: String,
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveryArtifact {
+    path: String,
+    proposals: usize,
+    candidates: usize,
+    verification_mode: String,
+    filed_issue_titles: Vec<String>,
+}
+
+impl MonitorSnapshot {
+    fn read(options: &Options) -> Result<Self, String> {
+        let layout = RunLayout::new(options)?;
+        let conductor = read_unit("conductor", &layout.state_dir);
+        let state = read_state_metadata(&layout);
+        let launch = read_launch_json(&layout.state_dir);
+        let logpath = if conductor.logpath.is_empty() {
+            newest_legacy_logpath().unwrap_or_default()
+        } else {
+            conductor.logpath.clone()
+        };
+        let timeline_lines = timeline_all_lines(&logpath, &layout.repo).unwrap_or_default();
+        let tier_dry_result = latest_tier_dry_result(&timeline_lines);
+        let stop_flag = stop_flag_path(&layout);
+        let stop_mode = read_stop_mode(&layout)
+            .ok()
+            .flatten()
+            .map(|mode| match mode {
+                LifecycleStopMode::Graceful => "graceful".to_string(),
+                LifecycleStopMode::Immediate => "immediate".to_string(),
+            })
+            .unwrap_or_default();
+
+        Ok(Self {
+            repo: layout.repo,
+            repo_dir: options.repo_dir.clone(),
+            pid: conductor.pid,
+            logpath,
+            launch_argv: extract_json_array(&launch, "argv").unwrap_or_else(|| "[]".to_string()),
+            stop_flag,
+            stop_mode,
+            run_mode: monitor_run_mode(&launch),
+            state_status: state.status,
+            heartbeat_age_secs: heartbeat_age_secs(&state.heartbeat_at),
+            current_cycle: latest_cycle(&timeline_lines).unwrap_or(state.last_cycle),
+            current_tier: latest_key_after(&timeline_lines, "tier=").unwrap_or_default(),
+            current_action: latest_key_after(&timeline_lines, "action=").unwrap_or_default(),
+            tier_dry_result,
+            discoveries: discovery_artifacts(Path::new(&options.repo_dir)),
+        })
+    }
+
+    fn json(&self) -> String {
+        format!(
+            "{{\"command\":\"autonomous\",\"subcommand\":\"monitor\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"run_mode\":\"{}\",\"pid\":\"{}\",\"logpath\":\"{}\",\"launch_argv\":{},\"stop_flag\":\"{}\",\"stop_mode\":\"{}\",\"state_status\":\"{}\",\"heartbeat_age_secs\":{},\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"tier_dry_result\":{},\"discovery_artifacts\":[{}]}}",
+            json_escape(&self.repo),
+            json_escape(&self.repo_dir),
+            json_escape(&self.run_mode),
+            json_escape(&self.pid),
+            json_escape(&self.logpath),
+            self.launch_argv,
+            json_escape(&self.stop_flag.display().to_string()),
+            json_escape(&self.stop_mode),
+            json_escape(&self.state_status),
+            self.heartbeat_age_secs
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            json_escape(&self.current_cycle),
+            json_escape(&self.current_tier),
+            json_escape(&self.current_action),
+            self.tier_dry_result
+                .as_ref()
+                .map(TierDryResult::json)
+                .unwrap_or_else(|| "null".to_string()),
+            self.discoveries
+                .iter()
+                .map(DiscoveryArtifact::json)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+
+    fn print(&self) {
+        println!(
+            "autospec-monitor: repo={} mode={} pid={} cycle={} tier={} action={}",
+            self.repo,
+            self.run_mode,
+            empty_dash(&self.pid),
+            empty_dash(&self.current_cycle),
+            empty_dash(&self.current_tier),
+            empty_dash(&self.current_action)
+        );
+        println!("log: {}", empty_dash(&self.logpath));
+        println!(
+            "stop_flag: {} {}",
+            self.stop_flag.display(),
+            empty_dash(&self.stop_mode)
+        );
+        if let Some(age) = self.heartbeat_age_secs {
+            println!("heartbeat_age_secs: {age}");
+        }
+        if let Some(result) = &self.tier_dry_result {
+            println!("{}", result.explanation());
+        }
+        for artifact in &self.discoveries {
+            println!(
+                "discovery: {} proposals={} candidates={} verification_mode={} titles={}",
+                artifact.path,
+                artifact.proposals,
+                artifact.candidates,
+                empty_dash(&artifact.verification_mode),
+                artifact.filed_issue_titles.join("; ")
+            );
+        }
+    }
+}
+
+impl TierDryResult {
+    fn explanation(&self) -> String {
+        if self.dry == "true" {
+            format!(
+                "tier_dry_result: tier produced no filed candidates in this cycle (tier {}); this is not the same as launch --dry-run mode.",
+                self.tier
+            )
+        } else {
+            format!(
+                "tier_dry_result: Tier {} produced filed candidates (filed={}).",
+                self.tier, self.filed
+            )
+        }
+    }
+
+    fn json(&self) -> String {
+        format!(
+            "{{\"tier\":\"{}\",\"dry\":{},\"filed\":{},\"explanation\":\"{}\"}}",
+            json_escape(&self.tier),
+            json_bool_or_string(&self.dry),
+            json_number_or_string(&self.filed),
+            json_escape(&self.explanation())
+        )
+    }
+}
+
+impl DiscoveryArtifact {
+    fn json(&self) -> String {
+        format!(
+            "{{\"path\":\"{}\",\"proposals\":{},\"candidates\":{},\"verification_mode\":\"{}\",\"filed_issue_titles\":{}}}",
+            json_escape(&self.path),
+            self.proposals,
+            self.candidates,
+            json_escape(&self.verification_mode),
+            json_string_array(&self.filed_issue_titles)
+        )
+    }
+}
+
+fn launch_contains_dry_run(launch: &str) -> bool {
+    ["argv", "conductor_argv"]
+        .iter()
+        .filter_map(|key| extract_json_array(launch, key))
+        .any(|argv| json_object_or_array_contains_string(&argv, "--dry-run"))
+}
+
+fn monitor_run_mode(launch: &str) -> String {
+    if launch.trim() == EMPTY_JSON_OBJECT {
+        "unknown".to_string()
+    } else if launch_contains_dry_run(launch) {
+        "dry-run".to_string()
+    } else {
+        "real".to_string()
+    }
+}
+
+fn json_object_or_array_contains_string(raw: &str, needle: &str) -> bool {
+    raw.split('"').any(|value| value == needle)
+}
+
+fn heartbeat_age_secs(raw: &str) -> Option<u64> {
+    let heartbeat = raw.parse::<u64>().ok()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(now.saturating_sub(heartbeat))
+}
+
+fn latest_cycle(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .rev()
+        .find_map(|line| conductor_cycle(line.trim()))
+}
+
+fn latest_key_after(lines: &[String], key: &str) -> Option<String> {
+    lines.iter().rev().find_map(|line| {
+        let rest = line.split_once(key)?.1;
+        let value = rest
+            .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    })
+}
+
+fn latest_tier_dry_result(lines: &[String]) -> Option<TierDryResult> {
+    lines.iter().rev().find_map(|line| {
+        let trimmed = line.trim();
+        let rest = trimmed.strip_prefix("[conductor] Tier ")?;
+        let (tier, after_tier) = rest.split_once(' ')?;
+        if !after_tier.starts_with("explore result:") {
+            return None;
+        }
+        Some(TierDryResult {
+            tier: tier.to_string(),
+            dry: value_after_token(after_tier, "dry=").unwrap_or_else(|| "true".to_string()),
+            filed: value_after_token(after_tier, "filed=").unwrap_or_else(|| "0".to_string()),
+        })
+    })
+}
+
+fn value_after_token(raw: &str, token: &str) -> Option<String> {
+    let rest = raw.split_once(token)?.1;
+    let value = rest
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';')
+        .next()
+        .unwrap_or_default();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn discovery_artifacts(repo_dir: &Path) -> Vec<DiscoveryArtifact> {
+    let root = repo_dir.join(".autospec");
+    let mut rows = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return rows;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("explore-once-") || !path.is_dir() {
+            continue;
+        }
+        let research = fs::read_to_string(path.join("research.json")).unwrap_or_default();
+        let candidates = fs::read_to_string(path.join("candidates.json")).unwrap_or_default();
+        let titles = filed_issue_titles(&candidates);
+        rows.push(DiscoveryArtifact {
+            path: path.display().to_string(),
+            proposals: json_array_object_count(&research, "proposals"),
+            candidates: json_object_strings(&candidates).len(),
+            verification_mode: extract_json_string(&research, "verification_mode")
+                .or_else(|| extract_json_string(&research, "verify_mode"))
+                .unwrap_or_default(),
+            filed_issue_titles: if titles.is_empty() {
+                filed_issue_titles(&research)
+            } else {
+                titles
+            },
+        });
+    }
+    rows.sort_by(|left, right| left.path.cmp(&right.path));
+    rows
+}
+
+fn json_array_object_count(raw: &str, key: &str) -> usize {
+    extract_json_array(raw, key)
+        .map(|array| json_object_strings(&array).len())
+        .unwrap_or(0)
+}
+
+fn filed_issue_titles(raw: &str) -> Vec<String> {
+    json_object_strings(raw)
+        .into_iter()
+        .filter_map(|object| extract_json_string(&object, "title"))
+        .filter(|title| !title.is_empty())
+        .collect()
+}
+
+fn json_bool_or_string(value: &str) -> String {
+    match value {
+        "true" | "false" => value.to_string(),
+        _ => format!("\"{}\"", json_escape(value)),
+    }
+}
+
+fn json_number_or_string(value: &str) -> String {
+    if value.chars().all(|ch| ch.is_ascii_digit()) && !value.is_empty() {
+        value.to_string()
+    } else {
+        format!("\"{}\"", json_escape(value))
+    }
+}
+
+fn empty_dash(value: &str) -> &str {
+    if value.is_empty() {
+        "-"
+    } else {
+        value
+    }
 }
 
 fn supervise(options: Options) -> Result<(), String> {
