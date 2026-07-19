@@ -172,6 +172,8 @@ Detect your harness by checking available tools before any phase:
 
 **Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same subagent dispatch with `TIER_A`. Preserve the parent context on retry by passing a bounded handoff containing the issue number, repo path, branch/worktree plan, relevant issue body sections, last error, and current queue/claim state. Codex native subagents with explicit `agent_type`, `model`, or `reasoning_effort` MUST use a bounded handoff, not a full-history fork; do not ask Codex to inherit/fork the full parent conversation when those fields are set. Never ask the user.
 
+**Codex SpawnAgent call-shape contract:** Codex has two valid subagent call shapes. Use the bounded handoff when setting an explicit executor/tier route: `SpawnAgent({ prompt: bounded_handoff, agent_type: "executor", model: TIER_B, reasoning_effort: "medium" })`. Use a full-history fork only when inheriting the current conversation without explicit routing: `SpawnAgent({ prompt: full_history_prompt, full_history: true })`. Never combine `full_history: true` with `agent_type`, `model`, or `reasoning_effort`. On Codex dispatch failure, retry once with the other valid shape when that still satisfies the phase's tier rule; if both valid shapes fail, release the claimed issue back to `auto-implement` with a visible blocker comment.
+
 Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
 
 ## Relevant memory injection (run-start, once)
