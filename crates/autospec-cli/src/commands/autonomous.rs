@@ -3896,25 +3896,7 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
                 HelperRecoveryState::RetryingHelper,
             );
         }
-        if let Some(start) = session_start_event(line, line_ts) {
-            rows.push(format!(
-                "time unknown - session {} entered starting.",
-                start.session_id
-            ));
-            child_sessions.push(start);
-        }
-        if let Some(session_id) = session_start_reconciled_event(line) {
-            if let Some(session) = child_sessions
-                .iter_mut()
-                .rev()
-                .find(|session| session.session_id == session_id)
-            {
-                session.state = ChildStartupState::Claimed;
-            }
-            rows.push(format!(
-                "time unknown - session {session_id} entered claimed after session_start_reconciled."
-            ));
-        }
+        record_session_reconciliation_line(&mut rows, &mut child_sessions, line, line_ts);
         if helper_failure_seen && records_helper_blocked(line) {
             push_helper_recovery_state(
                 &mut rows,
@@ -3997,6 +3979,33 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
     }
     flush_suppressed_leader_nudges(&mut rows, &mut suppressed_leader_nudges);
     dedupe_rows(rows)
+}
+
+fn record_session_reconciliation_line(
+    rows: &mut Vec<String>,
+    child_sessions: &mut Vec<ChildSessionStartup>,
+    line: &str,
+    line_ts: Option<u64>,
+) {
+    if let Some(start) = session_start_event(line, line_ts) {
+        rows.push(format!(
+            "time unknown - session {} entered starting.",
+            start.session_id
+        ));
+        child_sessions.push(start);
+    }
+    if let Some(session_id) = session_start_reconciled_event(line) {
+        if let Some(session) = child_sessions
+            .iter_mut()
+            .rev()
+            .find(|session| session.session_id == session_id)
+        {
+            session.state = ChildStartupState::Claimed;
+        }
+        rows.push(format!(
+            "time unknown - session {session_id} entered claimed after session_start_reconciled."
+        ));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4117,7 +4126,7 @@ fn records_helper_blocked(line: &str) -> bool {
 }
 
 fn session_start_event(line: &str, started_at: Option<u64>) -> Option<ChildSessionStartup> {
-    if line.contains("session_start_reconciled") || !line.contains("session_start") {
+    if has_marker(line, "session_start_reconciled") || !has_marker(line, "session_start") {
         return None;
     }
     let session_id = line_key_value(line, "child")
@@ -4143,7 +4152,7 @@ fn session_start_event(line: &str, started_at: Option<u64>) -> Option<ChildSessi
 }
 
 fn session_start_reconciled_event(line: &str) -> Option<String> {
-    if !line.contains("session_start_reconciled") {
+    if !has_marker(line, "session_start_reconciled") {
         return None;
     }
     line_key_value(line, "child")
