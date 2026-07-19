@@ -1,3 +1,6 @@
+#[path = "autonomous_conductor_normalized.rs"]
+mod autonomous_conductor_normalized;
+
 use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
