@@ -1,5 +1,7 @@
 use std::fs;
 
+use autospec_core::safety::{classify_explore_verifier_outcome, ExploreVerifierOutcome};
+
 use autospec_core::coordination::{
     parse_repository_routing_input_json, plan_repository_routing, CanonicalTarget,
     DoNotFileRepository, RepositoryRoutingReport, RoutedFinding,
@@ -19,6 +21,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         }
         [command, rest @ ..] if command == "repositories" => repositories(rest),
         [command, rest @ ..] if command == "specialists" => specialists(rest),
+        [command, rest @ ..] if command == "verifier-outcome" => verifier_outcome(rest),
         [command, ..] => Err(CommandFailure::diagnostic(format!(
             "unknown autospec explore command: {command}"
         ))),
@@ -75,6 +78,102 @@ fn specialists(args: &[String]) -> Result<(), CommandFailure> {
     })?;
     print!("{json}");
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct VerifierOutcomeOptions {
+    tier: Option<String>,
+    cycle: Option<u64>,
+    artifact: Option<String>,
+    status_code: Option<i32>,
+}
+
+fn verifier_outcome(args: &[String]) -> Result<(), CommandFailure> {
+    if matches!(args, [flag] if flag == "--help" || flag == "-h") {
+        print_verifier_outcome_help();
+        return Ok(());
+    }
+    let options = parse_verifier_outcome_options(args)?;
+    let tier = options.tier.ok_or_else(|| {
+        CommandFailure::diagnostic("autospec explore verifier-outcome requires --tier <name>")
+    })?;
+    let cycle = options.cycle.ok_or_else(|| {
+        CommandFailure::diagnostic("autospec explore verifier-outcome requires --cycle <n>")
+    })?;
+    let artifact = options.artifact.ok_or_else(|| {
+        CommandFailure::diagnostic("autospec explore verifier-outcome requires --artifact <path>")
+    })?;
+    let verify_command = std::env::var("AUTOSPEC_EXPLORE_VERIFY_CMD").ok();
+    let command_succeeded = options.status_code.map(|code| code == 0);
+    let outcome = classify_explore_verifier_outcome(
+        verify_command.as_deref(),
+        command_succeeded,
+        tier,
+        cycle,
+        artifact,
+    );
+    println!("{}", verifier_outcome_json(&outcome));
+    Ok(())
+}
+
+fn parse_verifier_outcome_options(
+    args: &[String],
+) -> Result<VerifierOutcomeOptions, CommandFailure> {
+    let mut options = VerifierOutcomeOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--tier" => {
+                let value = option_value(args, &mut index, "--tier")?;
+                replace_once(&mut options.tier, value, "--tier")?;
+            }
+            "--cycle" => {
+                let value = option_value(args, &mut index, "--cycle")?;
+                let parsed = value.parse::<u64>().map_err(|_| {
+                    CommandFailure::diagnostic("--cycle requires a non-negative integer")
+                })?;
+                replace_once(&mut options.cycle, parsed, "--cycle")?;
+            }
+            "--artifact" => {
+                let value = option_value(args, &mut index, "--artifact")?;
+                replace_once(&mut options.artifact, value, "--artifact")?;
+            }
+            "--status-code" => {
+                let value = option_value(args, &mut index, "--status-code")?;
+                let parsed = value
+                    .parse::<i32>()
+                    .map_err(|_| CommandFailure::diagnostic("--status-code requires an integer"))?;
+                replace_once(&mut options.status_code, parsed, "--status-code")?;
+            }
+            option => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autospec explore verifier-outcome option: {option}"
+                )));
+            }
+        }
+        index += 1;
+    }
+    Ok(options)
+}
+
+fn print_verifier_outcome_help() {
+    println!(
+        "autospec explore verifier-outcome\n\nUSAGE:\n    autospec explore verifier-outcome --tier <NAME> --cycle <N> --artifact <PATH> [--status-code N]\n\nOPTIONS:\n    --tier <NAME>       Discovery tier name\n    --cycle <N>         Discovery cycle number\n    --artifact <PATH>   Research/verifier artifact path\n    --status-code <N>   Optional verifier command exit status\n    -h, --help          Print help"
+    );
+}
+
+fn verifier_outcome_json(outcome: &ExploreVerifierOutcome) -> String {
+    format!(
+        "{{\"outcome\":{},\"reason\":{},\"tier\":{},\"cycle\":{},\"artifact_path\":{},\"sealed\":{},\"dry\":{},\"may_mutate_github\":{}}}",
+        json_string(outcome.kind.as_str()),
+        json_string(&outcome.reason),
+        json_string(&outcome.tier),
+        outcome.cycle,
+        json_string(&outcome.artifact_path),
+        json_bool(outcome.sealed),
+        json_bool(outcome.dry),
+        json_bool(outcome.may_mutate_github),
+    )
 }
 
 #[derive(Debug, Default)]
@@ -175,7 +274,7 @@ fn unknown_repository_option(option: &str) -> Result<RepositoryOptions, CommandF
 
 fn print_help() {
     println!(
-        "autospec explore\n\nUSAGE:\n    autospec explore [COMMAND]\n\nCOMMANDS:\n    repositories    Infer canonical repositories for org-sweep findings\n    specialists     Discover domain-specialist roster for autospec-explore\n\nOPTIONS:\n    -h, --help       Print help"
+        "autospec explore\n\nUSAGE:\n    autospec explore [COMMAND]\n\nCOMMANDS:\n    repositories       Infer canonical repositories for org-sweep findings\n    specialists        Discover domain-specialist roster for autospec-explore\n    verifier-outcome   Render sealed discovery verifier outcome JSON\n\nOPTIONS:\n    -h, --help          Print help"
     );
 }
 
@@ -273,4 +372,12 @@ fn json_string(value: &str) -> String {
     }
     escaped.push('"');
     escaped
+}
+
+fn json_bool(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
+    }
 }

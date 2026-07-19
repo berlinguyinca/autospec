@@ -8,6 +8,7 @@ All commands are operator-invoked local commands. No GitHub Actions, cron, or sc
 | `scripts/autospec-preflight.sh` | Check local environment readiness | yes/default | n/a | reports | no | `.autospec/reports/preflight.md` | MVP smoke |
 | `scripts/autospec-mvp-smoke.sh` | Run safe local MVP smoke checks | yes/default | n/a | reports | no | `.autospec/reports/mvp-smoke.md` | fix blockers or MVP status |
 | `scripts/autospec-command-audit.sh` | Audit command consistency | yes/default | n/a | reports | no | `.autospec/reports/command-audit.md` | update command docs |
+| `autospec explore verifier-outcome --tier <NAME> --cycle <N> --artifact <PATH>` | Render sealed `NotRun`/`Failed`/`Verified` discovery verifier outcome JSON | n/a | n/a | no | no | stdout JSON | autonomous discovery status |
 | `scripts/autospec-report-index.sh` | Index generated reports | yes/default | n/a | reports | no | `.autospec/reports/REPORT_INDEX.md` | MVP status |
 | `scripts/autospec-validate-state.sh` | Validate generated state/report artifacts | yes/default | n/a | reports | no | `.autospec/reports/state-validation.md` | sensitive audit |
 | `scripts/autospec-sensitive-output-audit.sh` | Scan generated Autospec outputs for secrets | yes/default | n/a | reports | no | `.autospec/reports/sensitive-output-audit.md` | fix leaks |

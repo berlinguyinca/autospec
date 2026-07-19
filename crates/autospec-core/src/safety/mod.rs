@@ -95,3 +95,121 @@ fn is_aws_key(token: &str) -> bool {
             .chars()
             .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExploreVerifierOutcomeKind {
+    NotRun,
+    Failed,
+    Verified,
+}
+
+impl ExploreVerifierOutcomeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotRun => "NotRun",
+            Self::Failed => "Failed",
+            Self::Verified => "Verified",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExploreVerifierOutcome {
+    pub kind: ExploreVerifierOutcomeKind,
+    pub reason: String,
+    pub tier: String,
+    pub cycle: u64,
+    pub artifact_path: String,
+    pub sealed: bool,
+    pub dry: bool,
+    pub may_mutate_github: bool,
+}
+
+impl ExploreVerifierOutcome {
+    pub fn not_run(tier: impl Into<String>, cycle: u64, artifact_path: impl Into<String>) -> Self {
+        Self::sealed(
+            ExploreVerifierOutcomeKind::NotRun,
+            "missing_AUTOSPEC_EXPLORE_VERIFY_CMD",
+            tier,
+            cycle,
+            artifact_path,
+        )
+    }
+
+    pub fn failed(
+        reason: impl Into<String>,
+        tier: impl Into<String>,
+        cycle: u64,
+        artifact_path: impl Into<String>,
+    ) -> Self {
+        Self::sealed(
+            ExploreVerifierOutcomeKind::Failed,
+            reason,
+            tier,
+            cycle,
+            artifact_path,
+        )
+    }
+
+    pub fn verified(tier: impl Into<String>, cycle: u64, artifact_path: impl Into<String>) -> Self {
+        Self {
+            kind: ExploreVerifierOutcomeKind::Verified,
+            reason: "verified".to_string(),
+            tier: tier.into(),
+            cycle,
+            artifact_path: artifact_path.into(),
+            sealed: false,
+            dry: false,
+            may_mutate_github: true,
+        }
+    }
+
+    fn sealed(
+        kind: ExploreVerifierOutcomeKind,
+        reason: impl Into<String>,
+        tier: impl Into<String>,
+        cycle: u64,
+        artifact_path: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind,
+            reason: reason.into(),
+            tier: tier.into(),
+            cycle,
+            artifact_path: artifact_path.into(),
+            sealed: true,
+            dry: false,
+            may_mutate_github: false,
+        }
+    }
+}
+
+pub fn classify_explore_verifier_outcome(
+    verify_command: Option<&str>,
+    command_succeeded: Option<bool>,
+    tier: impl Into<String>,
+    cycle: u64,
+    artifact_path: impl Into<String>,
+) -> ExploreVerifierOutcome {
+    let tier = tier.into();
+    let artifact_path = artifact_path.into();
+    let command = verify_command.unwrap_or_default().trim();
+    if command.is_empty() {
+        return ExploreVerifierOutcome::not_run(tier, cycle, artifact_path);
+    }
+    match command_succeeded {
+        Some(true) => ExploreVerifierOutcome::verified(tier, cycle, artifact_path),
+        Some(false) => ExploreVerifierOutcome::failed(
+            "AUTOSPEC_EXPLORE_VERIFY_CMD_failed",
+            tier,
+            cycle,
+            artifact_path,
+        ),
+        None => ExploreVerifierOutcome::failed(
+            "AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed",
+            tier,
+            cycle,
+            artifact_path,
+        ),
+    }
+}
