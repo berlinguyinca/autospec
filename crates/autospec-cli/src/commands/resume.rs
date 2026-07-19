@@ -1,5 +1,7 @@
 use autospec_core::execution::ExecutionQueue;
 
+use super::run::{resume_command_path, startup_failure_path};
+
 pub fn run(args: &[String]) -> Result<(), String> {
     let json = parse_options(args)?;
     let queue = ExecutionQueue::load_latest_incomplete(".")?
@@ -9,11 +11,19 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .ok_or_else(|| "autospec resume found no incomplete queue entry".to_string())?;
 
     if json {
+        let resume_command_persisted = resume_command_path(".", &queue.run_id).is_file();
+        let startup_recovery = if startup_failure_path(".", &queue.run_id).is_file() {
+            "retry"
+        } else {
+            ""
+        };
         println!(
-            "{{\"command\":\"resume\",\"status\":\"ready\",\"run_id\":\"{}\",\"spec_id\":\"{}\",\"entry_status\":\"{}\"}}",
+            "{{\"command\":\"resume\",\"status\":\"ready\",\"run_id\":\"{}\",\"spec_id\":\"{}\",\"entry_status\":\"{}\",\"resume_command_persisted\":{},\"startup_recovery\":\"{}\"}}",
             escape_json(&queue.run_id),
             escape_json(&entry.spec_id),
             entry.status.as_str(),
+            resume_command_persisted,
+            startup_recovery,
         );
     } else {
         println!(

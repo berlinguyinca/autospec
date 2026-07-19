@@ -187,7 +187,7 @@ dedicated config keys.
 ## Crash-resume & watchdog
 | Var | Default | Effect |
 |---|---|---|
-| `AUTOSPEC_RESUME_COMMAND` | derived | Command the usage-limit supervisor relaunches on reset. |
+| `AUTOSPEC_RESUME_COMMAND` | derived | Literal resume command persisted by `autospec run` and reused by supervisors on reset. |
 
 ## Memory management
 | Var | Default | Effect |
