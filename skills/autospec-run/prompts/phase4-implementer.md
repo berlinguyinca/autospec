@@ -446,7 +446,22 @@ if [ "$attempt" -ge "$max_attempts" ]; then
     gh issue comment <issue> --body "PR #<PR>: rebase-and-retest stalled after $max_attempts attempts; $PR_BASE is moving faster than CI completes. Pausing for operator review."
     exit 1
 fi
-gh pr merge <PR> --admin --squash --delete-branch
+# Blast-radius domain fence at the merge chokepoint (issue #1732): classify the
+# PR's actual changed files against the repo's fenced_surfaces registry and
+# refuse to merge a fenced-surface diff (applies autospec:needs-human + comments)
+# unless the PR carries the `autospec:fenced-approved` override label. Call the
+# wrapper INSTEAD of a bare `gh pr merge --admin`. exit 1 = quarantined (NOT
+# merged); exit 2 = fail-closed error.
+if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo <repo>; then
+    gm_rc=$?
+    if [ "$gm_rc" -eq 1 ]; then
+        gh issue edit <issue> --remove-label in-progress-by-bot --add-label autospec:needs-human 2>/dev/null || true
+        echo "quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
+    else
+        echo "guarded-merge fail-closed (rc=$gm_rc) — PR NOT merged; pausing for operator review"
+    fi
+    exit 0
+fi
 ```
 
 Notes:
