@@ -113,6 +113,18 @@ actors for the scoped test-reset exception; duplicate built-in patterns are harm
 An unsupported custom regex returns the fail-closed `invalid-policy-regex` block rather
 than being ignored.
 
+### `autospec issue promote`
+
+Typed admission gate for a final issue payload before `auto-implement` is added.
+
+Usage:
+`autospec issue promote --number N --title TITLE (--body BODY | --body-file PATH) --author LOGIN [--label LABEL ...] [--labels CSV] [--json]`
+
+The JSON response includes issue identity, `safety.decision`, `safety.reason`,
+`"auto-implement"`, `drainable`, `final_labels`, and `blocked_by_reason`. The
+command grants `"auto-implement": true` only when the exact final payload passes
+the claim safety verdict; ambiguous, blocked, or indeterminate verdicts fail closed.
+
 ### `autospec queue ready`
 
 Rust-owned, fail-closed selection of issues that are safe for an autospec worker to

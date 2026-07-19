@@ -25,6 +25,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec runtime env normalize-compose --repo <path> --check\|--apply [--fingerprint SHA256]` | yes | plans or transactionally applies a manifest-v2 Compose migration without a second YAML transformer |
 | `autospec claim state read\|upsert\|clear\|reconcile-linked-pr ...` | yes | manages the schema-1 GitHub run-state comment using lowest-comment-ID selection |
 | `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
+| `autospec issue promote --number N --title TITLE --body-file PATH --author LOGIN [--label LABEL ...]` | yes | evaluates the final issue payload and grants `auto-implement` only when the typed safety verdict passes |
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
 | `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
 | `autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]` | yes | reads resilient admission state without migration; atomic lifecycle ownership writes only canonical `owner__repo` state and starts no shell process |
@@ -78,6 +79,13 @@ the current issue safety review before it writes a startup heartbeat and moves l
 the lowest GitHub comment ID plus a server-side timestamp to decide the lease. `release` writes
 terminal merge evidence before state and label transitions. Legacy script entrypoints remain only
 as compatibility surfaces until every caller is redirected to this command family.
+
+`autospec issue promote` is the typed admission gate for callers that are about to add
+`auto-implement` to a final title/body/author/label payload. It evaluates that exact payload
+with the claim safety contract, emits `"auto-implement": true` only for a passing verdict,
+returns structured ambiguous/blocked/indeterminate decisions without the label grant, and
+groups blocked or indeterminate verdicts by inner safety reason in `blocked_by_reason`.
+`drainable` reports whether the safely promoted payload is accepted by the ready-queue selector.
 
 `autospec queue ready` follows every GitHub REST page for open `auto-implement` work and active
 claims, counts raw issue-page records before filtering pull requests, and cursor-paginates linked
