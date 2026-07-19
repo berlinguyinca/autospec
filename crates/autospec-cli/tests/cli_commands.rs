@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Command, Output, Stdio};
@@ -1204,6 +1205,101 @@ fn run_ingests_an_explicit_agent_result_without_launching_an_agent_or_validation
         .expect("updated queue is readable");
     assert!(queue.contains("\"status\":\"passed\""));
     assert!(queue.contains("\"agent_result_ids\":[\"result-1\"]"));
+}
+
+#[test]
+fn run_persists_literal_resume_command_without_shell_expansion_under_set_u() {
+    let root = temp_dir("autospec-run-literal-resume-command");
+    let script = concat!(
+        "AUTOSPEC_RESUME_COMMAND='omx exec --cd /repo $autospec-run' ",
+        "\"$AUTOSPEC_BIN\" run --run run-cli-literal-resume ",
+        "--spec v67-agent-integration-contracts --json"
+    );
+
+    let output = Command::new("sh")
+        .args(["-eu", "-c", script])
+        .env("AUTOSPEC_BIN", env!("CARGO_BIN_EXE_autospec"))
+        .current_dir(&root)
+        .output()
+        .expect("run command starts under set -u");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let resume_command = std::fs::read_to_string(
+        root.join(".autospec/runs/run-cli-literal-resume/resume-command.json"),
+    )
+    .expect("resume command metadata is persisted");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&resume_command).expect("resume command metadata is JSON");
+
+    assert_eq!(parsed["schema"], 1);
+    assert_eq!(parsed["status"], "ready");
+    assert_eq!(parsed["resume_command"]["kind"], "literal");
+    assert_eq!(
+        parsed["resume_command"]["value"],
+        "omx exec --cd /repo $autospec-run"
+    );
+}
+
+#[test]
+fn run_startup_failure_records_retry_metadata_for_resume() {
+    let root = temp_dir("autospec-run-startup-failure");
+    let output = autospec()
+        .args([
+            "run",
+            "--run",
+            "run-cli-startup-failure",
+            "--spec",
+            "v67-agent-integration-contracts",
+            "--json",
+        ])
+        .env(
+            "AUTOSPEC_RESUME_COMMAND",
+            std::ffi::OsString::from_vec(vec![0xff]),
+        )
+        .current_dir(&root)
+        .output()
+        .expect("run command starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("\"status\":\"startup_failed\""));
+    assert!(stdout.contains("\"recovery\":\"retry\""));
+    assert!(stdout.contains("\"lock\":\"released\""));
+    assert!(root
+        .join(".autospec/runs/run-cli-startup-failure/queue.json")
+        .exists());
+    let startup_failure = std::fs::read_to_string(
+        root.join(".autospec/runs/run-cli-startup-failure/startup-failed.json"),
+    )
+    .expect("startup failure metadata is persisted");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&startup_failure).expect("startup failure metadata is JSON");
+    assert_eq!(parsed["status"], "startup_failed");
+    assert_eq!(parsed["recovery"], "retry");
+    assert_eq!(parsed["lock"], "released");
+
+    let resumed = autospec()
+        .args(["resume", "--json"])
+        .current_dir(&root)
+        .output()
+        .expect("resume command starts");
+    let resume_stdout = String::from_utf8_lossy(&resumed.stdout);
+    assert!(
+        resumed.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(resume_stdout.contains("\"startup_recovery\":\"retry\""));
 }
 
 #[test]

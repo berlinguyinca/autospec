@@ -1,5 +1,6 @@
+use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use autospec_core::agent::AgentResult;
 use autospec_core::execution::{
@@ -7,6 +8,9 @@ use autospec_core::execution::{
 };
 
 const DEFAULT_RETRY_LIMIT: u32 = 3;
+const RESUME_COMMAND_ENV: &str = "AUTOSPEC_RESUME_COMMAND";
+const RESUME_COMMAND_FILE: &str = "resume-command.json";
+const STARTUP_FAILURE_FILE: &str = "startup-failed.json";
 
 #[derive(Debug)]
 enum Mode {
@@ -44,12 +48,27 @@ fn create_queue(options: &Options) -> Result<(), String> {
 
     let queue =
         ExecutionQueue::create_if_absent(".", options.run_id.clone(), options.specs.clone())?;
+    let resume_command_persisted = match persist_resume_command(".", &queue.run_id) {
+        Ok(persisted) => persisted,
+        Err(error) => {
+            let _ = record_startup_failure(".", &queue.run_id, &error);
+            if options.json {
+                println!(
+                    "{{\"command\":\"run\",\"mode\":\"create\",\"status\":\"startup_failed\",\"run_id\":\"{}\",\"recovery\":\"retry\",\"lock\":\"released\",\"error\":\"{}\"}}",
+                    escape_json(&queue.run_id),
+                    escape_json(&error),
+                );
+            }
+            return Err(error);
+        }
+    };
 
     if options.json {
         println!(
-            "{{\"command\":\"run\",\"mode\":\"create\",\"status\":\"created\",\"run_id\":\"{}\",\"spec_count\":{}}}",
+            "{{\"command\":\"run\",\"mode\":\"create\",\"status\":\"created\",\"run_id\":\"{}\",\"spec_count\":{},\"resume_command_persisted\":{}}}",
             escape_json(&queue.run_id),
-            options.specs.len()
+            options.specs.len(),
+            resume_command_persisted,
         );
     } else {
         println!(
@@ -59,6 +78,66 @@ fn create_queue(options: &Options) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+pub(super) fn resume_command_path(root: impl AsRef<Path>, run_id: &str) -> PathBuf {
+    run_directory(root.as_ref(), run_id).join(RESUME_COMMAND_FILE)
+}
+
+pub(super) fn startup_failure_path(root: impl AsRef<Path>, run_id: &str) -> PathBuf {
+    run_directory(root.as_ref(), run_id).join(STARTUP_FAILURE_FILE)
+}
+
+fn run_directory(root: &Path, run_id: &str) -> PathBuf {
+    root.join(".autospec").join("runs").join(run_id)
+}
+
+fn persist_resume_command(root: impl AsRef<Path>, run_id: &str) -> Result<bool, String> {
+    let command = match env::var(RESUME_COMMAND_ENV) {
+        Ok(command) if !command.is_empty() => command,
+        Ok(_) | Err(env::VarError::NotPresent) => return Ok(false),
+        Err(error) => return Err(format!("{RESUME_COMMAND_ENV} is not valid UTF-8: {error}")),
+    };
+    let path = resume_command_path(root, run_id);
+    write_atomic(
+        &path,
+        &format!(
+            "{{\n  \"schema\": 1,\n  \"status\": \"ready\",\n  \"resume_command\": {{\n    \"kind\": \"literal\",\n    \"source\": \"{}\",\n    \"value\": \"{}\"\n  }}\n}}\n",
+            RESUME_COMMAND_ENV,
+            escape_json(&command),
+        ),
+    )?;
+    Ok(true)
+}
+
+fn record_startup_failure(
+    root: impl AsRef<Path>,
+    run_id: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let path = startup_failure_path(root, run_id);
+    write_atomic(
+        &path,
+        &format!(
+            "{{\n  \"schema\": 1,\n  \"status\": \"startup_failed\",\n  \"recovery\": \"retry\",\n  \"lock\": \"released\",\n  \"reason\": \"{}\"\n}}\n",
+            escape_json(reason),
+        ),
+    )
+}
+
+fn write_atomic(path: &Path, contents: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+    let temporary = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    fs::write(&temporary, contents)
+        .map_err(|error| format!("cannot write {}: {error}", temporary.display()))?;
+    fs::rename(&temporary, path).map_err(|error| {
+        let _ = fs::remove_file(&temporary);
+        format!("cannot publish {}: {error}", path.display())
+    })
 }
 
 fn ingest_result(options: &Options, input: &PathBuf) -> Result<(), String> {
