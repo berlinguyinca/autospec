@@ -68,6 +68,24 @@ Before changing any code:
 
 > **Advisor gate `impl-decision` (any profile).** When you face a design or architecture sub-decision you cannot reasonably resolve within your tier's budget, run the `## Advisor escalation` protocol with `--gate impl-decision` before guessing. Apply a returned `plan`/`correction`; on `stop` take the soft-fail path. The shared per-issue cap bounds how often this fires, so reserve it for genuinely stuck decisions rather than routine choices.
 
+### UI cohesion audit
+
+When the issue is a UI cleanup/refactor of an existing page, audit the page's
+child chrome before editing instead of only inspecting the top-level route.
+Read the design-system README or token file, the route component, and every
+child component that renders visible chrome on that route. Identify nested
+cards, duplicate section headers, raw `px`/hex/`rgb()` values, inline styles,
+legacy utility classes, and inconsistent spacing before deciding what to keep.
+
+Composition rule: the page shell owns layout; design-system cards are only for
+top-level sections or true repeated item cards. Avoid cards-in-cards. Delete
+duplicate wrappers and legacy chrome in the touched children rather than adding
+new wrapper markup around them.
+
+When the app runs locally, verify the refactor with desktop and mobile screenshots.
+Iterate until the screenshots show no nested-card artifacts, duplicate chrome, or
+mixed typography.
+
 1. Stay within the context and reasoning budget implied by the issue's `ctx:*` / `reasoning:*` labels. If you hit budget pressure, stop and post a comment on the issue rather than producing rushed work.
 2. Follow the conventions surfaced during Expand. Do not introduce new patterns that diverge from surrounding code unless the issue explicitly asks for them.
 3. Write tests first when the change has a clear functional contract (TDD per AGENTS.md). For pure prose / docs changes, skip TDD.
@@ -442,12 +460,12 @@ remediation issues.
 
 ## Rebase-and-retest gate
 
-Immediately before `gh pr merge --admin --squash --delete-branch`, run the
-following loop. It addresses cross-session CI rot (issue #307): when two
-PRs are individually green but their combination breaks the resolved base, a
-stale branch at merge time silently corrupts that base. By asking GitHub to
-update the branch when it is `BEHIND` the PR base and waiting for CI to
-re-pass, the PR is proven against the post-merge base before we admin-merge.
+Run the following loop immediately before the admin-squash merge. It addresses
+cross-session CI rot (issue #307): when two PRs are individually green but their
+combination breaks the resolved base, a stale branch at merge time silently
+corrupts that base. By asking GitHub to update the branch when it is `BEHIND`
+the PR base and waiting for CI to re-pass, the PR is proven against the
+post-merge base before we admin-merge.
 
 The cap defaults to 3 attempts but is configurable via the
 `AUTOSPEC_REBASE_MAX_ATTEMPTS` env var.
@@ -517,14 +535,15 @@ if [ "$attempt" -ge "$max_attempts" ]; then
 fi
 # Blast-radius domain fence at the merge chokepoint (issue #1732): classify the
 # PR's actual changed files against the repo's fenced_surfaces registry and
-# refuse to merge a fenced-surface diff (applies autospec:needs-human + comments)
-# unless the PR carries the `autospec:fenced-approved` override label. Call the
-# wrapper INSTEAD of a bare `gh pr merge --admin`. exit 1 = quarantined (NOT
-# merged); exit 2 = fail-closed error.
-if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo <repo>; then
+# refuse to merge a fenced-surface diff (the wrapper applies the human-review
+# quarantine label and comments) unless the PR carries the
+# `autospec:fenced-approved` override label. Call the wrapper INSTEAD of a bare
+# `gh pr merge --admin`. exit 1 = quarantined (NOT merged); exit 2 =
+# fail-closed error.
+# This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
+if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo {repo}; then
     gm_rc=$?
     if [ "$gm_rc" -eq 1 ]; then
-        gh issue edit <issue> --remove-label in-progress-by-bot --add-label autospec:needs-human 2>/dev/null || true
         echo "quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
     else
         echo "guarded-merge fail-closed (rc=$gm_rc) — PR NOT merged; pausing for operator review"

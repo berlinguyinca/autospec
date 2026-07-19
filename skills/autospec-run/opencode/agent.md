@@ -1301,7 +1301,26 @@ do not fall back to an inline label-swap path.
 >        exit 1
 >      fi
 >    fi
->    gh pr merge <PR> --admin --squash --delete-branch
+>    # Blast-radius domain fence at the merge chokepoint (issue #1732). The guarded-merge
+>    # wrapper classifies the PR's ACTUAL changed files against the repo's fenced_surfaces
+>    # registry and refuses to merge a fenced-surface diff (the wrapper applies the
+>    # human-review quarantine label and comments) unless the PR carries the
+>    # `autospec:fenced-approved` override label; otherwise
+>    # it performs the same admin squash-merge. Call it INSTEAD of a bare `gh pr merge --admin`
+>    # so "merge without the fence check" requires deliberately bypassing the wrapper.
+>    # exit 0 = merged (allowed/overridden); 1 = quarantined (NOT merged); 2 = fail-closed error.
+>    # This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
+>    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo {repo}; then
+>      _gm_rc=$?
+>      if [ "$_gm_rc" -eq 1 ]; then
+>        "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --state blocked --branch "<BRANCH>" --pr "<PR>" || true
+>        echo "[monitor] #<ISSUE> quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
+>      else
+>        echo "[monitor] #<ISSUE> guarded-merge fail-closed (rc=$_gm_rc) — PR NOT merged; pausing for operator review"
+>      fi
+>      rm -f "/tmp/issue-<ISSUE>-body.md" || true
+>      exit 0
+>    fi
 >    "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} \
 >      --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" \
 >      --state merged --branch "<BRANCH>" --pr "<PR>" || true
