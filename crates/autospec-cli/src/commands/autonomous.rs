@@ -902,7 +902,7 @@ impl MonitorSnapshot {
     fn read(options: &Options) -> Result<Self, String> {
         let layout = RunLayout::new(options)?;
         let conductor = read_unit("conductor", &layout.state_dir);
-        let state = read_state_metadata(&layout);
+        let state = monitor_state_metadata(&layout);
         let launch = read_launch_json(&layout.state_dir);
         let logpath = if conductor.logpath.is_empty() {
             newest_legacy_logpath().unwrap_or_default()
@@ -1102,9 +1102,10 @@ fn latest_tier_dry_result(lines: &[String]) -> Option<TierDryResult> {
         if !after_tier.starts_with("explore result:") {
             return None;
         }
+        let dry = value_after_token(after_tier, "dry=")?;
         Some(TierDryResult {
             tier: tier.to_string(),
-            dry: value_after_token(after_tier, "dry=").unwrap_or_else(|| "true".to_string()),
+            dry,
             filed: value_after_token(after_tier, "filed=").unwrap_or_else(|| "0".to_string()),
         })
     })
@@ -3462,6 +3463,21 @@ fn git_top_level(repo_dir: &str) -> Option<PathBuf> {
     } else {
         Some(PathBuf::from(path))
     }
+}
+
+fn monitor_state_metadata(layout: &RunLayout) -> StateMetadata {
+    resilience::status(&layout.repo)
+        .ok()
+        .flatten()
+        .map(|state| StateMetadata {
+            status: state.status,
+            heartbeat_at: state
+                .heartbeat_at
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            last_cycle: state.last_cycle,
+        })
+        .unwrap_or_else(|| read_state_metadata(layout))
 }
 
 fn read_state_metadata(layout: &RunLayout) -> StateMetadata {

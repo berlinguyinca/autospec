@@ -1580,6 +1580,57 @@ fn explicit_zero_lifetime_budget_remains_valid() {
 }
 
 #[test]
+fn autonomous_monitor_reads_canonical_resilience_status_for_heartbeat_age() {
+    let fixture = ResilienceFixture::new();
+    let heartbeat = now_secs().saturating_sub(5);
+    fixture.write_state(
+        "owner__repo",
+        format!(
+            r#"{{"repo":"owner/repo","status":"running","heartbeat_at":{heartbeat},"cycle":12}}"#
+        ),
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["state_status"], "running");
+    assert_eq!(body["current_cycle"], "12");
+    assert!(
+        body["heartbeat_age_secs"].as_u64().is_some(),
+        "monitor should report heartbeat age from canonical resilience state: {body}"
+    );
+}
+
+#[test]
+fn autonomous_monitor_does_not_invent_dry_result_for_tier_errors() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 9 repo=owner/repo
+[conductor] waterfall decision tier=2 action=run-explore-once reason=local-discovery
+[conductor] Tier 2 explore result: ERROR helper unavailable
+",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!(
+            "{}
+",
+            logpath.display()
+        ),
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["current_tier"], "2");
+    assert_eq!(body["tier_dry_result"], serde_json::Value::Null);
+}
+
+#[test]
 fn autonomous_monitor_distinguishes_launch_dry_run_from_tier_dry_result() {
     let fixture = ResilienceFixture::new();
     let logpath = fixture.root.join("conductor.log");
