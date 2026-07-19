@@ -29,6 +29,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
 | `autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]` | yes | reads resilient admission state without migration; atomic lifecycle ownership writes only canonical `owner__repo` state and starts no shell process |
 | `autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]` | yes | directly supervises the fixed `omx exec ... $autospec-run` child, preserving local/external progress and terminating only a genuinely stalled live child |
+| `autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]` | yes | classifies changed paths against configured fenced surfaces; fenced matches exit non-zero and report quarantine evidence |
 | `autospec autonomous main-health --repo OWNER/REPO --repo-dir DIR [--branch BRANCH] [--json]` | yes | runs the Rust repository-local mainline-health probe without dispatching work |
 | `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR [--branch BRANCH]` | no | adopts its fenced native-child token or atomically acquires one before lifecycle, health, queue, claim, or foreground mutation; it launches no implementation agent |
 | `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `omx` effects |
@@ -118,6 +119,13 @@ GitHub default branch; exact ignored names become advisory health evidence only.
 See [mainline health admission](runbooks/mainline-health-admission.md) and the
 [configuration reference](CONFIG_REFERENCE.md#repository-local-rust-mainline-health)
 for the supported schema and fail-closed behavior.
+
+`autospec autonomous blast-radius` reads newline-delimited changed paths from
+`--changed-files` and matches them against `.autospec/autospec.yml`
+`fenced_surfaces` by default, or a caller-supplied `--fenced-surfaces` registry.
+Fenced matches emit `blast:fenced`, `decision:"quarantine"`, and non-zero exit
+status so policy config changes such as `.autospec/autospec.yml` cannot be
+treated as low-blast-radius.
 
 `autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]
 [--json]` is the Rust Tier-1 watchdog for the fixed direct `omx exec ... $autospec-run` child.

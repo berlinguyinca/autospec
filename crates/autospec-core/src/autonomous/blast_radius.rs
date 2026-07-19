@@ -243,25 +243,30 @@ where
 }
 
 fn match_registry(paths: &[String], registry: &[FencedSurface]) -> Vec<FencedMatch> {
-    let mut matches = Vec::new();
-    for changed in paths {
-        for surface in registry {
-            for pattern in &surface.paths {
-                let pattern = normalize_path(pattern);
-                if matches_pattern(&pattern, changed) {
-                    matches.push(FencedMatch {
-                        path: changed.clone(),
-                        surface: surface.id.clone(),
-                        severity: surface.severity.clone(),
-                        reason: surface.reason.clone(),
-                        pattern,
-                    });
-                    break;
-                }
-            }
-        }
-    }
-    matches
+    paths
+        .iter()
+        .flat_map(|changed| {
+            registry
+                .iter()
+                .filter_map(move |surface| match_surface(changed, surface))
+        })
+        .collect()
+}
+
+fn match_surface(changed: &str, surface: &FencedSurface) -> Option<FencedMatch> {
+    let pattern = surface
+        .paths
+        .iter()
+        .map(|pattern| normalize_path(pattern))
+        .find(|pattern| matches_pattern(pattern, changed))?;
+
+    Some(FencedMatch {
+        path: changed.to_string(),
+        surface: surface.id.clone(),
+        severity: surface.severity.clone(),
+        reason: surface.reason.clone(),
+        pattern,
+    })
 }
 
 fn matches_pattern(pattern: &str, path: &str) -> bool {
