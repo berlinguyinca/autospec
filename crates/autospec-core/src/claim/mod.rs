@@ -796,21 +796,71 @@ fn contains_ci_or_review_bypass(text: &str) -> bool {
         "suppressed",
     ];
     text.lines().any(|line| {
-        // Corresponds to the verb→noun regex arm.
-        VERBS.iter().any(|verb| {
-            NOUNS
-                .iter()
-                .any(|noun| ordered_contains_word(line, verb, noun))
-        })
-            // Corresponds to the noun→verb arm. Do not include present-tense
-            // "skips"/"disables"/"removes": that is the #1799 false-positive
-            // shape the bounded legacy rule deliberately excluded.
-            || NOUNS.iter().any(|noun| {
-                NOUN_FIRST_VERBS
-                    .iter()
-                    .any(|verb| ordered_contains_word(line, noun, verb))
-            })
+        // Collect every bypass-phrase start position on the line, across both
+        // arms.
+        let mut matches: Vec<usize> = Vec::new();
+        // verb→noun arm.
+        for verb in VERBS {
+            for noun in NOUNS {
+                if let Some(index) = ordered_pair_start(line, verb, noun) {
+                    matches.push(index);
+                }
+            }
+        }
+        // noun→verb arm. Present-tense "skips"/"disables"/"removes" stay
+        // excluded (the #1799 shape) via NOUN_FIRST_VERBS.
+        for noun in NOUNS {
+            for verb in NOUN_FIRST_VERBS {
+                if let Some(index) = ordered_pair_start(line, noun, verb) {
+                    matches.push(index);
+                }
+            }
+        }
+        // A bypass phrase governed by a nearby prohibition cue ("do not skip
+        // the tests", "no existing test is #[ignore]d") is a guardrail, not a
+        // bypass request — suppress it (issue #2175). The line still fires if
+        // ANY bypass phrase is ungoverned, so a real request ("disable CI",
+        // "skip the test suite", or "do not touch X; skip CI") still trips.
+        matches
+            .iter()
+            .any(|&index| !prohibition_precedes(line, index))
     })
+}
+
+/// Byte offset of `first` when a `second` word occurs later on the same line.
+fn ordered_pair_start(text: &str, first: &str, second: &str) -> Option<usize> {
+    word_positions(text, first)
+        .into_iter()
+        .find(|index| !word_positions(&text[index + first.len()..], second).is_empty())
+}
+
+/// True when a prohibition cue sits in the SAME CLAUSE before a bypass phrase
+/// at `match_index`, marking it as a guardrail rather than an instruction to
+/// bypass CI/review (issue #2175). Input is already lowercased by
+/// `lint_issue_intent`.
+///
+/// The clause is bounded by strong separators (`;` or `. `) — NOT commas, so a
+/// list guardrail like "…test weakened, loosened, `#[ignore]`d" keeps its
+/// leading "no". A real bypass in a later clause ("do not touch X; skip CI")
+/// is not suppressed because the cue is in the previous clause.
+fn prohibition_precedes(line: &str, match_index: usize) -> bool {
+    const CUES: &[&str] = &[
+        "no ", "not ", "n't", "never", "without", "cannot", "can not", "do not",
+        "does not", "must not", "should not", "may not", "will not", "avoid ",
+        "prohibit", "forbid", "prevent", "refuse", "disallow", "keep every",
+        "keep all", "leave every", "leave all",
+    ];
+    let prefix = &line[..match_index];
+    let clause_start = [
+        prefix.rfind(';').map(|index| index + 1),
+        prefix.rfind(". ").map(|index| index + 2),
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(0);
+    let clause = &prefix[clause_start..];
+    CUES.iter().any(|cue| clause.contains(cue))
 }
 
 fn contains_auth_backdoor(text: &str) -> bool {
@@ -862,14 +912,6 @@ fn ordered_contains(text: &str, first: &str, second: &str) -> bool {
         .is_some()
 }
 
-fn ordered_contains_word(text: &str, first: &str, second: &str) -> bool {
-    word_positions(text, first).into_iter().any(|first_index| {
-        word_positions(&text[first_index + first.len()..], second)
-            .into_iter()
-            .next()
-            .is_some()
-    })
-}
 
 fn word_positions(text: &str, word: &str) -> Vec<usize> {
     let mut positions = Vec::new();
