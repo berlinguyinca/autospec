@@ -725,6 +725,12 @@ do not fall back to an inline label-swap path.
 >     --body-file "skills/autospec-run/prompts/phase4-implementer.md")
 >   ```
 >   `gen-implementer-prompt.sh` emits the static cached prefix (framed by `<!-- CACHE BOUNDARY -->` markers, containing SKILL.md + AGENTS.md + RULE_ID table + tag-filtered saved-memory) first; the `phase4-implementer.md` body and the issue assignment ride below it as the dynamic suffix. Pass the prefix block (up to and including the closing `<!-- CACHE BOUNDARY -->`) with `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache reuses it across dispatches in the same monitor session. This only changes prompt **assembly/caching** — the implementer's absorbed-discipline BEHAVIOR (every step in `phase4-implementer.md`) is unchanged.
+>   UI/client-interaction issues handled by that prompt must record exactly one
+>   browser verification state in the PR body's `## Validation` section:
+>   `browser-verified`, `fallback-smoke-only`, or `not-run`. Harness-caused
+>   Browser connector skips that produce `fallback-smoke-only` or `not-run` must
+>   open or link a browser remediation issue with the redacted error detail before
+>   merge.
 > - **Otherwise** — use the legacy inline prompt below (current behavior). Legacy path is retained until every pre-v2 issue has drained.
 >
 > Both paths share the same outer monitor loop (queue scan, lock-step compliance, label-based locking, heartbeat updates, post-process pickup). The selection only changes the inner subagent prompt body.

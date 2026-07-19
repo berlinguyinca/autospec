@@ -30,6 +30,12 @@
     "justification": "This test supplies malformed CLI argument matrices; its repeated fixture rows are data, not production dispatch logic."
   },
   {
+    "file": "crates/autospec-cli/tests/autonomous_conductor_status.rs",
+    "function": "status_json_and_timeline_render_normalized_conductor_state",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test asserts rendered CLI status text and timeline wording; substring checks inspect presentation output, not domain representation logic."
+  },
+  {
     "file": "crates/autospec-cli/tests/autonomous_drain_commands.rs",
     "function": "workspace_root",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",

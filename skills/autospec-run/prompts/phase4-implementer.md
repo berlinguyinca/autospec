@@ -371,6 +371,63 @@ the implementation before re-running.
 > section whose code fence contains a single runnable shell command. Multi-line
 > prose without a runnable command is rejected by this gate.
 
+## Browser verification gate (UI/client-interaction issues)
+
+For issues that change user-facing UI or client interaction, the merge gate must
+attempt real browser verification before falling back to weaker smoke evidence.
+Use the same UI-marker convention as the issue linter: the issue is UI-scoped
+when its body contains `<!-- ui-feature -->`, `## Design reference`,
+`## Interaction states`, or `## UX flows`.
+
+Immediately before `gh pr create` for a UI-scoped issue:
+
+1. Attempt the harness Browser connector / browser tool first and capture the
+   result. Redact secrets, tokens, credentials, authenticated URLs, and
+   machine-local absolute paths before publishing any captured detail to GitHub.
+   A successful real browser check records
+   `browser-verified`.
+2. If the Browser connector fails because of harness/tool metadata, connector
+   availability, or browser-launch plumbing (not because the app itself failed),
+   capture the redacted error detail and run the local HTTP markup smoke path as the
+   fallback. A passing fallback records `fallback-smoke-only`; a failing or
+   unavailable fallback records `not-run`.
+3. If the browser attempt reaches the app and finds an app defect, treat it as a
+   normal blocking test failure: fix the app or comment on the issue and exit.
+   Do not relabel an app defect as `fallback-smoke-only`.
+4. Add a `## Validation` section to the PR body containing exactly one browser
+   verification state: `browser-verified`, `fallback-smoke-only`, or `not-run`.
+   For `fallback-smoke-only` and `not-run`, include the redacted Browser
+   connector error detail and the fallback smoke command/result.
+5. Before merging any PR whose UI-scoped validation state is
+   `fallback-smoke-only` or `not-run` because of a harness error, open or link a
+   browser remediation issue that includes the redacted error detail. Prefer
+   linking an existing open browser remediation issue when
+   `gh issue list --search` finds the same Browser connector error; otherwise
+   file a new issue labelled as autospec process remediation. Include the
+   remediation issue URL/number in the PR body's `## Validation` section.
+6. Immediately before `gh pr merge`, reject malformed PR validation with this
+   deterministic PR-body gate (replace `<PR>` with the PR number):
+
+   ```bash
+   pr_body="$(gh pr view <PR> --json body --jq .body)"
+   browser_state_count="$(printf '%s\n' "$pr_body" \
+       | grep -Eo 'browser-verified|fallback-smoke-only|not-run' \
+       | sort -u | wc -l | tr -d ' ')"
+   if [ "$browser_state_count" != "1" ]; then
+       gh issue comment <ISSUE> --body "PR #<PR> has invalid browser verification validation state count: $browser_state_count."
+       exit 1
+   fi
+   if printf '%s\n' "$pr_body" | grep -qE 'fallback-smoke-only|not-run' \
+       && ! printf '%s\n' "$pr_body" | grep -qiE 'remediation issue|https://github.com/.*/issues/[0-9]+|#[0-9]+'; then
+       gh issue comment <ISSUE> --body "PR #<PR> uses fallback browser verification without a linked remediation issue."
+       exit 1
+   fi
+   ```
+
+Non-UI issues still include `## Validation` when practical, but record
+`not-run` only with an explicit non-UI reason; they do not need browser
+remediation issues.
+
 ## Rebase-and-retest gate
 
 Immediately before `gh pr merge --admin --squash --delete-branch`, run the
