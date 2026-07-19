@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use autospec_core::autonomous::blast_radius::{
+    classify_paths_with_registry_name, default_legacy_registry, parse_fenced_surfaces,
+};
 use autospec_core::autonomous::config::AutonomousConfig;
 use autospec_core::autonomous::mainline_health::{
     apply_ignored_checks, check_run_evidence, evaluate_health, legacy_status_evidence,
@@ -152,6 +155,9 @@ impl StopMode {
 }
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
+    if args.first().is_some_and(|arg| arg == "blast-radius") {
+        return blast_radius(args);
+    }
     if args.first().is_some_and(|arg| arg == "resilience") {
         return resilience::run(&args[1..]);
     }
@@ -189,6 +195,126 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
             "unknown autospec autonomous subcommand: {other}"
         ))),
     }
+}
+
+fn blast_radius(args: &[String]) -> Result<(), CommandFailure> {
+    let mut changed_files = String::new();
+    let mut fenced_surfaces = String::new();
+    let mut json = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--changed-files" => {
+                index += 1;
+                changed_files = args.get(index).cloned().ok_or_else(|| {
+                    CommandFailure::diagnostic("--changed-files requires a value")
+                })?;
+            }
+            "--fenced-surfaces" => {
+                index += 1;
+                fenced_surfaces = args.get(index).cloned().ok_or_else(|| {
+                    CommandFailure::diagnostic("--fenced-surfaces requires a value")
+                })?;
+            }
+            "--json" => json = true,
+            "-h" | "--help" => {
+                println!(
+                    "USAGE:\n    autospec autonomous blast-radius --changed-files <FILE> [--fenced-surfaces <YML>] [--json]"
+                );
+                return Ok(());
+            }
+            other => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autospec autonomous blast-radius option: {other}"
+                )));
+            }
+        }
+        index += 1;
+    }
+    if changed_files.is_empty() {
+        return Err(CommandFailure::diagnostic("--changed-files is required"));
+    }
+
+    let paths =
+        read_changed_files(Path::new(&changed_files)).map_err(CommandFailure::diagnostic)?;
+    let (registry, registry_name) =
+        load_blast_radius_registry(&fenced_surfaces).map_err(CommandFailure::diagnostic)?;
+    let classification = classify_paths_with_registry_name(paths, &registry, registry_name);
+    if json {
+        println!(
+            "{}",
+            classification
+                .to_json_string()
+                .map_err(CommandFailure::diagnostic)?
+        );
+    } else if classification.fenced {
+        println!("DECISION:quarantine");
+        println!(
+            "REASON:{}",
+            classification.reason.as_deref().unwrap_or("fenced_surface")
+        );
+        for matched in &classification.fenced_matches {
+            println!(
+                "SURFACE:{}:{}:{}",
+                matched.surface, matched.path, matched.reason
+            );
+        }
+        for path in &classification.paths {
+            println!("PATH:{path}");
+        }
+    } else {
+        println!("DECISION:allow");
+        println!("LABEL:{}", classification.label);
+    }
+
+    if classification.fenced {
+        Err(CommandFailure::status(String::new(), 1))
+    } else {
+        Ok(())
+    }
+}
+
+fn load_blast_radius_registry(
+    path: &str,
+) -> Result<
+    (
+        Vec<autospec_core::autonomous::blast_radius::FencedSurface>,
+        String,
+    ),
+    String,
+> {
+    let registry_path = if !path.is_empty() {
+        Some(PathBuf::from(path))
+    } else if Path::new(".autospec/fenced-surfaces.yml").is_file() {
+        Some(PathBuf::from(".autospec/fenced-surfaces.yml"))
+    } else if Path::new(".autospec/autospec.yml").is_file() {
+        Some(PathBuf::from(".autospec/autospec.yml"))
+    } else {
+        None
+    };
+
+    let Some(registry_path) = registry_path else {
+        return Ok((default_legacy_registry(), "legacy-defaults".to_string()));
+    };
+    let source = fs::read_to_string(&registry_path)
+        .map_err(|error| format!("{}: {error}", registry_path.display()))?;
+    let parsed = parse_fenced_surfaces(&source)?;
+    if parsed.is_empty() {
+        Ok((default_legacy_registry(), "legacy-defaults".to_string()))
+    } else {
+        Ok((parsed, registry_path.display().to_string()))
+    }
+}
+
+fn read_changed_files(path: &Path) -> Result<Vec<String>, String> {
+    let source =
+        fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.strip_prefix("./").unwrap_or(line).to_string())
+        .collect())
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -3746,7 +3872,7 @@ fn json_string_array(values: &[String]) -> String {
 
 fn print_help() {
     println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
     );
 }
 

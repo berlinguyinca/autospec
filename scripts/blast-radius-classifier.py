@@ -9,6 +9,7 @@ from pathlib import Path
 
 LEGACY_REGISTRY = [
     {"id": "autonomous-control-plane", "severity": "fenced", "reason": "autonomous conductor or guardrail control plane", "paths": ["scripts/autospec-autonomous.sh", "scripts/autonomous-*.sh", "scripts/autospec-autonomous-run-drain.sh", "scripts/worktree-guard.sh", "scripts/claim-guard.sh", "scripts/autospec-autonomy-gate.sh"]},
+    {"id": "autospec-policy-config", "severity": "fenced", "reason": "autospec policy config controls autonomous safety policy", "paths": [".autospec/**"]},
     {"id": "skill-contracts", "severity": "high", "reason": "autospec skill public contracts", "paths": ["skills/autospec*/SKILL.md", "skills/autospec*/codex/prompt.md", "skills/autospec*/opencode/agent.md"]},
     {"id": "release-and-ci", "severity": "high", "reason": "release, install, or CI surface", "paths": [".github/workflows/*", "install.sh", "bootstrap.sh", "uninstall.sh"]},
     {"id": "schema-package-core", "severity": "high", "reason": "schema/package/crate core surface", "paths": ["schemas/*", "packages/*", "crates/*", "Cargo.toml", "Cargo.lock"]},
@@ -75,7 +76,9 @@ def match_registry(paths, registry):
     for changed in paths:
         for surface in registry:
             for pattern in surface.get("paths", []):
-                pat = str(pattern).lstrip("./")
+                pat = str(pattern)
+                if pat.startswith("./"):
+                    pat = pat[2:]
                 if fnmatch.fnmatch(changed, pat) or (pat.endswith("/**") and changed.startswith(pat[:-3].rstrip("/") + "/")):
                     matches.append({"path": changed, "surface": surface.get("id", "unknown"), "severity": surface.get("severity", "high"), "reason": surface.get("reason", "configured fenced surface"), "pattern": pat})
                     break
