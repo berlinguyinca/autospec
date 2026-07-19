@@ -19,6 +19,7 @@
     "check_startup_preflight",
     "check_codex_skills_install",
     "check_shared_script_install",
+    "check_root_helper_wrapper_policy",
     "check_mutation_and_negative_path",
     "check_python_suites",
     "check_subagent_model_tier",
