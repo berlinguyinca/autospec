@@ -161,6 +161,34 @@ impl ConductorState {
         {
             return Err("conductor boundary state carries active issue metadata".to_string());
         }
-        Ok(())
+        self.validate_boundary_outcome()
+    }
+
+    fn validate_boundary_outcome(&self) -> Result<(), String> {
+        let valid = matches!(
+            (&self.phase, &self.last_outcome),
+            (ConductorPhase::TierDry | ConductorPhase::IdleRescan, None)
+                | (
+                    ConductorPhase::AllBlocked,
+                    Some(ConductorOutcome::AllBlocked { .. }),
+                )
+                | (
+                    ConductorPhase::VerifierUnavailable,
+                    Some(ConductorOutcome::VerifierUnavailable { .. }),
+                )
+                | (
+                    ConductorPhase::ResourcePark,
+                    Some(ConductorOutcome::ResourcePark { .. }),
+                )
+                | (
+                    ConductorPhase::OperatorStop,
+                    Some(ConductorOutcome::OperatorStop { .. }),
+                )
+        );
+        if valid {
+            Ok(())
+        } else {
+            Err("conductor boundary state has incompatible phase/outcome".to_string())
+        }
     }
 }

@@ -1,3 +1,7 @@
+use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
+use autospec_core::autonomous::waterfall::{
+    receipt_reference, FunnelCounts, SealedEvidence, TierReceipt, TierStatus, WaterfallState,
+};
 use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorScope, ConductorState,
 };
@@ -36,6 +40,62 @@ fn status_json_and_timeline_render_normalized_conductor_state() {
     let stdout = String::from_utf8_lossy(&timeline.stdout);
     assert!(stdout.contains("time unknown - conductor cycle 0: all-blocked;"));
     assert!(stdout.contains("next=promote or unblock affected issues"));
+}
+
+#[test]
+fn status_json_derives_tier_dry_from_persisted_waterfall_receipt() {
+    let fixture = StatusFixture::new();
+    fixture.write_foreground_state(
+        ConductorState::new(REPO, ConductorScope::Repository, 2).expect("state"),
+    );
+    fixture.write_waterfall_receipts(&[tier_receipt(
+        1,
+        NoWorkTier::Tier1,
+        DryReason::NoProposalsGenerated,
+    )]);
+
+    let status = fixture
+        .command("status")
+        .arg("--json")
+        .output()
+        .expect("status");
+    assert!(
+        status.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&status.stdout);
+
+    assert!(stdout.contains("\"normalized_state\":\"cycle 0: tier-dry;"));
+    assert!(stdout.contains("tier=tier1"));
+    assert!(stdout.contains("next=advance waterfall to tier1_5"));
+}
+
+#[test]
+fn timeline_derives_idle_rescan_from_completed_waterfall_pass() {
+    let fixture = StatusFixture::new();
+    fixture.write_foreground_state(
+        ConductorState::new(REPO, ConductorScope::Repository, 2).expect("state"),
+    );
+    fixture.write_waterfall_receipts(&[
+        tier_receipt(1, NoWorkTier::Tier1, DryReason::NoProposalsGenerated),
+        tier_receipt(1, NoWorkTier::Tier1_5, DryReason::NoProposalsGenerated),
+        tier_receipt(1, NoWorkTier::Tier2, DryReason::VerificationRejected),
+        tier_receipt(1, NoWorkTier::Tier3, DryReason::NoMetadataFindings),
+        tier_receipt(1, NoWorkTier::Tier4, DryReason::RoiFiltered),
+    ]);
+
+    let timeline = fixture.command("timeline").output().expect("timeline");
+    assert!(
+        timeline.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&timeline.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&timeline.stdout);
+
+    assert!(stdout.contains("time unknown - conductor cycle 0: idle-rescan;"));
+    assert!(stdout.contains("action=rescan"));
+    assert!(stdout.contains("next=sleep until the next rescan interval"));
 }
 
 struct StatusFixture {
@@ -84,6 +144,23 @@ impl StatusFixture {
             format!("{}\n", state.to_json()),
         )
         .expect("write foreground state");
+    }
+
+    fn write_waterfall_receipts(&self, receipts: &[TierReceipt]) {
+        let root = self.operator.join(scope_slug()).join("waterfall");
+        let mut state = WaterfallState::new(REPO, 1, NoWorkTier::Tier1).expect("waterfall state");
+        for receipt in receipts {
+            let path = root.join(receipt_reference(receipt.pass_id(), receipt.tier()));
+            fs::create_dir_all(path.parent().expect("receipt parent")).expect("receipt dir");
+            fs::write(&path, format!("{}\n", receipt.to_json())).expect("receipt");
+            state = state.record_receipt(receipt).expect("record receipt");
+        }
+        fs::create_dir_all(&root).expect("waterfall root");
+        fs::write(
+            root.join("waterfall-state.json"),
+            format!("{}\n", state.to_json()),
+        )
+        .expect("waterfall state");
     }
 
     fn command(&self, subcommand: &str) -> Command {
@@ -140,4 +217,33 @@ fn selected_state() -> ConductorState {
 
 fn scope_slug() -> &'static Path {
     Path::new("test_repo")
+}
+
+fn tier_receipt(pass_id: u64, tier: NoWorkTier, reason: DryReason) -> TierReceipt {
+    TierReceipt::new(
+        REPO,
+        pass_id,
+        tier,
+        "test-producer",
+        1,
+        2,
+        TierStatus::Exhausted { reason },
+        FunnelCounts::new(0, 0, 0, 0, 0).expect("funnel"),
+        vec![SealedEvidence::new(
+            format!("waterfall/{pass_id}/{}.json", tier.as_str()),
+            format!("{:064x}", pass_id * 10 + tier_index(tier)),
+        )
+        .expect("evidence")],
+    )
+    .expect("receipt")
+}
+
+fn tier_index(tier: NoWorkTier) -> u64 {
+    match tier {
+        NoWorkTier::Tier1 => 1,
+        NoWorkTier::Tier1_5 => 2,
+        NoWorkTier::Tier2 => 3,
+        NoWorkTier::Tier3 => 4,
+        NoWorkTier::Tier4 => 5,
+    }
 }

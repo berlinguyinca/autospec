@@ -13,6 +13,8 @@ use autospec_core::autonomous::mainline_health::{
     resolve_health_branch, CheckEvidence, HealthBranchInput, MainlineHealth,
     MainlineHealthDiagnostic, MainlineHealthOutcome,
 };
+use autospec_core::autonomous::no_work::{NoWorkObservation, NoWorkState, NoWorkTier, TierOutcome};
+use autospec_core::autonomous::waterfall::{TierReceipt, TierStatus, WaterfallState};
 use autospec_core::autonomous_lifecycle::{
     decide as decide_lifecycle, Budget as LifecycleBudget, CapacityDecision, ClaimBranch,
     ClaimContext, ConductorLeaseDecision, Health as LifecycleHealth, IssueNumber, LeaseFreshness,
@@ -1476,7 +1478,8 @@ fn timeline(options: Options) -> Result<(), String> {
     let selected_lines = tail_lines(&all_lines, options.lines);
     let mut events = timeline_events(&selected_lines);
     let normalized_state =
-        foreground_normalized_state(&layout, latest_cycle_number(&all_lines)).unwrap_or_default();
+        normalized_cycle_boundary_state(&layout, latest_cycle_number(&all_lines))
+            .unwrap_or_default();
     if !normalized_state.is_empty() {
         events.push(format!("time unknown - conductor {normalized_state}."));
     }
@@ -3103,7 +3106,7 @@ impl StateMetadata {
     fn fill_normalized_state(&mut self, layout: &RunLayout) {
         if self.normalized_state.is_empty() {
             self.normalized_state =
-                foreground_normalized_state(layout, parse_cycle_number(&self.current_cycle))
+                normalized_cycle_boundary_state(layout, parse_cycle_number(&self.current_cycle))
                     .unwrap_or_default();
         }
     }
@@ -3633,11 +3636,110 @@ fn read_state_metadata(layout: &RunLayout) -> StateMetadata {
     }
 }
 
+fn normalized_cycle_boundary_state(layout: &RunLayout, cycle: u64) -> Option<String> {
+    waterfall_normalized_state(layout, cycle).or_else(|| foreground_normalized_state(layout, cycle))
+}
+
 fn foreground_normalized_state(layout: &RunLayout, cycle: u64) -> Option<String> {
     let source =
         fs::read_to_string(foreground_state_path(layout, ConductorScope::Repository)).ok()?;
     let state = ConductorState::parse_json(&source).ok()?;
     Some(state.normalized_state_for_cycle(cycle))
+}
+
+fn waterfall_normalized_state(layout: &RunLayout, cycle: u64) -> Option<String> {
+    let root = layout.state_dir.join("waterfall");
+    let state = read_waterfall_state(&root, &layout.repo)?;
+    let receipt_pass_id = waterfall_receipt_pass_id(&state);
+    let receipts = state
+        .completed_receipts()
+        .iter()
+        .filter_map(|completed| {
+            read_waterfall_receipt(&root, &layout.repo, receipt_pass_id, completed.tier).ok()
+        })
+        .collect::<Vec<_>>();
+    if receipts.is_empty() {
+        return None;
+    }
+    let conductor = ConductorState::new(&layout.repo, ConductorScope::Repository, 0).ok()?;
+    if receipts.len() == NoWorkTier::ALL.len()
+        && state.current_tier() == NoWorkTier::Tier1
+        && state.next_pass_id() > 1
+        && receipts
+            .iter()
+            .all(|receipt| matches!(receipt.status(), TierStatus::Exhausted { .. }))
+    {
+        return no_work_state_for_receipts(&layout.repo, receipt_pass_id, &receipts)
+            .ok()
+            .map(|state| conductor.normalized_state_for_no_work(cycle, &state));
+    }
+    receipts
+        .last()
+        .map(|receipt| conductor.normalized_state_for_tier_receipt(cycle, receipt))
+}
+
+fn read_waterfall_state(root: &Path, repo: &str) -> Option<WaterfallState> {
+    let source = fs::read_to_string(root.join("waterfall-state.json")).ok()?;
+    WaterfallState::parse_json(&source, repo).ok()
+}
+
+fn read_waterfall_receipt(
+    root: &Path,
+    repo: &str,
+    pass_id: u64,
+    tier: NoWorkTier,
+) -> Result<TierReceipt, String> {
+    let path = root.join(autospec_core::autonomous::waterfall::receipt_reference(
+        pass_id, tier,
+    ));
+    let source = fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read waterfall receipt {}: {error}", path.display()))?;
+    TierReceipt::parse_json(&source, repo, pass_id, tier)
+}
+
+fn waterfall_receipt_pass_id(state: &WaterfallState) -> u64 {
+    if state.current_tier() == NoWorkTier::Tier1 && state.next_pass_id() > 1 {
+        state.next_pass_id() - 1
+    } else {
+        state.next_pass_id()
+    }
+}
+
+fn no_work_state_for_receipts(
+    repo: &str,
+    pass_id: u64,
+    receipts: &[TierReceipt],
+) -> Result<NoWorkState, String> {
+    let evidence_digest = receipts
+        .last()
+        .map(|receipt| receipt.digest().to_string())
+        .ok_or_else(|| "no receipts for no-work state".to_string())?;
+    let tiers = receipts
+        .iter()
+        .map(|receipt| Ok((receipt.tier(), tier_outcome(receipt.status())?)))
+        .collect::<Result<Vec<_>, String>>()?;
+    NoWorkState::record(
+        None,
+        NoWorkObservation {
+            repo: repo.to_string(),
+            pass_id,
+            evidence_digest,
+            tiers,
+        },
+    )
+}
+
+fn tier_outcome(status: &TierStatus) -> Result<TierOutcome, String> {
+    match status {
+        TierStatus::Exhausted { reason } => Ok(TierOutcome::Dry { reason: *reason }),
+        TierStatus::Produced { count } => Ok(TierOutcome::Produced { count: *count }),
+        TierStatus::Failed { reason } => Ok(TierOutcome::Failed {
+            reason: reason.clone(),
+        }),
+        TierStatus::Blocked { reason } | TierStatus::NotRun { reason } => Ok(TierOutcome::NotRun {
+            reason: reason.clone(),
+        }),
+    }
 }
 
 fn latest_cycle_number(lines: &[String]) -> u64 {

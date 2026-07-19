@@ -16,6 +16,21 @@ fn persisted_state_rejects_a_forged_normalized_state() {
 }
 
 #[test]
+fn persisted_boundary_state_rejects_contradictory_phase_and_outcome() {
+    let forged = concat!(
+        r#"{"schema":1,"repo":"berlinguyinca/autospec","scope":"repository","#,
+        r#""phase":"all_blocked","state":"succeeded","selected_issue":null,"#,
+        r#""serialization_reasons":[],"retry_count":0,"retry_limit":2,"#,
+        r#""last_outcome":{"kind":"succeeded","reason":null},"#,
+        r#""pause_reason":null,"terminal_reason":null,"resume_phase":null}"#,
+    );
+
+    assert!(ConductorState::parse_json(forged)
+        .expect_err("contradictory boundary state is rejected")
+        .contains("incompatible phase/outcome"));
+}
+
+#[test]
 fn normalized_state_names_a_dry_tier_without_confusing_launch_dry_run() {
     let receipt = tier_receipt(
         7,
