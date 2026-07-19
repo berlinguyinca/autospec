@@ -74,6 +74,9 @@ Options:
   --force                 Replace stale PID metadata or restart a live process.
   AUTOSPEC_AUTONOMOUS_COMPANIONS=0 disables default monitor/supervisor startup.
   AUTOSPEC_AUTONOMOUS_SUPERVISOR_CMD overrides the built-in supervisor command.
+  AUTOSPEC_PERSONA_SOURCES_CMD overrides intent-source bundle inference.
+  AUTOSPEC_BOOTSTRAP_DECISION_CMD handles empty-bundle headless bootstrap filing.
+  AUTOSPEC_BOOTSTRAP_INTERVIEW_CMD handles empty-bundle interactive bootstrap.
   --graceful              Stop after the current iteration (default).
   --immediate             Request immediate stop at the next boundary.
 EOF
@@ -1040,6 +1043,7 @@ start_foreground() {
     export CONDUCTOR_SCRIPTS_DIR="${CONDUCTOR_SCRIPTS_DIR:-$SCRIPT_DIR}"
     export AUTOSPEC_SCRIPTS_DIR="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}"
     export AUTOSPEC_RUN_CMD="${AUTOSPEC_RUN_CMD:-$SCRIPT_DIR/autospec-autonomous-run-drain.sh}"
+    export AUTOSPEC_PERSONA_SOURCES_CMD="${AUTOSPEC_PERSONA_SOURCES_CMD:-$SCRIPT_DIR/autonomous-persona-sources.sh}"
     # Tier-2/3/4 discovery must run the explore SKILL through the LLM harness
     # (mirroring AUTOSPEC_RUN_CMD's drain wrapper). Without this, the loop falls
     # back to bare `bash autospec-explore.sh --once`, which has no orchestrator

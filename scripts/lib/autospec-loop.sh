@@ -1282,6 +1282,92 @@ _autospec_conductor_operator_stop_flag_path() {
     return 1
 }
 
+_autospec_conductor_persona_sources_cmd() {
+    local sdir="$1"
+    if [ -n "${AUTOSPEC_PERSONA_SOURCES_CMD:-}" ] && [ -f "$AUTOSPEC_PERSONA_SOURCES_CMD" ]; then
+        printf '%s\n' "$AUTOSPEC_PERSONA_SOURCES_CMD"
+    elif [ -f "${sdir}/autonomous-persona-sources.sh" ]; then
+        printf '%s\n' "${sdir}/autonomous-persona-sources.sh"
+    else
+        printf '\n'
+    fi
+}
+
+_autospec_conductor_inferred_source_summary() {
+    local sdir="$1"
+    local repo_root="$2"
+    local autospec_home="${HOME}/.autospec"
+    local sources_cmd
+    sources_cmd="$(_autospec_conductor_persona_sources_cmd "$sdir")"
+
+    if [ -z "$sources_cmd" ] || ! command -v jq >/dev/null 2>&1; then
+        printf '0 none\n'
+        return 0
+    fi
+
+    local bundle
+    bundle="$(REPO_ROOT="$repo_root" AUTOSPEC_HOME="$autospec_home" \
+        bash "$sources_cmd" 2>/dev/null || true)"
+    if [ -z "$bundle" ]; then
+        printf '0 none\n'
+        return 0
+    fi
+
+    printf '%s' "$bundle" | jq -r '
+        (.meta.source_count // (((.global // []) | length) + ((.overlay // []) | length))) as $count
+        | (.meta.confidence // (
+            if $count == 0 then "none"
+            elif $count == 1 then "low"
+            elif ((.global // []) | length) == 0 then "medium"
+            else "high"
+            end
+          )) as $confidence
+        | "\($count) \($confidence)"
+    ' 2>/dev/null || printf '0 none\n'
+}
+
+_autospec_conductor_interactive_bootstrap_enabled() {
+    if [ "${AUTOSPEC_BOOTSTRAP_INTERACTIVE:-0}" = "1" ]; then
+        return 0
+    fi
+    if [ "${AUTOSPEC_AUTONOMOUS_HEADLESS:-0}" = "1" ]; then
+        return 1
+    fi
+    [ -t 0 ] && [ -t 1 ]
+}
+
+_autospec_conductor_handle_empty_inference_bundle() {
+    local repo_root="$1"
+    local repo="$2"
+
+    if _autospec_conductor_interactive_bootstrap_enabled; then
+        printf '[conductor] bootstrap: empty inference bundle — running bootstrap interview dialog\n' >&2
+        if [ -n "${AUTOSPEC_BOOTSTRAP_INTERVIEW_CMD:-}" ]; then
+            bash -c "$AUTOSPEC_BOOTSTRAP_INTERVIEW_CMD" >/dev/null 2>&1 || true
+            return 0
+        fi
+        printf '[conductor] bootstrap: no AUTOSPEC_BOOTSTRAP_INTERVIEW_CMD seam; dialog deferred to harness\n' >&2
+        return 0
+    fi
+
+    printf '[conductor] bootstrap: empty inference bundle — filing bootstrap issue/PR decision\n' >&2
+    if [ -n "${AUTOSPEC_BOOTSTRAP_DECISION_CMD:-}" ]; then
+        bash -c "$AUTOSPEC_BOOTSTRAP_DECISION_CMD" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    local report="${repo_root}/.autospec/reports/bootstrap-decision.md"
+    mkdir -p "$(dirname "$report")" 2>/dev/null || true
+    {
+        printf '# Bootstrap context needed\n\n'
+        if [ -n "$repo" ]; then
+            printf 'Repo: `%s`\n\n' "$repo"
+        fi
+        printf 'The autonomous conductor found no inferable operator persona, repo memory, autonomy charter, or overlay sources.\n\n'
+        printf 'Next step: file a bootstrap issue/PR to collect project intent before self-originated generation resumes.\n'
+    } > "$report" 2>/dev/null || true
+}
+
 autospec_conductor_run() {
     if [ -n "${HOME:-}" ]; then
         case ":${PATH:-}:" in
@@ -1634,6 +1720,14 @@ fi'
                     >/dev/null 2>&1 || true
             fi
         fi
+        local _inferred_summary _inferred_source_count _inferred_confidence
+        _inferred_summary="$(_autospec_conductor_inferred_source_summary "$_sdir" "$_repo_root")"
+        _inferred_source_count="$(printf '%s' "$_inferred_summary" | awk '{print $1}')"
+        _inferred_confidence="$(printf '%s' "$_inferred_summary" | awk '{print $2}')"
+        case "$_inferred_source_count" in
+            ''|*[!0-9]*) _inferred_source_count=0 ;;
+        esac
+        [ -n "$_inferred_confidence" ] || _inferred_confidence="none"
 
         # ── Step 2: Tier-0 control-channel poll (preempts everything) ─────────
         local _ctrl_decision=""
@@ -1935,8 +2029,14 @@ fi'
                 && [ "${AUTOSPEC_ALLOW_UNSTEERED_GENERATION:-0}" != "1" ] \
                 && [ ! -s "$_priorities_file" ] \
                 && [ ! -s "$_eff_persona" ]; then
-            _action="park"
-            _reason="no-steering"
+            if [ "$_inferred_source_count" -gt 0 ]; then
+                printf '[conductor] inferred steering bundle present: sources=%s confidence=%s\n' \
+                    "$_inferred_source_count" "$_inferred_confidence" >&2
+            else
+                _action="park"
+                _reason="bootstrap-empty-intent-bundle"
+                _autospec_conductor_handle_empty_inference_bundle "$_repo_root" "$_repo"
+            fi
         fi
 
         printf '[conductor] tier=%s action=%s\n' "$_tier" "$_action" >&2
@@ -3013,12 +3113,16 @@ EOF_PROV_BATCH
 
         # ── Step 7: Once-per-UTC-day digest ───────────────────────────────────
         local _new_day
-        _new_day="$(_conductor_maybe_write_digest \
+        _new_day="$(AUTOSPEC_CONDUCTOR_INFER_CONFIDENCE="${_inferred_confidence:-}" \
+            AUTOSPEC_CONDUCTOR_INFER_SOURCE_COUNT="${_inferred_source_count:-0}" \
+            _conductor_maybe_write_digest \
             "$_no_digest" "$_last_digest_day" "$_sdir" "$_repo" "$_dry" 2>&1 \
             | tail -1 || printf '%s' "$_last_digest_day")"
         # _new_day stdout is the updated day; progress log went to stderr.
         # Re-capture cleanly by calling the helper with stderr suppressed.
-        _last_digest_day="$(_conductor_maybe_write_digest \
+        _last_digest_day="$(AUTOSPEC_CONDUCTOR_INFER_CONFIDENCE="${_inferred_confidence:-}" \
+            AUTOSPEC_CONDUCTOR_INFER_SOURCE_COUNT="${_inferred_source_count:-0}" \
+            _conductor_maybe_write_digest \
             "$_no_digest" "$_last_digest_day" "$_sdir" "$_repo" "$_dry" \
             2>/dev/null || printf '%s' "$_last_digest_day")"
 
@@ -3114,6 +3218,13 @@ _conductor_maybe_write_digest() {
         fi
         if [ -n "$_priorities_section" ]; then
             printf '\n%s\n' "$_priorities_section"
+        fi
+        if [ -n "${AUTOSPEC_CONDUCTOR_INFER_CONFIDENCE:-}" ] \
+            && [ "${AUTOSPEC_CONDUCTOR_INFER_CONFIDENCE:-none}" != "none" ]; then
+            printf '\n### Inferred steering\n\n'
+            printf -- '- **Confidence:** %s-confidence from %s source(s).\n' \
+                "$AUTOSPEC_CONDUCTOR_INFER_CONFIDENCE" \
+                "${AUTOSPEC_CONDUCTOR_INFER_SOURCE_COUNT:-0}"
         fi
         printf '\n_Generated by autospec-autonomous Phase-1 conductor._\n'
     } > "$digest_file" || true
