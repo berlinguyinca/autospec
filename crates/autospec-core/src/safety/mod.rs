@@ -1,3 +1,6 @@
+use std::fs;
+use std::path::Path;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsafeOperation {
     DestructiveGit,
@@ -63,6 +66,35 @@ impl SafetyPolicy {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionStartGitExcludeOutcome {
+    AlreadyPresent,
+    Created,
+    SkippedMissingInfoDir { debug_reason: String },
+}
+
+pub fn prepare_session_start_git_exclude(
+    repo_root: &Path,
+) -> std::io::Result<SessionStartGitExcludeOutcome> {
+    let info_dir = repo_root.join(".git/info");
+    if !info_dir.is_dir() {
+        return Ok(SessionStartGitExcludeOutcome::SkippedMissingInfoDir {
+            debug_reason: format!(
+                "SessionStart hook skipped git exclude setup: {} is missing",
+                info_dir.display()
+            ),
+        });
+    }
+
+    let exclude = info_dir.join("exclude");
+    if exclude.exists() {
+        return Ok(SessionStartGitExcludeOutcome::AlreadyPresent);
+    }
+
+    fs::File::create(exclude)?;
+    Ok(SessionStartGitExcludeOutcome::Created)
 }
 
 pub fn redact_secrets(input: &str) -> String {
