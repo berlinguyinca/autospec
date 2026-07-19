@@ -63,7 +63,10 @@ fn resilience_decide_prefers_canonical_layout_over_legacy_fallbacks() {
     let output = fixture.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
     assert_eq!(output.status.code(), Some(20));
-    assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"held\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
+    );
     assert!(fixture.state_path("owner__repo").exists());
 }
 
@@ -78,7 +81,10 @@ fn resilience_decide_reads_underscore_and_hyphen_compatibility_layouts_without_m
     let output = underscore.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
     assert_eq!(output.status.code(), Some(20));
-    assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"held\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
+    );
     assert!(!underscore.canonical_state_path().exists());
 
     let hyphen = ResilienceFixture::new();
@@ -90,7 +96,10 @@ fn resilience_decide_reads_underscore_and_hyphen_compatibility_layouts_without_m
     let output = hyphen.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
     assert_eq!(output.status.code(), Some(20));
-    assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"held\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
+    );
     assert!(!hyphen.canonical_state_path().exists());
 }
 
@@ -267,7 +276,7 @@ fn resilience_decide_reclaims_expired_leases_at_the_documented_boundaries() {
     assert!(output.status.success());
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"reclaim\",\"reason\":\"claimed_expired\"}\n"
+        "{\"decision\":\"reclaim\",\"reason\":\"claimed_expired\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 
     let abandoned = ResilienceFixture::new();
@@ -281,7 +290,7 @@ fn resilience_decide_reclaims_expired_leases_at_the_documented_boundaries() {
     assert!(output.status.success());
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"reclaim\",\"reason\":\"abandoned\"}\n"
+        "{\"decision\":\"reclaim\",\"reason\":\"abandoned\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 }
 
@@ -302,7 +311,7 @@ fn resilience_decide_parks_at_failure_cap_and_usage_precedes_issue_cap() {
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"reject\",\"reason\":\"failure_cap\"}\n"
+        "{\"decision\":\"reject\",\"reason\":\"failure_cap\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 
     let capacity = ResilienceFixture::new();
@@ -322,7 +331,59 @@ fn resilience_decide_parks_at_failure_cap_and_usage_precedes_issue_cap() {
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"park\",\"reason\":\"usage_cap\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"usage_cap\",\"spend\":{\"tokens\":10,\"issues\":4,\"filed_issues\":0,\"budget_issues\":4}}\n"
+    );
+}
+
+#[test]
+fn resilience_decide_reports_filed_and_budget_issue_counters_separately() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_spend_counters("owner__repo", 0, 1, 1);
+
+    let first = fixture.run(&[
+        "resilience",
+        "decide",
+        "--repo",
+        "owner/repo",
+        "--budget-issues",
+        "2",
+    ]);
+
+    assert!(first.status.success());
+    assert_eq!(
+        stdout(&first),
+        "{\"decision\":\"available\",\"spend\":{\"tokens\":0,\"issues\":1,\"filed_issues\":1,\"budget_issues\":1}}\n"
+    );
+
+    fixture.write_spend_counters("owner__repo", 0, 5, 2);
+
+    let second = fixture.run(&[
+        "resilience",
+        "decide",
+        "--repo",
+        "owner/repo",
+        "--budget-issues",
+        "3",
+    ]);
+
+    assert!(
+        second.status.success(),
+        "the budget cap must use budget_issues=2, not filed_issues=5"
+    );
+    assert_eq!(
+        stdout(&second),
+        "{\"decision\":\"available\",\"spend\":{\"tokens\":0,\"issues\":2,\"filed_issues\":5,\"budget_issues\":2}}\n"
+    );
+
+    let status = fixture.run(&["status", "--repo", "owner/repo", "--json"]);
+    let status_stdout = stdout(&status);
+
+    assert!(status.status.success());
+    assert!(
+        status_stdout.contains(
+            "\"spend\":{\"tokens\":0,\"issues\":2,\"filed_issues\":5,\"budget_issues\":2}"
+        ),
+        "status JSON must expose both issue counters by distinct names: {status_stdout}"
     );
 }
 
@@ -345,7 +406,7 @@ fn resilience_decide_reads_the_legacy_spend_root_despite_a_state_root_override()
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"park\",\"reason\":\"usage_cap\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"usage_cap\",\"spend\":{\"tokens\":10,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 }
 
@@ -359,7 +420,7 @@ fn resilience_decide_uses_legacy_lifetime_caps_when_environment_is_unset() {
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"park\",\"reason\":\"usage_cap\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"usage_cap\",\"spend\":{\"tokens\":10000000,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 
     let issues = ResilienceFixture::new();
@@ -370,7 +431,7 @@ fn resilience_decide_uses_legacy_lifetime_caps_when_environment_is_unset() {
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"park\",\"reason\":\"issue_cap\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"issue_cap\",\"spend\":{\"tokens\":0,\"issues\":500,\"filed_issues\":0,\"budget_issues\":500}}\n"
     );
 }
 
@@ -471,7 +532,7 @@ fn resilience_decide_accepts_legacy_decimal_string_failure_issue_identifier() {
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"reject\",\"reason\":\"failure_cap\"}\n"
+        "{\"decision\":\"reject\",\"reason\":\"failure_cap\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 
     let mismatch = ResilienceFixture::new();
@@ -544,7 +605,7 @@ fn resilience_decide_reclaims_only_a_known_same_host_dead_pid() {
     assert!(output.status.success());
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"reclaim\",\"reason\":\"dead_same_host_pid\"}\n"
+        "{\"decision\":\"reclaim\",\"reason\":\"dead_same_host_pid\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 }
 
@@ -560,7 +621,10 @@ fn resilience_decide_holds_unknown_host_identity_even_when_pid_is_dead() {
         fixture.run_with_host("unknown", &["resilience", "decide", "--repo", "owner/repo"]);
 
     assert_eq!(output.status.code(), Some(20));
-    assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"held\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
+    );
 }
 
 #[test]
@@ -571,7 +635,10 @@ fn resilience_decide_treats_legacy_released_lock_as_available() {
     let output = fixture.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
     assert!(output.status.success());
-    assert_eq!(stdout(&output), "{\"decision\":\"available\"}\n");
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"available\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
+    );
 }
 
 #[test]
@@ -2102,6 +2169,15 @@ esac
             slug,
             tokens,
             issues,
+        );
+    }
+
+    fn write_spend_counters(&self, slug: &str, tokens: u64, filed_issues: u64, budget_issues: u64) {
+        write_file(
+            &self.spend_root.join(slug).join("spend.json"),
+            &format!(
+                "{{\"schema\":1,\"tokens\":{tokens},\"filed_issues\":{filed_issues},\"budget_issues\":{budget_issues},\"parked\":false}}"
+            ),
         );
     }
 

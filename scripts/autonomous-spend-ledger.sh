@@ -7,7 +7,7 @@
 # (feedback_heartbeat_cross_repo_collision).
 #
 # Subcommands:
-#   add --tokens N [--issues N] [--repo-dir DIR]
+#   add --tokens N [--issues N] [--filed-issues N] [--budget-issues N] [--repo-dir DIR]
 #       Increment the cumulative totals in the ledger. Creates the file if
 #       absent. Prints the updated totals as JSON.
 #
@@ -104,7 +104,7 @@ read_ledger() {
         cat "$path"
     else
         # Return a zero-state JSON if absent.
-        printf '{"schema":1,"tokens":0,"issues":0,"created_at":"%s","updated_at":"%s","parked":false}\n' \
+        printf '{"schema":1,"tokens":0,"issues":0,"filed_issues":0,"budget_issues":0,"created_at":"%s","updated_at":"%s","parked":false}\n' \
             "$(iso_now)" "$(iso_now)"
     fi
 }
@@ -132,7 +132,7 @@ usage() {
 Usage: autonomous-spend-ledger.sh <subcommand> [options]
 
 Subcommands:
-  add     --tokens N [--issues N] [--repo-dir DIR]
+  add     --tokens N [--issues N] [--filed-issues N] [--budget-issues N] [--repo-dir DIR]
   check   [--repo-dir DIR]
   reset   [--repo-dir DIR]
   status  [--repo-dir DIR]
@@ -152,15 +152,19 @@ shift
 
 ADD_TOKENS=0
 ADD_ISSUES=0
+ADD_FILED_ISSUES=""
+ADD_BUDGET_ISSUES=""
 REPO_DIR="$(pwd)"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --tokens)   ADD_TOKENS="${2:-0}"; shift 2 ;;
-        --issues)   ADD_ISSUES="${2:-0}"; shift 2 ;;
-        --repo-dir) REPO_DIR="${2:-$(pwd)}"; shift 2 ;;
-        --help|-h)  usage; exit 0 ;;
-        *)          die "unknown option: $1" ;;
+        --tokens)        ADD_TOKENS="${2:-0}"; shift 2 ;;
+        --issues)        ADD_ISSUES="${2:-0}"; shift 2 ;;
+        --filed-issues)  ADD_FILED_ISSUES="${2:-0}"; shift 2 ;;
+        --budget-issues) ADD_BUDGET_ISSUES="${2:-0}"; shift 2 ;;
+        --repo-dir)      REPO_DIR="${2:-$(pwd)}"; shift 2 ;;
+        --help|-h)       usage; exit 0 ;;
+        *)               die "unknown option: $1" ;;
     esac
 done
 
@@ -171,13 +175,26 @@ if [ "$SUBCMD" = "add" ]; then
     require_jq
     case "$ADD_TOKENS" in *[!0-9]*|'') die "--tokens must be a non-negative integer" ;; esac
     case "$ADD_ISSUES" in *[!0-9]*|'') die "--issues must be a non-negative integer" ;; esac
+    if [ -z "$ADD_FILED_ISSUES" ]; then
+        ADD_FILED_ISSUES="$ADD_ISSUES"
+    fi
+    if [ -z "$ADD_BUDGET_ISSUES" ]; then
+        ADD_BUDGET_ISSUES="$ADD_ISSUES"
+    fi
+    case "$ADD_FILED_ISSUES" in *[!0-9]*|'') die "--filed-issues must be a non-negative integer" ;; esac
+    case "$ADD_BUDGET_ISSUES" in *[!0-9]*|'') die "--budget-issues must be a non-negative integer" ;; esac
 
     current="$(read_ledger "$LEDGER")"
     updated="$(printf '%s' "$current" | jq \
         --argjson t "$ADD_TOKENS" \
-        --argjson i "$ADD_ISSUES" \
+        --argjson filed "$ADD_FILED_ISSUES" \
+        --argjson budget "$ADD_BUDGET_ISSUES" \
         --arg ts "$(iso_now)" \
-        '.tokens += $t | .issues += $i | .updated_at = $ts')"
+        '.tokens = ((.tokens // 0) + $t)
+         | .filed_issues = ((.filed_issues // .issues // 0) + $filed)
+         | .budget_issues = ((.budget_issues // .issues // 0) + $budget)
+         | .issues = .budget_issues
+         | .updated_at = $ts')"
     printf '%s\n' "$updated" | write_json_atomic "$LEDGER"
     printf '%s\n' "$updated"
     exit 0
@@ -188,7 +205,7 @@ if [ "$SUBCMD" = "check" ]; then
     require_jq
     current="$(read_ledger "$LEDGER")"
     total_tokens="$(printf '%s' "$current" | jq -r '.tokens // 0')"
-    total_issues="$(printf '%s' "$current" | jq -r '.issues // 0')"
+    total_issues="$(printf '%s' "$current" | jq -r '.budget_issues // .issues // 0')"
 
     # Validate that the values are integers before arithmetic comparison.
     case "$total_tokens" in *[!0-9]*|'') total_tokens=0 ;; esac
@@ -213,7 +230,12 @@ if [ "$SUBCMD" = "check" ]; then
         parked_ledger="$(printf '%s' "$current" | jq \
             --arg reason "$park_reason" \
             --arg ts "$(iso_now)" \
-            '.parked = true | .park_reason = $reason | .parked_at = $ts')"
+            '.budget_issues = (.budget_issues // .issues // 0)
+             | .filed_issues = (.filed_issues // .issues // 0)
+             | .issues = .budget_issues
+             | .parked = true
+             | .park_reason = $reason
+             | .parked_at = $ts')"
         printf '%s\n' "$parked_ledger" | write_json_atomic "$LEDGER"
 
         # Invoke notify.sh (fail-open: notifier errors must never block).
@@ -234,7 +256,7 @@ if [ "$SUBCMD" = "reset" ]; then
     require_jq
     jq -n \
         --arg ts "$(iso_now)" \
-        '{"schema":1,"tokens":0,"issues":0,"created_at":$ts,"updated_at":$ts,"parked":false}' \
+        '{"schema":1,"tokens":0,"issues":0,"filed_issues":0,"budget_issues":0,"created_at":$ts,"updated_at":$ts,"parked":false}' \
         | write_json_atomic "$LEDGER"
     info "ledger reset: $LEDGER"
     exit 0
@@ -243,7 +265,10 @@ fi
 # ── Subcommand: status ───────────────────────────────────────────────────────
 if [ "$SUBCMD" = "status" ]; then
     require_jq
-    read_ledger "$LEDGER" | jq .
+    read_ledger "$LEDGER" | jq \
+        '.budget_issues = (.budget_issues // .issues // 0)
+         | .filed_issues = (.filed_issues // .issues // 0)
+         | .issues = .budget_issues'
     exit 0
 fi
 

@@ -1702,8 +1702,11 @@ fn autonomous_status_reports_the_repo_scoped_resilience_spend_ledger() {
     let legacy_spend = temp.join("legacy-spend.json");
     std::fs::create_dir_all(scoped_spend.parent().expect("scoped spend parent"))
         .expect("create scoped spend parent");
-    std::fs::write(&scoped_spend, "{\"schema\":1,\"tokens\":9,\"issues\":2}\n")
-        .expect("scoped spend");
+    std::fs::write(
+        &scoped_spend,
+        "{\"schema\":1,\"tokens\":9,\"filed_issues\":7,\"budget_issues\":2}\n",
+    )
+    .expect("scoped spend");
     std::fs::write(&legacy_spend, "{\"tokens\":1234,\"issues\":5}\n").expect("legacy spend");
 
     let output = autospec()
@@ -1724,7 +1727,8 @@ fn autonomous_status_reports_the_repo_scoped_resilience_spend_ledger() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     assert!(output.status.success());
-    assert!(stdout.contains("\"spend\":{\"tokens\":9,\"issues\":2}"));
+    assert!(stdout
+        .contains("\"spend\":{\"tokens\":9,\"issues\":2,\"filed_issues\":7,\"budget_issues\":2}"));
     assert!(
         !stdout.contains("1234"),
         "status must not display the legacy global spend file when policy uses a scoped ledger"
