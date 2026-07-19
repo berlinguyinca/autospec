@@ -1,5 +1,8 @@
 #!/usr/bin/env bats
 # tests/unit/test_autospec_run_state.bats — Rust GitHub run-state command.
+if [ -z "${BATS_VERSION:-}" ]; then
+    exec bats "$0" "$@"
+fi
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -203,6 +206,34 @@ JSON
     [ -f "$AUTOSPEC_TEST_PATCH_FAIL_MARKER" ]
     run run_state read --issue 42 --repo testorg/testrepo
     [[ "$output" == *'"state":"worktree_ready"'* ]]
+}
+
+@test "phase4 pr creation marks heartbeat and run-state with the PR number" {
+    prompt="$REPO_ROOT/skills/autospec-run/prompts/phase4-implementer.md"
+    run grep -Eq 'heartbeat-write\.sh.+--step[[:space:]]+pr_created.+--pr' "$prompt"
+    [ "$status" -eq 0 ]
+    run grep -Eq 'autospec claim state upsert.+--state[[:space:]]+pr_created.+--pr' "$prompt"
+    [ "$status" -eq 0 ]
+
+    heartbeat_dir="$TEST_TMP/heartbeats"
+    export AUTOSPEC_HEARTBEAT_DIR="$heartbeat_dir"
+    heartbeat_write="$REPO_ROOT/skills/autospec-run/scripts/heartbeat-write.sh"
+
+    bash "$heartbeat_write" --issue 42 --repo testorg/testrepo --branch feat/test --step claimed
+    run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step claimed --branch feat/test >/dev/null
+
+    pr_number=1858
+    bash "$heartbeat_write" --issue 42 --repo testorg/testrepo --branch feat/test --step pr_created --pr "$pr_number"
+    run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state pr_created --step pr_created --branch feat/test --pr "$pr_number" >/dev/null
+
+    state="$(run_state read --issue 42 --repo testorg/testrepo)"
+    [ "$(printf '%s' "$state" | jq -r '.state')" = "pr_created" ]
+    [ "$(printf '%s' "$state" | jq -r '.pr')" = "$pr_number" ]
+
+    heartbeat_file="$heartbeat_dir/testorg__testrepo/42.json"
+    [ -f "$heartbeat_file" ]
+    [ "$(jq -r '.step' "$heartbeat_file")" = "pr_created" ]
+    [ "$(jq -r '.pr' "$heartbeat_file")" = "$pr_number" ]
 }
 
 
