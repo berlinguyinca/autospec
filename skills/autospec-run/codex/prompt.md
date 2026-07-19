@@ -1588,11 +1588,12 @@ Run the shared read-only repository quality audit after Phase 5.5 converges or
 hits its cap, before Phase 6 writes the final run summary:
 
 ```bash
+AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES="${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:-1}" \
 bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-quality-audit.sh" \
   --repo . \
   --json ".autospec/repo-quality-audit.json" \
   --markdown ".autospec/repo-quality-audit.md" \
-  ${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:+--file-issues}
+  $([ "${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:-1}" != "0" ] && printf '%s' "--file-issues")
 ```
 
 The audit writes structured findings classified as `app-follow-up`,
@@ -1602,9 +1603,10 @@ scripts, runtime engine compatibility, typecheck/lint/test availability, route
 coverage, design/template guards, dependency audit readiness,
 security-sensitive storage, focused/skipped tests, large files, TypeScript
 `any` usage, and debug logging hotspots. When
-`AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES=1` and `gh` is available, the helper may
-file deduplicated `quality-audit` follow-up issues; otherwise it records
-unfiled residual risks in the JSON/Markdown artifacts. Failures of the audit
+`AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES` defaults to `1` for this Phase 5.6 call;
+set it to `0` to opt out. When issue filing is enabled and `gh` is available,
+the helper may file deduplicated `quality-audit` follow-up issues; otherwise it
+records unfiled residual risks in the JSON/Markdown artifacts. Failures of the audit
 helper should be reported as a warning in Phase 6, not hidden.
 
 ## Advisor escalation

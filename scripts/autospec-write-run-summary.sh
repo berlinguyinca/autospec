@@ -200,13 +200,23 @@ QUALITY_AUDIT_BODY="(not run)"
 if [ -n "$QUALITY_AUDIT_JSON" ] && [ -f "$QUALITY_AUDIT_JSON" ] \
     && command -v jq >/dev/null 2>&1; then
     QA_STATUS=$(jq -r '.status // "unknown"' "$QUALITY_AUDIT_JSON" 2>/dev/null || echo "unknown")
+    QA_AUDIT_STATUS="$QA_STATUS"
     QA_FINDINGS=$(jq -r '.summary.total_findings // 0' "$QUALITY_AUDIT_JSON" 2>/dev/null || echo 0)
     QA_SUPPRESSED=$(jq -r '.summary.suppressed_findings // 0' "$QUALITY_AUDIT_JSON" 2>/dev/null || echo 0)
     QA_ISSUES=$(jq -r '.summary.issue_links // 0' "$QUALITY_AUDIT_JSON" 2>/dev/null || echo 0)
     QA_RISKS=$(jq -r '.summary.unfiled_residual_risks // 0' "$QUALITY_AUDIT_JSON" 2>/dev/null || echo 0)
+    case "$QA_RISKS" in
+        ''|*[!0-9]*) QA_RISKS=0 ;;
+    esac
+    if [ "$QA_RISKS" -gt 0 ]; then
+        QA_STATUS="incomplete"
+    fi
     QUALITY_AUDIT_BODY=$(mktemp "${TMPDIR:-/tmp}/autospec-quality-audit.XXXXXX")
     {
         printf -- '- Status: %s\n' "$QA_STATUS"
+        if [ "$QA_AUDIT_STATUS" != "$QA_STATUS" ]; then
+            printf -- '- Status: %s (audit)\n' "$QA_AUDIT_STATUS"
+        fi
         printf -- '- Findings: %s\n' "$QA_FINDINGS"
         printf -- '- Suppressed findings: %s\n' "$QA_SUPPRESSED"
         printf -- '- Filed issues: %s\n' "$QA_ISSUES"
