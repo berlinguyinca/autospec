@@ -3,8 +3,67 @@ use autospec_core::autonomous::no_work::{
 };
 use autospec_core::autonomous::waterfall::{FunnelCounts, SealedEvidence, TierReceipt, TierStatus};
 use autospec_core::coordination::{
-    ConductorEvent, ConductorOutcome, ConductorScope, ConductorState,
+    ConductorEvent, ConductorOutcome, ConductorScope, ConductorState, BLOCKED_BACKLOG_THRESHOLD,
 };
+
+#[test]
+fn blocked_backlog_governor_seals_after_repeated_identical_cycles() {
+    let mut state = conductor(ConductorScope::Repository);
+    for cycle in 1..=BLOCKED_BACKLOG_THRESHOLD {
+        state = state
+            .record_blocked_backlog_cycle("missing_safety_reviewed", vec![43, 42])
+            .expect("record blocked cycle");
+        assert_eq!(state.blocked_backlog_cycles(), cycle);
+        if cycle < BLOCKED_BACKLOG_THRESHOLD {
+            assert_eq!(
+                state.phase(),
+                autospec_core::coordination::ConductorPhase::Scan
+            );
+        }
+    }
+    assert_eq!(
+        state.phase(),
+        autospec_core::coordination::ConductorPhase::AllBlocked
+    );
+    assert_eq!(
+        state.blocked_backlog_reason(),
+        Some("missing_safety_reviewed")
+    );
+    assert_eq!(state.blocked_backlog_issues(), &[42, 43]);
+    let restored = ConductorState::parse_json(&state.to_json()).expect("persisted governor state");
+    assert_eq!(restored.blocked_backlog_cycles(), BLOCKED_BACKLOG_THRESHOLD);
+    assert_eq!(
+        restored.phase(),
+        autospec_core::coordination::ConductorPhase::AllBlocked
+    );
+}
+
+#[test]
+fn blocked_backlog_governor_resets_when_reason_changes() {
+    let state = conductor(ConductorScope::Repository)
+        .record_blocked_backlog_cycle("missing_safety_reviewed", vec![42])
+        .expect("first cycle")
+        .record_blocked_backlog_cycle("missing_qa", vec![42])
+        .expect("changed cycle");
+    assert_eq!(state.blocked_backlog_cycles(), 1);
+    assert_eq!(state.blocked_backlog_reason(), Some("missing_qa"));
+}
+
+#[test]
+fn blocked_backlog_governor_can_resume_after_issue_set_changes() {
+    let mut state = conductor(ConductorScope::Repository);
+    for _ in 0..BLOCKED_BACKLOG_THRESHOLD {
+        state = state
+            .record_blocked_backlog_cycle("missing_safety_reviewed", vec![42])
+            .expect("block cycle");
+    }
+    assert_eq!(state.phase(), autospec_core::coordination::ConductorPhase::AllBlocked);
+    let resumed = state
+        .record_blocked_backlog_cycle("missing_safety_reviewed", vec![99])
+        .expect("changed issue set resumes scan");
+    assert_eq!(resumed.phase(), autospec_core::coordination::ConductorPhase::Scan);
+    assert_eq!(resumed.blocked_backlog_cycles(), 1);
+}
 
 #[test]
 fn persisted_state_rejects_a_forged_normalized_state() {

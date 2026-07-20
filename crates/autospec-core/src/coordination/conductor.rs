@@ -4,6 +4,7 @@ mod persistence;
 
 const CONDUCTOR_SCHEMA: u64 = 1;
 const RETRY_LIMIT_EXHAUSTED: &str = "retry_limit_exhausted";
+pub const BLOCKED_BACKLOG_THRESHOLD: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConductorScope {
@@ -84,6 +85,9 @@ pub struct ConductorState {
     pause_reason: Option<String>,
     terminal_reason: Option<String>,
     resume_phase: Option<ConductorPhase>,
+    blocked_backlog_cycles: u32,
+    blocked_backlog_reason: Option<String>,
+    blocked_backlog_issues: Vec<u64>,
 }
 
 impl ConductorState {
@@ -108,6 +112,9 @@ impl ConductorState {
             pause_reason: None,
             terminal_reason: None,
             resume_phase: None,
+            blocked_backlog_cycles: 0,
+            blocked_backlog_reason: None,
+            blocked_backlog_issues: Vec::new(),
         })
     }
 
@@ -149,6 +156,71 @@ impl ConductorState {
 
     pub fn terminal_reason(&self) -> Option<&str> {
         self.terminal_reason.as_deref()
+    }
+
+    pub fn blocked_backlog_cycles(&self) -> u32 {
+        self.blocked_backlog_cycles
+    }
+
+    pub fn blocked_backlog_reason(&self) -> Option<&str> {
+        self.blocked_backlog_reason.as_deref()
+    }
+
+    pub fn blocked_backlog_issues(&self) -> &[u64] {
+        &self.blocked_backlog_issues
+    }
+
+    /// Record one complete Tier 1 blocked cycle. Repeated cycles with a new
+    /// issue set or reason reset the governor; five identical cycles seal the
+    /// state as `AllBlocked` and prevent descent into discovery tiers.
+    pub fn record_blocked_backlog_cycle(
+        mut self,
+        reason: impl Into<String>,
+        mut issues: Vec<u64>,
+    ) -> Result<Self, String> {
+        let reason = reason.into();
+        if reason.trim().is_empty() || issues.iter().any(|issue| *issue == 0) {
+            return Err(
+                "blocked backlog requires a non-empty reason and positive issue ids".to_string(),
+            );
+        }
+        issues.sort_unstable();
+        issues.dedup();
+        let same = self.blocked_backlog_reason.as_deref() == Some(reason.as_str())
+            && self.blocked_backlog_issues == issues;
+        if !same && self.phase == ConductorPhase::AllBlocked {
+            self.phase = ConductorPhase::Scan;
+            self.last_outcome = None;
+        }
+        self.blocked_backlog_cycles = if same {
+            self.blocked_backlog_cycles.saturating_add(1)
+        } else {
+            1
+        };
+        self.blocked_backlog_reason = Some(reason.clone());
+        self.blocked_backlog_issues = issues.clone();
+        if self.blocked_backlog_cycles >= BLOCKED_BACKLOG_THRESHOLD {
+            self.clear_selection();
+            self.phase = ConductorPhase::AllBlocked;
+            self.last_outcome = Some(ConductorOutcome::AllBlocked {
+                reason,
+                issues: issues.into_boxed_slice(),
+            });
+        }
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn clear_blocked_backlog_governor(mut self) -> Result<Self, String> {
+        self.blocked_backlog_cycles = 0;
+        self.blocked_backlog_reason = None;
+        self.blocked_backlog_issues.clear();
+        if self.phase == ConductorPhase::AllBlocked {
+            self.phase = ConductorPhase::Scan;
+            self.last_outcome = None;
+        }
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn transition(mut self, event: ConductorEvent) -> Result<Self, String> {

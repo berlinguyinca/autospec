@@ -25,6 +25,24 @@ impl ConductorState {
         if let Some(outcome) = &self.last_outcome {
             outcome.validate()?;
         }
+        if self.blocked_backlog_cycles == 0
+            && (self.blocked_backlog_reason.is_some() || !self.blocked_backlog_issues.is_empty())
+        {
+            return Err("blocked backlog metadata requires a positive cycle count".to_string());
+        }
+        if self.blocked_backlog_issues.iter().any(|issue| *issue == 0)
+            || self
+                .blocked_backlog_issues
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err("blocked backlog issue ids must be positive and sorted".to_string());
+        }
+        if self.blocked_backlog_cycles >= super::BLOCKED_BACKLOG_THRESHOLD
+            && self.phase != ConductorPhase::AllBlocked
+        {
+            return Err("threshold blocked backlog must be sealed as all-blocked".to_string());
+        }
         Ok(())
     }
 
