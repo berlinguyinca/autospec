@@ -3,9 +3,10 @@ use std::fs;
 use std::path::Path;
 
 use autospec_core::autonomous::tier2::{
-    evaluate_tier2, Tier2Complexity, Tier2Evaluation, Tier2Failure, Tier2FailureCode,
-    Tier2GeneratedProposals, Tier2Input, Tier2Proposal, Tier2RoiPolicy, Tier2Severity, Tier2Source,
-    Tier2Stage, Tier2StageResult, Tier2Verification, Tier2VerifierVerdicts, DISABLED_REASON,
+    evaluate_tier2, evaluate_tier2_with_policy, Tier2Complexity, Tier2Evaluation,
+    Tier2ExclusionPolicy, Tier2Failure, Tier2FailureCode, Tier2GeneratedProposals, Tier2Input,
+    Tier2Proposal, Tier2RoiPolicy, Tier2Severity, Tier2Source, Tier2Stage, Tier2StageResult,
+    Tier2Verification, Tier2VerifierVerdicts, DISABLED_REASON,
 };
 use autospec_core::explore::specialists::{
     DetectedDomain, FileLineEvidence, StrictCollectorEvidence,
@@ -76,12 +77,90 @@ fn verdicts(rows: Vec<Tier2Verification>) -> Tier2VerifierVerdicts {
 }
 
 fn enabled(proposals: Vec<Tier2Proposal>, verdict_rows: Vec<Tier2Verification>) -> Tier2Input {
+    enabled_with_collector(collector(), proposals, verdict_rows)
+}
+
+fn enabled_with_collector(
+    collector: StrictCollectorEvidence,
+    proposals: Vec<Tier2Proposal>,
+    verdict_rows: Vec<Tier2Verification>,
+) -> Tier2Input {
     Tier2Input::Enabled {
-        collector: Tier2StageResult::Complete(collector()),
+        collector: Tier2StageResult::Complete(collector),
         generator: Tier2StageResult::Complete(generated(proposals)),
         verifier: Tier2StageResult::Complete(verdicts(verdict_rows)),
         roi_policy: Tier2RoiPolicy::v1(),
     }
+}
+
+#[test]
+fn default_exclusion_policy_filters_vendor_descendants_and_records_pollution() {
+    let mut supplied = collector();
+    supplied.domains[0].score = 3;
+    supplied.domains[0].evidence.extend([
+        row("node_modules/pkg/index.js", 1, "trading"),
+        row("node_modules/pkg/nested/mod.js", 2, "trading"),
+    ]);
+    supplied.domains[0]
+        .evidence
+        .sort_by(|left, right| left.file.cmp(&right.file).then(left.line.cmp(&right.line)));
+    let evaluation = evaluate_tier2(enabled_with_collector(
+        supplied,
+        vec![proposal("clean")],
+        vec![survives("clean")],
+    ))
+    .expect("default policy filters supplied vendor evidence");
+    let observation = evaluation
+        .observation()
+        .expect("complete filtered observation");
+
+    assert!(observation.collector().domains[0]
+        .evidence
+        .iter()
+        .all(|row| !row.file.starts_with("node_modules/")));
+    assert_eq!(observation.exclusion_report().excluded_path_count(), 2);
+    assert_eq!(observation.exclusion_report().pollution_findings().len(), 2);
+    assert!(observation
+        .evidence_json()
+        .contains("\"finding\":\"prohibited_vendor_path\""));
+    let collector_receipt = observation
+        .documents()
+        .collector_json()
+        .expect("collector receipt");
+    assert!(collector_receipt.contains(observation.exclusion_report().policy_digest()));
+    assert!(collector_receipt.contains("\"excluded_path_count\":2"));
+    for excluded in [".git", ".next", "dist", "build", "coverage", "node_modules"] {
+        assert!(Tier2ExclusionPolicy::default().excludes_component(excluded));
+    }
+}
+
+#[test]
+fn repository_exclusion_additions_are_deterministic_and_digest_bound() {
+    let first = Tier2ExclusionPolicy::with_repository_additions(["generated", "artifacts"])
+        .expect("valid checked-in additions");
+    let second = Tier2ExclusionPolicy::with_repository_additions(["artifacts", "generated"])
+        .expect("order-independent checked-in additions");
+
+    assert_eq!(first, second);
+    assert_eq!(first.digest(), second.digest());
+    assert_eq!(first.digest().len(), 64);
+    assert!(first.excludes_component("generated"));
+    assert!(Tier2ExclusionPolicy::with_repository_additions(["../outside"]).is_err());
+}
+
+#[test]
+fn tier2_exclusion_policy_rejects_evidence_traversal_outside_repository_root() {
+    let mut supplied = collector();
+    supplied.domains[0].evidence = vec![row("../outside/Cargo.toml", 1, "trading")];
+
+    let failure = evaluate_tier2_with_policy(
+        enabled_with_collector(supplied, Vec::new(), Vec::new()),
+        Tier2ExclusionPolicy::default(),
+    )
+    .expect_err("traversal must fail before policy filtering");
+
+    assert_eq!(failure.code(), Tier2FailureCode::PathEscapesRoot);
+    assert!(failure.detail().contains("outside repository root"));
 }
 
 fn failure(stage: Tier2Stage, code: Tier2FailureCode) -> Tier2Failure {
