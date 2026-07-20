@@ -31,7 +31,7 @@ use autospec_core::validation::{StructuralCheck, StructuralValidator};
 #[cfg(unix)]
 use nix::sys::signal::{killpg, Signal};
 #[cfg(unix)]
-use nix::unistd::{setsid, Pid};
+use nix::unistd::Pid;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::thread;
@@ -174,30 +174,29 @@ impl StopMode {
     }
 }
 
+type EarlyRouteHandler = fn(&[String]) -> Result<(), CommandFailure>;
+
+const EARLY_ROUTES: [(&str, EarlyRouteHandler); 7] = [
+    ("premerge", |args| premerge::run(&args[1..])),
+    ("implementer-wait-failed", |args| {
+        implementer_wait_failed(&args[1..])
+    }),
+    ("blast-radius", blast_radius),
+    ("resilience", |args| resilience::run(&args[1..])),
+    ("executor-result", executor_result),
+    ("executor-child", executor_child),
+    ("lifecycle", lifecycle),
+];
+
+fn dispatch_early_route(args: &[String]) -> Option<Result<(), CommandFailure>> {
+    let route_name = args.first()?.as_str();
+    let (_, handler) = EARLY_ROUTES.iter().find(|(name, _)| *name == route_name)?;
+    Some(handler(args))
+}
+
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
-    if args.first().is_some_and(|arg| arg == "premerge") {
-        return premerge::run(&args[1..]);
-    }
-    if args
-        .first()
-        .is_some_and(|arg| arg == "implementer-wait-failed")
-    {
-        return implementer_wait_failed(&args[1..]);
-    }
-    if args.first().is_some_and(|arg| arg == "blast-radius") {
-        return blast_radius(args);
-    }
-    if args.first().is_some_and(|arg| arg == "resilience") {
-        return resilience::run(&args[1..]);
-    }
-    if args.first().is_some_and(|arg| arg == "executor-result") {
-        return executor_result(args);
-    }
-    if args.first().is_some_and(|arg| arg == "executor-child") {
-        return executor_child(args);
-    }
-    if args.first().is_some_and(|arg| arg == "lifecycle") {
-        return lifecycle(args);
+    if let Some(result) = dispatch_early_route(args) {
+        return result;
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
@@ -3137,12 +3136,7 @@ impl ExecutorRequest {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(unix)]
-        unsafe {
-            command.pre_exec(|| {
-                let _ = setsid();
-                Ok(())
-            });
-        }
+        command.process_group(0);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(_) => return ExecutorReceipt::failed(),
@@ -5597,6 +5591,7 @@ mod foreground_tests {
 
     #[test]
     fn executor_child_rejects_a_foreign_typed_result() {
+        let expected_commit = "a".repeat(40);
         let result = executor_child_result(
             r#"{"repo":"other/repo","issue":42,"worker_id":"worker-42","branch":"main","claim_id":"claim-42","outcome":"blocked","reason":"x"}"#,
             "test/repo",
@@ -5604,6 +5599,8 @@ mod foreground_tests {
             "worker-42",
             "main",
             "claim-42",
+            "test-invocation",
+            &expected_commit,
         );
         assert!(result.is_err());
     }
