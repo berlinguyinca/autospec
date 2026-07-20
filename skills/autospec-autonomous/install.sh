@@ -227,6 +227,11 @@ write_autonomous_operator_wrapper() {
     {
         printf '%s\n' '#!/usr/bin/env bash'
         printf '%s\n' 'set -eu'
+        printf '%s\n' 'AUTOSPEC_WRAPPER_BIN_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"'
+        printf '%s\n' 'case ":$PATH:" in'
+        printf '%s\n' '    *":$AUTOSPEC_WRAPPER_BIN_DIR:"*) ;;'
+        printf '%s\n' '    *) PATH="$AUTOSPEC_WRAPPER_BIN_DIR:$PATH"; export PATH ;;'
+        printf '%s\n' 'esac'
         printf '%s\n' 'if ! command -v autospec >/dev/null 2>&1; then'
         printf '%s\n' '    printf "%s\\n" "autospec Rust binary is required; install it before using autonomous commands" >&2'
         printf '%s\n' '    exit 127'

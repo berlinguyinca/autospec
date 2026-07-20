@@ -150,6 +150,11 @@ write_autonomous_operator_wrapper() {
     {
         printf '%s\n' '#!/usr/bin/env bash'
         printf '%s\n' 'set -eu'
+        printf '%s\n' 'AUTOSPEC_WRAPPER_BIN_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"'
+        printf '%s\n' 'case ":$PATH:" in'
+        printf '%s\n' '    *":$AUTOSPEC_WRAPPER_BIN_DIR:"*) ;;'
+        printf '%s\n' '    *) PATH="$AUTOSPEC_WRAPPER_BIN_DIR:$PATH"; export PATH ;;'
+        printf '%s\n' 'esac'
         case "$subcommand" in
             ""|start|status|list|timeline|monitor|supervise|logs|watch|cleanup|stop|restart)
                 printf '%s\n' 'if command -v autospec >/dev/null 2>&1; then'
