@@ -1,4 +1,5 @@
 use autospec_core::autonomous::no_work::NoWorkTier;
+use autospec_core::autonomous::premerge::PremergeLaneIdentity;
 use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus, WaterfallState};
 use autospec_core::claim::{parse_remote_comments_json, select_run_state, RunStateRecord};
 use autospec_core::coordination::{ConductorOutcome, ConductorPhase, ConductorState};
@@ -1383,6 +1384,33 @@ fn executor_result_rejects_pr_head_mismatch_and_successor_claim_replay() {
 }
 
 #[test]
+fn executor_result_rejects_a_self_declared_noncanonical_lane_digest() {
+    const FORGED_LANE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+    fixture.set_valid_open_pull_request(EXECUTOR_COMMIT);
+    fixture.persist_pass_receipt_in_lane(
+        "pass",
+        EXECUTOR_CLAIM_ID,
+        "rust-foreground-conductor-1",
+        "autonomous/issue-42",
+        EXECUTOR_COMMIT,
+        false,
+        FORGED_LANE,
+    );
+    let before = fs::read_to_string(&fixture.comments).expect("read claim before forged receipt");
+
+    let output = fixture
+        .success_command()
+        .output()
+        .expect("submit self-declared forged lane receipt");
+
+    assert_eq!(output.status.code(), Some(20));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("success_evidence_unavailable"));
+    assert_eq!(fs::read_to_string(&fixture.comments).unwrap(), before);
+}
+
+#[test]
 fn executor_result_records_an_owner_verified_retryable_outcome() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
@@ -1944,13 +1972,40 @@ exit 1
         commit: &str,
         quarantine: bool,
     ) {
+        let lane_digest =
+            PremergeLaneIdentity::new("test/repo", 42, worker_id, claim_id, branch, commit)
+                .expect("valid premerge receipt lane")
+                .lane_digest();
+        self.persist_pass_receipt_in_lane(
+            decision,
+            claim_id,
+            worker_id,
+            branch,
+            commit,
+            quarantine,
+            &lane_digest,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_pass_receipt_in_lane(
+        &self,
+        decision: &str,
+        claim_id: &str,
+        worker_id: &str,
+        branch: &str,
+        commit: &str,
+        quarantine: bool,
+        lane_digest: &str,
+    ) {
         let lane = self
             .operator
-            .join("test_repo/premerge/lanes/test-lane-generation");
+            .join("test_repo/premerge/lanes")
+            .join(lane_digest);
         let decisions = lane.join("decisions");
         fs::create_dir_all(&decisions).expect("create premerge receipt directory");
         let receipt = format!(
-            "{{\"schema\":1,\"decision\":\"{decision}\",\"repo\":\"test/repo\",\"issue\":42,\"worker_id\":\"{worker_id}\",\"claim_id\":\"{claim_id}\",\"branch\":\"{branch}\",\"commit\":\"{commit}\",\"lane_digest\":\"test-lane-generation\",\"evidence_digest\":\"{PREMERGE_RECEIPT}\",\"reason\":\"\",\"finding_codes\":[]}}\n"
+            "{{\"schema\":1,\"decision\":\"{decision}\",\"repo\":\"test/repo\",\"issue\":42,\"worker_id\":\"{worker_id}\",\"claim_id\":\"{claim_id}\",\"branch\":\"{branch}\",\"commit\":\"{commit}\",\"lane_digest\":\"{lane_digest}\",\"evidence_digest\":\"{PREMERGE_RECEIPT}\",\"reason\":\"\",\"finding_codes\":[]}}\n"
         );
         fs::write(decisions.join(format!("{PREMERGE_RECEIPT}.json")), &receipt)
             .expect("persist immutable Pass receipt");
@@ -1960,9 +2015,22 @@ exit 1
     }
 
     fn explicit_success_command(&self) -> Command {
-        let receipt = self.operator.join(format!(
-            "test_repo/premerge/lanes/test-lane-generation/decisions/{PREMERGE_RECEIPT}.json"
-        ));
+        let lane_digest = PremergeLaneIdentity::new(
+            "test/repo",
+            42,
+            "rust-foreground-conductor-1",
+            EXECUTOR_CLAIM_ID,
+            "autonomous/issue-42",
+            EXECUTOR_COMMIT,
+        )
+        .expect("valid executor lane")
+        .lane_digest();
+        let receipt = self
+            .operator
+            .join("test_repo/premerge/lanes")
+            .join(lane_digest)
+            .join("decisions")
+            .join(format!("{PREMERGE_RECEIPT}.json"));
         if !receipt.exists() {
             self.persist_pass_receipt(
                 "pass",
@@ -1973,6 +2041,10 @@ exit 1
                 false,
             );
         }
+        self.success_command()
+    }
+
+    fn success_command(&self) -> Command {
         let mut command = self.configured_command();
         command.args([
             "autonomous",

@@ -1,10 +1,22 @@
 use serde::{Deserialize, Serialize};
 
 use super::{
-    EvidenceVerdict, PremergeLaneIdentity, QaEvidence, SecurityAuditEvidence, MAX_FINDING_CODES,
-    MAX_FINDING_CODE_LENGTH, MAX_IDENTIFIER_LENGTH, MAX_REASON_LENGTH, QA_PRODUCER,
-    SECURITY_AUDIT_PRODUCER,
+    EvidenceVerdict, PremergeDecisionKind, PremergeDecisionReceipt, PremergeLaneIdentity,
+    QaEvidence, SecurityAuditEvidence, MAX_FINDING_CODES, MAX_FINDING_CODE_LENGTH,
+    MAX_IDENTIFIER_LENGTH, MAX_REASON_LENGTH, QA_PRODUCER, SECURITY_AUDIT_PRODUCER,
 };
+
+pub(super) fn parse_decision_receipt(document: &str) -> Result<PremergeDecisionReceipt, String> {
+    let raw: RawDecisionReceipt = serde_json::from_str(document)
+        .map_err(|error| format!("malformed premerge decision receipt JSON: {error}"))?;
+    if raw.schema != 1 {
+        return Err(format!(
+            "unsupported premerge decision receipt schema: {}",
+            raw.schema
+        ));
+    }
+    raw.typed()
+}
 
 pub(super) fn parse_qa(document: &str) -> Result<QaEvidence, String> {
     let raw = parse_raw(document, "qa", QA_PRODUCER)?;
@@ -92,6 +104,66 @@ struct RawEvidence {
     verdict: String,
     finding_codes: Vec<String>,
     reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDecisionReceipt {
+    schema: u64,
+    decision: String,
+    repo: String,
+    issue: u64,
+    worker_id: String,
+    claim_id: String,
+    branch: String,
+    commit: String,
+    lane_digest: String,
+    evidence_digest: String,
+    reason: String,
+    finding_codes: Vec<String>,
+}
+
+impl RawDecisionReceipt {
+    fn typed(self) -> Result<PremergeDecisionReceipt, String> {
+        let decision = self.decision_kind()?;
+        validate_digest("lane_digest", &self.lane_digest)?;
+        validate_digest("evidence_digest", &self.evidence_digest)?;
+        let lane = PremergeLaneIdentity::new(
+            self.repo.as_str(),
+            self.issue,
+            self.worker_id.as_str(),
+            self.claim_id.as_str(),
+            self.branch.as_str(),
+            self.commit.as_str(),
+        )?;
+        if self.lane_digest != lane.lane_digest() {
+            return Err("premerge decision receipt lane_digest is not canonical".into());
+        }
+        Ok(PremergeDecisionReceipt {
+            decision,
+            lane,
+            lane_digest: self.lane_digest,
+            evidence_digest: self.evidence_digest,
+        })
+    }
+
+    fn decision_kind(&self) -> Result<PremergeDecisionKind, String> {
+        validate_finding_codes(&self.finding_codes)?;
+        match self.decision.as_str() {
+            "pass" if self.reason.is_empty() && self.finding_codes.is_empty() => {
+                Ok(PremergeDecisionKind::Pass)
+            }
+            "blocked" if !self.reason.is_empty() && !self.finding_codes.is_empty() => {
+                validate_bounded_nonempty("reason", &self.reason, MAX_REASON_LENGTH)?;
+                Ok(PremergeDecisionKind::Blocked)
+            }
+            "failed" if !self.reason.is_empty() && self.finding_codes.is_empty() => {
+                validate_bounded_nonempty("reason", &self.reason, MAX_REASON_LENGTH)?;
+                Ok(PremergeDecisionKind::Failed)
+            }
+            _ => Err("premerge decision receipt has inconsistent decision fields".into()),
+        }
+    }
 }
 
 impl RawEvidence {
@@ -206,6 +278,19 @@ fn validate_commit(commit: &str) -> Result<(), String> {
         return Ok(());
     }
     Err("commit must be 40 or 64 lowercase hexadecimal characters".into())
+}
+
+fn validate_digest(name: &str, digest: &str) -> Result<(), String> {
+    if digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "{name} must be 64 lowercase hexadecimal characters"
+    ))
 }
 
 fn validate_typed_verdict(verdict: &EvidenceVerdict) -> Result<(), String> {

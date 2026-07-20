@@ -14,6 +14,7 @@ use autospec_core::autonomous::mainline_health::{
     MainlineHealthDiagnostic, MainlineHealthOutcome,
 };
 use autospec_core::autonomous::no_work::{NoWorkObservation, NoWorkState, NoWorkTier, TierOutcome};
+use autospec_core::autonomous::premerge::{PremergeDecisionKind, PremergeDecisionReceipt};
 use autospec_core::autonomous::waterfall::{TierReceipt, TierStatus, WaterfallState};
 use autospec_core::autonomous_lifecycle::{
     decide as decide_lifecycle, Budget as LifecycleBudget, CapacityDecision, ClaimBranch,
@@ -2490,30 +2491,18 @@ fn parse_pass_receipt(
 ) -> Result<Option<String>, CommandFailure> {
     let source = fs::read_to_string(receipt_path)
         .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&source) else {
+    let Ok(receipt) = PremergeDecisionReceipt::parse(&source) else {
         return Ok(None);
     };
-    let Some(receipt) = value.as_object() else {
-        return Ok(None);
-    };
-    let exact = receipt.get("schema").and_then(serde_json::Value::as_u64) == Some(1)
-        && receipt_string(receipt, "decision") == Some("pass")
-        && receipt_string(receipt, "repo") == Some(&input.repo)
-        && receipt.get("issue").and_then(serde_json::Value::as_u64) == Some(input.issue)
-        && receipt_string(receipt, "worker_id") == Some(&input.worker_id)
-        && receipt_string(receipt, "claim_id") == Some(claim_id)
-        && receipt_string(receipt, "branch") == Some(&input.branch)
-        && receipt_string(receipt, "lane_digest") == Some(lane_digest)
-        && receipt_string(receipt, "evidence_digest") == Some(receipt_digest);
-    let commit = receipt_string(receipt, "commit").filter(|value| !value.is_empty());
-    Ok((exact && commit.is_some()).then(|| commit.expect("checked commit").to_string()))
-}
-
-fn receipt_string<'a>(
-    receipt: &'a serde_json::Map<String, serde_json::Value>,
-    field: &str,
-) -> Option<&'a str> {
-    receipt.get(field).and_then(serde_json::Value::as_str)
+    let exact = receipt.decision == PremergeDecisionKind::Pass
+        && receipt.lane.repo == input.repo
+        && receipt.lane.issue == input.issue
+        && receipt.lane.worker_id == input.worker_id
+        && receipt.lane.claim_id == claim_id
+        && receipt.lane.branch == input.branch
+        && receipt.lane_digest == lane_digest
+        && receipt.evidence_digest == receipt_digest;
+    Ok(exact.then_some(receipt.lane.commit))
 }
 
 fn is_lower_hex_digest(value: &str) -> bool {

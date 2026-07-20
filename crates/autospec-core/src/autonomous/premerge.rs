@@ -46,6 +46,27 @@ impl PremergeLaneIdentity {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PremergeDecisionKind {
+    Pass,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PremergeDecisionReceipt {
+    pub decision: PremergeDecisionKind,
+    pub lane: PremergeLaneIdentity,
+    pub lane_digest: String,
+    pub evidence_digest: String,
+}
+
+impl PremergeDecisionReceipt {
+    pub fn parse(document: &str) -> Result<Self, String> {
+        codec::parse_decision_receipt(document)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EvidenceVerdict {
     Pass,
