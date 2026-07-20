@@ -56,8 +56,9 @@ ARTIFACTS_JSON="$TMP_DIR/artifacts.json"
 STORAGE_KEYS="$TMP_DIR/storage-keys.txt"
 HOTSPOTS_ND="$TMP_DIR/maintainability-hotspots.ndjson"
 HOTSPOT_KEYS="$TMP_DIR/maintainability-hotspot-keys.txt"
+FAILED_ISSUE_KEYS="$TMP_DIR/failed-issue-keys.txt"
 touch "$FINDINGS_ND" "$SUPPRESSED_ND" "$ISSUES_ND" "$RISKS_ND" "$VERIFICATION_ND"
-touch "$STORAGE_KEYS" "$HOTSPOTS_ND" "$HOTSPOT_KEYS"
+touch "$STORAGE_KEYS" "$HOTSPOTS_ND" "$HOTSPOT_KEYS" "$FAILED_ISSUE_KEYS"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -303,11 +304,71 @@ add_maintainability_hotspot_finding() {
     '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,rank:$rank,score:$score,hotspot_kind:$kind,lines:$lines,any_count:$any_count,any_density:$any_density,debug_logging_count:$debug_count,disabled_test_count:$disabled_count,eslint_disable_count:$eslint_count,ts_ignore_count:$ts_ignore_count,recent_touch:$recent_touch,test_signal:$test_signal,remediation:"bounded refactor follow-up; behavior locks/regression tests required before cleanup edits"}'
 }
 
-rel_path() {
-  case "$1" in
-    "$REPO"/*) printf '%s' "${1#"$REPO"/}" ;;
-    *) printf '%s' "$1" ;;
+normalize_repo_path() {
+  path="$1"
+  case "$path" in
+    "$REPO"/*) printf '%s' "${path#"$REPO"/}"; return 0 ;;
+    /*)
+      suffix="${path#/}"
+      while [ -n "$suffix" ]; do
+        if [ -e "$REPO/$suffix" ]; then
+          printf '%s' "$suffix"
+          return 0
+        fi
+        case "$suffix" in
+          */*) suffix="${suffix#*/}" ;;
+          *) break ;;
+        esac
+      done
+      base="${path##*/}"
+      [ -n "$base" ] || base="unknown"
+      identity="$(printf '%s' "$path" | cksum | awk '{print $1}')"
+      printf 'external/%s-%s' "$base" "$identity"
+      ;;
+    ./*) printf '%s' "${path#./}" ;;
+    *) printf '%s' "$path" ;;
   esac
+}
+
+rel_path() {
+  normalize_repo_path "$1"
+}
+
+normalize_title_identity() {
+  printf '%s' "$1" \
+    | LC_ALL=C tr '[:upper:]' '[:lower:]' \
+    | LC_ALL=C sed 's/[^a-z0-9][^a-z0-9]*/-/g; s/^-//; s/-$//'
+}
+
+canonicalize_findings() {
+  source_file="$1"
+  canonical_file="$TMP_DIR/canonical-$(basename "$source_file")"
+  : > "$canonical_file"
+  while IFS= read -r finding; do
+    [ -n "$finding" ] || continue
+    raw_path="$(printf '%s' "$finding" | jq -r '.file // "."')"
+    normalized_path="$(normalize_repo_path "$raw_path")"
+    display_title="$(printf '%s' "$finding" | jq -r --arg raw "$raw_path" --arg normalized "$normalized_path" \
+      '(.title // "") | split($raw) | join($normalized)')"
+    normalized_title="$(normalize_title_identity "$display_title")"
+    semantic_seed="$(printf '%s' "$finding" | jq -r --arg raw "$raw_path" --arg normalized "$normalized_path" \
+      '.dedupe_key | split($raw) | join($normalized)')"
+    canonical_key="${semantic_seed}|path=${normalized_path}|title=${normalized_title}"
+    printf '%s' "$finding" | jq -c \
+      --arg raw "$raw_path" \
+      --arg path "$normalized_path" \
+      --arg title "$display_title" \
+      --arg normalized_title "$normalized_title" \
+      --arg key "$canonical_key" '
+        walk(if type == "string" then split($raw) | join($path) else . end)
+        | .file = $path
+        | .title = $title
+        | .normalized_path = $path
+        | .normalized_title = $normalized_title
+        | .dedupe_key = $key
+      ' >> "$canonical_file"
+  done < "$source_file"
+  mv "$canonical_file" "$source_file"
 }
 
 has_package_script() {
@@ -378,8 +439,9 @@ parse_design_template_guard_output() {
     [ -n "$line_text" ] || continue
     file="$(extract_guard_file "$line_text")"
     [ -n "$file" ] || continue
-    file="$(rel_path "$REPO/$file")"
-    line_no="$(extract_guard_line_number "$line_text" "$file")"
+    reported_file="$file"
+    line_no="$(extract_guard_line_number "$line_text" "$reported_file")"
+    case "$file" in /*) : ;; *) file="$REPO/$file" ;; esac
     case "$line_no" in ''|*[!0-9]*) line_no=0 ;; esac
     rule="$(extract_guard_rule "$line_text")"
     class_name="$(extract_guard_class "$line_text")"
@@ -1222,6 +1284,8 @@ SUPPRESSED_JSON="$TMP_DIR/suppressed.json"
 ISSUES_JSON="$TMP_DIR/issues.json"
 RISKS_JSON="$TMP_DIR/risks.json"
 VERIFICATION_JSON="$TMP_DIR/verification-lanes.json"
+canonicalize_findings "$FINDINGS_ND"
+canonicalize_findings "$SUPPRESSED_ND"
 ndjson_to_array "$FINDINGS_ND" > "$FINDINGS_JSON"
 ndjson_to_array "$SUPPRESSED_ND" > "$SUPPRESSED_JSON"
 ndjson_to_array "$VERIFICATION_ND" > "$VERIFICATION_JSON"
@@ -1233,15 +1297,65 @@ if [ "$FILE_ISSUES" -eq 1 ] && [ "${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:-0}" = "1
 fi
 
 open_issues='[]'
+closed_issues='[]'
+issue_catalog_ok=1
 if [ "$issue_policy_permits" -eq 1 ]; then
-  open_issues="$(cd "$REPO" && gh issue list --state open --limit 500 --json number,title,body,labels,url 2>/dev/null || echo '[]')"
-  printf '%s' "$open_issues" | jq -e 'type=="array"' >/dev/null 2>&1 || open_issues='[]'
+  if ! open_issues="$(cd "$REPO" && gh issue list --state open --limit 500 --json number,state,title,body,labels,url 2>/dev/null)"; then
+    issue_catalog_ok=0
+    open_issues='[]'
+  elif ! printf '%s' "$open_issues" | jq -e 'type=="array"' >/dev/null 2>&1; then
+    issue_catalog_ok=0
+    open_issues='[]'
+  fi
+  if ! closed_issues="$(cd "$REPO" && gh issue list --state closed --limit 500 --json number,state,title,body,labels,url 2>/dev/null)"; then
+    issue_catalog_ok=0
+    closed_issues='[]'
+  elif ! printf '%s' "$closed_issues" | jq -e 'type=="array"' >/dev/null 2>&1; then
+    issue_catalog_ok=0
+    closed_issues='[]'
+  fi
 fi
 
+issue_catalog="$(jq -cn --argjson open "$open_issues" --argjson closed "$closed_issues" \
+  '($open | map(.state = "OPEN")) + ($closed | map(.state = "CLOSED"))')"
+
 existing_issue_for_finding() {
-  key="$1"; title="$2"
-  printf '%s' "$open_issues" | jq -c --arg key "$key" --arg title "$title" \
-    'first(.[] | select((.title == $title) or ((.body // "") | contains($key)))) // empty'
+  key="$1"; title="$2"; semantic_seed="${key%%|path=*}"
+  key_path="${key#*|path=}"
+  key_path="${key_path%%|title=*}"
+  marker="<!-- autospec-quality-audit-dedupe:v2:$key -->"
+  while IFS= read -r candidate; do
+    [ -n "$candidate" ] || continue
+    candidate_body="$(printf '%s' "$candidate" | jq -r '.body // ""')"
+    if printf '%s\n' "$candidate_body" | grep -Fx "$marker" >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+    if printf '%s\n' "$candidate_body" | grep -F '<!-- autospec-quality-audit-dedupe:v2:' >/dev/null 2>&1; then
+      continue
+    fi
+    legacy_key="$(printf '%s\n' "$candidate_body" | sed -n \
+      -e 's/^[[:space:]]*-[[:space:]]*dedupe_key:[[:space:]]*//p' \
+      -e 's/^[[:space:]]*dedupe_key:[[:space:]]*//p' | head -1)"
+    [ -n "$legacy_key" ] || continue
+    seed_prefix="$(jq -nr --arg seed "$semantic_seed" --arg path "$key_path" '$seed | rtrimstr($path)')"
+    if [ "$seed_prefix" = "$semantic_seed" ]; then
+      [ "$legacy_key" = "$semantic_seed" ] || continue
+      legacy_path=""
+    else
+      case "$legacy_key" in "$seed_prefix"*) legacy_path="${legacy_key#"$seed_prefix"}" ;; *) continue ;; esac
+      [ "$(normalize_repo_path "$legacy_path")" = "$key_path" ] || continue
+    fi
+    candidate_title="$(printf '%s' "$candidate" | jq -r '.title // ""')"
+    if [ -n "$legacy_path" ]; then
+      candidate_title="$(printf '%s' "$candidate_title" | jq -Rr --arg raw "$legacy_path" --arg path "$key_path" 'split($raw) | join($path)')"
+    fi
+    [ "$candidate_title" = "$title" ] || continue
+    printf '%s' "$candidate"
+    return 0
+  done <<EOF
+$(printf '%s' "$issue_catalog" | jq -c '.[]')
+EOF
 }
 
 coalesced_by_hotspot() {
@@ -1254,7 +1368,7 @@ coalesced_by_hotspot() {
   esac
 }
 
-if [ "$issue_policy_permits" -eq 1 ]; then
+if [ "$issue_policy_permits" -eq 1 ] && [ "$issue_catalog_ok" -eq 1 ]; then
   (cd "$REPO" && gh label create quality-audit --color d4c5f9 --force >/dev/null 2>&1) || true
   (cd "$REPO" && gh label create auto-implement --color 0e8a16 --force >/dev/null 2>&1) || true
   (cd "$REPO" && gh label create autospec:v2-flow --color 1d76db --force >/dev/null 2>&1) || true
@@ -1280,13 +1394,31 @@ if [ "$issue_policy_permits" -eq 1 ]; then
     if [ -n "$existing" ]; then
       existing_title="$(printf '%s' "$existing" | jq -r --arg title "$title" '.title // $title')"
       existing_url="$(printf '%s' "$existing" | jq -r '.url // ""')"
-      json_append "$ISSUES_ND" --arg title "$existing_title" --arg url "$existing_url" --arg key "$key" \
-        '{title:$title,url:$url,dedupe_key:$key,existing:true}'
+      existing_state="$(printf '%s' "$existing" | jq -r '.state // "OPEN"')"
+      if [ "$existing_state" = "CLOSED" ]; then
+        existing_number="$(printf '%s' "$existing" | jq -r '.number')"
+        recurrence_body="$TMP_DIR/recurrence-$existing_number.md"
+        printf 'Recurring autospec quality-audit evidence:\n\n- dedupe_key: `%s`\n- file: `%s`\n- title: %s\n' \
+          "$key" "$file" "$title" > "$recurrence_body"
+        if ! (cd "$REPO" && gh issue comment "$existing_number" --body-file "$recurrence_body" >/dev/null 2>&1); then
+          printf '%s\n' "$key" >> "$FAILED_ISSUE_KEYS"
+          continue
+        fi
+        if ! (cd "$REPO" && gh issue reopen "$existing_number" >/dev/null 2>&1); then
+          printf '%s\n' "$key" >> "$FAILED_ISSUE_KEYS"
+          continue
+        fi
+        json_append "$ISSUES_ND" --arg title "$existing_title" --arg url "$existing_url" --arg key "$key" \
+          '{title:$title,url:$url,dedupe_key:$key,existing:true,reopened:true}'
+      else
+        json_append "$ISSUES_ND" --arg title "$existing_title" --arg url "$existing_url" --arg key "$key" \
+          '{title:$title,url:$url,dedupe_key:$key,existing:true}'
+      fi
       created_issue_keys="${created_issue_keys}${key}
 "
       continue
     fi
-    body="$(printf '%s' "$finding" | jq -r '"## Goal\n" + .body + "\n\n## Acceptance criteria\n- [ ] Address `" + .dedupe_key + "` in `" + .file + "`.\n\n---\n- probe: " + .probe + "\n- classification: " + .classification + "\n- severity: " + .severity + "\n- dedupe_key: " + .dedupe_key')"
+    body="$(printf '%s' "$finding" | jq -r '"## Goal\n" + .body + "\n\n## Acceptance criteria\n- [ ] Address `" + .dedupe_key + "` in `" + .file + "`.\n\n---\n- probe: " + .probe + "\n- classification: " + .classification + "\n- severity: " + .severity + "\n- dedupe_key: " + .dedupe_key + "\n\n<!-- autospec-quality-audit-dedupe:v2:" + .dedupe_key + " -->"')"
     url="$(cd "$REPO" && gh issue create --title "$title" --body "$body" --label "quality-audit" --label "auto-implement" --label "autospec:v2-flow" --label "origin:self" 2>/dev/null || true)"
     if [ -n "$url" ]; then
       json_append "$ISSUES_ND" --arg title "$title" --arg url "$url" --arg key "$key" \
@@ -1298,14 +1430,17 @@ if [ "$issue_policy_permits" -eq 1 ]; then
 fi
 ndjson_to_array "$ISSUES_ND" > "$ISSUES_JSON"
 
-jq --slurpfile issues "$ISSUES_JSON" --rawfile hotspot_keys "$HOTSPOT_KEYS" '
+jq --slurpfile issues "$ISSUES_JSON" --rawfile hotspot_keys "$HOTSPOT_KEYS" --rawfile failed_issue_keys "$FAILED_ISSUE_KEYS" '
   ($issues[0] | map(.dedupe_key)) as $issue_keys
   | ($hotspot_keys | split("\n") | map(select(length > 0))) as $hotspot_keys
+  | ($failed_issue_keys | split("\n") | map(select(length > 0))) as $failed_issue_keys
   | [ .[]
       | select((.dedupe_key as $key | ($issue_keys | index($key)) | not))
       | select(
-          if (.probe == "any-usage" or .probe == "debug-logging-hotspots" or .probe == "focused-skipped-tests" or .probe == "eslint-disable-usage" or .probe == "ts-ignore-usage") then
-            (("maintainability-hotspot:" + .file) as $hotspot_key | ($issue_keys | index($hotspot_key)) | not)
+          if (.dedupe_key as $key | ($failed_issue_keys | index($key)) != null) then
+            true
+          elif (.probe == "any-usage" or .probe == "debug-logging-hotspots" or .probe == "focused-skipped-tests" or .probe == "eslint-disable-usage" or .probe == "ts-ignore-usage") then
+            (("maintainability-hotspot:" + .file + "|path=") as $hotspot_key | ($issue_keys | map(startswith($hotspot_key)) | any) | not)
           else
             true
           end

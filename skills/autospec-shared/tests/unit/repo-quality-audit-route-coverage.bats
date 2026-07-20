@@ -76,9 +76,9 @@ EOF
     jq -e '.findings[] | select(.probe=="route-registry-drift" and .route_family=="stats" and (.missing_routes | index("stats/admin/state-over-time")) and (.missing_routes | index("stats/database-content")))' "$OUT_JSON"
     jq -e '.findings[] | select(.probe=="route-registry-drift" and .route_family=="system" and (.missing_routes | index("system")))' "$OUT_JSON"
     jq -e '.findings[] | select(.probe=="route-coverage-compiler-warning" and .warning_code=="NG8113" and (.body | contains("RouterLink")))' "$OUT_JSON"
-    jq -e '.issue_links | map(select(.dedupe_key=="route-registry-drift:test:route-coverage:admin")) | length == 1' "$OUT_JSON"
-    jq -e '.issue_links | map(select(.dedupe_key=="route-registry-drift:test:route-coverage:stats")) | length == 1' "$OUT_JSON"
-    jq -e '.issue_links | map(select(.dedupe_key=="route-registry-drift:test:route-coverage:system")) | length == 1' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="route-registry-drift:test:route-coverage:admin|path=package.json|title=route-registry-drift-in-admin-routes")) | length == 1' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="route-registry-drift:test:route-coverage:stats|path=package.json|title=route-registry-drift-in-stats-routes")) | length == 1' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="route-registry-drift:test:route-coverage:system|path=package.json|title=route-registry-drift-in-system-routes")) | length == 1' "$OUT_JSON"
     grep -q 'route-registry-drift / app-follow-up' "$OUT_MD"
     grep -q 'NG8113' "$OUT_MD"
 }
@@ -138,8 +138,8 @@ EOF
     [ "$status" -eq 0 ]
     jq -e '.verification.lanes.lint.status == "not configured"' "$OUT_JSON"
     jq -e '.verification.lanes.typecheck.status == "not configured"' "$OUT_JSON"
-    jq -e '.findings[] | select(.probe=="package-manager-scripts" and .classification=="verification-contract-drift" and .dedupe_key=="package-script-missing:lint")' "$OUT_JSON"
-    jq -e '.findings[] | select(.probe=="package-manager-scripts" and .classification=="verification-contract-drift" and .dedupe_key=="package-script-missing:typecheck")' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="package-manager-scripts" and .classification=="verification-contract-drift" and .dedupe_key=="package-script-missing:lint|path=package.json|title=missing-npm-lint-script")' "$OUT_JSON"
+    jq -e '.findings[] | select(.probe=="package-manager-scripts" and .classification=="verification-contract-drift" and .dedupe_key=="package-script-missing:typecheck|path=package.json|title=missing-npm-typecheck-script")' "$OUT_JSON"
 }
 
 @test "audit validates caret-or engine ranges against recorded runtime versions" {
@@ -176,7 +176,7 @@ EOF
     jq -e '.runtime.node.engine == "^20.19.0 || ^22.12.0"' "$OUT_JSON"
     jq -e '.runtime.node.status == "configured but failing"' "$OUT_JSON"
     jq -e '.runtime.package_managers.npm.status == "passed"' "$OUT_JSON"
-    jq -e '.findings[] | select(.dedupe_key=="runtime-engine:node-version" and .classification=="verification-contract-drift")' "$OUT_JSON"
+    jq -e '.findings[] | select(.dedupe_key=="runtime-engine:node-version|path=package.json|title=local-node-runtime-does-not-satisfy-engines-node" and .classification=="verification-contract-drift")' "$OUT_JSON"
 }
 
 @test "audit validates space-separated compound engine ranges without truncating upper bounds" {
@@ -210,7 +210,7 @@ EOF
     run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
     [ "$status" -eq 0 ]
     jq -e '.runtime.node.status == "configured but failing"' "$OUT_JSON"
-    jq -e '.findings[] | select(.dedupe_key=="runtime-engine:node-version" and (.body | contains(">=20 <23")))' "$OUT_JSON"
+    jq -e '.findings[] | select(.dedupe_key=="runtime-engine:node-version|path=package.json|title=local-node-runtime-does-not-satisfy-engines-node" and (.body | contains(">=20 <23")))' "$OUT_JSON"
 }
 
 @test "audit large-file probe handles spaces and prunes generated state" {
