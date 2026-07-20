@@ -2526,6 +2526,9 @@ fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
     let mut repo = None;
     let mut issue = None;
     let mut invocation = None;
+    let mut worker_id = None;
+    let mut branch = None;
+    let mut claim_id = None;
     let mut index = 1;
     while index < args.len() {
         let flag = &args[index];
@@ -2541,6 +2544,12 @@ fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
                 set_executor_result_value(&mut invocation, value.clone(), "--invocation-id")
                     .map_err(CommandFailure::diagnostic)?
             }
+            "--worker-id" => set_executor_result_value(&mut worker_id, value.clone(), "--worker-id")
+                .map_err(CommandFailure::diagnostic)?,
+            "--branch" => set_executor_result_value(&mut branch, value.clone(), "--branch")
+                .map_err(CommandFailure::diagnostic)?,
+            "--claim-id" => set_executor_result_value(&mut claim_id, value.clone(), "--claim-id")
+                .map_err(CommandFailure::diagnostic)?,
             unknown => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown executor-child option: {unknown}"
@@ -2553,11 +2562,64 @@ fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
     let issue = issue.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --issue"))?;
     let invocation = invocation
         .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --invocation-id"))?;
+    let worker_id = worker_id
+        .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --worker-id"))?;
+    let branch = branch
+        .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --branch"))?;
+    let claim_id = claim_id
+        .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --claim-id"))?;
+    if let Ok(document) = fs::read_to_string(".autospec/executor-result.json") {
+        return executor_child_result(&document, &repo, issue, &worker_id, &branch, &claim_id);
+    }
     println!(
         "{{\"schema\":1,\"status\":\"blocked\",\"repo\":\"{}\",\"issue\":{},\"invocation_id\":\"{}\",\"reason\":\"{}\"}}",
         json_escape(&repo), issue, json_escape(&invocation), EXECUTOR_PENDING_REASON
     );
     Ok(())
+}
+
+fn executor_child_result(
+    document: &str,
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+) -> Result<(), CommandFailure> {
+    let value: serde_json::Value = serde_json::from_str(document)
+        .map_err(|error| CommandFailure::diagnostic(format!("invalid executor result: {error}")))?;
+    let field = |name: &str| value.get(name).and_then(serde_json::Value::as_str);
+    if field("repo") != Some(repo)
+        || value.get("issue").and_then(serde_json::Value::as_u64) != Some(issue)
+        || field("worker_id") != Some(worker_id)
+        || field("branch") != Some(branch)
+        || field("claim_id") != Some(claim_id)
+    {
+        return Err(CommandFailure::diagnostic(
+            "executor result identity does not match invocation",
+        ));
+    }
+    let outcome = field("outcome")
+        .ok_or_else(|| CommandFailure::diagnostic("executor result requires outcome"))?;
+    let mut args = vec![
+        "executor-result".to_string(),
+        "--repo".to_string(), repo.to_string(),
+        "--issue".to_string(), issue.to_string(),
+        "--worker-id".to_string(), worker_id.to_string(),
+        "--branch".to_string(), branch.to_string(),
+        "--outcome".to_string(), outcome.to_string(),
+    ];
+    if let Some(reason) = field("reason") {
+        args.extend(["--reason".to_string(), reason.to_string()]);
+    }
+    if outcome == "succeeded" {
+        for (flag, name) in [("--pr", "pr"), ("--claim-id", "claim_id"), ("--premerge-receipt", "premerge_receipt")] {
+            let result = field(name)
+                .ok_or_else(|| CommandFailure::diagnostic(format!("executor success requires {name}")))?;
+            args.extend([flag.to_string(), result.to_string()]);
+        }
+    }
+    executor_result(&args)
 }
 
 fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
@@ -2932,6 +2994,12 @@ impl ExecutorRequest {
                 layout.repo.clone(),
                 "--issue".to_string(),
                 issue.to_string(),
+                "--worker-id".to_string(),
+                worker_id.to_string(),
+                "--branch".to_string(),
+                branch.to_string(),
+                "--claim-id".to_string(),
+                claim_id.to_string(),
                 "--invocation-id".to_string(),
                 invocation_id.clone(),
             ],
@@ -2993,9 +3061,31 @@ impl ExecutorRequest {
             "{{\"schema\":1,\"status\":\"blocked\",\"repo\":\"{}\",\"issue\":{},\"invocation_id\":\"{}\",\"reason\":\"{}\"}}",
             json_escape(&self.repo), self.issue, json_escape(&self.invocation_id), EXECUTOR_PENDING_REASON
         );
-        if output.is_ok_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected
-        }) {
+        let terminal = output.ok().and_then(|output| {
+            if !output.status.success() {
+                return None;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if stdout == expected {
+                Some(ExecutorReceipt {
+                    outcome: ConductorOutcome::Blocked(EXECUTOR_PENDING_REASON.to_string()),
+                    claim_step: "executor_pending".to_string(),
+                })
+            } else if stdout.contains("\"status\":\"succeeded\"") {
+                Some(ExecutorReceipt {
+                    outcome: ConductorOutcome::Succeeded,
+                    claim_step: "executor_succeeded".to_string(),
+                })
+            } else if stdout.contains("\"status\":\"blocked\"") {
+                Some(ExecutorReceipt {
+                    outcome: ConductorOutcome::Blocked("executor_child_blocked".to_string()),
+                    claim_step: "executor_blocked".to_string(),
+                })
+            } else {
+                None
+            }
+        });
+        if let Some(receipt) = terminal {
             let _ = fs::write(
                 &invocation_path,
                 format!(
@@ -3005,10 +3095,7 @@ impl ExecutorRequest {
                     json_escape(&self.invocation_id), json_escape(&self.expected_commit)
                 ),
             );
-            ExecutorReceipt {
-                outcome: ConductorOutcome::Blocked(EXECUTOR_PENDING_REASON.to_string()),
-                claim_step: "executor_pending".to_string(),
-            }
+            receipt
         } else {
             ExecutorReceipt::failed()
         }
