@@ -728,6 +728,8 @@ fn main_health_reads_the_same_repository_config_as_foreground_admission() {
 
 #[test]
 fn missing_default_branch_keeps_its_typed_policy_bound_health_receipt() {
+    const UNRESOLVED_POLICY_DIGEST: &str =
+        "autospec-main-health-policy-v1:66e6f0c0605153f689ec9b01bbbd3ada254ed0031573a196fed67c7aab401671";
     let fixture = ForegroundFixture::new();
 
     let output = fixture
@@ -743,11 +745,16 @@ fn missing_default_branch_keeps_its_typed_policy_bound_health_receipt() {
     let lines = receipts.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
     assert!(lines[0].contains("\"diagnostic\":\"default-branch-missing\""));
-    assert!(!json_string_field(lines[0], "effective_policy_digest").is_empty());
+    assert_eq!(
+        json_string_field(lines[0], "effective_policy_digest"),
+        UNRESOLVED_POLICY_DIGEST
+    );
 }
 
 #[test]
 fn foreground_missing_default_branch_applies_typed_halt_after_recording_policy() {
+    const UNRESOLVED_POLICY_DIGEST: &str =
+        "autospec-main-health-policy-v1:66e6f0c0605153f689ec9b01bbbd3ada254ed0031573a196fed67c7aab401671";
     let fixture = ForegroundFixture::new();
 
     let output = fixture
@@ -766,7 +773,10 @@ fn foreground_missing_default_branch_applies_typed_halt_after_recording_policy()
     let lines = receipts.lines().collect::<Vec<_>>();
     assert_eq!(lines.len(), 1);
     assert!(lines[0].contains("\"diagnostic\":\"default-branch-missing\""));
-    assert!(!json_string_field(lines[0], "effective_policy_digest").is_empty());
+    assert_eq!(
+        json_string_field(lines[0], "effective_policy_digest"),
+        UNRESOLVED_POLICY_DIGEST
+    );
     assert!(!fixture.state_path().exists());
 }
 
