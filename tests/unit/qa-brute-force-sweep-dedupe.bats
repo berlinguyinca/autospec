@@ -11,6 +11,7 @@ setup() {
     printf '[]\n' > "$OPEN_JSON"
     printf '[]\n' > "$CLOSED_JSON"
     : > "$GH_LOG"
+    : > "$BATS_TEST_TMPDIR/gh-lookups.log"
 
     cat > "$REPO_FIXTURE/src/classify.py" <<'PY'
 import ast
@@ -35,6 +36,7 @@ PY
 #!/usr/bin/env bash
 set -eu
 if [ "$1 $2" = "issue list" ]; then
+    printf '%s\n' "$*" >> "$BATS_TEST_TMPDIR/gh-lookups.log"
     state=""
     while [ "$#" -gt 0 ]; do
         if [ "$1" = "--state" ]; then state="$2"; shift 2; else shift; fi
@@ -103,6 +105,15 @@ run_sweep() {
         GH_LIST_FAIL_STATE="${GH_LIST_FAIL_STATE:-}" GH_COMMENT_FAIL="${GH_COMMENT_FAIL:-0}" \
         GH_REOPEN_FAIL="${GH_REOPEN_FAIL:-0}" BATS_TEST_TMPDIR="$BATS_TEST_TMPDIR" \
         bash "$BATS_TEST_DIRNAME/../../scripts/qa-brute-force-sweep.sh"
+}
+
+@test "open and closed catalogs request a repository-complete practical limit" {
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    [ "$(grep -c -- '--limit 100000' "$BATS_TEST_TMPDIR/gh-lookups.log")" -eq 2 ]
+    grep -q -- '--state open .*--limit 100000' "$BATS_TEST_TMPDIR/gh-lookups.log"
+    grep -q -- '--state closed .*--limit 100000' "$BATS_TEST_TMPDIR/gh-lookups.log"
 }
 
 @test "exact open marker suppresses every GitHub mutation and records repo-relative identity" {

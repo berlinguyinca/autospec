@@ -83,8 +83,8 @@ relative_repo_path() {
 
 load_issue_catalogs() {
     local open_ok=1 closed_ok=1
-    gh issue list --state open --limit 1000 --json number,state,title,body,url > "$OPEN_ISSUES" 2>/dev/null || open_ok=0
-    gh issue list --state closed --limit 1000 --json number,state,title,body,url > "$CLOSED_ISSUES" 2>/dev/null || closed_ok=0
+    gh issue list --state open --limit 100000 --json number,state,title,body,url > "$OPEN_ISSUES" 2>/dev/null || open_ok=0
+    gh issue list --state closed --limit 100000 --json number,state,title,body,url > "$CLOSED_ISSUES" 2>/dev/null || closed_ok=0
     if [ "$open_ok" -ne 1 ] || [ "$closed_ok" -ne 1 ] || \
        ! jq -e 'type == "array" and all(.[]; (.number | type == "number") and (.body | type == "string"))' "$OPEN_ISSUES" >/dev/null 2>&1 || \
        ! jq -e 'type == "array" and all(.[]; (.number | type == "number") and (.body | type == "string"))' "$CLOSED_ISSUES" >/dev/null 2>&1; then
