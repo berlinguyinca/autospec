@@ -147,6 +147,7 @@ Commit `feat: type premerge evidence decisions` with Lore trailers naming strict
 **Files:**
 - Create: `crates/autospec-cli/src/commands/autonomous/premerge.rs`
 - Modify: `crates/autospec-cli/src/commands/autonomous.rs`
+- Modify: `crates/autospec-cli/src/commands/claim.rs`
 - Create: `crates/autospec-cli/tests/autonomous_premerge_commands.rs`
 
 **Interfaces:**
@@ -175,7 +176,7 @@ Expected: `premerge evaluate` is an unknown subcommand.
 
 Route `args.first() == "premerge"` to the new module. Accept only subcommand `evaluate` and flags `--repo`, `--repo-dir`, `--issue`, `--worker-id`, `--claim-id`, and optional `--json`, each exactly once. Canonicalize `--repo-dir`; use direct `git -C <repo-dir> symbolic-ref --quiet --short HEAD`, `git -C <repo-dir> rev-parse HEAD`, and `git -C <repo-dir> status --porcelain`; reject detached or dirty state.
 
-Build `PremergeLaneIdentity`, verify the current active claim has exact repo/issue/worker/claim/branch identity through a read-only helper in `commands/claim.rs`, then read only:
+Build `PremergeLaneIdentity`, then call a new read-only `claim::active_claim_generation_matches(repo, issue, worker_id, claim_id, branch) -> Result<bool, CommandFailure>` helper before reading evidence. The helper reuses the existing comment selection and freshness logic and requires exact repo/issue/worker/claim/branch identity without writing comments, labels, or run state. Then read only:
 
 ```text
 <repo-dir>/.autospec/evidence/premerge/<lane-digest>/qa.json
@@ -302,4 +303,3 @@ Any unchanged baseline validator failure must be reproduced on `origin/main` and
 - [ ] **Step 5: Commit Task 4**
 
 Commit `docs: define Rust premerge admission boundary` with Lore trailers listing exact verification and the remaining producer/executor dependency.
-
