@@ -2907,6 +2907,8 @@ impl ExecutorRequest {
         let output = Command::new(&self.program)
             .args(&self.args)
             .current_dir(&self.current_dir)
+            .env_remove("AUTOSPEC_AUTONOMOUS_PREMERGE_CMD")
+            .env_remove("AUTOSPEC_AUTONOMOUS_CMD")
             .output();
         let _ = fs::create_dir_all(&invocation_dir);
         let expected = executor_receipt_json(&self.repo, self.issue);
