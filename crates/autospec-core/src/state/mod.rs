@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -117,6 +117,104 @@ impl SpecLifecycle {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParentIssueStatus {
+    PendingChildren,
+    QuarantinedParentDecomposed,
+    CompleteButStale,
+    Closed,
+}
+
+impl ParentIssueStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::PendingChildren => "children pending",
+            Self::QuarantinedParentDecomposed => "quarantined-parent-decomposed",
+            Self::CompleteButStale => "complete but stale",
+            Self::Closed => "closed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentIssueUpdate {
+    pub parent_issue: u64,
+    pub comment_body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentIssueTerminalAction {
+    pub parent_issue: u64,
+    pub completion_summary: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParentIssueRecord {
+    parent_issue: u64,
+    child_issues: Vec<ChildIssueRecord>,
+    quarantined_parent: bool,
+    decomposition_comment_posted: bool,
+    parent_closed: bool,
+}
+
+impl ParentIssueRecord {
+    fn status(&self) -> ParentIssueStatus {
+        if self.parent_closed {
+            ParentIssueStatus::Closed
+        } else if self.child_issues.iter().all(|child| child.terminal) {
+            ParentIssueStatus::CompleteButStale
+        } else if self.quarantined_parent {
+            ParentIssueStatus::QuarantinedParentDecomposed
+        } else {
+            ParentIssueStatus::PendingChildren
+        }
+    }
+
+    fn child_numbers(&self) -> Vec<u64> {
+        self.child_issues.iter().map(|child| child.issue).collect()
+    }
+
+    fn to_json(&self) -> String {
+        let children = self
+            .child_issues
+            .iter()
+            .map(ChildIssueRecord::to_json)
+            .collect::<Vec<_>>()
+            .join(",");
+        format!(
+            "{{\"parent_issue\":{},\"child_issues\":[{}],\"quarantined_parent\":{},\"decomposition_comment_posted\":{},\"parent_closed\":{}}}",
+            self.parent_issue,
+            children,
+            self.quarantined_parent,
+            self.decomposition_comment_posted,
+            self.parent_closed
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChildIssueRecord {
+    issue: u64,
+    terminal: bool,
+}
+
+impl ChildIssueRecord {
+    fn to_json(&self) -> String {
+        format!(
+            "{{\"issue\":{},\"terminal\":{}}}",
+            self.issue, self.terminal
+        )
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParentIssueCounts {
+    pub pending_children: usize,
+    pub quarantined_parent_decomposed: usize,
+    pub complete_but_stale: usize,
+    pub closed: usize,
+}
+
 /// A validated, deterministic state document for package lifecycle progress.
 ///
 /// The store is intentionally local and non-executing. It owns only
@@ -125,6 +223,7 @@ impl SpecLifecycle {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpecStateStore {
     records: BTreeMap<String, SpecLifecycle>,
+    parent_issues: BTreeMap<u64, ParentIssueRecord>,
 }
 
 impl SpecStateStore {
@@ -151,16 +250,233 @@ impl SpecStateStore {
         self.records.values()
     }
 
+    pub fn record_parent_decomposition(
+        &mut self,
+        parent_issue: u64,
+        child_issues: Vec<u64>,
+        quarantined_parent: bool,
+    ) -> Result<ParentIssueUpdate, String> {
+        if parent_issue == 0 {
+            return Err("parent issue number must be positive".to_string());
+        }
+        if child_issues.is_empty() {
+            return Err("parent issue decomposition requires at least one child issue".to_string());
+        }
+        if self.parent_issues.contains_key(&parent_issue) {
+            return Err(format!(
+                "parent issue #{parent_issue} is already decomposed"
+            ));
+        }
+
+        let mut seen = BTreeSet::new();
+        let mut children = Vec::new();
+        for issue in child_issues {
+            if issue == 0 {
+                return Err("child issue number must be positive".to_string());
+            }
+            if issue == parent_issue {
+                return Err(format!(
+                    "parent issue #{parent_issue} cannot be its own child"
+                ));
+            }
+            if !seen.insert(issue) {
+                return Err(format!("duplicate child issue #{issue}"));
+            }
+            children.push(ChildIssueRecord {
+                issue,
+                terminal: false,
+            });
+        }
+
+        let record = ParentIssueRecord {
+            parent_issue,
+            child_issues: children,
+            quarantined_parent,
+            decomposition_comment_posted: true,
+            parent_closed: false,
+        };
+        validate_parent_record(&record)?;
+        let comment_body = decomposition_comment(
+            parent_issue,
+            &record.child_numbers(),
+            record.quarantined_parent,
+        );
+        self.parent_issues.insert(parent_issue, record);
+
+        Ok(ParentIssueUpdate {
+            parent_issue,
+            comment_body,
+        })
+    }
+
+    /// Replace local parent metadata with the relationship currently recorded
+    /// on GitHub. The remote lifecycle comment is authoritative; this cache is
+    /// only a recoverable status projection.
+    pub fn sync_parent_decomposition(
+        &mut self,
+        parent_issue: u64,
+        child_issues: Vec<u64>,
+        quarantined_parent: bool,
+    ) -> Result<ParentIssueUpdate, String> {
+        let previous = self.parent_issues.remove(&parent_issue);
+        match self.record_parent_decomposition(parent_issue, child_issues, quarantined_parent) {
+            Ok(update) => Ok(update),
+            Err(error) => {
+                if let Some(record) = previous {
+                    self.parent_issues.insert(parent_issue, record);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    pub fn record_child_terminal(
+        &mut self,
+        child_issue: u64,
+    ) -> Result<Vec<ParentIssueTerminalAction>, String> {
+        if child_issue == 0 {
+            return Err("child issue number must be positive".to_string());
+        }
+
+        let mut matched = false;
+        for record in self.parent_issues.values_mut() {
+            for child in &mut record.child_issues {
+                if child.issue == child_issue {
+                    child.terminal = true;
+                    matched = true;
+                }
+            }
+            validate_parent_record(record)?;
+        }
+        if !matched {
+            return Err(format!(
+                "child issue #{child_issue} is not linked to a parent issue"
+            ));
+        }
+
+        Ok(self.parent_issue_terminal_actions())
+    }
+
+    pub fn record_parent_closed(&mut self, parent_issue: u64) -> Result<(), String> {
+        let record = self
+            .parent_issues
+            .get_mut(&parent_issue)
+            .ok_or_else(|| format!("parent issue #{parent_issue} is not tracked"))?;
+        if !record.child_issues.iter().all(|child| child.terminal) {
+            return Err(format!(
+                "parent issue #{parent_issue} cannot close while child issues are pending"
+            ));
+        }
+        record.parent_closed = true;
+        validate_parent_record(record)
+    }
+
+    pub fn parent_issue_status(&self, parent_issue: u64) -> Option<ParentIssueStatus> {
+        self.parent_issues
+            .get(&parent_issue)
+            .map(ParentIssueRecord::status)
+    }
+
+    pub fn parent_issue_children(&self, parent_issue: u64) -> Option<Vec<u64>> {
+        self.parent_issues
+            .get(&parent_issue)
+            .map(ParentIssueRecord::child_numbers)
+    }
+
+    pub fn parent_issue_numbers(&self) -> Vec<u64> {
+        self.parent_issues.keys().copied().collect()
+    }
+
+    pub fn parent_issue_update(&self, parent_issue: u64) -> Option<ParentIssueUpdate> {
+        self.parent_issues
+            .get(&parent_issue)
+            .map(|record| ParentIssueUpdate {
+                parent_issue,
+                comment_body: decomposition_comment(
+                    parent_issue,
+                    &record.child_numbers(),
+                    record.quarantined_parent,
+                ),
+            })
+    }
+
+    pub fn parent_issue_terminal_action(
+        &self,
+        parent_issue: u64,
+    ) -> Option<ParentIssueTerminalAction> {
+        self.parent_issues.get(&parent_issue).and_then(|record| {
+            record
+                .child_issues
+                .iter()
+                .all(|child| child.terminal)
+                .then(|| ParentIssueTerminalAction {
+                    parent_issue,
+                    completion_summary: completion_summary(parent_issue, &record.child_numbers()),
+                })
+        })
+    }
+
+    pub fn parent_issue_counts(&self) -> ParentIssueCounts {
+        let mut counts = ParentIssueCounts::default();
+        for record in self.parent_issues.values() {
+            match record.status() {
+                ParentIssueStatus::PendingChildren => counts.pending_children += 1,
+                ParentIssueStatus::QuarantinedParentDecomposed => {
+                    counts.quarantined_parent_decomposed += 1;
+                }
+                ParentIssueStatus::CompleteButStale => counts.complete_but_stale += 1,
+                ParentIssueStatus::Closed => counts.closed += 1,
+            }
+        }
+        counts
+    }
+
+    pub fn parent_issue_status_lines(&self) -> Vec<String> {
+        self.parent_issues
+            .values()
+            .map(|record| {
+                let child_issues = issue_list(&record.child_numbers(), ", ");
+                format!(
+                    "#{}: {} ({})",
+                    record.parent_issue,
+                    record.status().as_str(),
+                    child_issues
+                )
+            })
+            .collect()
+    }
+
+    fn parent_issue_terminal_actions(&self) -> Vec<ParentIssueTerminalAction> {
+        self.parent_issues
+            .values()
+            .filter(|record| matches!(record.status(), ParentIssueStatus::CompleteButStale))
+            .map(|record| ParentIssueTerminalAction {
+                parent_issue: record.parent_issue,
+                completion_summary: completion_summary(
+                    record.parent_issue,
+                    &record.child_numbers(),
+                ),
+            })
+            .collect()
+    }
+
     pub fn to_json(&self) -> Result<String, String> {
         validate_records(&self.records)?;
+        validate_parent_records(&self.parent_issues)?;
         let records = self
             .records
             .values()
             .map(SpecLifecycle::to_json)
             .collect::<Vec<_>>()
             .join(",");
+        let parent_issues = self
+            .parent_issues
+            .values()
+            .map(ParentIssueRecord::to_json)
+            .collect::<Vec<_>>()
+            .join(",");
         Ok(format!(
-            "{{\"schema\":{STATE_SCHEMA_VERSION},\"specs\":[{records}]}}"
+            "{{\"schema\":{STATE_SCHEMA_VERSION},\"specs\":[{records}],\"parent_issues\":[{parent_issues}]}}"
         ))
     }
 
@@ -323,7 +639,11 @@ impl SpecStateStore {
 fn parse_store(document: &str) -> Result<SpecStateStore, String> {
     let value = JsonParser::new(document).parse()?;
     let mut root = value.into_object("spec state document")?;
-    require_only_keys(&root, &["schema", "specs"], "spec state document")?;
+    require_only_keys(
+        &root,
+        &["schema", "specs", "parent_issues"],
+        "spec state document",
+    )?;
 
     let schema =
         take_required(&mut root, "schema", "spec state document")?.into_number("schema")?;
@@ -332,6 +652,11 @@ fn parse_store(document: &str) -> Result<SpecStateStore, String> {
     }
 
     let records = take_required(&mut root, "specs", "spec state document")?.into_array("specs")?;
+    let parent_records = root
+        .remove("parent_issues")
+        .map(|value| value.into_array("parent_issues"))
+        .transpose()?
+        .unwrap_or_default();
     let mut store = SpecStateStore::new();
     for record in records {
         let lifecycle = parse_lifecycle(record)?;
@@ -340,7 +665,15 @@ fn parse_store(document: &str) -> Result<SpecStateStore, String> {
         }
         store.records.insert(lifecycle.spec_id.clone(), lifecycle);
     }
+    for record in parent_records {
+        let parent = parse_parent_issue_record(record)?;
+        if store.parent_issues.contains_key(&parent.parent_issue) {
+            return Err(format!("duplicate parent issue: #{}", parent.parent_issue));
+        }
+        store.parent_issues.insert(parent.parent_issue, parent);
+    }
     validate_records(&store.records)?;
+    validate_parent_records(&store.parent_issues)?;
     Ok(store)
 }
 
@@ -369,6 +702,56 @@ fn parse_lifecycle(value: JsonValue) -> Result<SpecLifecycle, String> {
     })
 }
 
+fn parse_parent_issue_record(value: JsonValue) -> Result<ParentIssueRecord, String> {
+    let mut record = value.into_object("parent issue record")?;
+    require_only_keys(
+        &record,
+        &[
+            "parent_issue",
+            "child_issues",
+            "quarantined_parent",
+            "decomposition_comment_posted",
+            "parent_closed",
+        ],
+        "parent issue record",
+    )?;
+    let parent_issue = take_required(&mut record, "parent_issue", "parent issue record")?
+        .into_number("parent_issue")?;
+    let child_values = take_required(&mut record, "child_issues", "parent issue record")?
+        .into_array("child_issues")?;
+    let mut child_issues = Vec::new();
+    for child in child_values {
+        child_issues.push(parse_child_issue_record(child)?);
+    }
+    let quarantined_parent =
+        take_required(&mut record, "quarantined_parent", "parent issue record")?
+            .into_bool("quarantined_parent")?;
+    let decomposition_comment_posted = take_required(
+        &mut record,
+        "decomposition_comment_posted",
+        "parent issue record",
+    )?
+    .into_bool("decomposition_comment_posted")?;
+    let parent_closed = take_required(&mut record, "parent_closed", "parent issue record")?
+        .into_bool("parent_closed")?;
+    Ok(ParentIssueRecord {
+        parent_issue,
+        child_issues,
+        quarantined_parent,
+        decomposition_comment_posted,
+        parent_closed,
+    })
+}
+
+fn parse_child_issue_record(value: JsonValue) -> Result<ChildIssueRecord, String> {
+    let mut record = value.into_object("child issue record")?;
+    require_only_keys(&record, &["issue", "terminal"], "child issue record")?;
+    let issue = take_required(&mut record, "issue", "child issue record")?.into_number("issue")?;
+    let terminal =
+        take_required(&mut record, "terminal", "child issue record")?.into_bool("terminal")?;
+    Ok(ChildIssueRecord { issue, terminal })
+}
+
 fn take_required(
     object: &mut BTreeMap<String, JsonValue>,
     key: &str,
@@ -390,6 +773,101 @@ fn require_only_keys(
         }
     }
     Ok(())
+}
+
+fn validate_parent_records(records: &BTreeMap<u64, ParentIssueRecord>) -> Result<(), String> {
+    for (parent_issue, record) in records {
+        if parent_issue != &record.parent_issue {
+            return Err(format!(
+                "parent issue record key does not match issue number: #{parent_issue}"
+            ));
+        }
+        validate_parent_record(record)?;
+    }
+    Ok(())
+}
+
+fn validate_parent_record(record: &ParentIssueRecord) -> Result<(), String> {
+    if record.parent_issue == 0 {
+        return Err("parent issue number must be positive".to_string());
+    }
+    if record.child_issues.is_empty() {
+        return Err(format!(
+            "parent issue #{} requires at least one child issue",
+            record.parent_issue
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for child in &record.child_issues {
+        if child.issue == 0 {
+            return Err(format!(
+                "parent issue #{} has a non-positive child issue",
+                record.parent_issue
+            ));
+        }
+        if child.issue == record.parent_issue {
+            return Err(format!(
+                "parent issue #{} cannot be its own child",
+                record.parent_issue
+            ));
+        }
+        if !seen.insert(child.issue) {
+            return Err(format!(
+                "parent issue #{} has duplicate child issue #{}",
+                record.parent_issue, child.issue
+            ));
+        }
+    }
+    if record.parent_closed && !record.child_issues.iter().all(|child| child.terminal) {
+        return Err(format!(
+            "parent issue #{} is closed before all child issues are terminal",
+            record.parent_issue
+        ));
+    }
+    Ok(())
+}
+
+fn decomposition_comment(
+    parent_issue: u64,
+    child_issues: &[u64],
+    quarantined_parent: bool,
+) -> String {
+    let children = format_bullet_issue_list(child_issues);
+    let state = if quarantined_parent {
+        "\nState: `quarantined-parent-decomposed`."
+    } else {
+        ""
+    };
+    format!(
+        "<!-- autospec-parent-decomposition:begin -->
+Parent issue #{parent_issue} was decomposed into child implementation issues:
+{children}{state}
+<!-- autospec-parent-decomposition:end -->"
+    )
+}
+
+fn completion_summary(parent_issue: u64, child_issues: &[u64]) -> String {
+    let children = format_bullet_issue_list(child_issues);
+    format!(
+        "<!-- autospec-parent-complete:begin -->
+All child implementation issues for parent #{parent_issue} reached a terminal state:
+{children}
+
+Closing parent issue automatically.
+<!-- autospec-parent-complete:end -->"
+    )
+}
+
+fn format_bullet_issue_list(child_issues: &[u64]) -> String {
+    format!("- {}", issue_list(child_issues, "\n- "))
+}
+
+fn issue_list(child_issues: &[u64], separator: &str) -> String {
+    child_issues
+        .iter()
+        .map(|issue| format!("#{issue}"))
+        .collect::<Vec<_>>()
+        .join(separator)
 }
 
 fn validate_records(records: &BTreeMap<String, SpecLifecycle>) -> Result<(), String> {

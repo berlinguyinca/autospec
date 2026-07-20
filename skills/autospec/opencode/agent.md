@@ -465,6 +465,20 @@ Children are written assuming the implementer is a 32B-class local model with **
 
 Capture the umbrella + child issue numbers.
 
+Persist the relationship on GitHub and in the shared per-repository parent-state
+cache before classification. This command also posts a trusted typed
+parent-marker lifecycle comment on every child and the idempotent decomposition
+comment on the parent. Append `--quarantined` when the umbrella's authoritative
+typed safety decision is `SAFETY_AMBIGUOUS` or `SAFETY_BLOCK`; otherwise omit
+it. A failure is blocking because an unlinked child could merge without ever
+reconciling its parent.
+
+```bash
+_parent_slug=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")
+export AUTOSPEC_PARENT_STATE_ROOT="${AUTOSPEC_PARENT_STATE_ROOT:-$HOME/.autospec/parent-state/$_parent_slug}"
+"${AUTOSPEC_BIN:-autospec}" parent record --repo {repo} --parent "<UMBRELLA>" --children "<CHILDREN_CSV>"
+```
+
 ## Phase 3.5 — Review and label (delegate)
 
 Dispatch a **foreground subagent** to retro-review the child issues just
@@ -723,6 +737,12 @@ Pass the following prompt verbatim to each background subagent:
 > #   rm -f "$HOME/.autospec/batch-done.json"   # clear stale file from prior crash
 >
 > while true:
+>   # Reconcile parent issues even when a child was closed manually or by another workflow.
+>   _parent_slug=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")
+>   export AUTOSPEC_PARENT_STATE_ROOT="${AUTOSPEC_PARENT_STATE_ROOT:-$HOME/.autospec/parent-state/$_parent_slug}"
+>   if ! "${AUTOSPEC_BIN:-autospec}" parent sweep --repo {repo}; then
+>     echo "[monitor] WARN: parent sweep failed; remote parent state is unknown and will be retried" >&2
+>   fi
 >   # Startup/per-scan heartbeat reconciliation — run before candidate selection.
 >   # This deletes closed/merged/orphaned heartbeats, rejects old schemas like
 >   # {"issue":407,"status":"in_progress"}, normalizes current schemas, and
@@ -1153,7 +1173,14 @@ Pass the following prompt verbatim to each background subagent:
 >      exit 0
 >    fi
 >    ```
-> 8. SUCCESS: Run the **Full test suite gate** one final time after the PR branch is current with `main`; if it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`. Then run `gh pr merge <PR> --admin --squash --delete-branch`. Merge auto-closes the issue.
+> 8. SUCCESS: Run the **Full test suite gate** one final time after the PR branch is current with `main`; if it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`. Then run `gh pr merge <PR> --admin --squash --delete-branch`. Merge auto-closes the issue. After the merge succeeds, reconcile its linked parent. A reconciliation failure cannot undo the completed merge, so post the failure on the child and leave the parent as `complete but stale` for operator-visible retry.
+>    ```bash
+>    _parent_slug=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")
+>    export AUTOSPEC_PARENT_STATE_ROOT="${AUTOSPEC_PARENT_STATE_ROOT:-$HOME/.autospec/parent-state/$_parent_slug}"
+>    if ! "${AUTOSPEC_BIN:-autospec}" parent reconcile-child --repo {repo} --child "<ISSUE>"; then
+>      gh issue comment "<ISSUE>" --repo {repo} --body "Parent reconciliation failed after merge; remote parent state is unknown and will be retried by the recurring parent sweep."
+>    fi
+>    ```
 >    ```bash
 >    # Stop-sentinel: abort if an immediate stop flag is present after this step.
 >    if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-stop-check.sh" "$ISSUE" "$BRANCH" "$LAST_STEP"; then
