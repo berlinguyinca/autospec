@@ -5,7 +5,7 @@ use crate::coordination::{dependency_numbers, RemoteIssue};
 
 use super::model::{
     Tier15Classification, Tier15Decision, Tier15HoldReason, Tier15Input, Tier15Observation,
-    Tier15QuarantineReason, Tier15Route, Tier15RouteReason, Tier15SkipReason,
+    Tier15QuarantineReason, Tier15Readiness, Tier15Route, Tier15RouteReason, Tier15SkipReason,
 };
 
 pub fn observe_tier15(input: Tier15Input) -> Result<Tier15Observation, String> {
@@ -19,6 +19,10 @@ pub fn observe_tier15(input: Tier15Input) -> Result<Tier15Observation, String> {
         .collect::<BTreeSet<_>>();
     let known = known_issues(&open, &input.closed);
     let mut decisions = Vec::with_capacity(open.len());
+    let readiness = open
+        .values()
+        .map(|issue| (issue.number, readiness(issue)))
+        .collect();
     let mut budget_used = 0usize;
 
     for issue in open.values() {
@@ -73,7 +77,18 @@ pub fn observe_tier15(input: Tier15Input) -> Result<Tier15Observation, String> {
         closed_observed: input.closed.len(),
         budget: input.budget,
         decisions,
+        readiness,
     })
+}
+
+fn readiness(issue: &RemoteIssue) -> Tier15Readiness {
+    if has_label(issue, "safety:reviewed") && has_label(issue, "autospec:verified") {
+        Tier15Readiness::SafetyReviewed
+    } else if has_label(issue, "autospec:verified") {
+        Tier15Readiness::Verified
+    } else {
+        Tier15Readiness::Candidate
+    }
 }
 
 fn deduplicate_open(open: Vec<RemoteIssue>) -> Result<BTreeMap<u64, RemoteIssue>, String> {

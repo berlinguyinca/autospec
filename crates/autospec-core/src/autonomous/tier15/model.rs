@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use crate::coordination::RemoteIssue;
 
 #[derive(Debug, Clone)]
@@ -24,11 +26,16 @@ pub struct Tier15Observation {
     pub(super) closed_observed: usize,
     pub(super) budget: usize,
     pub(super) decisions: Vec<Tier15Decision>,
+    pub(super) readiness: BTreeMap<u64, Tier15Readiness>,
 }
 
 impl Tier15Observation {
     pub fn decisions(&self) -> &[Tier15Decision] {
         &self.decisions
+    }
+
+    pub fn readiness(&self, number: u64) -> Option<Tier15Readiness> {
+        self.readiness.get(&number).copied()
     }
 
     pub fn open_observed(&self) -> usize {
@@ -58,9 +65,35 @@ impl Tier15Observation {
             .collect::<Vec<_>>()
             .join(",");
         format!(
-            "{{\"schema\":1,\"kind\":\"tier15_observation\",\"open_observed\":{},\"open_deduplicated\":{},\"closed_observed\":{},\"budget\":{},\"decisions\":[{decisions}]}}\n",
-            self.open_observed, self.open_deduplicated, self.closed_observed, self.budget
+            "{{\"schema\":1,\"kind\":\"tier15_observation\",\"open_observed\":{},\"open_deduplicated\":{},\"closed_observed\":{},\"budget\":{},\"readiness\":{{{readiness}}},\"decisions\":[{decisions}]}}\n",
+            self.open_observed,
+            self.open_deduplicated,
+            self.closed_observed,
+            self.budget,
+            readiness = self
+                .readiness
+                .iter()
+                .map(|(number, state)| format!("\"{number}\":\"{}\"", state.as_str()))
+                .collect::<Vec<_>>()
+                .join(",")
         )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier15Readiness {
+    Candidate,
+    Verified,
+    SafetyReviewed,
+}
+
+impl Tier15Readiness {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate",
+            Self::Verified => "verified",
+            Self::SafetyReviewed => "safety_reviewed",
+        }
     }
 }
 
