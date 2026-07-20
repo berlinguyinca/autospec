@@ -4040,7 +4040,7 @@ fn waterfall_normalized_state(layout: &RunLayout, cycle: u64) -> Option<String> 
             .iter()
             .all(|receipt| matches!(receipt.status(), TierStatus::Exhausted { .. }))
     {
-        return no_work_state_for_receipts(&layout.repo, receipt_pass_id, &receipts)
+        return no_work_state_for_receipts(&root, &layout.repo, receipt_pass_id, &receipts)
             .ok()
             .map(|state| conductor.normalized_state_for_no_work(cycle, &state));
     }
@@ -4077,6 +4077,7 @@ fn waterfall_receipt_pass_id(state: &WaterfallState) -> u64 {
 }
 
 fn no_work_state_for_receipts(
+    root: &Path,
     repo: &str,
     pass_id: u64,
     receipts: &[TierReceipt],
@@ -4089,15 +4090,68 @@ fn no_work_state_for_receipts(
         .iter()
         .map(|receipt| Ok((receipt.tier(), tier_outcome(receipt.status())?)))
         .collect::<Result<Vec<_>, String>>()?;
-    NoWorkState::record(
-        None,
+    let state_path = root.join("no-work-state.json");
+    let previous = fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|source| NoWorkState::parse_json(&source).ok());
+    let state = NoWorkState::record(
+        previous.as_ref(),
         NoWorkObservation {
             repo: repo.to_string(),
             pass_id,
             evidence_digest,
             tiers,
         },
+    )?;
+    atomic_write(&state_path, &state.to_json())
+        .map_err(|error| format!("cannot persist no-work state: {error}"))?;
+    if state.ideation_request().is_some() {
+        let json_path = root.join("ideation-backlog.json");
+        let markdown_path = root.join("ideation-backlog.md");
+        atomic_write(&json_path, &ideation_backlog_json(&state))
+            .map_err(|error| format!("cannot persist {}: {error}", json_path.display()))?;
+        atomic_write(&markdown_path, &ideation_backlog_markdown(&state))
+            .map_err(|error| format!("cannot persist {}: {error}", markdown_path.display()))?;
+    }
+    Ok(state)
+}
+
+fn ideation_backlog_json(state: &NoWorkState) -> String {
+    let tiers = state
+        .tiers()
+        .iter()
+        .map(|(tier, outcome)| {
+            let reason = match outcome {
+                TierOutcome::Dry { reason } => reason.as_str(),
+                TierOutcome::Produced { .. } => "produced",
+                TierOutcome::NotRun { .. } => "not_run",
+                TierOutcome::Failed { .. } => "failed",
+            };
+            format!("{{\"tier\":\"{}\",\"classification\":\"{}\"}}", tier.as_str(), reason)
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"schema\":1,\"repo\":\"{}\",\"pass_id\":{},\"remote_mutation\":\"none\",\"tiers\":[{}]}}\n",
+        json_escape(state.repo()), state.pass_id(), tiers
     )
+}
+
+fn ideation_backlog_markdown(state: &NoWorkState) -> String {
+    let mut body = format!(
+        "# Ideation backlog\n\nRepository: `{}`\nPass: `{}`\nRemote mutation: `none`\n\n## Dry-tier classifications\n",
+        state.repo(), state.pass_id()
+    );
+    for (tier, outcome) in state.tiers() {
+        let classification = match outcome {
+            TierOutcome::Dry { reason } => reason.as_str(),
+            TierOutcome::Produced { .. } => "produced",
+            TierOutcome::NotRun { .. } => "not_run",
+            TierOutcome::Failed { .. } => "failed",
+        };
+        body.push_str(&format!("- `{}`: `{classification}`\n", tier.as_str()));
+    }
+    body
 }
 
 fn tier_outcome(status: &TierStatus) -> Result<TierOutcome, String> {
