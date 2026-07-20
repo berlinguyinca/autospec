@@ -271,6 +271,24 @@ asset is needed outside a Markdown page. If no diagram is useful, the spec must
 state `Mermaid: not applicable` with the reason, so omission is explicit rather
 than accidental.
 
+### Design cohesion
+
+When the requested work creates a website, app, dashboard, portal, or other UI,
+the design spec MUST define app-wide design guidelines instead of letting each
+page improvise. Require page structure rules for the page header, constrained
+content width, section rhythm, and clear action hierarchy. Name the reusable
+primitives the spec expects agents to reuse — forms, filter bars, segmented
+controls, tables, stat cards, empty states, charts, and navbars — and state
+where each primitive applies.
+
+The spec MUST flag full-document horizontal overflow as a defect unless the
+overflow is inside an intentional bounded scroller such as a table or chart
+viewport. Empty states must be visually lighter than data-rich panels so missing
+data reads as lower emphasis, not as a primary card competing with real content.
+The Testing section MUST include desktop and mobile visual QA that reports
+spacing, alignment, overflow, table density, toolbar grouping, and chart defaults
+as explicit checks.
+
 If this is a fresh repo, commit the spec to `main` directly (`git add docs/... && git commit -m "docs: <topic> design spec" && git push`) so subsequent issues can reference it as a tracked file.
 
 For an existing repo, land the spec via a short-lived PR so CI can validate it.
