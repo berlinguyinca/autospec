@@ -45,15 +45,6 @@ pub(super) fn record_tier2_with_lease(
     with_current_lifecycle_lease(lease, || record_tier2_fenced(state_root, repo, scan))
 }
 
-#[cfg(test)]
-pub(super) fn record_tier2(
-    state_root: &Path,
-    repo: &str,
-    scan: Tier2Scan,
-) -> Result<Tier2Progress, String> {
-    record_tier2_fenced(state_root, repo, scan)
-}
-
 fn record_tier2_fenced(
     state_root: &Path,
     repo: &str,
@@ -399,6 +390,15 @@ fn store_error(error: WaterfallStoreError) -> String {
 }
 
 #[cfg(test)]
+pub(super) fn record_tier2(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier2Scan,
+) -> Result<Tier2Progress, String> {
+    record_tier2_fenced(state_root, repo, scan)
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn receipt_coordinator_keeps_only_local_persistence_authority() {
@@ -410,6 +410,10 @@ mod tests {
         assert!(
             production.contains("WaterfallStore"),
             "Tier 2 coordinator owns the local waterfall persistence boundary"
+        );
+        assert!(
+            production.contains("fn record_tier2_fenced"),
+            "authority scan must include the Tier 2 fenced recorder"
         );
         let gh_cli = ["\"", "g", "h "].concat();
         for forbidden in [

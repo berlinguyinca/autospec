@@ -50,29 +50,6 @@ pub(super) fn record_tier4_with_lease(
     })
 }
 
-#[cfg(test)]
-pub(super) fn record_tier4(
-    state_root: &Path,
-    repo: &str,
-    scan: Tier4Scan,
-) -> Result<Tier4Progress, String> {
-    let policy = WaterfallPolicy::from_config(
-        &autospec_core::autonomous::config::AutonomousConfig::default(),
-    )?;
-    record_tier4_fenced(state_root, repo, scan, &policy)
-}
-
-#[cfg(test)]
-pub(super) fn record_tier4_with_source_policy(
-    state_root: &Path,
-    repo: &str,
-    scan: Tier4Scan,
-    expected_source_policy: autospec_core::autonomous::tier4::Tier4SourcePolicy,
-) -> Result<Tier4Progress, String> {
-    let policy = WaterfallPolicy::from_tier4_source_for_test(expected_source_policy);
-    record_tier4_fenced(state_root, repo, scan, &policy)
-}
-
 fn record_tier4_fenced(
     state_root: &Path,
     repo: &str,
@@ -440,6 +417,29 @@ fn store_error(error: WaterfallStoreError) -> String {
 }
 
 #[cfg(test)]
+pub(super) fn record_tier4(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier4Scan,
+) -> Result<Tier4Progress, String> {
+    let policy = WaterfallPolicy::from_config(
+        &autospec_core::autonomous::config::AutonomousConfig::default(),
+    )?;
+    record_tier4_fenced(state_root, repo, scan, &policy)
+}
+
+#[cfg(test)]
+pub(super) fn record_tier4_with_source_policy(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier4Scan,
+    expected_source_policy: autospec_core::autonomous::tier4::Tier4SourcePolicy,
+) -> Result<Tier4Progress, String> {
+    let policy = WaterfallPolicy::from_tier4_source_for_test(expected_source_policy);
+    record_tier4_fenced(state_root, repo, scan, &policy)
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn receipt_coordinator_keeps_only_local_receipt_authority() {
@@ -449,6 +449,10 @@ mod tests {
             .next()
             .expect("production source");
         assert!(production.contains("WaterfallStore"));
+        assert!(
+            production.contains("fn record_tier4_fenced"),
+            "authority scan must include the Tier 4 fenced recorder"
+        );
         let gh_cli = ["\"", "g", "h "].concat();
         for forbidden in [
             "std::env",
