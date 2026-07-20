@@ -66,9 +66,11 @@ autospec autonomous premerge evaluate --repo OWNER/REPO --repo-dir DIR \
 
 The `autospec-qa` and `autospec-secaudit` producers write schema-1 JSON only to the fixed untracked paths
 `.autospec/evidence/premerge/<lane-digest>/qa.json` and `security.json`.
-Each document has exactly `schema`, `kind`, `producer`, `lane`, `run_id`,
-`completed_at`, and `verdict`; verdicts are `pass`, bounded-code `blocked`, or
-bounded-reason `failed`, with the producer/kind pair fixed per file. Tracked
+Each document has exactly `schema`, `kind`, `producer`, `repo`, `issue`,
+`worker_id`, `claim_id`, `branch`, `commit`, `run_id`, `completed_at`,
+`verdict`, `finding_codes`, and `reason`; kind is `qa` or `security-audit`, and
+verdicts are `pass`, bounded-code `blocked`, or bounded-reason `failed`, with the
+producer/kind pair fixed per file. Tracked
 staged or unstaged changes reject admission, as do detached or non-attached
 worktrees; those two untracked evidence files are intentionally permitted. The
 evaluator verifies canonical lane and evidence digests, writes immutable
