@@ -775,6 +775,19 @@ do not fall back to an inline label-swap path.
 > 2. **Dynamic uncached suffix** — appended by `bundle-and-dispatch.sh` after the cached prefix:
 >    the issue body, per-iteration findings (if retry > 1), branch name, and "begin coding now".
 >
+> **Closed-stdin Wait recovery.** When waiting on the implementer returns a
+> transport error containing `write_stdin failed` and `stdin is closed`, inspect
+> durable agent/session state once for a live child recovery path. If recovery
+> fails, use the actual session ID from the failed Wait target (never infer it
+> from an environment variable) and run:
+> ```bash
+> "${AUTOSPEC_BIN:-autospec}" autonomous implementer-wait-failed --repo {repo} \
+>   --issue "<ISSUE>" --worker-id "$AUTOSPEC_WORKER_ID" --branch "<BRANCH>" \
+>   --session-id "<ACTUAL_SESSION_ID>" --diagnostic "<REDACTED_WAIT_ERROR>"
+> ```
+> A non-zero result is a surfaced recovery failure: log it and stop processing
+> that issue. Never perform an inline label swap or overwrite a successor claim.
+>
 > The combined prompt sent to the subagent is:
 >
 > ```

@@ -3689,3 +3689,246 @@ fn cli_commands_require_explicit_input_or_report_the_remaining_stub() {
     assert!(!benchmark.status.success());
     assert!(String::from_utf8_lossy(&benchmark.stderr).contains("not yet implemented"));
 }
+
+#[test]
+fn autonomous_implementer_wait_failed_requires_actual_session_id() {
+    let output = autospec()
+        .args([
+            "autonomous",
+            "implementer-wait-failed",
+            "--repo",
+            "testorg/testrepo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--diagnostic",
+            "write_stdin failed: stdin is closed",
+        ])
+        .output()
+        .expect("autospec recovery command runs");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--session-id is required"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_requeues_exact_owner_with_bounded_comment() {
+    let root = temp_dir("autospec-wait-failed");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+    let diagnostic = format!(
+        "write_stdin failed: stdin is closed token=super-secret {}",
+        "x".repeat(800)
+    );
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "implementer-wait-failed",
+            "--repo",
+            "testorg/testrepo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--session-id",
+            "session-real-7",
+            "--diagnostic",
+            &diagnostic,
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("AUTOSPEC_WAIT_STATE", &state)
+        .env("AUTOSPEC_WAIT_LOG", &log)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"event\":\"implementer_wait_failed\"")
+    );
+    let remote = std::fs::read_to_string(&state).unwrap();
+    assert!(remote.contains("\\\"state\\\":\\\"failed\\\""));
+    assert!(remote.contains("autospec-implementer-wait-failed"));
+    assert!(remote.contains("session-real-7"));
+    assert!(remote.contains("[REDACTED]"));
+    assert!(!remote.contains("super-secret"));
+    assert!(!remote.contains(&"x".repeat(513)));
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(calls.contains("--remove-label\nin-progress-by-bot\n--add-label\nauto-implement"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_does_not_touch_successor_claim() {
+    let root = temp_dir("autospec-wait-successor");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-b", "feat/next", "claimed"),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+    let output = wait_failure_command(&bin, &state, &log).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""));
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(!calls.contains("issue\nedit"));
+    assert!(!calls.contains("issue\ncomment"));
+    assert!(!calls.contains("-X\nPATCH"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_is_idempotent_and_surfaces_comment_failure() {
+    let root = temp_dir("autospec-wait-idempotent");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+    assert!(wait_failure_command(&bin, &state, &log)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(wait_failure_command(&bin, &state, &log)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(
+        std::fs::read_to_string(&state)
+            .unwrap()
+            .matches("autospec-implementer-wait-failed")
+            .count(),
+        1
+    );
+
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    let failed = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_COMMENT_FAIL", "1")
+        .env("AUTOSPEC_GH_API_RETRIES", "1")
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stdout).contains("\"event\":\"implementer_wait_failed\"")
+    );
+    assert!(String::from_utf8_lossy(&failed.stdout).contains("\"outcome\":\"recovery_failed\""));
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("create run-state comment"));
+    assert!(std::fs::read_to_string(&state)
+        .unwrap()
+        .contains("\\\"state\\\":\\\"failed\\\""));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_does_not_requeue_until_failed_state_is_confirmed() {
+    let root = temp_dir("autospec-wait-unconfirmed");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+    let output = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_PATCH_NOOP", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""));
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(!calls.contains("issue\nedit"));
+    assert!(!calls.contains("issue\ncomment"));
+}
+
+fn wait_failure_command(
+    bin: &std::path::Path,
+    state: &std::path::Path,
+    log: &std::path::Path,
+) -> Command {
+    let mut command = autospec();
+    command
+        .args([
+            "autonomous",
+            "implementer-wait-failed",
+            "--repo",
+            "testorg/testrepo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--session-id",
+            "session-real-7",
+            "--diagnostic",
+            "write_stdin failed: stdin is closed",
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("AUTOSPEC_WAIT_STATE", state)
+        .env("AUTOSPEC_WAIT_LOG", log)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0");
+    command
+}
+
+fn wait_failure_comments(worker: &str, branch: &str, state: &str) -> String {
+    format!(
+        r#"[{{"id":100,"updated_at":"2026-07-19T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"{worker}\",\"state\":\"{state}\",\"branch\":\"{branch}\",\"pr\":\"\",\"step\":\"{state}\",\"paths\":[],\"claimed_at\":\"2026-07-19T00:00:00Z\",\"updated_at\":\"2026-07-19T00:00:00Z\",\"ttl_seconds\":10800}}\n<!-- autospec-run-state:end -->"}}]"#
+    )
+}
+
+const WAIT_FAILURE_GH: &str = r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" >> "$AUTOSPEC_WAIT_LOG"
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then cat "$AUTOSPEC_WAIT_STATE"; exit 0; fi
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/comments/100 ]; then
+  [ "${AUTOSPEC_WAIT_PATCH_NOOP:-0}" != 1 ] || exit 0
+  body=''; shift 2; while [ "$#" -gt 0 ]; do case "$1" in -f) body="${2#body=}"; shift 2;; *) shift;; esac; done
+  jq --arg body "$body" '.[0].body=$body' "$AUTOSPEC_WAIT_STATE" > "$AUTOSPEC_WAIT_STATE.tmp" && mv "$AUTOSPEC_WAIT_STATE.tmp" "$AUTOSPEC_WAIT_STATE"; exit 0
+fi
+if [ "$1" = issue ] && [ "$2" = edit ]; then exit 0; fi
+if [ "$1" = issue ] && [ "$2" = comment ]; then
+  [ "${AUTOSPEC_WAIT_COMMENT_FAIL:-0}" != 1 ] || exit 44
+  body=''; shift 2; while [ "$#" -gt 0 ]; do case "$1" in --body) body="$2"; shift 2;; *) shift;; esac; done
+  jq --arg body "$body" '. + [{id:101,updated_at:"2026-07-19T00:00:01Z",body:$body}]' "$AUTOSPEC_WAIT_STATE" > "$AUTOSPEC_WAIT_STATE.tmp" && mv "$AUTOSPEC_WAIT_STATE.tmp" "$AUTOSPEC_WAIT_STATE"; exit 0
+fi
+exit 0
+"#;
