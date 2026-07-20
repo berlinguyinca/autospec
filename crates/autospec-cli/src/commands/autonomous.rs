@@ -27,8 +27,14 @@ use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
+#[cfg(unix)]
+use nix::sys::signal::{killpg, Signal};
+#[cfg(unix)]
+use nix::unistd::{setsid, Pid};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{claim, queue, CommandFailure};
 
@@ -90,7 +96,7 @@ mod waterfall_policy_tests;
 mod waterfall_tests;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
-const DEFERRED_EXECUTOR_REASON: &str = "awaiting_typed_implementation_executor";
+const EXECUTOR_PENDING_REASON: &str = "implementation_executor_pending";
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -169,7 +175,7 @@ impl StopMode {
 
 type EarlyRouteHandler = fn(&[String]) -> Result<(), CommandFailure>;
 
-const EARLY_ROUTES: [(&str, EarlyRouteHandler); 6] = [
+const EARLY_ROUTES: [(&str, EarlyRouteHandler); 7] = [
     ("premerge", |args| premerge::run(&args[1..])),
     ("implementer-wait-failed", |args| {
         implementer_wait_failed(&args[1..])
@@ -177,6 +183,7 @@ const EARLY_ROUTES: [(&str, EarlyRouteHandler); 6] = [
     ("blast-radius", blast_radius),
     ("resilience", |args| resilience::run(&args[1..])),
     ("executor-result", executor_result),
+    ("executor-child", executor_child),
     ("lifecycle", lifecycle),
 ];
 
@@ -2371,8 +2378,15 @@ fn dispatch_foreground(
         })?;
         persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
 
-        let receipt = ExecutorRequest::for_selected(layout, &options.repo_dir, selection.issue)
-            .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
+        let receipt = ExecutorRequest::for_selected(
+            layout,
+            &options.repo_dir,
+            selection.issue,
+            &lease.worker_id,
+            &lease.branch,
+            &lease.claim_id,
+        )
+        .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
         state = state
             .transition(ConductorEvent::DispatchRecorded {
                 outcome: receipt.outcome.clone(),
@@ -2511,6 +2525,148 @@ fn is_lower_hex_digest(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
+    let mut repo = None;
+    let mut issue = None;
+    let mut invocation = None;
+    let mut worker_id = None;
+    let mut branch = None;
+    let mut claim_id = None;
+    let mut expected_commit = None;
+    let mut index = 1;
+    while index < args.len() {
+        let flag = &args[index];
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| CommandFailure::diagnostic("executor-child option requires a value"))?;
+        match flag.as_str() {
+            "--repo" => set_executor_result_value(&mut repo, value.clone(), "--repo")
+                .map_err(CommandFailure::diagnostic)?,
+            "--issue" => set_executor_result_number(&mut issue, value.clone(), "--issue")
+                .map_err(CommandFailure::diagnostic)?,
+            "--invocation-id" => {
+                set_executor_result_value(&mut invocation, value.clone(), "--invocation-id")
+                    .map_err(CommandFailure::diagnostic)?
+            }
+            "--worker-id" => {
+                set_executor_result_value(&mut worker_id, value.clone(), "--worker-id")
+                    .map_err(CommandFailure::diagnostic)?
+            }
+            "--branch" => set_executor_result_value(&mut branch, value.clone(), "--branch")
+                .map_err(CommandFailure::diagnostic)?,
+            "--claim-id" => set_executor_result_value(&mut claim_id, value.clone(), "--claim-id")
+                .map_err(CommandFailure::diagnostic)?,
+            "--expected-commit" => {
+                set_executor_result_value(&mut expected_commit, value.clone(), "--expected-commit")
+                    .map_err(CommandFailure::diagnostic)?
+            }
+            unknown => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown executor-child option: {unknown}"
+                )))
+            }
+        }
+        index += 2;
+    }
+    let repo = repo.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --repo"))?;
+    let issue =
+        issue.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --issue"))?;
+    let invocation = invocation
+        .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --invocation-id"))?;
+    let worker_id = worker_id
+        .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --worker-id"))?;
+    let branch =
+        branch.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --branch"))?;
+    let claim_id =
+        claim_id.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --claim-id"))?;
+    let expected_commit = expected_commit
+        .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --expected-commit"))?;
+    if let Ok(document) = fs::read_to_string(".autospec/executor-result.json") {
+        return executor_child_result(
+            &document,
+            &repo,
+            issue,
+            &worker_id,
+            &branch,
+            &claim_id,
+            &invocation,
+            &expected_commit,
+        );
+    }
+    println!(
+        "{{\"schema\":1,\"status\":\"blocked\",\"repo\":\"{}\",\"issue\":{},\"invocation_id\":\"{}\",\"reason\":\"{}\"}}",
+        json_escape(&repo), issue, json_escape(&invocation), EXECUTOR_PENDING_REASON
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn executor_child_result(
+    document: &str,
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    invocation_id: &str,
+    expected_commit: &str,
+) -> Result<(), CommandFailure> {
+    let value: serde_json::Value = serde_json::from_str(document)
+        .map_err(|error| CommandFailure::diagnostic(format!("invalid executor result: {error}")))?;
+    let field = |name: &str| value.get(name).and_then(serde_json::Value::as_str);
+    if field("repo") != Some(repo)
+        || value.get("issue").and_then(serde_json::Value::as_u64) != Some(issue)
+        || field("worker_id") != Some(worker_id)
+        || field("branch") != Some(branch)
+        || field("claim_id") != Some(claim_id)
+        || field("invocation_id") != Some(invocation_id)
+        || field("expected_commit") != Some(expected_commit)
+    {
+        return Err(CommandFailure::diagnostic(
+            "executor result identity does not match invocation",
+        ));
+    }
+    let outcome = field("outcome")
+        .ok_or_else(|| CommandFailure::diagnostic("executor result requires outcome"))?;
+    let mut args = vec![
+        "executor-result".to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+        "--issue".to_string(),
+        issue.to_string(),
+        "--worker-id".to_string(),
+        worker_id.to_string(),
+        "--branch".to_string(),
+        branch.to_string(),
+        "--outcome".to_string(),
+        outcome.to_string(),
+    ];
+    if let Some(reason) = field("reason") {
+        args.extend(["--reason".to_string(), reason.to_string()]);
+    }
+    if outcome == "succeeded" {
+        for (flag, name) in [
+            ("--pr", "pr"),
+            ("--claim-id", "claim_id"),
+            ("--premerge-receipt", "premerge_receipt"),
+        ] {
+            let result = if name == "pr" {
+                value
+                    .get(name)
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|number| number.to_string())
+            } else {
+                field(name).map(str::to_string)
+            }
+            .ok_or_else(|| {
+                CommandFailure::diagnostic(format!("executor success requires {name}"))
+            })?;
+            args.extend([flag.to_string(), result]);
+        }
+    }
+    executor_result(&args)
 }
 
 fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
@@ -2657,6 +2813,7 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
     let mut reason = None;
     let mut claim_id = None;
     let mut premerge_receipt = None;
+    let mut invocation_id = None;
     let mut index = 1;
 
     while index < args.len() {
@@ -2665,6 +2822,9 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
         match flag.as_str() {
             "--repo" => set_executor_result_value(&mut repo, value, "--repo")?,
             "--issue" => set_executor_result_number(&mut issue, value, "--issue")?,
+            "--invocation-id" => {
+                set_executor_result_value(&mut invocation_id, value, "--invocation-id")?
+            }
             "--worker-id" => set_executor_result_value(&mut worker_id, value, "--worker-id")?,
             "--branch" => set_executor_result_value(&mut branch, value, "--branch")?,
             "--outcome" => set_executor_result_value(&mut outcome, value, "--outcome")?,
@@ -2838,6 +2998,11 @@ struct ExecutorRequest {
     current_dir: PathBuf,
     repo: String,
     issue: u64,
+    worker_id: String,
+    branch: String,
+    claim_id: String,
+    invocation_id: String,
+    expected_commit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2847,37 +3012,148 @@ struct ExecutorReceipt {
 }
 
 impl ExecutorRequest {
-    fn for_selected(layout: &RunLayout, repo_dir: &str, issue: u64) -> Result<Self, String> {
+    fn for_selected(
+        layout: &RunLayout,
+        repo_dir: &str,
+        issue: u64,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+    ) -> Result<Self, String> {
+        let invocation_id = format!("{}-{}", issue, claim_id);
+        let expected_commit = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|commit| commit.len() == 40 || commit.len() == 64)
+            .unwrap_or_else(|| "0".repeat(40));
         Ok(Self {
             program: std::env::current_exe()
                 .map_err(|error| format!("cannot resolve Rust executor program: {error}"))?,
             args: vec![
                 "autonomous".to_string(),
-                "executor-result".to_string(),
+                "executor-child".to_string(),
                 "--repo".to_string(),
                 layout.repo.clone(),
                 "--issue".to_string(),
                 issue.to_string(),
+                "--worker-id".to_string(),
+                worker_id.to_string(),
+                "--branch".to_string(),
+                branch.to_string(),
+                "--claim-id".to_string(),
+                claim_id.to_string(),
+                "--expected-commit".to_string(),
+                expected_commit.clone(),
+                "--invocation-id".to_string(),
+                invocation_id.clone(),
             ],
             current_dir: PathBuf::from(repo_dir),
             repo: layout.repo.clone(),
             issue,
+            worker_id: worker_id.to_string(),
+            branch: branch.to_string(),
+            claim_id: claim_id.to_string(),
+            invocation_id,
+            expected_commit,
         })
     }
 
     fn run(&self) -> ExecutorReceipt {
-        let output = Command::new(&self.program)
+        let invocation_dir = self.current_dir.join(".autospec/executor-invocations");
+        let invocation_path = invocation_dir.join(format!("{}.json", self.invocation_id));
+        if let Ok(existing) = fs::read_to_string(&invocation_path) {
+            if existing.contains("\"terminal\":true") {
+                return ExecutorReceipt {
+                    outcome: ConductorOutcome::Blocked(EXECUTOR_PENDING_REASON.to_string()),
+                    claim_step: "executor_replayed".to_string(),
+                };
+            }
+        }
+        let mut command = Command::new(&self.program);
+        command
             .args(&self.args)
             .current_dir(&self.current_dir)
-            .output();
-        let expected = executor_receipt_json(&self.repo, self.issue);
-        if output.is_ok_and(|output| {
-            output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected
-        }) {
-            ExecutorReceipt {
-                outcome: ConductorOutcome::Blocked(DEFERRED_EXECUTOR_REASON.to_string()),
-                claim_step: "executor_deferred".to_string(),
+            .env_remove("AUTOSPEC_AUTONOMOUS_PREMERGE_CMD")
+            .env_remove("AUTOSPEC_AUTONOMOUS_CMD")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                let _ = setsid();
+                Ok(())
+            });
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(_) => return ExecutorReceipt::failed(),
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let timed_out = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break false,
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                Ok(None) => {
+                    #[cfg(unix)]
+                    let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
+                    let _ = child.kill();
+                    break true;
+                }
+                Err(_) => break true,
             }
+        };
+        let output = child.wait_with_output();
+        if timed_out {
+            return ExecutorReceipt {
+                outcome: ConductorOutcome::Retryable("executor_timeout".to_string()),
+                claim_step: "executor_timeout".to_string(),
+            };
+        }
+        let _ = fs::create_dir_all(&invocation_dir);
+        let expected = format!(
+            "{{\"schema\":1,\"status\":\"blocked\",\"repo\":\"{}\",\"issue\":{},\"invocation_id\":\"{}\",\"reason\":\"{}\"}}",
+            json_escape(&self.repo), self.issue, json_escape(&self.invocation_id), EXECUTOR_PENDING_REASON
+        );
+        let terminal = output.ok().and_then(|output| {
+            if !output.status.success() {
+                return None;
+            }
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if stdout == expected {
+                Some(ExecutorReceipt {
+                    outcome: ConductorOutcome::Blocked(EXECUTOR_PENDING_REASON.to_string()),
+                    claim_step: "executor_pending".to_string(),
+                })
+            } else if stdout.contains("\"status\":\"succeeded\"") {
+                Some(ExecutorReceipt {
+                    outcome: ConductorOutcome::Succeeded,
+                    claim_step: "executor_succeeded".to_string(),
+                })
+            } else if stdout.contains("\"status\":\"blocked\"") {
+                Some(ExecutorReceipt {
+                    outcome: ConductorOutcome::Blocked("executor_child_blocked".to_string()),
+                    claim_step: "executor_blocked".to_string(),
+                })
+            } else {
+                None
+            }
+        });
+        if let Some(receipt) = terminal {
+            let _ = fs::write(
+                &invocation_path,
+                format!(
+                    "{{\"terminal\":true,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"claim_id\":\"{}\",\"invocation_id\":\"{}\",\"expected_commit\":\"{}\"}}\n",
+                    json_escape(&self.repo), self.issue, json_escape(&self.worker_id),
+                    json_escape(&self.branch), json_escape(&self.claim_id),
+                    json_escape(&self.invocation_id), json_escape(&self.expected_commit)
+                ),
+            );
+            receipt
         } else {
             ExecutorReceipt::failed()
         }
@@ -2898,7 +3174,7 @@ fn executor_receipt_json(repo: &str, issue: u64) -> String {
         "{{\"repo\":\"{}\",\"issue\":{},\"outcome\":\"blocked\",\"reason\":\"{}\"}}",
         json_escape(repo),
         issue,
-        DEFERRED_EXECUTOR_REASON,
+        EXECUTOR_PENDING_REASON,
     )
 }
 
@@ -4041,7 +4317,7 @@ fn waterfall_normalized_state(layout: &RunLayout, cycle: u64) -> Option<String> 
             .iter()
             .all(|receipt| matches!(receipt.status(), TierStatus::Exhausted { .. }))
     {
-        return no_work_state_for_receipts(&layout.repo, receipt_pass_id, &receipts)
+        return no_work_state_for_receipts(&root, &layout.repo, receipt_pass_id, &receipts)
             .ok()
             .map(|state| conductor.normalized_state_for_no_work(cycle, &state));
     }
@@ -4078,6 +4354,7 @@ fn waterfall_receipt_pass_id(state: &WaterfallState) -> u64 {
 }
 
 fn no_work_state_for_receipts(
+    root: &Path,
     repo: &str,
     pass_id: u64,
     receipts: &[TierReceipt],
@@ -4090,15 +4367,72 @@ fn no_work_state_for_receipts(
         .iter()
         .map(|receipt| Ok((receipt.tier(), tier_outcome(receipt.status())?)))
         .collect::<Result<Vec<_>, String>>()?;
-    NoWorkState::record(
-        None,
+    let state_path = root.join("no-work-state.json");
+    let previous = fs::read_to_string(&state_path)
+        .ok()
+        .and_then(|source| NoWorkState::parse_json(&source).ok());
+    let state = NoWorkState::record(
+        previous.as_ref(),
         NoWorkObservation {
             repo: repo.to_string(),
             pass_id,
             evidence_digest,
             tiers,
         },
+    )?;
+    atomic_write(&state_path, &state.to_json())
+        .map_err(|error| format!("cannot persist no-work state: {error}"))?;
+    if state.ideation_request().is_some() {
+        let json_path = root.join("ideation-backlog.json");
+        let markdown_path = root.join("ideation-backlog.md");
+        atomic_write(&json_path, &ideation_backlog_json(&state))
+            .map_err(|error| format!("cannot persist {}: {error}", json_path.display()))?;
+        atomic_write(&markdown_path, &ideation_backlog_markdown(&state))
+            .map_err(|error| format!("cannot persist {}: {error}", markdown_path.display()))?;
+    }
+    Ok(state)
+}
+
+fn ideation_backlog_json(state: &NoWorkState) -> String {
+    let tiers = state
+        .tiers()
+        .iter()
+        .map(|(tier, outcome)| {
+            let reason = match outcome {
+                TierOutcome::Dry { reason } => reason.as_str(),
+                TierOutcome::Produced { .. } => "produced",
+                TierOutcome::NotRun { .. } => "not_run",
+                TierOutcome::Failed { .. } => "failed",
+            };
+            format!(
+                "{{\"tier\":\"{}\",\"classification\":\"{}\"}}",
+                tier.as_str(),
+                reason
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"schema\":1,\"repo\":\"{}\",\"pass_id\":{},\"remote_mutation\":\"none\",\"tiers\":[{}]}}\n",
+        json_escape(state.repo()), state.pass_id(), tiers
     )
+}
+
+fn ideation_backlog_markdown(state: &NoWorkState) -> String {
+    let mut body = format!(
+        "# Ideation backlog\n\nRepository: `{}`\nPass: `{}`\nRemote mutation: `none`\n\n## Dry-tier classifications\n",
+        state.repo(), state.pass_id()
+    );
+    for (tier, outcome) in state.tiers() {
+        let classification = match outcome {
+            TierOutcome::Dry { reason } => reason.as_str(),
+            TierOutcome::Produced { .. } => "produced",
+            TierOutcome::NotRun { .. } => "not_run",
+            TierOutcome::Failed { .. } => "failed",
+        };
+        body.push_str(&format!("- `{}`: `{classification}`\n", tier.as_str()));
+    }
+    body
 }
 
 fn tier_outcome(status: &TierStatus) -> Result<TierOutcome, String> {
@@ -5137,6 +5471,11 @@ mod foreground_tests {
             current_dir: std::env::temp_dir(),
             repo: "test/repo".to_string(),
             issue: 42,
+            worker_id: "worker-42".to_string(),
+            branch: "autonomous/issue-42".to_string(),
+            claim_id: "claim-42".to_string(),
+            invocation_id: "test-invocation".to_string(),
+            expected_commit: "a".repeat(40),
         };
 
         let receipt = request.run();
@@ -5146,6 +5485,22 @@ mod foreground_tests {
             ConductorOutcome::Blocked("executor_receipt_failed".to_string())
         );
         assert_eq!(receipt.claim_step, "executor_receipt_failed");
+    }
+
+    #[test]
+    fn executor_child_rejects_a_foreign_typed_result() {
+        let expected_commit = "a".repeat(40);
+        let result = executor_child_result(
+            r#"{"repo":"other/repo","issue":42,"worker_id":"worker-42","branch":"main","claim_id":"claim-42","outcome":"blocked","reason":"x"}"#,
+            "test/repo",
+            42,
+            "worker-42",
+            "main",
+            "claim-42",
+            "test-invocation",
+            &expected_commit,
+        );
+        assert!(result.is_err());
     }
 
     #[test]

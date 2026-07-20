@@ -227,21 +227,14 @@ write_autonomous_operator_wrapper() {
     {
         printf '%s\n' '#!/usr/bin/env bash'
         printf '%s\n' 'set -eu'
-        case "$subcommand" in
-            ""|start|status|list|timeline|monitor|supervise|logs|watch|cleanup|stop|restart)
-                printf '%s\n' 'if command -v autospec >/dev/null 2>&1; then'
-                if [ -n "$rust_subcommand" ]; then
-                    printf '%s\n' '    exec autospec autonomous '"$rust_subcommand"' "$@"'
-                else
-                    printf '%s\n' '    exec autospec autonomous "$@"'
-                fi
-                printf '%s\n' 'fi'
-                ;;
-        esac
+        printf '%s\n' 'if ! command -v autospec >/dev/null 2>&1; then'
+        printf '%s\n' '    printf "%s\\n" "autospec Rust binary is required; install it before using autonomous commands" >&2'
+        printf '%s\n' '    exit 127'
+        printf '%s\n' 'fi'
         if [ -n "$subcommand" ]; then
-            printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh" '"$subcommand"' "$@"'
+            printf '%s\n' 'exec autospec autonomous '"$rust_subcommand"' "$@"'
         else
-            printf '%s\n' 'exec "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh" "$@"'
+            printf '%s\n' 'exec autospec autonomous "$@"'
         fi
     } > "$target"
     chmod +x "$target"
@@ -299,30 +292,14 @@ heal_autonomous_operator_wrappers() {
 
 install_autonomous_operator_commands() {
     autospec_bin_dir="$HOME/.autospec/bin"
-    autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
-    launcher="$autospec_scripts_dir/autospec-autonomous.sh"
-    canonical_launcher="$HOME/.autospec/scripts/autospec-autonomous.sh"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "  [dry-run] install autospec-autonomous command wrappers in $autospec_bin_dir"
         return 0
     fi
 
-    case "$autospec_scripts_dir/" in
-        "$HOME/.autospec/"*) ;;
-        *)
-            warn "install_autonomous_operator_commands: ignoring non-persistent AUTOSPEC_SCRIPTS_DIR=$autospec_scripts_dir for wrapper exec target; wrappers resolve at runtime via \${AUTOSPEC_SCRIPTS_DIR:-\$HOME/.autospec/scripts}"
-            launcher="$canonical_launcher"
-            ;;
-    esac
-
-    if [ ! -f "$launcher" ]; then
-        warn "autonomous launcher not present yet at $launcher; writing runtime-resolving wrappers anyway"
-    fi
-
     mkdir -p "$autospec_bin_dir"
     heal_autonomous_operator_wrappers
-    [ -f "$launcher" ] && chmod +x "$launcher"
     for command in autospec-autonomous autospec-autonomous-start autospec-autonomous-status autospec-autonomous-list autospec-autonomous-timeline autospec-autonomous-monitor autospec-autonomous-supervise autospec-autonomous-logs autospec-autonomous-watch autospec-autonomous-cleanup autospec-autonomous-stop autospec-autonomous-restart; do
         target="$autospec_bin_dir/$command"
         subcommand="${command#autospec-autonomous-}"

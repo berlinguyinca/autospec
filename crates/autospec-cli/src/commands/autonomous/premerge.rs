@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use autospec_core::autonomous::premerge::{
-    evaluate_premerge, EvidenceAvailability, PremergeDecision, PremergeLaneIdentity, QaEvidence,
-    SecurityAuditEvidence,
+    evaluate_premerge, EvidenceAvailability, EvidenceVerdict, PremergeDecision,
+    PremergeLaneIdentity, QaEvidence, SecurityAuditEvidence,
 };
 
 use super::{atomic_write, json_escape, Options, RunLayout};
@@ -24,6 +24,7 @@ struct EvaluateOptions {
 pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
     match args {
         [command, rest @ ..] if command == "evaluate" => evaluate(rest),
+        [command, rest @ ..] if command == "produce" => produce(rest),
         [] => Err(CommandFailure::diagnostic(
             "autospec autonomous premerge requires a subcommand",
         )),
@@ -31,6 +32,131 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
             "unknown autospec autonomous premerge subcommand: {command}"
         ))),
     }
+}
+
+fn produce(args: &[String]) -> Result<(), CommandFailure> {
+    let mut kind = None;
+    let mut repo = None;
+    let mut repo_dir = None;
+    let mut issue = None;
+    let mut worker_id = None;
+    let mut claim_id = None;
+    let mut run_id = None;
+    let mut verdict = None;
+    let mut reason = None;
+    let mut finding_codes = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| CommandFailure::diagnostic(format!("{flag} requires a value")))?;
+        match flag {
+            "--kind" => set_string(&mut kind, args, &mut index, flag)?,
+            "--repo" => set_string(&mut repo, args, &mut index, flag)?,
+            "--repo-dir" => {
+                let mut value_slot = None;
+                set_string(&mut value_slot, args, &mut index, flag)?;
+                repo_dir = value_slot.map(PathBuf::from);
+            }
+            "--issue" => {
+                issue = Some(
+                    value
+                        .parse()
+                        .map_err(|_| CommandFailure::diagnostic("--issue must be positive"))?,
+                );
+                index += 2;
+            }
+            "--worker-id" => set_string(&mut worker_id, args, &mut index, flag)?,
+            "--claim-id" => set_string(&mut claim_id, args, &mut index, flag)?,
+            "--run-id" => set_string(&mut run_id, args, &mut index, flag)?,
+            "--verdict" => set_string(&mut verdict, args, &mut index, flag)?,
+            "--reason" => set_string(&mut reason, args, &mut index, flag)?,
+            "--finding-code" => {
+                finding_codes.push(value.to_string());
+                index += 2;
+            }
+            unknown => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown produce option: {unknown}"
+                )))
+            }
+        }
+    }
+    let kind = kind.ok_or_else(|| CommandFailure::diagnostic("--kind is required"))?;
+    let repo = repo.ok_or_else(|| CommandFailure::diagnostic("--repo is required"))?;
+    let repo_dir = canonical_repo_dir(
+        &repo_dir.ok_or_else(|| CommandFailure::diagnostic("--repo-dir is required"))?,
+    )?;
+    let issue = issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?;
+    let worker_id =
+        worker_id.ok_or_else(|| CommandFailure::diagnostic("--worker-id is required"))?;
+    let claim_id = claim_id.ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?;
+    let run_id = run_id.ok_or_else(|| CommandFailure::diagnostic("--run-id is required"))?;
+    let verdict_name =
+        verdict.ok_or_else(|| CommandFailure::diagnostic("--verdict is required"))?;
+    let branch = git_stdout(&repo_dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map_err(|_| CommandFailure::diagnostic("premerge producer worktree is detached"))?;
+    let commit = git_stdout(&repo_dir, &["rev-parse", "HEAD"])?;
+    let lane = PremergeLaneIdentity::new(repo.clone(), issue, worker_id, claim_id, branch, commit)
+        .map_err(CommandFailure::diagnostic)?;
+    let evidence_verdict = match verdict_name.as_str() {
+        "pass" => EvidenceVerdict::Pass,
+        "blocked" => EvidenceVerdict::Blocked { finding_codes },
+        "failed" => EvidenceVerdict::Failed {
+            reason: reason.unwrap_or_else(|| "producer failed".to_string()),
+        },
+        _ => {
+            return Err(CommandFailure::diagnostic(
+                "--verdict must be pass, blocked, or failed",
+            ))
+        }
+    };
+    let json = match kind.as_str() {
+        "qa" => QaEvidence {
+            lane: lane.clone(),
+            run_id: run_id.clone(),
+            completed_at: unix_now(),
+            verdict: evidence_verdict.clone(),
+        }
+        .to_json(),
+        "security" => SecurityAuditEvidence {
+            lane: lane.clone(),
+            run_id,
+            completed_at: unix_now(),
+            verdict: evidence_verdict,
+        }
+        .to_json(),
+        _ => return Err(CommandFailure::diagnostic("--kind must be qa or security")),
+    };
+    let directory = repo_dir
+        .join(".autospec/evidence/premerge")
+        .join(lane.lane_digest());
+    fs::create_dir_all(&directory).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "cannot create producer evidence directory: {error}"
+        ))
+    })?;
+    let filename = if kind == "qa" {
+        "qa.json"
+    } else {
+        "security.json"
+    };
+    atomic_write(&directory.join(filename), &format!("{json}\n"))
+        .map_err(CommandFailure::diagnostic)?;
+    println!(
+        "{{\"kind\":\"{}\",\"lane_digest\":\"{}\",\"path\":\"{}\"}}",
+        kind,
+        lane.lane_digest(),
+        directory.join(filename).display()
+    );
+    Ok(())
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
 }
 
 fn evaluate(args: &[String]) -> Result<(), CommandFailure> {
