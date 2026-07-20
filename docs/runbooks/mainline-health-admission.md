@@ -64,16 +64,19 @@ autospec autonomous premerge evaluate --repo OWNER/REPO --repo-dir DIR \
   --issue N --worker-id ID --claim-id ID --json
 ```
 
-QA and security producers write schema-1 JSON only to the fixed untracked paths
+The `autospec-qa` and `autospec-secaudit` producers write schema-1 JSON only to the fixed untracked paths
 `.autospec/evidence/premerge/<lane-digest>/qa.json` and `security.json`. Tracked
-staged or unstaged changes reject admission; those two untracked evidence files
-are intentionally permitted. The evaluator verifies canonical lane and evidence
-digests, writes immutable receipts and a latest pointer, and quarantines blocked
-lanes under repo-scoped autonomous state. Any missing, malformed, mismatched, or
-unavailable evidence fails closed.
+staged or unstaged changes reject admission, as do detached or non-attached
+worktrees; those two untracked evidence files are intentionally permitted. The
+evaluator verifies canonical lane and evidence digests, writes immutable
+decisions under
+`.autospec/autonomous-operator/<scope>/premerge/lanes/<lane-digest>/decisions/<evidence-digest>.json`,
+plus `latest.json` and blocked-lane `quarantine.json`. Any missing, malformed,
+mismatched, or unavailable evidence fails closed. Exit 0 is pass, 20 is
+blocked/quarantined (another lane may continue), and 2 is diagnostic failure.
 
 The receipt is an observability/admission artifact, not a foreground executor:
 the supervised Rust executor and live QA/security producers remain follow-up
-work. Claim success must include the exact claim id and receipt digest, and the
+work. Claim success must include `--claim-id` and `--premerge-receipt`, and the
 receipt commit must match the GitHub PR `headRefOid`; otherwise the claim remains
 non-successful.

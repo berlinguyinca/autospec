@@ -11,6 +11,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[path = "autonomous_premerge_authority.rs"]
+mod authority;
+
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
     root: PathBuf,
