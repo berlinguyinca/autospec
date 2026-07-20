@@ -17,7 +17,7 @@ mod promotion;
 
 use output::promotion_decision_json;
 use promotion::{
-    add_issue_label, read_issue, remove_issue_label, remove_owned_labels, restore_removed_labels,
+    add_issue_label, read_issue, remove_issue_label, remove_owned_labels, rollback_cleanup_labels,
     rollback_owned_labels,
 };
 
@@ -175,11 +175,14 @@ fn promote_remote_issue(
             .retain(|label| !remove_labels.contains(label));
         let decision = evaluate(&normalized, trusted_actors);
         if decision.auto_implement && decision.eligible {
-            let changed = remove_owned_labels(repo, number, &initial, remove_labels)?;
-            if changed {
-                verify_owned_cleanup(repo, number, &initial, &normalized, remove_labels)?;
+            let removed = remove_owned_labels(repo, number, &initial, remove_labels)?;
+            if !removed.is_empty() {
+                verify_owned_cleanup(repo, number, &initial, &normalized, remove_labels, &removed)?;
             }
-            return Ok(PromotionResult { decision, changed });
+            return Ok(PromotionResult {
+                decision,
+                changed: !removed.is_empty(),
+            });
         }
         remove_issue_label(repo, number, "auto-implement")?;
         let reread = read_issue(repo, number)?;
@@ -342,16 +345,53 @@ fn verify_owned_cleanup(
     number: u64,
     initial: &RemoteIssue,
     normalized: &RemoteIssue,
-    remove_labels: &[String],
+    owned_labels: &[String],
+    removed_labels: &[String],
 ) -> Result<(), CommandFailure> {
-    let reread = read_issue(repo, number)?;
+    let reread = match read_issue(repo, number) {
+        Ok(issue) => issue,
+        Err(error) => {
+            return Err(cleanup_rollback_after_error(
+                repo,
+                number,
+                initial,
+                owned_labels,
+                removed_labels,
+                error,
+            ))
+        }
+    };
     if snapshot_matches(&reread, initial, &initial.body, &normalized.labels) {
         return Ok(());
     }
-    restore_removed_labels(repo, initial, remove_labels);
-    Err(promotion_conflict(
-        "issue changed while owned labels were finalized",
+    Err(cleanup_rollback_after_error(
+        repo,
+        number,
+        initial,
+        owned_labels,
+        removed_labels,
+        promotion_conflict("issue changed while owned labels were finalized"),
     ))
+}
+
+fn cleanup_rollback_after_error(
+    repo: &str,
+    number: u64,
+    initial: &RemoteIssue,
+    owned_labels: &[String],
+    removed_labels: &[String],
+    original: CommandFailure,
+) -> CommandFailure {
+    match rollback_cleanup_labels(repo, number, initial, owned_labels, removed_labels) {
+        Ok(()) => original,
+        Err(rollback) => CommandFailure::status(
+            format!(
+                "{}; original failure: {}",
+                rollback.message, original.message
+            ),
+            rollback.exit_code,
+        ),
+    }
 }
 
 fn snapshot_matches(

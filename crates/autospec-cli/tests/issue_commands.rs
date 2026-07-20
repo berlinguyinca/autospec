@@ -205,6 +205,67 @@ fn issue_promote_finishes_owned_label_cleanup_for_an_existing_admission() {
 }
 
 #[test]
+fn issue_promote_restores_existing_admission_cleanup_when_verification_read_fails() {
+    let fixture = PromotionFixture::new(
+        SAFE_BODY,
+        "berlinguyinca",
+        &[
+            "ctx:32k",
+            "safety:reviewed",
+            "auto-implement",
+            "needs-autospec-template",
+        ],
+    );
+
+    let output = fixture
+        .command()
+        .args(["--remove-label", "needs-autospec-template"])
+        .env("AUTOSPEC_PROMOTE_FAILURE", "cleanup-get")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("gh issue read failed"));
+    assert!(labels(&fixture.issue()).contains(&"needs-autospec-template"));
+    let calls = fixture.calls();
+    assert_before(
+        &calls,
+        "labels/needs-autospec-template",
+        "labels[]=needs-autospec-template",
+    );
+    assert!(
+        calls.rfind("--method GET").unwrap()
+            > calls.rfind("labels[]=needs-autospec-template").unwrap()
+    );
+}
+
+#[test]
+fn issue_promote_reports_existing_admission_cleanup_restore_failure_after_drift() {
+    let fixture = PromotionFixture::new(
+        SAFE_BODY,
+        "berlinguyinca",
+        &[
+            "ctx:32k",
+            "safety:reviewed",
+            "auto-implement",
+            "needs-autospec-template",
+        ],
+    );
+
+    let output = fixture
+        .command()
+        .args(["--remove-label", "needs-autospec-template"])
+        .env("AUTOSPEC_PROMOTE_RACE", "cleanup-drift")
+        .env("AUTOSPEC_PROMOTE_FAILURE", "cleanup-restore")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ISSUE_PROMOTION_ROLLBACK_FAILED"));
+    assert!(!labels(&fixture.issue()).contains(&"needs-autospec-template"));
+}
+
+#[test]
 fn issue_promote_fails_closed_when_issue_changes_before_safety_write() {
     let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
 
@@ -417,6 +478,14 @@ case "$method:$endpoint" in
       printf 'simulated safety verification read failure\n' >&2
       exit 44
     fi
+    if [ "${AUTOSPEC_PROMOTE_FAILURE:-}" = cleanup-get ] \
+      && jq -e '.labels | index("auto-implement")' "$state" >/dev/null \
+      && ! jq -e '.labels | index("needs-autospec-template")' "$state" >/dev/null \
+      && [ ! -e "$state.cleanup-get-failed" ]; then
+      : > "$state.cleanup-get-failed"
+      printf 'simulated cleanup verification read failure\n' >&2
+      exit 45
+    fi
     cat "$state"
     ;;
   PATCH:repos/test/repo/issues/1890)
@@ -431,6 +500,11 @@ case "$method:$endpoint" in
     ;;
   POST:repos/test/repo/issues/1890/labels)
     label="${field#labels[]=}"
+    if [ "${AUTOSPEC_PROMOTE_FAILURE:-}" = cleanup-restore ] \
+      && [ "$label" = needs-autospec-template ]; then
+      printf 'simulated cleanup restore failure\n' >&2
+      exit 46
+    fi
     if [ "${AUTOSPEC_PROMOTE_RACE:-}" = before-safety-mutation ] \
       && [ "$label" = safety:reviewed ] \
       && [ ! -e "$state.safety-raced" ]; then
@@ -453,6 +527,11 @@ case "$method:$endpoint" in
     fi
     jq --arg label "$label" '.labels = [.labels[] | select(. != $label)]' "$state" > "$state.tmp"
     mv "$state.tmp" "$state"
+    if [ "${AUTOSPEC_PROMOTE_RACE:-}" = cleanup-drift ] \
+      && [ "$label" = needs-autospec-template ]; then
+      jq '.title += " (changed during cleanup)"' "$state" > "$state.tmp"
+      mv "$state.tmp" "$state"
+    fi
     ;;
   *)
     printf 'unexpected gh call: %s %s\n' "$method" "$endpoint" >&2

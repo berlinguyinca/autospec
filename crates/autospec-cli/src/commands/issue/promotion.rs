@@ -37,26 +37,58 @@ pub(super) fn remove_owned_labels(
     number: u64,
     initial: &RemoteIssue,
     remove_labels: &[String],
-) -> Result<bool, CommandFailure> {
-    let mut changed = false;
+) -> Result<Vec<String>, CommandFailure> {
+    let mut removed = Vec::new();
     for label in remove_labels {
         if has_label(initial, label) {
             if let Err(error) = remove_issue_label(repo, number, label) {
-                restore_removed_labels(repo, initial, remove_labels);
-                return Err(error);
+                return match rollback_cleanup_labels(repo, number, initial, remove_labels, &removed)
+                {
+                    Ok(()) => Err(error),
+                    Err(rollback) => Err(combine_failures(rollback, error)),
+                };
             }
-            changed = true;
+            removed.push(label.clone());
         }
     }
-    Ok(changed)
+    Ok(removed)
 }
 
-pub(super) fn restore_removed_labels(repo: &str, initial: &RemoteIssue, removed_labels: &[String]) {
+pub(super) fn rollback_cleanup_labels(
+    repo: &str,
+    number: u64,
+    initial: &RemoteIssue,
+    owned_labels: &[String],
+    removed_labels: &[String],
+) -> Result<(), CommandFailure> {
+    let mut mutation_failures = Vec::new();
     for label in removed_labels {
-        if has_label(initial, label) {
-            let _ = add_issue_label(repo, initial.number, label);
+        if let Err(error) = add_issue_label(repo, number, label) {
+            mutation_failures.push(error.message);
         }
     }
+
+    let current = match read_issue(repo, number) {
+        Ok(issue) => issue,
+        Err(error) => {
+            return Err(rollback_failure(
+                mutation_failures,
+                format!("could not verify cleanup rollback state: {}", error.message),
+            ))
+        }
+    };
+    let residual_state = owned_labels
+        .iter()
+        .filter(|label| has_label(&current, label) != has_label(initial, label))
+        .map(|label| format!("{label} was not restored to its initial state"))
+        .collect::<Vec<_>>();
+    if residual_state.is_empty() {
+        return Ok(());
+    }
+    Err(rollback_failure(
+        mutation_failures,
+        residual_state.join("; "),
+    ))
 }
 
 pub(super) fn rollback_owned_labels(
@@ -118,6 +150,16 @@ fn rollback_failure(mut mutation_failures: Vec<String>, verification: String) ->
         "ISSUE_PROMOTION_ROLLBACK_FAILED: {}",
         mutation_failures.join("; ")
     ))
+}
+
+fn combine_failures(rollback: CommandFailure, original: CommandFailure) -> CommandFailure {
+    CommandFailure::status(
+        format!(
+            "{}; original failure: {}",
+            rollback.message, original.message
+        ),
+        rollback.exit_code,
+    )
 }
 
 fn run_gh(args: &[&str]) -> Result<Output, CommandFailure> {
