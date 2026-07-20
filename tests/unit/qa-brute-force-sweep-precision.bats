@@ -34,6 +34,19 @@ rule_count() {
     jq -s --arg rule_id "$rule_id" '[.[] | select(.rule_id == $rule_id)] | length' "$VERDICT"
 }
 
+write_rust_warn_fixture() {
+    cat > "$REPO_FIXTURE/src/warn.rs" <<'RUST'
+use serde::Deserialize;
+
+fn classify(value: &str) -> u8 {
+    if value.contains("alpha") { warn!("alpha"); return 1; }
+    if value.contains("beta") { warn!("beta"); return 2; }
+    if value.contains("gamma") { warn!("gamma"); return 3; }
+    0
+}
+RUST
+}
+
 @test "Rust output assertions do not count as string-match domain logic" {
     cat > "$REPO_FIXTURE/src/output.rs" <<'RUST'
 use std::time::Duration;
@@ -92,6 +105,54 @@ RUST
 
     [ "$status" -eq 0 ]
     [ "$(rule_count STRING_MATCH_DOMAIN_LOGIC)" -eq 0 ]
+}
+
+@test "Python native assertions do not count as string-match domain logic" {
+    cat > "$REPO_FIXTURE/src/output.py" <<'PYTHON'
+import ast
+
+def verify_names(name):
+    assert "alpha" in name
+    assert "beta" in name
+    assert "gamma" in name
+    return ast.parse(name)
+PYTHON
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    [ "$(rule_count STRING_MATCH_DOMAIN_LOGIC)" -eq 0 ]
+}
+
+@test "Java native assertions do not count as string-match domain logic" {
+    cat > "$REPO_FIXTURE/src/Output.java" <<'JAVA'
+import java.time.Instant;
+
+class Output {
+    void verifyName(String name, String candidate) {
+        assert name.contains(candidate);
+        assert name.contains("alpha");
+        assert name.contains("beta");
+        assert name.contains("gamma");
+        Instant.now();
+    }
+}
+JAVA
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    [ "$(rule_count STRING_MATCH_DOMAIN_LOGIC)" -eq 0 ]
+}
+
+@test "Rust control-flow candidates survive trailing same-line warnings" {
+    write_rust_warn_fixture
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    run jq -e -s 'map(select(.rule_id == "STRING_MATCH_DOMAIN_LOGIC")) | length == 1' "$VERDICT"
+    [ "$status" -eq 0 ]
 }
 
 @test "repeated-structure finding remains byte-identical" {
