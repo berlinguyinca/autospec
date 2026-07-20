@@ -63,6 +63,7 @@ create_lines() {
   export GH_LABEL_FAIL=1
   export GH_CREATE_FAIL_ONCE=1
   mkdir -p "$TMP/repo"
+  git -C "$TMP/repo" init -q
   cat > "$TMP/repo/smelly.py" <<'PY'
 import ast
 

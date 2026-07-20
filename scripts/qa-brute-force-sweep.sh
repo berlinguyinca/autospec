@@ -40,8 +40,21 @@ mkdir -p "$(dirname "$VERDICT_FILE")"
 SWEEP_TMP="$(mktemp -d)"
 OPEN_ISSUES="$SWEEP_TMP/open-issues.json"
 CLOSED_ISSUES="$SWEEP_TMP/closed-issues.json"
+MARKER_LEDGER="$SWEEP_TMP/markers"
 CATALOG_STATUS="not-loaded"
-trap 'rm -rf "$SWEEP_TMP"' EXIT HUP INT TERM
+LOCK_DIR=""
+LOCK_HELD=0
+: > "$MARKER_LEDGER"
+
+cleanup() {
+    if [ "$LOCK_HELD" -eq 1 ]; then
+        rmdir "$LOCK_DIR" >/dev/null 2>&1 || true
+        LOCK_HELD=0
+    fi
+    rm -rf "$SWEEP_TMP"
+}
+trap cleanup EXIT
+trap 'exit 130' HUP INT TERM
 
 # Directive map — must stay byte-identical to AGENTS.md ### Corrective
 # directive map entries for these two RULE_IDs. The implementer retry loop
@@ -52,7 +65,30 @@ DIRECTIVE_REPEATED_STRUCTURE='Extract the N branches into a table + single dispa
 
 # origin:self provenance (issue #1744): idempotent, best-effort label
 ensure_origin_self_label() {
-    gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
+    repo_gh label create origin:self --color 8250df --force >/dev/null 2>&1 || true
+}
+
+repo_gh() {
+    (cd "$REPO_DIR" && gh "$@")
+}
+
+acquire_sweep_lock() {
+    local common_dir
+    if ! common_dir="$(git -C "$REPO_DIR" rev-parse --git-common-dir 2>/dev/null)"; then
+        return 1
+    fi
+    case "$common_dir" in
+        /*) ;;
+        *) common_dir="$REPO_DIR/$common_dir" ;;
+    esac
+    if ! common_dir="$(cd "$common_dir" 2>/dev/null && pwd -P)"; then
+        return 1
+    fi
+    LOCK_DIR="$common_dir/autospec-qa-brute-force.lock"
+    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+        return 1
+    fi
+    LOCK_HELD=1
 }
 
 emit_finding() {
@@ -83,8 +119,8 @@ relative_repo_path() {
 
 load_issue_catalogs() {
     local open_ok=1 closed_ok=1
-    gh issue list --state open --limit 100000 --json number,state,title,body,url > "$OPEN_ISSUES" 2>/dev/null || open_ok=0
-    gh issue list --state closed --limit 100000 --json number,state,title,body,url > "$CLOSED_ISSUES" 2>/dev/null || closed_ok=0
+    repo_gh issue list --state open --limit 100000 --json number,state,title,body,url > "$OPEN_ISSUES" 2>/dev/null || open_ok=0
+    repo_gh issue list --state closed --limit 100000 --json number,state,title,body,url > "$CLOSED_ISSUES" 2>/dev/null || closed_ok=0
     if [ "$open_ok" -ne 1 ] || [ "$closed_ok" -ne 1 ] || \
        ! jq -e 'type == "array" and all(.[]; (.number | type == "number") and (.body | type == "string"))' "$OPEN_ISSUES" >/dev/null 2>&1 || \
        ! jq -e 'type == "array" and all(.[]; (.number | type == "number") and (.body | type == "string"))' "$CLOSED_ISSUES" >/dev/null 2>&1; then
@@ -93,6 +129,15 @@ load_issue_catalogs() {
         return 0
     fi
     CATALOG_STATUS="ready"
+}
+
+refresh_open_catalog() {
+    local refreshed="$SWEEP_TMP/open-refreshed.json"
+    if ! repo_gh issue list --state open --limit 100000 --json number,state,title,body,url > "$refreshed" 2>/dev/null || \
+       ! jq -e 'type == "array" and all(.[]; (.number | type == "number") and (.body | type == "string"))' "$refreshed" >/dev/null 2>&1; then
+        return 1
+    fi
+    mv "$refreshed" "$OPEN_ISSUES"
 }
 
 exact_issue_number() {
@@ -110,68 +155,87 @@ semantic_issue_match() {
     ' "$catalog"
 }
 
-file_issue() {
-    local file="$1" lang="$2" rule_id="$3" line="$4" scope="$5" blob="$6" directive="$7" marker="$8"
-    local title body exact_number semantic_prefix semantic_match issue_number old_marker old_blob recurrence_file
-    if [ "$CATALOG_STATUS" != "ready" ]; then
-        printf '%s\n' "not-filed-catalog"
-        return 0
-    fi
+existing_issue_status() {
+    local marker="$1" exact_number
+    exact_number="$(exact_issue_number "$OPEN_ISSUES" "$marker")"
+    if [ -n "$exact_number" ]; then printf '%s\n' "existing-open"; return 0; fi
+    exact_number="$(exact_issue_number "$CLOSED_ISSUES" "$marker")"
+    if [ -n "$exact_number" ]; then printf '%s\n' "existing-closed"; return 0; fi
+    return 1
+}
 
+handle_recurrence() {
+    local semantic_match="$1" marker="$2" blob="$3"
+    local issue_number old_marker old_blob recurrence_file issue_body_file
+    issue_number="${semantic_match%%$'\t'*}"
+    old_marker="${semantic_match#*$'\t'}"
+    old_blob="${old_marker##* blob=}"
+    old_blob="${old_blob% -->}"
+    recurrence_file="$(mktemp "$SWEEP_TMP/recurrence.XXXXXX")"
+    printf 'The same brute-force heuristic recurred at a new Git blob.\n\nPrevious blob: `%s`\nCurrent blob: `%s`\n\n%s\n' \
+        "$old_blob" "$blob" "$marker" > "$recurrence_file"
+    if ! repo_gh issue comment "$issue_number" --body-file "$recurrence_file" >/dev/null 2>&1; then
+        printf '%s\n' "not-filed-comment-failed"; return 0
+    fi
+    issue_body_file="$(mktemp "$SWEEP_TMP/issue-body.XXXXXX")"
+    jq -r --argjson number "$issue_number" '.[] | select(.number == $number) | .body' "$CLOSED_ISSUES" > "$issue_body_file"
+    printf '\n%s\n' "$marker" >> "$issue_body_file"
+    if ! repo_gh issue edit "$issue_number" --body-file "$issue_body_file" >/dev/null 2>&1; then
+        printf '%s\n' "not-filed-edit-failed"; return 0
+    fi
+    if ! repo_gh issue reopen "$issue_number" >/dev/null 2>&1; then
+        printf '%s\n' "not-filed-reopen-failed"; return 0
+    fi
+    printf '%s\n' "reopened"
+}
+
+create_or_recheck_issue() {
+    local title="$1" body="$2" marker="$3" exact_number
+    ensure_origin_self_label
+    if repo_gh issue create --title "$title" --body "$body" \
+        --label "auto-implement,autospec:v2-flow" --label origin:self >/dev/null 2>&1; then
+        printf '%s\n' "created"; return 0
+    fi
+    if ! refresh_open_catalog; then
+        printf '%s\n' "not-filed-create-refresh-failed"; return 0
+    fi
     exact_number="$(exact_issue_number "$OPEN_ISSUES" "$marker")"
     if [ -n "$exact_number" ]; then
-        printf '%s\n' "existing-open"
-        return 0
+        printf '%s\n' "existing-open-after-create"; return 0
     fi
-    exact_number="$(exact_issue_number "$CLOSED_ISSUES" "$marker")"
-    if [ -n "$exact_number" ]; then
-        printf '%s\n' "existing-closed"
-        return 0
-    fi
-
-    semantic_prefix="<!-- autospec-qa-brute-force:v1 rule=$rule_id path=$file scope=$scope blob="
-    semantic_match="$(semantic_issue_match "$CLOSED_ISSUES" "$semantic_prefix")"
-    if [ -n "$semantic_match" ]; then
-        issue_number="${semantic_match%%$'\t'*}"
-        old_marker="${semantic_match#*$'\t'}"
-        old_blob="${old_marker##* blob=}"
-        old_blob="${old_blob% -->}"
-        recurrence_file="$(mktemp "$SWEEP_TMP/recurrence.XXXXXX")"
-        printf 'The same brute-force heuristic recurred at a new Git blob.\n\nPrevious blob: `%s`\nCurrent blob: `%s`\n\n%s\n' \
-            "$old_blob" "$blob" "$marker" > "$recurrence_file"
-        if ! gh issue comment "$issue_number" --body-file "$recurrence_file" >/dev/null 2>&1; then
-            printf '%s\n' "not-filed-comment-failed"
-            return 0
-        fi
-        if ! gh issue reopen "$issue_number" >/dev/null 2>&1; then
-            printf '%s\n' "not-filed-reopen-failed"
-            return 0
-        fi
-        printf '%s\n' "reopened"
-        return 0
-    fi
-
-    title="code_health: rewrite brute-force string heuristics in $file ($rule_id)"
-    body=$(printf '%s\n\nDetected %s in `%s` (%s)\n\nFunction/method: `%s`\nLine: %s\nGit blob: `%s`\n\nDirective (verbatim from AGENTS.md):\n\n> %s\n\nLanguage: %s\n' \
-        "$marker" "$rule_id" "$file" "$lang" "$scope" "$line" "$blob" "$directive" "$lang")
-    ensure_origin_self_label
-    if gh issue create \
-        --title "$title" \
-        --body "$body" \
-        --label "auto-implement,autospec:v2-flow" \
-        --label origin:self >/dev/null 2>&1; then
-        printf '%s\n' "created"
-        return 0
-    fi
-    if gh issue create \
-        --title "$title" \
-        --body "$body" \
-        --label "auto-implement,autospec:v2-flow" \
-        --label origin:self >/dev/null 2>&1; then
+    if repo_gh issue create --title "$title" --body "$body" \
+        --label "auto-implement,autospec:v2-flow" --label origin:self >/dev/null 2>&1; then
         printf '%s\n' "created"
     else
         printf '%s\n' "not-filed-create-failed"
     fi
+}
+
+file_issue() {
+    local file="$1" lang="$2" rule_id="$3" line="$4" scope="$5" blob="$6" directive="$7" marker="$8"
+    local title body existing_status semantic_prefix semantic_match
+    if [ "$CATALOG_STATUS" = "lock-failed" ]; then
+        printf '%s\n' "not-filed-lock"; return 0
+    fi
+    if [ "$CATALOG_STATUS" != "ready" ]; then
+        printf '%s\n' "not-filed-catalog"; return 0
+    fi
+    if grep -Fqx -- "$marker" "$MARKER_LEDGER"; then
+        printf '%s\n' "existing-run"; return 0
+    fi
+    printf '%s\n' "$marker" >> "$MARKER_LEDGER"
+    if existing_status="$(existing_issue_status "$marker")"; then
+        printf '%s\n' "$existing_status"; return 0
+    fi
+    semantic_prefix="<!-- autospec-qa-brute-force:v1 rule=$rule_id path=$file scope=$scope blob="
+    semantic_match="$(semantic_issue_match "$CLOSED_ISSUES" "$semantic_prefix")"
+    if [ -n "$semantic_match" ]; then
+        handle_recurrence "$semantic_match" "$marker" "$blob"; return 0
+    fi
+    title="code_health: rewrite brute-force string heuristics in $file ($rule_id)"
+    body=$(printf '%s\n\nDetected %s in `%s` (%s)\n\nFunction/method: `%s`\nLine: %s\nGit blob: `%s`\n\nDirective (verbatim from AGENTS.md):\n\n> %s\n\nLanguage: %s\n' \
+        "$marker" "$rule_id" "$file" "$lang" "$scope" "$line" "$blob" "$directive" "$lang")
+    create_or_recheck_issue "$title" "$body" "$marker"
 }
 
 process_finding() {
@@ -518,7 +582,12 @@ scan_lang() {
 }
 
 # Order matters: lang-tag → find ext pattern.
-load_issue_catalogs
+if acquire_sweep_lock; then
+    load_issue_catalogs
+else
+    CATALOG_STATUS="lock-failed"
+    printf 'WARN: brute-force sweep lock unavailable; findings will not mutate GitHub\n' >&2
+fi
 scan_lang python     "-name *.py"
 scan_lang javascript "-name *.js -o -name *.ts -o -name *.jsx -o -name *.tsx"
 scan_lang go         "-name *.go"
