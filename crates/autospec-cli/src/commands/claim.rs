@@ -21,7 +21,7 @@ use autospec_core::safety::redact_secrets;
 use super::lint::claim_safety_with_config;
 use super::CommandFailure;
 
-static EXECUTOR_RESULT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static UNIQUE_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const WAIT_FAILURE_MARKER: &str = "<!-- autospec-implementer-wait-failed -->";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -101,10 +101,12 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
     let worker_id = options.worker_id.unwrap_or_else(default_worker_id);
     let comments = list_comments(&repo, options.issue)?;
     let now = utc_now_iso()?;
-    let claimed_at = select_run_state(&comments, &repo, options.issue)
-        .map(|state| state.record.claimed_at)
+    let selected = select_run_state(&comments, &repo, options.issue);
+    let claimed_at = selected
+        .as_ref()
+        .map(|state| state.record.claimed_at.clone())
         .unwrap_or_else(|| now.clone());
-    let record = RunStateRecord::new(
+    let mut record = RunStateRecord::new(
         &repo,
         options.issue,
         &worker_id,
@@ -117,6 +119,7 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
         &now,
         10_800,
     );
+    record.claim_id = selected.and_then(|state| state.record.claim_id);
     if options.state == "merged" && !terminal_merged_exists(&comments) {
         let body = format!(
             "{RUN_TERMINAL_BEGIN_MARKER}\n{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"state\":\"merged\",\"branch\":\"{}\",\"pr\":\"{}\",\"finalized_at\":\"{}\"}}\n{RUN_TERMINAL_END_MARKER}",
@@ -274,6 +277,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     if !safety.allowed {
         return unavailable_safety_claim(options.issue, &repo, &worker_id, safety.reason);
     }
+    let claim_id = claim_generation_id()?;
     if write_startup_heartbeat(&repo, options.issue, &options.branch).is_err() {
         return unavailable_claim(
             options.issue,
@@ -364,7 +368,8 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         claimed_at,
         now,
         ttl_seconds,
-    );
+    )
+    .with_claim_id(claim_id.clone());
     if upsert_record(&repo, &comments, &record).is_err() {
         cleanup_startup_heartbeat(&repo, options.issue);
         let restore = [
@@ -399,7 +404,9 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         let observed = select_run_state(&observed_comments, &repo, options.issue);
         let labels = load_claim_issue(&repo, options.issue)?.labels;
         if observed.as_ref().is_none_or(|state| {
-            state.record.worker_id != worker_id || state.record.state != "claimed"
+            state.record.worker_id != worker_id
+                || state.record.state != "claimed"
+                || state.record.claim_id.as_deref() != Some(claim_id.as_str())
         }) || !labels.iter().any(|label| label == "in-progress-by-bot")
         {
             cleanup_own_marked_comments(&repo, options.issue, &worker_id, &observed_comments);
@@ -440,10 +447,12 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
     };
     let comments = list_comments(&repo, options.issue)?;
     let now = utc_now_iso()?;
-    let claimed_at = select_run_state(&comments, &repo, options.issue)
-        .map(|state| state.record.claimed_at)
+    let selected = select_run_state(&comments, &repo, options.issue);
+    let claimed_at = selected
+        .as_ref()
+        .map(|state| state.record.claimed_at.clone())
         .unwrap_or_else(|| now.clone());
-    let record = RunStateRecord::new(
+    let mut record = RunStateRecord::new(
         &repo,
         options.issue,
         options.worker_id,
@@ -456,6 +465,7 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
         now,
         options.ttl_seconds,
     );
+    record.claim_id = selected.and_then(|state| state.record.claim_id);
     upsert_record(&repo, &comments, &record)?;
     emit_claim_telemetry(
         if lowest_marked_comment(&comments).is_some() {
@@ -788,6 +798,7 @@ pub(crate) fn recover_implementer_wait_failure(
     issue: u64,
     worker_id: &str,
     branch: &str,
+    expected_claim_id: &str,
     session_id: &str,
     diagnostic: &str,
 ) -> Result<WaitFailureRecovery, CommandFailure> {
@@ -795,6 +806,9 @@ pub(crate) fn recover_implementer_wait_failure(
     let Some(selected) = select_run_state(&comments, repo, issue) else {
         return Ok(WaitFailureRecovery::OwnershipLost);
     };
+    if selected.record.claim_id.as_deref() != Some(expected_claim_id) {
+        return Ok(WaitFailureRecovery::OwnershipLost);
+    }
     if !has_active_executor_claim(
         &comments,
         &selected.record,
@@ -810,7 +824,7 @@ pub(crate) fn recover_implementer_wait_failure(
         issue,
         worker_id,
         branch,
-        &selected.record.claimed_at,
+        expected_claim_id,
         session_id,
     );
     let already = executor_result_evidence_exists(&comments, &evidence);
@@ -832,7 +846,7 @@ pub(crate) fn recover_implementer_wait_failure(
         &confirmed.server_updated_at,
         worker_id,
         branch,
-    ) || confirmed.record.claimed_at != selected.record.claimed_at
+    ) || confirmed.record.claim_id.as_deref() != Some(expected_claim_id)
     {
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
@@ -851,7 +865,7 @@ fn wait_failure_evidence(
     issue: u64,
     worker_id: &str,
     branch: &str,
-    claimed_at: &str,
+    claim_id: &str,
     session_id: &str,
 ) -> ExecutorResultEvidence {
     ExecutorResultEvidence::new(
@@ -862,7 +876,7 @@ fn wait_failure_evidence(
         "failed",
         None,
         "implementer_wait_failed",
-        format!("implementer-wait-failed:{claimed_at}:{session_id}"),
+        format!("implementer-wait-failed:{claim_id}:{session_id}"),
     )
 }
 
@@ -1024,17 +1038,23 @@ fn executor_result_outcome_name(outcome: &ConductorOutcome) -> &'static str {
 }
 
 fn executor_result_receipt_id() -> Result<String, CommandFailure> {
+    unique_operation_id("executor-result")
+}
+
+fn claim_generation_id() -> Result<String, CommandFailure> {
+    unique_operation_id("claim")
+}
+
+fn unique_operation_id(prefix: &str) -> Result<String, CommandFailure> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "cannot generate executor result receipt id: {error}"
-            ))
+            CommandFailure::diagnostic(format!("cannot generate unique operation id: {error}"))
         })?
         .as_nanos();
-    let sequence = EXECUTOR_RESULT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let sequence = UNIQUE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     Ok(format!(
-        "executor-result-{}-{nanos}-{sequence}",
+        "{prefix}-{}-{nanos}-{sequence}",
         std::process::id()
     ))
 }

@@ -22,6 +22,8 @@ setup() { ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"; }
     [ "$live_line" -lt "$reap_line" ]
     [ "$reap_line" -lt "$fail_closed_line" ]
     [ "$fail_closed_line" -lt "$typed_line" ]
+    [ "$(sed -n "${recovery_line},${typed_line}p" "$skill" | grep -Fc 'read ISSUE, BRANCH, WORKER_ID, and CLAIM_ID from the active durable claim/heartbeat')" -eq 1 ]
+    [ "$(sed -n "${typed_line}p" "$skill" | grep -Fc -- '--claim-id "<CLAIM_ID>"')" -eq 1 ]
     [ "$recovery_line" -lt "$consume_line" ]
     [ "$recovery_line" -lt "$prompt_line" ]
     [ "$(grep -Fc 'autonomous implementer-wait-failed --repo {repo}' "$skill")" -eq 1 ]

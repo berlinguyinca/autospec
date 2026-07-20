@@ -1215,7 +1215,10 @@ pub fn executor_wait_failure_relinquishes_claim(
     comments: &[RemoteComment],
     claim: &RunStateRecord,
 ) -> bool {
-    let receipt_prefix = format!("implementer-wait-failed:{}:", claim.claimed_at);
+    let Some(claim_id) = claim.claim_id.as_deref() else {
+        return false;
+    };
+    let receipt_prefix = format!("implementer-wait-failed:{claim_id}:");
     comments.iter().any(|comment| {
         parse_executor_result_evidence_comment(&comment.body).is_ok_and(|evidence| {
             evidence.repo == claim.repo
@@ -1297,6 +1300,7 @@ pub struct RunStateRecord {
     pub pr: String,
     pub step: String,
     pub paths: Vec<String>,
+    pub claim_id: Option<String>,
     pub claimed_at: String,
     pub updated_at: String,
     pub ttl_seconds: u64,
@@ -1326,6 +1330,7 @@ impl RunStateRecord {
             pr: pr.into(),
             step: step.into(),
             paths,
+            claim_id: None,
             claimed_at: claimed_at.into(),
             updated_at: updated_at.into(),
             ttl_seconds,
@@ -1347,6 +1352,7 @@ impl RunStateRecord {
                 "pr",
                 "step",
                 "paths",
+                "claim_id",
                 "claimed_at",
                 "updated_at",
                 "ttl_seconds",
@@ -1380,6 +1386,7 @@ impl RunStateRecord {
             pr: take_optional_string(&mut object, "pr", "run-state record")?.unwrap_or_default(),
             state,
             paths,
+            claim_id: take_optional_string(&mut object, "claim_id", "run-state record")?,
             updated_at: take_optional_string(&mut object, "updated_at", "run-state record")?
                 .unwrap_or_else(|| claimed_at.clone()),
             claimed_at,
@@ -1393,8 +1400,11 @@ impl RunStateRecord {
     }
 
     pub fn to_json(&self) -> String {
+        let claim_id = self.claim_id.as_ref().map_or_else(String::new, |claim_id| {
+            format!(",\"claim_id\":\"{}\"", escape_json(claim_id))
+        });
         format!(
-            "{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"state\":\"{}\",\"branch\":\"{}\",\"pr\":\"{}\",\"step\":\"{}\",\"paths\":[{}],\"claimed_at\":\"{}\",\"updated_at\":\"{}\",\"ttl_seconds\":{}}}",
+            "{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"state\":\"{}\",\"branch\":\"{}\",\"pr\":\"{}\",\"step\":\"{}\",\"paths\":[{}],\"claimed_at\":\"{}\",\"updated_at\":\"{}\",\"ttl_seconds\":{}{}}}",
             escape_json(&self.repo),
             self.issue,
             escape_json(&self.worker_id),
@@ -1410,7 +1420,13 @@ impl RunStateRecord {
             escape_json(&self.claimed_at),
             escape_json(&self.updated_at),
             self.ttl_seconds,
+            claim_id,
         )
+    }
+
+    pub fn with_claim_id(mut self, claim_id: impl Into<String>) -> Self {
+        self.claim_id = Some(claim_id.into());
+        self
     }
 
     pub fn to_marked_comment(&self) -> String {
@@ -1431,6 +1447,13 @@ impl RunStateRecord {
             if value.trim().is_empty() {
                 return Err(format!("run-state {name} must not be empty"));
             }
+        }
+        if self
+            .claim_id
+            .as_ref()
+            .is_some_and(|claim_id| claim_id.trim().is_empty())
+        {
+            return Err("run-state claim_id must not be empty".to_string());
         }
         Ok(())
     }

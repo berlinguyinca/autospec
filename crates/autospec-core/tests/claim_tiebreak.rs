@@ -71,7 +71,7 @@ fn dotted_worker_id_cleanup_uses_literal_equality_not_regex_matching() {
 
 #[test]
 fn wait_failure_evidence_relinquishes_only_the_exact_claim_generation() {
-    let claim = RunStateRecord::new(
+    let legacy_claim = RunStateRecord::new(
         "testorg/testrepo",
         42,
         "worker-a",
@@ -84,6 +84,7 @@ fn wait_failure_evidence_relinquishes_only_the_exact_claim_generation() {
         "2026-01-01T00:00:00Z",
         10_800,
     );
+    let claim = legacy_claim.clone().with_claim_id("claim-generation-a");
     let exact = ExecutorResultEvidence::new(
         "testorg/testrepo",
         42,
@@ -92,7 +93,7 @@ fn wait_failure_evidence_relinquishes_only_the_exact_claim_generation() {
         "failed",
         None,
         "implementer_wait_failed",
-        "implementer-wait-failed:2026-01-01T00:00:00Z:session-7",
+        "implementer-wait-failed:claim-generation-a:session-7",
     );
     let prior_generation = ExecutorResultEvidence::new(
         "testorg/testrepo",
@@ -102,7 +103,7 @@ fn wait_failure_evidence_relinquishes_only_the_exact_claim_generation() {
         "failed",
         None,
         "implementer_wait_failed",
-        "implementer-wait-failed:2025-12-31T23:59:59Z:session-6",
+        "implementer-wait-failed:claim-generation-prior:session-6",
     );
 
     assert!(executor_wait_failure_relinquishes_claim(
@@ -120,5 +121,13 @@ fn wait_failure_evidence_relinquishes_only_the_exact_claim_generation() {
             "2026-01-01T00:00:01Z",
         )],
         &claim,
+    ));
+    assert!(!executor_wait_failure_relinquishes_claim(
+        &[RemoteComment::new(
+            101,
+            exact.to_marked_comment(),
+            "2026-01-01T00:00:01Z",
+        )],
+        &legacy_claim,
     ));
 }

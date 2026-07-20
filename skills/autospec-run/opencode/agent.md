@@ -304,9 +304,9 @@ while true:
       explicitly terminate and reap the child through the harness process API
       if termination and reap cannot be proven: stop without typed recovery or label mutation
     require durable proof that the child exited or was terminated and reaped
-    read ISSUE, BRANCH, and WORKER_ID from the active durable claim/heartbeat
+    read ISSUE, BRANCH, WORKER_ID, and CLAIM_ID from the active durable claim/heartbeat
     use the actual session ID from the failed Wait target (never infer it from an environment variable)
-    run `"${AUTOSPEC_BIN:-autospec}" autonomous implementer-wait-failed --repo {repo} --issue "<ISSUE>" --worker-id "<WORKER_ID>" --branch "<BRANCH>" --session-id "<ACTUAL_SESSION_ID>" --diagnostic "<REDACTED_WAIT_ERROR>"`
+    run `"${AUTOSPEC_BIN:-autospec}" autonomous implementer-wait-failed --repo {repo} --issue "<ISSUE>" --worker-id "<WORKER_ID>" --branch "<BRANCH>" --claim-id "<CLAIM_ID>" --session-id "<ACTUAL_SESSION_ID>" --diagnostic "<REDACTED_WAIT_ERROR>"`
     if typed recovery exits non-zero: log the surfaced recovery failure and stop processing that issue
     never mutate labels inline or overwrite a successor claim
     continue  # start a fresh monitor batch from the restored auto-implement queue

@@ -212,6 +212,7 @@ struct ImplementerWaitFailedOptions {
     issue: Option<u64>,
     worker_id: Option<String>,
     branch: Option<String>,
+    claim_id: Option<String>,
     session_id: Option<String>,
     diagnostic: Option<String>,
 }
@@ -222,6 +223,7 @@ fn implementer_wait_failed(args: &[String]) -> Result<(), CommandFailure> {
     let issue = options.issue.unwrap();
     let worker = options.worker_id.unwrap();
     let branch = options.branch.unwrap();
+    let claim_id = options.claim_id.unwrap();
     let session = options.session_id.unwrap();
     let diagnostic = options.diagnostic.unwrap();
     let recovery = match claim::recover_implementer_wait_failure(
@@ -229,6 +231,7 @@ fn implementer_wait_failed(args: &[String]) -> Result<(), CommandFailure> {
         issue,
         &worker,
         &branch,
+        &claim_id,
         &session,
         &diagnostic,
     ) {
@@ -236,6 +239,7 @@ fn implementer_wait_failed(args: &[String]) -> Result<(), CommandFailure> {
         Err(error) => {
             emit_implementer_wait_failed(
                 &repo,
+                &claim_id,
                 issue,
                 &worker,
                 &branch,
@@ -250,19 +254,20 @@ fn implementer_wait_failed(args: &[String]) -> Result<(), CommandFailure> {
         claim::WaitFailureRecovery::AlreadyRecovered => "already_recovered",
         claim::WaitFailureRecovery::OwnershipLost => "ownership_lost",
     };
-    emit_implementer_wait_failed(&repo, issue, &worker, &branch, &session, outcome);
+    emit_implementer_wait_failed(&repo, &claim_id, issue, &worker, &branch, &session, outcome);
     Ok(())
 }
 
 fn emit_implementer_wait_failed(
     repo: &str,
+    claim_id: &str,
     issue: u64,
     worker: &str,
     branch: &str,
     session: &str,
     outcome: &str,
 ) {
-    println!("{{\"event\":\"implementer_wait_failed\",\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"session_id\":\"{}\",\"outcome\":\"{}\"}}", json_escape(repo), issue, json_escape(worker), json_escape(branch), json_escape(session), outcome);
+    println!("{{\"event\":\"implementer_wait_failed\",\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"claim_id\":\"{}\",\"session_id\":\"{}\",\"outcome\":\"{}\"}}", json_escape(repo), issue, json_escape(worker), json_escape(branch), json_escape(claim_id), json_escape(session), outcome);
 }
 
 fn parse_implementer_wait_failed(
@@ -276,6 +281,7 @@ fn parse_implementer_wait_failed(
             "--repo" => &mut parsed.repo,
             "--worker-id" => &mut parsed.worker_id,
             "--branch" => &mut parsed.branch,
+            "--claim-id" => &mut parsed.claim_id,
             "--session-id" => &mut parsed.session_id,
             "--diagnostic" => &mut parsed.diagnostic,
             "--issue" => {
@@ -318,6 +324,7 @@ fn parse_implementer_wait_failed(
         (&parsed.repo, "--repo"),
         (&parsed.worker_id, "--worker-id"),
         (&parsed.branch, "--branch"),
+        (&parsed.claim_id, "--claim-id"),
         (&parsed.session_id, "--session-id"),
         (&parsed.diagnostic, "--diagnostic"),
     ] {
