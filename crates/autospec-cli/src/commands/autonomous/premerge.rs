@@ -61,12 +61,12 @@ fn evaluate(args: &[String]) -> Result<(), CommandFailure> {
         ));
     }
 
-    let evidence_dir = repo_dir
-        .join(".autospec/evidence/premerge")
-        .join(lane.lane_digest());
-    let qa = read_evidence(&evidence_dir.join("qa.json"), QaEvidence::parse)?;
+    let lane_digest = lane.lane_digest();
+    let qa = read_evidence(&repo_dir, &lane_digest, "qa.json", QaEvidence::parse)?;
     let security = read_evidence(
-        &evidence_dir.join("security.json"),
+        &repo_dir,
+        &lane_digest,
+        "security.json",
         SecurityAuditEvidence::parse,
     )?;
     let decision = evaluate_premerge(&lane, qa, security);
@@ -193,10 +193,15 @@ fn git_stdout(repo_dir: &Path, args: &[&str]) -> Result<String, CommandFailure> 
 }
 
 fn read_evidence<T>(
-    path: &Path,
+    repo_dir: &Path,
+    lane_digest: &str,
+    filename: &str,
     parse: fn(&str) -> Result<T, String>,
 ) -> Result<EvidenceAvailability<T>, CommandFailure> {
-    let bytes = match fs::read(path) {
+    let Some(path) = fixed_evidence_path(repo_dir, lane_digest, filename)? else {
+        return Ok(EvidenceAvailability::Missing);
+    };
+    let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok(EvidenceAvailability::Missing)
@@ -216,6 +221,49 @@ fn read_evidence<T>(
         Ok(evidence) => EvidenceAvailability::Present(evidence),
         Err(error) => EvidenceAvailability::Malformed(error),
     })
+}
+
+fn fixed_evidence_path(
+    repo_dir: &Path,
+    lane_digest: &str,
+    filename: &str,
+) -> Result<Option<PathBuf>, CommandFailure> {
+    let mut path = repo_dir.to_path_buf();
+    for component in [".autospec", "evidence", "premerge", lane_digest] {
+        path.push(component);
+        let Some(metadata) = evidence_metadata(&path)? else {
+            return Ok(None);
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            return Err(unsafe_evidence_path(&path));
+        }
+    }
+    path.push(filename);
+    let Some(metadata) = evidence_metadata(&path)? else {
+        return Ok(None);
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(unsafe_evidence_path(&path));
+    }
+    Ok(Some(path))
+}
+
+fn evidence_metadata(path: &Path) -> Result<Option<fs::Metadata>, CommandFailure> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(CommandFailure::diagnostic(format!(
+            "cannot inspect fixed premerge evidence path {}: {error}",
+            path.display()
+        ))),
+    }
+}
+
+fn unsafe_evidence_path(path: &Path) -> CommandFailure {
+    CommandFailure::diagnostic(format!(
+        "fixed premerge evidence path is a symlink or non-regular component: {}",
+        path.display()
+    ))
 }
 
 fn decision_document(decision: &PremergeDecision) -> String {

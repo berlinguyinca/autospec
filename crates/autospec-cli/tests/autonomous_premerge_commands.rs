@@ -5,6 +5,7 @@ use autospec_core::autonomous::premerge::{
 use autospec_core::claim::RunStateRecord;
 use serde_json::{json, Value};
 use std::fs;
+use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -88,7 +89,6 @@ impl Fixture {
                 .as_bytes(),
             );
         }
-
         let fixture = Self {
             root,
             repo_dir,
@@ -100,21 +100,17 @@ impl Fixture {
         fixture.write_claim_comments(comments.to_string());
         fixture
     }
-
     fn write_claim_comments(&self, comments: String) {
         fs::write(self.root.join("comments.json"), comments).expect("claim comments fixture");
     }
-
     fn comments(&self) -> String {
         fs::read_to_string(self.root.join("comments.json")).expect("claim comments fixture")
     }
-
     fn evidence_dir(&self) -> PathBuf {
         self.repo_dir
             .join(".autospec/evidence/premerge")
             .join(self.lane.lane_digest())
     }
-
     fn write_evidence(&self, qa: &QaEvidence, security: &SecurityAuditEvidence) {
         let directory = self.evidence_dir();
         fs::create_dir_all(&directory).expect("evidence directory");
@@ -125,7 +121,6 @@ impl Fixture {
         )
         .expect("security evidence");
     }
-
     fn run(&self) -> Output {
         Command::new(env!("CARGO_BIN_EXE_autospec"))
             .args([
@@ -159,14 +154,12 @@ impl Fixture {
             .output()
             .expect("premerge evaluate starts")
     }
-
     fn lane_state_dir(&self) -> PathBuf {
         self.state_root
             .join("test_repo/premerge/lanes")
             .join(self.lane.lane_digest())
     }
 }
-
 fn git(repo_dir: &Path, args: &[&str]) {
     let output = Command::new("git")
         .arg("-C")
@@ -180,7 +173,6 @@ fn git(repo_dir: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stderr)
     );
 }
-
 fn git_stdout(repo_dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .arg("-C")
@@ -194,14 +186,12 @@ fn git_stdout(repo_dir: &Path, args: &[&str]) -> String {
         .trim()
         .to_string()
 }
-
 fn write_executable(path: &Path, contents: &[u8]) {
     fs::write(path, contents).expect("executable fixture");
     let mut permissions = fs::metadata(path).expect("fixture metadata").permissions();
     permissions.set_mode(0o755);
     fs::set_permissions(path, permissions).expect("fixture permissions");
 }
-
 fn qa(lane: &PremergeLaneIdentity, verdict: EvidenceVerdict) -> QaEvidence {
     QaEvidence {
         lane: lane.clone(),
@@ -210,7 +200,6 @@ fn qa(lane: &PremergeLaneIdentity, verdict: EvidenceVerdict) -> QaEvidence {
         verdict,
     }
 }
-
 fn security(lane: &PremergeLaneIdentity, verdict: EvidenceVerdict) -> SecurityAuditEvidence {
     SecurityAuditEvidence {
         lane: lane.clone(),
@@ -219,7 +208,6 @@ fn security(lane: &PremergeLaneIdentity, verdict: EvidenceVerdict) -> SecurityAu
         verdict,
     }
 }
-
 fn decision_digest(
     lane: &PremergeLaneIdentity,
     qa: EvidenceAvailability<QaEvidence>,
@@ -237,11 +225,9 @@ fn decision_digest(
         } => evidence_digest,
     }
 }
-
 fn json_output(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("command emits JSON")
 }
-
 #[test]
 fn pass_uses_git_identity_fixed_evidence_and_closed_authority() {
     let fixture = Fixture::new("feat/lane-a", 42, "worker-42", "claim-42");
@@ -257,7 +243,6 @@ fn pass_uses_git_identity_fixed_evidence_and_closed_authority() {
         "not JSON",
     )
     .expect("unrelated poisoned evidence");
-
     let first = fixture.run();
     assert!(
         first.status.success(),
@@ -272,7 +257,6 @@ fn pass_uses_git_identity_fixed_evidence_and_closed_authority() {
     assert_eq!(body["commit"], fixture.lane.commit);
     assert_eq!(body["lane_digest"], fixture.lane.lane_digest());
     assert_eq!(body["finding_codes"], json!([]));
-
     let digest = decision_digest(
         &fixture.lane,
         EvidenceAvailability::Present(qa),
@@ -283,7 +267,6 @@ fn pass_uses_git_identity_fixed_evidence_and_closed_authority() {
     assert!(decision.is_file());
     assert!(lane_state.join("latest.json").is_file());
     assert!(!lane_state.join("quarantine.json").exists());
-
     let original = fs::read(&decision).expect("immutable decision");
     let second = fixture.run();
     assert!(second.status.success());
@@ -296,7 +279,6 @@ fn pass_uses_git_identity_fixed_evidence_and_closed_authority() {
     );
     assert!(!fixture.poison_log.exists());
 }
-
 #[test]
 fn tracked_dirt_and_detached_head_fail_before_receipt_creation() {
     let dirty = Fixture::new("feat/dirty", 42, "worker-42", "claim-dirty");
@@ -309,8 +291,13 @@ fn tracked_dirt_and_detached_head_fail_before_receipt_creation() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("dirty"));
     assert!(!dirty.lane_state_dir().exists());
-
-    let detached = Fixture::new("feat/detached", 43, "worker-43", "claim-detached");
+    let staged = Fixture::new("feat/staged", 43, "worker-43", "claim-staged");
+    fs::write(staged.repo_dir.join("staged.txt"), "staged only\n").expect("staged fixture");
+    git(&staged.repo_dir, &["add", "staged.txt"]);
+    let output = staged.run();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!staged.lane_state_dir().exists());
+    let detached = Fixture::new("feat/detached", 54, "worker-54", "claim-detached");
     detached.write_evidence(
         &qa(&detached.lane, EvidenceVerdict::Pass),
         &security(&detached.lane, EvidenceVerdict::Pass),
@@ -321,7 +308,6 @@ fn tracked_dirt_and_detached_head_fail_before_receipt_creation() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("detached"));
     assert!(!detached.lane_state_dir().exists());
 }
-
 #[test]
 fn missing_malformed_foreign_and_stale_claim_evidence_fail_without_quarantine() {
     let missing = Fixture::new("feat/missing", 44, "worker-44", "claim-missing");
@@ -329,7 +315,6 @@ fn missing_malformed_foreign_and_stale_claim_evidence_fail_without_quarantine() 
     assert_eq!(output.status.code(), Some(2));
     assert_eq!(json_output(&output)["decision"], "failed");
     assert!(!missing.lane_state_dir().join("quarantine.json").exists());
-
     let malformed = Fixture::new("feat/malformed", 45, "worker-45", "claim-malformed");
     fs::create_dir_all(malformed.evidence_dir()).expect("evidence directory");
     fs::write(malformed.evidence_dir().join("qa.json"), [0xff, 0xfe]).expect("malformed UTF-8");
@@ -345,7 +330,6 @@ fn missing_malformed_foreign_and_stale_claim_evidence_fail_without_quarantine() 
         .expect("failure reason")
         .contains("malformed"));
     assert!(!malformed.lane_state_dir().join("quarantine.json").exists());
-
     let foreign = Fixture::new("feat/foreign", 46, "worker-46", "claim-foreign");
     let other = PremergeLaneIdentity::new(
         "test/repo",
@@ -367,40 +351,61 @@ fn missing_malformed_foreign_and_stale_claim_evidence_fail_without_quarantine() 
         .expect("failure reason")
         .contains("mismatch"));
     assert!(!foreign.lane_state_dir().join("quarantine.json").exists());
-
-    let stale = Fixture::new("feat/stale", 47, "worker-47", "claim-stale");
-    stale.write_evidence(
-        &qa(&stale.lane, EvidenceVerdict::Pass),
-        &security(&stale.lane, EvidenceVerdict::Pass),
-    );
-    let wrong_claim = RunStateRecord::new(
-        "test/repo",
-        47,
-        "worker-47",
-        "claimed",
-        "feat/stale",
-        "",
-        "claimed",
-        Vec::new(),
-        "2026-07-20T00:00:00Z",
-        "2026-07-20T00:00:00Z",
-        u64::MAX,
-    )
-    .with_claim_id("successor-claim");
-    stale.write_claim_comments(
-        json!([{
-            "id": 100,
-            "updated_at": "2026-07-20T00:00:00Z",
-            "body": wrong_claim.to_marked_comment(),
-        }])
-        .to_string(),
-    );
-    let output = stale.run();
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("active claim"));
-    assert!(!stale.lane_state_dir().exists());
+    for (repo, issue, worker, claim_id, branch) in [
+        ("other/repo", 47, "worker-47", "claim-47", "feat/claim"),
+        ("test/repo", 99, "worker-47", "claim-47", "feat/claim"),
+        ("test/repo", 47, "other-worker", "claim-47", "feat/claim"),
+        ("test/repo", 47, "worker-47", "other-claim", "feat/claim"),
+        ("test/repo", 47, "worker-47", "claim-47", "feat/other"),
+    ] {
+        let fixture = Fixture::new("feat/claim", 47, "worker-47", "claim-47");
+        let claim = RunStateRecord::new(
+            repo,
+            issue,
+            worker,
+            "claimed",
+            branch,
+            "",
+            "claimed",
+            Vec::new(),
+            "2026-07-20T00:00:00Z",
+            "2026-07-20T00:00:00Z",
+            u64::MAX,
+        )
+        .with_claim_id(claim_id);
+        fixture.write_claim_comments(
+            json!([{"id":100,"updated_at":"2026-07-20T00:00:00Z",
+                "body":claim.to_marked_comment()}])
+            .to_string(),
+        );
+        let output = fixture.run();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("active claim"));
+        assert!(!fixture.lane_state_dir().exists());
+    }
 }
-
+#[test]
+fn fixed_evidence_symlinks_never_escape_the_canonical_repository() {
+    for (offset, filename) in ["qa.json", "security.json"].into_iter().enumerate() {
+        let fixture = Fixture::new(
+            "feat/symlink",
+            60 + offset as u64,
+            "worker-link",
+            "claim-link",
+        );
+        fixture.write_evidence(
+            &qa(&fixture.lane, EvidenceVerdict::Pass),
+            &security(&fixture.lane, EvidenceVerdict::Pass),
+        );
+        let evidence = fixture.evidence_dir().join(filename);
+        let outside = fixture.root.join(filename);
+        fs::rename(&evidence, &outside).expect("move evidence outside lane");
+        symlink(&outside, &evidence).expect("outside evidence symlink");
+        let output = fixture.run();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(!fixture.lane_state_dir().exists());
+    }
+}
 #[test]
 fn blocking_quarantine_is_lane_scoped_and_passing_lane_is_unaffected() {
     let blocked = Fixture::new("feat/lane-blocked", 48, "worker-48", "claim-48");
@@ -418,7 +423,6 @@ fn blocking_quarantine_is_lane_scoped_and_passing_lane_is_unaffected() {
     assert_eq!(json_output(&output)["decision"], "blocked");
     let quarantine = blocked.lane_state_dir().join("quarantine.json");
     assert!(quarantine.is_file());
-
     let passing = Fixture::new("feat/lane-passing", 49, "worker-49", "claim-49");
     passing.write_evidence(
         &qa(&passing.lane, EvidenceVerdict::Pass),
@@ -434,7 +438,6 @@ fn blocking_quarantine_is_lane_scoped_and_passing_lane_is_unaffected() {
     );
     assert!(quarantine.is_file());
 }
-
 #[test]
 fn an_existing_decision_with_different_contents_is_never_replaced() {
     let fixture = Fixture::new("feat/immutable", 50, "worker-50", "claim-50");
@@ -450,7 +453,6 @@ fn an_existing_decision_with_different_contents_is_never_replaced() {
     fs::create_dir_all(&decisions).expect("decision directory");
     let decision = decisions.join(format!("{digest}.json"));
     fs::write(&decision, "poisoned immutable receipt\n").expect("poisoned receipt");
-
     let output = fixture.run();
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("immutable"));
@@ -460,7 +462,6 @@ fn an_existing_decision_with_different_contents_is_never_replaced() {
     );
     assert!(!fixture.lane_state_dir().join("latest.json").exists());
 }
-
 #[test]
 fn evaluate_rejects_unknown_duplicate_and_extra_arguments() {
     let fixture = Fixture::new("feat/args", 51, "worker-51", "claim-51");
