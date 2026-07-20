@@ -3743,7 +3743,7 @@ fn autonomous_implementer_wait_failed_requires_expected_claim_id() {
 }
 
 #[test]
-fn autonomous_implementer_wait_failed_requeues_exact_owner_with_bounded_comment() {
+fn autonomous_implementer_wait_failure_requeues_exact_owner_with_bounded_comment() {
     let root = temp_dir("autospec-wait-failed");
     let bin = root.join("bin");
     let state = root.join("comments.json");
