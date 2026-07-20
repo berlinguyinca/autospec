@@ -165,11 +165,15 @@ existing_issue_status() {
 }
 
 pending_issue_match() {
-    local pending_marker="$1" exact_number
-    exact_number="$(exact_issue_number "$OPEN_ISSUES" "$pending_marker")"
-    if [ -n "$exact_number" ]; then printf 'open\t%s\n' "$exact_number"; return 0; fi
-    exact_number="$(exact_issue_number "$CLOSED_ISSUES" "$pending_marker")"
-    if [ -n "$exact_number" ]; then printf 'closed\t%s\n' "$exact_number"; return 0; fi
+    local pending_prefix="$1" match
+    match="$(jq -r --arg prefix "$pending_prefix" --arg state "open" '
+        [.[] as $issue | ($issue.body | split("\n")[] | select(startswith($prefix) and endswith(" -->"))) as $pending
+         | [$state, ($issue.number | tostring), $pending] | @tsv][0] // empty' "$OPEN_ISSUES")"
+    if [ -n "$match" ]; then printf '%s\n' "$match"; return 0; fi
+    match="$(jq -r --arg prefix "$pending_prefix" --arg state "closed" '
+        [.[] as $issue | ($issue.body | split("\n")[] | select(startswith($prefix) and endswith(" -->"))) as $pending
+         | [$state, ($issue.number | tostring), $pending] | @tsv][0] // empty' "$CLOSED_ISSUES")"
+    if [ -n "$match" ]; then printf '%s\n' "$match"; return 0; fi
     return 1
 }
 
@@ -188,10 +192,12 @@ remove_pending_line() {
 }
 
 resume_pending() {
-    local pending_match="$1" pending_marker="$2"
-    local state number catalog source cleaned
+    local pending_match="$1"
+    local state remainder number pending_marker catalog source cleaned
     state="${pending_match%%$'\t'*}"
-    number="${pending_match#*$'\t'}"
+    remainder="${pending_match#*$'\t'}"
+    number="${remainder%%$'\t'*}"
+    pending_marker="${remainder#*$'\t'}"
     if [ "$state" = "open" ]; then catalog="$OPEN_ISSUES"; else catalog="$CLOSED_ISSUES"; fi
     if [ "$state" = "closed" ] && ! repo_gh issue reopen "$number" >/dev/null 2>&1; then
         printf '%s\n' "not-filed-reopen-failed"; return 0
@@ -274,8 +280,8 @@ file_issue() {
     printf '%s\n' "$marker" >> "$MARKER_LEDGER"
     pending_prefix="<!-- autospec-qa-brute-force:pending-reopen:v1 rule=$rule_id path=$file scope=$scope blob="
     pending_marker="$pending_prefix$blob -->"
-    if pending_match="$(pending_issue_match "$pending_marker")"; then
-        resume_pending "$pending_match" "$pending_marker"; return 0
+    if pending_match="$(pending_issue_match "$pending_prefix")"; then
+        resume_pending "$pending_match"; return 0
     fi
     if existing_status="$(existing_issue_status "$marker")"; then
         printf '%s\n' "$existing_status"; return 0

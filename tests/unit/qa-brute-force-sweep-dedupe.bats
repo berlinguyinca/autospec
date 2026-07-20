@@ -347,6 +347,7 @@ run_sweep() {
     : > "$GH_LOG"
     : > "$VERDICT"
     export GH_CLEANUP_FAIL_ONCE=0
+    printf '# newer-blob-before-cleanup\n' >> "$REPO_FIXTURE/src/classify.py"
 
     run_sweep
     [ "$status" -eq 0 ]
