@@ -28,7 +28,7 @@ use autospec_core::coordination::{
 };
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{claim, queue, CommandFailure};
 
@@ -2945,12 +2945,37 @@ impl ExecutorRequest {
                 };
             }
         }
-        let output = Command::new(&self.program)
+        let mut child = match Command::new(&self.program)
             .args(&self.args)
             .current_dir(&self.current_dir)
             .env_remove("AUTOSPEC_AUTONOMOUS_PREMERGE_CMD")
             .env_remove("AUTOSPEC_AUTONOMOUS_CMD")
-            .output();
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => return ExecutorReceipt::failed(),
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let timed_out = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break false,
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    break true;
+                }
+                Err(_) => break true,
+            }
+        };
+        let output = child.wait_with_output();
+        if timed_out {
+            return ExecutorReceipt {
+                outcome: ConductorOutcome::Retryable("executor_timeout".to_string()),
+                claim_step: "executor_timeout".to_string(),
+            };
+        }
         let _ = fs::create_dir_all(&invocation_dir);
         let expected = format!(
             "{{\"schema\":1,\"status\":\"blocked\",\"repo\":\"{}\",\"issue\":{},\"invocation_id\":\"{}\",\"reason\":\"{}\"}}",
