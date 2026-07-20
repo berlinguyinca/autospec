@@ -86,6 +86,16 @@ for command in autospec-autonomous autospec-autonomous-start autospec-autonomous
         cat "$TEST_HOME/.autospec/bin/$command"
         exit 1
     }
+    [ "$(grep -cF 'AUTOSPEC_WRAPPER_BIN_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"' "$TEST_HOME/.autospec/bin/$command")" -eq 1 ] || {
+        echo "FAIL: $command does not resolve its own bin directory exactly once"
+        cat "$TEST_HOME/.autospec/bin/$command"
+        exit 1
+    }
+    [ "$(grep -cF '*) PATH="$AUTOSPEC_WRAPPER_BIN_DIR:$PATH"; export PATH ;;' "$TEST_HOME/.autospec/bin/$command")" -eq 1 ] || {
+        echo "FAIL: $command does not prepend its own bin directory exactly once"
+        cat "$TEST_HOME/.autospec/bin/$command"
+        exit 1
+    }
 done
 
 # Premerge-gate scanner shims (issue: autospec#1693 / autotrade#1350 Part 1 systemic):
@@ -152,7 +162,7 @@ grep -qF 'exec autospec autonomous status "$@"' "$TEST_HOME/.autospec/bin/autosp
     exit 1
 }
 
-HOME="$TEST_HOME" "$TEST_HOME/.autospec/bin/autospec-autonomous-status" --json >/tmp/autospec-autonomous-status-healed.json || {
+HOME="$TEST_HOME" PATH=/usr/bin:/bin "$TEST_HOME/.autospec/bin/autospec-autonomous-status" --json >/tmp/autospec-autonomous-status-healed.json || {
     echo "FAIL: healed autospec-autonomous-status command did not execute"
     cat /tmp/autospec-autonomous-status-healed.json 2>/dev/null || true
     cat /tmp/autospec-install-heal.out
@@ -182,7 +192,7 @@ if grep -q 'heal_autonomous_operator_wrappers: healed' /tmp/autospec-install-hea
     exit 1
 fi
 
-HOME="$TEST_HOME" "$TEST_HOME/.autospec/bin/autospec-autonomous-status" --json >/tmp/autospec-autonomous-status.json || {
+HOME="$TEST_HOME" PATH=/usr/bin:/bin "$TEST_HOME/.autospec/bin/autospec-autonomous-status" --json >/tmp/autospec-autonomous-status.json || {
     echo "FAIL: autospec-autonomous-status command did not run after ephemeral scripts dir deletion"
     cat /tmp/autospec-autonomous-status.json 2>/dev/null || true
     cat /tmp/autospec-install-path.out
