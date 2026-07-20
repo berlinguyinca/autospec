@@ -3,7 +3,7 @@
 # specs to define coherent app-wide design guidelines before decomposition.
 
 setup() {
-    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+    REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     SKILL="$REPO_ROOT/skills/autospec-define/SKILL.md"
 }
 
