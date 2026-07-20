@@ -15,7 +15,7 @@ if [ "$1 $2" = "label create" ] && [ -n "${GH_LABEL_FAIL:-}" ]; then
   exit 1
 fi
 if [ "$1 $2" = "issue list" ]; then
-  echo "0"
+  echo "[]"
   exit 0
 fi
 if [ "$1 $2" = "issue create" ]; then
@@ -63,6 +63,7 @@ create_lines() {
   export GH_LABEL_FAIL=1
   export GH_CREATE_FAIL_ONCE=1
   mkdir -p "$TMP/repo"
+  git -C "$TMP/repo" init -q
   cat > "$TMP/repo/smelly.py" <<'PY'
 import ast
 
