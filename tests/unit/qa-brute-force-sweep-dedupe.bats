@@ -39,6 +39,21 @@ PY
     cat > "$BIN_DIR/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
+update_body() {
+    local catalog="$1" number="$2" body_file="$3"
+    jq --argjson number "$number" --rawfile body "$body_file" \
+        'map(if .number == $number then .body = $body else . end)' "$catalog" > "$catalog.next"
+    mv "$catalog.next" "$catalog"
+}
+move_open() {
+    local number="$1" issue
+    issue="$(jq -c --argjson number "$number" '.[] | select(.number == $number) | .state = "OPEN"' "$CLOSED_JSON")"
+    [ -n "$issue" ] || return 0
+    jq --argjson number "$number" 'map(select(.number != $number))' "$CLOSED_JSON" > "$CLOSED_JSON.next"
+    mv "$CLOSED_JSON.next" "$CLOSED_JSON"
+    jq --argjson issue "$issue" '. + [$issue]' "$OPEN_JSON" > "$OPEN_JSON.next"
+    mv "$OPEN_JSON.next" "$OPEN_JSON"
+}
 printf '%s\n' "$PWD" >> "$GH_PWD_LOG"
 if [ "$1 $2" = "issue list" ]; then
     printf '%s\n' "$*" >> "$BATS_TEST_TMPDIR/gh-lookups.log"
@@ -100,15 +115,25 @@ if [ "$1 $2" = "issue edit" ]; then
     done
     printf 'edit:%s\n' "$number" >> "$GH_LOG"
     if [ "${GH_EDIT_FAIL:-0}" = 1 ]; then exit 1; fi
-    jq --argjson number "$number" --rawfile body "$body_file" \
-        'map(if .number == $number then .body = $body else . end)' "$CLOSED_JSON" > "$CLOSED_JSON.next"
-    mv "$CLOSED_JSON.next" "$CLOSED_JSON"
+    if ! grep -q 'autospec-qa-brute-force:pending-reopen:v1' "$body_file"; then
+        cleanup_count="$(cat "$BATS_TEST_TMPDIR/cleanup-count" 2>/dev/null || printf '0')"
+        cleanup_count=$((cleanup_count + 1))
+        printf '%s\n' "$cleanup_count" > "$BATS_TEST_TMPDIR/cleanup-count"
+        if [ "${GH_CLEANUP_FAIL_ONCE:-0}" = 1 ] && [ "$cleanup_count" -eq 1 ]; then exit 1; fi
+    fi
+    update_body "$CLOSED_JSON" "$number" "$body_file"
+    update_body "$OPEN_JSON" "$number" "$body_file"
+    edit_count="$(cat "$BATS_TEST_TMPDIR/edit-count" 2>/dev/null || printf '0')"
+    edit_count=$((edit_count + 1))
+    printf '%s\n' "$edit_count" > "$BATS_TEST_TMPDIR/edit-count"
+    if [ "${GH_EDIT_REMOTE_SUCCESS_ONCE:-0}" = 1 ] && [ "$edit_count" -eq 1 ]; then exit 1; fi
     exit 0
 fi
 if [ "$1 $2" = "issue reopen" ]; then
     printf 'reopen:%s\n' "$3" >> "$GH_LOG"
-    [ "${GH_REOPEN_FAIL:-0}" != 1 ]
-    exit
+    if [ "${GH_REOPEN_FAIL:-0}" = 1 ]; then exit 1; fi
+    move_open "$3"
+    exit 0
 fi
 exit 2
 SH
@@ -134,6 +159,20 @@ marker() {
     printf '<!-- autospec-qa-brute-force:v1 rule=%s path=src/classify.py scope=%s blob=%s -->' "$rule" "$scope" "$blob"
 }
 
+issue_body() {
+    local number="$1"
+    jq -r --argjson number "$number" '[.[] | select(.number == $number) | .body][0] // empty' "$OPEN_JSON" "$CLOSED_JSON"
+}
+
+close_issue() {
+    local number="$1" issue
+    issue="$(jq -c --argjson number "$number" '.[] | select(.number == $number) | .state = "CLOSED"' "$OPEN_JSON")"
+    jq --argjson number "$number" 'map(select(.number != $number))' "$OPEN_JSON" > "$OPEN_JSON.next"
+    mv "$OPEN_JSON.next" "$OPEN_JSON"
+    jq --argjson issue "$issue" '. + [$issue]' "$CLOSED_JSON" > "$CLOSED_JSON.next"
+    mv "$CLOSED_JSON.next" "$CLOSED_JSON"
+}
+
 catalog() {
     local output="$1" number="$2" state="$3" marker_value="$4"
     jq -n --argjson number "$number" --arg state "$state" --arg body "$marker_value" \
@@ -145,6 +184,8 @@ run_sweep() {
         OPEN_JSON="$OPEN_JSON" CLOSED_JSON="$CLOSED_JSON" GH_LOG="$GH_LOG" \
         GH_LIST_FAIL_STATE="${GH_LIST_FAIL_STATE:-}" GH_COMMENT_FAIL="${GH_COMMENT_FAIL:-0}" \
         GH_EDIT_FAIL="${GH_EDIT_FAIL:-0}" GH_REOPEN_FAIL="${GH_REOPEN_FAIL:-0}" \
+        GH_EDIT_REMOTE_SUCCESS_ONCE="${GH_EDIT_REMOTE_SUCCESS_ONCE:-0}" \
+        GH_CLEANUP_FAIL_ONCE="${GH_CLEANUP_FAIL_ONCE:-0}" \
         GH_CREATE_REMOTE_SUCCESS_ONCE="${GH_CREATE_REMOTE_SUCCESS_ONCE:-0}" \
         FIND_DUPLICATE="${FIND_DUPLICATE:-0}" REAL_FIND="$REAL_FIND" GH_PWD_LOG="$GH_PWD_LOG" \
         BATS_TEST_TMPDIR="$BATS_TEST_TMPDIR" CALLER_DIR="$CALLER_DIR" SWEEP_SCRIPT="$SWEEP_SCRIPT" \
@@ -191,20 +232,22 @@ run_sweep() {
     run_sweep
 
     [ "$status" -eq 0 ]
-    [ "$(cat "$GH_LOG")" = $'comment:43\nedit:43\nreopen:43' ]
+    [ "$(cat "$GH_LOG")" = $'comment:43\nedit:43\nreopen:43\nedit:43' ]
     grep -q 'Previous blob: `0000000000000000000000000000000000000000`' "$BATS_TEST_TMPDIR/recurrence-body"
     grep -q 'Current blob:' "$BATS_TEST_TMPDIR/recurrence-body"
     grep -q '"filing_status":"reopened"' "$VERDICT"
+    [ "$(issue_body 43 | grep -c 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/classify.py scope=<file>')" -eq 1 ]
+    ! issue_body 43 | grep -q 'pending-reopen'
 
     : > "$GH_LOG"
     : > "$VERDICT"
     run_sweep
     [ "$status" -eq 0 ]
     [ ! -s "$GH_LOG" ]
-    grep -q '"filing_status":"existing-closed"' "$VERDICT"
+    grep -q '"filing_status":"existing-open"' "$VERDICT"
 }
 
-@test "recurrence mutation failure never creates a replacement issue" {
+@test "comment and hard edit failures never create a replacement issue" {
     catalog "$CLOSED_JSON" 44 CLOSED "$(marker '<file>' 0000000000000000000000000000000000000000)"
     export GH_COMMENT_FAIL=1
 
@@ -229,22 +272,87 @@ run_sweep() {
     : > "$GH_LOG"
     : > "$VERDICT"
     export GH_EDIT_FAIL=0
+    ! grep -q '^create$' "$GH_LOG"
+}
+
+@test "A to B to A replaces semantic markers and reopens the same issue twice" {
+    blob_a="$(git -C "$REPO_FIXTURE" hash-object src/classify.py)"
+    catalog "$CLOSED_JSON" 46 CLOSED "$(marker '<file>' "$blob_a")"
+    printf '# blob-b\n' >> "$REPO_FIXTURE/src/classify.py"
+
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^create$' "$GH_LOG" || true)" -eq 0 ]
+    close_issue 46
+    sed -i '/^# blob-b$/d' "$REPO_FIXTURE/src/classify.py"
+    : > "$GH_LOG"
+    : > "$VERDICT"
+
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GH_LOG")" = $'comment:46\nedit:46\nreopen:46\nedit:46' ]
+    ! grep -q '^create$' "$GH_LOG"
+    [ "$(issue_body 46 | grep -c 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/classify.py scope=<file>')" -eq 1 ]
+    issue_body 46 | grep -q "blob=$blob_a"
+    ! issue_body 46 | grep -q 'pending-reopen'
+}
+
+@test "remote-success local edit failure resumes pending closed recurrence" {
+    catalog "$CLOSED_JSON" 47 CLOSED "$(marker '<file>' 0000000000000000000000000000000000000000)"
+    export GH_EDIT_REMOTE_SUCCESS_ONCE=1
+
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GH_LOG")" = $'comment:47\nedit:47' ]
+    issue_body 47 | grep -q 'pending-reopen'
+    : > "$GH_LOG"
+    : > "$VERDICT"
+    export GH_EDIT_REMOTE_SUCCESS_ONCE=0
+
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GH_LOG")" = $'reopen:47\nedit:47' ]
+    ! grep -q '^create$' "$GH_LOG"
+    [ "$(issue_body 47 | grep -c 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/classify.py scope=<file>')" -eq 1 ]
+    ! issue_body 47 | grep -q 'pending-reopen'
+}
+
+@test "reopen failure resumes pending closed recurrence on next run" {
+    catalog "$CLOSED_JSON" 48 CLOSED "$(marker '<file>' 0000000000000000000000000000000000000000)"
     export GH_REOPEN_FAIL=1
 
     run_sweep
-
     [ "$status" -eq 0 ]
-    [ "$(cat "$GH_LOG")" = $'comment:44\nedit:44\nreopen:44' ]
-    ! grep -q '^create$' "$GH_LOG"
-    grep -q '"filing_status":"not-filed-reopen-failed"' "$VERDICT"
-
+    [ "$(cat "$GH_LOG")" = $'comment:48\nedit:48\nreopen:48' ]
+    issue_body 48 | grep -q 'pending-reopen'
     : > "$GH_LOG"
     : > "$VERDICT"
     export GH_REOPEN_FAIL=0
+
     run_sweep
     [ "$status" -eq 0 ]
-    [ ! -s "$GH_LOG" ]
-    grep -q '"filing_status":"existing-closed"' "$VERDICT"
+    [ "$(cat "$GH_LOG")" = $'reopen:48\nedit:48' ]
+    ! grep -q '^create$' "$GH_LOG"
+    ! issue_body 48 | grep -q 'pending-reopen'
+}
+
+@test "cleanup failure resumes pending open recurrence on next run" {
+    catalog "$CLOSED_JSON" 49 CLOSED "$(marker '<file>' 0000000000000000000000000000000000000000)"
+    export GH_CLEANUP_FAIL_ONCE=1
+
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GH_LOG")" = $'comment:49\nedit:49\nreopen:49\nedit:49' ]
+    issue_body 49 | grep -q 'pending-reopen'
+    : > "$GH_LOG"
+    : > "$VERDICT"
+    export GH_CLEANUP_FAIL_ONCE=0
+
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GH_LOG")" = 'edit:49' ]
+    ! grep -q '^create$' "$GH_LOG"
+    ! issue_body 49 | grep -q 'pending-reopen'
 }
 
 @test "every GitHub call executes from REPO_DIR even when caller is another repository" {
@@ -312,7 +420,7 @@ run_sweep() {
     run_sweep
 
     [ "$status" -eq 0 ]
-    [ "$(cat "$GH_LOG")" = $'comment:45\nedit:45\nreopen:45' ]
+    [ "$(cat "$GH_LOG")" = $'comment:45\nedit:45\nreopen:45\nedit:45' ]
     grep -q '"scope":"<file>"' "$VERDICT"
     ! grep -q '"scope":"helper"' "$VERDICT"
 }
