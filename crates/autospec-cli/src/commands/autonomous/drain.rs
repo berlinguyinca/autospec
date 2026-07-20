@@ -870,18 +870,44 @@ fn join_readers(readers: &mut OutputReaders) {
 fn heartbeat_signature(repo: &str) -> String {
     let mut paths = Vec::new();
     for directory in heartbeat_dirs(repo) {
-        let Ok(entries) = fs::read_dir(directory) else {
+        let Ok(entries) = fs::read_dir(&directory) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|value| value.to_str()) == Some("json") {
-                paths.push(file_signature(&path));
+                if let Some(signature) = typed_heartbeat_signature(&path, repo) {
+                    paths.push(signature);
+                }
+            }
+        }
+        let sessions = directory.join("sessions");
+        if let Ok(entries) = fs::read_dir(sessions) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) == Some("json") {
+                    if let Some(signature) = typed_heartbeat_signature(&path, repo) {
+                        paths.push(signature);
+                    }
+                }
             }
         }
     }
     paths.sort();
     paths.join("|")
+}
+
+fn typed_heartbeat_signature(path: &Path, repo: &str) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let object = value.as_object()?;
+    let fields = ["issue", "branch", "step", "ts", "worker_id", "claim_id"];
+    if object.get("repo").and_then(serde_json::Value::as_str) != Some(repo)
+        || fields.iter().any(|field| !object.contains_key(*field))
+    {
+        return None;
+    }
+    Some(format!("{}:{}", path.display(), raw.trim()))
 }
 
 fn heartbeat_dirs(repo: &str) -> Vec<PathBuf> {
@@ -1175,9 +1201,10 @@ fn child_exit_code_json(decision: DrainDecision) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::time::{Duration, Instant};
 
-    use super::{heartbeat_dirs, SessionStartupTracker};
+    use super::{heartbeat_dirs, typed_heartbeat_signature, SessionStartupTracker};
 
     #[test]
     fn repository_aliases_cannot_share_heartbeat_progress_paths() {
@@ -1187,6 +1214,23 @@ mod tests {
             first.iter().all(|path| !second.contains(path)),
             "distinct canonical repositories must not share a progress path"
         );
+    }
+
+    #[test]
+    fn malformed_heartbeat_never_counts_as_progress() {
+        let path = std::env::temp_dir().join(format!(
+            "autospec-malformed-heartbeat-{}.json",
+            std::process::id()
+        ));
+        fs::write(&path, "not-json").expect("malformed heartbeat");
+        assert_eq!(typed_heartbeat_signature(&path, "owner/repo"), None);
+        fs::write(
+            &path,
+            r#"{"repo":"owner/repo","issue":"42","branch":"main","step":"claimed","ts":1,"worker_id":"worker","claim_id":"claim"}"#,
+        )
+        .expect("valid heartbeat");
+        assert!(typed_heartbeat_signature(&path, "owner/repo").is_some());
+        let _ = fs::remove_file(path);
     }
 
     #[test]
