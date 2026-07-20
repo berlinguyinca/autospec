@@ -2535,6 +2535,7 @@ fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
     let mut worker_id = None;
     let mut branch = None;
     let mut claim_id = None;
+    let mut expected_commit = None;
     let mut index = 1;
     while index < args.len() {
         let flag = &args[index];
@@ -2556,6 +2557,8 @@ fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
                 .map_err(CommandFailure::diagnostic)?,
             "--claim-id" => set_executor_result_value(&mut claim_id, value.clone(), "--claim-id")
                 .map_err(CommandFailure::diagnostic)?,
+            "--expected-commit" => set_executor_result_value(&mut expected_commit, value.clone(), "--expected-commit")
+                .map_err(CommandFailure::diagnostic)?,
             unknown => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown executor-child option: {unknown}"
@@ -2574,8 +2577,10 @@ fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
         .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --branch"))?;
     let claim_id = claim_id
         .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --claim-id"))?;
+    let expected_commit = expected_commit
+        .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --expected-commit"))?;
     if let Ok(document) = fs::read_to_string(".autospec/executor-result.json") {
-        return executor_child_result(&document, &repo, issue, &worker_id, &branch, &claim_id);
+        return executor_child_result(&document, &repo, issue, &worker_id, &branch, &claim_id, &invocation, &expected_commit);
     }
     println!(
         "{{\"schema\":1,\"status\":\"blocked\",\"repo\":\"{}\",\"issue\":{},\"invocation_id\":\"{}\",\"reason\":\"{}\"}}",
@@ -2591,6 +2596,8 @@ fn executor_child_result(
     worker_id: &str,
     branch: &str,
     claim_id: &str,
+    invocation_id: &str,
+    expected_commit: &str,
 ) -> Result<(), CommandFailure> {
     let value: serde_json::Value = serde_json::from_str(document)
         .map_err(|error| CommandFailure::diagnostic(format!("invalid executor result: {error}")))?;
@@ -2600,6 +2607,8 @@ fn executor_child_result(
         || field("worker_id") != Some(worker_id)
         || field("branch") != Some(branch)
         || field("claim_id") != Some(claim_id)
+        || field("invocation_id") != Some(invocation_id)
+        || field("expected_commit") != Some(expected_commit)
     {
         return Err(CommandFailure::diagnostic(
             "executor result identity does not match invocation",
@@ -3010,6 +3019,8 @@ impl ExecutorRequest {
                 branch.to_string(),
                 "--claim-id".to_string(),
                 claim_id.to_string(),
+                "--expected-commit".to_string(),
+                expected_commit.clone(),
                 "--invocation-id".to_string(),
                 invocation_id.clone(),
             ],

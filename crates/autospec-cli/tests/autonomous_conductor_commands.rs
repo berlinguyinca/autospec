@@ -1247,7 +1247,7 @@ fn supervised_executor_child_accepts_a_typed_success_result() {
     fs::write(
         fixture.repo_dir.join(".autospec/executor-result.json"),
         format!(
-            "{{\"repo\":\"test/repo\",\"issue\":42,\"worker_id\":\"rust-foreground-conductor-1\",\"branch\":\"autonomous/issue-42\",\"claim_id\":\"{EXECUTOR_CLAIM_ID}\",\"outcome\":\"succeeded\",\"pr\":17,\"premerge_receipt\":\"{PREMERGE_RECEIPT}\"}}"
+            "{{\"repo\":\"test/repo\",\"issue\":42,\"worker_id\":\"rust-foreground-conductor-1\",\"branch\":\"autonomous/issue-42\",\"claim_id\":\"{EXECUTOR_CLAIM_ID}\",\"invocation_id\":\"42-claim-42\",\"expected_commit\":\"{EXECUTOR_COMMIT}\",\"outcome\":\"succeeded\",\"pr\":17,\"premerge_receipt\":\"{PREMERGE_RECEIPT}\"}}"
         ),
     )
     .expect("typed executor result");
@@ -1266,6 +1266,8 @@ fn supervised_executor_child_accepts_a_typed_success_result() {
             "autonomous/issue-42",
             "--claim-id",
             EXECUTOR_CLAIM_ID,
+            "--expected-commit",
+            EXECUTOR_COMMIT,
             "--invocation-id",
             "42-claim-42",
         ])
