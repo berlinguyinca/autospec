@@ -137,7 +137,7 @@ impl ConductorOutcome {
 impl ConductorState {
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":{CONDUCTOR_SCHEMA},\"repo\":\"{}\",\"scope\":\"{}\",\"phase\":\"{}\",\"state\":\"{}\",\"selected_issue\":{},\"serialization_reasons\":[{}],\"retry_count\":{},\"retry_limit\":{},\"last_outcome\":{},\"pause_reason\":{},\"terminal_reason\":{},\"resume_phase\":{}}}",
+            "{{\"schema\":{CONDUCTOR_SCHEMA},\"repo\":\"{}\",\"scope\":\"{}\",\"phase\":\"{}\",\"state\":\"{}\",\"selected_issue\":{},\"serialization_reasons\":[{}],\"retry_count\":{},\"retry_limit\":{},\"last_outcome\":{},\"pause_reason\":{},\"terminal_reason\":{},\"resume_phase\":{},\"blocked_backlog_cycles\":{},\"blocked_backlog_reason\":{},\"blocked_backlog_issues\":[{}]}}",
             escape_json(&self.repo),
             self.scope.as_str(),
             self.phase.as_str(),
@@ -158,6 +158,13 @@ impl ConductorState {
             self.resume_phase
                 .as_ref()
                 .map_or_else(|| "null".to_string(), |phase| format!("\"{}\"", phase.as_str())),
+            self.blocked_backlog_cycles,
+            optional_string_json(self.blocked_backlog_reason.as_deref()),
+            self.blocked_backlog_issues
+                .iter()
+                .map(u64::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
         )
     }
 
@@ -181,6 +188,9 @@ impl ConductorState {
                 "pause_reason",
                 "terminal_reason",
                 "resume_phase",
+                "blocked_backlog_cycles",
+                "blocked_backlog_reason",
+                "blocked_backlog_issues",
             ],
             "conductor state",
         )?;
@@ -236,6 +246,24 @@ impl ConductorState {
             take_required(&mut object, "resume_phase", "conductor state")?,
             "conductor state.resume_phase",
         )?;
+        let blocked_backlog_cycles = object
+            .remove("blocked_backlog_cycles")
+            .map(|value| {
+                value
+                    .into_number("conductor state.blocked_backlog_cycles")?
+                    .try_into()
+                    .map_err(|_| "conductor state.blocked_backlog_cycles exceeds u32".to_string())
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let blocked_backlog_reason = object
+            .remove("blocked_backlog_reason")
+            .map(|value| value.into_optional_string("conductor state.blocked_backlog_reason"))
+            .transpose()?;
+        let blocked_backlog_issues = optional_issues(
+            object.remove("blocked_backlog_issues"),
+            "conductor state.blocked_backlog_issues",
+        )?;
         let state = Self {
             repo,
             scope,
@@ -248,6 +276,9 @@ impl ConductorState {
             pause_reason,
             terminal_reason,
             resume_phase,
+            blocked_backlog_cycles,
+            blocked_backlog_reason,
+            blocked_backlog_issues,
         };
         state.validate()?;
         if let Some(normalized_state) = normalized_state {
