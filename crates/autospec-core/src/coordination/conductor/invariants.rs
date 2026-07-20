@@ -30,7 +30,7 @@ impl ConductorState {
         {
             return Err("blocked backlog metadata requires a positive cycle count".to_string());
         }
-        if self.blocked_backlog_issues.iter().any(|issue| *issue == 0)
+        if self.blocked_backlog_issues.contains(&0)
             || self
                 .blocked_backlog_issues
                 .windows(2)

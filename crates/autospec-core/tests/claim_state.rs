@@ -111,9 +111,9 @@ fn parses_the_projected_github_comment_shape_without_accepting_unknown_fields() 
 fn selects_the_lowest_linked_open_pr_with_exactly_one_closeout_report() {
     let pull_requests = parse_open_pull_requests_json(
         r#"[
-          {"number":77,"body":"Fixes #42\n\n## Closeout report\n\n## Closeout report"},
-          {"number":75,"body":"Closes #42\n\n## Closeout report\n\nshipped"},
-          {"number":74,"body":"Fixes #420\n\n## Closeout report"}
+          {"number":77,"body":"Fixes #42\n\n## Closeout report\n\n## Closeout report","headRefName":"feat/77","headRefOid":"7777777777777777777777777777777777777777"},
+          {"number":75,"body":"Closes #42\n\n## Closeout report\n\nshipped","headRefName":"feat/75","headRefOid":"7575757575757575757575757575757575757575"},
+          {"number":74,"body":"Fixes #420\n\n## Closeout report","headRefName":"feat/74","headRefOid":"7474747474747474747474747474747474747474"}
         ]"#,
     )
     .expect("projected pull request list parses");

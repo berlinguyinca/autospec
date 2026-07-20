@@ -179,7 +179,7 @@ impl ConductorState {
         mut issues: Vec<u64>,
     ) -> Result<Self, String> {
         let reason = reason.into();
-        if reason.trim().is_empty() || issues.iter().any(|issue| *issue == 0) {
+        if reason.trim().is_empty() || issues.contains(&0) {
             return Err(
                 "blocked backlog requires a non-empty reason and positive issue ids".to_string(),
             );
