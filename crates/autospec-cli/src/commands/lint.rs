@@ -3,6 +3,7 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::str::FromStr;
 
 use autospec_core::claim::{
     evaluate_claim_safety_with_trusted_actors, lint_issue_intent_with_trusted_actors,
@@ -14,6 +15,7 @@ use autospec_core::lint::{
     ImplementationLintContext, ImplementationLintFinding, ImplementationLintOptions,
     ImplementationLintSeverity, IssueLintFinding, RepositoryIndex, UnifiedDiff,
 };
+use yaml_edit::Document;
 
 use super::CommandFailure;
 
@@ -614,7 +616,7 @@ fn run_issue_safety(args: &[String]) -> Result<(), CommandFailure> {
     }
     let options = parse_issue_safety_options(args)?;
     let body = read_body(&options.body_path)?;
-    let policy = load_issue_safety_policy(options.config_path.as_deref());
+    let policy = load_issue_safety_policy(options.config_path.as_deref())?;
     let trusted_actors = policy
         .trusted_actors
         .iter()
@@ -729,16 +731,34 @@ pub(crate) struct IssueSafetyPolicy {
     pub(crate) has_unsupported_pattern: bool,
 }
 
-pub(crate) fn load_issue_safety_policy(config_path: Option<&str>) -> IssueSafetyPolicy {
-    let path = config_path.map(PathBuf::from).unwrap_or_else(|| {
-        std::env::var("AUTOSPEC_CONFIG_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(".autospec/autospec.yml"))
-    });
-    let Ok(document) = fs::read_to_string(path) else {
-        return default_issue_safety_policy();
+pub(crate) fn load_issue_safety_policy(
+    config_path: Option<&str>,
+) -> Result<IssueSafetyPolicy, CommandFailure> {
+    let (path, explicit) = match config_path {
+        Some(path) => (PathBuf::from(path), true),
+        None => match std::env::var_os("AUTOSPEC_CONFIG_FILE") {
+            Some(path) => (PathBuf::from(path), true),
+            None => (PathBuf::from(".autospec/autospec.yml"), false),
+        },
     };
-    parse_issue_safety_policy(&document).unwrap_or_else(default_issue_safety_policy)
+    let document = match fs::read_to_string(&path) {
+        Ok(document) => document,
+        Err(error) if !explicit && error.kind() == io::ErrorKind::NotFound => {
+            return Ok(default_issue_safety_policy())
+        }
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not read issue safety policy {}: {error}",
+                path.display()
+            )))
+        }
+    };
+    parse_issue_safety_policy(&document).ok_or_else(|| {
+        CommandFailure::diagnostic(format!(
+            "could not parse issue safety policy {}",
+            path.display()
+        ))
+    })
 }
 
 pub(crate) fn review_issue_safety_for_queue(
@@ -776,7 +796,7 @@ pub(crate) fn claim_safety_with_config(
 }
 
 pub(crate) fn configured_safety_trusted_actors() -> Result<Vec<String>, CommandFailure> {
-    let policy = load_issue_safety_policy(None);
+    let policy = load_issue_safety_policy(None)?;
     if policy.has_unsupported_pattern {
         return Err(CommandFailure::diagnostic(
             "issue safety policy contains unsupported custom regex",
@@ -793,6 +813,7 @@ fn default_issue_safety_policy() -> IssueSafetyPolicy {
 }
 
 fn parse_issue_safety_policy(document: &str) -> Option<IssueSafetyPolicy> {
+    Document::from_str(document).ok()?.as_mapping()?;
     let mut policy = default_issue_safety_policy();
     let mut gate_indent = None;
     let mut section_indent = None;

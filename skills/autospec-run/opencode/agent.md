@@ -293,8 +293,32 @@ Then launch a **background monitor loop** — the orchestrator relaunches the mo
 ```
 batch_num=1
 while true:
-  launch background subagent (pass batch_num; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-1})
+  launch background subagent paused before its first claim (pass batch_num; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-1})
+  capture the returned ACTUAL_SESSION_ID and bind it into that child's durable session context as WAIT_TARGET_SESSION_ID
+  do not allow the child to claim work until it can pass that exact WAIT_TARGET_SESSION_ID to `autospec claim acquire --session-id`
   wait for task-notification (monitor agent completes)
+
+  if Wait returns `write_stdin failed` with `stdin is closed`:
+    inspect durable agent/session state once for a live recovery path
+    if the child is reported live:
+      attempt one harness reattach to the exact failed Wait target
+      if reattach succeeds: continue waiting for task-notification
+      explicitly terminate and reap the child through the harness process API
+      if termination and reap cannot be proven: stop without typed recovery or label mutation
+    require durable proof that the child exited or was terminated and reaped
+    use the actual session ID from the failed Wait target (never infer it from an environment variable)
+    read the immutable heartbeat binding for ACTUAL_SESSION_ID before inspecting any current claim state
+    BOUND_HEARTBEAT="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/heartbeat-read.sh" --repo {repo} --session-id "<ACTUAL_SESSION_ID>")" or stop without typed recovery or label mutation
+    ISSUE="$(printf '%s' "$BOUND_HEARTBEAT" | jq -er '.issue | select((type == "string" and length > 0) or (type == "number" and . > 0)) | tostring')" or stop
+    BRANCH="$(printf '%s' "$BOUND_HEARTBEAT" | jq -er '.branch | select(type == "string")')" or stop
+    WORKER_ID="$(printf '%s' "$BOUND_HEARTBEAT" | jq -er '.worker_id | select(type == "string" and length > 0)')" or stop
+    CLAIM_ID="$(printf '%s' "$BOUND_HEARTBEAT" | jq -er '.claim_id | select(type == "string" and length > 0)')" or stop
+    if the binding is absent, malformed, or legacy/unbound: stop without typed recovery or label mutation
+    never read CLAIM_ID from the currently active claim after Wait fails; a successor may already own the same issue, worker, and branch
+    run `"${AUTOSPEC_BIN:-autospec}" autonomous implementer-wait-failed --repo {repo} --issue "<ISSUE>" --worker-id "<WORKER_ID>" --branch "<BRANCH>" --claim-id "<CLAIM_ID>" --session-id "<ACTUAL_SESSION_ID>" --diagnostic "<REDACTED_WAIT_ERROR>"`
+    if typed recovery exits non-zero: log the surfaced recovery failure and stop processing that issue
+    never mutate labels inline or overwrite a successor claim
+    continue  # start a fresh monitor batch from the restored auto-implement queue
 
   # Read and consume the batch-done signal.
   if [ -f "$HOME/.autospec/batch-done.json" ]; then
@@ -609,7 +633,7 @@ do not fall back to an inline label-swap path.
 >   # read-back verification, so the hot loop NEVER re-implements the inline
 >   # label swap. Multiple monitors can race the same candidate; exactly one
 >   # wins (exit 0), the rest lose (non-zero) and skip to the next candidate.
->   claim_json="$("$AUTOSPEC_CLAIM_BIN" claim acquire --issue "$ISSUE" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:monitor:$$}" --branch "${BRANCH:-}")" && claim_rc=0 || claim_rc=$?
+>   claim_json="$("$AUTOSPEC_CLAIM_BIN" claim acquire --issue "$ISSUE" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:monitor:$$}" --branch "${BRANCH:-}" --session-id "${WAIT_TARGET_SESSION_ID:?missing durable Wait target session binding}")" && claim_rc=0 || claim_rc=$?
 >   # exit 1 = hard usage error (never a race signal); exit 2 = lost race.
 >   # Split them: a misconfigured claim (rc 1 or any other non-2 non-zero) must
 >   # surface an operator-visible WARN, not masquerade as a silently-dropped
@@ -625,11 +649,11 @@ do not fall back to an inline label-swap path.
 >     ready=($READY_REMOVE)
 >     continue
 >   fi
->   # exit 0 only: this monitor now owns #$ISSUE (label already swapped to
->   # in-progress-by-bot by autospec claim acquire) -> heartbeat write -> process(ISSUE).
->   _hb_slug="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")"
->   mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
->   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$_hb_slug/$ISSUE.json"
+>   # exit 0 only: this monitor now owns #$ISSUE. claim acquire has already
+>   # persisted both the per-issue heartbeat and immutable session sidecar.
+>   CLAIM_ID="$(printf '%s' "$claim_json" | jq -er '.claim_id | select(type == "string" and length > 0)')" || exit 1
+>   CLAIM_WORKER_ID="$(printf '%s' "$claim_json" | jq -er '.worker_id | select(type == "string" and length > 0)')" || exit 1
+>   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/heartbeat-read.sh" --repo "{repo}" --session-id "$WAIT_TARGET_SESSION_ID" >/dev/null || exit 1
 >   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #$ISSUE: claimed" "Starting implementation on {repo}" || true
 >   # Issue start summary — print before dispatching process(ISSUE) so the operator
 >   # knows exactly what the monitor is about to work on.
@@ -810,7 +834,7 @@ do not fall back to an inline label-swap path.
 > Keep a progress heartbeat so the monitor can prove forward movement:
 > - Create/update `~/.autospec/process-heartbeats/<repo-slug>/<ISSUE>.json` at each major step:
 >   - `claimed`, `expand_start`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
-> - Schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}"}`
+> - Recovery-bound schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}","host":"<HOST>","worker_id":"<WORKER_ID>","claim_id":"<CLAIM_ID>","session_id":"<WAIT_TARGET_SESSION_ID>"}`. `heartbeat-write.sh` creates the exact-session sidecar once: an identical identity refresh preserves it, while any session/issue/worker/branch/claim mismatch fails closed before updating liveness. Legacy heartbeats without that sidecar remain valid only for liveness and fail closed for Wait recovery.
 > - Delete this file on terminal SUCCESS/FAILURE in both clean and failure paths.
 > - Transition notifications: on `tests_passed`, `pr_created`, `merged`, and `failed` call
 >   `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "<title>" "<body>" || true`
@@ -831,11 +855,9 @@ do not fall back to an inline label-swap path.
 >
 > 0. **Heartbeat refresh at expand start.** The very first action before any expand work (reading files, pattern survey, verifying paths) is to refresh the heartbeat to `expand_start`. This covers the claim→worktree_ready window: the monitor wrote `claimed` when it dispatched you; without this refresh the watchdog may falsely reclaim the issue during a long expand phase.
 >    ```bash
->    _hb_slug="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")"
->    mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
->    printf '{"issue":"%s","branch":"","step":"expand_start","ts":%s,"pr":"","repo":"%s"}\n' \
->      "<ISSUE>" "$(date -u +%s)" "{repo}" \
->      > "$HOME/.autospec/process-heartbeats/$_hb_slug/<ISSUE>.json"
+>    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/heartbeat-write.sh" \
+>      --issue "<ISSUE>" --branch "${BRANCH:-}" --step expand_start --repo "{repo}" \
+>      --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --session-id "$WAIT_TARGET_SESSION_ID"
 >    ```
 > 1. **PR-aware recovery ladder, then worktree.** Resolve the branch state FIRST, then act on the verdict. NEVER `cd`/`git checkout`/`git commit` in the primary checkout — all work happens in a linked worktree off `origin/main`.
 >    <!-- worktree-ladder:begin -->

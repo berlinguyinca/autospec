@@ -430,8 +430,7 @@ fn real_ci_or_review_bypass_still_blocks() {
     for body in bypasses {
         let lint = lint_issue_intent("chore: speed up", body, "agent");
         assert!(
-            lint
-                .findings
+            lint.findings
                 .iter()
                 .any(|finding| finding.rule_id == "ci-or-review-bypass"),
             "real bypass not flagged: {body:?}"

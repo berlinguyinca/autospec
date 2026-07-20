@@ -1,4 +1,6 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -9,18 +11,27 @@ use autospec_core::autonomous_lifecycle::{
 };
 use autospec_core::claim::{
     claim_losing_worker_comment_id, executor_result_evidence_exists,
-    find_reconcilable_pull_request, is_executor_result_pull_request, is_reconcilable_pull_request,
-    lowest_marked_comment, parse_claim_issue_json, parse_open_pull_requests_json,
-    parse_paths_argument, parse_remote_comments_json, select_run_state,
-    terminal_merged_comment_exists, ExecutorResultEvidence, RunStateRecord,
-    RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
+    executor_wait_failure_relinquishes_claim, find_reconcilable_pull_request,
+    is_executor_result_pull_request, is_reconcilable_pull_request, lowest_marked_comment,
+    parse_claim_issue_json, parse_open_pull_requests_json, parse_paths_argument,
+    parse_remote_comments_json, select_run_state, terminal_merged_comment_exists,
+    ExecutorResultEvidence, RunStateRecord, RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
 };
 use autospec_core::coordination::ConductorOutcome;
+use autospec_core::safety::redact_secrets;
 
 use super::lint::claim_safety_with_config;
 use super::CommandFailure;
 
-static EXECUTOR_RESULT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static UNIQUE_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const WAIT_FAILURE_MARKER: &str = "<!-- autospec-implementer-wait-failed -->";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaitFailureRecovery {
+    Requeued,
+    AlreadyRecovered,
+    OwnershipLost,
+}
 
 pub(crate) enum ConductorClaimError {
     Diagnostic(CommandFailure),
@@ -92,10 +103,12 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
     let worker_id = options.worker_id.unwrap_or_else(default_worker_id);
     let comments = list_comments(&repo, options.issue)?;
     let now = utc_now_iso()?;
-    let claimed_at = select_run_state(&comments, &repo, options.issue)
-        .map(|state| state.record.claimed_at)
+    let selected = select_run_state(&comments, &repo, options.issue);
+    let claimed_at = selected
+        .as_ref()
+        .map(|state| state.record.claimed_at.clone())
         .unwrap_or_else(|| now.clone());
-    let record = RunStateRecord::new(
+    let mut record = RunStateRecord::new(
         &repo,
         options.issue,
         &worker_id,
@@ -108,6 +121,7 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
         &now,
         10_800,
     );
+    record.claim_id = selected.and_then(|state| state.record.claim_id);
     if options.state == "merged" && !terminal_merged_exists(&comments) {
         let body = format!(
             "{RUN_TERMINAL_BEGIN_MARKER}\n{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"state\":\"merged\",\"branch\":\"{}\",\"pr\":\"{}\",\"finalized_at\":\"{}\"}}\n{RUN_TERMINAL_END_MARKER}",
@@ -149,11 +163,16 @@ fn acquire(args: &[String]) -> Result<(), CommandFailure> {
     let lease = acquire_record(parse_acquire_options(args)?)
         .map_err(ConductorClaimError::into_command_failure)?;
     println!(
-        "{{\"claimed\":true,\"issue\":{},\"repo\":\"{}\",\"worker_id\":\"{}\",\"branch\":\"{}\"}}",
+        "{{\"claimed\":true,\"issue\":{},\"repo\":\"{}\",\"worker_id\":\"{}\",\"branch\":\"{}\",\"claim_id\":\"{}\",\"session_id\":{}}}",
         lease.issue,
         json_escape(&lease.repo),
         json_escape(&lease.worker_id),
         json_escape(&lease.branch),
+        json_escape(&lease.claim_id),
+        lease.session_id.as_ref().map_or_else(
+            || "null".to_string(),
+            |session_id| format!("\"{}\"", json_escape(session_id)),
+        ),
     );
     Ok(())
 }
@@ -169,6 +188,7 @@ pub(crate) fn acquire_for_conductor(
         repo: Some(repo.to_string()),
         worker_id: Some(worker_id.to_string()),
         branch: branch.to_string(),
+        session_id: None,
     })
 }
 
@@ -265,7 +285,17 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     if !safety.allowed {
         return unavailable_safety_claim(options.issue, &repo, &worker_id, safety.reason);
     }
-    if write_startup_heartbeat(&repo, options.issue, &options.branch).is_err() {
+    let claim_id = claim_generation_id()?;
+    if write_startup_heartbeat(
+        &repo,
+        options.issue,
+        &worker_id,
+        &options.branch,
+        &claim_id,
+        options.session_id.as_deref(),
+    )
+    .is_err()
+    {
         return unavailable_claim(
             options.issue,
             &repo,
@@ -296,7 +326,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         "in-progress-by-bot".to_string(),
     ];
     if run_gh_with_retry(&label_move, "mark issue in progress").is_err() {
-        cleanup_startup_heartbeat(&repo, options.issue);
+        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         return unavailable_claim(
             options.issue,
             &repo,
@@ -308,7 +338,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     let ttl_seconds = claim_ttl_seconds();
     let comments = list_comments(&repo, options.issue)?;
     if terminal_merged_exists(&comments) {
-        cleanup_startup_heartbeat(&repo, options.issue);
+        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         let remove_active = [
             "issue".to_string(),
             "edit".to_string(),
@@ -322,20 +352,25 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
     }
     let selected = select_run_state(&comments, &repo, options.issue);
+    let wait_failure_relinquished = selected.as_ref().is_some_and(|selected| {
+        executor_wait_failure_relinquishes_claim(&comments, &selected.record)
+    });
     let foreign_fresh_owner = selected.as_ref().and_then(|selected| {
         (selected.record.worker_id != worker_id
+            && !wait_failure_relinquished
             && !server_lease_is_stale(&selected.server_updated_at, ttl_seconds))
         .then_some(selected.record.worker_id.as_str())
     });
     if let Some(owner) = foreign_fresh_owner {
         cleanup_own_marked_comments(&repo, options.issue, &worker_id, &comments);
-        cleanup_startup_heartbeat(&repo, options.issue);
+        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
     }
 
     let now = utc_now_iso()?;
     let claimed_at = selected
         .as_ref()
+        .filter(|_| !wait_failure_relinquished)
         .map(|state| state.record.claimed_at.clone())
         .unwrap_or_else(|| now.clone());
     let record = RunStateRecord::new(
@@ -350,9 +385,10 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         claimed_at,
         now,
         ttl_seconds,
-    );
+    )
+    .with_claim_id(claim_id.clone());
     if upsert_record(&repo, &comments, &record).is_err() {
-        cleanup_startup_heartbeat(&repo, options.issue);
+        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         let restore = [
             "issue".to_string(),
             "edit".to_string(),
@@ -379,17 +415,19 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         }
         let observed_comments = list_comments(&repo, options.issue)?;
         if terminal_merged_exists(&observed_comments) {
-            cleanup_startup_heartbeat(&repo, options.issue);
+            cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
             return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
         }
         let observed = select_run_state(&observed_comments, &repo, options.issue);
         let labels = load_claim_issue(&repo, options.issue)?.labels;
         if observed.as_ref().is_none_or(|state| {
-            state.record.worker_id != worker_id || state.record.state != "claimed"
+            state.record.worker_id != worker_id
+                || state.record.state != "claimed"
+                || state.record.claim_id.as_deref() != Some(claim_id.as_str())
         }) || !labels.iter().any(|label| label == "in-progress-by-bot")
         {
             cleanup_own_marked_comments(&repo, options.issue, &worker_id, &observed_comments);
-            cleanup_startup_heartbeat(&repo, options.issue);
+            cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
             let owner = observed
                 .as_ref()
                 .map(|state| state.record.worker_id.as_str())
@@ -402,6 +440,8 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         repo,
         worker_id,
         branch: options.branch,
+        claim_id,
+        session_id: options.session_id,
     })
 }
 
@@ -426,10 +466,12 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
     };
     let comments = list_comments(&repo, options.issue)?;
     let now = utc_now_iso()?;
-    let claimed_at = select_run_state(&comments, &repo, options.issue)
-        .map(|state| state.record.claimed_at)
+    let selected = select_run_state(&comments, &repo, options.issue);
+    let claimed_at = selected
+        .as_ref()
+        .map(|state| state.record.claimed_at.clone())
         .unwrap_or_else(|| now.clone());
-    let record = RunStateRecord::new(
+    let mut record = RunStateRecord::new(
         &repo,
         options.issue,
         options.worker_id,
@@ -442,6 +484,7 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
         now,
         options.ttl_seconds,
     );
+    record.claim_id = selected.and_then(|state| state.record.claim_id);
     upsert_record(&repo, &comments, &record)?;
     emit_claim_telemetry(
         if lowest_marked_comment(&comments).is_some() {
@@ -769,6 +812,139 @@ pub(crate) fn record_executor_outcome(
     }
 }
 
+pub(crate) fn recover_implementer_wait_failure(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    expected_claim_id: &str,
+    session_id: &str,
+    diagnostic: &str,
+) -> Result<WaitFailureRecovery, CommandFailure> {
+    let comments = list_comments(repo, issue)?;
+    let Some(selected) = select_run_state(&comments, repo, issue) else {
+        return Ok(WaitFailureRecovery::OwnershipLost);
+    };
+    if selected.record.claim_id.as_deref() != Some(expected_claim_id) {
+        return Ok(WaitFailureRecovery::OwnershipLost);
+    }
+    if !has_active_executor_claim(
+        &comments,
+        &selected.record,
+        &selected.server_updated_at,
+        worker_id,
+        branch,
+    ) {
+        return Ok(WaitFailureRecovery::OwnershipLost);
+    }
+
+    let evidence = wait_failure_evidence(
+        repo,
+        issue,
+        worker_id,
+        branch,
+        expected_claim_id,
+        session_id,
+    );
+    let already = executor_result_evidence_exists(&comments, &evidence);
+    if !already {
+        create_comment(repo, issue, &evidence.to_marked_comment())?;
+    }
+    let confirmed_comments = list_comments(repo, issue)?;
+    if !executor_result_evidence_exists(&confirmed_comments, &evidence) {
+        return Err(CommandFailure::diagnostic(
+            "implementer wait-failure evidence was not persisted",
+        ));
+    }
+    let Some(confirmed) = select_run_state(&confirmed_comments, repo, issue) else {
+        return Ok(WaitFailureRecovery::OwnershipLost);
+    };
+    if !has_active_executor_claim(
+        &confirmed_comments,
+        &confirmed.record,
+        &confirmed.server_updated_at,
+        worker_id,
+        branch,
+    ) || confirmed.record.claim_id.as_deref() != Some(expected_claim_id)
+    {
+        return Ok(WaitFailureRecovery::OwnershipLost);
+    }
+
+    requeue_wait_failure(repo, issue)?;
+    upsert_wait_failure_comment(repo, issue, worker_id, branch, session_id, diagnostic)?;
+    Ok(if already {
+        WaitFailureRecovery::AlreadyRecovered
+    } else {
+        WaitFailureRecovery::Requeued
+    })
+}
+
+fn wait_failure_evidence(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    session_id: &str,
+) -> ExecutorResultEvidence {
+    ExecutorResultEvidence::new(
+        repo,
+        issue,
+        worker_id,
+        branch,
+        "failed",
+        None,
+        "implementer_wait_failed",
+        format!("implementer-wait-failed:{claim_id}:{session_id}"),
+    )
+}
+
+fn requeue_wait_failure(repo: &str, issue: u64) -> Result<(), CommandFailure> {
+    run_gh_with_retry(
+        &[
+            "issue".into(),
+            "edit".into(),
+            issue.to_string(),
+            "--repo".into(),
+            repo.into(),
+            "--remove-label".into(),
+            "in-progress-by-bot".into(),
+            "--add-label".into(),
+            "auto-implement".into(),
+        ],
+        "requeue implementer wait failure",
+    )
+}
+
+fn upsert_wait_failure_comment(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    session_id: &str,
+    diagnostic: &str,
+) -> Result<(), CommandFailure> {
+    let comments = list_comments(repo, issue)?;
+    let body = format!("{WAIT_FAILURE_MARKER}\nAutospec requeued issue #{issue} after `implementer_wait_failed`. Session: `{}`. Worker: `{}`. Branch: `{}`. Diagnostic: `{}`. Recovery: start a fresh implementer from the restored `auto-implement` queue.", comment_field(session_id), comment_field(worker_id), comment_field(branch), safe_wait_diagnostic(diagnostic));
+    if let Some(comment) = comments
+        .iter()
+        .find(|comment| comment.body.contains(WAIT_FAILURE_MARKER))
+    {
+        patch_comment(repo, comment.id, &body)?;
+    } else {
+        create_comment(repo, issue, &body)?;
+    }
+    Ok(())
+}
+
+fn comment_field(value: &str) -> String {
+    value.replace(['`', '\n', '\r'], " ")
+}
+
+fn safe_wait_diagnostic(value: &str) -> String {
+    redact_secrets(value).chars().take(512).collect()
+}
+
 fn record_executor_result_with_step(
     repo: &str,
     issue: u64,
@@ -881,17 +1057,23 @@ fn executor_result_outcome_name(outcome: &ConductorOutcome) -> &'static str {
 }
 
 fn executor_result_receipt_id() -> Result<String, CommandFailure> {
+    unique_operation_id("executor-result")
+}
+
+fn claim_generation_id() -> Result<String, CommandFailure> {
+    unique_operation_id("claim")
+}
+
+fn unique_operation_id(prefix: &str) -> Result<String, CommandFailure> {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "cannot generate executor result receipt id: {error}"
-            ))
+            CommandFailure::diagnostic(format!("cannot generate unique operation id: {error}"))
         })?
         .as_nanos();
-    let sequence = EXECUTOR_RESULT_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let sequence = UNIQUE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     Ok(format!(
-        "executor-result-{}-{nanos}-{sequence}",
+        "{prefix}-{}-{nanos}-{sequence}",
         std::process::id()
     ))
 }
@@ -1008,6 +1190,7 @@ struct AcquireOptions {
     repo: Option<String>,
     worker_id: Option<String>,
     branch: String,
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1016,6 +1199,8 @@ pub(crate) struct ClaimLease {
     pub repo: String,
     pub worker_id: String,
     pub branch: String,
+    pub claim_id: String,
+    pub session_id: Option<String>,
 }
 
 fn parse_read_options(args: &[String]) -> Result<ReadOptions, CommandFailure> {
@@ -1365,11 +1550,12 @@ fn parse_acquire_options(args: &[String]) -> Result<AcquireOptions, CommandFailu
     let mut worker_id = None;
     let mut branch = String::new();
     let mut branch_seen = false;
+    let mut session_id = None;
     let mut index = 0;
     while index < args.len() {
         let option = args[index].as_str();
         let value = match option {
-            "--issue" | "--repo" | "--worker-id" | "--branch" => {
+            "--issue" | "--repo" | "--worker-id" | "--branch" | "--session-id" => {
                 argument_value(args, &mut index, option)?
             }
             _ => {
@@ -1408,6 +1594,11 @@ fn parse_acquire_options(args: &[String]) -> Result<AcquireOptions, CommandFailu
                 branch_seen = true;
                 branch = value;
             }
+            "--session-id" => set_once(
+                &mut session_id,
+                value,
+                "--session-id accepts exactly one session identifier",
+            )?,
             _ => unreachable!("options were matched before parsing"),
         }
         index += 1;
@@ -1417,6 +1608,7 @@ fn parse_acquire_options(args: &[String]) -> Result<AcquireOptions, CommandFailu
         repo,
         worker_id,
         branch,
+        session_id,
     })
 }
 
@@ -1674,7 +1866,14 @@ fn terminal_merged_exists(comments: &[autospec_core::claim::RemoteComment]) -> b
     terminal_merged_comment_exists(comments)
 }
 
-fn write_startup_heartbeat(repo: &str, issue: u64, branch: &str) -> Result<(), CommandFailure> {
+fn write_startup_heartbeat(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    session_id: Option<&str>,
+) -> Result<(), CommandFailure> {
     let root = heartbeat_root()?;
     let directory = root.join(super::autonomous::drain::repository_progress_key(repo));
     fs::create_dir_all(&directory).map_err(|error| {
@@ -1684,24 +1883,155 @@ fn write_startup_heartbeat(repo: &str, issue: u64, branch: &str) -> Result<(), C
         ))
     })?;
     let timestamp = unix_now()?;
+    let session_field = session_id.map_or_else(String::new, |session_id| {
+        format!(",\"session_id\":\"{}\"", json_escape(session_id))
+    });
     let body = format!(
-        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"pr\":\"\",\"repo\":\"{}\"}}\n",
+        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
         json_escape(branch),
         json_escape(repo),
+        json_escape(worker_id),
+        json_escape(claim_id),
     );
-    fs::write(directory.join(format!("{issue}.json")), body).map_err(|error| {
-        CommandFailure::diagnostic(format!("could not write claim startup heartbeat: {error}"))
-    })
+    let mut created_session_binding = None;
+    if let Some(session_id) = session_id {
+        let sessions = directory.join("sessions");
+        fs::create_dir_all(&sessions).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not create claim session heartbeat directory {}: {error}",
+                sessions.display()
+            ))
+        })?;
+        let path = sessions.join(format!("{}.json", heartbeat_session_key(session_id)));
+        let identity = SessionBindingIdentity::new(session_id, issue, worker_id, branch, claim_id);
+        let created = publish_session_binding(&path, body.as_bytes(), &identity)?;
+        created_session_binding = created.then_some(path);
+    }
+    if let Err(error) = fs::write(directory.join(format!("{issue}.json")), &body) {
+        if let Some(path) = created_session_binding {
+            let _ = fs::remove_file(path);
+        }
+        return Err(CommandFailure::diagnostic(format!(
+            "could not write claim startup heartbeat: {error}"
+        )));
+    }
+    Ok(())
 }
 
-fn cleanup_startup_heartbeat(repo: &str, issue: u64) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionBindingIdentity {
+    session_id: String,
+    issue: String,
+    worker_id: String,
+    branch: String,
+    claim_id: String,
+}
+
+impl SessionBindingIdentity {
+    fn new(session_id: &str, issue: u64, worker_id: &str, branch: &str, claim_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            issue: issue.to_string(),
+            worker_id: worker_id.to_string(),
+            branch: branch.to_string(),
+            claim_id: claim_id.to_string(),
+        }
+    }
+
+    fn from_document(document: &[u8]) -> Result<Self, CommandFailure> {
+        let value: serde_json::Value = serde_json::from_slice(document).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "existing claim session binding is malformed: {error}"
+            ))
+        })?;
+        let field = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    CommandFailure::diagnostic(format!(
+                        "existing claim session binding has invalid {name}"
+                    ))
+                })
+        };
+        Ok(Self {
+            session_id: field("session_id")?,
+            issue: field("issue")?,
+            worker_id: field("worker_id")?,
+            branch: value
+                .get("branch")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    CommandFailure::diagnostic(
+                        "existing claim session binding has invalid branch".to_string(),
+                    )
+                })?,
+            claim_id: field("claim_id")?,
+        })
+    }
+}
+
+fn publish_session_binding(
+    path: &Path,
+    document: &[u8],
+    expected: &SessionBindingIdentity,
+) -> Result<bool, CommandFailure> {
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read(path).map_err(|read_error| {
+                CommandFailure::diagnostic(format!(
+                    "could not read existing claim session binding: {read_error}"
+                ))
+            })?;
+            let observed = SessionBindingIdentity::from_document(&existing)?;
+            if observed == *expected {
+                return Ok(false);
+            }
+            return Err(CommandFailure::diagnostic(
+                "claim session binding identity conflict".to_string(),
+            ));
+        }
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not create claim session binding: {error}"
+            )))
+        }
+    };
+    if let Err(error) = file.write_all(document).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(CommandFailure::diagnostic(format!(
+            "could not persist claim session binding: {error}"
+        )));
+    }
+    Ok(true)
+}
+
+fn heartbeat_session_key(session_id: &str) -> String {
+    session_id
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn cleanup_startup_heartbeat(repo: &str, issue: u64, session_id: Option<&str>) {
     let Ok(root) = heartbeat_root() else {
         return;
     };
-    let _ = fs::remove_file(
-        root.join(super::autonomous::drain::repository_progress_key(repo))
-            .join(format!("{issue}.json")),
-    );
+    let directory = root.join(super::autonomous::drain::repository_progress_key(repo));
+    let _ = fs::remove_file(directory.join(format!("{issue}.json")));
+    if let Some(session_id) = session_id {
+        let _ = fs::remove_file(
+            directory
+                .join("sessions")
+                .join(format!("{}.json", heartbeat_session_key(session_id))),
+        );
+    }
 }
 
 pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
@@ -1759,14 +2089,13 @@ fn branch_ref_exists(branch: &str) -> bool {
 
 fn cleanup_own_marked_comments(
     repo: &str,
-    issue: u64,
+    _issue: u64,
     worker_id: &str,
     comments: &[autospec_core::claim::RemoteComment],
 ) {
     if let Some(comment_id) = claim_losing_worker_comment_id(comments, worker_id) {
         let _ = delete_comment(repo, comment_id);
     }
-    cleanup_startup_heartbeat(repo, issue);
 }
 
 fn claim_ttl_seconds() -> u64 {
@@ -2066,7 +2395,7 @@ fn unavailable_claim_with_observed_owner<T>(
 
 fn print_help() {
     println!(
-        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME]\n    autospec claim release --issue <N> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
+        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
     );
 }
 
@@ -2078,7 +2407,8 @@ fn print_state_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::claim_settle_millis;
+    use super::{claim_settle_millis, publish_session_binding, SessionBindingIdentity};
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn claim_settle_millis_preserves_decimal_second_configuration() {
@@ -2092,5 +2422,74 @@ mod tests {
         assert_eq!(claim_settle_millis(Some("17"), Some("0.2")), Some(17));
         assert_eq!(claim_settle_millis(None, Some("-0.2")), None);
         assert_eq!(claim_settle_millis(None, Some("not-a-duration")), None);
+    }
+
+    #[test]
+    fn session_binding_is_create_once_and_idempotent_for_the_same_identity() {
+        let directory = std::env::temp_dir().join(format!(
+            "autospec-session-binding-{}-{}",
+            std::process::id(),
+            super::UNIQUE_ID_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("session binding fixture");
+        let path = directory.join("session.json");
+        let original = SessionBindingIdentity::new("session", 42, "worker", "feat/a", "claim-a");
+        let successor = SessionBindingIdentity::new("session", 42, "worker", "feat/a", "claim-b");
+
+        let original_document = br#"{"issue":"42","branch":"feat/a","worker_id":"worker","claim_id":"claim-a","session_id":"session"}"#;
+        let refresh_document = br#"{"issue":"42","branch":"feat/a","worker_id":"worker","claim_id":"claim-a","session_id":"session","step":"refresh"}"#;
+        let successor_document = br#"{"issue":"42","branch":"feat/a","worker_id":"worker","claim_id":"claim-b","session_id":"session"}"#;
+        publish_session_binding(&path, original_document, &original).expect("initial binding");
+        publish_session_binding(&path, refresh_document, &original).expect("idempotent refresh");
+        assert!(publish_session_binding(&path, successor_document, &successor).is_err());
+        assert_eq!(
+            std::fs::read(&path).expect("preserved binding"),
+            original_document
+        );
+        std::fs::remove_dir_all(directory).expect("remove session binding fixture");
+    }
+
+    #[test]
+    fn concurrent_session_binding_publishers_cannot_overwrite_the_winner() {
+        let directory = std::env::temp_dir().join(format!(
+            "autospec-session-binding-race-{}-{}",
+            std::process::id(),
+            super::UNIQUE_ID_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("session binding fixture");
+        let path = Arc::new(directory.join("session.json"));
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = [
+            (
+                "claim-a",
+                br#"{"issue":"42","branch":"feat/a","worker_id":"worker","claim_id":"claim-a","session_id":"session"}"#.as_slice(),
+            ),
+            (
+                "claim-b",
+                br#"{"issue":"42","branch":"feat/a","worker_id":"worker","claim_id":"claim-b","session_id":"session"}"#.as_slice(),
+            ),
+        ]
+            .into_iter()
+            .map(|(claim_id, document)| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let identity =
+                        SessionBindingIdentity::new("session", 42, "worker", "feat/a", claim_id);
+                    barrier.wait();
+                    publish_session_binding(&path, document, &identity)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("publisher thread"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let stored = std::fs::read_to_string(&*path).expect("winning session binding");
+        assert!(stored.contains("claim-a") || stored.contains("claim-b"));
+        std::fs::remove_dir_all(directory).expect("remove session binding fixture");
     }
 }

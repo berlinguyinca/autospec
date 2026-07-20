@@ -5,6 +5,7 @@ pub mod doctor;
 pub mod explore;
 pub mod growth_report;
 pub mod init;
+pub mod issue;
 pub mod lint;
 pub mod parent;
 pub mod plan;
@@ -80,6 +81,7 @@ pub fn run(args: Vec<String>) -> Result<(), CommandFailure> {
         }
         [command, rest @ ..] => match command.as_str() {
             "init" => init::run(rest).map_err(CommandFailure::diagnostic),
+            "issue" => issue::run(rest),
             "lint" => lint::run(rest),
             "claim" => claim::run(rest),
             "parent" => parent::run(rest),

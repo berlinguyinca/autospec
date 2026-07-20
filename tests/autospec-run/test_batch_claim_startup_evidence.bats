@@ -164,11 +164,14 @@ run_list_ready() {
     # The autospec-run orchestrator may export AUTOSPEC_RUN_ONLY_ISSUES for the
     # live queue; this fixture must exercise all synthetic issues regardless.
     unset AUTOSPEC_RUN_ONLY_ISSUES
-    PATH="$MOCK_BIN:$PATH" \
-    AUTOSPEC_CONFIG_FILE="$TMPDIR_BATS/missing-config.yml" \
-    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3 \
-    AUTOSPEC_HEARTBEAT_DIR="$TMPDIR_BATS/heartbeats" \
-      "$AUTOSPEC" queue ready --repo test/repo --batch-size 3
+    unset AUTOSPEC_CONFIG_FILE
+    (
+        cd "$TMPDIR_BATS"
+        PATH="$MOCK_BIN:$PATH" \
+        AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3 \
+        AUTOSPEC_HEARTBEAT_DIR="$TMPDIR_BATS/heartbeats" \
+          "$AUTOSPEC" queue ready --repo test/repo --batch-size 3
+    )
 }
 
 @test "batch size 3 ignores and requeues startup-failed second worker with no heartbeat or branch" {

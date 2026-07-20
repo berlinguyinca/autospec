@@ -399,7 +399,7 @@ impl ClaimSafetyDecision {
 
 /// Evaluate the fail-closed claim safety contract without executing a script or
 /// trusting generated metadata. This deliberately checks the current issue
-/// title/body after validating the exact reviewed marker block.
+/// title/body after validating either an exact marker block or its review label.
 pub fn evaluate_claim_safety(input: &ClaimSafetyInput) -> ClaimSafetyDecision {
     evaluate_claim_safety_with_trusted_actors(input, &["berlinguyinca"])
 }
@@ -425,57 +425,10 @@ pub fn evaluate_claim_safety_with_trusted_actors(
     if !labels.contains(&"safety:reviewed") {
         return ClaimSafetyDecision::reject("missing_safety_reviewed");
     }
-    if input.body.matches(SAFETY_BEGIN_MARKER).count() != 1
-        || input.body.matches(SAFETY_END_MARKER).count() != 1
-    {
-        return ClaimSafetyDecision::reject("invalid_safety_markers");
-    }
-    let Some(begin) = input.body.find(SAFETY_BEGIN_MARKER) else {
-        return ClaimSafetyDecision::reject("invalid_safety_markers");
+    let body_without_review = match reviewed_body_without_safety_section(&input.body) {
+        Ok(body) => body,
+        Err(reason) => return ClaimSafetyDecision::reject(reason),
     };
-    let Some(end) = input.body.find(SAFETY_END_MARKER) else {
-        return ClaimSafetyDecision::reject("invalid_safety_markers");
-    };
-    if begin >= end {
-        return ClaimSafetyDecision::reject("invalid_safety_markers");
-    }
-
-    let prefix = &input.body[..begin];
-    let Some((heading_start, heading_end)) = last_safety_heading(prefix) else {
-        return ClaimSafetyDecision::reject("missing_safety_review_heading");
-    };
-    if prefix[heading_end..]
-        .lines()
-        .any(|line| !line.trim().is_empty())
-    {
-        return ClaimSafetyDecision::reject("unexpected_safety_review_preamble");
-    }
-    let block_start = begin + SAFETY_BEGIN_MARKER.len();
-    let block = &input.body[block_start..end];
-    let lines = block
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>();
-    if lines
-        .iter()
-        .any(|line| !line.starts_with("- **decision:**"))
-    {
-        return ClaimSafetyDecision::reject("unexpected_safety_block_content");
-    }
-    if lines.len() != 1 {
-        return ClaimSafetyDecision::reject("missing_safety_pass");
-    }
-    if lines[0] != "- **decision:** `SAFETY_PASS`" {
-        return ClaimSafetyDecision::reject("non_pass_safety_decision");
-    }
-
-    let after_end = end + SAFETY_END_MARKER.len();
-    let body_without_review = format!(
-        "{}{}",
-        &input.body[..heading_start],
-        &input.body[after_end..]
-    );
     let scan = format!(
         "{}\n{}",
         input.title,
@@ -489,6 +442,61 @@ pub fn evaluate_claim_safety_with_trusted_actors(
         return ClaimSafetyDecision::reject("current_body_safety_ambiguous");
     }
     ClaimSafetyDecision::pass()
+}
+
+fn reviewed_body_without_safety_section(body: &str) -> Result<String, &'static str> {
+    let begin_count = body.matches(SAFETY_BEGIN_MARKER).count();
+    let end_count = body.matches(SAFETY_END_MARKER).count();
+    if begin_count == 0 && end_count == 0 {
+        return if last_safety_heading(body).is_none() {
+            Ok(body.to_string())
+        } else {
+            Err("invalid_safety_markers")
+        };
+    }
+    if begin_count != 1 || end_count != 1 {
+        return Err("invalid_safety_markers");
+    }
+    let begin = body
+        .find(SAFETY_BEGIN_MARKER)
+        .ok_or("invalid_safety_markers")?;
+    let end = body
+        .find(SAFETY_END_MARKER)
+        .ok_or("invalid_safety_markers")?;
+    if begin >= end {
+        return Err("invalid_safety_markers");
+    }
+
+    let prefix = &body[..begin];
+    let (heading_start, heading_end) =
+        last_safety_heading(prefix).ok_or("missing_safety_review_heading")?;
+    if prefix[heading_end..]
+        .lines()
+        .any(|line| !line.trim().is_empty())
+    {
+        return Err("unexpected_safety_review_preamble");
+    }
+    let block_start = begin + SAFETY_BEGIN_MARKER.len();
+    let lines = body[block_start..end]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines
+        .iter()
+        .any(|line| !line.starts_with("- **decision:**"))
+    {
+        return Err("unexpected_safety_block_content");
+    }
+    if lines.len() != 1 {
+        return Err("missing_safety_pass");
+    }
+    if lines[0] != "- **decision:** `SAFETY_PASS`" {
+        return Err("non_pass_safety_decision");
+    }
+
+    let after_end = end + SAFETY_END_MARKER.len();
+    Ok(format!("{}{}", &body[..heading_start], &body[after_end..]))
 }
 
 #[derive(Debug, Default)]
@@ -845,10 +853,29 @@ fn ordered_pair_start(text: &str, first: &str, second: &str) -> Option<usize> {
 /// is not suppressed because the cue is in the previous clause.
 fn prohibition_precedes(line: &str, match_index: usize) -> bool {
     const CUES: &[&str] = &[
-        "no ", "not ", "n't", "never", "without", "cannot", "can not", "do not",
-        "does not", "must not", "should not", "may not", "will not", "avoid ",
-        "prohibit", "forbid", "prevent", "refuse", "disallow", "keep every",
-        "keep all", "leave every", "leave all",
+        "no ",
+        "not ",
+        "n't",
+        "never",
+        "without",
+        "cannot",
+        "can not",
+        "do not",
+        "does not",
+        "must not",
+        "should not",
+        "may not",
+        "will not",
+        "avoid ",
+        "prohibit",
+        "forbid",
+        "prevent",
+        "refuse",
+        "disallow",
+        "keep every",
+        "keep all",
+        "leave every",
+        "leave all",
     ];
     let prefix = &line[..match_index];
     let clause_start = [
@@ -911,7 +938,6 @@ fn ordered_contains(text: &str, first: &str, second: &str) -> bool {
         .and_then(|index| text[index + first.len()..].find(second))
         .is_some()
 }
-
 
 fn word_positions(text: &str, word: &str) -> Vec<usize> {
     let mut positions = Vec::new();
@@ -1185,6 +1211,29 @@ pub fn executor_result_evidence_exists(
     })
 }
 
+pub fn executor_wait_failure_relinquishes_claim(
+    comments: &[RemoteComment],
+    claim: &RunStateRecord,
+) -> bool {
+    let Some(claim_id) = claim.claim_id.as_deref() else {
+        return false;
+    };
+    let receipt_prefix = format!("implementer-wait-failed:{claim_id}:");
+    comments.iter().any(|comment| {
+        parse_executor_result_evidence_comment(&comment.body).is_ok_and(|evidence| {
+            evidence.repo == claim.repo
+                && evidence.issue == claim.issue
+                && evidence.worker_id == claim.worker_id
+                && evidence.branch == claim.branch
+                && evidence.outcome == "failed"
+                && evidence.pr.is_none()
+                && evidence.step == "implementer_wait_failed"
+                && evidence.receipt_id.starts_with(&receipt_prefix)
+                && evidence.receipt_id.len() > receipt_prefix.len()
+        })
+    })
+}
+
 fn parse_executor_result_evidence_comment(body: &str) -> Result<ExecutorResultEvidence, String> {
     if body.matches(EXECUTOR_RESULT_BEGIN_MARKER).count() != 1
         || body.matches(EXECUTOR_RESULT_END_MARKER).count() != 1
@@ -1251,6 +1300,7 @@ pub struct RunStateRecord {
     pub pr: String,
     pub step: String,
     pub paths: Vec<String>,
+    pub claim_id: Option<String>,
     pub claimed_at: String,
     pub updated_at: String,
     pub ttl_seconds: u64,
@@ -1280,6 +1330,7 @@ impl RunStateRecord {
             pr: pr.into(),
             step: step.into(),
             paths,
+            claim_id: None,
             claimed_at: claimed_at.into(),
             updated_at: updated_at.into(),
             ttl_seconds,
@@ -1301,6 +1352,7 @@ impl RunStateRecord {
                 "pr",
                 "step",
                 "paths",
+                "claim_id",
                 "claimed_at",
                 "updated_at",
                 "ttl_seconds",
@@ -1334,6 +1386,7 @@ impl RunStateRecord {
             pr: take_optional_string(&mut object, "pr", "run-state record")?.unwrap_or_default(),
             state,
             paths,
+            claim_id: take_optional_string(&mut object, "claim_id", "run-state record")?,
             updated_at: take_optional_string(&mut object, "updated_at", "run-state record")?
                 .unwrap_or_else(|| claimed_at.clone()),
             claimed_at,
@@ -1347,8 +1400,11 @@ impl RunStateRecord {
     }
 
     pub fn to_json(&self) -> String {
+        let claim_id = self.claim_id.as_ref().map_or_else(String::new, |claim_id| {
+            format!(",\"claim_id\":\"{}\"", escape_json(claim_id))
+        });
         format!(
-            "{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"state\":\"{}\",\"branch\":\"{}\",\"pr\":\"{}\",\"step\":\"{}\",\"paths\":[{}],\"claimed_at\":\"{}\",\"updated_at\":\"{}\",\"ttl_seconds\":{}}}",
+            "{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"state\":\"{}\",\"branch\":\"{}\",\"pr\":\"{}\",\"step\":\"{}\",\"paths\":[{}],\"claimed_at\":\"{}\",\"updated_at\":\"{}\",\"ttl_seconds\":{}{}}}",
             escape_json(&self.repo),
             self.issue,
             escape_json(&self.worker_id),
@@ -1364,7 +1420,13 @@ impl RunStateRecord {
             escape_json(&self.claimed_at),
             escape_json(&self.updated_at),
             self.ttl_seconds,
+            claim_id,
         )
+    }
+
+    pub fn with_claim_id(mut self, claim_id: impl Into<String>) -> Self {
+        self.claim_id = Some(claim_id.into());
+        self
     }
 
     pub fn to_marked_comment(&self) -> String {
@@ -1385,6 +1447,13 @@ impl RunStateRecord {
             if value.trim().is_empty() {
                 return Err(format!("run-state {name} must not be empty"));
             }
+        }
+        if self
+            .claim_id
+            .as_ref()
+            .is_some_and(|claim_id| claim_id.trim().is_empty())
+        {
+            return Err("run-state claim_id must not be empty".to_string());
         }
         Ok(())
     }
@@ -1439,10 +1508,7 @@ pub fn lowest_marked_comment(comments: &[RemoteComment]) -> Option<&RemoteCommen
 /// `worker_id` is literally equal to its own ID. This keeps dotted IDs distinct
 /// from near-collisions and prevents regex-like matching from deleting another
 /// worker's comment.
-pub fn claim_losing_worker_comment_id(
-    comments: &[RemoteComment],
-    worker_id: &str,
-) -> Option<u64> {
+pub fn claim_losing_worker_comment_id(comments: &[RemoteComment], worker_id: &str) -> Option<u64> {
     let lowest = lowest_marked_comment(comments).map(|comment| comment.id);
     comments
         .iter()

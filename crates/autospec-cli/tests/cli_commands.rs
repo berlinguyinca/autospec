@@ -2278,6 +2278,80 @@ fn autonomous_timeline_rate_limits_leader_nudges_and_reports_helper_recovery() {
 }
 
 #[test]
+fn autonomous_timeline_requires_an_explicit_event_before_reporting_failed_startup() {
+    let temp = temp_dir("autospec-autonomous-session-start-timeout");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let home = temp.join("home");
+    write_conductor_log(
+        &operator_dir,
+        "berlinguyinca_autospec",
+        "2026-07-19T01:00:00Z session_start child=child-1850 session_turns=0 issue_claim=none\n\
+2026-07-19T01:00:01Z session_start child=child-1851 session_turns=0 issue_claim=none\n\
+2026-07-19T01:06:00Z session_start_reconciled child=child-1851 session_turns=1 issue_claim=1851\n\
+2026-07-19T01:06:00Z leader_nudge_tick issue=1850\n",
+    );
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "timeline",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--lines",
+            "80",
+        ])
+        .env("HOME", &home)
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .output()
+        .expect("autospec autonomous timeline runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("session child-1850 entered starting"));
+    assert!(stdout.contains("session child-1851 entered claimed"));
+    assert!(!stdout.contains("failed-startup"));
+    assert!(!stdout.contains("terminated and queued for retry"));
+}
+
+#[test]
+fn autonomous_timeline_reports_explicit_startup_timeout_and_retry_events() {
+    let temp = temp_dir("autospec-autonomous-explicit-session-start-timeout");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let home = temp.join("home");
+    let drain_state = operator_dir.join("o13_berlinguyinca_r8_autospec");
+    std::fs::create_dir_all(&drain_state).expect("create drain state directory");
+    std::fs::write(
+        drain_state.join("drain-session-events.jsonl"),
+        "{\"event\":\"session_start_observed\",\"session_id\":\"child-1850\",\"state\":\"starting\"}\n\
+{\"event\":\"session_start_timeout\",\"session_id\":\"child-1850\",\"state\":\"failed-startup\",\"termination\":\"process_group\",\"retry\":\"scheduled\",\"attempt\":1}\n",
+    )
+    .expect("write persisted drain events");
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "timeline",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--lines",
+            "80",
+        ])
+        .env("HOME", &home)
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .output()
+        .expect("autospec autonomous timeline runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("session child-1850 entered failed-startup"));
+    assert!(stdout.contains("terminated and queued for retry"));
+}
+
+#[test]
 fn autonomous_timeline_reports_item_timing() {
     let temp = temp_dir("autospec-autonomous-timeline-timing");
     let operator_dir = temp.join("operator");
@@ -3616,3 +3690,616 @@ fn cli_commands_require_explicit_input_or_report_the_remaining_stub() {
     assert!(!benchmark.status.success());
     assert!(String::from_utf8_lossy(&benchmark.stderr).contains("not yet implemented"));
 }
+
+#[test]
+fn autonomous_implementer_wait_failed_requires_actual_session_id() {
+    let output = autospec()
+        .args([
+            "autonomous",
+            "implementer-wait-failed",
+            "--repo",
+            "testorg/testrepo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-generation-a",
+            "--diagnostic",
+            "write_stdin failed: stdin is closed",
+        ])
+        .output()
+        .expect("autospec recovery command runs");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--session-id is required"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_requires_expected_claim_id() {
+    let output = autospec()
+        .args([
+            "autonomous",
+            "implementer-wait-failed",
+            "--repo",
+            "testorg/testrepo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--session-id",
+            "session-real-7",
+            "--diagnostic",
+            "write_stdin failed: stdin is closed",
+        ])
+        .output()
+        .expect("autospec recovery command runs");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--claim-id is required"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_requeues_exact_owner_with_bounded_comment() {
+    let root = temp_dir("autospec-wait-failed");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+    let secrets = [
+        "super-secret",
+        "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99",
+        "gho_123456789012345678901234567890123456",
+        "bearer-value",
+        "key-value",
+        "token-value",
+        "hunter2",
+        "private-material",
+    ];
+    let diagnostic = format!(
+        "write_stdin failed: stdin is closed token={} {} {} Authorization: Bearer {} api_key={} token:{} user:{} -----BEGIN PRIVATE KEY----- {} -----END PRIVATE KEY----- {}",
+        secrets[0],
+        secrets[1],
+        secrets[2],
+        secrets[3],
+        secrets[4],
+        secrets[5],
+        secrets[6],
+        secrets[7],
+        "x".repeat(800)
+    );
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "implementer-wait-failed",
+            "--repo",
+            "testorg/testrepo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-generation-a",
+            "--session-id",
+            "session-real-7",
+            "--diagnostic",
+            &diagnostic,
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("AUTOSPEC_WAIT_STATE", &state)
+        .env("AUTOSPEC_WAIT_LOG", &log)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"event\":\"implementer_wait_failed\"")
+    );
+    let remote = std::fs::read_to_string(&state).unwrap();
+    assert!(remote.contains("\\\"outcome\\\":\\\"failed\\\""));
+    assert!(remote.contains("\\\"state\\\":\\\"claimed\\\""));
+    assert!(remote.contains("autospec-implementer-wait-failed"));
+    assert!(remote.contains("session-real-7"));
+    assert!(remote.contains("[REDACTED]"));
+    for secret in secrets {
+        assert!(!remote.contains(secret), "leaked {secret}: {remote}");
+    }
+    assert!(!remote.contains(&"x".repeat(513)));
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(calls.contains("--remove-label\nin-progress-by-bot\n--add-label\nauto-implement"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_requeue_allows_a_new_worker_to_acquire() {
+    let root = temp_dir("autospec-wait-reacquire");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let labels = root.join("labels.mode");
+    let log = root.join("gh.log");
+    let heartbeats = root.join("heartbeats");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    std::fs::write(&labels, "active\n").unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+
+    let recovered = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_LABELS", &labels)
+        .output()
+        .unwrap();
+    assert!(recovered.status.success());
+    assert_eq!(std::fs::read_to_string(&labels).unwrap().trim(), "ready");
+
+    let issue_body = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Goal\nRecover the stranded issue.";
+    let acquired = autospec()
+        .args([
+            "claim",
+            "acquire",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-b",
+            "--branch",
+            "feat/next",
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("AUTOSPEC_WAIT_STATE", &state)
+        .env("AUTOSPEC_WAIT_LABELS", &labels)
+        .env("AUTOSPEC_WAIT_LOG", &log)
+        .env("AUTOSPEC_WAIT_ISSUE_BODY", issue_body)
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
+        .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .output()
+        .unwrap();
+
+    assert!(
+        acquired.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&acquired.stdout),
+        String::from_utf8_lossy(&acquired.stderr)
+    );
+    assert!(String::from_utf8_lossy(&acquired.stdout).contains("\"claimed\":true"));
+    let remote = std::fs::read_to_string(&state).unwrap();
+    assert!(remote.contains("\\\"worker_id\\\":\\\"worker-b\\\""));
+    assert!(remote.contains("\\\"branch\\\":\\\"feat/next\\\""));
+    assert_eq!(std::fs::read_to_string(&labels).unwrap().trim(), "active");
+}
+
+#[test]
+fn wait_failure_evidence_cannot_release_same_second_successor_generation() {
+    let root = temp_dir("autospec-wait-same-second-generation");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let labels = root.join("labels.mode");
+    let log = root.join("gh.log");
+    let heartbeats = root.join("heartbeats");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    std::fs::write(&labels, "active\n").unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+
+    let recovered = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_LABELS", &labels)
+        .output()
+        .unwrap();
+    assert!(recovered.status.success());
+
+    let reacquired = wait_claim_acquire(
+        &bin,
+        &state,
+        &labels,
+        &log,
+        &heartbeats,
+        "worker-a",
+        "feat/test",
+    )
+    .output()
+    .unwrap();
+    assert!(reacquired.status.success());
+    let mut remote = std::fs::read_to_string(&state).unwrap();
+    force_first_wait_claimed_at(&mut remote, "2099-07-19T00:00:00Z");
+    std::fs::write(&state, remote).unwrap();
+
+    std::fs::write(&labels, "ready\n").unwrap();
+    let third = wait_claim_acquire(
+        &bin,
+        &state,
+        &labels,
+        &log,
+        &heartbeats,
+        "worker-c",
+        "feat/third",
+    )
+    .output()
+    .unwrap();
+
+    assert_eq!(third.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&third.stdout).contains("\"reason\":\"claim_lost\""));
+    let remote = std::fs::read_to_string(&state).unwrap();
+    assert!(remote.contains("\\\"worker_id\\\":\\\"worker-a\\\""));
+    assert!(!remote.contains("\\\"worker_id\\\":\\\"worker-c\\\""));
+    assert_eq!(std::fs::read_to_string(&labels).unwrap().trim(), "active");
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_does_not_touch_successor_claim() {
+    let root = temp_dir("autospec-wait-successor");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-b", "feat/next", "claimed"),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+    let output = wait_failure_command(&bin, &state, &log).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""));
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(!calls.contains("issue\nedit"));
+    assert!(!calls.contains("issue\ncomment"));
+    assert!(!calls.contains("-X\nPATCH"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_rejects_delayed_same_owner_command_for_new_generation() {
+    let root = temp_dir("autospec-wait-delayed-generation");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments_with_claim_id(
+            "worker-a",
+            "feat/test",
+            "claimed",
+            "claim-generation-new",
+        ),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+
+    let output = wait_failure_command_with_claim_id(&bin, &state, &log, "claim-generation-old")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""));
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(!calls.contains("issue\nedit"));
+    assert!(!calls.contains("issue\ncomment"));
+    assert!(!calls.contains("-X\nPATCH"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_does_not_requeue_successor_won_during_recovery() {
+    let root = temp_dir("autospec-wait-race");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+
+    let output = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_RACE_SUCCESSOR", "1")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""));
+    let remote = std::fs::read_to_string(&state).unwrap();
+    assert!(remote.contains("worker-b"));
+    assert!(remote.contains("feat/next"));
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(!calls.contains("issue\nedit"));
+    assert!(!calls.contains("issues/comments/100"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_rejects_stale_and_terminal_claims() {
+    for (name, comments) in [
+        (
+            "stale",
+            wait_failure_comments("worker-a", "feat/test", "claimed")
+                .replace("2099-07-19T00:00:00Z", "2000-01-01T00:00:00Z"),
+        ),
+        (
+            "failed-state",
+            wait_failure_comments("worker-a", "feat/test", "failed"),
+        ),
+        (
+            "terminal",
+            wait_failure_terminal_comments("worker-a", "feat/test"),
+        ),
+    ] {
+        let root = temp_dir(&format!("autospec-wait-{name}"));
+        let bin = root.join("bin");
+        let state = root.join("comments.json");
+        let log = root.join("gh.log");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(&state, comments).unwrap();
+        write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+
+        let output = wait_failure_command(&bin, &state, &log).output().unwrap();
+
+        assert!(output.status.success(), "{name}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(!calls.contains("issue\nedit"), "{name}");
+        assert!(!calls.contains("issue\ncomment"), "{name}");
+        assert!(!calls.contains("-X\nPATCH"), "{name}");
+    }
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_is_idempotent_and_surfaces_comment_failure() {
+    let root = temp_dir("autospec-wait-idempotent");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+    assert!(wait_failure_command(&bin, &state, &log)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert!(wait_failure_command(&bin, &state, &log)
+        .output()
+        .unwrap()
+        .status
+        .success());
+    assert_eq!(
+        std::fs::read_to_string(&state)
+            .unwrap()
+            .matches("autospec-implementer-wait-failed")
+            .count(),
+        1
+    );
+
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    let failed = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_COMMENT_FAIL", "1")
+        .env("AUTOSPEC_GH_API_RETRIES", "1")
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed.stdout).contains("\"event\":\"implementer_wait_failed\"")
+    );
+    assert!(String::from_utf8_lossy(&failed.stdout).contains("\"outcome\":\"recovery_failed\""));
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("create run-state comment"));
+    assert!(std::fs::read_to_string(&state)
+        .unwrap()
+        .contains("\\\"outcome\\\":\\\"failed\\\""));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_does_not_requeue_until_failure_evidence_is_confirmed() {
+    let root = temp_dir("autospec-wait-unconfirmed");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+    let output = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_EVIDENCE_NOOP", "1")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("implementer wait-failure evidence was not persisted"));
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(!calls.contains("issue\nedit"));
+    assert_eq!(calls.matches("issue\ncomment").count(), 1);
+    assert!(!calls.contains("autospec-implementer-wait-failed"));
+}
+
+fn wait_failure_command(
+    bin: &std::path::Path,
+    state: &std::path::Path,
+    log: &std::path::Path,
+) -> Command {
+    wait_failure_command_with_claim_id(bin, state, log, "claim-generation-a")
+}
+
+fn wait_failure_command_with_claim_id(
+    bin: &std::path::Path,
+    state: &std::path::Path,
+    log: &std::path::Path,
+    claim_id: &str,
+) -> Command {
+    let mut command = autospec();
+    command
+        .args([
+            "autonomous",
+            "implementer-wait-failed",
+            "--repo",
+            "testorg/testrepo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            claim_id,
+            "--session-id",
+            "session-real-7",
+            "--diagnostic",
+            "write_stdin failed: stdin is closed",
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("AUTOSPEC_WAIT_STATE", state)
+        .env("AUTOSPEC_WAIT_LOG", log)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0");
+    command
+}
+
+fn wait_claim_acquire(
+    bin: &std::path::Path,
+    state: &std::path::Path,
+    labels: &std::path::Path,
+    log: &std::path::Path,
+    heartbeats: &std::path::Path,
+    worker: &str,
+    branch: &str,
+) -> Command {
+    let issue_body = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Goal\nRecover the stranded issue.";
+    let mut command = autospec();
+    command
+        .args([
+            "claim",
+            "acquire",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            worker,
+            "--branch",
+            branch,
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("AUTOSPEC_WAIT_STATE", state)
+        .env("AUTOSPEC_WAIT_LABELS", labels)
+        .env("AUTOSPEC_WAIT_LOG", log)
+        .env("AUTOSPEC_WAIT_ISSUE_BODY", issue_body)
+        .env("AUTOSPEC_HEARTBEAT_DIR", heartbeats)
+        .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
+        .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0");
+    command
+}
+
+fn force_first_wait_claimed_at(remote: &mut String, claimed_at: &str) {
+    let marker = "\\\"claimed_at\\\":\\\"";
+    let start = remote.find(marker).unwrap() + marker.len();
+    let end = start + remote[start..].find("\\\"").unwrap();
+    remote.replace_range(start..end, claimed_at);
+}
+
+fn wait_failure_comments(worker: &str, branch: &str, state: &str) -> String {
+    wait_failure_comments_with_claim_id(worker, branch, state, "claim-generation-a")
+}
+
+fn wait_failure_comments_with_claim_id(
+    worker: &str,
+    branch: &str,
+    state: &str,
+    claim_id: &str,
+) -> String {
+    format!(
+        r#"[{{"id":100,"updated_at":"2099-07-19T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"{worker}\",\"state\":\"{state}\",\"branch\":\"{branch}\",\"pr\":\"\",\"step\":\"{state}\",\"paths\":[],\"claimed_at\":\"2099-07-19T00:00:00Z\",\"updated_at\":\"2099-07-19T00:00:00Z\",\"ttl_seconds\":10800,\"claim_id\":\"{claim_id}\"}}\n<!-- autospec-run-state:end -->"}}]"#
+    )
+}
+
+fn wait_failure_terminal_comments(worker: &str, branch: &str) -> String {
+    let active = wait_failure_comments(worker, branch, "claimed");
+    let terminal = r#"{"id":99,"updated_at":"2099-07-19T00:00:01Z","body":"<!-- autospec-run-terminal:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"merged\",\"branch\":\"feat/test\",\"pr\":\"2273\",\"finalized_at\":\"2099-07-19T00:00:01Z\"}\n<!-- autospec-run-terminal:end -->"}"#;
+    format!("[{},{}]", &active[1..active.len() - 1], terminal)
+}
+
+const WAIT_FAILURE_GH: &str = r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" >> "$AUTOSPEC_WAIT_LOG"
+if [ "$1" = issue ] && [ "$2" = view ]; then
+  if [ "$(cat "$AUTOSPEC_WAIT_LABELS")" = active ]; then labels='["in-progress-by-bot","safety:reviewed"]'; else labels='["auto-implement","safety:reviewed"]'; fi
+  jq -n --argjson labels "$labels" --arg body "$AUTOSPEC_WAIT_ISSUE_BODY" '{labels:$labels,title:"Recover wait failure",body:$body,author:"agent"}'; exit 0
+fi
+if [ "$1" = label ] && [ "$2" = create ]; then exit 0; fi
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then cat "$AUTOSPEC_WAIT_STATE"; exit 0; fi
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/comments/100 ]; then
+  body=''; shift 2; while [ "$#" -gt 0 ]; do case "$1" in -f) body="${2#body=}"; shift 2;; *) shift;; esac; done
+  jq --arg body "$body" '.[0].body=$body' "$AUTOSPEC_WAIT_STATE" > "$AUTOSPEC_WAIT_STATE.tmp" && mv "$AUTOSPEC_WAIT_STATE.tmp" "$AUTOSPEC_WAIT_STATE"; exit 0
+fi
+if [ "$1" = issue ] && [ "$2" = edit ]; then
+  if [ -n "${AUTOSPEC_WAIT_LABELS:-}" ]; then
+    add=''; shift 2; while [ "$#" -gt 0 ]; do case "$1" in --add-label) add="$2"; shift 2;; *) shift;; esac; done
+    if [ "$add" = auto-implement ]; then printf ready > "$AUTOSPEC_WAIT_LABELS"; else printf active > "$AUTOSPEC_WAIT_LABELS"; fi
+  fi
+  exit 0
+fi
+if [ "$1" = issue ] && [ "$2" = comment ]; then
+  body=''; shift 2; while [ "$#" -gt 0 ]; do case "$1" in --body) body="$2"; shift 2;; *) shift;; esac; done
+  if [ "${AUTOSPEC_WAIT_EVIDENCE_NOOP:-0}" = 1 ] && printf '%s' "$body" | grep -Fq 'autospec-executor-result:begin'; then exit 0; fi
+  if printf '%s' "$body" | grep -Fq 'autospec-implementer-wait-failed'; then
+    [ "${AUTOSPEC_WAIT_COMMENT_FAIL:-0}" != 1 ] || exit 44
+  fi
+  if [ "${AUTOSPEC_WAIT_RACE_SUCCESSOR:-0}" = 1 ] && printf '%s' "$body" | grep -Fq 'autospec-executor-result:begin'; then
+    successor='<!-- autospec-run-state:begin -->
+{"schema":1,"repo":"testorg/testrepo","issue":42,"worker_id":"worker-b","state":"claimed","branch":"feat/next","pr":"","step":"claimed","paths":[],"claimed_at":"2099-07-19T00:00:01Z","updated_at":"2099-07-19T00:00:01Z","ttl_seconds":10800,"claim_id":"claim-generation-b"}
+<!-- autospec-run-state:end -->'
+    jq --arg body "$body" --arg successor "$successor" '.[0].body=$successor | . + [{id:101,updated_at:"2099-07-19T00:00:01Z",body:$body}]' "$AUTOSPEC_WAIT_STATE" > "$AUTOSPEC_WAIT_STATE.tmp" && mv "$AUTOSPEC_WAIT_STATE.tmp" "$AUTOSPEC_WAIT_STATE"; exit 0
+  fi
+  jq --arg body "$body" '. + [{id:(([.[].id] | max) + 1),updated_at:"2099-07-19T00:00:01Z",body:$body}]' "$AUTOSPEC_WAIT_STATE" > "$AUTOSPEC_WAIT_STATE.tmp" && mv "$AUTOSPEC_WAIT_STATE.tmp" "$AUTOSPEC_WAIT_STATE"; exit 0
+fi
+exit 0
+"#;

@@ -92,10 +92,10 @@ EOF
     cat > "$TMP/bin/groom-safety.sh" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "autospec $*" >> "$GH_LOG"
-if [ "${1:-}" != "queue" ] || [ "${2:-}" != "review-safety" ]; then
+if [ "${1:-}" != "issue" ] || [ "${2:-}" != "promote" ]; then
   exit 41
 fi
-printf '%s\n' '{"pass":1,"ambiguous":0,"block":0,"stale":0,"conflicted":0,"skipped":0}'
+printf '%s\n' '{"safety":{"decision":"pass","reason":"pass"},"auto-implement":true,"eligible":true,"changed":true}'
 EOF
     chmod +x "$TMP/bin/groom-safety.sh"
 
@@ -107,12 +107,27 @@ EOF
 
     cat > "$TMP/bin/groom-eligibility.sh" <<'EOF'
 #!/usr/bin/env bash
-printf '{"decision":"eligible","reason":"test"}\n'
+printf '{"decision":"%s","reason":"test"}\n' "${AUTOSPEC_GROOM_ELIGIBILITY:-eligible}"
 EOF
     chmod +x "$TMP/bin/groom-eligibility.sh"
 
+    cat > "$TMP/bin/groom-fill.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"body":"## Goal\nUse the human-reviewed template proposal.\n"}'
+EOF
+    chmod +x "$TMP/bin/groom-fill.sh"
+
+    cat > "$TMP/bin/groom-govern.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"active":["eligible-promote","template-promote"]}'
+EOF
+    chmod +x "$TMP/bin/groom-govern.sh"
+
     cat > "$TMP/bin/groom-config.sh" <<'EOF'
 #!/usr/bin/env bash
+if [ "${AUTOSPEC_GROOM_CONFIG_FAIL:-}" = "1" ]; then
+  exit 42
+fi
 case "$*" in
   *"policy"*) printf '%s\n' "${AUTOSPEC_GROOMING_POLICY:-auto}" ;;
   *"budget.max_issues_per_cycle"*) printf '5\n' ;;
@@ -126,6 +141,8 @@ EOF
     export AUTOSPEC_GROOM_CLASSIFY_SCRIPT="$TMP/bin/groom-classify.sh"
     export AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT="$TMP/bin/groom-eligibility.sh"
     export AUTOSPEC_GROOM_CONFIG_SCRIPT="$TMP/bin/groom-config.sh"
+    export AUTOSPEC_GROOM_FILL_SCRIPT="$TMP/bin/groom-fill.sh"
+    export AUTOSPEC_GROOM_GOVERN_SCRIPT="$TMP/bin/groom-govern.sh"
 }
 
 teardown() {
@@ -167,6 +184,16 @@ teardown() {
     ! grep -q 'issue edit' "$GH_LOG"
 }
 
+@test "apply stays report-only when the policy resolver fails" {
+    AUTOSPEC_GROOM_CONFIG_FAIL=1 run bash "$SCRIPT" --repo owner/repo --apply
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e . >/dev/null
+    [ "$(echo "$output" | jq -r '.dry')" = "true" ]
+    [ "$(echo "$output" | jq -r '.filed')" = "0" ]
+    ! grep -q 'issue edit' "$GH_LOG"
+    ! grep -q 'autospec issue promote' "$GH_LOG"
+}
+
 # ── Apply mode enabled (both gates) ────────────────────────────────────────────
 
 @test "apply mode enabled promotes the candidate with correct label mutations" {
@@ -177,17 +204,31 @@ teardown() {
     [ "$(echo "$output" | jq -r '.filed')" = "1" ]
     [ "$(echo "$output" | jq -r '.promoted[0]')" = "101" ]
 
-    # auto-implement added and needs-classify removed on issue 101.
+    # Model-fit classification still removes needs-classify, but the shell must
+    # never add auto-implement itself.
     grep -q 'issue edit 101' "$GH_LOG"
-    grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'auto-implement'
     grep -E 'issue edit 101 .*--remove-label' "$GH_LOG" | grep -q 'needs-classify'
     # A ctx:* and reasoning:* label were applied (not coupled to a specific tier).
     grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'ctx:'
     grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'reasoning:'
-    grep -q 'autospec queue review-safety --repo owner/repo --limit 1 --issue 101' "$GH_LOG"
-    auto_line="$(grep -n 'issue edit 101 .*auto-implement' "$GH_LOG" | head -1 | cut -d: -f1)"
-    review_line="$(grep -n 'autospec queue review-safety --repo owner/repo --limit 1 --issue 101' "$GH_LOG" | head -1 | cut -d: -f1)"
-    [ "$auto_line" -lt "$review_line" ]
+    grep -q 'autospec issue promote --repo owner/repo --number 101 --remove-label needs-autospec-template --json' "$GH_LOG"
+    ! grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'auto-implement'
+    ! grep -Fq -- '--body-file' "$GH_LOG"
+    ! grep -q 'autospec queue review-safety' "$GH_LOG"
+}
+
+@test "generated template remains a human proposal even when template promotion is active" {
+    AUTOSPEC_GROOMING_POLICY=auto AUTOSPEC_GROOM_ELIGIBILITY=needs-template \
+        run bash "$SCRIPT" --repo owner/repo --apply
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e . >/dev/null
+    [ "$(echo "$output" | jq -r '.filed')" = "0" ]
+    echo "$output" | jq -e '.routed[] | select(.issue == 101 and .action == "groom-canary")' >/dev/null
+    grep -q 'issue edit 101 .*--add-label groom:proposed' "$GH_LOG"
+    grep -q 'issue comment 101 .*--body-file' "$GH_LOG"
+    ! grep -q 'issue edit 101 .*--body-file' "$GH_LOG"
+    ! grep -q 'autospec issue promote' "$GH_LOG"
+    ! grep -q 'remove-label needs-autospec-template' "$GH_LOG"
 }
 
 # ── Selector exclusions ────────────────────────────────────────────────────────

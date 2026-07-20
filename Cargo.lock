@@ -9,6 +9,7 @@ dependencies = [
  "autospec-core",
  "nix",
  "serde_json",
+ "yaml-edit",
 ]
 
 [[package]]
