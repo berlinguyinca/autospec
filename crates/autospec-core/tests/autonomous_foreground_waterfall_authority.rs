@@ -53,7 +53,12 @@ fn production_tokens(path: &Path) -> Vec<String> {
 
 fn function_tokens(path: &Path, name: &str) -> Vec<String> {
     let source = fs::read_to_string(path).expect("read foreground wiring source");
-    let tokens = code_tokens(&code_without_comments_and_literals(&source));
+    let production = production_code(&source, &path.display().to_string());
+    assert!(
+        !has_write_capable_github_argv(&production),
+        "{name} retains write-capable GitHub argv literals"
+    );
+    let tokens = code_tokens(&code_without_comments_and_literals(&production));
     let start = tokens
         .windows(2)
         .position(|window| window == ["fn", name])
@@ -299,6 +304,34 @@ fn write_capable_github_argv_literals_cannot_evade_scan() {
         "write-capable GitHub argv literals evaded the scan"
     );
     fs::remove_dir_all(root).expect("remove GitHub argv authority fixture");
+}
+
+#[test]
+fn named_function_scan_rejects_write_capable_github_argv_literals() {
+    let root = std::env::temp_dir().join(format!(
+        "autospec-foreground-function-github-argv-authority-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create function GitHub argv authority fixture");
+    let source = root.join("autonomous.rs");
+    fs::write(
+        &source,
+        r#"fn scan_foreground() {
+        let executable = "gh";
+        let arguments = ["api", "repos/o/r/issues/1", "--method", "POST"];
+    }"#,
+    )
+    .expect("write function GitHub argv authority fixture");
+
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_no_foreground_authority(&function_tokens(&source, "scan_foreground"), "fixture")
+        })
+        .is_err(),
+        "named-function scan lost write-capable GitHub argv literals"
+    );
+    fs::remove_dir_all(root).expect("remove function GitHub argv authority fixture");
 }
 
 #[test]
