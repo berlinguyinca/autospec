@@ -30,7 +30,7 @@ use autospec_core::validation::{StructuralCheck, StructuralValidator};
 #[cfg(unix)]
 use nix::sys::signal::{killpg, Signal};
 #[cfg(unix)]
-use nix::unistd::{setsid, Pid};
+use nix::unistd::Pid;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::thread;
@@ -3083,12 +3083,7 @@ impl ExecutorRequest {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(unix)]
-        unsafe {
-            command.pre_exec(|| {
-                let _ = setsid();
-                Ok(())
-            });
-        }
+        command.process_group(0);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(_) => return ExecutorReceipt::failed(),
