@@ -28,7 +28,10 @@ impl ExecutorInvocation {
             return Err("executor issue must be positive".to_string());
         }
         if !((self.expected_commit.len() == 40 || self.expected_commit.len() == 64)
-            && self.expected_commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            && self
+                .expected_commit
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit()))
         {
             return Err("executor expected_commit must be 40 or 64 hex characters".to_string());
         }

@@ -1273,7 +1273,11 @@ fn supervised_executor_child_accepts_a_typed_success_result() {
         ])
         .output()
         .expect("run typed executor child");
-    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"accepted\""));
 }
 

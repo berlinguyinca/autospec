@@ -27,14 +27,14 @@ use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
-use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
 #[cfg(unix)]
 use nix::sys::signal::{killpg, Signal};
 #[cfg(unix)]
 use nix::unistd::{setsid, Pid};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{claim, queue, CommandFailure};
 
@@ -2551,14 +2551,18 @@ fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
                 set_executor_result_value(&mut invocation, value.clone(), "--invocation-id")
                     .map_err(CommandFailure::diagnostic)?
             }
-            "--worker-id" => set_executor_result_value(&mut worker_id, value.clone(), "--worker-id")
-                .map_err(CommandFailure::diagnostic)?,
+            "--worker-id" => {
+                set_executor_result_value(&mut worker_id, value.clone(), "--worker-id")
+                    .map_err(CommandFailure::diagnostic)?
+            }
             "--branch" => set_executor_result_value(&mut branch, value.clone(), "--branch")
                 .map_err(CommandFailure::diagnostic)?,
             "--claim-id" => set_executor_result_value(&mut claim_id, value.clone(), "--claim-id")
                 .map_err(CommandFailure::diagnostic)?,
-            "--expected-commit" => set_executor_result_value(&mut expected_commit, value.clone(), "--expected-commit")
-                .map_err(CommandFailure::diagnostic)?,
+            "--expected-commit" => {
+                set_executor_result_value(&mut expected_commit, value.clone(), "--expected-commit")
+                    .map_err(CommandFailure::diagnostic)?
+            }
             unknown => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown executor-child option: {unknown}"
@@ -2568,19 +2572,29 @@ fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
         index += 2;
     }
     let repo = repo.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --repo"))?;
-    let issue = issue.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --issue"))?;
+    let issue =
+        issue.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --issue"))?;
     let invocation = invocation
         .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --invocation-id"))?;
     let worker_id = worker_id
         .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --worker-id"))?;
-    let branch = branch
-        .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --branch"))?;
-    let claim_id = claim_id
-        .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --claim-id"))?;
+    let branch =
+        branch.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --branch"))?;
+    let claim_id =
+        claim_id.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --claim-id"))?;
     let expected_commit = expected_commit
         .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --expected-commit"))?;
     if let Ok(document) = fs::read_to_string(".autospec/executor-result.json") {
-        return executor_child_result(&document, &repo, issue, &worker_id, &branch, &claim_id, &invocation, &expected_commit);
+        return executor_child_result(
+            &document,
+            &repo,
+            issue,
+            &worker_id,
+            &branch,
+            &claim_id,
+            &invocation,
+            &expected_commit,
+        );
     }
     println!(
         "{{\"schema\":1,\"status\":\"blocked\",\"repo\":\"{}\",\"issue\":{},\"invocation_id\":\"{}\",\"reason\":\"{}\"}}",
@@ -2589,6 +2603,7 @@ fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn executor_child_result(
     document: &str,
     repo: &str,
@@ -2618,23 +2633,37 @@ fn executor_child_result(
         .ok_or_else(|| CommandFailure::diagnostic("executor result requires outcome"))?;
     let mut args = vec![
         "executor-result".to_string(),
-        "--repo".to_string(), repo.to_string(),
-        "--issue".to_string(), issue.to_string(),
-        "--worker-id".to_string(), worker_id.to_string(),
-        "--branch".to_string(), branch.to_string(),
-        "--outcome".to_string(), outcome.to_string(),
+        "--repo".to_string(),
+        repo.to_string(),
+        "--issue".to_string(),
+        issue.to_string(),
+        "--worker-id".to_string(),
+        worker_id.to_string(),
+        "--branch".to_string(),
+        branch.to_string(),
+        "--outcome".to_string(),
+        outcome.to_string(),
     ];
     if let Some(reason) = field("reason") {
         args.extend(["--reason".to_string(), reason.to_string()]);
     }
     if outcome == "succeeded" {
-        for (flag, name) in [("--pr", "pr"), ("--claim-id", "claim_id"), ("--premerge-receipt", "premerge_receipt")] {
+        for (flag, name) in [
+            ("--pr", "pr"),
+            ("--claim-id", "claim_id"),
+            ("--premerge-receipt", "premerge_receipt"),
+        ] {
             let result = if name == "pr" {
-                value.get(name).and_then(serde_json::Value::as_u64).map(|number| number.to_string())
+                value
+                    .get(name)
+                    .and_then(serde_json::Value::as_u64)
+                    .map(|number| number.to_string())
             } else {
                 field(name).map(str::to_string)
             }
-            .ok_or_else(|| CommandFailure::diagnostic(format!("executor success requires {name}")))?;
+            .ok_or_else(|| {
+                CommandFailure::diagnostic(format!("executor success requires {name}"))
+            })?;
             args.extend([flag.to_string(), result]);
         }
     }
@@ -3061,8 +3090,7 @@ impl ExecutorRequest {
                 Ok(())
             });
         }
-        let mut child = match command.spawn()
-        {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(_) => return ExecutorReceipt::failed(),
         };
@@ -4377,7 +4405,11 @@ fn ideation_backlog_json(state: &NoWorkState) -> String {
                 TierOutcome::NotRun { .. } => "not_run",
                 TierOutcome::Failed { .. } => "failed",
             };
-            format!("{{\"tier\":\"{}\",\"classification\":\"{}\"}}", tier.as_str(), reason)
+            format!(
+                "{{\"tier\":\"{}\",\"classification\":\"{}\"}}",
+                tier.as_str(),
+                reason
+            )
         })
         .collect::<Vec<_>>()
         .join(",");
