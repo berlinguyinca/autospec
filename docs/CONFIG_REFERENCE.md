@@ -94,6 +94,17 @@ case-sensitive check names. A matching health observation remains persisted as
 evidence but is marked advisory; it no longer blocks mainline health. Unmatched
 failed or pending checks remain required and block admission.
 
+Each appended `main-health-observations.jsonl` record includes an
+`effective_policy_digest`. The digest is canonical over the resolved branch and
+the sorted, exact `ignore_checks` names: it changes when either effective value
+changes, but not when YAML formatting or unrelated configuration changes. Rust
+reloads the repository file and records the resulting digest on every evaluated
+`run-foreground` invocation, including invocations that return retained
+conductor state. When GitHub supplies no default branch, the typed
+`default-branch-missing` observation uses the reserved, invalid-ref identity
+`autospec:unresolved-default-branch` so the failed evaluation is still bound to
+the effective policy.
+
 A missing file preserves existing behavior. An unreadable file or malformed,
 duplicate, unknown, incorrectly indented, or wrongly typed field inside
 `main_health` fails closed with a diagnostic before foreground lease, queue,

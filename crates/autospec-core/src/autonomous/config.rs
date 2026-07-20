@@ -1,5 +1,7 @@
 use std::collections::BTreeSet;
 
+use crate::autonomous::waterfall::sha256_hex;
+
 mod tier4;
 
 pub use tier4::{Tier4Config, Tier4SourceDescriptor};
@@ -14,6 +16,24 @@ pub struct AutonomousConfig {
 pub struct MainHealthConfig {
     pub branch: Option<String>,
     pub ignore_checks: BTreeSet<String>,
+}
+
+impl MainHealthConfig {
+    pub fn effective_policy_digest(&self, resolved_branch: &str) -> Result<String, String> {
+        if resolved_branch.trim().is_empty() {
+            return Err("effective main-health branch must not be empty".to_string());
+        }
+
+        let mut identity = "autospec-main-health-policy-v1\n".to_string();
+        append_identity_field(&mut identity, "branch", resolved_branch);
+        for check in &self.ignore_checks {
+            append_identity_field(&mut identity, "ignore_check", check);
+        }
+        Ok(format!(
+            "autospec-main-health-policy-v1:{}",
+            sha256_hex(identity.as_bytes())
+        ))
+    }
 }
 
 impl AutonomousConfig {
@@ -260,4 +280,8 @@ fn strip_comment(line: &str) -> &str {
 
 fn error(line_number: usize, message: &str) -> String {
     format!("invalid .autospec/autonomous.yml at line {line_number}: {message}")
+}
+
+fn append_identity_field(document: &mut String, name: &str, value: &str) {
+    document.push_str(&format!("{name}:{}:{value}\n", value.len()));
 }

@@ -103,3 +103,69 @@ fn rejects_invalid_relevant_main_health_shapes() {
         );
     }
 }
+
+#[test]
+fn canonical_effective_policy_digests_are_isolated_per_repository() {
+    let first = AutonomousConfig::parse(
+        "main_health:\n  branch: main\n  ignore_checks:\n    - Unit Tests\n    - E2E Tests\n",
+    )
+    .expect("first repository config parses");
+    let reordered = AutonomousConfig::parse(
+        "main_health:\n  ignore_checks:\n    - E2E Tests\n    - Unit Tests\n  branch: main\n",
+    )
+    .expect("reordered repository config parses");
+    let different_checks =
+        AutonomousConfig::parse("main_health:\n  branch: main\n  ignore_checks:\n    - Lint\n")
+            .expect("different advisory checks parse");
+    let second = AutonomousConfig::parse(
+        "main_health:\n  branch: release\n  ignore_checks:\n    - Unit Tests\n    - E2E Tests\n",
+    )
+    .expect("second repository config parses");
+
+    let first_digest = first
+        .main_health
+        .effective_policy_digest("main")
+        .expect("first digest");
+    assert_eq!(
+        first_digest,
+        reordered
+            .main_health
+            .effective_policy_digest("main")
+            .expect("reordered digest"),
+        "YAML field order must not change the canonical effective policy"
+    );
+    assert_eq!(
+        first_digest,
+        "autospec-main-health-policy-v1:876040758f56862e3b8a7a7e5588db70eaee33b3cf2b2bb7c348db79f921e9f2",
+        "the versioned length-prefixed identity document must remain stable"
+    );
+    assert_ne!(
+        first_digest,
+        different_checks
+            .main_health
+            .effective_policy_digest("main")
+            .expect("different-check digest"),
+        "ignored checks are part of the effective repository policy"
+    );
+    assert_ne!(
+        first_digest,
+        second
+            .main_health
+            .effective_policy_digest("release")
+            .expect("second digest"),
+        "repository policies must retain distinct identities in one process"
+    );
+}
+
+#[test]
+fn effective_policy_digest_rejects_an_empty_resolved_branch() {
+    let config = AutonomousConfig::default();
+
+    assert_eq!(
+        config
+            .main_health
+            .effective_policy_digest("  ")
+            .expect_err("empty branch must fail"),
+        "effective main-health branch must not be empty"
+    );
+}

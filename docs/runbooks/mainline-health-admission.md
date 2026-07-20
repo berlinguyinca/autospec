@@ -39,6 +39,17 @@ admission path.
 
 Observations are appended under repo-scoped autonomous state as
 `main-health-observations.jsonl` with branch, outcome, diagnostic, and check
-evidence. `autospec autonomous run-foreground` completes this Rust admission
-gate before entering its bounded Rust conductor cycle, so missing branches or
-required failed/pending checks cannot dispatch ready work.
+evidence. Every record also carries `effective_policy_digest`, a canonical
+binding over the resolved branch and sorted exact ignored-check names. Changing
+either effective value changes the digest; YAML formatting and unrelated
+configuration do not. Rust reloads the repository policy and appends this
+binding on every evaluated foreground invocation, even when retained conductor
+state ends the cycle. Malformed policy fails before a new record is written.
+If no configured, explicit, or GitHub default branch can be resolved, the
+`default-branch-missing` receipt uses the reserved invalid-ref identity
+`autospec:unresolved-default-branch` for digest input while retaining an empty
+`branch` field as typed diagnostic evidence.
+
+`autospec autonomous run-foreground` completes this Rust admission gate before
+entering its bounded Rust conductor cycle, so missing branches or required
+failed/pending checks cannot dispatch ready work.

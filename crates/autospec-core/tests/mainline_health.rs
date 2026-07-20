@@ -144,3 +144,24 @@ fn ignored_checks_do_not_relax_unmatched_failure() {
         MainlineHealthOutcome::Halt
     );
 }
+
+#[test]
+fn health_receipt_can_bind_the_effective_policy_digest() {
+    let health = autospec_core::autonomous::mainline_health::evaluate_health(
+        "main",
+        true,
+        vec![CheckEvidence::required("ci", "completed", Some("success"))],
+    );
+
+    let receipt =
+        health.to_json_with_policy_digest("owner/repo", "autospec-main-health-policy-v1:abc123");
+
+    assert!(
+        receipt.contains("\"effective_policy_digest\":\"autospec-main-health-policy-v1:abc123\"")
+    );
+    assert_eq!(
+        receipt.matches("\"effective_policy_digest\"").count(),
+        1,
+        "the receipt must carry exactly one policy binding"
+    );
+}

@@ -727,6 +727,157 @@ fn main_health_reads_the_same_repository_config_as_foreground_admission() {
 }
 
 #[test]
+fn missing_default_branch_keeps_its_typed_policy_bound_health_receipt() {
+    const UNRESOLVED_POLICY_DIGEST: &str =
+        "autospec-main-health-policy-v1:66e6f0c0605153f689ec9b01bbbd3ada254ed0031573a196fed67c7aab401671";
+    let fixture = ForegroundFixture::new();
+
+    let output = fixture
+        .unbranched_main_health_command()
+        .env("AUTOSPEC_FOREGROUND_NO_DEFAULT_BRANCH", "1")
+        .output()
+        .expect("run main-health without GitHub default branch metadata");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("default-branch-missing"));
+    let receipts = fs::read_to_string(fixture.main_health_observations_path())
+        .expect("missing branch health must retain a policy-bound observation");
+    let lines = receipts.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("\"diagnostic\":\"default-branch-missing\""));
+    assert_eq!(
+        json_string_field(lines[0], "effective_policy_digest"),
+        UNRESOLVED_POLICY_DIGEST
+    );
+}
+
+#[test]
+fn foreground_missing_default_branch_applies_typed_halt_after_recording_policy() {
+    const UNRESOLVED_POLICY_DIGEST: &str =
+        "autospec-main-health-policy-v1:66e6f0c0605153f689ec9b01bbbd3ada254ed0031573a196fed67c7aab401671";
+    let fixture = ForegroundFixture::new();
+
+    let output = fixture
+        .unbranched_foreground_command()
+        .env("AUTOSPEC_FOREGROUND_NO_DEFAULT_BRANCH", "1")
+        .output()
+        .expect("run foreground without GitHub default branch metadata");
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"decision\":\"park\",\"reason\":\"health_halt\"}\n"
+    );
+    let receipts = fs::read_to_string(fixture.main_health_observations_path())
+        .expect("foreground health halt must retain a policy-bound observation");
+    let lines = receipts.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("\"diagnostic\":\"default-branch-missing\""));
+    assert_eq!(
+        json_string_field(lines[0], "effective_policy_digest"),
+        UNRESOLVED_POLICY_DIGEST
+    );
+    assert!(!fixture.state_path().exists());
+}
+
+#[test]
+fn retained_foreground_state_reloads_and_records_repository_policy() {
+    let fixture = ForegroundFixture::new();
+    fixture.write_autonomous_config(
+        "main_health:\n  branch: main\n  ignore_checks:\n    - Unit Tests\n",
+    );
+
+    let first = fixture
+        .unbranched_foreground_command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run first configured foreground cycle");
+    assert!(
+        first.status.success(),
+        "status={:?} stdout={} stderr={}",
+        first.status.code(),
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_receipts = fs::read_to_string(fixture.main_health_observations_path())
+        .expect("read first health observation");
+    let first_lines = first_receipts.lines().collect::<Vec<_>>();
+    assert_eq!(first_lines.len(), 1);
+    let first_digest = json_string_field(first_lines[0], "effective_policy_digest");
+
+    fixture.write_autonomous_config(
+        "main_health:\n  branch: master_ai\n  ignore_checks:\n    - E2E Tests\n",
+    );
+    let second = fixture
+        .unbranched_foreground_command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run retained foreground cycle with changed config");
+    assert!(
+        second.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_receipts = fs::read_to_string(fixture.main_health_observations_path())
+        .expect("read reloaded health observations");
+    let second_lines = second_receipts.lines().collect::<Vec<_>>();
+    assert_eq!(
+        second_lines.len(),
+        2,
+        "retained state must not suppress the next cycle policy receipt"
+    );
+    assert_ne!(
+        first_digest,
+        json_string_field(second_lines[1], "effective_policy_digest"),
+        "changed effective repository policy must change its receipt binding"
+    );
+
+    fixture.write_autonomous_config("main_health:\n  ignore_checks: malformed\n");
+    let before_malformed = second_receipts;
+    let malformed = fixture
+        .unbranched_foreground_command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run malformed repository config");
+    assert_eq!(malformed.status.code(), Some(2));
+    assert_eq!(
+        fs::read_to_string(fixture.main_health_observations_path())
+            .expect("read unchanged health observations"),
+        before_malformed,
+        "invalid config must fail before appending a policy receipt"
+    );
+}
+
+#[test]
+fn post_health_issue_admission_failure_keeps_the_evaluated_policy_receipt() {
+    let fixture = ForegroundFixture::new();
+    fs::write(&fixture.mode, "reviewed\n").expect("make the queued issue safety-ready");
+    fixture.write_autonomous_config("main_health:\n  branch: main\n");
+
+    let output = fixture
+        .unbranched_foreground_command()
+        .env("AUTOSPEC_FOREGROUND_CORRUPT_SPEND_AFTER_QUEUE", "1")
+        .output()
+        .expect("run foreground with a post-health admission failure");
+
+    assert!(!output.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        diagnostic.contains("malformed_spend"),
+        "expected issue-admission failure, got {diagnostic}"
+    );
+    let receipts = fs::read_to_string(fixture.main_health_observations_path())
+        .expect("health evaluation must be recorded before issue admission");
+    let lines = receipts.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    assert!(!json_string_field(lines[0], "effective_policy_digest").is_empty());
+}
+
+#[test]
 fn invalid_configured_branch_does_not_fall_back_to_github_default() {
     let fixture = ForegroundFixture::new();
     fixture.write_autonomous_config("main_health:\n  branch: missing\n");
@@ -1281,7 +1432,11 @@ if [ "$1" = api ] && [ "$2" = graphql ]; then
   exit 0
 fi
 if [ "$1" = repo ] && [ "$2" = view ]; then
-  printf '%s\n' main
+  if [ "${AUTOSPEC_FOREGROUND_NO_DEFAULT_BRANCH:-0}" = 1 ]; then
+    printf '\n'
+  else
+    printf '%s\n' main
+  fi
   exit 0
 fi
 if [ "$1" = api ] && [ "$2" = repos/test/repo/branches/main ]; then
@@ -1312,6 +1467,10 @@ if [ "$1" = api ]; then
         *labels=in-progress-by-bot*) printf '%s\n' '{"raw_count":0,"items":[]}' ;;
         *labels=auto-implement*)
           if [ "${AUTOSPEC_FOREGROUND_QUEUE_FAILURE:-0}" = 1 ]; then exit 1; fi
+          if [ "${AUTOSPEC_FOREGROUND_CORRUPT_SPEND_AFTER_QUEUE:-0}" = 1 ]; then
+            mkdir -p "$AUTOSPEC_AUTONOMOUS_SPEND_DIR/test_repo"
+            printf '%s\n' '{malformed' > "$AUTOSPEC_AUTONOMOUS_SPEND_DIR/test_repo/spend.json"
+          fi
           if [ "${AUTOSPEC_FOREGROUND_EMPTY_QUEUE:-0}" = 1 ]; then
             printf '%s\n' '{"raw_count":0,"items":[]}'
           else
@@ -1466,6 +1625,12 @@ exit 1
         let config_dir = self.repo_dir.join(".autospec");
         fs::create_dir_all(&config_dir).expect("create autonomous config directory");
         fs::write(config_dir.join("autonomous.yml"), source).expect("write autonomous config");
+    }
+
+    fn main_health_observations_path(&self) -> PathBuf {
+        self.health
+            .join("test_repo")
+            .join("main-health-observations.jsonl")
     }
 
     fn initialize_git_remote(&self) {
@@ -1646,6 +1811,15 @@ exit 1
         TierReceipt::parse_json(&source, "test/repo", pass_id, NoWorkTier::Tier1)
             .expect("parse Tier 1 waterfall receipt")
     }
+}
+
+fn json_string_field(document: &str, field: &str) -> String {
+    let marker = format!("\"{field}\":\"");
+    document
+        .split_once(&marker)
+        .and_then(|(_, remainder)| remainder.split_once('"'))
+        .map(|(value, _)| value.to_string())
+        .unwrap_or_else(|| panic!("missing string field {field} in {document}"))
 }
 
 impl Drop for ForegroundFixture {
