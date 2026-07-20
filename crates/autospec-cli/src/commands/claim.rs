@@ -21,6 +21,14 @@ use super::lint::claim_safety_with_config;
 use super::CommandFailure;
 
 static EXECUTOR_RESULT_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+const WAIT_FAILURE_MARKER: &str = "<!-- autospec-implementer-wait-failed -->";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WaitFailureRecovery {
+    Requeued,
+    AlreadyRecovered,
+    OwnershipLost,
+}
 
 pub(crate) enum ConductorClaimError {
     Diagnostic(CommandFailure),
@@ -767,6 +775,123 @@ pub(crate) fn record_executor_outcome(
             "claim ownership changed while recording executor outcome",
         )),
     }
+}
+
+pub(crate) fn recover_implementer_wait_failure(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    session_id: &str,
+    diagnostic: &str,
+) -> Result<WaitFailureRecovery, CommandFailure> {
+    let comments = list_comments(repo, issue)?;
+    let Some(selected) = select_run_state(&comments, repo, issue) else {
+        return Ok(WaitFailureRecovery::OwnershipLost);
+    };
+    let already = is_wait_failure_owner(&selected.record, worker_id, branch);
+    if !already && !has_executor_claim_owner(&selected.record, worker_id, branch) {
+        return Ok(WaitFailureRecovery::OwnershipLost);
+    }
+    if !already && !persist_wait_failure(repo, issue, worker_id, branch, comments, selected.record)?
+    {
+        return Ok(WaitFailureRecovery::OwnershipLost);
+    }
+    requeue_wait_failure(repo, issue)?;
+    upsert_wait_failure_comment(repo, issue, worker_id, branch, session_id, diagnostic)?;
+    Ok(if already {
+        WaitFailureRecovery::AlreadyRecovered
+    } else {
+        WaitFailureRecovery::Requeued
+    })
+}
+
+fn is_wait_failure_owner(record: &RunStateRecord, worker_id: &str, branch: &str) -> bool {
+    record.worker_id == worker_id
+        && record.branch == branch
+        && record.state == "failed"
+        && record.step == "implementer_wait_failed"
+}
+
+fn persist_wait_failure(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    comments: Vec<autospec_core::claim::RemoteComment>,
+    mut record: RunStateRecord,
+) -> Result<bool, CommandFailure> {
+    record.state = "failed".into();
+    record.step = "implementer_wait_failed".into();
+    record.updated_at = utc_now_iso()?;
+    upsert_record(repo, &comments, &record)?;
+    let confirmed_comments = list_comments(repo, issue)?;
+    Ok(select_run_state(&confirmed_comments, repo, issue)
+        .is_some_and(|selected| is_wait_failure_owner(&selected.record, worker_id, branch)))
+}
+
+fn requeue_wait_failure(repo: &str, issue: u64) -> Result<(), CommandFailure> {
+    run_gh_with_retry(
+        &[
+            "issue".into(),
+            "edit".into(),
+            issue.to_string(),
+            "--repo".into(),
+            repo.into(),
+            "--remove-label".into(),
+            "in-progress-by-bot".into(),
+            "--add-label".into(),
+            "auto-implement".into(),
+        ],
+        "requeue implementer wait failure",
+    )
+}
+
+fn upsert_wait_failure_comment(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    session_id: &str,
+    diagnostic: &str,
+) -> Result<(), CommandFailure> {
+    let comments = list_comments(repo, issue)?;
+    let body = format!("{WAIT_FAILURE_MARKER}\nAutospec requeued issue #{issue} after `implementer_wait_failed`. Session: `{}`. Worker: `{}`. Branch: `{}`. Diagnostic: `{}`. Recovery: start a fresh implementer from the restored `auto-implement` queue.", comment_field(session_id), comment_field(worker_id), comment_field(branch), safe_wait_diagnostic(diagnostic));
+    if let Some(comment) = comments
+        .iter()
+        .find(|comment| comment.body.contains(WAIT_FAILURE_MARKER))
+    {
+        patch_comment(repo, comment.id, &body)?;
+    } else {
+        create_comment(repo, issue, &body)?;
+    }
+    Ok(())
+}
+
+fn comment_field(value: &str) -> String {
+    value.replace(['`', '\n', '\r'], " ")
+}
+
+fn safe_wait_diagnostic(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|token| {
+            let lower = token.to_ascii_lowercase();
+            let assignment_key = lower.split_once('=').map(|(key, _)| key);
+            if matches!(assignment_key, Some("token" | "password" | "secret"))
+                || lower.starts_with("ghp_")
+                || (token.starts_with("AKIA") && token.len() >= 20)
+            {
+                "[REDACTED]"
+            } else {
+                token
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(512)
+        .collect()
 }
 
 fn record_executor_result_with_step(
