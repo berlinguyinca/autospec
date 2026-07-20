@@ -1,8 +1,15 @@
 #!/usr/bin/env bats
 
+setup_file() {
+  local repo_root
+  repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+  cargo build --quiet --manifest-path "$repo_root/Cargo.toml" -p autospec-cli --bin autospec
+}
+
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   CLI="$REPO_ROOT/scripts/autospec-autonomous.sh"
+  RUST_CLI="$REPO_ROOT/target/debug/autospec"
   TEST_TMP="$(mktemp -d)"
   export HOME="$TEST_TMP/home"
   mkdir -p "$HOME"
@@ -13,6 +20,25 @@ setup() {
 
 teardown() {
   rm -rf "$TEST_TMP"
+}
+
+@test "operator cli: typed blast-radius route preserves the command token" {
+  local changed_files="$TEST_TMP/changed-files.txt"
+  printf '%s\n' 'docs/README.md' > "$changed_files"
+
+  run "$RUST_CLI" autonomous blast-radius --changed-files "$changed_files" --json
+
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"fenced":false'* ]]
+  [[ "$output" == *'"paths":["docs/README.md"]'* ]]
+}
+
+@test "operator cli: typed lifecycle route preserves the decide action" {
+  run "$RUST_CLI" autonomous lifecycle decide \
+    --repo berlinguyinca/autospec --ready-tier 1.5
+
+  [ "$status" -eq 0 ]
+  [ "$output" = '{"decision":"run","tier":"1.5"}' ]
 }
 
 @test "operator cli: default foreground drain dispatches the typed autonomous command" {

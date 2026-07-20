@@ -30,12 +30,6 @@
     "justification": "This test supplies malformed CLI argument matrices; its repeated fixture rows are data, not production dispatch logic."
   },
   {
-    "file": "crates/autospec-cli/tests/autonomous_conductor_status.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This test asserts rendered CLI status text and timeline wording; substring checks inspect presentation output, not domain representation logic."
-  },
-  {
     "file": "crates/autospec-cli/tests/autonomous_drain_commands.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
@@ -48,21 +42,9 @@
     "justification": "This helper parses a labeled CLI help section; its string operations inspect presentation structure rather than encode domain logic."
   },
   {
-    "file": "crates/autospec-cli/tests/runtime_commands.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This test-only command factory selects the compiled CLI; the file-scoped substring heuristic does not represent domain logic."
-  },
-  {
     "file": "crates/autospec-core/src/validation/structural.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "The structural validator scans static skill text for required contract vocabulary; it does not encode runtime domain meaning from free-form names."
-  },
-  {
-    "file": "crates/autospec-core/tests/explore_specialists.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This test asserts typed specialist evidence; std::time plus substring assertions trigger the file-scoped heuristic without implementing domain logic."
   }
 ]
