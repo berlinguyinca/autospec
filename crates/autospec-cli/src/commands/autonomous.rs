@@ -186,6 +186,9 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     if args.first().is_some_and(|arg| arg == "executor-result") {
         return executor_result(args);
     }
+    if args.first().is_some_and(|arg| arg == "executor-child") {
+        return executor_child(args);
+    }
     if args.first().is_some_and(|arg| arg == "lifecycle") {
         return lifecycle(args);
     }
@@ -2519,6 +2522,44 @@ fn is_lower_hex_digest(value: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+fn executor_child(args: &[String]) -> Result<(), CommandFailure> {
+    let mut repo = None;
+    let mut issue = None;
+    let mut invocation = None;
+    let mut index = 1;
+    while index < args.len() {
+        let flag = &args[index];
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| CommandFailure::diagnostic("executor-child option requires a value"))?;
+        match flag.as_str() {
+            "--repo" => set_executor_result_value(&mut repo, value.clone(), "--repo")
+                .map_err(CommandFailure::diagnostic)?,
+            "--issue" => set_executor_result_number(&mut issue, value.clone(), "--issue")
+                .map_err(CommandFailure::diagnostic)?,
+            "--invocation-id" => {
+                set_executor_result_value(&mut invocation, value.clone(), "--invocation-id")
+                    .map_err(CommandFailure::diagnostic)?
+            }
+            unknown => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown executor-child option: {unknown}"
+                )))
+            }
+        }
+        index += 2;
+    }
+    let repo = repo.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --repo"))?;
+    let issue = issue.ok_or_else(|| CommandFailure::diagnostic("executor-child requires --issue"))?;
+    let invocation = invocation
+        .ok_or_else(|| CommandFailure::diagnostic("executor-child requires --invocation-id"))?;
+    println!(
+        "{{\"schema\":1,\"status\":\"blocked\",\"repo\":\"{}\",\"issue\":{},\"invocation_id\":\"{}\",\"reason\":\"{}\"}}",
+        json_escape(&repo), issue, json_escape(&invocation), EXECUTOR_PENDING_REASON
+    );
+    Ok(())
+}
+
 fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
     let input = match parse_executor_result_input(args) {
         Ok(ExecutorResultInvocation::Deferred { repo, issue }) => {
@@ -2875,7 +2916,7 @@ impl ExecutorRequest {
                 .map_err(|error| format!("cannot resolve Rust executor program: {error}"))?,
             args: vec![
                 "autonomous".to_string(),
-                "executor-result".to_string(),
+                "executor-child".to_string(),
                 "--repo".to_string(),
                 layout.repo.clone(),
                 "--issue".to_string(),
@@ -2911,7 +2952,10 @@ impl ExecutorRequest {
             .env_remove("AUTOSPEC_AUTONOMOUS_CMD")
             .output();
         let _ = fs::create_dir_all(&invocation_dir);
-        let expected = executor_receipt_json(&self.repo, self.issue);
+        let expected = format!(
+            "{{\"schema\":1,\"status\":\"blocked\",\"repo\":\"{}\",\"issue\":{},\"invocation_id\":\"{}\",\"reason\":\"{}\"}}",
+            json_escape(&self.repo), self.issue, json_escape(&self.invocation_id), EXECUTOR_PENDING_REASON
+        );
         if output.is_ok_and(|output| {
             output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected
         }) {
