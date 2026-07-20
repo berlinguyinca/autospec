@@ -202,13 +202,21 @@ fn foreground_wiring_only_delegates_empty_repository_traversal() {
 
 #[test]
 fn tier4_config_is_trust_context_for_the_disabled_adapter_only() {
-    let source = workspace_root()
-        .join("crates/autospec-cli/src/commands/autonomous/foreground_waterfall.rs");
+    let root = workspace_root();
+    let source = root.join("crates/autospec-cli/src/commands/autonomous/foreground_waterfall.rs");
     let tokens = production_tokens(&source);
+    let foreground_entry = function_tokens(
+        &root.join("crates/autospec-cli/src/commands/autonomous.rs"),
+        "run_foreground_with_lease",
+    );
 
     assert_eq!(
-        count_path(&tokens, &["WaterfallPolicy", "::", "from_config"]),
+        count_path(&foreground_entry, &["WaterfallPolicy", "::", "from_config"]),
         1
+    );
+    assert_eq!(
+        count_path(&tokens, &["WaterfallPolicy", "::", "from_config"]),
+        0
     );
     assert_eq!(count_path(&tokens, &["config", ".", "tier4"]), 1);
     assert_eq!(

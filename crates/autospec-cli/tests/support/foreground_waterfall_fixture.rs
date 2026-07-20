@@ -226,7 +226,8 @@ impl ForegroundWaterfallFixture {
             .expect("read calls")
             .lines()
             .filter(|line| {
-                line.contains("issues?state=open") || line.contains("issues?state=closed")
+                line.contains("issues?state=open&per_page=100")
+                    || line.contains("issues?state=closed&per_page=100")
             })
             .count()
     }
