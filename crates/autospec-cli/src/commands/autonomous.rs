@@ -26,6 +26,7 @@ use autospec_core::autonomous_lifecycle::{
 use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
+use autospec_core::execution::{OneShotIssueSelector, QueueStatus};
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
 #[cfg(unix)]
 use nix::sys::signal::{killpg, Signal};
@@ -2109,7 +2110,7 @@ fn run_foreground_with_lease(
         }
     }
     persist_foreground_lifecycle(layout, &lifecycle)?;
-    let scope = foreground_scope();
+    let scope = foreground_scope(options, layout);
     let state_path = foreground_state_path(layout, scope);
     let state =
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
@@ -2388,6 +2389,23 @@ fn dispatch_foreground(
             &lease.claim_id,
         )
         .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
+        if let Some(issue) = options.issue {
+            let mut selector =
+                load_one_shot_selector(layout, issue).map_err(CommandFailure::diagnostic)?;
+            let status = match &receipt.outcome {
+                ConductorOutcome::Succeeded => QueueStatus::Passed,
+                ConductorOutcome::Retryable(_) => QueueStatus::Failed,
+                ConductorOutcome::Blocked(_)
+                | ConductorOutcome::AllBlocked { .. }
+                | ConductorOutcome::VerifierUnavailable { .. }
+                | ConductorOutcome::ResourcePark { .. }
+                | ConductorOutcome::OperatorStop { .. } => QueueStatus::Blocked,
+            };
+            let _ = selector
+                .observe_status(issue, &status)
+                .map_err(CommandFailure::diagnostic)?;
+            persist_one_shot_selector(layout, &selector).map_err(CommandFailure::diagnostic)?;
+        }
         state = state
             .transition(ConductorEvent::DispatchRecorded {
                 outcome: receipt.outcome.clone(),
@@ -3604,12 +3622,45 @@ fn lifecycle_stop_mode(mode: StopMode) -> LifecycleStopMode {
     }
 }
 
-fn foreground_scope() -> ConductorScope {
-    if std::env::var("AUTOSPEC_RUN_ONLY_ISSUES").is_ok_and(|value| !value.trim().is_empty()) {
+fn foreground_scope(options: &Options, layout: &RunLayout) -> ConductorScope {
+    if options.issue.is_some() && !one_shot_selector_consumed(layout) {
         ConductorScope::Slice
     } else {
         ConductorScope::Repository
     }
+}
+
+fn one_shot_selector_path(layout: &RunLayout) -> PathBuf {
+    layout.state_dir.join("one-shot-selector.json")
+}
+
+fn load_one_shot_selector(layout: &RunLayout, issue: u64) -> Result<OneShotIssueSelector, String> {
+    let mut selector = OneShotIssueSelector::new(issue)?;
+    if fs::read_to_string(one_shot_selector_path(layout))
+        .map(|contents| contents.contains("\"consumed\":true"))
+        .unwrap_or(false)
+    {
+        let _ = selector.observe_status(issue, &QueueStatus::Passed)?;
+    }
+    Ok(selector)
+}
+
+fn persist_one_shot_selector(
+    layout: &RunLayout,
+    selector: &OneShotIssueSelector,
+) -> Result<(), String> {
+    fs::create_dir_all(&layout.state_dir)
+        .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
+    atomic_write(
+        &one_shot_selector_path(layout),
+        &format!("{}\n", selector.status_json()),
+    )
+}
+
+fn one_shot_selector_consumed(layout: &RunLayout) -> bool {
+    fs::read_to_string(one_shot_selector_path(layout))
+        .map(|contents| contents.contains("\"consumed\":true"))
+        .unwrap_or(false)
 }
 
 fn command_error(error: super::CommandFailure) -> String {
