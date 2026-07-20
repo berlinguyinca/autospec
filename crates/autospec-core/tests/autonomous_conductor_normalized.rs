@@ -3,8 +3,10 @@ use autospec_core::autonomous::no_work::{
 };
 use autospec_core::autonomous::waterfall::{FunnelCounts, SealedEvidence, TierReceipt, TierStatus};
 use autospec_core::coordination::{
-    ConductorEvent, ConductorOutcome, ConductorScope, ConductorState, BLOCKED_BACKLOG_THRESHOLD,
+    ConductorEvent, ConductorOutcome, ConductorScope, ConductorState,
 };
+
+const BLOCKED_BACKLOG_THRESHOLD: u32 = 5;
 
 #[test]
 fn blocked_backlog_governor_seals_after_repeated_identical_cycles() {
@@ -33,9 +35,33 @@ fn blocked_backlog_governor_seals_after_repeated_identical_cycles() {
     let restored = ConductorState::parse_json(&state.to_json()).expect("persisted governor state");
     assert_eq!(restored.blocked_backlog_cycles(), BLOCKED_BACKLOG_THRESHOLD);
     assert_eq!(
+        restored.blocked_backlog_reason(),
+        Some("missing_safety_reviewed")
+    );
+    assert_eq!(
         restored.phase(),
         autospec_core::coordination::ConductorPhase::AllBlocked
     );
+}
+
+#[test]
+fn persisted_blocked_backlog_reason_defaults_to_none_when_missing() {
+    let encoded = conductor(ConductorScope::Repository)
+        .to_json()
+        .replace("\"blocked_backlog_reason\":null,", "");
+
+    let restored = ConductorState::parse_json(&encoded).expect("legacy state parses");
+
+    assert_eq!(restored.blocked_backlog_reason(), None);
+}
+
+#[test]
+fn persisted_blocked_backlog_reason_accepts_explicit_null() {
+    let encoded = conductor(ConductorScope::Repository).to_json();
+
+    let restored = ConductorState::parse_json(&encoded).expect("null reason parses");
+
+    assert_eq!(restored.blocked_backlog_reason(), None);
 }
 
 #[test]
