@@ -724,6 +724,12 @@ pub(crate) enum ExecutorResultRecord {
     OwnershipLost,
 }
 
+pub(crate) struct ExecutorSuccessBinding<'a> {
+    pub(crate) claim_id: &'a str,
+    pub(crate) commit: &'a str,
+    pub(crate) premerge_receipt: &'a str,
+}
+
 pub(crate) fn record_executor_result(
     repo: &str,
     issue: u64,
@@ -731,6 +737,7 @@ pub(crate) fn record_executor_result(
     branch: &str,
     outcome: &ConductorOutcome,
     pull_request: Option<u64>,
+    success: Option<ExecutorSuccessBinding<'_>>,
 ) -> Result<ExecutorResultRecord, CommandFailure> {
     let comments = list_comments(repo, issue)?;
     let Some(selected) = select_run_state(&comments, repo, issue) else {
@@ -745,9 +752,17 @@ pub(crate) fn record_executor_result(
     ) {
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
+    if matches!(outcome, ConductorOutcome::Succeeded)
+        && selected.record.claim_id.as_deref() != success.as_ref().map(|binding| binding.claim_id)
+    {
+        return Ok(ExecutorResultRecord::OwnershipLost);
+    }
 
     let pull_request = match outcome {
         ConductorOutcome::Succeeded => {
+            let Some(success) = success.as_ref() else {
+                return Ok(ExecutorResultRecord::EvidenceUnavailable);
+            };
             let Some(pull_request) = pull_request else {
                 return Ok(ExecutorResultRecord::EvidenceUnavailable);
             };
@@ -755,6 +770,7 @@ pub(crate) fn record_executor_result(
             if !pull_requests.iter().any(|candidate| {
                 candidate.number == pull_request
                     && is_executor_result_pull_request(candidate, issue, branch)
+                    && candidate.head_ref_oid == success.commit
             }) {
                 return Ok(ExecutorResultRecord::EvidenceUnavailable);
             }
@@ -783,6 +799,11 @@ pub(crate) fn record_executor_result(
         pull_request,
         executor_result_step(outcome),
         receipt_id,
+        success.as_ref().map(|binding| binding.claim_id.to_string()),
+        success.as_ref().map(|binding| binding.commit.to_string()),
+        success
+            .as_ref()
+            .map(|binding| binding.premerge_receipt.to_string()),
     );
     create_comment(repo, issue, &evidence.to_marked_comment())?;
 
@@ -802,6 +823,11 @@ pub(crate) fn record_executor_result(
         worker_id,
         branch,
     ) {
+        return Ok(ExecutorResultRecord::OwnershipLost);
+    }
+    if matches!(outcome, ConductorOutcome::Succeeded)
+        && confirmed.record.claim_id.as_deref() != success.as_ref().map(|binding| binding.claim_id)
+    {
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
     Ok(ExecutorResultRecord::Recorded)
@@ -922,6 +948,9 @@ fn wait_failure_evidence(
         None,
         "implementer_wait_failed",
         format!("implementer-wait-failed:{claim_id}:{session_id}"),
+        None,
+        None,
+        None,
     )
 }
 
@@ -1763,7 +1792,7 @@ fn list_open_pull_requests(
             "--limit",
             "100",
             "--json",
-            "number,body,headRefName",
+            "number,body,headRefName,headRefOid",
         ])
         .output()
         .map_err(|error| {
