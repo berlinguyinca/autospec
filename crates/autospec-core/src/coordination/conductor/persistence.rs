@@ -256,10 +256,10 @@ impl ConductorState {
             })
             .transpose()?
             .unwrap_or(0);
-        let blocked_backlog_reason = object
-            .remove("blocked_backlog_reason")
-            .map(|value| value.into_optional_string("conductor state.blocked_backlog_reason"))
-            .transpose()?;
+        let blocked_backlog_reason = optional_string(
+            object.remove("blocked_backlog_reason"),
+            "conductor state.blocked_backlog_reason",
+        )?;
         let blocked_backlog_issues = optional_issues(
             object.remove("blocked_backlog_issues"),
             "conductor state.blocked_backlog_issues",
