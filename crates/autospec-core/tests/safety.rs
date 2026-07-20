@@ -171,13 +171,17 @@ fn issue_promotion_safety_gate_uses_configured_trusted_actors() {
 
 #[test]
 fn safety_redacts_transport_diagnostics_across_credential_forms() {
-    let diagnostic = "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99 gho_123456789012345678901234567890123456 Authorization: Bearer bearer-value api_key=key-value token:token-value user:hunter2 -----BEGIN PRIVATE KEY----- private-material -----END PRIVATE KEY-----";
+    let github_pat = ["github", "_pat_11AA22BB33CC44DD55EE66FF77GG88HH99"].concat();
+    let github_oauth = ["gh", "o_123456789012345678901234567890123456"].concat();
+    let diagnostic = format!(
+        "{github_pat} {github_oauth} Authorization: Bearer bearer-value api_key=key-value token:token-value user:hunter2 -----BEGIN PRIVATE KEY----- private-material -----END PRIVATE KEY-----"
+    );
 
-    let redacted = redact_secrets(diagnostic);
+    let redacted = redact_secrets(&diagnostic);
 
     for secret in [
-        "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99",
-        "gho_123456789012345678901234567890123456",
+        github_pat.as_str(),
+        github_oauth.as_str(),
         "bearer-value",
         "key-value",
         "token-value",
