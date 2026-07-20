@@ -3,8 +3,11 @@
 #
 # Usage:
 #   heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] [--repo <owner/repo>]
+#                      [--worker-id <id> --claim-id <id> --session-id <id>]
 #
 # Writes to: ~/.autospec/process-heartbeats/<repo-slug>/<issue>.json
+# Recovery-bound writes also atomically update
+# ~/.autospec/process-heartbeats/<repo-slug>/sessions/<hex-session-id>.json.
 # where <repo-slug> is the canonical owner__name form produced by
 # scripts/repo-slug.sh (F4). Readers resolve canonical-first with a legacy
 # (owner_name) fallback for one release so in-flight heartbeats aren't orphaned.
@@ -27,6 +30,9 @@ STEP=""
 BRANCH=""
 PR_VAL=""
 REPO_VAL=""
+WORKER_ID=""
+CLAIM_ID=""
+SESSION_ID=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -35,8 +41,11 @@ while [ $# -gt 0 ]; do
         --branch)  BRANCH="${2:-}";  shift 2 ;;
         --pr)      PR_VAL="${2:-}";  shift 2 ;;
         --repo)    REPO_VAL="${2:-}"; shift 2 ;;
+        --worker-id) WORKER_ID="${2:-}"; shift 2 ;;
+        --claim-id) CLAIM_ID="${2:-}"; shift 2 ;;
+        --session-id) SESSION_ID="${2:-}"; shift 2 ;;
         --help|-h)
-            printf 'Usage: heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] [--repo <owner/repo>]\n'
+            printf 'Usage: heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] [--repo <owner/repo>] [--worker-id <id> --claim-id <id> --session-id <id>]\n'
             exit 0
             ;;
         *)
@@ -52,6 +61,15 @@ if [ -z "$ISSUE" ]; then
 fi
 if [ -z "$STEP" ]; then
     printf 'heartbeat-write: --step is required\n' >&2
+    exit 1
+fi
+
+binding_fields=0
+[ -n "$WORKER_ID" ] && binding_fields=$((binding_fields + 1))
+[ -n "$CLAIM_ID" ] && binding_fields=$((binding_fields + 1))
+[ -n "$SESSION_ID" ] && binding_fields=$((binding_fields + 1))
+if [ "$binding_fields" -ne 0 ] && [ "$binding_fields" -ne 3 ]; then
+    printf 'heartbeat-write: session binding requires --session-id, --claim-id, and --worker-id\n' >&2
     exit 1
 fi
 
@@ -118,12 +136,21 @@ NOW_TS="$(date -u +%s)"
 # --resume-partial (always clean-restart). Override via AUTOSPEC_HOST for tests.
 HOST_VAL="${AUTOSPEC_HOST:-$(hostname 2>/dev/null || echo "")}"
 
-printf '{"issue":"%s","branch":"%s","step":"%s","ts":%s,"pr":"%s","repo":"%s","host":"%s"}\n' \
-    "$ISSUE" \
-    "${BRANCH:-}" \
-    "$STEP" \
-    "$NOW_TS" \
-    "${PR_VAL:-}" \
-    "$REPO_FULL" \
-    "$HOST_VAL" \
-    > "${TARGET_DIR}/${ISSUE}.json"
+if [ "$binding_fields" -eq 3 ]; then
+    printf '{"issue":"%s","branch":"%s","step":"%s","ts":%s,"pr":"%s","repo":"%s","host":"%s","worker_id":"%s","claim_id":"%s","session_id":"%s"}\n' \
+        "$ISSUE" "${BRANCH:-}" "$STEP" "$NOW_TS" "${PR_VAL:-}" "$REPO_FULL" "$HOST_VAL" \
+        "$WORKER_ID" "$CLAIM_ID" "$SESSION_ID" > "${TARGET_DIR}/${ISSUE}.json"
+
+    session_key="$(LC_ALL=C printf '%s' "$SESSION_ID" | od -An -tx1 | tr -d ' \n')"
+    [ -n "$session_key" ] || { printf 'heartbeat-write: --session-id must not be empty\n' >&2; exit 1; }
+    session_dir="${TARGET_DIR}/sessions"
+    session_file="${session_dir}/${session_key}.json"
+    session_tmp="${session_file}.tmp.$$"
+    mkdir -p "$session_dir"
+    cp "${TARGET_DIR}/${ISSUE}.json" "$session_tmp"
+    mv "$session_tmp" "$session_file"
+else
+    printf '{"issue":"%s","branch":"%s","step":"%s","ts":%s,"pr":"%s","repo":"%s","host":"%s"}\n' \
+        "$ISSUE" "${BRANCH:-}" "$STEP" "$NOW_TS" "${PR_VAL:-}" "$REPO_FULL" "$HOST_VAL" \
+        > "${TARGET_DIR}/${ISSUE}.json"
+fi

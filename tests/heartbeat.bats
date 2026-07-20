@@ -70,6 +70,49 @@ teardown() {
     [ -f "$TEST_TMP/envorg__envrepo/77.json" ]
 }
 
+@test "heartbeat session binding preserves the failed target after an issue successor" {
+    bash "$HB_WRITE" --issue 42 --step claimed --branch feat/test --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-generation-old --session-id session-old
+    bash "$HB_WRITE" --issue 42 --step claimed --branch feat/test --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-generation-new --session-id session-new
+
+    run bash "$HB_READ" --session-id session-old --repo testorg/testrepo
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '"session_id":"session-old"'
+    echo "$output" | grep -q '"claim_id":"claim-generation-old"'
+    echo "$output" | grep -q '"worker_id":"worker-a"'
+
+    current="$(bash "$HB_READ" --issue 42 --repo testorg/testrepo)"
+    echo "$current" | grep -q '"session_id":"session-new"'
+    echo "$current" | grep -q '"claim_id":"claim-generation-new"'
+}
+
+@test "heartbeat session lookup fails closed for a legacy heartbeat" {
+    bash "$HB_WRITE" --issue 42 --step claimed --repo testorg/testrepo
+
+    run bash "$HB_READ" --session-id session-old --repo testorg/testrepo
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q 'no durable heartbeat binding'
+}
+
+@test "heartbeat session lookup reads the Rust collision-safe repository directory" {
+    session_key="$(printf '%s' session-rust | od -An -tx1 | tr -d ' \n')"
+    mkdir -p "$TEST_TMP/o7_testorg_r8_testrepo/sessions"
+    printf '{"issue":"42","branch":"feat/test","step":"claimed","ts":1,"pr":"","repo":"testorg/testrepo","worker_id":"worker-a","claim_id":"claim-rust","session_id":"session-rust"}\n' \
+        > "$TEST_TMP/o7_testorg_r8_testrepo/sessions/${session_key}.json"
+
+    run bash "$HB_READ" --session-id session-rust --repo testorg/testrepo
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '"claim_id":"claim-rust"'
+}
+
+@test "heartbeat writer rejects a partial session binding" {
+    run bash "$HB_WRITE" --issue 42 --step claimed --repo testorg/testrepo \
+        --session-id session-old --claim-id claim-generation-old
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q 'session binding requires --session-id, --claim-id, and --worker-id'
+}
+
 # ── heartbeat-read.sh ─────────────────────────────────────────────────────────
 
 @test "heartbeat-read.sh is executable" {

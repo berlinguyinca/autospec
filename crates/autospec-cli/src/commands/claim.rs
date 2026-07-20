@@ -161,11 +161,16 @@ fn acquire(args: &[String]) -> Result<(), CommandFailure> {
     let lease = acquire_record(parse_acquire_options(args)?)
         .map_err(ConductorClaimError::into_command_failure)?;
     println!(
-        "{{\"claimed\":true,\"issue\":{},\"repo\":\"{}\",\"worker_id\":\"{}\",\"branch\":\"{}\"}}",
+        "{{\"claimed\":true,\"issue\":{},\"repo\":\"{}\",\"worker_id\":\"{}\",\"branch\":\"{}\",\"claim_id\":\"{}\",\"session_id\":{}}}",
         lease.issue,
         json_escape(&lease.repo),
         json_escape(&lease.worker_id),
         json_escape(&lease.branch),
+        json_escape(&lease.claim_id),
+        lease.session_id.as_ref().map_or_else(
+            || "null".to_string(),
+            |session_id| format!("\"{}\"", json_escape(session_id)),
+        ),
     );
     Ok(())
 }
@@ -181,6 +186,7 @@ pub(crate) fn acquire_for_conductor(
         repo: Some(repo.to_string()),
         worker_id: Some(worker_id.to_string()),
         branch: branch.to_string(),
+        session_id: None,
     })
 }
 
@@ -278,7 +284,17 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         return unavailable_safety_claim(options.issue, &repo, &worker_id, safety.reason);
     }
     let claim_id = claim_generation_id()?;
-    if write_startup_heartbeat(&repo, options.issue, &options.branch).is_err() {
+    if write_startup_heartbeat(
+        &repo,
+        options.issue,
+        &worker_id,
+        &options.branch,
+        &claim_id,
+        options.session_id.as_deref(),
+    )
+    .is_err()
+    {
+        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         return unavailable_claim(
             options.issue,
             &repo,
@@ -309,7 +325,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         "in-progress-by-bot".to_string(),
     ];
     if run_gh_with_retry(&label_move, "mark issue in progress").is_err() {
-        cleanup_startup_heartbeat(&repo, options.issue);
+        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         return unavailable_claim(
             options.issue,
             &repo,
@@ -321,7 +337,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     let ttl_seconds = claim_ttl_seconds();
     let comments = list_comments(&repo, options.issue)?;
     if terminal_merged_exists(&comments) {
-        cleanup_startup_heartbeat(&repo, options.issue);
+        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         let remove_active = [
             "issue".to_string(),
             "edit".to_string(),
@@ -346,7 +362,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     });
     if let Some(owner) = foreign_fresh_owner {
         cleanup_own_marked_comments(&repo, options.issue, &worker_id, &comments);
-        cleanup_startup_heartbeat(&repo, options.issue);
+        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
     }
 
@@ -371,7 +387,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     )
     .with_claim_id(claim_id.clone());
     if upsert_record(&repo, &comments, &record).is_err() {
-        cleanup_startup_heartbeat(&repo, options.issue);
+        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         let restore = [
             "issue".to_string(),
             "edit".to_string(),
@@ -398,7 +414,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         }
         let observed_comments = list_comments(&repo, options.issue)?;
         if terminal_merged_exists(&observed_comments) {
-            cleanup_startup_heartbeat(&repo, options.issue);
+            cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
             return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
         }
         let observed = select_run_state(&observed_comments, &repo, options.issue);
@@ -410,7 +426,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         }) || !labels.iter().any(|label| label == "in-progress-by-bot")
         {
             cleanup_own_marked_comments(&repo, options.issue, &worker_id, &observed_comments);
-            cleanup_startup_heartbeat(&repo, options.issue);
+            cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
             let owner = observed
                 .as_ref()
                 .map(|state| state.record.worker_id.as_str())
@@ -423,6 +439,8 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         repo,
         worker_id,
         branch: options.branch,
+        claim_id,
+        session_id: options.session_id,
     })
 }
 
@@ -1171,6 +1189,7 @@ struct AcquireOptions {
     repo: Option<String>,
     worker_id: Option<String>,
     branch: String,
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1179,6 +1198,8 @@ pub(crate) struct ClaimLease {
     pub repo: String,
     pub worker_id: String,
     pub branch: String,
+    pub claim_id: String,
+    pub session_id: Option<String>,
 }
 
 fn parse_read_options(args: &[String]) -> Result<ReadOptions, CommandFailure> {
@@ -1528,11 +1549,12 @@ fn parse_acquire_options(args: &[String]) -> Result<AcquireOptions, CommandFailu
     let mut worker_id = None;
     let mut branch = String::new();
     let mut branch_seen = false;
+    let mut session_id = None;
     let mut index = 0;
     while index < args.len() {
         let option = args[index].as_str();
         let value = match option {
-            "--issue" | "--repo" | "--worker-id" | "--branch" => {
+            "--issue" | "--repo" | "--worker-id" | "--branch" | "--session-id" => {
                 argument_value(args, &mut index, option)?
             }
             _ => {
@@ -1571,6 +1593,11 @@ fn parse_acquire_options(args: &[String]) -> Result<AcquireOptions, CommandFailu
                 branch_seen = true;
                 branch = value;
             }
+            "--session-id" => set_once(
+                &mut session_id,
+                value,
+                "--session-id accepts exactly one session identifier",
+            )?,
             _ => unreachable!("options were matched before parsing"),
         }
         index += 1;
@@ -1580,6 +1607,7 @@ fn parse_acquire_options(args: &[String]) -> Result<AcquireOptions, CommandFailu
         repo,
         worker_id,
         branch,
+        session_id,
     })
 }
 
@@ -1837,7 +1865,14 @@ fn terminal_merged_exists(comments: &[autospec_core::claim::RemoteComment]) -> b
     terminal_merged_comment_exists(comments)
 }
 
-fn write_startup_heartbeat(repo: &str, issue: u64, branch: &str) -> Result<(), CommandFailure> {
+fn write_startup_heartbeat(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    session_id: Option<&str>,
+) -> Result<(), CommandFailure> {
     let root = heartbeat_root()?;
     let directory = root.join(super::autonomous::drain::repository_progress_key(repo));
     fs::create_dir_all(&directory).map_err(|error| {
@@ -1847,24 +1882,65 @@ fn write_startup_heartbeat(repo: &str, issue: u64, branch: &str) -> Result<(), C
         ))
     })?;
     let timestamp = unix_now()?;
+    let session_field = session_id.map_or_else(String::new, |session_id| {
+        format!(",\"session_id\":\"{}\"", json_escape(session_id))
+    });
     let body = format!(
-        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"pr\":\"\",\"repo\":\"{}\"}}\n",
+        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
         json_escape(branch),
         json_escape(repo),
+        json_escape(worker_id),
+        json_escape(claim_id),
     );
-    fs::write(directory.join(format!("{issue}.json")), body).map_err(|error| {
+    fs::write(directory.join(format!("{issue}.json")), &body).map_err(|error| {
         CommandFailure::diagnostic(format!("could not write claim startup heartbeat: {error}"))
-    })
+    })?;
+    if let Some(session_id) = session_id {
+        let sessions = directory.join("sessions");
+        fs::create_dir_all(&sessions).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not create claim session heartbeat directory {}: {error}",
+                sessions.display()
+            ))
+        })?;
+        let path = sessions.join(format!("{}.json", heartbeat_session_key(session_id)));
+        let temporary = sessions.join(format!(
+            ".{}.tmp-{}",
+            heartbeat_session_key(session_id),
+            std::process::id()
+        ));
+        fs::write(&temporary, body).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not write claim session binding: {error}"))
+        })?;
+        fs::rename(&temporary, &path).map_err(|error| {
+            let _ = fs::remove_file(&temporary);
+            CommandFailure::diagnostic(format!("could not publish claim session binding: {error}"))
+        })?;
+    }
+    Ok(())
 }
 
-fn cleanup_startup_heartbeat(repo: &str, issue: u64) {
+fn heartbeat_session_key(session_id: &str) -> String {
+    session_id
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn cleanup_startup_heartbeat(repo: &str, issue: u64, session_id: Option<&str>) {
     let Ok(root) = heartbeat_root() else {
         return;
     };
-    let _ = fs::remove_file(
-        root.join(super::autonomous::drain::repository_progress_key(repo))
-            .join(format!("{issue}.json")),
-    );
+    let directory = root.join(super::autonomous::drain::repository_progress_key(repo));
+    let _ = fs::remove_file(directory.join(format!("{issue}.json")));
+    if let Some(session_id) = session_id {
+        let _ = fs::remove_file(
+            directory
+                .join("sessions")
+                .join(format!("{}.json", heartbeat_session_key(session_id))),
+        );
+    }
 }
 
 pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
@@ -1922,14 +1998,13 @@ fn branch_ref_exists(branch: &str) -> bool {
 
 fn cleanup_own_marked_comments(
     repo: &str,
-    issue: u64,
+    _issue: u64,
     worker_id: &str,
     comments: &[autospec_core::claim::RemoteComment],
 ) {
     if let Some(comment_id) = claim_losing_worker_comment_id(comments, worker_id) {
         let _ = delete_comment(repo, comment_id);
     }
-    cleanup_startup_heartbeat(repo, issue);
 }
 
 fn claim_ttl_seconds() -> u64 {
@@ -2229,7 +2304,7 @@ fn unavailable_claim_with_observed_owner<T>(
 
 fn print_help() {
     println!(
-        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME]\n    autospec claim release --issue <N> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
+        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
     );
 }
 
