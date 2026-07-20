@@ -464,8 +464,8 @@ Capture the umbrella + child issue numbers.
 Persist the relationship on GitHub and in the shared per-repository parent-state
 cache before classification. This command also posts a trusted typed
 parent-marker lifecycle comment on every child and the idempotent decomposition
-comment on the parent. Append
-`--quarantined` when the umbrella carries `autospec:needs-human`; otherwise omit
+comment on the parent. Append `--quarantined` when the umbrella's authoritative
+typed safety decision is `SAFETY_AMBIGUOUS` or `SAFETY_BLOCK`; otherwise omit
 it. A failure is blocking because an unlinked child could merge without ever
 reconciling its parent.
 

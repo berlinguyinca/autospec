@@ -2,7 +2,10 @@ use autospec_core::state::SpecStateStore;
 
 use super::CommandFailure;
 use options::ReconcileOptions;
-use support::{find_trusted_marked_comment, issue_comment, issue_field, run_gh, ParentStateLock};
+use support::{
+    find_trusted_marked_comment, issue_close, issue_comment, issue_field, issue_reopen,
+    ParentStateLock,
+};
 
 mod options;
 mod support;
@@ -118,15 +121,13 @@ fn reconcile_parent(
     let reconciliation = read_reconciliation(&options.repo, triggering_child, parent)?;
     update_local_state(options, &reconciliation)?;
     if !reconciliation.is_complete() {
-        print_pending(&reconciliation);
-        return Ok(());
+        return finish_pending_parent(options, &reconciliation);
     }
 
     let settled = read_reconciliation(&options.repo, triggering_child, parent)?;
     let mut store = update_local_state(options, &settled)?;
     if !settled.is_complete() {
-        print_pending(&settled);
-        return Ok(());
+        return finish_pending_parent(options, &settled);
     }
     close_complete_parent(options, &settled, &mut store)
 }
@@ -223,16 +224,13 @@ fn close_complete_parent(
         )));
     }
     if issue_field(&options.repo, parent, "state")?.trim() != "CLOSED" {
-        run_gh(
-            &[
-                "issue".into(),
-                "close".into(),
-                parent.to_string(),
-                "--repo".into(),
-                options.repo.clone(),
-            ],
-            "close completed parent issue",
-        )?;
+        issue_close(&options.repo, parent)?;
+    }
+
+    let confirmed = read_reconciliation(&options.repo, None, parent)?;
+    *store = update_local_state(options, &confirmed)?;
+    if !confirmed.is_complete() {
+        return finish_pending_parent(options, &confirmed);
     }
     if !matches!(
         store.parent_issue_status(parent),
@@ -246,6 +244,17 @@ fn close_complete_parent(
         .save(&options.state_root)
         .map_err(CommandFailure::diagnostic)?;
     println!("{{\"reconciled\":true,\"parent\":{parent},\"closed\":true}}");
+    Ok(())
+}
+
+fn finish_pending_parent(
+    options: &ReconcileOptions,
+    reconciliation: &Reconciliation,
+) -> Result<(), CommandFailure> {
+    if issue_field(&options.repo, reconciliation.parent, "state")?.trim() == "CLOSED" {
+        issue_reopen(&options.repo, reconciliation.parent)?;
+    }
+    print_pending(reconciliation);
     Ok(())
 }
 

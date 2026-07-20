@@ -8,9 +8,9 @@ export AUTOSPEC_PARENT_STATE_ROOT="$HOME/.autospec/parent-state/owner__repo"
 autospec parent record --repo owner/repo --parent 10 --children 11,12
 ```
 
-Use `--quarantined` when the umbrella carries `autospec:needs-human`. The
-command posts one marked decomposition comment, adds
-an `<!-- autospec-parent:10 -->` lifecycle comment to each child, and updates
+Use `--quarantined` when the umbrella's authoritative typed safety decision is
+`SAFETY_AMBIGUOUS` or `SAFETY_BLOCK`. The command posts one marked decomposition
+comment, adds an `<!-- autospec-parent:10 -->` lifecycle comment to each child, and updates
 the shared status cache. Lifecycle comments are accepted only from actors in
 the issue-safety `trusted_actors` policy. Repeating the command with the same
 relationship is safe; a conflicting child list fails closed. Child issue bodies

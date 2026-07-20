@@ -108,6 +108,34 @@ pub(super) fn issue_comment(repo: &str, issue: u64, body: &str) -> Result<(), Co
     )
 }
 
+pub(super) fn issue_close(repo: &str, issue: u64) -> Result<(), CommandFailure> {
+    require_trusted_writer()?;
+    run_gh(
+        &[
+            "issue".into(),
+            "close".into(),
+            issue.to_string(),
+            "--repo".into(),
+            repo.to_string(),
+        ],
+        "close completed parent issue",
+    )
+}
+
+pub(super) fn issue_reopen(repo: &str, issue: u64) -> Result<(), CommandFailure> {
+    require_trusted_writer()?;
+    run_gh(
+        &[
+            "issue".into(),
+            "reopen".into(),
+            issue.to_string(),
+            "--repo".into(),
+            repo.to_string(),
+        ],
+        "reopen parent issue after child state changed",
+    )
+}
+
 fn require_trusted_writer() -> Result<(), CommandFailure> {
     let actors = trusted_actors()?;
     let login = gh_output(
@@ -140,7 +168,7 @@ fn trusted_actors() -> Result<Vec<String>, CommandFailure> {
     Ok(actors)
 }
 
-pub(super) fn run_gh(arguments: &[String], action: &str) -> Result<(), CommandFailure> {
+fn run_gh(arguments: &[String], action: &str) -> Result<(), CommandFailure> {
     gh_output(arguments, action).map(|_| ())
 }
 
