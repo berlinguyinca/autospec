@@ -296,13 +296,38 @@ impl SpecStateStore {
             parent_closed: false,
         };
         validate_parent_record(&record)?;
-        let comment_body = decomposition_comment(parent_issue, &record.child_numbers());
+        let comment_body = decomposition_comment(
+            parent_issue,
+            &record.child_numbers(),
+            record.quarantined_parent,
+        );
         self.parent_issues.insert(parent_issue, record);
 
         Ok(ParentIssueUpdate {
             parent_issue,
             comment_body,
         })
+    }
+
+    /// Replace local parent metadata with the relationship currently recorded
+    /// on GitHub. The remote lifecycle comment is authoritative; this cache is
+    /// only a recoverable status projection.
+    pub fn sync_parent_decomposition(
+        &mut self,
+        parent_issue: u64,
+        child_issues: Vec<u64>,
+        quarantined_parent: bool,
+    ) -> Result<ParentIssueUpdate, String> {
+        let previous = self.parent_issues.remove(&parent_issue);
+        match self.record_parent_decomposition(parent_issue, child_issues, quarantined_parent) {
+            Ok(update) => Ok(update),
+            Err(error) => {
+                if let Some(record) = previous {
+                    self.parent_issues.insert(parent_issue, record);
+                }
+                Err(error)
+            }
+        }
     }
 
     pub fn record_child_terminal(
@@ -350,6 +375,45 @@ impl SpecStateStore {
         self.parent_issues
             .get(&parent_issue)
             .map(ParentIssueRecord::status)
+    }
+
+    pub fn parent_issue_children(&self, parent_issue: u64) -> Option<Vec<u64>> {
+        self.parent_issues
+            .get(&parent_issue)
+            .map(ParentIssueRecord::child_numbers)
+    }
+
+    pub fn parent_issue_numbers(&self) -> Vec<u64> {
+        self.parent_issues.keys().copied().collect()
+    }
+
+    pub fn parent_issue_update(&self, parent_issue: u64) -> Option<ParentIssueUpdate> {
+        self.parent_issues
+            .get(&parent_issue)
+            .map(|record| ParentIssueUpdate {
+                parent_issue,
+                comment_body: decomposition_comment(
+                    parent_issue,
+                    &record.child_numbers(),
+                    record.quarantined_parent,
+                ),
+            })
+    }
+
+    pub fn parent_issue_terminal_action(
+        &self,
+        parent_issue: u64,
+    ) -> Option<ParentIssueTerminalAction> {
+        self.parent_issues.get(&parent_issue).and_then(|record| {
+            record
+                .child_issues
+                .iter()
+                .all(|child| child.terminal)
+                .then(|| ParentIssueTerminalAction {
+                    parent_issue,
+                    completion_summary: completion_summary(parent_issue, &record.child_numbers()),
+                })
+        })
     }
 
     pub fn parent_issue_counts(&self) -> ParentIssueCounts {
@@ -763,12 +827,21 @@ fn validate_parent_record(record: &ParentIssueRecord) -> Result<(), String> {
     Ok(())
 }
 
-fn decomposition_comment(parent_issue: u64, child_issues: &[u64]) -> String {
+fn decomposition_comment(
+    parent_issue: u64,
+    child_issues: &[u64],
+    quarantined_parent: bool,
+) -> String {
     let children = format_bullet_issue_list(child_issues);
+    let state = if quarantined_parent {
+        "\nState: `quarantined-parent-decomposed`."
+    } else {
+        ""
+    };
     format!(
         "<!-- autospec-parent-decomposition:begin -->
 Parent issue #{parent_issue} was decomposed into child implementation issues:
-{children}
+{children}{state}
 <!-- autospec-parent-decomposition:end -->"
     )
 }

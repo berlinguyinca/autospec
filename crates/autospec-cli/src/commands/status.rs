@@ -3,7 +3,11 @@ use autospec_core::state::{SpecRunState, SpecStateStore};
 pub fn run(args: &[String]) -> Result<(), String> {
     let store = SpecStateStore::load_or_default(".")?;
     let counts = Counts::from_store(&store);
-    let parent_counts = store.parent_issue_counts();
+    let parent_store = match std::env::var_os("AUTOSPEC_PARENT_STATE_ROOT") {
+        Some(root) => SpecStateStore::load_or_default(root)?,
+        None => store.clone(),
+    };
+    let parent_counts = parent_store.parent_issue_counts();
 
     if super::is_json(args) {
         println!(
@@ -40,7 +44,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
             parent_counts.complete_but_stale,
             parent_counts.closed
         );
-        for line in store.parent_issue_status_lines() {
+        for line in parent_store.parent_issue_status_lines() {
             println!("parent issue {line}");
         }
     }

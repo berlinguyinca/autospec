@@ -365,7 +365,7 @@ fn spec_state_store_round_trips_escaped_lifecycle_metadata() {
 fn parent_issue_closes_after_children_terminal() {
     use ParentIssueStatus::*;
 
-    const DECOMPOSITION_COMMENT: &str = "<!-- autospec-parent-decomposition:begin -->\nParent issue #1899 was decomposed into child implementation issues:\n- #1900\n- #1901\n<!-- autospec-parent-decomposition:end -->";
+    const DECOMPOSITION_COMMENT: &str = "<!-- autospec-parent-decomposition:begin -->\nParent issue #1899 was decomposed into child implementation issues:\n- #1900\n- #1901\nState: `quarantined-parent-decomposed`.\n<!-- autospec-parent-decomposition:end -->";
     const COMPLETION_SUMMARY: &str = "<!-- autospec-parent-complete:begin -->\nAll child implementation issues for parent #1899 reached a terminal state:\n- #1900\n- #1901\n\nClosing parent issue automatically.\n<!-- autospec-parent-complete:end -->";
     let mut store = SpecStateStore::new();
     let decomposition = store

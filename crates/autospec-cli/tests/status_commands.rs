@@ -55,3 +55,34 @@ fn status_reports_parent_issue_terminal_state_counts() {
     assert_eq!(body["parent_issues"]["pending_children"], 1);
     assert_eq!(body["parent_issues"]["complete_but_stale"], 1);
 }
+
+#[test]
+fn status_reads_shared_parent_state_without_replacing_local_spec_state() {
+    let root = temp_dir("autospec-status-local-specs");
+    let shared = temp_dir("autospec-status-shared-parents");
+    std::fs::create_dir_all(root.join(".autospec/state")).expect("local state dir");
+    std::fs::create_dir_all(shared.join(".autospec/state")).expect("shared state dir");
+    std::fs::write(
+        root.join(".autospec/state/specs.json"),
+        r#"{"schema":1,"specs":[{"spec_id":"v1-local","state":"planned","deferred_reason":null,"superseded_by":null}],"parent_issues":[]}"#,
+    )
+    .expect("local state");
+    std::fs::write(
+        shared.join(".autospec/state/specs.json"),
+        r#"{"schema":1,"specs":[],"parent_issues":[{"parent_issue":10,"child_issues":[{"issue":11,"terminal":false}],"quarantined_parent":true,"decomposition_comment_posted":true,"parent_closed":false}]}"#,
+    )
+    .expect("shared state");
+
+    let output = autospec()
+        .args(["status", "--json"])
+        .current_dir(&root)
+        .env("AUTOSPEC_PARENT_STATE_ROOT", &shared)
+        .output()
+        .expect("status json");
+
+    assert!(output.status.success());
+    let body: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("status JSON document");
+    assert_eq!(body["specs"]["planned"], 1);
+    assert_eq!(body["parent_issues"]["quarantined_parent_decomposed"], 1);
+}

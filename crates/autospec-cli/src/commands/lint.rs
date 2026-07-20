@@ -775,7 +775,7 @@ pub(crate) fn claim_safety_with_config(
     ))
 }
 
-fn configured_safety_trusted_actors() -> Result<Vec<String>, CommandFailure> {
+pub(crate) fn configured_safety_trusted_actors() -> Result<Vec<String>, CommandFailure> {
     let policy = load_issue_safety_policy(None);
     if policy.has_unsupported_pattern {
         return Err(CommandFailure::diagnostic(

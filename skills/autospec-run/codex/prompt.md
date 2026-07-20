@@ -467,6 +467,15 @@ During the normal monitor loop:
 > label transition, and confirms the lowest-ID run-state comment. The monitor
 > never reimplements that safety or lease transition with `gh issue edit`.
 
+0. Reconcile parents whose children may have closed outside autospec before
+   selecting work:
+   ```bash
+   _parent_slug=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")
+   export AUTOSPEC_PARENT_STATE_ROOT="${AUTOSPEC_PARENT_STATE_ROOT:-$HOME/.autospec/parent-state/$_parent_slug}"
+   if ! "${AUTOSPEC_BIN:-autospec}" parent sweep --repo {repo}; then
+     echo "[monitor] WARN: parent sweep failed; remote parent state is unknown and will be retried" >&2
+   fi
+   ```
 1. Run `autospec queue ready --repo {repo} --batch-size "$effective_batch_size"`
    after watchdog reconciliation and profile filtering.
 2. Use `.ready[0].number` as the next issue candidate.
@@ -1322,6 +1331,12 @@ do not fall back to an inline label-swap path.
 >    "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} \
 >      --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" \
 >      --state merged --branch "<BRANCH>" --pr "<PR>" || true
+>    _parent_slug=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")
+>    export AUTOSPEC_PARENT_STATE_ROOT="${AUTOSPEC_PARENT_STATE_ROOT:-$HOME/.autospec/parent-state/$_parent_slug}"
+>    if ! "$AUTOSPEC_CLAIM_BIN" parent reconcile-child --repo {repo} --child "<ISSUE>"; then
+>      gh issue comment "<ISSUE>" --repo {repo} --body "Parent reconciliation failed after merge; remote parent state is unknown and will be retried by the recurring parent sweep."
+>      echo "[monitor] WARN: parent reconciliation failed for merged child #<ISSUE>" >&2
+>    fi
 >    case "$_notify_fired" in *:merged:*) ;; *) _notify_fired="${_notify_fired}:merged:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: merged" "PR #<PR> merged on {repo}" || true ;; esac
 >    ```
 >    The block ends with the admin-merge and merged-state claim release; merge auto-closes the issue.
@@ -1349,10 +1364,10 @@ do not fall back to an inline label-swap path.
 > 10. Cleanup: run `autospec runtime env down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" --purge-maven`; then run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-runtime-worktree-cleanup.sh" /tmp/wt-<BRANCH>`; only after both succeed, run `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`.
 > 11. Report: PR number, outcome, one-paragraph summary.
 >
-> Hard rules: NEVER push to main, force-push, bypass hooks, or touch the umbrella issue. gh CLI only.
+> Hard rules: NEVER push to main, force-push, or bypass hooks. Only `autospec parent` may update or close an umbrella issue. gh CLI only.
 > ```
 >
-> Hard rules for the monitor: ONE issue at a time, sequential. Do NOT touch the umbrella. On transient gh errors retry once. Do NOT ask the user — auto-merge authority is granted in AGENTS.md.
+> Hard rules for the monitor: ONE issue at a time, sequential. Only `autospec parent` may update or close an umbrella issue. On transient gh errors retry once. Do NOT ask the user — auto-merge authority is granted in AGENTS.md.
 >
 > Final output when shutdown: numbered list of every processed issue with PR # and outcome.
 

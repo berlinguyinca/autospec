@@ -502,6 +502,20 @@ Children are written assuming the implementer is a 32B-class local model with **
 
 Capture the umbrella + child issue numbers.
 
+Persist the relationship on GitHub and in the shared per-repository parent-state
+cache before classification. This command also posts a trusted typed
+parent-marker lifecycle comment on every child and the idempotent decomposition
+comment on the parent. Append
+`--quarantined` when the umbrella carries `autospec:needs-human`; otherwise omit
+it. A failure is blocking because an unlinked child could merge without ever
+reconciling its parent.
+
+```bash
+_parent_slug=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")
+export AUTOSPEC_PARENT_STATE_ROOT="${AUTOSPEC_PARENT_STATE_ROOT:-$HOME/.autospec/parent-state/$_parent_slug}"
+"${AUTOSPEC_BIN:-autospec}" parent record --repo {repo} --parent "<UMBRELLA>" --children "<CHILDREN_CSV>"
+```
+
 ## Phase 3.5 — Review and label (delegate)
 
 Dispatch a **foreground subagent** to retro-review the child issues just
