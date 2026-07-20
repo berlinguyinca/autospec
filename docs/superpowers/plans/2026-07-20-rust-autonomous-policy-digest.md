@@ -4,7 +4,7 @@
 
 **Goal:** Complete issue #1602 by binding every persisted Rust main-health cycle receipt to the exact effective repository policy and proving policy reload across foreground invocations.
 
-**Architecture:** `MainHealthConfig` produces a canonical SHA-256 identity from the resolved health branch plus its sorted exact advisory-check set. The CLI computes that identity after branch resolution and persists it in `mainline-health.json` on every foreground invocation, including retained-state invocations, without changing the conductor-state schema.
+**Architecture:** `MainHealthConfig` produces a canonical SHA-256 identity from the resolved health branch plus its sorted exact advisory-check set. The CLI computes that identity after branch resolution and appends it to `main-health-observations.jsonl` on every foreground invocation, including retained-state invocations, without changing the conductor-state schema.
 
 **Tech Stack:** Rust 2021 standard library, the existing `autonomous::waterfall::sha256_hex` helper, fake-`gh` CLI integration tests, Cargo.
 
@@ -12,7 +12,7 @@
 
 - Preserve the existing `.autospec/autonomous.yml` parser and precedence `--branch` > `main_health.branch` > GitHub default branch.
 - Hash the effective resolved branch and sorted exact `ignore_checks`; do not hash raw YAML, comments, field order, or unrelated policy blocks.
-- Persist `effective_policy_digest` in the native `mainline-health.json` receipt on every foreground invocation after successful config parsing and health evaluation.
+- Persist `effective_policy_digest` in each native `main-health-observations.jsonl` receipt on every foreground invocation after successful config parsing and health evaluation.
 - Malformed or unreadable repository configuration must fail before a health decision or receipt write.
 - Do not change the strict `ConductorState` schema, add a dependency, read a global health environment variable, or invoke a shell/helper script.
 
@@ -99,7 +99,7 @@ Stage the two Task 1 files and commit `feat: bind autonomous health policy ident
 **Interfaces:**
 - Consumes: `MainHealthConfig::effective_policy_digest(&resolved_branch)`.
 - Produces: `MainlineHealth::to_json_with_policy_digest(repo, digest)` with an exact `effective_policy_digest` field.
-- Persists: `<autonomous-state-scope>/mainline-health.json` for every evaluated foreground invocation.
+- Persists: `<autonomous-state-scope>/main-health-observations.jsonl` for every evaluated foreground invocation.
 
 - [ ] **Step 1: Write failing receipt and reload tests**
 
@@ -115,7 +115,7 @@ assert!(json.contains(
 ));
 ```
 
-The CLI fixture must run foreground with one valid repository config, read `mainline-health.json`, rewrite the same repository's config to a second valid branch/check policy, run foreground again with retained conductor state, and require the persisted digest to change. It must also assert that malformed config leaves the prior receipt bytes unchanged.
+The CLI fixture must run foreground with one valid repository config, read `main-health-observations.jsonl`, rewrite the same repository's config to a second valid branch/check policy, run foreground again with retained conductor state, and require a second appended observation whose digest changes. It must also assert that malformed config leaves the prior observation bytes unchanged.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
