@@ -5426,6 +5426,19 @@ mod foreground_tests {
     }
 
     #[test]
+    fn executor_child_rejects_a_foreign_typed_result() {
+        let result = executor_child_result(
+            r#"{"repo":"other/repo","issue":42,"worker_id":"worker-42","branch":"main","claim_id":"claim-42","outcome":"blocked","reason":"x"}"#,
+            "test/repo",
+            42,
+            "worker-42",
+            "main",
+            "claim-42",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn foreground_retry_state_schedules_another_bounded_claim_attempt() {
         let state = ConductorState::new("test/repo", ConductorScope::Slice, 1)
             .expect("state")
