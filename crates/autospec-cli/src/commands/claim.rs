@@ -789,14 +789,40 @@ pub(crate) fn recover_implementer_wait_failure(
     let Some(selected) = select_run_state(&comments, repo, issue) else {
         return Ok(WaitFailureRecovery::OwnershipLost);
     };
-    let already = is_wait_failure_owner(&selected.record, worker_id, branch);
-    if !already && !has_executor_claim_owner(&selected.record, worker_id, branch) {
+    if !has_active_executor_claim(
+        &comments,
+        &selected.record,
+        &selected.server_updated_at,
+        worker_id,
+        branch,
+    ) {
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
-    if !already && !persist_wait_failure(repo, issue, worker_id, branch, comments, selected.record)?
-    {
+
+    let evidence = wait_failure_evidence(repo, issue, worker_id, branch, session_id);
+    let already = executor_result_evidence_exists(&comments, &evidence);
+    if !already {
+        create_comment(repo, issue, &evidence.to_marked_comment())?;
+    }
+    let confirmed_comments = list_comments(repo, issue)?;
+    if !executor_result_evidence_exists(&confirmed_comments, &evidence) {
+        return Err(CommandFailure::diagnostic(
+            "implementer wait-failure evidence was not persisted",
+        ));
+    }
+    let Some(confirmed) = select_run_state(&confirmed_comments, repo, issue) else {
+        return Ok(WaitFailureRecovery::OwnershipLost);
+    };
+    if !has_active_executor_claim(
+        &confirmed_comments,
+        &confirmed.record,
+        &confirmed.server_updated_at,
+        worker_id,
+        branch,
+    ) {
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
+
     requeue_wait_failure(repo, issue)?;
     upsert_wait_failure_comment(repo, issue, worker_id, branch, session_id, diagnostic)?;
     Ok(if already {
@@ -806,28 +832,23 @@ pub(crate) fn recover_implementer_wait_failure(
     })
 }
 
-fn is_wait_failure_owner(record: &RunStateRecord, worker_id: &str, branch: &str) -> bool {
-    record.worker_id == worker_id
-        && record.branch == branch
-        && record.state == "failed"
-        && record.step == "implementer_wait_failed"
-}
-
-fn persist_wait_failure(
+fn wait_failure_evidence(
     repo: &str,
     issue: u64,
     worker_id: &str,
     branch: &str,
-    comments: Vec<autospec_core::claim::RemoteComment>,
-    mut record: RunStateRecord,
-) -> Result<bool, CommandFailure> {
-    record.state = "failed".into();
-    record.step = "implementer_wait_failed".into();
-    record.updated_at = utc_now_iso()?;
-    upsert_record(repo, &comments, &record)?;
-    let confirmed_comments = list_comments(repo, issue)?;
-    Ok(select_run_state(&confirmed_comments, repo, issue)
-        .is_some_and(|selected| is_wait_failure_owner(&selected.record, worker_id, branch)))
+    session_id: &str,
+) -> ExecutorResultEvidence {
+    ExecutorResultEvidence::new(
+        repo,
+        issue,
+        worker_id,
+        branch,
+        "failed",
+        None,
+        "implementer_wait_failed",
+        format!("implementer-wait-failed:{session_id}"),
+    )
 }
 
 fn requeue_wait_failure(repo: &str, issue: u64) -> Result<(), CommandFailure> {

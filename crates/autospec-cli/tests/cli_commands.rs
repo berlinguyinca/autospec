@@ -3768,7 +3768,8 @@ fn autonomous_implementer_wait_failed_requeues_exact_owner_with_bounded_comment(
         String::from_utf8_lossy(&output.stdout).contains("\"event\":\"implementer_wait_failed\"")
     );
     let remote = std::fs::read_to_string(&state).unwrap();
-    assert!(remote.contains("\\\"state\\\":\\\"failed\\\""));
+    assert!(remote.contains("\\\"outcome\\\":\\\"failed\\\""));
+    assert!(remote.contains("\\\"state\\\":\\\"claimed\\\""));
     assert!(remote.contains("autospec-implementer-wait-failed"));
     assert!(remote.contains("session-real-7"));
     assert!(remote.contains("[REDACTED]"));
@@ -3798,6 +3799,75 @@ fn autonomous_implementer_wait_failed_does_not_touch_successor_claim() {
     assert!(!calls.contains("issue\nedit"));
     assert!(!calls.contains("issue\ncomment"));
     assert!(!calls.contains("-X\nPATCH"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_does_not_requeue_successor_won_during_recovery() {
+    let root = temp_dir("autospec-wait-race");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+
+    let output = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_RACE_SUCCESSOR", "1")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""));
+    let remote = std::fs::read_to_string(&state).unwrap();
+    assert!(remote.contains("worker-b"));
+    assert!(remote.contains("feat/next"));
+    let calls = std::fs::read_to_string(log).unwrap();
+    assert!(!calls.contains("issue\nedit"));
+    assert!(!calls.contains("issues/comments/100"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_rejects_stale_and_terminal_claims() {
+    for (name, comments) in [
+        (
+            "stale",
+            wait_failure_comments("worker-a", "feat/test", "claimed")
+                .replace("2099-07-19T00:00:00Z", "2000-01-01T00:00:00Z"),
+        ),
+        (
+            "failed-state",
+            wait_failure_comments("worker-a", "feat/test", "failed"),
+        ),
+        (
+            "terminal",
+            wait_failure_terminal_comments("worker-a", "feat/test"),
+        ),
+    ] {
+        let root = temp_dir(&format!("autospec-wait-{name}"));
+        let bin = root.join("bin");
+        let state = root.join("comments.json");
+        let log = root.join("gh.log");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(&state, comments).unwrap();
+        write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+
+        let output = wait_failure_command(&bin, &state, &log).output().unwrap();
+
+        assert!(output.status.success(), "{name}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""),
+            "{name}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        let calls = std::fs::read_to_string(log).unwrap();
+        assert!(!calls.contains("issue\nedit"), "{name}");
+        assert!(!calls.contains("issue\ncomment"), "{name}");
+        assert!(!calls.contains("-X\nPATCH"), "{name}");
+    }
 }
 
 #[test]
@@ -3849,11 +3919,11 @@ fn autonomous_implementer_wait_failed_is_idempotent_and_surfaces_comment_failure
     assert!(String::from_utf8_lossy(&failed.stderr).contains("create run-state comment"));
     assert!(std::fs::read_to_string(&state)
         .unwrap()
-        .contains("\\\"state\\\":\\\"failed\\\""));
+        .contains("\\\"outcome\\\":\\\"failed\\\""));
 }
 
 #[test]
-fn autonomous_implementer_wait_failed_does_not_requeue_until_failed_state_is_confirmed() {
+fn autonomous_implementer_wait_failed_does_not_requeue_until_failure_evidence_is_confirmed() {
     let root = temp_dir("autospec-wait-unconfirmed");
     let bin = root.join("bin");
     let state = root.join("comments.json");
@@ -3866,14 +3936,16 @@ fn autonomous_implementer_wait_failed_does_not_requeue_until_failed_state_is_con
     .unwrap();
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
     let output = wait_failure_command(&bin, &state, &log)
-        .env("AUTOSPEC_WAIT_PATCH_NOOP", "1")
+        .env("AUTOSPEC_WAIT_EVIDENCE_NOOP", "1")
         .output()
         .unwrap();
-    assert!(output.status.success());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""));
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("implementer wait-failure evidence was not persisted"));
     let calls = std::fs::read_to_string(log).unwrap();
     assert!(!calls.contains("issue\nedit"));
-    assert!(!calls.contains("issue\ncomment"));
+    assert_eq!(calls.matches("issue\ncomment").count(), 1);
+    assert!(!calls.contains("autospec-implementer-wait-failed"));
 }
 
 fn wait_failure_command(
@@ -3911,8 +3983,14 @@ fn wait_failure_command(
 
 fn wait_failure_comments(worker: &str, branch: &str, state: &str) -> String {
     format!(
-        r#"[{{"id":100,"updated_at":"2026-07-19T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"{worker}\",\"state\":\"{state}\",\"branch\":\"{branch}\",\"pr\":\"\",\"step\":\"{state}\",\"paths\":[],\"claimed_at\":\"2026-07-19T00:00:00Z\",\"updated_at\":\"2026-07-19T00:00:00Z\",\"ttl_seconds\":10800}}\n<!-- autospec-run-state:end -->"}}]"#
+        r#"[{{"id":100,"updated_at":"2099-07-19T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"{worker}\",\"state\":\"{state}\",\"branch\":\"{branch}\",\"pr\":\"\",\"step\":\"{state}\",\"paths\":[],\"claimed_at\":\"2099-07-19T00:00:00Z\",\"updated_at\":\"2099-07-19T00:00:00Z\",\"ttl_seconds\":10800}}\n<!-- autospec-run-state:end -->"}}]"#
     )
+}
+
+fn wait_failure_terminal_comments(worker: &str, branch: &str) -> String {
+    let active = wait_failure_comments(worker, branch, "claimed");
+    let terminal = r#"{"id":99,"updated_at":"2099-07-19T00:00:01Z","body":"<!-- autospec-run-terminal:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"merged\",\"branch\":\"feat/test\",\"pr\":\"2273\",\"finalized_at\":\"2099-07-19T00:00:01Z\"}\n<!-- autospec-run-terminal:end -->"}"#;
+    format!("[{},{}]", &active[1..active.len() - 1], terminal)
 }
 
 const WAIT_FAILURE_GH: &str = r#"#!/bin/sh
@@ -3920,15 +3998,23 @@ set -eu
 printf '%s\n' "$@" >> "$AUTOSPEC_WAIT_LOG"
 if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then cat "$AUTOSPEC_WAIT_STATE"; exit 0; fi
 if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/comments/100 ]; then
-  [ "${AUTOSPEC_WAIT_PATCH_NOOP:-0}" != 1 ] || exit 0
   body=''; shift 2; while [ "$#" -gt 0 ]; do case "$1" in -f) body="${2#body=}"; shift 2;; *) shift;; esac; done
   jq --arg body "$body" '.[0].body=$body' "$AUTOSPEC_WAIT_STATE" > "$AUTOSPEC_WAIT_STATE.tmp" && mv "$AUTOSPEC_WAIT_STATE.tmp" "$AUTOSPEC_WAIT_STATE"; exit 0
 fi
 if [ "$1" = issue ] && [ "$2" = edit ]; then exit 0; fi
 if [ "$1" = issue ] && [ "$2" = comment ]; then
-  [ "${AUTOSPEC_WAIT_COMMENT_FAIL:-0}" != 1 ] || exit 44
   body=''; shift 2; while [ "$#" -gt 0 ]; do case "$1" in --body) body="$2"; shift 2;; *) shift;; esac; done
-  jq --arg body "$body" '. + [{id:101,updated_at:"2026-07-19T00:00:01Z",body:$body}]' "$AUTOSPEC_WAIT_STATE" > "$AUTOSPEC_WAIT_STATE.tmp" && mv "$AUTOSPEC_WAIT_STATE.tmp" "$AUTOSPEC_WAIT_STATE"; exit 0
+  if [ "${AUTOSPEC_WAIT_EVIDENCE_NOOP:-0}" = 1 ] && printf '%s' "$body" | grep -Fq 'autospec-executor-result:begin'; then exit 0; fi
+  if printf '%s' "$body" | grep -Fq 'autospec-implementer-wait-failed'; then
+    [ "${AUTOSPEC_WAIT_COMMENT_FAIL:-0}" != 1 ] || exit 44
+  fi
+  if [ "${AUTOSPEC_WAIT_RACE_SUCCESSOR:-0}" = 1 ] && printf '%s' "$body" | grep -Fq 'autospec-executor-result:begin'; then
+    successor='<!-- autospec-run-state:begin -->
+{"schema":1,"repo":"testorg/testrepo","issue":42,"worker_id":"worker-b","state":"claimed","branch":"feat/next","pr":"","step":"claimed","paths":[],"claimed_at":"2099-07-19T00:00:01Z","updated_at":"2099-07-19T00:00:01Z","ttl_seconds":10800}
+<!-- autospec-run-state:end -->'
+    jq --arg body "$body" --arg successor "$successor" '.[0].body=$successor | . + [{id:101,updated_at:"2099-07-19T00:00:01Z",body:$body}]' "$AUTOSPEC_WAIT_STATE" > "$AUTOSPEC_WAIT_STATE.tmp" && mv "$AUTOSPEC_WAIT_STATE.tmp" "$AUTOSPEC_WAIT_STATE"; exit 0
+  fi
+  jq --arg body "$body" '. + [{id:(([.[].id] | max) + 1),updated_at:"2099-07-19T00:00:01Z",body:$body}]' "$AUTOSPEC_WAIT_STATE" > "$AUTOSPEC_WAIT_STATE.tmp" && mv "$AUTOSPEC_WAIT_STATE.tmp" "$AUTOSPEC_WAIT_STATE"; exit 0
 fi
 exit 0
 "#;
