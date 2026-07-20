@@ -333,7 +333,7 @@ current_state="$(autospec claim state read --issue <ISSUE> --repo <REPO> 2>/dev/
 worker_id="$(printf '%s' "$current_state" | jq -r '.worker_id // empty' 2>/dev/null || true)"
 [ -n "$worker_id" ] || worker_id="${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:phase4:$$}"
 branch_name="$(git branch --show-current)"
-bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/heartbeat-write.sh" --issue <ISSUE> --repo <REPO> --branch "$branch_name" --step pr_created --pr "$pr_number" || exit 1
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/heartbeat-write.sh" --issue <ISSUE> --repo <REPO> --branch "$branch_name" --step pr_created --pr "$pr_number" --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --session-id "$WAIT_TARGET_SESSION_ID" || exit 1
 autospec claim state upsert --issue <ISSUE> --repo <REPO> --worker-id "$worker_id" --state pr_created --step pr_created --branch "$branch_name" --pr "$pr_number" || exit 1
 ```
 

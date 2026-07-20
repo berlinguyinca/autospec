@@ -525,6 +525,8 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
             "worker-a",
             "--branch",
             "feat/test",
+            "--session-id",
+            "session-real-7",
         ])
         .env("PATH", path_with(&bin))
         .env("AUTOSPEC_CLAIM_LOG", &log)
@@ -539,8 +541,19 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"claimed\":true"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"claimed\":true"));
+    assert!(stdout.contains("\"claim_id\":\"claim-"));
+    assert!(stdout.contains("\"session_id\":\"session-real-7\""));
     assert!(heartbeats.join("o7_testorg_r8_testrepo/42.json").exists());
+    let heartbeat = std::fs::read_to_string(heartbeats.join("o7_testorg_r8_testrepo/42.json"))
+        .expect("claim heartbeat");
+    assert!(heartbeat.contains("\"worker_id\":\"worker-a\""));
+    assert!(heartbeat.contains("\"claim_id\":\"claim-"));
+    assert!(heartbeat.contains("\"session_id\":\"session-real-7\""));
+    assert!(heartbeats
+        .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d7265616c2d37.json")
+        .exists());
     assert!(std::fs::read_to_string(&comments)
         .expect("claim comments")
         .contains("worker-a"));
