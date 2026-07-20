@@ -254,6 +254,32 @@ pub(crate) fn lifecycle_claim_evidence(
     )))
 }
 
+/// Confirm that premerge evidence belongs to the one active claim generation.
+/// This is intentionally observational: it reads the deterministic claim
+/// linearization point without refreshing or otherwise mutating the lease.
+pub(crate) fn active_claim_generation_matches(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    claim_id: &str,
+    branch: &str,
+) -> Result<bool, CommandFailure> {
+    let comments = list_comments(repo, issue)?;
+    if terminal_merged_exists(&comments) {
+        return Ok(false);
+    }
+    let Some(selected) = select_run_state(&comments, repo, issue) else {
+        return Ok(false);
+    };
+    Ok(selected.record.repo == repo
+        && selected.record.issue == issue
+        && selected.record.worker_id == worker_id
+        && selected.record.claim_id.as_deref() == Some(claim_id)
+        && selected.record.branch == branch
+        && selected.record.state == "claimed"
+        && server_lease_is_fresh(&selected.server_updated_at, claim_ttl_seconds()))
+}
+
 fn lifecycle_lease_freshness(server_timestamp: &str) -> LeaseFreshness {
     let Some(updated_at) = parse_iso_timestamp(server_timestamp) else {
         return LeaseFreshness::Stale;

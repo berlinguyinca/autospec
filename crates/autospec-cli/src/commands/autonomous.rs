@@ -32,6 +32,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
+mod premerge;
 // Task 3 wires the closed dispatcher into the foreground cycle.
 #[allow(dead_code)]
 mod foreground_waterfall;
@@ -166,6 +167,9 @@ impl StopMode {
 }
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
+    if args.first().is_some_and(|arg| arg == "premerge") {
+        return premerge::run(&args[1..]);
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "implementer-wait-failed")
