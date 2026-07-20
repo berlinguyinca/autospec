@@ -114,10 +114,9 @@ fn canonical_effective_policy_digests_are_isolated_per_repository() {
         "main_health:\n  ignore_checks:\n    - E2E Tests\n    - Unit Tests\n  branch: main\n",
     )
     .expect("reordered repository config parses");
-    let different_checks = AutonomousConfig::parse(
-        "main_health:\n  branch: main\n  ignore_checks:\n    - Lint\n",
-    )
-    .expect("different advisory checks parse");
+    let different_checks =
+        AutonomousConfig::parse("main_health:\n  branch: main\n  ignore_checks:\n    - Lint\n")
+            .expect("different advisory checks parse");
     let second = AutonomousConfig::parse(
         "main_health:\n  branch: release\n  ignore_checks:\n    - Unit Tests\n    - E2E Tests\n",
     )
