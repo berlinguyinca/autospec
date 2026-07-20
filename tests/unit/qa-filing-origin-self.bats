@@ -15,7 +15,7 @@ if [ "$1 $2" = "label create" ] && [ -n "${GH_LABEL_FAIL:-}" ]; then
   exit 1
 fi
 if [ "$1 $2" = "issue list" ]; then
-  echo "0"
+  echo "[]"
   exit 0
 fi
 if [ "$1 $2" = "issue create" ]; then

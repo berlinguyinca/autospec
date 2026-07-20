@@ -1,0 +1,232 @@
+#!/usr/bin/env bats
+
+setup() {
+    REPO_FIXTURE="$BATS_TEST_TMPDIR/repo"
+    BIN_DIR="$BATS_TEST_TMPDIR/bin"
+    GH_LOG="$BATS_TEST_TMPDIR/gh-mutations.log"
+    OPEN_JSON="$BATS_TEST_TMPDIR/open.json"
+    CLOSED_JSON="$BATS_TEST_TMPDIR/closed.json"
+    VERDICT="$BATS_TEST_TMPDIR/verdict.json"
+    mkdir -p "$REPO_FIXTURE/src" "$BIN_DIR"
+    printf '[]\n' > "$OPEN_JSON"
+    printf '[]\n' > "$CLOSED_JSON"
+    : > "$GH_LOG"
+
+    cat > "$REPO_FIXTURE/src/classify.py" <<'PY'
+import ast
+
+def classify(name):
+    if "acid" in name:
+        return 1
+    if "base" in name:
+        return 2
+    if "salt" in name:
+        return 3
+    return ast.parse(name)
+PY
+
+    git -C "$REPO_FIXTURE" init -q
+    git -C "$REPO_FIXTURE" config user.email test@example.com
+    git -C "$REPO_FIXTURE" config user.name Test
+    git -C "$REPO_FIXTURE" add src/classify.py
+    git -C "$REPO_FIXTURE" commit -qm fixture
+
+    cat > "$BIN_DIR/gh" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "$1 $2" = "issue list" ]; then
+    state=""
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--state" ]; then state="$2"; shift 2; else shift; fi
+    done
+    if [ "${GH_LIST_FAIL_STATE:-}" = "$state" ]; then exit 1; fi
+    if [ "$state" = open ]; then cat "$OPEN_JSON"; else cat "$CLOSED_JSON"; fi
+    exit 0
+fi
+if [ "$1 $2" = "label create" ]; then
+    printf 'label\n' >> "$GH_LOG"
+    exit 0
+fi
+if [ "$1 $2" = "issue create" ]; then
+    shift 2
+    title="" body=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --title) title="$2"; shift 2 ;;
+            --body) body="$2"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    printf 'create\n' >> "$GH_LOG"
+    printf '%s\n' "$title" > "$BATS_TEST_TMPDIR/create-title"
+    printf '%s\n' "$body" > "$BATS_TEST_TMPDIR/create-body"
+    printf 'https://example.test/issues/99\n'
+    exit 0
+fi
+if [ "$1 $2" = "issue comment" ]; then
+    number="$3"
+    shift 3
+    body_file=""
+    while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--body-file" ]; then body_file="$2"; shift 2; else shift; fi
+    done
+    printf 'comment:%s\n' "$number" >> "$GH_LOG"
+    cp "$body_file" "$BATS_TEST_TMPDIR/recurrence-body"
+    [ "${GH_COMMENT_FAIL:-0}" != 1 ]
+    exit
+fi
+if [ "$1 $2" = "issue reopen" ]; then
+    printf 'reopen:%s\n' "$3" >> "$GH_LOG"
+    [ "${GH_REOPEN_FAIL:-0}" != 1 ]
+    exit
+fi
+exit 2
+SH
+    chmod +x "$BIN_DIR/gh"
+    export BATS_TEST_TMPDIR REPO_FIXTURE BIN_DIR GH_LOG OPEN_JSON CLOSED_JSON VERDICT
+}
+
+marker() {
+    local scope="$1" blob="$2" rule="${3:-STRING_MATCH_DOMAIN_LOGIC}"
+    printf '<!-- autospec-qa-brute-force:v1 rule=%s path=src/classify.py scope=%s blob=%s -->' "$rule" "$scope" "$blob"
+}
+
+catalog() {
+    local output="$1" number="$2" state="$3" marker_value="$4"
+    jq -n --argjson number "$number" --arg state "$state" --arg body "$marker_value" \
+        '[{number:$number,state:$state,title:"existing",body:$body,url:("https://example.test/issues/"+($number|tostring))}]' > "$output"
+}
+
+run_sweep() {
+    run env PATH="$BIN_DIR:$PATH" REPO_DIR="$REPO_FIXTURE" VERDICT_FILE="$VERDICT" \
+        OPEN_JSON="$OPEN_JSON" CLOSED_JSON="$CLOSED_JSON" GH_LOG="$GH_LOG" \
+        GH_LIST_FAIL_STATE="${GH_LIST_FAIL_STATE:-}" GH_COMMENT_FAIL="${GH_COMMENT_FAIL:-0}" \
+        GH_REOPEN_FAIL="${GH_REOPEN_FAIL:-0}" BATS_TEST_TMPDIR="$BATS_TEST_TMPDIR" \
+        bash "$BATS_TEST_DIRNAME/../../scripts/qa-brute-force-sweep.sh"
+}
+
+@test "exact open marker suppresses every GitHub mutation and records repo-relative identity" {
+    blob="$(git -C "$REPO_FIXTURE" hash-object src/classify.py)"
+    catalog "$OPEN_JSON" 41 OPEN "$(marker '<file>' "$blob")"
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    [ ! -s "$GH_LOG" ]
+    grep -q '"file":"src/classify.py"' "$VERDICT"
+    grep -q '"scope":"<file>"' "$VERDICT"
+    grep -q '"filing_status":"existing-open"' "$VERDICT"
+    ! grep -q '/tmp/' "$VERDICT"
+}
+
+@test "exact unchanged closed marker is not reopened or replaced" {
+    blob="$(git -C "$REPO_FIXTURE" hash-object src/classify.py)"
+    catalog "$CLOSED_JSON" 42 CLOSED "$(marker '<file>' "$blob")"
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    [ ! -s "$GH_LOG" ]
+    grep -q '"filing_status":"existing-closed"' "$VERDICT"
+}
+
+@test "changed blob comments recurrence evidence then reopens the same closed issue" {
+    catalog "$CLOSED_JSON" 43 CLOSED "$(marker '<file>' 0000000000000000000000000000000000000000)"
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GH_LOG")" = $'comment:43\nreopen:43' ]
+    grep -q 'Previous blob: `0000000000000000000000000000000000000000`' "$BATS_TEST_TMPDIR/recurrence-body"
+    grep -q 'Current blob:' "$BATS_TEST_TMPDIR/recurrence-body"
+    grep -q '"filing_status":"reopened"' "$VERDICT"
+}
+
+@test "recurrence mutation failure never creates a replacement issue" {
+    catalog "$CLOSED_JSON" 44 CLOSED "$(marker '<file>' 0000000000000000000000000000000000000000)"
+    export GH_COMMENT_FAIL=1
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GH_LOG")" = 'comment:44' ]
+    grep -q '"filing_status":"not-filed-comment-failed"' "$VERDICT"
+
+    : > "$GH_LOG"
+    : > "$VERDICT"
+    export GH_COMMENT_FAIL=0
+    export GH_REOPEN_FAIL=1
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    ! grep -q '^create$' "$GH_LOG"
+    grep -q '"filing_status":"not-filed-reopen-failed"' "$VERDICT"
+}
+
+@test "malformed or failed catalog lookup fails closed before all mutations" {
+    printf '{bad json\n' > "$OPEN_JSON"
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    [ ! -s "$GH_LOG" ]
+    grep -q '"filing_status":"not-filed-catalog"' "$VERDICT"
+
+    : > "$VERDICT"
+    export GH_LIST_FAIL_STATE=closed
+    printf '[]\n' > "$OPEN_JSON"
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ ! -s "$GH_LOG" ]
+    grep -q '"filing_status":"not-filed-catalog"' "$VERDICT"
+}
+
+@test "first-function churn keeps STRING_MATCH_DOMAIN_LOGIC at file scope" {
+    old_blob="$(git -C "$REPO_FIXTURE" hash-object src/classify.py)"
+    catalog "$CLOSED_JSON" 45 CLOSED "$(marker '<file>' "$old_blob")"
+    sed -i '3i def helper():\n    return 0\n' "$REPO_FIXTURE/src/classify.py"
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GH_LOG")" = $'comment:45\nreopen:45' ]
+    grep -q '"scope":"<file>"' "$VERDICT"
+    ! grep -q '"scope":"helper"' "$VERDICT"
+}
+
+@test "a distinct signature creates an origin:self issue with marker and no absolute path" {
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    grep -q '^label$' "$GH_LOG"
+    grep -q '^create$' "$GH_LOG"
+    grep -q 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/classify.py scope=<file> blob=' "$BATS_TEST_TMPDIR/create-body"
+    ! grep -q '/tmp/' "$BATS_TEST_TMPDIR/create-title"
+    ! grep -q '/tmp/' "$BATS_TEST_TMPDIR/create-body"
+    grep -q '"filing_status":"created"' "$VERDICT"
+}
+
+@test "REPEATED_STRUCTURE_AS_CODE identity uses the detected function scope" {
+    rm "$REPO_FIXTURE/src/classify.py"
+    cat > "$REPO_FIXTURE/src/repeated.py" <<'PY'
+def dispatch(name):
+    if "one" in name:
+        return 1
+    elif "two" in name:
+        return 2
+    elif "three" in name:
+        return 3
+    elif "four" in name:
+        return 4
+    elif "five" in name:
+        return 5
+PY
+    git -C "$REPO_FIXTURE" add src/repeated.py
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    grep -q 'autospec-qa-brute-force:v1 rule=REPEATED_STRUCTURE_AS_CODE path=src/repeated.py scope=dispatch blob=' "$BATS_TEST_TMPDIR/create-body"
+    grep -q '"rule_id":"REPEATED_STRUCTURE_AS_CODE".*"scope":"dispatch"' "$VERDICT"
+}
