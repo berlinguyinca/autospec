@@ -30,6 +30,7 @@ pub(super) struct ResilienceAdmission {
     pub failure_count: u8,
     pub capacity: CapacityDecision,
     pub lease: Option<ConductorLeaseDecision>,
+    pub spend: ResilienceSpend,
 }
 
 pub(super) struct ResilienceStatus {
@@ -40,7 +41,8 @@ pub(super) struct ResilienceStatus {
 
 pub(super) struct ResilienceSpend {
     pub tokens: u64,
-    pub issues: u64,
+    pub filed_issues: u64,
+    pub budget_issues: u64,
 }
 
 pub(super) enum LifecycleAdmissionError {
@@ -98,8 +100,6 @@ struct LeaseTransaction {
 impl LeaseTransaction {
     #[cfg(unix)]
     fn try_open(path: &Path) -> Result<Self, StoreError> {
-        use std::os::fd::AsRawFd;
-
         let parent = path.parent().expect("lease lock path has a parent");
         fs::create_dir_all(parent).map_err(|error| {
             StoreError::Diagnostic(format!(
@@ -120,25 +120,13 @@ impl LeaseTransaction {
                 ))
             })?;
 
-        unsafe extern "C" {
-            fn flock(fd: i32, operation: i32) -> i32;
-        }
-        const LOCK_EX: i32 = 2;
-        const LOCK_NB: i32 = 4;
-        // SAFETY: `file` remains open for the transaction lifetime and `LOCK_EX | LOCK_NB`
-        // is the documented POSIX non-blocking exclusive advisory-lock operation.
-        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
-            Ok(Self { _file: file })
-        } else {
-            let error = io::Error::last_os_error();
-            if error.kind() == io::ErrorKind::WouldBlock {
-                Err(StoreError::Held)
-            } else {
-                Err(StoreError::Diagnostic(format!(
-                    "cannot lock resilience lease {}: {error}",
-                    path.display()
-                )))
-            }
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(fs::TryLockError::WouldBlock) => Err(StoreError::Held),
+            Err(fs::TryLockError::Error(error)) => Err(StoreError::Diagnostic(format!(
+                "cannot lock resilience lease {}: {error}",
+                path.display()
+            ))),
         }
     }
 
@@ -370,7 +358,7 @@ impl ResilienceStore {
         let capacity = decide_capacity(CapacityInput::new(
             spend.tokens,
             usage_cap,
-            spend.issues,
+            spend.budget_issues,
             issue_cap,
         ));
         let lease = stored_state
@@ -381,6 +369,11 @@ impl ResilienceStore {
                 failure_count,
                 capacity,
                 lease,
+                spend: ResilienceSpend {
+                    tokens: spend.tokens,
+                    filed_issues: spend.filed_issues,
+                    budget_issues: spend.budget_issues,
+                },
             },
             stored_state,
         ))
@@ -653,7 +646,8 @@ pub(super) fn spend_status(repo: &str) -> Result<ResilienceSpend, LifecycleAdmis
     let spend = store.read_spend().map_err(store_error_to_lifecycle_error)?;
     Ok(ResilienceSpend {
         tokens: spend.tokens,
-        issues: spend.issues,
+        filed_issues: spend.filed_issues,
+        budget_issues: spend.budget_issues,
     })
 }
 
@@ -666,9 +660,9 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
     let store = ResilienceStore::from_env(&options.repo).map_err(CommandFailure::diagnostic)?;
     let admission = match store.admit(options.issue, options.usage_cap, options.issue_cap) {
         Ok(admission) => admission,
-        Err(StoreError::Reject(reject)) => return emit(Decision::Reject(reject.reason())),
+        Err(StoreError::Reject(reject)) => return emit(Decision::Reject(reject.reason()), None),
         Err(StoreError::Diagnostic(message)) => return Err(CommandFailure::diagnostic(message)),
-        Err(StoreError::Held) => return emit(Decision::Held),
+        Err(StoreError::Held) => return emit(Decision::Held, None),
         Err(StoreError::TokenMismatch) => {
             return Err(CommandFailure::diagnostic(
                 "resilience token mismatch is not valid for read-only admission".to_string(),
@@ -681,7 +675,7 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
         }
     };
     if let Some(ConductorLeaseDecision::Held) = admission.lease {
-        return emit(Decision::Held);
+        return emit(Decision::Held, Some(&admission.spend));
     }
     if matches!(
         decide_lifecycle(
@@ -690,15 +684,17 @@ pub(super) fn run(args: &[String]) -> Result<(), CommandFailure> {
         ),
         LifecycleDecision::Reject(LifecycleReject::FailureCap)
     ) {
-        return emit(Decision::Reject("failure_cap"));
+        return emit(Decision::Reject("failure_cap"), Some(&admission.spend));
     }
     match admission.capacity {
-        CapacityDecision::UsageCap => emit(Decision::Park("usage_cap")),
-        CapacityDecision::IssueCap => emit(Decision::Park("issue_cap")),
+        CapacityDecision::UsageCap => emit(Decision::Park("usage_cap"), Some(&admission.spend)),
+        CapacityDecision::IssueCap => emit(Decision::Park("issue_cap"), Some(&admission.spend)),
         CapacityDecision::WithinCap => match admission.lease {
-            Some(ConductorLeaseDecision::Reclaim(reason)) => emit(Decision::Reclaim(reason)),
-            Some(ConductorLeaseDecision::Held) => emit(Decision::Held),
-            None => emit(Decision::Available),
+            Some(ConductorLeaseDecision::Reclaim(reason)) => {
+                emit(Decision::Reclaim(reason), Some(&admission.spend))
+            }
+            Some(ConductorLeaseDecision::Held) => emit(Decision::Held, Some(&admission.spend)),
+            None => emit(Decision::Available, Some(&admission.spend)),
         },
     }
 }
@@ -800,23 +796,24 @@ enum Decision {
     Reject(&'static str),
 }
 
-fn emit(decision: Decision) -> Result<(), CommandFailure> {
+fn emit(decision: Decision, spend: Option<&ResilienceSpend>) -> Result<(), CommandFailure> {
+    let spend_suffix = spend.map(spend_json_suffix).unwrap_or_default();
     let (body, exit_code) = match decision {
-        Decision::Available => ("{\"decision\":\"available\"}".to_string(), 0),
-        Decision::Held => ("{\"decision\":\"held\"}".to_string(), 20),
+        Decision::Available => (format!("{{\"decision\":\"available\"{spend_suffix}}}"), 0),
+        Decision::Held => (format!("{{\"decision\":\"held\"{spend_suffix}}}"), 20),
         Decision::Reclaim(reason) => (
             format!(
-                "{{\"decision\":\"reclaim\",\"reason\":\"{}\"}}",
+                "{{\"decision\":\"reclaim\",\"reason\":\"{}\"{spend_suffix}}}",
                 reclaim_name(reason)
             ),
             0,
         ),
         Decision::Park(reason) => (
-            format!("{{\"decision\":\"park\",\"reason\":\"{reason}\"}}"),
+            format!("{{\"decision\":\"park\",\"reason\":\"{reason}\"{spend_suffix}}}"),
             20,
         ),
         Decision::Reject(reason) => (
-            format!("{{\"decision\":\"reject\",\"reason\":\"{reason}\"}}"),
+            format!("{{\"decision\":\"reject\",\"reason\":\"{reason}\"{spend_suffix}}}"),
             3,
         ),
     };
@@ -826,6 +823,13 @@ fn emit(decision: Decision) -> Result<(), CommandFailure> {
     } else {
         Err(CommandFailure::status(String::new(), exit_code))
     }
+}
+
+fn spend_json_suffix(spend: &ResilienceSpend) -> String {
+    format!(
+        ",\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}}",
+        spend.tokens, spend.budget_issues, spend.filed_issues, spend.budget_issues
+    )
 }
 
 fn reclaim_name(reason: ConductorLeaseReclaim) -> &'static str {
@@ -943,12 +947,15 @@ fn pid_is_dead(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return true;
     }
-    unsafe extern "C" {
-        fn kill(pid: i32, signal: i32) -> i32;
-    }
-    // SAFETY: POSIX `kill(pid, 0)` only probes process existence; it does not send a signal.
-    let result = unsafe { kill(pid as i32, 0) };
-    result != 0 && io::Error::last_os_error().raw_os_error() != Some(1)
+    pid_probe_is_dead(nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(pid as i32),
+        None,
+    ))
+}
+
+#[cfg(unix)]
+fn pid_probe_is_dead(result: Result<(), nix::errno::Errno>) -> bool {
+    matches!(result, Err(nix::errno::Errno::ESRCH))
 }
 
 #[cfg(not(unix))]
@@ -958,15 +965,58 @@ fn pid_is_dead(_pid: u32) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests {
+    use super::super::waterfall::retry_transient_lock;
     use super::*;
     use autospec_core::coordination::{QueueGateCounts, ReadyQueuePlan, WorkerCap};
-    use std::process::Command;
+    use std::process::{Child, Command};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
     const LEASE_LOCK_TEST_ROOT: &str = "AUTOSPEC_LEASE_LOCK_TEST_ROOT";
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    struct ChildGuard(Child);
+
+    impl ChildGuard {
+        fn stop_and_reap(&mut self) {
+            self.0.kill().expect("stop liveness child");
+            self.0.wait().expect("reap liveness child");
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    #[test]
+    fn pid_liveness_requires_observed_process_absence() {
+        assert!(!pid_is_dead(std::process::id()));
+        assert!(pid_is_dead(0));
+        assert!(pid_is_dead(i32::MAX as u32 + 1));
+
+        let mut child = ChildGuard(
+            Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("start liveness child"),
+        );
+        let pid = child.0.id();
+        assert!(!pid_is_dead(pid));
+        child.stop_and_reap();
+        assert!(pid_is_dead(pid));
+    }
+
+    #[test]
+    fn pid_probe_fails_closed_for_errors_other_than_process_absence() {
+        assert!(!pid_probe_is_dead(Ok(())));
+        assert!(pid_probe_is_dead(Err(nix::errno::Errno::ESRCH)));
+        assert!(!pid_probe_is_dead(Err(nix::errno::Errno::EPERM)));
+        assert!(!pid_probe_is_dead(Err(nix::errno::Errno::EINVAL)));
+    }
 
     #[test]
     fn competing_conductors_hold_one_owner_before_operator_write() {
@@ -1128,7 +1178,10 @@ mod tests {
             Err(_) => panic!("acquire claimed lease"),
         };
 
-        let adopted = match store.adopt(&claimed.token) {
+        let adopted = match retry_transient_lock(
+            || store.adopt(&claimed.token),
+            |result| matches!(result, Err(StoreError::Held)),
+        ) {
             Ok(lease) => lease,
             Err(_) => panic!("adopt matching lease"),
         };
@@ -1145,7 +1198,10 @@ mod tests {
         assert_eq!(running.lock_host.as_deref(), Some("autospec-test-host"));
         assert!(running.lock_acquired_at.is_some());
 
-        match store.release(&adopted) {
+        match retry_transient_lock(
+            || store.release(&adopted),
+            |result| matches!(result, Err(StoreError::Held)),
+        ) {
             Ok(()) => {}
             Err(_) => panic!("release matching lease"),
         }

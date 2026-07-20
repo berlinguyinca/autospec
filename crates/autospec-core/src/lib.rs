@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod autonomous {
     pub mod audit;
+    pub mod blast_radius;
     pub mod config;
     pub mod drain;
     pub mod mainline_health;
@@ -30,6 +31,7 @@ pub mod state;
 pub mod validation;
 
 pub use error::AutospecError;
+pub use safety::{prepare_session_start_git_exclude, SessionStartGitExcludeOutcome};
 
 pub const WORKSPACE_NAME: &str = "autospec";
 pub const RUST_CORE_CHECK: &str = "rust-core-workspace";

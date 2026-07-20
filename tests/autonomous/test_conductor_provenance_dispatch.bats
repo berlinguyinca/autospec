@@ -36,6 +36,7 @@ setup() {
   unset AUTOSPEC_RUN_ONLY_ISSUES
   unset AUTOSPEC_PROVENANCE_BIN
   unset AUTOSPEC_INTEGRATION_BRANCH_BIN
+  unset AUTOSPEC_ALLOW_UNSTEERED_GENERATION
 
   FAKE_SCRIPTS="$TEST_TMP/fake-scripts"
   mkdir -p "$FAKE_SCRIPTS"
@@ -478,6 +479,7 @@ _run_cycles() {
   _install_stub "autonomous-waterfall.sh" \
     'printf '\''{"tier":2,"action":"run-explore-once","reason":"tier2-test"}\n'\'''
   export AUTOSPEC_EXPLORE_CMD="printf '{\"tier\":\"local\",\"proposals_seen\":0,\"new_candidates\":0,\"filed\":0,\"dry\":true,\"reason\":\"test-dry\"}\n'"
+  export AUTOSPEC_ALLOW_UNSTEERED_GENERATION=1
 
   _run_cycle
 
@@ -493,6 +495,7 @@ _run_cycles() {
   _install_stub "autonomous-waterfall.sh" \
     'printf '\''{"tier":2,"action":"run-explore-once","reason":"tier2-test"}\n'\'''
   export AUTOSPEC_EXPLORE_CMD="printf '{\"tier\":\"local\",\"proposals_seen\":0,\"new_candidates\":0,\"filed\":0,\"dry\":true,\"reason\":\"test-dry\"}\n'"
+  export AUTOSPEC_ALLOW_UNSTEERED_GENERATION=1
 
   _run_cycle
 

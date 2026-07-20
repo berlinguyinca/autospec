@@ -2,14 +2,17 @@
 # heartbeat-read.sh — Read heartbeat files for the current repo's slug subdir.
 #
 # Usage:
-#   heartbeat-read.sh [--issue <N>] [--repo <owner/repo>]
+#   heartbeat-read.sh [--issue <N> | --session-id <id>] [--repo <owner/repo>]
 #
 # Without --issue: prints all heartbeat files in the repo's subdir (one path per line).
 # With --issue: prints the content of the specific heartbeat file (or empty if not found).
+# With --session-id: prints only the exact immutable Wait-target binding and
+# exits non-zero when the binding is missing, malformed, or legacy/unbound.
 #
 # Reads from: ~/.autospec/process-heartbeats/<repo-slug>/ — resolved canonical
-# (owner__name) first, with a legacy (owner_name / owner-name) fallback for one
-# release so in-flight heartbeats from pre-migration writers are still found.
+# Rust collision-safe form first, then owner__name, with a legacy
+# (owner_name / owner-name) fallback for one release so in-flight heartbeats
+# from pre-migration writers are still found.
 #
 # Environment:
 #   AUTOSPEC_HEARTBEAT_DIR   base dir (default: ~/.autospec/process-heartbeats);
@@ -24,13 +27,15 @@ HEARTBEAT_BASE="${AUTOSPEC_HEARTBEAT_DIR:-${AUTOSPEC_WATCHDOG_DIR:-$HOME/.autosp
 
 ISSUE=""
 REPO_VAL=""
+SESSION_ID=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --issue)  ISSUE="${2:-}";    shift 2 ;;
         --repo)   REPO_VAL="${2:-}"; shift 2 ;;
+        --session-id) SESSION_ID="${2:-}"; shift 2 ;;
         --help|-h)
-            printf 'Usage: heartbeat-read.sh [--issue <N>] [--repo <owner/repo>]\n'
+            printf 'Usage: heartbeat-read.sh [--issue <N> | --session-id <id>] [--repo <owner/repo>]\n'
             exit 0
             ;;
         *)
@@ -39,6 +44,19 @@ while [ $# -gt 0 ]; do
             ;;
     esac
 done
+
+if [ -n "$ISSUE" ] && [ -n "$SESSION_ID" ]; then
+    printf 'heartbeat-read: --issue and --session-id are mutually exclusive\n' >&2
+    exit 1
+fi
+if [ -n "$ISSUE" ]; then
+    case "$ISSUE" in
+        *[!0-9]*|0|0*)
+            printf 'heartbeat-read: --issue must be a canonical positive integer\n' >&2
+            exit 1
+            ;;
+    esac
+fi
 
 # ── Canonical repo-slug helper (F4) ───────────────────────────────────────────
 # Source repo-slug.sh so this READER resolves the canonical owner__name dir
@@ -67,9 +85,11 @@ _slug_dirs() {
     _owner="${_repo%%/*}"
     _name="${_repo##*/}"
     _canonical="${_base}/${_owner}__${_name}"
+    _collision_safe="${_base}/o${#_owner}_${_owner}_r${#_name}_${_name}"
     _legacy_under="${_base}/${_owner}_${_name}"
     _legacy_hyphen="${_base}/${_owner}-${_name}"
-    printf '%s\n' "$_canonical"
+    printf '%s\n' "$_collision_safe"
+    [ "$_canonical" = "$_collision_safe" ] || printf '%s\n' "$_canonical"
     [ "$_legacy_under" = "$_canonical" ] || printf '%s\n' "$_legacy_under"
     [ "$_legacy_hyphen" = "$_canonical" ] || [ "$_legacy_hyphen" = "$_legacy_under" ] || printf '%s\n' "$_legacy_hyphen"
 }
@@ -94,6 +114,28 @@ resolve_repo() {
 REPO_FULL="$(resolve_repo "${REPO_VAL:-}")"
 
 # ── Read heartbeats ───────────────────────────────────────────────────────────
+
+if [ -n "$SESSION_ID" ]; then
+    session_key="$(LC_ALL=C printf '%s' "$SESSION_ID" | od -An -tx1 | tr -d ' \n')"
+    for TARGET_DIR in $(_slug_dirs "$HEARTBEAT_BASE" "$REPO_FULL"); do
+        binding="${TARGET_DIR}/sessions/${session_key}.json"
+        [ -f "$binding" ] || continue
+        if ! command -v jq >/dev/null 2>&1; then
+            printf 'heartbeat-read: jq is required for exact session binding validation\n' >&2
+            exit 2
+        fi
+        if ! jq -e --arg session_id "$SESSION_ID" \
+            '.session_id == $session_id and (.claim_id | type == "string" and length > 0) and (.worker_id | type == "string" and length > 0) and (.issue | type == "string" and length > 0) and (.branch | type == "string")' \
+            "$binding" >/dev/null 2>&1; then
+            printf 'heartbeat-read: malformed durable heartbeat binding for session %s\n' "$SESSION_ID" >&2
+            exit 4
+        fi
+        cat "$binding"
+        exit 0
+    done
+    printf 'heartbeat-read: no durable heartbeat binding for session %s\n' "$SESSION_ID" >&2
+    exit 4
+fi
 
 if [ -n "$ISSUE" ]; then
     newest_file=""

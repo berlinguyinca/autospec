@@ -7,6 +7,26 @@ one-off compatibility overrides when no config key is present.
 
 Behavior toggles that are flag-files rather than env vars live in [`FLAGS.md`](FLAGS.md).
 
+## Runtime resource isolation
+
+Manifest `version: 2` is the canonical repository configuration for worktree resources.
+`resources.maven.isolation: split-local` requires Maven 4 and owns only
+`<effective-local-repository>/autospec/<AGENT_ENV_ID>`. `resources.compose` declares `files`,
+`exports`, `preserve_volumes`, and exact `shared_resources`; every other Compose container,
+network, volume, project name, and published port is broker-owned.
+
+| Environment value | Effect |
+|---|---|
+| `AGENT_ENV_STATE_ROOT` | Overrides the private state root; Unix directories/files are forced to `0700`/`0600`. |
+| `AUTOSPEC_MAVEN_ISOLATION=off` | Bypasses Maven isolation and exports `AUTOSPEC_ISOLATION_BYPASSED=1`. |
+| `AUTOSPEC_COMPOSE_ISOLATION=off` | Bypasses Compose isolation and exports `AUTOSPEC_ISOLATION_BYPASSED=1`. |
+| `AUTOSPEC_ENV_DISABLE=1` | Bypasses broker provisioning for a direct child and exports `AUTOSPEC_ISOLATION_BYPASSED=1`. |
+
+An opt-out downgrades an isolation claim from verified. Cleanup rejects symlinked state or
+session roots with `RUNTIME_STATE_SYMLINK_REJECTED`; use `gc` or `down --purge-maven` rather
+than deleting state by hand. Compose migrations use `normalize-compose --check` followed by
+the fingerprint-bound `--apply` command.
+
 ## Autonomous runtime
 
 ```yaml
@@ -120,9 +140,54 @@ marker that flips an issue's provenance from `self` to `operator` pre-dispatch).
 The remaining tables list older operator-facing env knobs that do not yet have
 dedicated config keys.
 
+## Root helper wrapper policy
+
+The supported command surface is the Rust `autospec` binary plus helpers
+installed into `~/.autospec/scripts` by skill installers. Root-level
+`scripts/` shell files are repository source files, not a generated wrapper API:
+autospec does not support, regenerate, or install ad-hoc root-level wrapper
+copies. Restoring stale helper copies into root `scripts/` is disallowed unless
+the copy is tracked source or has a tracked canonical skill/shared script source.
+
+Validation enforces this policy with `check_root_helper_wrapper_policy` in
+`autospec validate`: untracked root `scripts/` files without a matching tracked
+source under `skills/*/scripts/` or `skills/autospec-shared/scripts/` fail the
+run. This keeps old stashes from silently reviving a second shell-wrapper
+surface; add new operator behavior to the Rust CLI or a skill-owned installer
+instead.
+
+Audit note: the named dropped stash
+`codex-preserve-main-worktree-before-autonomous-merge` was not present in
+`git stash list` during the issue-1901 implementation. The fallback audit below
+uses root helper names present in tracked repository evidence and records whether
+they have a skill/shared canonical source.
+
+| Helper name | Canonical tracked path | Skill/shared canonical? | Policy result |
+|---|---|---:|---|
+| `accessibility-workstream.sh` | `scripts/accessibility-workstream.sh` | No | Tracked repo source, not an install wrapper |
+| `apply-memory-tags.sh` | `scripts/apply-memory-tags.sh` | No | Tracked repo source, not an install wrapper |
+| `architecture-fitness.sh` | `scripts/architecture-fitness.sh` | No | Tracked repo source, not an install wrapper |
+| `assemble-impl-prompt.sh` | `scripts/assemble-impl-prompt.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-control-channel.sh` | `scripts/autonomous-control-channel.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-guardrails.sh` | `scripts/autonomous-guardrails.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-integration-branch.sh` | `scripts/autonomous-integration-branch.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-persona-mine.sh` | `scripts/autonomous-persona-mine.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-persona-sources.sh` | `scripts/autonomous-persona-sources.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-persona-synth.sh` | `scripts/autonomous-persona-synth.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-premerge-gate.sh` | `scripts/autonomous-premerge-gate.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-prioritize.sh` | `scripts/autonomous-prioritize.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-priority-match.sh` | `scripts/autonomous-priority-match.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-promote-open-issues.sh` | `scripts/autonomous-promote-open-issues.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-provenance.sh` | `scripts/autonomous-provenance.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-resilience.sh` | `scripts/autonomous-resilience.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-self-improvement.sh` | `scripts/autonomous-self-improvement.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-spend-ledger.sh` | `scripts/autonomous-spend-ledger.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-usage-governor.sh` | `scripts/autonomous-usage-governor.sh` | No | Tracked repo source, not an install wrapper |
+| `autonomous-waterfall.sh` | `scripts/autonomous-waterfall.sh` | No | Tracked repo source, not an install wrapper |
+
 ## Issue intent safety
 
-`safety.issue_intent_gate` configures deterministic issue screening. Missing or invalid config falls back to conservative built-in defaults. The built-in policy is evaluated natively in Rust: duplicate built-in entries are accepted, while a custom regex that the dependency-free evaluator cannot represent fails closed with `invalid-policy-regex` rather than being ignored. `trusted_actors` can pass scoped test/dev cleanup but cannot bypass secret exfiltration, production data destruction, instruction bypass, backdoors, or CI/review bypass. `autospec queue review-safety --limit N [--issue N]` and `autospec claim acquire` use this same policy; review requires an explicit positive bound, and `--issue N` targets one admitted issue without scanning the queue. Neither adds a configuration key.
+`safety.issue_intent_gate` configures deterministic issue screening. The conservative built-in defaults apply only when the implicit `.autospec/autospec.yml` path is absent; an explicit, unreadable, or malformed config fails closed. The built-in policy is evaluated natively in Rust: duplicate built-in entries are accepted, while a custom regex that the evaluator cannot represent fails closed with `invalid-policy-regex` rather than being ignored. `trusted_actors` can pass scoped test/dev cleanup but cannot bypass secret exfiltration, production data destruction, instruction bypass, backdoors, or CI/review bypass. `autospec queue review-safety --limit N [--issue N]` and `autospec claim acquire` use this same policy; review requires an explicit positive bound, and `--issue N` targets one admitted issue without scanning the queue. Neither adds a configuration key.
 
 ## Core paths & repo
 | Var | Default | Effect |
@@ -167,7 +232,7 @@ dedicated config keys.
 ## Crash-resume & watchdog
 | Var | Default | Effect |
 |---|---|---|
-| `AUTOSPEC_RESUME_COMMAND` | derived | Command the usage-limit supervisor relaunches on reset. |
+| `AUTOSPEC_RESUME_COMMAND` | derived | Literal resume command persisted by `autospec run` and reused by supervisors on reset. |
 
 ## Memory management
 | Var | Default | Effect |

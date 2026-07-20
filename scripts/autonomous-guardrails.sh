@@ -81,6 +81,7 @@ is_high_risk_path() {
     case "$1" in
         scripts/autospec-autonomous.sh|scripts/autonomous-*.sh|scripts/autospec-autonomous-run-drain.sh) return 0 ;;
         scripts/worktree-guard.sh|scripts/claim-guard.sh|scripts/autospec-autonomy-gate.sh) return 0 ;;
+        .autospec/*|.autospec/**) return 0 ;;
         skills/autospec*/SKILL.md|skills/autospec*/codex/prompt.md|skills/autospec*/opencode/agent.md) return 0 ;;
         .github/workflows/*|install.sh|bootstrap.sh|uninstall.sh) return 0 ;;
         schemas/*|packages/*|crates/*|Cargo.toml|Cargo.lock) return 0 ;;

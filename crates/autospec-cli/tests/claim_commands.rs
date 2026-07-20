@@ -1,7 +1,11 @@
 use autospec_core::claim::RunStateRecord;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static EXECUTABLE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn autospec() -> Command {
     Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -18,12 +22,28 @@ fn temp_dir(prefix: &str) -> std::path::PathBuf {
 }
 
 fn write_executable(path: &std::path::Path, contents: &str) {
-    std::fs::write(path, contents).expect("fake command");
-    let mut permissions = std::fs::metadata(path)
+    publish_executable(path, contents.as_bytes());
+}
+
+fn publish_executable(path: &std::path::Path, contents: &[u8]) {
+    let sequence = EXECUTABLE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("tmp-{}-{sequence}", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .expect("fake command temporary");
+    file.write_all(contents).expect("fake command");
+    drop(file);
+    let mut permissions = std::fs::metadata(&temporary)
         .expect("fake command metadata")
         .permissions();
     permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions).expect("fake command permissions");
+    std::fs::set_permissions(&temporary, permissions).expect("fake command permissions");
+    std::fs::rename(temporary, path).expect("fake command publish");
+    // Atomic rename prevents inode clashes; 30-run stress showed this ZFS host
+    // still needs 10 ms after close before exec stops returning ETXTBSY.
+    std::thread::sleep(std::time::Duration::from_millis(10));
 }
 
 fn path_with(bin: &std::path::Path) -> String {
@@ -37,6 +57,41 @@ fn path_with(bin: &std::path::Path) -> String {
 fn claim_run_state(stdout: &[u8]) -> RunStateRecord {
     let text = std::str::from_utf8(stdout).expect("claim state stdout is UTF-8");
     RunStateRecord::parse_json(text.trim()).expect("claim state stdout is a run-state JSON object")
+}
+
+/// One `gh api <endpoint> [-X <method>]` invocation recovered from the call
+/// log the fake `gh` script appends (one CLI argument per line, invocations
+/// concatenated with no delimiter between them).
+#[derive(Debug, PartialEq, Eq)]
+struct GhApiCall {
+    endpoint: String,
+    method: Option<String>,
+}
+
+/// Parses the raw call log into the `gh api <endpoint> [-X <method>]`
+/// invocations it contains. Replaces matching on raw newline-joined
+/// substrings (fragile to one endpoint's logged args being a prefix/suffix
+/// of another's) with a parsed, structurally-compared call list.
+fn gh_api_calls(log: &str) -> Vec<GhApiCall> {
+    let lines: Vec<&str> = log.lines().collect();
+    let mut calls = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i] == "api" && i + 1 < lines.len() {
+            let endpoint = lines[i + 1].to_string();
+            let method = if lines.get(i + 2) == Some(&"-X") {
+                lines.get(i + 3).map(|m| (*m).to_string())
+            } else {
+                None
+            };
+            let advance = if method.is_some() { 4 } else { 2 };
+            calls.push(GhApiCall { endpoint, method });
+            i += advance;
+        } else {
+            i += 1;
+        }
+    }
+    calls
 }
 
 #[test]
@@ -123,8 +178,15 @@ fn claim_state_upsert_patches_the_lowest_comment_and_deletes_higher_duplicates()
     assert_eq!(state.ttl_seconds, 7200);
     assert_eq!(state.claimed_at, "2026-07-14T00:00:00Z");
     let calls = std::fs::read_to_string(log).expect("gh call log");
-    assert!(calls.contains("repos/testorg/testrepo/issues/comments/100\n-X\nPATCH"));
-    assert!(calls.contains("repos/testorg/testrepo/issues/comments/101\n-X\nDELETE"));
+    let api_calls = gh_api_calls(&calls);
+    assert!(api_calls.contains(&GhApiCall {
+        endpoint: "repos/testorg/testrepo/issues/comments/100".to_string(),
+        method: Some("PATCH".to_string()),
+    }));
+    assert!(api_calls.contains(&GhApiCall {
+        endpoint: "repos/testorg/testrepo/issues/comments/101".to_string(),
+        method: Some("DELETE".to_string()),
+    }));
 }
 
 #[test]
@@ -463,6 +525,8 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
             "worker-a",
             "--branch",
             "feat/test",
+            "--session-id",
+            "session-real-7",
         ])
         .env("PATH", path_with(&bin))
         .env("AUTOSPEC_CLAIM_LOG", &log)
@@ -477,8 +541,19 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"claimed\":true"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"claimed\":true"));
+    assert!(stdout.contains("\"claim_id\":\"claim-"));
+    assert!(stdout.contains("\"session_id\":\"session-real-7\""));
     assert!(heartbeats.join("o7_testorg_r8_testrepo/42.json").exists());
+    let heartbeat = std::fs::read_to_string(heartbeats.join("o7_testorg_r8_testrepo/42.json"))
+        .expect("claim heartbeat");
+    assert!(heartbeat.contains("\"worker_id\":\"worker-a\""));
+    assert!(heartbeat.contains("\"claim_id\":\"claim-"));
+    assert!(heartbeat.contains("\"session_id\":\"session-real-7\""));
+    assert!(heartbeats
+        .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d7265616c2d37.json")
+        .exists());
     assert!(std::fs::read_to_string(&comments)
         .expect("claim comments")
         .contains("worker-a"));

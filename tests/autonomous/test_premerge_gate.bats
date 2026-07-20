@@ -1033,3 +1033,111 @@ GHSTUB
 
     [ "$status" -eq 3 ]
 }
+
+# ─── Autonomous conductor no-steering guard (issue #1724) ────────────────────
+# These regression tests live here because this issue's primary smoke points at
+# this suite; they exercise autospec_conductor_run() through its public shell API.
+
+_install_conductor_helper() {
+    local name="$1"
+    local body="$2"
+    mkdir -p "$TMP/conductor-scripts"
+    printf '#!/usr/bin/env bash\n%s\n' "$body" > "$TMP/conductor-scripts/$name"
+    chmod +x "$TMP/conductor-scripts/$name"
+}
+
+_install_conductor_baseline() {
+    export CONDUCTOR_HOME="$TMP/conductor-home"
+    export CONDUCTOR_SCRIPTS="$TMP/conductor-scripts"
+    export CONDUCTOR_LOG="$TMP/conductor.log"
+    mkdir -p "$CONDUCTOR_HOME/.autospec" "$CONDUCTOR_SCRIPTS"
+
+    _install_conductor_helper "autonomous-control-channel.sh" 'exit 0'
+    _install_conductor_helper "autonomous-premerge-gate.sh" 'printf "merge-ok\n"'
+    _install_conductor_helper "autonomous-spend-ledger.sh" \
+        'case "${1:-}" in add) exit 0;; check) printf "continue\n";; *) exit 0;; esac'
+    _install_conductor_helper "autonomous-resilience.sh" \
+        'case "${1:-}" in state) printf "DECISION:state-written\n";; lock) printf "DECISION:lock-acquired\nLOCK_SESSION:test\n";; *) exit 0;; esac'
+    _install_conductor_helper "autospec-usage-limit.sh" 'exit 0'
+    _install_conductor_helper "autonomous-waterfall.sh" \
+        'printf '\''{"tier":2,"action":"run-explore-once","reason":"test-tier-2"}\n'\'''
+    _install_conductor_helper "autospec" \
+        'case "${1:-} ${2:-}" in "queue ready") printf '\''{"ready":[],"blocked":[],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[]}\n'\'';; *) exit 0;; esac'
+}
+
+_run_conductor_once() {
+    local extra_env="${1:-}"
+    run bash -c "
+        set -eu
+        . '$REPO_ROOT/scripts/lib/autospec-loop.sh'
+        HOME='$CONDUCTOR_HOME' \
+        CONDUCTOR_SCRIPTS_DIR='$CONDUCTOR_SCRIPTS' \
+        CONDUCTOR_REPO='test-owner/test-repo' \
+        CONDUCTOR_MAX_CYCLES=1 \
+        CONDUCTOR_POLL_INTERVAL=0 \
+        CONDUCTOR_DRY_RUN=0 \
+        CONDUCTOR_NO_DIGEST=1 \
+        AUTOSPEC_QUEUE_BIN='$CONDUCTOR_SCRIPTS/autospec' \
+        AUTOSPEC_EXPLORE_CMD=\"printf 'explore-called\\n' >> '$CONDUCTOR_LOG'; printf '{\\\"dry\\\":false,\\\"filed\\\":1}\\n'\" \
+        AUTOSPEC_RUN_CMD=\"printf 'drain-called\\n' >> '$CONDUCTOR_LOG'\" \
+        $extra_env \
+        autospec_conductor_run
+    " 2>&1
+}
+
+@test "conductor no-steering: empty backlog without priorities or persona files bootstrap decision before Tier 2" {
+    _install_conductor_baseline
+
+    _run_conductor_once
+
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q 'bootstrap-empty-intent-bundle'
+    printf '%s\n' "$output" | grep -q 'bootstrap: empty inference bundle'
+    ! printf '%s\n' "$output" | grep -q 'no-steering'
+    if [ -f "$CONDUCTOR_LOG" ]; then
+        ! grep -q 'explore-called' "$CONDUCTOR_LOG"
+    fi
+}
+
+@test "conductor no-steering: explicit unsteered-generation override still enters Tier 2" {
+    _install_conductor_baseline
+
+    _run_conductor_once 'AUTOSPEC_ALLOW_UNSTEERED_GENERATION=1'
+
+    [ "$status" -eq 0 ]
+    grep -q 'explore-called' "$CONDUCTOR_LOG"
+}
+
+@test "conductor no-steering: Tier-1 backlog still drains without steering" {
+    _install_conductor_baseline
+    _install_conductor_helper "autospec" \
+        'case "${1:-} ${2:-}" in "queue ready") printf '\''{"ready":[{"number":1724}],"blocked":[],"claimed":[],"conflicts":[],"worker_cap":{"reached":false},"batch":[{"number":1724}]}\n'\'';; *) exit 0;; esac'
+    _install_conductor_helper "autonomous-waterfall.sh" \
+        'printf '\''{"tier":1,"action":"run-backlog","reason":"backlog has work"}\n'\'''
+
+    _run_conductor_once
+
+    [ "$status" -eq 0 ]
+    grep -q 'drain-called' "$CONDUCTOR_LOG"
+    ! printf '%s\n' "$output" | grep -q 'no-steering'
+}
+
+@test "conductor no-steering: non-empty priorities allow Tier 2 generation" {
+    _install_conductor_baseline
+    printf -- '- Fix high-value bugs first\n' > "$CONDUCTOR_HOME/.autospec/autonomous-priorities.md"
+
+    _run_conductor_once
+
+    [ "$status" -eq 0 ]
+    grep -q 'explore-called' "$CONDUCTOR_LOG"
+}
+
+@test "conductor no-steering: operator persona allows Tier 2 generation" {
+    _install_conductor_baseline
+    printf 'Operator prefers safety-first autonomous work.\n' > "$CONDUCTOR_HOME/.autospec/operator-persona.md"
+
+    _run_conductor_once
+
+    [ "$status" -eq 0 ]
+    grep -q 'explore-called' "$CONDUCTOR_LOG"
+}

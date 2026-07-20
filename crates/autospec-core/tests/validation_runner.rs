@@ -154,8 +154,8 @@ fn direct_plan_keeps_reachable_occurrences_and_excludes_fast_only_suites() {
     )
     .expect("fast validation plan builds");
 
-    assert_eq!(full.ids().len(), 140);
-    assert_eq!(full.unique_ids().len(), 135);
+    assert_eq!(full.ids().len(), 141);
+    assert_eq!(full.unique_ids().len(), 136);
     assert!(!full.ids().contains(&"check_architecture_fitness_engine"));
     assert!(full.ids().contains(&"check_python_suites"));
     assert!(full.ids().contains(&"check_install_tests"));
@@ -280,7 +280,7 @@ fn runner_aggregates_typed_derive_trio_commands() {
 
     assert_eq!(report.results.len(), 1);
     assert_eq!(report.results[0].exit_code, Some(0));
-    assert_eq!(report.results[0].spawn_count, 2);
+    assert_eq!(report.results[0].spawn_count, 3);
 }
 
 #[test]

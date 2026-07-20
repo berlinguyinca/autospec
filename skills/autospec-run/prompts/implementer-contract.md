@@ -111,17 +111,30 @@ Liveness is tracked per-issue, per-repo via
 `skills/autospec-run/scripts/heartbeat-write.sh`:
 
 ```
-heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] --repo <owner/repo>
+heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] --repo <owner/repo> \
+  --worker-id <worker> --claim-id <claim> --session-id <actual-wait-session>
 ```
 
-- Writes `~/.autospec/process-heartbeats/<repo-slug>/<issue>.json`, where
-  `<repo-slug>` is `<owner/repo>` with `/` replaced by `_` (path-scoped so the
-  shared heartbeat dir never collides across repos).
+- Writes `~/.autospec/process-heartbeats/<repo-key>/<issue>.json`. Rust claim
+  acquisition uses the collision-safe `o<len>_<owner>_r<len>_<repo>` key; the
+  shell writer uses the canonical `owner__repo` key, and the reader recognizes
+  both plus the documented legacy forms.
 - Update the heartbeat at each major step:
   `claimed → worktree_ready → tests_started → tests_passed → pr_created →
   reviewed → merged`.
 - Delete the heartbeat on any terminal outcome (merged, failed, or returned to
   queue).
+- Recovery-bound writes also update
+  `<repo-key>/sessions/<hex-actual-wait-session>.json`. Wait recovery
+  reads that sidecar by the failed target's actual session ID; it never derives
+  a claim generation from the currently active issue claim. Legacy heartbeats
+  remain liveness-only and are ineligible for recovery.
+- The exact-session sidecar is create-once. A refresh with the same
+  session/issue/worker/branch/claim identity is idempotent and updates only the
+  per-issue liveness file; a conflicting identity fails closed without replacing
+  either record.
+- `--issue` accepts only canonical positive integers before any heartbeat path
+  is constructed.
 
 ## Worktree / branch rules
 

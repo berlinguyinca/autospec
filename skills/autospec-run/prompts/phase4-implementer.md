@@ -35,7 +35,9 @@ Skipping this step or leaving the reuse decision undocumented in the PR body is 
 
 **Before any code is written**, resolve the branch state and enter an isolated
 worktree. You NEVER `cd`/`git checkout`/`git commit` in the primary checkout —
-all work happens in a linked worktree off `origin/main`. This file is standalone
+all work happens in a linked worktree off the resolved base branch
+(`origin/${AUTOSPEC_BASE_BRANCH:-main}`, unless `.autospec/autospec.yml`
+`git.base_branch` or the remote default-branch fallback says otherwise). This file is standalone
 (not lock-step with the run trios) but its rules MUST agree with the trio
 contract.
 
@@ -43,6 +45,10 @@ contract.
    - **`open-pr`** (#886 recovery): a PR already exists — **skip implementation** entirely. Create an adopt-mode worktree, `gh pr checkout <PR>`, then run the issue's verification (tests + `validate.sh`) and the standard review loop against the EXISTING PR, and merge if green. Never re-implement.
    - **`branch-only`** (#917 recovery): the branch exists with un-PR'd work — adopt it (`worktree-guard.sh create --adopt`) in a fresh worktree and **continue** the remaining work; do not start over.
    - **`fresh`**: no branch, no PR — `worktree-guard.sh create --branch <BRANCH>`.
+     The guard resolves its base from `--base`, then `AUTOSPEC_BASE_BRANCH`,
+     then `.autospec/autospec.yml` `git.base_branch`, then `origin/main`; if
+     that unconfigured `origin/main` ref is absent, it falls back to
+     `gh repo view --json defaultBranchRef`.
 2. **Assert before any edit.** `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh assert` MUST exit 0 before the first file edit/commit. A non-zero exit (`in_primary_checkout` / `dirty` / `stale_base`) is NEVER worked around — comment the emitted `code_health:` identifier on the issue, restore the `auto-implement` label, and stop the issue.
 3. **Claim the edit surface before any edit.** After `assert` passes and before the first edit, `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh scan $TARGETS || true` then `AUTOSPEC_CLAIM_GUARD=strict bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh acquire $TARGETS` (where `TARGETS` is the issue's **Files touched** skills/paths; strict is scoped to this one call so the blocking gate fires while the global default stays `warn` for interactive use). A `6` exit (`code_health:claim_conflict`) means another live session owns this surface — comment it, restore the `auto-implement` label, and stop the issue. `refresh` rides the existing heartbeat tick (no new loop); `release $TARGETS` immediately after the PR opens. `AUTOSPEC_CLAIM_GUARD=off` or an unwritable store degrades to a no-op and never blocks.
 4. **Cleanup.** After the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`. Never delete un-pushed work before merge.
@@ -62,6 +68,24 @@ Before changing any code:
 
 > **Advisor gate `impl-decision` (any profile).** When you face a design or architecture sub-decision you cannot reasonably resolve within your tier's budget, run the `## Advisor escalation` protocol with `--gate impl-decision` before guessing. Apply a returned `plan`/`correction`; on `stop` take the soft-fail path. The shared per-issue cap bounds how often this fires, so reserve it for genuinely stuck decisions rather than routine choices.
 
+### UI cohesion audit
+
+When the issue is a UI cleanup/refactor of an existing page, audit the page's
+child chrome before editing instead of only inspecting the top-level route.
+Read the design-system README or token file, the route component, and every
+child component that renders visible chrome on that route. Identify nested
+cards, duplicate section headers, raw `px`/hex/`rgb()` values, inline styles,
+legacy utility classes, and inconsistent spacing before deciding what to keep.
+
+Composition rule: the page shell owns layout; design-system cards are only for
+top-level sections or true repeated item cards. Avoid cards-in-cards. Delete
+duplicate wrappers and legacy chrome in the touched children rather than adding
+new wrapper markup around them.
+
+When the app runs locally, verify the refactor with desktop and mobile screenshots.
+Iterate until the screenshots show no nested-card artifacts, duplicate chrome, or
+mixed typography.
+
 1. Stay within the context and reasoning budget implied by the issue's `ctx:*` / `reasoning:*` labels. If you hit budget pressure, stop and post a comment on the issue rather than producing rushed work.
 2. Follow the conventions surfaced during Expand. Do not introduce new patterns that diverge from surrounding code unless the issue explicitly asks for them.
 3. Write tests first when the change has a clear functional contract (TDD per AGENTS.md). For pure prose / docs changes, skip TDD.
@@ -70,6 +94,23 @@ Before changing any code:
 ## Finalize
 
 Before considering the work done:
+
+### Base branch resolution
+
+Resolve the PR/worktree comparison base once and reuse it for diff-based gates.
+`AUTOSPEC_BASE_BRANCH` wins, `.autospec/autospec.yml` `git.base_branch` is the
+per-repo default when the environment is unset, and missing unconfigured
+`origin/main` falls back to GitHub's default branch.
+
+```bash
+WORKTREE_GUARD="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/worktree-guard.sh"
+BASE_REF="$(bash "$WORKTREE_GUARD" resolve-base)"
+DEFAULT_PR_BASE="$(bash "$WORKTREE_GUARD" resolve-base --pr-base)"
+if ! git rev-parse --verify "$BASE_REF^{commit}" >/dev/null 2>&1; then
+    echo "Resolved base ref not found: $BASE_REF" >&2
+    exit 1
+fi
+```
 
 ### Migration-replay pre-PR hook
 
@@ -80,7 +121,7 @@ timestamp order on a fresh DB, regress each other (e.g. PR D's
 this before opening the PR, run the target repo's migration-replay test
 whenever the diff touches a migration path.
 
-If `git diff --name-only origin/main...HEAD` matches `*migrations/*` or
+If `git diff --name-only "$BASE_REF"...HEAD` matches `*migrations/*` or
 contains `*migration*`, run the first-hit detection block below. On a
 non-zero exit, post the failure output as an issue comment and exit
 WITHOUT opening the PR — the migration must be fixed first. If no
@@ -92,7 +133,7 @@ target repo has not opted in).
 # touches a migration path; detection order is first-hit-wins across 4
 # conventions; non-zero replay exit → comment on the issue and abort
 # before `gh pr create`.
-diff_paths=$(git diff --name-only origin/main...HEAD || true)
+diff_paths=$(git diff --name-only "$BASE_REF"...HEAD || true)
 if printf '%s\n' "$diff_paths" | grep -qE '(^|/)migrations/|migration'; then
     replay_log=$(mktemp)
     replay_rc=0
@@ -200,7 +241,7 @@ Exit 0: continue. Exit 1: log drift, continue (the Phase 4 monitor's reviewer di
 If the `codex` CLI is on PATH, get a second opinion on the diff:
 
 ```bash
-git diff main...HEAD | codex exec --prompt "Review this diff for correctness, security, broken tests, and consistency with surrounding code. For each finding, label it must-fix or nice-to-have. Be brief."
+git diff "$BASE_REF"...HEAD | codex exec --prompt "Review this diff for correctness, security, broken tests, and consistency with surrounding code. For each finding, label it must-fix or nice-to-have. Be brief."
 ```
 
 If `codex` is NOT on PATH: skip this step entirely, log a single line `Peer-review: codex not on PATH, skipping` in the eventual PR description, and proceed.
@@ -230,7 +271,7 @@ backdoors. The gate shares its engine with `/autospec-secaudit`.
 ```bash
 SECGATE="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/security-remediation-loop.sh"
 if [ -x "$SECGATE" ] || [ -f "$SECGATE" ]; then
-  sec_out="$(bash "$SECGATE" --decide --diff origin/main --root .)"; sec_exit=$?
+  sec_out="$(bash "$SECGATE" --decide --diff "$BASE_REF" --root .)"; sec_exit=$?
   echo "$sec_out"
 else
   echo "[secgate] security-remediation-loop.sh not installed — skipping (run /autospec-secaudit update)"; sec_exit=0
@@ -273,20 +314,32 @@ MUST target the sandbox branch as PR base instead of `main` — and MUST refuse
 any code path that would merge back to `main` while explore-mode is active.
 
 ```bash
-# Resolve PR base — sandbox if explore-mode active, else main.
+# Resolve PR base — sandbox if explore-mode active, else the resolved base.
 EXPLORE_BASE=""
 if [ -f .autospec/explore-mode.json ]; then
     EXPLORE_BASE=$(grep -o '"branch"[[:space:]]*:[[:space:]]*"[^"]*"' .autospec/explore-mode.json \
         | sed 's/.*"branch"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
 fi
-PR_BASE="${EXPLORE_BASE:-main}"
+PR_BASE="${EXPLORE_BASE:-$DEFAULT_PR_BASE}"
 
 if [ -n "$EXPLORE_BASE" ]; then
-    gh pr create --base "$EXPLORE_BASE" --title "<title>" --body "<body>"
+    pr_url="$(gh pr create --base "$EXPLORE_BASE" --title "<title>" --body "<body>")"
 else
-    gh pr create --base main --title "<title>" --body "<body>"
+    pr_url="$(gh pr create --base "$PR_BASE" --title "<title>" --body "<body>")"
 fi
+pr_number="$(gh pr view "$pr_url" --json number --jq .number)"
+[ -n "$pr_number" ] && [ "$pr_number" != "null" ] || { echo "gh pr create succeeded but PR number could not be resolved" >&2; exit 1; }
+current_state="$(autospec claim state read --issue <ISSUE> --repo <REPO> 2>/dev/null || true)"
+worker_id="$(printf '%s' "$current_state" | jq -r '.worker_id // empty' 2>/dev/null || true)"
+[ -n "$worker_id" ] || worker_id="${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:phase4:$$}"
+branch_name="$(git branch --show-current)"
+bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/heartbeat-write.sh" --issue <ISSUE> --repo <REPO> --branch "$branch_name" --step pr_created --pr "$pr_number" --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --session-id "$WAIT_TARGET_SESSION_ID" || exit 1
+autospec claim state upsert --issue <ISSUE> --repo <REPO> --worker-id "$worker_id" --state pr_created --step pr_created --branch "$branch_name" --pr "$pr_number" || exit 1
 ```
+
+After `gh pr create` succeeds, the heartbeat and GitHub `autospec-run-state`
+comment MUST both be updated to `pr_created` with the captured PR number before
+any later handoff, notification, claim-guard release, review, or merge step runs.
 
 ### No accidental main merges
 
@@ -348,14 +401,71 @@ the implementation before re-running.
 > section whose code fence contains a single runnable shell command. Multi-line
 > prose without a runnable command is rejected by this gate.
 
+## Browser verification gate (UI/client-interaction issues)
+
+For issues that change user-facing UI or client interaction, the merge gate must
+attempt real browser verification before falling back to weaker smoke evidence.
+Use the same UI-marker convention as the issue linter: the issue is UI-scoped
+when its body contains `<!-- ui-feature -->`, `## Design reference`,
+`## Interaction states`, or `## UX flows`.
+
+Immediately before `gh pr create` for a UI-scoped issue:
+
+1. Attempt the harness Browser connector / browser tool first and capture the
+   result. Redact secrets, tokens, credentials, authenticated URLs, and
+   machine-local absolute paths before publishing any captured detail to GitHub.
+   A successful real browser check records
+   `browser-verified`.
+2. If the Browser connector fails because of harness/tool metadata, connector
+   availability, or browser-launch plumbing (not because the app itself failed),
+   capture the redacted error detail and run the local HTTP markup smoke path as the
+   fallback. A passing fallback records `fallback-smoke-only`; a failing or
+   unavailable fallback records `not-run`.
+3. If the browser attempt reaches the app and finds an app defect, treat it as a
+   normal blocking test failure: fix the app or comment on the issue and exit.
+   Do not relabel an app defect as `fallback-smoke-only`.
+4. Add a `## Validation` section to the PR body containing exactly one browser
+   verification state: `browser-verified`, `fallback-smoke-only`, or `not-run`.
+   For `fallback-smoke-only` and `not-run`, include the redacted Browser
+   connector error detail and the fallback smoke command/result.
+5. Before merging any PR whose UI-scoped validation state is
+   `fallback-smoke-only` or `not-run` because of a harness error, open or link a
+   browser remediation issue that includes the redacted error detail. Prefer
+   linking an existing open browser remediation issue when
+   `gh issue list --search` finds the same Browser connector error; otherwise
+   file a new issue labelled as autospec process remediation. Include the
+   remediation issue URL/number in the PR body's `## Validation` section.
+6. Immediately before `gh pr merge`, reject malformed PR validation with this
+   deterministic PR-body gate (replace `<PR>` with the PR number):
+
+   ```bash
+   pr_body="$(gh pr view <PR> --json body --jq .body)"
+   browser_state_count="$(printf '%s\n' "$pr_body" \
+       | grep -Eo 'browser-verified|fallback-smoke-only|not-run' \
+       | sort -u | wc -l | tr -d ' ')"
+   if [ "$browser_state_count" != "1" ]; then
+       gh issue comment <ISSUE> --body "PR #<PR> has invalid browser verification validation state count: $browser_state_count."
+       exit 1
+   fi
+   if printf '%s\n' "$pr_body" | grep -qE 'fallback-smoke-only|not-run' \
+       && ! printf '%s\n' "$pr_body" | grep -qiE 'remediation issue|https://github.com/.*/issues/[0-9]+|#[0-9]+'; then
+       gh issue comment <ISSUE> --body "PR #<PR> uses fallback browser verification without a linked remediation issue."
+       exit 1
+   fi
+   ```
+
+Non-UI issues still include `## Validation` when practical, but record
+`not-run` only with an explicit non-UI reason; they do not need browser
+remediation issues.
+
 ## Rebase-and-retest gate
 
-Immediately before `gh pr merge --admin --squash --delete-branch`, run the
-following loop. It addresses cross-session CI rot (issue #307): when two
-PRs are individually green but their combination breaks main, a stale
-branch at merge time silently corrupts main. By asking GitHub to update
-the branch when it is `BEHIND` main and waiting for CI to re-pass, the
-PR is proven against post-merge main before we admin-merge.
+Run the following loop immediately before the admin-squash merge. It addresses
+cross-session CI rot (issue #307): when two PRs are individually green but their
+combination breaks the resolved base, a stale branch at merge time silently
+corrupts that base. By asking GitHub to update the branch when it is `BEHIND`
+the PR base and waiting for CI to re-pass, the PR is proven against the
+post-merge base before we admin-merge.
 
 The cap defaults to 3 attempts but is configurable via the
 `AUTOSPEC_REBASE_MAX_ATTEMPTS` env var.
@@ -406,7 +516,7 @@ while [ "$attempt" -lt "$max_attempts" ]; do
             wait_for_ci_green                                           # CI re-triggers after update; settle before re-querying state
             ;;
         DIRTY)
-            gh issue comment <issue> --body "PR #<PR> has a merge conflict against main; needs human resolution."
+            gh issue comment <issue> --body "PR #<PR> has a merge conflict against $PR_BASE; needs human resolution."
             exit 1
             ;;
         BLOCKED)
@@ -420,10 +530,28 @@ while [ "$attempt" -lt "$max_attempts" ]; do
     attempt=$((attempt + 1))
 done
 if [ "$attempt" -ge "$max_attempts" ]; then
-    gh issue comment <issue> --body "PR #<PR>: rebase-and-retest stalled after $max_attempts attempts; main is moving faster than CI completes. Pausing for operator review."
+    gh issue comment <issue> --body "PR #<PR>: rebase-and-retest stalled after $max_attempts attempts; $PR_BASE is moving faster than CI completes. Pausing for operator review."
     exit 1
 fi
-gh pr merge <PR> --admin --squash --delete-branch
+# Blast-radius domain fence at the merge chokepoint (issue #1732): classify the
+# PR's actual changed files against the repo's fenced_surfaces registry and
+# refuse to merge a fenced-surface diff (the wrapper applies the human-review
+# quarantine label and comments) unless the PR carries the
+# `autospec:fenced-approved` override label. Call the wrapper INSTEAD of a bare
+# `gh pr merge --admin`. exit 1 = quarantined (NOT merged); exit 2 =
+# fail-closed error.
+# This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
+if bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo <repo>; then
+    :
+else
+    gm_rc=$?
+    if [ "$gm_rc" -eq 1 ]; then
+        echo "quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
+    else
+        echo "guarded-merge fail-closed (rc=$gm_rc) — PR NOT merged; pausing for operator review"
+    fi
+    exit 0
+fi
 ```
 
 Notes:
@@ -440,12 +568,12 @@ Notes:
   much churn for this PR to merge cleanly, and an operator should
   intervene.
 - Lock-step deps are already checked immediately before `gh pr create`.
-  If a lock-step dep merges into main during the rebase window, that's
+  If a lock-step dep merges into the PR base during the rebase window, that's
   already-merged state being absorbed into this PR via update-branch —
   the desired behavior.
 
 ## Exit conditions
 
-- **Success** — PR opened, all CI checks green, auto-merge enabled.
+- **Success** — PR opened against the resolved base branch, all CI checks green, auto-merge enabled.
 - **Soft fail (return to queue)** — clarification needed, lockstep blocked, budget exhausted. Comment on the issue explaining; do not open a PR.
 - **Hard fail (escalate)** — test infrastructure broken, repo in inconsistent state, conflicting changes detected. Comment on the issue and add label `escalate:human`.

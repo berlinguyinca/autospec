@@ -1,4 +1,7 @@
-use autospec_core::runtime_env::{RuntimeContext, RuntimeManifest, RuntimeState};
+use autospec_core::runtime_env::{
+    ComposeIsolation, ExportProtocol, ExportValue, MavenIsolation, RuntimeContext, RuntimeManifest,
+    RuntimeState,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -194,7 +197,7 @@ fn companion_runbook_lists_every_broker_owned_environment_key() {
 #[test]
 fn manifest_rejects_unknown_versions_and_duplicate_mode_names() {
     let version_error =
-        RuntimeManifest::parse("version: 2\nmodes:\n  local:\n    command: sh -c 'true'\n")
+        RuntimeManifest::parse("version: 3\nmodes:\n  local:\n    command: sh -c 'true'\n")
             .expect_err("unsupported version is rejected");
     assert!(version_error
         .to_string()
@@ -207,6 +210,31 @@ fn manifest_rejects_unknown_versions_and_duplicate_mode_names() {
     assert!(duplicate_error
         .to_string()
         .contains("duplicate runtime mode"));
+}
+
+#[test]
+fn v2_resources_parse_exports_and_logical_preserved_volumes() {
+    let manifest = RuntimeManifest::parse(include_str!(
+        "../../../tests/fixtures/runtime-resources/manifest-v2.yml"
+    ))
+    .expect("version 2 manifest parses");
+    let resources = manifest.resources();
+
+    assert_eq!(resources.maven.isolation, MavenIsolation::SplitLocal);
+    assert_eq!(resources.compose.isolation, ComposeIsolation::Managed);
+    assert_eq!(resources.compose.files, vec![PathBuf::from("compose.yaml")]);
+    assert_eq!(resources.compose.exports[0].service, "web");
+    assert_eq!(resources.compose.exports[0].target, 8080);
+    assert_eq!(resources.compose.exports[0].protocol, ExportProtocol::Http);
+    assert_eq!(resources.compose.exports[0].env, "AUTOSPEC_PUBLIC_URL");
+    assert_eq!(resources.compose.exports[0].value, ExportValue::Url);
+    assert_eq!(resources.compose.preserve_volumes, vec!["postgres-data"]);
+    assert_eq!(resources.compose.shared_networks, vec!["developer-proxy"]);
+    assert_eq!(resources.compose.shared_volumes, vec!["maven-cache"]);
+    assert_eq!(
+        manifest.selected_mode("auto").expect("default mode").name(),
+        "local"
+    );
 }
 
 #[test]

@@ -146,7 +146,7 @@ exit 1
             .env("AUTOSPEC_QUEUE_CALLS", &self.calls)
             .env("AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS", "0")
             .env("AUTOSPEC_HEARTBEAT_DIR", self.root.join("heartbeats"))
-            .env("AUTOSPEC_CONFIG_FILE", self.root.join("missing.yml"));
+            .env_remove("AUTOSPEC_CONFIG_FILE");
         command
     }
 }

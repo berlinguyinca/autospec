@@ -1,5 +1,8 @@
 #!/usr/bin/env bats
 # tests/unit/test_autospec_run_state.bats — Rust GitHub run-state command.
+if [ -z "${BATS_VERSION:-}" ]; then
+    exec bats "$0" "$@"
+fi
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -203,6 +206,47 @@ JSON
     [ -f "$AUTOSPEC_TEST_PATCH_FAIL_MARKER" ]
     run run_state read --issue 42 --repo testorg/testrepo
     [[ "$output" == *'"state":"worktree_ready"'* ]]
+}
+
+@test "phase4 pr creation marks heartbeat and run-state with the PR number" {
+    prompt="$REPO_ROOT/skills/autospec-run/prompts/phase4-implementer.md"
+    run grep -Fq 'pr_number="$(gh pr view "$pr_url" --json number --jq .number)"' "$prompt"
+    [ "$status" -eq 0 ]
+    run grep -Fq '[ -n "$pr_number" ] && [ "$pr_number" != "null" ]' "$prompt"
+    [ "$status" -eq 0 ]
+    heartbeat_cmd='heartbeat-write.sh" --issue <ISSUE> --repo <REPO> --branch "$branch_name" --step pr_created --pr "$pr_number" --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --session-id "$WAIT_TARGET_SESSION_ID" || exit 1'
+    run_state_cmd='autospec claim state upsert --issue <ISSUE> --repo <REPO> --worker-id "$worker_id" --state pr_created --step pr_created --branch "$branch_name" --pr "$pr_number" || exit 1'
+    run grep -Fq "$heartbeat_cmd" "$prompt"
+    [ "$status" -eq 0 ]
+    run grep -Fq "$run_state_cmd" "$prompt"
+    [ "$status" -eq 0 ]
+    pr_number_line="$(grep -nF 'pr_number="$(gh pr view "$pr_url" --json number --jq .number)"' "$prompt" | cut -d: -f1)"
+    heartbeat_line="$(grep -nF "$heartbeat_cmd" "$prompt" | cut -d: -f1)"
+    run_state_line="$(grep -nF "$run_state_cmd" "$prompt" | cut -d: -f1)"
+    handoff_line="$(grep -nF 'any later handoff' "$prompt" | cut -d: -f1)"
+    [ "$pr_number_line" -lt "$heartbeat_line" ]
+    [ "$heartbeat_line" -lt "$run_state_line" ]
+    [ "$run_state_line" -lt "$handoff_line" ]
+
+    heartbeat_dir="$TEST_TMP/heartbeats"
+    export AUTOSPEC_HEARTBEAT_DIR="$heartbeat_dir"
+    heartbeat_write="$REPO_ROOT/skills/autospec-run/scripts/heartbeat-write.sh"
+
+    bash "$heartbeat_write" --issue 42 --repo testorg/testrepo --branch feat/test --step claimed
+    run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state claimed --step claimed --branch feat/test >/dev/null
+
+    pr_number=1858
+    bash "$heartbeat_write" --issue 42 --repo testorg/testrepo --branch feat/test --step pr_created --pr "$pr_number"
+    run_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state pr_created --step pr_created --branch feat/test --pr "$pr_number" >/dev/null
+
+    state="$(run_state read --issue 42 --repo testorg/testrepo)"
+    [ "$(printf '%s' "$state" | jq -r '.state')" = "pr_created" ]
+    [ "$(printf '%s' "$state" | jq -r '.pr')" = "$pr_number" ]
+
+    heartbeat_file="$heartbeat_dir/testorg__testrepo/42.json"
+    [ -f "$heartbeat_file" ]
+    [ "$(jq -r '.step' "$heartbeat_file")" = "pr_created" ]
+    [ "$(jq -r '.pr' "$heartbeat_file")" = "$pr_number" ]
 }
 
 

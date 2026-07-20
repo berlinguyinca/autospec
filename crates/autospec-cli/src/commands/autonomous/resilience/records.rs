@@ -24,7 +24,8 @@ impl ResilienceReject {
 #[derive(Default)]
 pub(super) struct Spend {
     pub(super) tokens: u64,
-    pub(super) issues: u64,
+    pub(super) filed_issues: u64,
+    pub(super) budget_issues: u64,
 }
 
 impl Spend {
@@ -36,13 +37,22 @@ impl Spend {
         if schema != 1 {
             return Err(ResilienceReject::MalformedSpend);
         }
+        let tokens = number_field(&mut fields, "tokens")
+            .map_err(|_| ResilienceReject::MalformedSpend)?
+            .ok_or(ResilienceReject::MalformedSpend)?;
+        let legacy_issues =
+            number_field(&mut fields, "issues").map_err(|_| ResilienceReject::MalformedSpend)?;
+        let filed_issues = number_field(&mut fields, "filed_issues")
+            .map_err(|_| ResilienceReject::MalformedSpend)?
+            .unwrap_or(0);
+        let budget_issues = number_field(&mut fields, "budget_issues")
+            .map_err(|_| ResilienceReject::MalformedSpend)?
+            .or(legacy_issues)
+            .ok_or(ResilienceReject::MalformedSpend)?;
         Ok(Self {
-            tokens: number_field(&mut fields, "tokens")
-                .map_err(|_| ResilienceReject::MalformedSpend)?
-                .ok_or(ResilienceReject::MalformedSpend)?,
-            issues: number_field(&mut fields, "issues")
-                .map_err(|_| ResilienceReject::MalformedSpend)?
-                .ok_or(ResilienceReject::MalformedSpend)?,
+            tokens,
+            filed_issues,
+            budget_issues,
         })
     }
 }

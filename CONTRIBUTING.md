@@ -17,11 +17,18 @@ Avoid opening a first PR that adds broad autonomy, new dependencies, or large pr
 ```bash
 git clone https://github.com/berlinguyinca/autospec.git
 cd autospec
-bash scripts/dev-bootstrap.sh
+bash install.sh --skill all --harness all
 autospec validate --fast
 ```
 
-Optional tools such as `bats`, `ajv`, `yq`, `gh`, and browser automation unlock deeper validation.
+The installer ensures Bash, Git, curl, Cargo/Rust, Python 3, `gh`, and `jq`, plus
+at least one of Codex CLI, Claude Code, or OpenCode. Linux system packages may
+prompt through `sudo`; root installs do not use sudo. Set
+`AUTOSPEC_SKIP_SYSTEM_TOOLS=1` to suppress package changes while retaining the
+required-command checks.
+
+Optional tools such as `bats`, `ajv`, `yq`, Bun, and browser automation unlock
+deeper validation without blocking the core install.
 
 ## Development Rules
 

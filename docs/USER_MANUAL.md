@@ -46,6 +46,20 @@ or offline hosts continue with warnings; use `AUTOSPEC_SKIP_SYSTEM_TOOLS=1` or
 
 ## Skills
 
+## Worktree runtime resources
+
+The generated installer exposes one Rust-owned runtime contract to every harness. Use
+`autospec runtime env up|status|down|exec|session|gc|normalize-compose`; the guarded Maven
+cleanup is `down --purge-maven`. A `version: 2` manifest gives linked worktrees distinct Maven
+4 repositories, Compose projects, containers, networks, volumes, URLs, and host ports.
+
+`AUTOSPEC_MAVEN_ISOLATION=off`, `AUTOSPEC_COMPOSE_ISOLATION=off`, and
+`AUTOSPEC_ENV_DISABLE=1` are explicit opt-outs. They export
+`AUTOSPEC_ISOLATION_BYPASSED=1`, so reports must downgrade verified isolation claims.
+Recovery is fail-closed: ownership ambiguity is retained for `gc`, live sessions preserve
+the stack, and `RUNTIME_STATE_SYMLINK_REJECTED` blocks cleanup through a symlink. Unix state
+directories use `0700`; authoritative files use `0600`.
+
 ### `/autospec-define`
 
 <!-- autospec-doc-scope:

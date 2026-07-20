@@ -492,7 +492,7 @@ pub(crate) fn ready_plan_for(
     let mut policy = QueuePolicy::new(batch_size, max_repo_workers());
     policy.only_issues = only_issues.clone();
     policy.non_blocking_dependency_labels = non_blocking_dependency_labels();
-    let safety_policy = load_issue_safety_policy(None);
+    let safety_policy = load_issue_safety_policy(None)?;
     if safety_policy.has_unsupported_pattern {
         return Err(CommandFailure::diagnostic(
             "queue safety policy contains unsupported custom regex",
@@ -515,36 +515,29 @@ pub(crate) fn ready_plan_for(
     ))
 }
 
+type ReadyOptionSetter = fn(&mut ReadyOptions, &[String], &mut usize) -> Result<(), CommandFailure>;
+
+const READY_OPTION_SETTERS: &[(&str, ReadyOptionSetter)] = &[
+    ("--repo", set_ready_repo),
+    ("--batch-size", set_ready_batch_size),
+];
+
 fn parse_ready_options(args: &[String]) -> Result<ReadyOptions, CommandFailure> {
     let mut options = ReadyOptions::default();
     let mut index = 0;
     while index < args.len() {
-        match args[index].as_str() {
-            "--repo" => {
-                let value = next_value(args, &mut index, "--repo")?;
-                if options.repo.replace(value).is_some() {
-                    return Err(CommandFailure::diagnostic(
-                        "--repo accepts exactly one value",
-                    ));
-                }
-            }
-            "--batch-size" => {
-                let value = next_value(args, &mut index, "--batch-size")?;
-                let batch_size = value
-                    .parse::<usize>()
-                    .map_err(|_| CommandFailure::diagnostic("--batch-size must be an integer"))?;
-                if options.batch_size.replace(batch_size.max(1)).is_some() {
-                    return Err(CommandFailure::diagnostic(
-                        "--batch-size accepts exactly one value",
-                    ));
-                }
-            }
-            "--help" | "-h" => {
+        let option = args[index].as_str();
+        match READY_OPTION_SETTERS
+            .iter()
+            .find(|(name, _)| *name == option)
+        {
+            Some((_, setter)) => setter(&mut options, args, &mut index)?,
+            None if matches!(option, "--help" | "-h") => {
                 return Err(CommandFailure::diagnostic(
                     "--help cannot be combined with queue ready options",
                 ));
             }
-            option => {
+            None => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown autospec queue ready option: {option}"
                 )));
@@ -553,6 +546,37 @@ fn parse_ready_options(args: &[String]) -> Result<ReadyOptions, CommandFailure> 
         index += 1;
     }
     Ok(options)
+}
+
+fn set_ready_repo(
+    options: &mut ReadyOptions,
+    args: &[String],
+    index: &mut usize,
+) -> Result<(), CommandFailure> {
+    let value = next_value(args, index, "--repo")?;
+    if options.repo.replace(value).is_some() {
+        return Err(CommandFailure::diagnostic(
+            "--repo accepts exactly one value",
+        ));
+    }
+    Ok(())
+}
+
+fn set_ready_batch_size(
+    options: &mut ReadyOptions,
+    args: &[String],
+    index: &mut usize,
+) -> Result<(), CommandFailure> {
+    let value = next_value(args, index, "--batch-size")?;
+    let batch_size = value
+        .parse::<usize>()
+        .map_err(|_| CommandFailure::diagnostic("--batch-size must be an integer"))?;
+    if options.batch_size.replace(batch_size.max(1)).is_some() {
+        return Err(CommandFailure::diagnostic(
+            "--batch-size accepts exactly one value",
+        ));
+    }
+    Ok(())
 }
 
 fn next_value(args: &[String], index: &mut usize, option: &str) -> Result<String, CommandFailure> {
@@ -843,19 +867,64 @@ fn discovered_workers() -> usize {
 }
 
 fn plan_json(plan: &ReadyQueuePlan, constrained: bool) -> String {
+    let diagnostics = local_diagnostics_json(plan);
+    let diagnostics_field = if diagnostics == "[]" {
+        String::new()
+    } else {
+        format!(",\"diagnostics\":{diagnostics}")
+    };
     format!(
-        "{{\"ready\":{},\"blocked\":{},\"claimed\":{},\"conflicts\":{},\"gate_counts\":{},\"scan_scope\":{},\"worker_cap\":{{\"max_repo_workers\":{},\"active_count\":{},\"remaining\":{},\"reached\":{}}},\"batch\":{}}}",
+        "{{\"ready\":{},\"blocked\":{},\"claimed\":{},\"conflicts\":{},\"gate_counts\":{}{},\"scan_scope\":{},\"worker_cap\":{{\"max_repo_workers\":{},\"active_count\":{},\"remaining\":{},\"reached\":{}}},\"batch\":{}}}",
         views_json(&plan.ready),
         views_json(&plan.blocked),
         issues_json(&plan.claimed),
         views_json(&plan.conflicts),
         gate_counts_json(plan),
+        diagnostics_field,
         json_string(if constrained { "slice" } else { "repository" }),
         plan.worker_cap.max_repo_workers,
         plan.worker_cap.active_count,
         plan.worker_cap.remaining,
         json_bool(plan.worker_cap.reached),
         views_json(&plan.batch),
+    )
+}
+
+fn local_diagnostics_json(plan: &ReadyQueuePlan) -> String {
+    let mut seen = BTreeSet::new();
+    let diagnostics = plan
+        .blocked
+        .iter()
+        .filter(|view| {
+            view.reason.as_deref() == Some("safety_gate_failed")
+                && view
+                    .safety_gate
+                    .as_ref()
+                    .is_some_and(|gate| gate.reason == "missing_safety_reviewed")
+                && discovery_filed_issue(&view.issue)
+        })
+        .filter(|view| seen.insert(view.issue.number))
+        .map(discovery_missing_safety_diagnostic_json)
+        .collect::<Vec<_>>();
+    format!("[{}]", diagnostics.join(","))
+}
+
+fn discovery_filed_issue(issue: &RemoteIssue) -> bool {
+    issue.labels.iter().any(|label| label == "explore")
+        || issue.body.contains("explore research-cycle finalize gate")
+        || issue
+            .body
+            .contains("Auto-filed by /autospec-explore round ")
+        || issue.body.contains("<!-- explore-ledger source=")
+}
+
+fn discovery_missing_safety_diagnostic_json(view: &QueueIssueView) -> String {
+    format!(
+        "{{\"kind\":\"discovery_missing_safety_review\",\"issue\":{},\"reason\":\"missing_safety_reviewed\",\"message\":{}}}",
+        view.issue.number,
+        json_string(
+            "discovery-filed auto-implement issue is blocked locally until canonical safety review metadata is stamped"
+        )
     )
 }
 

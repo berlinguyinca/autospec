@@ -395,3 +395,45 @@ fn intent_lint_scans_an_unknown_guardian_rule() {
         .iter()
         .any(|finding| finding.rule_id == "production-data-destruction"));
 }
+
+// issue #2175: the CI/review-bypass rule must not false-positive on tests-only
+// guardrail phrasing that PROHIBITS skipping/ignoring/removing tests.
+#[test]
+fn tests_only_guardrails_do_not_trip_ci_bypass() {
+    let guardrails = [
+        "No existing assertion or test is `#[ignore]`d, skipped, or removed.",
+        "Do not skip the tests or disable the CI checks.",
+        "Never remove existing tests to make it pass.",
+        "Tests must not be disabled to get a green run.",
+        "Keep all existing tests; do not skip any check.",
+    ];
+    for body in guardrails {
+        let lint = lint_issue_intent("test: harden coverage", body, "agent");
+        assert!(
+            !lint
+                .findings
+                .iter()
+                .any(|finding| finding.rule_id == "ci-or-review-bypass"),
+            "guardrail wrongly flagged as ci-or-review-bypass: {body:?}"
+        );
+    }
+}
+
+#[test]
+fn real_ci_or_review_bypass_still_blocks() {
+    let bypasses = [
+        "Disable the CI checks before merging.",
+        "Skip the test suite to speed up the build.",
+        "Remove the review hook so it merges faster.",
+        "Do not touch the config; skip CI entirely.",
+    ];
+    for body in bypasses {
+        let lint = lint_issue_intent("chore: speed up", body, "agent");
+        assert!(
+            lint.findings
+                .iter()
+                .any(|finding| finding.rule_id == "ci-or-review-bypass"),
+            "real bypass not flagged: {body:?}"
+        );
+    }
+}

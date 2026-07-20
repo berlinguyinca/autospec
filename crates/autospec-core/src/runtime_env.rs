@@ -3,9 +3,38 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod compose;
+mod compose_normalize;
+mod diagnostic;
+mod identity;
 mod manifest;
+mod manifest_v2;
+mod maven;
+mod ports;
+mod resource_plan;
+mod resources;
+mod session;
+mod shell_command;
 
+pub use compose::{ComposeOverride, ComposeOwnership, ComposePolicy, COMPOSE_POLICY_VERSION};
+pub use compose_normalize::{
+    ComposeNormalizer, NormalizationEdit, NormalizationPlan, ResourceKind, RuntimeResourcesReport,
+};
+pub use diagnostic::IsolationDiagnostic;
+pub use identity::{load_generation_token, EnvironmentIdentity};
 pub use manifest::{RuntimeEnvError, RuntimeManifest, RuntimeMode};
+pub use maven::{MavenArgPlatform, MavenArgs, MavenPurgeTarget};
+pub use ports::{
+    reserve_loopback_port, wait_for_loopback_bind, GcDecision, GcInventorySnapshot,
+    GcOwnerSnapshot, GcPolicy, PortClaim, PortClaimError, PortRegistry, PortReservation,
+};
+pub use resources::{
+    read_json, write_file_atomic, write_json_atomic, ComposeExport, ComposeIsolation, ComposePlan,
+    ComposeResourceConfig, EnvironmentLifecycle, EnvironmentOwner, ExportProtocol, ExportValue,
+    MavenIsolation, MavenPlan, MavenResourceConfig, OwnedVolume, ResolvedExport, ResourceInventory,
+    ResourcePlan, RuntimeResources, SessionRecord,
+};
+pub use session::{random_session_token, ProcessIdentity, ReleaseDecision, SessionSet};
 
 const BROKER_OWNED_ENVIRONMENT_KEYS: [&str; 9] = [
     "AGENT_ENV_ID",
@@ -55,6 +84,43 @@ impl RuntimeContext {
         let environment_dir = state_root.join(&environment_id);
         let env_file = environment_dir.join("env");
 
+        Ok(Self {
+            repo,
+            manifest,
+            mode,
+            environment_id,
+            environment_dir,
+            env_file,
+        })
+    }
+
+    pub fn new_with_identity(
+        mut manifest: RuntimeManifest,
+        repo: &Path,
+        requested_mode: &str,
+        state_root: &Path,
+        identity: &EnvironmentIdentity,
+    ) -> Result<Self, RuntimeEnvError> {
+        let manifest_relative_path = manifest.path().strip_prefix(repo).map_err(|_| {
+            RuntimeEnvError::new(format!(
+                "runtime manifest {} is not inside repo {}",
+                manifest.path().display(),
+                repo.display()
+            ))
+        })?;
+        let repo = std::fs::canonicalize(repo).map_err(|error| {
+            RuntimeEnvError::new(format!("repo does not exist: {} ({error})", repo.display()))
+        })?;
+        manifest.path = repo.join(manifest_relative_path);
+        let mode = manifest.selected_mode(requested_mode)?.clone();
+        if identity.canonical_repo != repo || identity.mode != mode.name() {
+            return Err(RuntimeEnvError::new(
+                "runtime environment identity does not match the selected repository and mode",
+            ));
+        }
+        let environment_id = identity.environment_id.clone();
+        let environment_dir = state_root.join(&environment_id);
+        let env_file = environment_dir.join("env");
         Ok(Self {
             repo,
             manifest,
@@ -150,6 +216,39 @@ impl RuntimeState {
             .map(|(_, value)| value.as_str())
     }
 
+    pub fn values(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.values
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
+    pub fn validate_child_environment(
+        &self,
+        context: &RuntimeContext,
+    ) -> Result<(), RuntimeEnvError> {
+        let mut allowed = BROKER_OWNED_ENVIRONMENT_KEYS
+            .into_iter()
+            .chain(["MAVEN_ARGS"])
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        allowed.extend(context.mode.env().iter().map(|(key, _)| key.clone()));
+        allowed.extend(
+            context
+                .manifest
+                .resources()
+                .compose
+                .exports
+                .iter()
+                .map(|export| export.env.clone()),
+        );
+        if let Some((key, _)) = self.values.iter().find(|(key, _)| !allowed.contains(key)) {
+            return Err(RuntimeEnvError::new(format!(
+                "RUNTIME_CHILD_ENV_UNDECLARED: {key}"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn replace_existing_value(
         &mut self,
         key: &str,
@@ -165,6 +264,29 @@ impl RuntimeState {
             )));
         };
         *existing_value = value.into();
+        Ok(())
+    }
+
+    pub fn set_value(
+        &mut self,
+        key: &str,
+        value: impl Into<String>,
+    ) -> Result<(), RuntimeEnvError> {
+        if !is_valid_environment_name(key) {
+            return Err(RuntimeEnvError::new(format!(
+                "invalid runtime environment name: {key}"
+            )));
+        }
+        let value = value.into();
+        if let Some((_, existing)) = self
+            .values
+            .iter_mut()
+            .find(|(candidate, _)| candidate == key)
+        {
+            *existing = value;
+        } else {
+            self.values.push((key.to_string(), value));
+        }
         Ok(())
     }
 }
@@ -248,7 +370,7 @@ fn cksum(value: &str) -> Result<u32, RuntimeEnvError> {
         .map_err(|error| RuntimeEnvError::new(format!("invalid cksum output: {error}")))
 }
 
-fn shell_quote(value: &str) -> String {
+pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

@@ -18,15 +18,19 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec runtime env init [--repo <path>] [--manifest agent\|autospec] [--force]` | no | creates a conservative v1 runtime manifest; refuses an existing manifest without `--force` |
 | `autospec runtime env up [--repo <path>] [--mode <mode>]` | no | provisions or reuses the selected environment, runs its manifest command on first provision, and prints the sourceable environment protocol |
 | `autospec runtime env status [--repo <path>] [--mode <mode>]` | no | prints a provisioned environment or returns status `3` when it is inactive |
-| `autospec runtime env down [--repo <path>] [--mode <mode>]` | no | runs the selected optional teardown command and removes its state after successful teardown |
+| `autospec runtime env down [--repo <path>] [--mode <mode>] [--purge-maven]` | no | removes owned Compose resources; `down --purge-maven` also removes the guarded Maven 4 environment prefix |
 | `autospec runtime env exec [--repo <path>] [--mode <mode>] -- <command> [args...]` | no | provisions or reuses state, then runs one direct child with the runtime environment |
 | `autospec runtime env session [--repo <path>] [--mode <mode>] [--keep-alive] -- <command> [args...]` | no | runs one direct child with lifecycle cleanup, manifest auto-init/bypass controls, and Unix interruption cleanup |
+| `autospec runtime env gc [--repo <path>] [--mode <mode>]` | no | removes only stale resources whose generation and ownership labels are proven; ambiguity fails closed with a recovery command |
+| `autospec runtime env normalize-compose --repo <path> --check\|--apply [--fingerprint SHA256]` | yes | plans or transactionally applies a manifest-v2 Compose migration without a second YAML transformer |
 | `autospec claim state read\|upsert\|clear\|reconcile-linked-pr ...` | yes | manages the schema-1 GitHub run-state comment using lowest-comment-ID selection |
 | `autospec claim acquire\|release ...` | yes | applies the typed safety gate, heartbeat/label ordering, lease CAS, and terminal release transitions |
+| `autospec issue promote --repo OWNER/REPO --number N [--remove-label needs-autospec-template]` | yes | validates the canonical GitHub issue, records review with owned labels without editing its body, and verifies authoritative re-reads |
 | `autospec queue ready [--repo OWNER/REPO] [--batch-size N]` | yes | scans every Rust-owned GitHub issue page and returns typed eligibility, gate totals, and scan scope |
 | `autospec queue review-safety --repo OWNER/REPO --limit N [--issue N]` | yes | writes bounded Rust issue-intent safety decisions and reports outcome totals |
 | `autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]` | yes | reads resilient admission state without migration; atomic lifecycle ownership writes only canonical `owner__repo` state and starts no shell process |
 | `autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]` | yes | directly supervises the fixed `omx exec ... $autospec-run` child, preserving local/external progress and terminating only a genuinely stalled live child |
+| `autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]` | yes | classifies changed paths against configured fenced surfaces; fenced matches exit non-zero and report quarantine evidence |
 | `autospec autonomous main-health --repo OWNER/REPO --repo-dir DIR [--branch BRANCH] [--json]` | yes | runs the Rust repository-local mainline-health probe without dispatching work |
 | `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR [--branch BRANCH]` | no | adopts its fenced native-child token or atomically acquires one before lifecycle, health, queue, claim, or foreground mutation; it launches no implementation agent |
 | `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `omx` effects |
@@ -60,6 +64,12 @@ current queue position. Use `/autospec-run` for the existing agent-execution wor
 For the v1 runtime-manifest grammar, state behavior, child-command semantics, and cleanup
 procedure, see [Agent runtime manifests](runbooks/agent-runtime-manifest.md).
 
+Manifest `version: 2` adds typed Maven and Compose ownership. The opt-outs
+`AUTOSPEC_MAVEN_ISOLATION=off`, `AUTOSPEC_COMPOSE_ISOLATION=off`, and
+`AUTOSPEC_ENV_DISABLE=1` export `AUTOSPEC_ISOLATION_BYPASSED=1`; evidence produced under an
+opt-out is not verified isolation. Unix state is private (`0700` directories, `0600` files),
+and `RUNTIME_STATE_SYMLINK_REJECTED` prevents destructive cleanup through a linked root.
+
 `autospec claim state` is the Rust-owned transport and codec for the existing GitHub
 run-state comment protocol. `read` fails closed when the lowest marked comment is malformed
 or bound to a different issue; `upsert` patches that lowest comment and removes higher-ID
@@ -69,6 +79,20 @@ the current issue safety review before it writes a startup heartbeat and moves l
 the lowest GitHub comment ID plus a server-side timestamp to decide the lease. `release` writes
 terminal merge evidence before state and label transitions. Legacy script entrypoints remain only
 as compatibility surfaces until every caller is redirected to this command family.
+
+`autospec issue promote` owns the remote admission transaction. It fetches the canonical GitHub
+issue, applies the repository's trusted-actor and regex policy, validates the existing canonical
+safety section, records review with `safety:reviewed` without editing the body, re-reads the exact
+state, and only then adds `auto-implement`. A final re-read detects concurrent title, body, author,
+state, or label changes and rolls back transaction-owned labels. Completed admissions are
+idempotent, and `--remove-label needs-autospec-template` lets the same transaction finish the
+groomer's owned label transition with verified rollback on cleanup failure or drift.
+
+The JSON response emits `"auto-implement": true` only for a passing verdict and reports
+`eligible` for final-payload queue-policy eligibility plus `changed` for remote mutation. It
+returns structured ambiguous/blocked/indeterminate decisions without admission and groups
+blocked or indeterminate verdicts by inner safety reason in `blocked_by_reason`. `eligible` is
+not a live claim, dependency, pull-request, worker-capacity, or path-conflict decision.
 
 `autospec queue ready` follows every GitHub REST page for open `auto-implement` work and active
 claims, counts raw issue-page records before filtering pull requests, and cursor-paginates linked
@@ -110,6 +134,13 @@ GitHub default branch; exact ignored names become advisory health evidence only.
 See [mainline health admission](runbooks/mainline-health-admission.md) and the
 [configuration reference](CONFIG_REFERENCE.md#repository-local-rust-mainline-health)
 for the supported schema and fail-closed behavior.
+
+`autospec autonomous blast-radius` reads newline-delimited changed paths from
+`--changed-files` and matches them against `.autospec/autospec.yml`
+`fenced_surfaces` by default, or a caller-supplied `--fenced-surfaces` registry.
+Fenced matches emit `blast:fenced`, `decision:"quarantine"`, and non-zero exit
+status so policy config changes such as `.autospec/autospec.yml` cannot be
+treated as low-blast-radius.
 
 `autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]
 [--json]` is the Rust Tier-1 watchdog for the fixed direct `omx exec ... $autospec-run` child.

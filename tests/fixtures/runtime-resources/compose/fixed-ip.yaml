@@ -1,0 +1,8 @@
+services:
+  web:
+    image: nginx:alpine
+    networks:
+      private:
+        ipv4_address: 10.0.0.8
+networks:
+  private: {}

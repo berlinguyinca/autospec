@@ -12,7 +12,6 @@
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
-    VALIDATE="$REPO_ROOT/autospec validate"
     EXPANDER="$REPO_ROOT/scripts/expand-skill-blocks.sh"
     GOLDEN_DIR="$REPO_ROOT/tests/fixtures/skill-goldens"
     TMP="$(mktemp -d)"
@@ -313,39 +312,11 @@ ENDMARKER
 # contains a markered codex member but no recorded golden for it.
 # ---------------------------------------------------------------------------
 @test "markered codex member with missing golden fails check_block_expansion (fail closed)" {
-    # Stand up an isolated REPO_ROOT-like sandbox with one skill whose codex
-    # member is markered but has SKILL.md + codex goldens missing for codex.
-    local sand="$TMP/sandbox"
-    mkdir -p "$sand/scripts" "$sand/tests/fixtures/skill-goldens" "$sand/templates/skill-blocks"
-    mkdir -p "$sand/skills/demo/codex"
-
-    # Copy the real expander + template so expansion works.
-    cp "$REPO_ROOT/scripts/expand-skill-blocks.sh" "$sand/scripts/"
-    cp "$REPO_ROOT/templates/skill-blocks/startup-self-update.md" "$sand/templates/skill-blocks/"
-
-    # A plain SKILL.md (no marker) WITH a matching golden so the SKILL.md leg passes.
-    printf '# demo\n\nplain body\n' > "$sand/skills/demo/SKILL.md"
-    bash "$sand/scripts/expand-skill-blocks.sh" "$sand/skills/demo/SKILL.md" \
-        | shasum -a 256 | cut -d' ' -f1 > "$sand/tests/fixtures/skill-goldens/demo.SKILL.md.sha256"
-
-    # A MARKERED codex member with NO golden recorded — must trip the gate.
-    printf '# demo codex\n\n<!-- autospec-block:startup-self-update SKILL_NAME=demo -->\n' \
-        > "$sand/skills/demo/codex/prompt.md"
-
-    # Run only check_block_expansion (+ its helper) against the sandbox.
-    run bash -c '
-        set -eu
-        REPO_ROOT="'"$sand"'"
-        cd "$REPO_ROOT"
-        fail(){ printf "validate: FAIL — %s\n" "$*" >&2; exit 1; }
-        info(){ printf "validate: %s\n" "$*"; }
-        # Source the helper + gate straight from the repo validate.sh.
-        eval "$(awk "/^gate_block_member\(\)/{f=1} f{print} f&&/^}\$/{c++; if(c==1) exit}" "'"$VALIDATE"'")"
-        eval "$(awk "/^check_block_expansion\(\)/{f=1} f{print} f&&/^}\$/{exit}" "'"$VALIDATE"'")"
-        check_block_expansion
-    '
-    [ "$status" -ne 0 ]
-    [[ "$output" =~ "no golden" ]] || [[ "$output" =~ "fail closed" ]] || [[ "$output" =~ "FAIL" ]]
+    run bash -c 'cd "$1" && cargo test -q -p autospec-core \
+      validation::external::tests::block_expansion_rejects_markered_member_without_golden \
+      -- --exact' _ "$REPO_ROOT"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ "1 passed" ]]
 }
 
 # ---------------------------------------------------------------------------

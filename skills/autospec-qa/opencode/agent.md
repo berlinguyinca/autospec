@@ -157,7 +157,7 @@ harness exposes it, then stop. Do not run the QA audit.
 | --- | --- | --- | --- | --- |
 | Subagent model tier | Tier A: `opus` + ultrathink | Tier A: top-tier `task` + max reasoning | Tier A: current top GPT + `reasoning_effort=high` | Run inline, but keep the same report contract |
 <!-- autospec-block:harness-adapter-core -->
-| Browser/E2E execution | Playwright/browser tool or shell | Playwright/browser task | shell + browser when available | Mark UI-only checks NOT TESTED with blocker |
+| Browser/E2E execution | Playwright/browser tool or shell | Playwright/browser task | shell + browser when available | Use `browser-verified` / `fallback-smoke-only` / `not-run`; mark UI-only gaps with blocker |
 | Shell execution | Bash tool | shell tool | shell/apply_patch | Required for regeneration |
 
 **Model tier:** TIER_A for the spec audit and test-regeneration plan because

@@ -225,6 +225,43 @@ fn explore_specialists_empty_proposal_suppresses_fallback() {
 
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(json["domains"].as_array().unwrap().len() > 0);
+    assert!(!json["domains"].as_array().unwrap().is_empty());
     assert!(json["suggested_specialists"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn explore_verifier_outcome_seals_absent_verify_command_as_not_run() {
+    let artifact = temp_dir("autospec-explore-verifier-artifact").join("research.json");
+    std::fs::write(&artifact, r#"{"failclosed":true}"#).unwrap();
+
+    let output = autospec()
+        .args([
+            "explore",
+            "verifier-outcome",
+            "--tier",
+            "local",
+            "--cycle",
+            "7",
+            "--artifact",
+            artifact.to_str().unwrap(),
+        ])
+        .env_remove("AUTOSPEC_EXPLORE_VERIFY_CMD")
+        .output()
+        .expect("autospec explore verifier-outcome runs");
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stderr.is_empty());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["outcome"], "NotRun");
+    assert_eq!(json["reason"], "missing_AUTOSPEC_EXPLORE_VERIFY_CMD");
+    assert_eq!(json["tier"], "local");
+    assert_eq!(json["cycle"], 7);
+    assert_eq!(json["artifact_path"], artifact.to_str().unwrap());
+    assert_eq!(json["sealed"], true);
+    assert_eq!(json["dry"], false);
+    assert_eq!(json["may_mutate_github"], false);
 }

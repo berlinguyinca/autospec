@@ -26,7 +26,7 @@ setup() {
 
 write_git_mock() {
     REAL_GIT="$(command -v git)"
-    cat > "$MOCK_BIN/git" <<MOCKEOF
+    cat > "$MOCK_BIN/git.new" <<MOCKEOF
 #!/usr/bin/env bash
 if [ "\$1" = "ls-remote" ]; then
     # No remote branch ref exists for the issue-1858 startup-failure fixture.
@@ -41,15 +41,27 @@ if [ "\$1" = "show-ref" ] && printf '%s\n' "\$*" | grep -q 'fix/issue-1858-start
 fi
 exec "$REAL_GIT" "\$@"
 MOCKEOF
-    chmod +x "$MOCK_BIN/git"
+    publish_mock "$MOCK_BIN/git.new" "$MOCK_BIN/git"
 }
 
 write_gh_mock() {
-    cat > "$MOCK_BIN/gh" <<MOCKEOF
+    cat > "$MOCK_BIN/gh.new" <<MOCKEOF
 #!/usr/bin/env bash
 set -eu
 TMPDIR_BATS="$TMPDIR_BATS"
 FIXTURE="$FIXTURE"
+if [ "\${1:-}" = "api" ] && [ "\${2:-}" = "--method" ] && [ "\${3:-}" = "GET" ]; then
+    case "\${4:-}" in
+      *"labels=auto-implement"*)
+        jq '{raw_count:length,items:map({number,title,body,labels:[.labels[].name],author:{login:"fixture-agent"}})}' "\$TMPDIR_BATS/auto.json"
+        ;;
+      *"labels=in-progress-by-bot"*)
+        jq '{raw_count:length,items:map({number,title,body,labels:[.labels[].name],author:{login:"fixture-agent"}})}' "\$TMPDIR_BATS/active.json"
+        ;;
+      *) printf '{"raw_count":0,"items":[]}\n' ;;
+    esac
+    exit 0
+fi
 sub="\${1:-} \${2:-}"
 case "\$sub" in
   "issue list")
@@ -108,7 +120,17 @@ case "\$sub" in
     ;;
 esac
 MOCKEOF
-    chmod +x "$MOCK_BIN/gh"
+    publish_mock "$MOCK_BIN/gh.new" "$MOCK_BIN/gh"
+}
+
+publish_mock() {
+    source_path="$1"
+    destination_path="$2"
+    chmod +x "$source_path"
+    mv "$source_path" "$destination_path"
+    # Atomic rename prevents inode clashes; repeated validation on this ZFS
+    # host still requires a short close-to-exec settle interval.
+    sleep 0.01
 }
 
 teardown() {
@@ -142,10 +164,14 @@ run_list_ready() {
     # The autospec-run orchestrator may export AUTOSPEC_RUN_ONLY_ISSUES for the
     # live queue; this fixture must exercise all synthetic issues regardless.
     unset AUTOSPEC_RUN_ONLY_ISSUES
-    PATH="$MOCK_BIN:$PATH" \
-    AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3 \
-    AUTOSPEC_HEARTBEAT_DIR="$TMPDIR_BATS/heartbeats" \
-      "$AUTOSPEC" queue ready --repo test/repo --batch-size 3
+    unset AUTOSPEC_CONFIG_FILE
+    (
+        cd "$TMPDIR_BATS"
+        PATH="$MOCK_BIN:$PATH" \
+        AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS=3 \
+        AUTOSPEC_HEARTBEAT_DIR="$TMPDIR_BATS/heartbeats" \
+          "$AUTOSPEC" queue ready --repo test/repo --batch-size 3
+    )
 }
 
 @test "batch size 3 ignores and requeues startup-failed second worker with no heartbeat or branch" {
@@ -154,7 +180,8 @@ run_list_ready() {
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | index(1858) == null')" = "true" ]
     [ "$(printf '%s\n' "$output" | jq -r '.worker_cap.active_count')" = "0" ]
-    [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860,1861" ]
+    [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860,1861" ] \
+        || { printf 'queue output: %s\n' "$output" >&3; false; }
     grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$TMPDIR_BATS/edit.log"
     grep -q -- '^api repos/test/repo/issues/comments/10 -X DELETE' "$TMPDIR_BATS/clear.log"
 }

@@ -172,6 +172,8 @@ Detect your harness by checking available tools before any phase:
 
 **Fallback rule:** If `TIER_B` is not available in your harness (model unknown, quota/capacity failure, authorization failure, or tool call returns an error for that model), silently retry the same subagent dispatch with `TIER_A`. Preserve the parent context on retry by passing a bounded handoff containing the issue number, repo path, branch/worktree plan, relevant issue body sections, last error, and current queue/claim state. Codex native subagents with explicit `agent_type`, `model`, or `reasoning_effort` MUST use a bounded handoff, not a full-history fork; do not ask Codex to inherit/fork the full parent conversation when those fields are set. Never ask the user.
 
+**Codex SpawnAgent call-shape contract:** Codex has two valid subagent call shapes. Use the bounded handoff when setting an explicit executor/tier route: `SpawnAgent({ prompt: bounded_handoff, agent_type: "executor", model: TIER_B, reasoning_effort: "medium" })`. Use a full-history fork only when inheriting the current conversation without explicit routing: `SpawnAgent({ prompt: full_history_prompt, full_history: true })`. Never combine `full_history: true` with `agent_type`, `model`, or `reasoning_effort`. On Codex dispatch failure, retry once with the other valid shape when that still satisfies the phase's tier rule; if both valid shapes fail, release the claimed issue back to `auto-implement` with a visible blocker comment.
+
 Hold `TIER_A` and `TIER_B` for the entire skill run. Every "Tier A" and "Tier B" reference below resolves to these harness-specific values.
 
 ## Relevant memory injection (run-start, once)
@@ -287,8 +289,32 @@ Then launch a **background monitor loop** — the orchestrator relaunches the mo
 ```
 batch_num=1
 while true:
-  launch background subagent (pass batch_num; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-1})
+  launch background subagent paused before its first claim (pass batch_num; AUTOSPEC_BATCH_SIZE=${AUTOSPEC_BATCH_SIZE:-1})
+  capture the returned ACTUAL_SESSION_ID and bind it into that child's durable session context as WAIT_TARGET_SESSION_ID
+  do not allow the child to claim work until it can pass that exact WAIT_TARGET_SESSION_ID to `autospec claim acquire --session-id`
   wait for task-notification (monitor agent completes)
+
+  if Wait returns `write_stdin failed` with `stdin is closed`:
+    inspect durable agent/session state once for a live recovery path
+    if the child is reported live:
+      attempt one harness reattach to the exact failed Wait target
+      if reattach succeeds: continue waiting for task-notification
+      explicitly terminate and reap the child through the harness process API
+      if termination and reap cannot be proven: stop without typed recovery or label mutation
+    require durable proof that the child exited or was terminated and reaped
+    use the actual session ID from the failed Wait target (never infer it from an environment variable)
+    read the immutable heartbeat binding for ACTUAL_SESSION_ID before inspecting any current claim state
+    BOUND_HEARTBEAT="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/heartbeat-read.sh" --repo {repo} --session-id "<ACTUAL_SESSION_ID>")" or stop without typed recovery or label mutation
+    ISSUE="$(printf '%s' "$BOUND_HEARTBEAT" | jq -er '.issue | select((type == "string" and length > 0) or (type == "number" and . > 0)) | tostring')" or stop
+    BRANCH="$(printf '%s' "$BOUND_HEARTBEAT" | jq -er '.branch | select(type == "string")')" or stop
+    WORKER_ID="$(printf '%s' "$BOUND_HEARTBEAT" | jq -er '.worker_id | select(type == "string" and length > 0)')" or stop
+    CLAIM_ID="$(printf '%s' "$BOUND_HEARTBEAT" | jq -er '.claim_id | select(type == "string" and length > 0)')" or stop
+    if the binding is absent, malformed, or legacy/unbound: stop without typed recovery or label mutation
+    never read CLAIM_ID from the currently active claim after Wait fails; a successor may already own the same issue, worker, and branch
+    run `"${AUTOSPEC_BIN:-autospec}" autonomous implementer-wait-failed --repo {repo} --issue "<ISSUE>" --worker-id "<WORKER_ID>" --branch "<BRANCH>" --claim-id "<CLAIM_ID>" --session-id "<ACTUAL_SESSION_ID>" --diagnostic "<REDACTED_WAIT_ERROR>"`
+    if typed recovery exits non-zero: log the surfaced recovery failure and stop processing that issue
+    never mutate labels inline or overwrite a successor claim
+    continue  # start a fresh monitor batch from the restored auto-implement queue
 
   # Read and consume the batch-done signal.
   if [ -f "$HOME/.autospec/batch-done.json" ]; then
@@ -594,7 +620,7 @@ do not fall back to an inline label-swap path.
 >   # read-back verification, so the hot loop NEVER re-implements the inline
 >   # label swap. Multiple monitors can race the same candidate; exactly one
 >   # wins (exit 0), the rest lose (non-zero) and skip to the next candidate.
->   claim_json="$("$AUTOSPEC_CLAIM_BIN" claim acquire --issue "$ISSUE" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:monitor:$$}" --branch "${BRANCH:-}")" && claim_rc=0 || claim_rc=$?
+>   claim_json="$("$AUTOSPEC_CLAIM_BIN" claim acquire --issue "$ISSUE" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-$(hostname):${USER:-unknown}:monitor:$$}" --branch "${BRANCH:-}" --session-id "${WAIT_TARGET_SESSION_ID:?missing durable Wait target session binding}")" && claim_rc=0 || claim_rc=$?
 >   # exit 1 = hard usage error (never a race signal); exit 2 = lost race.
 >   # Split them: a misconfigured claim (rc 1 or any other non-2 non-zero) must
 >   # surface an operator-visible WARN, not masquerade as a silently-dropped
@@ -610,11 +636,11 @@ do not fall back to an inline label-swap path.
 >     ready=($READY_REMOVE)
 >     continue
 >   fi
->   # exit 0 only: this monitor now owns #$ISSUE (label already swapped to
->   # in-progress-by-bot by autospec claim acquire) -> heartbeat write -> process(ISSUE).
->   _hb_slug="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")"
->   mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
->   printf '{"issue":"%s","branch":"","step":"claimed","ts":%s,"pr":"","repo":"%s"}\n' "$ISSUE" "$(date -u +%s)" "{repo}" > "$HOME/.autospec/process-heartbeats/$_hb_slug/$ISSUE.json"
+>   # exit 0 only: this monitor now owns #$ISSUE. claim acquire has already
+>   # persisted both the per-issue heartbeat and immutable session sidecar.
+>   CLAIM_ID="$(printf '%s' "$claim_json" | jq -er '.claim_id | select(type == "string" and length > 0)')" || exit 1
+>   CLAIM_WORKER_ID="$(printf '%s' "$claim_json" | jq -er '.worker_id | select(type == "string" and length > 0)')" || exit 1
+>   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/heartbeat-read.sh" --repo "{repo}" --session-id "$WAIT_TARGET_SESSION_ID" >/dev/null || exit 1
 >   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #$ISSUE: claimed" "Starting implementation on {repo}" || true
 >   # Issue start summary — print before dispatching process(ISSUE) so the operator
 >   # knows exactly what the monitor is about to work on.
@@ -719,6 +745,12 @@ do not fall back to an inline label-swap path.
 >     --body-file "skills/autospec-run/prompts/phase4-implementer.md")
 >   ```
 >   `gen-implementer-prompt.sh` emits the static cached prefix (framed by `<!-- CACHE BOUNDARY -->` markers, containing SKILL.md + AGENTS.md + RULE_ID table + tag-filtered saved-memory) first; the `phase4-implementer.md` body and the issue assignment ride below it as the dynamic suffix. Pass the prefix block (up to and including the closing `<!-- CACHE BOUNDARY -->`) with `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache reuses it across dispatches in the same monitor session. This only changes prompt **assembly/caching** — the implementer's absorbed-discipline BEHAVIOR (every step in `phase4-implementer.md`) is unchanged.
+>   UI/client-interaction issues handled by that prompt must record exactly one
+>   browser verification state in the PR body's `## Validation` section:
+>   `browser-verified`, `fallback-smoke-only`, or `not-run`. Harness-caused
+>   Browser connector skips that produce `fallback-smoke-only` or `not-run` must
+>   open or link a browser remediation issue with the redacted error detail before
+>   merge.
 > - **Otherwise** — use the legacy inline prompt below (current behavior). Legacy path is retained until every pre-v2 issue has drained.
 >
 > Both paths share the same outer monitor loop (queue scan, lock-step compliance, label-based locking, heartbeat updates, post-process pickup). The selection only changes the inner subagent prompt body.
@@ -789,7 +821,7 @@ do not fall back to an inline label-swap path.
 > Keep a progress heartbeat so the monitor can prove forward movement:
 > - Create/update `~/.autospec/process-heartbeats/<repo-slug>/<ISSUE>.json` at each major step:
 >   - `claimed`, `expand_start`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
-> - Schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}"}`
+> - Recovery-bound schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}","host":"<HOST>","worker_id":"<WORKER_ID>","claim_id":"<CLAIM_ID>","session_id":"<WAIT_TARGET_SESSION_ID>"}`. `heartbeat-write.sh` creates the exact-session sidecar once: an identical identity refresh preserves it, while any session/issue/worker/branch/claim mismatch fails closed before updating liveness. Legacy heartbeats without that sidecar remain valid only for liveness and fail closed for Wait recovery.
 > - Delete this file on terminal SUCCESS/FAILURE in both clean and failure paths.
 > - Transition notifications: on `tests_passed`, `pr_created`, `merged`, and `failed` call
 >   `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "<title>" "<body>" || true`
@@ -810,11 +842,9 @@ do not fall back to an inline label-swap path.
 >
 > 0. **Heartbeat refresh at expand start.** The very first action before any expand work (reading files, pattern survey, verifying paths) is to refresh the heartbeat to `expand_start`. This covers the claim→worktree_ready window: the monitor wrote `claimed` when it dispatched you; without this refresh the watchdog may falsely reclaim the issue during a long expand phase.
 >    ```bash
->    _hb_slug="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")"
->    mkdir -p "$HOME/.autospec/process-heartbeats/$_hb_slug"
->    printf '{"issue":"%s","branch":"","step":"expand_start","ts":%s,"pr":"","repo":"%s"}\n' \
->      "<ISSUE>" "$(date -u +%s)" "{repo}" \
->      > "$HOME/.autospec/process-heartbeats/$_hb_slug/<ISSUE>.json"
+>    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/heartbeat-write.sh" \
+>      --issue "<ISSUE>" --branch "${BRANCH:-}" --step expand_start --repo "{repo}" \
+>      --worker-id "$CLAIM_WORKER_ID" --claim-id "$CLAIM_ID" --session-id "$WAIT_TARGET_SESSION_ID"
 >    ```
 > 1. **PR-aware recovery ladder, then worktree.** Resolve the branch state FIRST, then act on the verdict. NEVER `cd`/`git checkout`/`git commit` in the primary checkout — all work happens in a linked worktree off `origin/main`.
 >    <!-- worktree-ladder:begin -->
@@ -866,22 +896,7 @@ do not fall back to an inline label-swap path.
 >    ```
 >    <!-- worktree-ladder:end -->
 >    On the `open-pr` path the verification bar EQUALS fresh work — full tests + the standard review loop, never a blind merge. Cleanup is identical for every path: after the merge is confirmed (or on terminal failure), `git worktree remove` the linked worktree and `git worktree prune`; never delete un-pushed work before merge.
-> 1a. **Isolated runtime provisioning.** After entering the issue worktree and passing `worktree-guard.sh assert`, check for `.autospec/runtime.yml` or `.agent-runtime.yml`. If either exists, provision through the shared broker before starting any dev server, E2E server, database, Docker Compose stack, or browser evidence run. Never hand-pick fixed ports in a repo with a runtime manifest. Source the emitted env file so `AUTOSPEC_PUBLIC_URL`, `AGENT_PUBLIC_URL`, `AGENT_FRONTEND_PORT`, `AGENT_BACKEND_PORT`, and `COMPOSE_PROJECT_NAME` flow into tests and subcommands. Use `AUTOSPEC_PUBLIC_URL` as the canonical browser/QA URL instead of `localhost:3000`, `localhost:4200`, or `localhost:5173`.
->    <!-- agent-env-provision:begin -->
->    ```bash
->    if [ -f ".autospec/runtime.yml" ] || [ -f ".agent-runtime.yml" ]; then
->      autospec runtime env up --repo "$PWD" --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" > .autospec-agent-env.out
->      AGENT_ENV_FILE=$(sed -n 's/^AGENT_ENV_FILE=//p' .autospec-agent-env.out | tail -n 1)
->      if [ -n "$AGENT_ENV_FILE" ] && [ -f "$AGENT_ENV_FILE" ]; then
->        . "$AGENT_ENV_FILE"
->      else
->        echo "autospec runtime env did not emit a usable AGENT_ENV_FILE" >&2
->        exit 1
->      fi
->      echo "[runtime] isolated environment: ${AUTOSPEC_PUBLIC_URL:-$AGENT_PUBLIC_URL}"
->    fi
->    ```
->    <!-- agent-env-provision:end -->
+<!-- autospec-block:runtime-resource-preflight -->
 > 1b. **Claim the edit surface (claim-guard), nested inside the issue claim.** After the `worktree-guard.sh assert` gate passes and BEFORE the first file edit, take a fine-grained lease on the skill(s)/paths this issue will touch so a concurrent session in another worktree cannot stomp the same trio+golden surface. This is the inner layer of the three-layer caller pattern (worktree-guard → claim-guard scan → claim-guard acquire); it composes with — and sits inside — the issue-level lease you already hold. Set `TARGETS` to the space-separated skill names and/or repo-relative paths the issue's **Files touched** lists.
 >    <!-- claim-guard-acquire:begin -->
 >    ```bash
@@ -1304,7 +1319,28 @@ do not fall back to an inline label-swap path.
 >        exit 1
 >      fi
 >    fi
->    gh pr merge <PR> --admin --squash --delete-branch
+>    # Blast-radius domain fence at the merge chokepoint (issue #1732). The guarded-merge
+>    # wrapper classifies the PR's ACTUAL changed files against the repo's fenced_surfaces
+>    # registry and refuses to merge a fenced-surface diff (the wrapper applies the
+>    # human-review quarantine label and comments) unless the PR carries the
+>    # `autospec:fenced-approved` override label; otherwise
+>    # it performs the same admin squash-merge. Call it INSTEAD of a bare `gh pr merge --admin`
+>    # so "merge without the fence check" requires deliberately bypassing the wrapper.
+>    # exit 0 = merged (allowed/overridden); 1 = quarantined (NOT merged); 2 = fail-closed error.
+>    # This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
+>    if bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo {repo}; then
+>      :
+>    else
+>      _gm_rc=$?
+>      if [ "$_gm_rc" -eq 1 ]; then
+>        "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" --state blocked --branch "<BRANCH>" --pr "<PR>" || true
+>        echo "[monitor] #<ISSUE> quarantined by blast-radius fence — fenced surface, left for human review; PR NOT merged"
+>      else
+>        echo "[monitor] #<ISSUE> guarded-merge fail-closed (rc=$_gm_rc) — PR NOT merged; pausing for operator review"
+>      fi
+>      rm -f "/tmp/issue-<ISSUE>-body.md" || true
+>      exit 0
+>    fi
 >    "$AUTOSPEC_CLAIM_BIN" claim release --issue "<ISSUE>" --repo {repo} \
 >      --worker-id "${AUTOSPEC_WORKER_ID:-<derived>}" \
 >      --state merged --branch "<BRANCH>" --pr "<PR>" || true
@@ -1332,7 +1368,7 @@ do not fall back to an inline label-swap path.
 > 9. FAILURE (loop exhausted): comment failure on issue, swap label `in-progress-by-bot` → `auto-implement`, `gh pr close <PR> --delete-branch`.
 >    Fire the terminal failure notification: `case "$_notify_fired" in *:failed:*) ;; *) _notify_fired="${_notify_fired}:failed:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: failed" "Implementation failed on {repo}" || true ;; esac`
 >    Cleanup single-fetch body temp file on terminal failure: `rm -f "/tmp/issue-<ISSUE>-body.md" || true`
-> 10. Cleanup: if `.autospec/runtime.yml` or `.agent-runtime.yml` exists in the issue worktree, run `autospec runtime env down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" || true`; then `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`
+> 10. Cleanup: run `autospec runtime env down --repo /tmp/wt-<BRANCH> --mode "${AUTOSPEC_RUNTIME_MODE:-auto}" --purge-maven`; then run `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-runtime-worktree-cleanup.sh" /tmp/wt-<BRANCH>`; only after both succeed, run `cd / && git -C {repo_root} worktree remove /tmp/wt-<BRANCH> --force`.
 > 11. Report: PR number, outcome, one-paragraph summary.
 >
 > Hard rules: NEVER push to main, force-push, bypass hooks, or touch the umbrella issue. gh CLI only.
@@ -1595,11 +1631,12 @@ Run the shared read-only repository quality audit after Phase 5.5 converges or
 hits its cap, before Phase 6 writes the final run summary:
 
 ```bash
+AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES="${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:-1}" \
 bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-quality-audit.sh" \
   --repo . \
   --json ".autospec/repo-quality-audit.json" \
   --markdown ".autospec/repo-quality-audit.md" \
-  ${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:+--file-issues}
+  $([ "${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:-1}" != "0" ] && printf '%s' "--file-issues")
 ```
 
 The audit writes structured findings classified as `app-follow-up`,
@@ -1609,9 +1646,10 @@ scripts, runtime engine compatibility, typecheck/lint/test availability, route
 coverage, design/template guards, dependency audit readiness,
 security-sensitive storage, focused/skipped tests, large files, TypeScript
 `any` usage, and debug logging hotspots. When
-`AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES=1` and `gh` is available, the helper may
-file deduplicated `quality-audit` follow-up issues; otherwise it records
-unfiled residual risks in the JSON/Markdown artifacts. Failures of the audit
+`AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES` defaults to `1` for this Phase 5.6 call;
+set it to `0` to opt out. When issue filing is enabled and `gh` is available,
+the helper may file deduplicated `quality-audit` follow-up issues; otherwise it
+records unfiled residual risks in the JSON/Markdown artifacts. Failures of the audit
 helper should be reported as a warning in Phase 6, not hidden.
 
 ## Advisor escalation

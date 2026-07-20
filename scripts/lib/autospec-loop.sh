@@ -1282,6 +1282,92 @@ _autospec_conductor_operator_stop_flag_path() {
     return 1
 }
 
+_autospec_conductor_persona_sources_cmd() {
+    local sdir="$1"
+    if [ -n "${AUTOSPEC_PERSONA_SOURCES_CMD:-}" ] && [ -f "$AUTOSPEC_PERSONA_SOURCES_CMD" ]; then
+        printf '%s\n' "$AUTOSPEC_PERSONA_SOURCES_CMD"
+    elif [ -f "${sdir}/autonomous-persona-sources.sh" ]; then
+        printf '%s\n' "${sdir}/autonomous-persona-sources.sh"
+    else
+        printf '\n'
+    fi
+}
+
+_autospec_conductor_inferred_source_summary() {
+    local sdir="$1"
+    local repo_root="$2"
+    local autospec_home="${HOME}/.autospec"
+    local sources_cmd
+    sources_cmd="$(_autospec_conductor_persona_sources_cmd "$sdir")"
+
+    if [ -z "$sources_cmd" ] || ! command -v jq >/dev/null 2>&1; then
+        printf '0 none\n'
+        return 0
+    fi
+
+    local bundle
+    bundle="$(REPO_ROOT="$repo_root" AUTOSPEC_HOME="$autospec_home" \
+        bash "$sources_cmd" 2>/dev/null || true)"
+    if [ -z "$bundle" ]; then
+        printf '0 none\n'
+        return 0
+    fi
+
+    printf '%s' "$bundle" | jq -r '
+        (.meta.source_count // (((.global // []) | length) + ((.overlay // []) | length))) as $count
+        | (.meta.confidence // (
+            if $count == 0 then "none"
+            elif $count == 1 then "low"
+            elif ((.global // []) | length) == 0 then "medium"
+            else "high"
+            end
+          )) as $confidence
+        | "\($count) \($confidence)"
+    ' 2>/dev/null || printf '0 none\n'
+}
+
+_autospec_conductor_interactive_bootstrap_enabled() {
+    if [ "${AUTOSPEC_BOOTSTRAP_INTERACTIVE:-0}" = "1" ]; then
+        return 0
+    fi
+    if [ "${AUTOSPEC_AUTONOMOUS_HEADLESS:-0}" = "1" ]; then
+        return 1
+    fi
+    [ -t 0 ] && [ -t 1 ]
+}
+
+_autospec_conductor_handle_empty_inference_bundle() {
+    local repo_root="$1"
+    local repo="$2"
+
+    if _autospec_conductor_interactive_bootstrap_enabled; then
+        printf '[conductor] bootstrap: empty inference bundle — running bootstrap interview dialog\n' >&2
+        if [ -n "${AUTOSPEC_BOOTSTRAP_INTERVIEW_CMD:-}" ]; then
+            bash -c "$AUTOSPEC_BOOTSTRAP_INTERVIEW_CMD" >/dev/null 2>&1 || true
+            return 0
+        fi
+        printf '[conductor] bootstrap: no AUTOSPEC_BOOTSTRAP_INTERVIEW_CMD seam; dialog deferred to harness\n' >&2
+        return 0
+    fi
+
+    printf '[conductor] bootstrap: empty inference bundle — filing bootstrap issue/PR decision\n' >&2
+    if [ -n "${AUTOSPEC_BOOTSTRAP_DECISION_CMD:-}" ]; then
+        bash -c "$AUTOSPEC_BOOTSTRAP_DECISION_CMD" >/dev/null 2>&1 || true
+        return 0
+    fi
+
+    local report="${repo_root}/.autospec/reports/bootstrap-decision.md"
+    mkdir -p "$(dirname "$report")" 2>/dev/null || true
+    {
+        printf '# Bootstrap context needed\n\n'
+        if [ -n "$repo" ]; then
+            printf 'Repo: `%s`\n\n' "$repo"
+        fi
+        printf 'The autonomous conductor found no inferable operator persona, repo memory, autonomy charter, or overlay sources.\n\n'
+        printf 'Next step: file a bootstrap issue/PR to collect project intent before self-originated generation resumes.\n'
+    } > "$report" 2>/dev/null || true
+}
+
 autospec_conductor_run() {
     if [ -n "${HOME:-}" ]; then
         case ":${PATH:-}:" in
@@ -1634,6 +1720,14 @@ fi'
                     >/dev/null 2>&1 || true
             fi
         fi
+        local _inferred_summary _inferred_source_count _inferred_confidence
+        _inferred_summary="$(_autospec_conductor_inferred_source_summary "$_sdir" "$_repo_root")"
+        _inferred_source_count="$(printf '%s' "$_inferred_summary" | awk '{print $1}')"
+        _inferred_confidence="$(printf '%s' "$_inferred_summary" | awk '{print $2}')"
+        case "$_inferred_source_count" in
+            ''|*[!0-9]*) _inferred_source_count=0 ;;
+        esac
+        [ -n "$_inferred_confidence" ] || _inferred_confidence="none"
 
         # ── Step 2: Tier-0 control-channel poll (preempts everything) ─────────
         local _ctrl_decision=""
@@ -1929,10 +2023,27 @@ fi'
         _reason="$(printf '%s' "$_tier_json" \
             | jq -r '.reason // ""' 2>/dev/null || echo "")"
 
+        if { [ "$_action" = "run-explore-once" ] \
+                || [ "$_action" = "run-architecture-improvement" ] \
+                || [ "$_action" = "run-explore-once-internet" ]; } \
+                && [ "${AUTOSPEC_ALLOW_UNSTEERED_GENERATION:-0}" != "1" ] \
+                && [ ! -s "$_priorities_file" ] \
+                && [ ! -s "$_eff_persona" ]; then
+            if [ "$_inferred_source_count" -gt 0 ]; then
+                printf '[conductor] inferred steering bundle present: sources=%s confidence=%s\n' \
+                    "$_inferred_source_count" "$_inferred_confidence" >&2
+            else
+                _action="park"
+                _reason="bootstrap-empty-intent-bundle"
+                _autospec_conductor_handle_empty_inference_bundle "$_repo_root" "$_repo"
+            fi
+        fi
+
         printf '[conductor] tier=%s action=%s\n' "$_tier" "$_action" >&2
 
         # ── Step 4 + 5: Tier-1 drain gated on premerge check ─────────────────
         local _work_done=0
+        local _filed_issues=0
         if [ "$_action" = "park" ]; then
             printf '[conductor] parking: %s\n' "$_reason" >&2
             _stop_reason="waterfall:park:${_reason}"
@@ -2170,6 +2281,7 @@ fi'
 
             if [ "$_promote_filed" -gt 0 ] 2>/dev/null || [ "$_promote_promoted" -gt 0 ] 2>/dev/null; then
                 _work_done=1
+                _filed_issues=$((_filed_issues + _promote_filed))
             else
                 _tier15_dry_cycles=$((_tier15_dry_cycles + 1))
                 printf '[conductor] Tier 1.5 dry (tier15-dry-cycles=%s)
@@ -2656,10 +2768,12 @@ EOF_PROV_BATCH
             local _arch_dry _arch_filed
             _arch_dry="$(printf '%s' "$_arch_out" | jq -r 'if has("dry") then .dry else true end' 2>/dev/null || echo 'true')"
             _arch_filed="$(printf '%s' "$_arch_out" | jq -r '.filed // 0' 2>/dev/null || echo 0)"
+            case "$_arch_filed" in ''|*[!0-9]*) _arch_filed=0 ;; esac
             printf '[conductor] Tier 3 architecture result: dry=%s filed=%s
 '                 "$_arch_dry" "$_arch_filed" >&2
             if [ "$_arch_dry" = "false" ] || { [ "$_arch_filed" -gt 0 ] 2>/dev/null; }; then
                 _work_done=1
+                _filed_issues=$((_filed_issues + _arch_filed))
             else
                 _tier3_dry_cycles=$((_tier3_dry_cycles + 1))
                 printf '[conductor] Tier 3 dry (tier3-dry-cycles=%s)
@@ -2794,6 +2908,7 @@ EOF_PROV_BATCH
                 local _explore_filed
                 _explore_filed="$(printf '%s' "$_explore_out" \
                     | jq -r '.filed // 0' 2>/dev/null || echo 0)"
+                case "$_explore_filed" in ''|*[!0-9]*) _explore_filed=0 ;; esac
 
                 if [ "$_explore_is_error" -eq 1 ]; then
                     printf '[conductor] Tier %s explore result: ERROR (exit=%s) — not a clean dry\n' \
@@ -2810,6 +2925,7 @@ EOF_PROV_BATCH
                     printf '[conductor] Tier %s filed %s candidate(s) — floating back to Tier 1\n' \
                         "$_tier" "$_explore_filed" >&2
                     _work_done=1
+                    _filed_issues=$((_filed_issues + _explore_filed))
                     # F3: track in-flight discovery issues so the main-merge
                     # refusal gate blocks Tier-1 drain until they are consumed.
                     if [ "$_explore_filed" -gt 0 ] 2>/dev/null; then
@@ -2866,10 +2982,12 @@ EOF_PROV_BATCH
             local _gd_dry _gd_filed
             _gd_dry="$(printf '%s' "$_gd_out" | jq -r 'if has("dry") then .dry else true end' 2>/dev/null || echo 'true')"
             _gd_filed="$(printf '%s' "$_gd_out" | jq -r '.filed // 0' 2>/dev/null || echo 0)"
+            case "$_gd_filed" in ''|*[!0-9]*) _gd_filed=0 ;; esac
             printf '[conductor] Tier G1 growth-define result: dry=%s filed=%s\n' \
                 "$_gd_dry" "$_gd_filed" >&2
             if [ "$_gd_dry" = "false" ] || { [ "$_gd_filed" -gt 0 ] 2>/dev/null; }; then
                 _work_done=1
+                _filed_issues=$((_filed_issues + _gd_filed))
             else
                 _tierg_dry_cycles=$((_tierg_dry_cycles + 1))
                 printf '[conductor] Tier G1 dry (tierg-dry-cycles=%s)\n' \
@@ -2983,7 +3101,8 @@ EOF_PROV_BATCH
             if [ "$_dry" != "1" ]; then
                 bash "$_spend" add \
                     --tokens 0 \
-                    --issues "$_work_done" \
+                    --filed-issues "$_filed_issues" \
+                    --budget-issues "$_work_done" \
                     2>/dev/null || true
             fi
             local _spend_check
@@ -3003,12 +3122,16 @@ EOF_PROV_BATCH
 
         # ── Step 7: Once-per-UTC-day digest ───────────────────────────────────
         local _new_day
-        _new_day="$(_conductor_maybe_write_digest \
+        _new_day="$(AUTOSPEC_CONDUCTOR_INFER_CONFIDENCE="${_inferred_confidence:-}" \
+            AUTOSPEC_CONDUCTOR_INFER_SOURCE_COUNT="${_inferred_source_count:-0}" \
+            _conductor_maybe_write_digest \
             "$_no_digest" "$_last_digest_day" "$_sdir" "$_repo" "$_dry" 2>&1 \
             | tail -1 || printf '%s' "$_last_digest_day")"
         # _new_day stdout is the updated day; progress log went to stderr.
         # Re-capture cleanly by calling the helper with stderr suppressed.
-        _last_digest_day="$(_conductor_maybe_write_digest \
+        _last_digest_day="$(AUTOSPEC_CONDUCTOR_INFER_CONFIDENCE="${_inferred_confidence:-}" \
+            AUTOSPEC_CONDUCTOR_INFER_SOURCE_COUNT="${_inferred_source_count:-0}" \
+            _conductor_maybe_write_digest \
             "$_no_digest" "$_last_digest_day" "$_sdir" "$_repo" "$_dry" \
             2>/dev/null || printf '%s' "$_last_digest_day")"
 
@@ -3104,6 +3227,13 @@ _conductor_maybe_write_digest() {
         fi
         if [ -n "$_priorities_section" ]; then
             printf '\n%s\n' "$_priorities_section"
+        fi
+        if [ -n "${AUTOSPEC_CONDUCTOR_INFER_CONFIDENCE:-}" ] \
+            && [ "${AUTOSPEC_CONDUCTOR_INFER_CONFIDENCE:-none}" != "none" ]; then
+            printf '\n### Inferred steering\n\n'
+            printf -- '- **Confidence:** %s-confidence from %s source(s).\n' \
+                "$AUTOSPEC_CONDUCTOR_INFER_CONFIDENCE" \
+                "${AUTOSPEC_CONDUCTOR_INFER_SOURCE_COUNT:-0}"
         fi
         printf '\n_Generated by autospec-autonomous Phase-1 conductor._\n'
     } > "$digest_file" || true

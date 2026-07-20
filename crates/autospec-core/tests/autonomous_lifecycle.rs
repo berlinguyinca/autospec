@@ -2,8 +2,8 @@ use autospec_core::autonomous_lifecycle::{
     decide, decide_capacity, decide_conductor_lease, Budget, CapacityDecision, CapacityInput,
     ClaimBranch, ClaimContext, ClaimEvidence, ConductorLeaseDecision, ConductorLeaseInput,
     ConductorLeaseReclaim, Health, IssueNumber, LeaseFreshness, LifecycleDecision, LifecycleInput,
-    LifecycleReject, LifecycleTier, ParkReason, RepositoryScope, StopMode, WorkerId,
-    ABANDONED_LEASE_SECS, ISSUE_FAILURE_CAP, STALE_LEASE_SECS,
+    LifecycleRecord, LifecycleReject, LifecycleTier, ParkReason, RepositoryScope, StopMode,
+    WorkerId, ABANDONED_LEASE_SECS, ISSUE_FAILURE_CAP, STALE_LEASE_SECS,
 };
 
 #[test]
@@ -236,5 +236,20 @@ fn malformed_claim_evidence_is_non_executable() {
     assert_eq!(
         decide(&LifecycleInput::ready("owner/repo").with_claim_evidence(ClaimEvidence::Malformed)),
         LifecycleDecision::Reject(LifecycleReject::MalformedClaim)
+    );
+}
+
+#[test]
+fn lifecycle_record_parses_no_steering_park_reason() {
+    let record = LifecycleRecord::parse_json(
+        r#"{"version":1,"repo":"test/repo","result":{"decision":"park","reason":"no-steering"}}"#,
+    )
+    .expect("parse no-steering park record");
+
+    assert_eq!(
+        record.decision,
+        LifecycleDecision::Park {
+            reason: ParkReason::NoSteering,
+        }
     );
 }

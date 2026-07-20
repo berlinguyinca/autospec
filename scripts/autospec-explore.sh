@@ -571,23 +571,33 @@ PY
     # state is never silent.
     if [ "$_once_failclosed" = "true" ]; then
         _once_reason="verify-unavailable-failclosed"
+        _once_verifier_outcome="$(autospec explore verifier-outcome --tier "$_once_tier" --cycle 1 --artifact "$_once_out" 2>/dev/null || true)"
+        if [ -z "$_once_verifier_outcome" ]; then
+            _once_verifier_outcome='{"outcome":"NotRun","reason":"missing_AUTOSPEC_EXPLORE_VERIFY_CMD","sealed":true,"dry":false,"may_mutate_github":false}'
+        fi
         echo "code_health:explore_verify_unavailable_failclosed (--once filed 0: autonomous run with no skeptic verdicts; wire AUTOSPEC_EXPLORE_VERIFY_CMD to verify + file)" >&2
     elif [ "$_once_dry" = "true" ]; then
         _once_reason="no new candidates after dedup"
+        _once_verifier_outcome="null"
     else
         _once_reason="filed $_once_filed of $_once_new candidates from $_once_tier research pass"
+        _once_verifier_outcome="null"
     fi
 
     # Emit the yield JSON. The legacy 6 keys remain stable; `candidates` is the
     # machine-readable single-cycle issue list consumed by autonomous discovery.
-    python3 - "$_once_tier" "$_once_seen" "$_once_new" "$_once_filed" "$_once_dry" "$_once_reason" "$_once_candidates" <<'PY'
+    python3 - "$_once_tier" "$_once_seen" "$_once_new" "$_once_filed" "$_once_dry" "$_once_reason" "$_once_candidates" "$_once_verifier_outcome" <<'PY'
 import json, sys
-_, tier, seen, new, filed, dry, reason, candidates_path = sys.argv
+_, tier, seen, new, filed, dry, reason, candidates_path, verifier_outcome_raw = sys.argv
 try:
     candidates = json.load(open(candidates_path))
 except Exception:
     candidates = []
-print(json.dumps({
+try:
+    verifier_outcome = json.loads(verifier_outcome_raw)
+except Exception:
+    verifier_outcome = None
+payload = {
     "tier": tier,
     "proposals_seen": int(seen),
     "new_candidates": int(new),
@@ -595,7 +605,10 @@ print(json.dumps({
     "dry": dry == "true",
     "reason": reason,
     "candidates": candidates,
-}, separators=(",", ":")))
+}
+if verifier_outcome is not None:
+    payload["verifier_outcome"] = verifier_outcome
+print(json.dumps(payload, separators=(",", ":")))
 PY
     exit 0
 fi

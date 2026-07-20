@@ -1,0 +1,8 @@
+services:
+  web:
+    image: nginx:alpine
+    container_name: web
+  sidecar:
+    image: nginx:alpine
+    environment:
+      TARGET_CONTAINER: web

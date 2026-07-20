@@ -45,25 +45,17 @@ pub(super) fn record_tier3_with_lease(
     with_current_lifecycle_lease(lease, || record_tier3_fenced(state_root, repo, scan))
 }
 
-#[cfg(test)]
-pub(super) fn record_tier3(
-    state_root: &Path,
-    repo: &str,
-    scan: Tier3Scan,
-) -> Result<Tier3Progress, String> {
-    record_tier3_fenced(state_root, repo, scan)
-}
-
 fn record_tier3_fenced(
     state_root: &Path,
     repo: &str,
     scan: Tier3Scan,
 ) -> Result<Tier3Progress, String> {
-    let store =
-        match WaterfallStore::acquire(state_root.join("waterfall"), repo).map_err(store_error)? {
-            StoreAcquisition::Acquired(store) => store,
-            StoreAcquisition::Held => return Ok(Tier3Progress::Pending),
-        };
+    let store = match WaterfallStore::acquire_for_receipts(state_root.join("waterfall"), repo, None)
+        .map_err(store_error)?
+    {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => return Ok(Tier3Progress::Pending),
+    };
     let Some(state) = store.load_state().map_err(store_error)? else {
         return Ok(Tier3Progress::Pending);
     };
@@ -89,7 +81,7 @@ fn replay_tier3_fenced(
     state_root: &Path,
     repo: &str,
 ) -> Result<ReceiptPreflight<Tier3Progress>, String> {
-    let store = match WaterfallStore::acquire(state_root.join("waterfall"), repo)
+    let store = match WaterfallStore::acquire_for_receipts(state_root.join("waterfall"), repo, None)
         .map_err(store_error)?
     {
         StoreAcquisition::Acquired(store) => store,
@@ -317,4 +309,13 @@ fn store_error(error: WaterfallStoreError) -> String {
         | WaterfallStoreError::InvalidReceipt(reason)
         | WaterfallStoreError::InvalidState(reason) => reason,
     }
+}
+
+#[cfg(test)]
+pub(super) fn record_tier3(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier3Scan,
+) -> Result<Tier3Progress, String> {
+    record_tier3_fenced(state_root, repo, scan)
 }

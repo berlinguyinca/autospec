@@ -333,6 +333,7 @@ pub enum ParkReason {
     BudgetSoftCap,
     BudgetHardCap,
     IdleRescan,
+    NoSteering,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -629,6 +630,7 @@ fn parse_park_reason(value: String) -> Result<ParkReason, String> {
         "budget_soft_cap" => Ok(ParkReason::BudgetSoftCap),
         "budget_hard_cap" => Ok(ParkReason::BudgetHardCap),
         "idle_rescan" => Ok(ParkReason::IdleRescan),
+        "no-steering" => Ok(ParkReason::NoSteering),
         _ => Err("unknown lifecycle park reason".to_string()),
     }
 }

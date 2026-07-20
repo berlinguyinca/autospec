@@ -3,6 +3,11 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+use std::thread;
+#[cfg(test)]
+use std::time::{Duration, Instant};
+
 use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
 use autospec_core::autonomous::tier4::Tier4SourcePolicy;
 use autospec_core::autonomous::waterfall::{
@@ -54,7 +59,7 @@ impl WaterfallStore {
         repo: impl Into<String>,
         policy: &WaterfallPolicy,
     ) -> Result<StoreAcquisition, WaterfallStoreError> {
-        Self::acquire_with_optional_tier4_source_policy(root, repo, policy.tier4_source().cloned())
+        Self::acquire_for_receipts(root, repo, policy.tier4_source().cloned())
     }
 
     #[cfg(test)]
@@ -68,6 +73,30 @@ impl WaterfallStore {
             repo,
             Some(expected_tier4_source_policy),
         )
+    }
+
+    pub(super) fn acquire_for_receipts(
+        root: impl AsRef<Path>,
+        repo: impl Into<String>,
+        expected_tier4_source_policy: Option<Tier4SourcePolicy>,
+    ) -> Result<StoreAcquisition, WaterfallStoreError> {
+        let root = root.as_ref().to_path_buf();
+        let repo = repo.into();
+        #[cfg(test)]
+        {
+            retry_transient_lock(
+                || {
+                    Self::acquire_with_optional_tier4_source_policy(
+                        &root,
+                        repo.clone(),
+                        expected_tier4_source_policy.clone(),
+                    )
+                },
+                |result| matches!(result, Ok(StoreAcquisition::Held)),
+            )
+        }
+        #[cfg(not(test))]
+        Self::acquire_with_optional_tier4_source_policy(root, repo, expected_tier4_source_policy)
     }
 
     fn acquire_with_optional_tier4_source_policy(
@@ -99,6 +128,11 @@ impl WaterfallStore {
     pub(super) fn state_path(&self) -> &Path {
         // The state filename is intentionally stable: Task 3 resumes only from this cursor.
         &self.state_path
+    }
+
+    #[cfg(test)]
+    pub(in crate::commands::autonomous) fn clone_lock_for_test(&self) -> File {
+        self._lock.try_clone().expect("clone waterfall lock")
     }
 
     pub(super) fn receipt_path(
@@ -280,6 +314,21 @@ impl WaterfallStore {
     }
 }
 
+#[cfg(test)]
+pub(super) fn retry_transient_lock<T>(
+    mut operation: impl FnMut() -> T,
+    is_transient: impl Fn(&T) -> bool,
+) -> T {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let result = operation();
+        if !is_transient(&result) || Instant::now() >= deadline {
+            return result;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
 fn is_advancing_completed_status(tier: NoWorkTier, status: &TierStatus) -> bool {
     matches!(
         (tier, status),
@@ -332,25 +381,13 @@ fn try_lock(path: &Path) -> Result<Option<File>, WaterfallStoreError> {
 
     #[cfg(unix)]
     {
-        use std::os::fd::AsRawFd;
-
-        unsafe extern "C" {
-            fn flock(fd: i32, operation: i32) -> i32;
-        }
-        const LOCK_EX: i32 = 2;
-        const LOCK_NB: i32 = 4;
-        // SAFETY: the returned file retains the successful flock for the store lifetime.
-        if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } == 0 {
-            return Ok(Some(file));
-        }
-        let error = io::Error::last_os_error();
-        if error.kind() == io::ErrorKind::WouldBlock {
-            Ok(None)
-        } else {
-            Err(WaterfallStoreError::Diagnostic(format!(
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(WaterfallStoreError::Diagnostic(format!(
                 "cannot lock waterfall store {}: {error}",
                 path.display()
-            )))
+            ))),
         }
     }
 

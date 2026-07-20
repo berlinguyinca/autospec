@@ -10,9 +10,9 @@
 # Usage:
 #   ensure-tool.sh <tool>          # ensure <tool> is on PATH; install if absent
 #
-# Supported tools (baked-in table): ajv, bash, bats, bun, claude, codex, curl,
-# gh, git, gitleaks, jq, license-checker, mempalace, node, npm, omc, omx,
-# oh-my-opencode, opencode, pipx, python3, semgrep, trivy, uv, yq
+# Supported tools (baked-in table): ajv, bash, bats, bun, cargo, claude, codex,
+# curl, gh, git, gitleaks, jq, license-checker, mempalace, node, npm, omc, omx,
+# oh-my-opencode, opencode, pipx, python3, rustc, semgrep, trivy, uv, yq
 # Unknown tools are a silent no-op (exit 0).
 #
 # Exit codes:
@@ -183,6 +183,11 @@ case "$TOOL" in
     ;;
   bun)
     _try_brew bun || _try_winget Oven-sh.Bun || _try_choco bun || _try_scoop bun || true
+    ;;
+  cargo|rustc)
+    _try_brew rust || _try_apt cargo rustc || _try_dnf cargo rust || _try_yum cargo rust \
+      || _try_pacman rust || _try_apk cargo rust || _try_winget Rustlang.Rustup \
+      || _try_choco rustup.install || _try_scoop rustup || true
     ;;
   claude)
     _try_npm @anthropic-ai/claude-code || true

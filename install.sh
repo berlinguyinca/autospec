@@ -25,7 +25,7 @@
 #   AUTOSPEC_NO_STAR_PROMPT=1  skip the optional GitHub star prompt.
 #   AUTOSPEC_NO_DB_PROMPT=1  skip the optional autospec-db prompt.
 #   AUTOSPEC_INSTALL_DB=1|0  force install/update or skip the optional autospec-db module.
-#   AUTOSPEC_SKIP_SYSTEM_TOOLS=1  skip best-effort CLI dependency installs.
+#   AUTOSPEC_SKIP_SYSTEM_TOOLS=1  skip CLI dependency install attempts (verification still runs).
 #   AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1  skip peer ecosystem bootstrap.
 #   AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1  skip claude/codex/opencode runtime aliases.
 #
@@ -49,10 +49,16 @@ SUPERPOWERS_REMOTE="${SUPERPOWERS_REMOTE:-https://github.com/obra/superpowers.gi
 SUPERPOWERS_CODEX_SKILLS_DIR="${SUPERPOWERS_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
 SUPERPOWERS_OPENCODE_PLUGIN="${SUPERPOWERS_OPENCODE_PLUGIN:-superpowers@git+https://github.com/obra/superpowers.git}"
 OPENCODE_CONFIG_ROOT="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
-AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-git bash curl jq yq gh node npm bun bats codex claude opencode omx omc oh-my-opencode mempalace ajv}"
+AUTOSPEC_REQUIRED_SYSTEM_TOOLS="${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-git bash curl cargo python3 gh jq}"
+AUTOSPEC_HARNESS_TOOLS="${AUTOSPEC_HARNESS_TOOLS:-codex claude opencode}"
+AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-yq node npm bun bats omx omc oh-my-opencode mempalace ajv}"
 OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"
 OH_MY_OPENCODE_PACKAGE="${OH_MY_OPENCODE_PACKAGE:-oh-my-opencode}"
 OH_MY_CLAUDE_PACKAGE="${OH_MY_CLAUDE_PACKAGE:-oh-my-claude-sisyphus}"
+ENSURE_TOOL_SCRIPT="$REPO_ROOT/skills/autospec-shared/scripts/ensure-tool.sh"
+DEPENDENCIES_PRESENT=""
+DEPENDENCIES_INSTALLED=""
+DEPENDENCIES_OPTIONAL_MISSING=""
 
 # Auto-discover skills from the repo by walking skills/*/install.sh. Earlier
 # this was a hardcoded list, which silently dropped any new skill that didn't
@@ -252,13 +258,14 @@ install_autonomous_operator_commands() {
 }
 
 install_autospec_runtime_binary() {
-    runtime_source="$REPO_ROOT/target/release/autospec"
+    cargo_target_dir="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+    runtime_source="$cargo_target_dir/release/autospec"
     runtime_target="$HOME/.autospec/bin/autospec"
     autospec_bin_dir="$HOME/.autospec/bin"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] install_autospec_runtime_binary: cargo build --release -p autospec-cli (from $REPO_ROOT)"
-        info "[dry-run] install_autospec_runtime_binary: install $REPO_ROOT/target/release/autospec -> $HOME/.autospec/bin/autospec"
+        info "[dry-run] install_autospec_runtime_binary: install $runtime_source -> $HOME/.autospec/bin/autospec"
         return 0
     fi
 
@@ -336,15 +343,27 @@ install_agent_env_commands() {
 _AGENT_ENV_ALIAS_MARKER_START="# >>> autospec isolated runtime aliases >>>"
 _AGENT_ENV_ALIAS_MARKER_END="# <<< autospec isolated runtime aliases <<<"
 
+generated_harness_section() {
+    format="$1"
+    section="$2"
+    generated="$REPO_ROOT/templates/generated/harness-runtime-aliases.$format"
+    awk -v start="# BEGIN AUTOSPEC $section" -v end="# END AUTOSPEC $section" '
+        $0 == start { capture=1; next }
+        $0 == end { exit }
+        capture { print }
+    ' "$generated"
+}
+
 agent_env_alias_block() {
+    format="${1:-sh}"
     cat <<EOF
 $_AGENT_ENV_ALIAS_MARKER_START
 # Wrap agent harnesses in manifest-driven isolated runtime environments.
 # Bypass for one command with: AUTOSPEC_ENV_DISABLE=1 claude
 if command -v autospec-env >/dev/null 2>&1; then
-    alias claude='autospec-env session -- claude --dangerously-skip-permissions'
-    alias codex='autospec-env session -- codex --yolo'
-    alias opencode='autospec-env session -- opencode'
+EOF
+    generated_harness_section "$format" "RUNTIME ALIASES"
+    cat <<EOF
 fi
 $_AGENT_ENV_ALIAS_MARKER_END
 EOF
@@ -352,9 +371,10 @@ EOF
 
 install_agent_env_alias_block() {
     rc="$1"
+    format="${2:-sh}"
     block_file="$(mktemp)"
     tmp_file="$(mktemp)"
-    agent_env_alias_block > "$block_file"
+    agent_env_alias_block "$format" > "$block_file"
     [ -f "$rc" ] || touch "$rc"
     if grep -qF "$_AGENT_ENV_ALIAS_MARKER_START" "$rc"; then
         awk -v s="$_AGENT_ENV_ALIAS_MARKER_START" -v e="$_AGENT_ENV_ALIAS_MARKER_END" -v bf="$block_file" '
@@ -536,23 +556,194 @@ check_codex() {
     return 0
 }
 
-ensure_system_tools() {
-    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" = "1" ]; then
-        info "ensure_system_tools: skipped by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
-        return 0
-    fi
-    ensure_tool="$REPO_ROOT/skills/autospec-shared/scripts/ensure-tool.sh"
-    if [ ! -f "$ensure_tool" ]; then
-        warn "ensure_system_tools: $ensure_tool missing; skipping"
-        return 0
-    fi
-    for tool in $AUTOSPEC_SYSTEM_TOOLS; do
-        if [ "$DRY_RUN" -eq 1 ]; then
-            info "[dry-run] ensure_system_tools: would ensure $tool"
-        else
-            bash "$ensure_tool" "$tool" || true
+record_dependency() {
+    dependency_bucket="$1"
+    dependency_name="$2"
+    case "$dependency_bucket" in
+        DEPENDENCIES_PRESENT) dependency_values="$DEPENDENCIES_PRESENT" ;;
+        DEPENDENCIES_INSTALLED) dependency_values="$DEPENDENCIES_INSTALLED" ;;
+        DEPENDENCIES_OPTIONAL_MISSING) dependency_values="$DEPENDENCIES_OPTIONAL_MISSING" ;;
+        *) err "unknown dependency result bucket: $dependency_bucket"; return 1 ;;
+    esac
+    case " $dependency_values " in
+        *" $dependency_name "*) return 0 ;;
+    esac
+    dependency_values="${dependency_values:+$dependency_values }$dependency_name"
+    case "$dependency_bucket" in
+        DEPENDENCIES_PRESENT) DEPENDENCIES_PRESENT="$dependency_values" ;;
+        DEPENDENCIES_INSTALLED) DEPENDENCIES_INSTALLED="$dependency_values" ;;
+        DEPENDENCIES_OPTIONAL_MISSING) DEPENDENCIES_OPTIONAL_MISSING="$dependency_values" ;;
+    esac
+}
+
+refresh_dependency_path() {
+    windows_path=""
+    windows_shell=""
+    for windows_shell_candidate in powershell.exe pwsh.exe; do
+        if command_present "$windows_shell_candidate"; then
+            windows_shell="$windows_shell_candidate"
+            break
         fi
     done
+    if [ -n "$windows_shell" ] && command_present cygpath; then
+        windows_path="$($windows_shell -NoProfile -NonInteractive -Command \
+            '$machine = [Environment]::GetEnvironmentVariable("Path", "Machine"); $user = [Environment]::GetEnvironmentVariable("Path", "User"); @($machine, $user) -join ";"' \
+            2>/dev/null | tr -d '\r' || true)"
+        if [ -n "$windows_path" ]; then
+            windows_unix_path="$(cygpath --unix --path "$windows_path" 2>/dev/null || true)"
+            if [ -n "$windows_unix_path" ]; then
+                PATH="$PATH:$windows_unix_path"
+            fi
+        fi
+    fi
+    for dependency_bin in "$HOME/.cargo/bin" "$HOME/.autospec/bin"; do
+        [ -d "$dependency_bin" ] || continue
+        case ":$PATH:" in
+            *":$dependency_bin:"*) ;;
+            *) PATH="$dependency_bin:$PATH" ;;
+        esac
+    done
+    export PATH
+    hash -r 2>/dev/null || true
+}
+
+ensure_python3_alias() {
+    command_present python3 && return 0
+    command_present python || return 0
+    python -c 'import sys; raise SystemExit(sys.version_info.major != 3)' >/dev/null 2>&1 || return 0
+
+    python3_alias_dir="$HOME/.autospec/bin"
+    python3_alias="$python3_alias_dir/python3"
+    mkdir -p "$python3_alias_dir"
+    python3_alias_tmp="$(mktemp "$python3_alias_dir/.python3.XXXXXX")"
+    {
+        printf '%s\n' '#!/usr/bin/env bash'
+        printf '%s\n' 'exec python "$@"'
+    } > "$python3_alias_tmp"
+    chmod +x "$python3_alias_tmp"
+    mv "$python3_alias_tmp" "$python3_alias"
+    refresh_dependency_path
+}
+
+attempt_tool_install() {
+    tool="$1"
+    missing_bucket="$2"
+
+    if command_present "$tool"; then
+        record_dependency DEPENDENCIES_PRESENT "$tool"
+        return 0
+    fi
+    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" != "1" ] && [ -f "$ENSURE_TOOL_SCRIPT" ]; then
+        bash "$ENSURE_TOOL_SCRIPT" "$tool" || true
+        refresh_dependency_path
+        if [ "$tool" = "python3" ]; then
+            ensure_python3_alias
+        fi
+    fi
+    if command_present "$tool"; then
+        record_dependency DEPENDENCIES_INSTALLED "$tool"
+    elif [ -n "$missing_bucket" ]; then
+        record_dependency "$missing_bucket" "$tool"
+    fi
+}
+
+report_dependency_install_context() {
+    package_manager=""
+    for candidate in brew apt-get dnf yum pacman apk winget choco scoop; do
+        if command_present "$candidate"; then
+            package_manager="$candidate"
+            break
+        fi
+    done
+    if [ -z "$package_manager" ]; then
+        err "no supported package manager was available (brew/apt-get/dnf/yum/pacman/apk/winget/choco/scoop)"
+        return 0
+    fi
+
+    case "$package_manager" in
+        apt-get|dnf|yum|pacman|apk)
+            if [ "$(id -u 2>/dev/null || printf '1')" != "0" ] && ! command_present sudo; then
+                err "$package_manager needs root privileges, but sudo is unavailable"
+                return 0
+            fi
+            ;;
+    esac
+    err "automatic installation through $package_manager finished, but required commands are still unavailable"
+    err "check package repositories, network access, and privilege prompts above"
+}
+
+verify_required_system_tools() {
+    missing_required=""
+    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
+        if ! command_present "$tool"; then
+            missing_required="${missing_required:+$missing_required }$tool"
+        fi
+    done
+    if [ -z "$missing_required" ]; then
+        return 0
+    fi
+
+    err "required missing: $missing_required"
+    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" = "1" ]; then
+        err "automatic installation was disabled by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
+    elif [ ! -f "$ENSURE_TOOL_SCRIPT" ]; then
+        err "dependency installer is missing: $ENSURE_TOOL_SCRIPT"
+    else
+        report_dependency_install_context
+    fi
+    err "install the missing commands and rerun: bash install.sh --skill $SKILL_ARG --harness $HARNESS_ARG"
+    return 1
+}
+
+ensure_required_system_tools() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] ensure_required_system_tools: would ensure and verify $AUTOSPEC_REQUIRED_SYSTEM_TOOLS"
+        return 0
+    fi
+    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
+        attempt_tool_install "$tool" ""
+    done
+    verify_required_system_tools
+}
+
+ensure_system_tools() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        for tool in $AUTOSPEC_SYSTEM_TOOLS $AUTOSPEC_HARNESS_TOOLS; do
+            info "[dry-run] ensure_system_tools: would ensure $tool"
+        done
+        return 0
+    fi
+    if [ "${AUTOSPEC_SKIP_SYSTEM_TOOLS:-0}" = "1" ]; then
+        info "ensure_system_tools: install attempts skipped by AUTOSPEC_SKIP_SYSTEM_TOOLS=1"
+    elif [ ! -f "$ENSURE_TOOL_SCRIPT" ]; then
+        warn "ensure_system_tools: $ENSURE_TOOL_SCRIPT missing; recording unavailable optional tools"
+    fi
+    for tool in $AUTOSPEC_SYSTEM_TOOLS $AUTOSPEC_HARNESS_TOOLS; do
+        attempt_tool_install "$tool" DEPENDENCIES_OPTIONAL_MISSING
+    done
+}
+
+verify_harness_tools() {
+    [ "$DRY_RUN" -eq 1 ] && return 0
+    for tool in $AUTOSPEC_HARNESS_TOOLS; do
+        command_present "$tool" && return 0
+    done
+    err "required harness missing: $AUTOSPEC_HARNESS_TOOLS"
+    err "install at least one supported harness and rerun: bash install.sh --skill $SKILL_ARG --harness $HARNESS_ARG"
+    return 1
+}
+
+print_dependency_summary() {
+    info ""
+    info "Dependency summary:"
+    info "  present:          ${DEPENDENCIES_PRESENT:-none}"
+    info "  installed:        ${DEPENDENCIES_INSTALLED:-none}"
+    info "  optional missing: ${DEPENDENCIES_OPTIONAL_MISSING:-none}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "  required missing: not verified (dry-run)"
+    else
+        info "  required missing: none"
+    fi
 }
 
 install_npm_ecosystem_package() {
@@ -1050,13 +1241,12 @@ install_rollover_block() {
     # PreCompact hook can `python3 -m autospec_context_monitor`.
     install_context_monitor_pkg
 
-    local bash_block
+    local bash_block bash_wrappers
+    bash_wrappers="$(generated_harness_section sh "ROLLOVER WRAPPERS")"
     bash_block="$_ROLLOVER_MARKER_START
 export AUTOSPEC_AUTO_ROLLOVER=1
 if [ \"\${AUTOSPEC_AUTO_ROLLOVER:-0}\" = \"1\" ] && command -v autospec-session >/dev/null 2>&1; then
-    claude()   { autospec-session claude \"\$@\"; }
-    codex()    { autospec-session codex \"\$@\"; }
-    opencode() { autospec-session opencode \"\$@\"; }
+$bash_wrappers
 fi
 $_ROLLOVER_MARKER_END"
 
@@ -1076,12 +1266,12 @@ $_ROLLOVER_MARKER_END"
         if grep -qF "$_ROLLOVER_MARKER_START" "$fish_config"; then
             info "  auto-rollover block already present in $fish_config (skipping)"
         else
+            local fish_wrappers
+            fish_wrappers="$(generated_harness_section fish "ROLLOVER WRAPPERS")"
             printf '\n%s\n' "$_ROLLOVER_MARKER_START
 set -x AUTOSPEC_AUTO_ROLLOVER 1
 if test \"\$AUTOSPEC_AUTO_ROLLOVER\" = \"1\"; and command -v autospec-session >/dev/null 2>&1
-    function claude; autospec-session claude \$argv; end
-    function codex; autospec-session codex \$argv; end
-    function opencode; autospec-session opencode \$argv; end
+$fish_wrappers
 end
 $_ROLLOVER_MARKER_END" >> "$fish_config"
             info "  auto-rollover block added to $fish_config"
@@ -1406,6 +1596,7 @@ skills/autospec-run/scripts/fab-route.sh::fab-route.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
 skills/autospec-run/scripts/run-groom-preflight.sh::run-groom-preflight.sh \
 skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \
+skills/autospec-compose-normalize/scripts/workflow-guard.sh::autospec-compose-normalize-guard.sh \
 skills/autospec-doc/scripts/doc-orchestrator-entry.mjs::doc-orchestrator.mjs \
 skills/autospec-harmonize/scripts/harmonize.sh::harmonize.sh \
 skills/autospec-harmonize/scripts/design-discover.sh::design-discover.sh \
@@ -1592,7 +1783,7 @@ copy_runtime_subdirs() {
     runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] copy_runtime_subdirs: would copy runtime libs + scripts/explore-research/ to $autospec_scripts_dir/"
+        info "[dry-run] copy_runtime_subdirs: would copy runtime libs + harness table + scripts/explore-research/ to $autospec_scripts_dir/"
         return 0
     fi
 
@@ -1607,6 +1798,10 @@ copy_runtime_subdirs() {
         fi
     done
 
+    harness_config_dir="${AUTOSPEC_CONFIG_DIR:-$HOME/.autospec/config}"
+    mkdir -p "$harness_config_dir"
+    cp "$REPO_ROOT/config/harness-runtime-aliases.tsv" "$harness_config_dir/"
+
     if [ -d "$REPO_ROOT/scripts/explore-research" ]; then
         mkdir -p "$autospec_scripts_dir/explore-research"
         cp -R "$REPO_ROOT/scripts/explore-research/." "$autospec_scripts_dir/explore-research/"
@@ -1614,7 +1809,7 @@ copy_runtime_subdirs() {
     else
         warn "copy_runtime_subdirs: $REPO_ROOT/scripts/explore-research not found; skipping"
     fi
-    info "copy_runtime_subdirs: copied runtime libs + explore-research to $autospec_scripts_dir/"
+    info "copy_runtime_subdirs: copied runtime libs + harness table + explore-research to $autospec_scripts_dir/"
 }
 
 # Integration bootstrap: pull autospec (if --update) + turbo, before per-skill installers run.
@@ -1625,12 +1820,14 @@ copy_runtime_subdirs
 copy_runtime_skill_scripts
 copy_schemas
 ensure_autospec_bin_path
+ensure_required_system_tools
 install_autonomous_operator_commands
 install_autospec_runtime_binary
 install_agent_env_commands
 install_agent_env_aliases
 install_scanner_shims
 ensure_system_tools
+verify_harness_tools
 bootstrap_peer_ecosystems
 bootstrap_turbo
 check_codex
@@ -1732,6 +1929,7 @@ $_skill_src_dir/codex/prompt.md|$_codex_dir/prompts/$skill.md"
 done
 
 succeeded=$((total - failures))
+print_dependency_summary
 info ""
 info "Suite install summary: $succeeded/$total pairs OK ($failures failed)"
 

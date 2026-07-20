@@ -4,12 +4,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use autospec_core::autonomous::blast_radius::{
+    classify_paths_with_registry_name, default_legacy_registry, parse_fenced_surfaces,
+};
 use autospec_core::autonomous::config::AutonomousConfig;
 use autospec_core::autonomous::mainline_health::{
     apply_ignored_checks, check_run_evidence, evaluate_health, legacy_status_evidence,
     resolve_health_branch, CheckEvidence, HealthBranchInput, MainlineHealth,
     MainlineHealthDiagnostic, MainlineHealthOutcome,
 };
+use autospec_core::autonomous::no_work::{NoWorkObservation, NoWorkState, NoWorkTier, TierOutcome};
+use autospec_core::autonomous::waterfall::{TierReceipt, TierStatus, WaterfallState};
 use autospec_core::autonomous_lifecycle::{
     decide as decide_lifecycle, Budget as LifecycleBudget, CapacityDecision, ClaimBranch,
     ClaimContext, ConductorLeaseDecision, Health as LifecycleHealth, IssueNumber, LeaseFreshness,
@@ -20,6 +25,7 @@ use autospec_core::autonomous_lifecycle::{
 use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
+use autospec_core::validation::{StructuralCheck, StructuralValidator};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -160,6 +166,15 @@ impl StopMode {
 }
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
+    if args
+        .first()
+        .is_some_and(|arg| arg == "implementer-wait-failed")
+    {
+        return implementer_wait_failed(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "blast-radius") {
+        return blast_radius(args);
+    }
     if args.first().is_some_and(|arg| arg == "resilience") {
         return resilience::run(&args[1..]);
     }
@@ -197,6 +212,258 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
             "unknown autospec autonomous subcommand: {other}"
         ))),
     }
+}
+
+#[derive(Default)]
+struct ImplementerWaitFailedOptions {
+    repo: Option<String>,
+    issue: Option<u64>,
+    worker_id: Option<String>,
+    branch: Option<String>,
+    claim_id: Option<String>,
+    session_id: Option<String>,
+    diagnostic: Option<String>,
+}
+
+fn implementer_wait_failed(args: &[String]) -> Result<(), CommandFailure> {
+    let options = parse_implementer_wait_failed(args)?;
+    let repo = options.repo.unwrap();
+    let issue = options.issue.unwrap();
+    let worker = options.worker_id.unwrap();
+    let branch = options.branch.unwrap();
+    let claim_id = options.claim_id.unwrap();
+    let session = options.session_id.unwrap();
+    let diagnostic = options.diagnostic.unwrap();
+    let recovery = match claim::recover_implementer_wait_failure(
+        &repo,
+        issue,
+        &worker,
+        &branch,
+        &claim_id,
+        &session,
+        &diagnostic,
+    ) {
+        Ok(recovery) => recovery,
+        Err(error) => {
+            emit_implementer_wait_failed(
+                &repo,
+                &claim_id,
+                issue,
+                &worker,
+                &branch,
+                &session,
+                "recovery_failed",
+            );
+            return Err(error);
+        }
+    };
+    let outcome = match recovery {
+        claim::WaitFailureRecovery::Requeued => "requeued",
+        claim::WaitFailureRecovery::AlreadyRecovered => "already_recovered",
+        claim::WaitFailureRecovery::OwnershipLost => "ownership_lost",
+    };
+    emit_implementer_wait_failed(&repo, &claim_id, issue, &worker, &branch, &session, outcome);
+    Ok(())
+}
+
+fn emit_implementer_wait_failed(
+    repo: &str,
+    claim_id: &str,
+    issue: u64,
+    worker: &str,
+    branch: &str,
+    session: &str,
+    outcome: &str,
+) {
+    println!("{{\"event\":\"implementer_wait_failed\",\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"claim_id\":\"{}\",\"session_id\":\"{}\",\"outcome\":\"{}\"}}", json_escape(repo), issue, json_escape(worker), json_escape(branch), json_escape(claim_id), json_escape(session), outcome);
+}
+
+fn parse_implementer_wait_failed(
+    args: &[String],
+) -> Result<ImplementerWaitFailedOptions, CommandFailure> {
+    let mut parsed = ImplementerWaitFailedOptions::default();
+    let mut index = 0;
+    while index < args.len() {
+        let option = args[index].as_str();
+        let target = match option {
+            "--repo" => &mut parsed.repo,
+            "--worker-id" => &mut parsed.worker_id,
+            "--branch" => &mut parsed.branch,
+            "--claim-id" => &mut parsed.claim_id,
+            "--session-id" => &mut parsed.session_id,
+            "--diagnostic" => &mut parsed.diagnostic,
+            "--issue" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .ok_or_else(|| CommandFailure::diagnostic("--issue requires a value"))?;
+                parsed.issue = Some(
+                    value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|value| *value > 0)
+                        .ok_or_else(|| {
+                            CommandFailure::diagnostic("--issue must be a positive integer")
+                        })?,
+                );
+                index += 1;
+                continue;
+            }
+            other => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autonomous implementer-wait-failed option: {other}"
+                )))
+            }
+        };
+        index += 1;
+        let value = args
+            .get(index)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic(format!("{option} requires a value")))?;
+        if target.is_some() {
+            return Err(CommandFailure::diagnostic(format!(
+                "{option} accepts exactly one value"
+            )));
+        }
+        *target = Some(value.clone());
+        index += 1;
+    }
+    for (value, option) in [
+        (&parsed.repo, "--repo"),
+        (&parsed.worker_id, "--worker-id"),
+        (&parsed.branch, "--branch"),
+        (&parsed.claim_id, "--claim-id"),
+        (&parsed.session_id, "--session-id"),
+        (&parsed.diagnostic, "--diagnostic"),
+    ] {
+        if value.is_none() {
+            return Err(CommandFailure::diagnostic(format!("{option} is required")));
+        }
+    }
+    if parsed.issue.is_none() {
+        return Err(CommandFailure::diagnostic("--issue is required"));
+    }
+    Ok(parsed)
+}
+
+fn blast_radius(args: &[String]) -> Result<(), CommandFailure> {
+    let mut changed_files = String::new();
+    let mut fenced_surfaces = String::new();
+    let mut json = false;
+    let mut index = 1;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--changed-files" => {
+                index += 1;
+                changed_files = args.get(index).cloned().ok_or_else(|| {
+                    CommandFailure::diagnostic("--changed-files requires a value")
+                })?;
+            }
+            "--fenced-surfaces" => {
+                index += 1;
+                fenced_surfaces = args.get(index).cloned().ok_or_else(|| {
+                    CommandFailure::diagnostic("--fenced-surfaces requires a value")
+                })?;
+            }
+            "--json" => json = true,
+            "-h" | "--help" => {
+                println!(
+                    "USAGE:\n    autospec autonomous blast-radius --changed-files <FILE> [--fenced-surfaces <YML>] [--json]"
+                );
+                return Ok(());
+            }
+            other => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autospec autonomous blast-radius option: {other}"
+                )));
+            }
+        }
+        index += 1;
+    }
+    if changed_files.is_empty() {
+        return Err(CommandFailure::diagnostic("--changed-files is required"));
+    }
+
+    let paths =
+        read_changed_files(Path::new(&changed_files)).map_err(CommandFailure::diagnostic)?;
+    let (registry, registry_name) =
+        load_blast_radius_registry(&fenced_surfaces).map_err(CommandFailure::diagnostic)?;
+    let classification = classify_paths_with_registry_name(paths, &registry, registry_name);
+    if json {
+        println!(
+            "{}",
+            classification
+                .to_json_string()
+                .map_err(CommandFailure::diagnostic)?
+        );
+    } else if classification.fenced {
+        println!("DECISION:quarantine");
+        println!(
+            "REASON:{}",
+            classification.reason.as_deref().unwrap_or("fenced_surface")
+        );
+        for matched in &classification.fenced_matches {
+            println!(
+                "SURFACE:{}:{}:{}",
+                matched.surface, matched.path, matched.reason
+            );
+        }
+        for path in &classification.paths {
+            println!("PATH:{path}");
+        }
+    } else {
+        println!("DECISION:allow");
+        println!("LABEL:{}", classification.label);
+    }
+
+    if classification.fenced {
+        Err(CommandFailure::status(String::new(), 1))
+    } else {
+        Ok(())
+    }
+}
+
+fn load_blast_radius_registry(
+    path: &str,
+) -> Result<
+    (
+        Vec<autospec_core::autonomous::blast_radius::FencedSurface>,
+        String,
+    ),
+    String,
+> {
+    let registry_path = if !path.is_empty() {
+        Some(PathBuf::from(path))
+    } else if Path::new(".autospec/fenced-surfaces.yml").is_file() {
+        Some(PathBuf::from(".autospec/fenced-surfaces.yml"))
+    } else if Path::new(".autospec/autospec.yml").is_file() {
+        Some(PathBuf::from(".autospec/autospec.yml"))
+    } else {
+        None
+    };
+
+    let Some(registry_path) = registry_path else {
+        return Ok((default_legacy_registry(), "legacy-defaults".to_string()));
+    };
+    let source = fs::read_to_string(&registry_path)
+        .map_err(|error| format!("{}: {error}", registry_path.display()))?;
+    let parsed = parse_fenced_surfaces(&source)?;
+    if parsed.is_empty() {
+        Ok((default_legacy_registry(), "legacy-defaults".to_string()))
+    } else {
+        Ok((parsed, registry_path.display().to_string()))
+    }
+}
+
+fn read_changed_files(path: &Path) -> Result<Vec<String>, String> {
+    let source =
+        fs::read_to_string(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| line.strip_prefix("./").unwrap_or(line).to_string())
+        .collect())
 }
 
 fn parse(args: &[String]) -> Result<Options, String> {
@@ -590,6 +857,7 @@ fn lifecycle_park_name(reason: LifecycleParkReason) -> &'static str {
         LifecycleParkReason::BudgetSoftCap => "budget_soft_cap",
         LifecycleParkReason::BudgetHardCap => "budget_hard_cap",
         LifecycleParkReason::IdleRescan => "idle_rescan",
+        LifecycleParkReason::NoSteering => "no-steering",
     }
 }
 
@@ -730,13 +998,11 @@ fn monitor(options: Options) -> Result<(), String> {
     let mut iteration = 0;
     loop {
         iteration += 1;
+        let snapshot = MonitorSnapshot::read(&options)?;
         if options.json {
-            println!(
-                "{{\"command\":\"autonomous\",\"subcommand\":\"monitor\",\"repo\":\"{}\",\"status\":\"ok\",\"action\":\"none\"}}",
-                json_escape(&options.repo)
-            );
+            println!("{}", snapshot.json());
         } else {
-            println!("autospec-monitor: ok repo={} action=none", options.repo);
+            snapshot.print();
         }
         if options.once || (options.iterations > 0 && iteration >= options.iterations) {
             break;
@@ -744,6 +1010,342 @@ fn monitor(options: Options) -> Result<(), String> {
         thread::sleep(Duration::from_secs(options.interval_sec));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct MonitorSnapshot {
+    repo: String,
+    repo_dir: String,
+    pid: String,
+    logpath: String,
+    launch_argv: String,
+    stop_flag: PathBuf,
+    stop_mode: String,
+    run_mode: String,
+    state_status: String,
+    heartbeat_age_secs: Option<u64>,
+    current_cycle: String,
+    current_tier: String,
+    current_action: String,
+    tier_dry_result: Option<TierDryResult>,
+    discoveries: Vec<DiscoveryArtifact>,
+}
+
+#[derive(Debug, Clone)]
+struct TierDryResult {
+    tier: String,
+    dry: String,
+    filed: String,
+}
+
+#[derive(Debug, Clone)]
+struct DiscoveryArtifact {
+    path: String,
+    proposals: usize,
+    candidates: usize,
+    verification_mode: String,
+    filed_issue_titles: Vec<String>,
+}
+
+impl MonitorSnapshot {
+    fn read(options: &Options) -> Result<Self, String> {
+        let layout = RunLayout::new(options)?;
+        let conductor = read_unit("conductor", &layout.state_dir);
+        let state = monitor_state_metadata(&layout);
+        let launch = read_launch_json(&layout.state_dir);
+        let logpath = if conductor.logpath.is_empty() {
+            newest_legacy_logpath().unwrap_or_default()
+        } else {
+            conductor.logpath.clone()
+        };
+        let timeline_lines =
+            timeline_all_lines(&logpath, &layout.repo, &layout.state_dir).unwrap_or_default();
+        let tier_dry_result = latest_tier_dry_result(&timeline_lines);
+        let stop_flag = stop_flag_path(&layout);
+        let stop_mode = read_stop_mode(&layout)
+            .ok()
+            .flatten()
+            .map(|mode| match mode {
+                LifecycleStopMode::Graceful => "graceful".to_string(),
+                LifecycleStopMode::Immediate => "immediate".to_string(),
+            })
+            .unwrap_or_default();
+
+        Ok(Self {
+            repo: layout.repo,
+            repo_dir: options.repo_dir.clone(),
+            pid: conductor.pid,
+            logpath,
+            launch_argv: extract_json_array(&launch, "argv").unwrap_or_else(|| "[]".to_string()),
+            stop_flag,
+            stop_mode,
+            run_mode: monitor_run_mode(&launch),
+            state_status: state.status.clone().unwrap_or_default(),
+            heartbeat_age_secs: state.heartbeat_age_secs(),
+            current_cycle: latest_cycle(&timeline_lines).unwrap_or(state.current_cycle),
+            current_tier: latest_key_after(&timeline_lines, "tier=").unwrap_or_default(),
+            current_action: latest_key_after(&timeline_lines, "action=").unwrap_or_default(),
+            tier_dry_result,
+            discoveries: discovery_artifacts(Path::new(&options.repo_dir)),
+        })
+    }
+
+    fn json(&self) -> String {
+        format!(
+            "{{\"command\":\"autonomous\",\"subcommand\":\"monitor\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"run_mode\":\"{}\",\"pid\":\"{}\",\"logpath\":\"{}\",\"launch_argv\":{},\"stop_flag\":\"{}\",\"stop_mode\":\"{}\",\"state_status\":\"{}\",\"heartbeat_age_secs\":{},\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"tier_dry_result\":{},\"discovery_artifacts\":[{}]}}",
+            json_escape(&self.repo),
+            json_escape(&self.repo_dir),
+            json_escape(&self.run_mode),
+            json_escape(&self.pid),
+            json_escape(&self.logpath),
+            self.launch_argv,
+            json_escape(&self.stop_flag.display().to_string()),
+            json_escape(&self.stop_mode),
+            json_escape(&self.state_status),
+            self.heartbeat_age_secs
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            json_escape(&self.current_cycle),
+            json_escape(&self.current_tier),
+            json_escape(&self.current_action),
+            self.tier_dry_result
+                .as_ref()
+                .map(TierDryResult::json)
+                .unwrap_or_else(|| "null".to_string()),
+            self.discoveries
+                .iter()
+                .map(DiscoveryArtifact::json)
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    }
+
+    fn print(&self) {
+        println!(
+            "autospec-monitor: repo={} mode={} pid={} cycle={} tier={} action={}",
+            self.repo,
+            self.run_mode,
+            empty_dash(&self.pid),
+            empty_dash(&self.current_cycle),
+            empty_dash(&self.current_tier),
+            empty_dash(&self.current_action)
+        );
+        println!("log: {}", empty_dash(&self.logpath));
+        println!(
+            "stop_flag: {} {}",
+            self.stop_flag.display(),
+            empty_dash(&self.stop_mode)
+        );
+        if let Some(age) = self.heartbeat_age_secs {
+            println!("heartbeat_age_secs: {age}");
+        }
+        if let Some(result) = &self.tier_dry_result {
+            println!("{}", result.explanation());
+        }
+        for artifact in &self.discoveries {
+            println!(
+                "discovery: {} proposals={} candidates={} verification_mode={} titles={}",
+                artifact.path,
+                artifact.proposals,
+                artifact.candidates,
+                empty_dash(&artifact.verification_mode),
+                artifact.filed_issue_titles.join("; ")
+            );
+        }
+    }
+}
+
+impl TierDryResult {
+    fn explanation(&self) -> String {
+        if self.dry == "true" {
+            format!(
+                "tier_dry_result: tier produced no filed candidates in this cycle (tier {}); this is not the same as launch --dry-run mode.",
+                self.tier
+            )
+        } else {
+            format!(
+                "tier_dry_result: Tier {} produced filed candidates (filed={}).",
+                self.tier, self.filed
+            )
+        }
+    }
+
+    fn json(&self) -> String {
+        format!(
+            "{{\"tier\":\"{}\",\"dry\":{},\"filed\":{},\"explanation\":\"{}\"}}",
+            json_escape(&self.tier),
+            json_bool_or_string(&self.dry),
+            json_number_or_string(&self.filed),
+            json_escape(&self.explanation())
+        )
+    }
+}
+
+impl DiscoveryArtifact {
+    fn json(&self) -> String {
+        format!(
+            "{{\"path\":\"{}\",\"proposals\":{},\"candidates\":{},\"verification_mode\":\"{}\",\"filed_issue_titles\":{}}}",
+            json_escape(&self.path),
+            self.proposals,
+            self.candidates,
+            json_escape(&self.verification_mode),
+            json_string_array(&self.filed_issue_titles)
+        )
+    }
+}
+
+fn launch_contains_dry_run(launch: &str) -> bool {
+    ["argv", "conductor_argv"]
+        .iter()
+        .filter_map(|key| extract_json_array(launch, key))
+        .any(|argv| json_object_or_array_contains_string(&argv, "--dry-run"))
+}
+
+fn monitor_run_mode(launch: &str) -> String {
+    if launch.trim() == EMPTY_JSON_OBJECT {
+        "unknown".to_string()
+    } else if launch_contains_dry_run(launch) {
+        "dry-run".to_string()
+    } else {
+        "real".to_string()
+    }
+}
+
+fn json_object_or_array_contains_string(raw: &str, needle: &str) -> bool {
+    raw.split('"').any(|value| value == needle)
+}
+
+fn heartbeat_age_secs(raw: &str) -> Option<u64> {
+    let heartbeat = raw.parse::<u64>().ok()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(now.saturating_sub(heartbeat))
+}
+
+fn latest_cycle(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .rev()
+        .find_map(|line| conductor_cycle(line.trim()))
+}
+
+fn latest_key_after(lines: &[String], key: &str) -> Option<String> {
+    lines.iter().rev().find_map(|line| {
+        let rest = line.split_once(key)?.1;
+        let value = rest
+            .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        if value.is_empty() {
+            None
+        } else {
+            Some(value.to_string())
+        }
+    })
+}
+
+fn latest_tier_dry_result(lines: &[String]) -> Option<TierDryResult> {
+    let (tier, after_tier) = lines.iter().rev().find_map(|line| {
+        let trimmed = line.trim();
+        let rest = trimmed.strip_prefix("[conductor] Tier ")?;
+        let (tier, after_tier) = rest.split_once(' ')?;
+        if after_tier.starts_with("explore result:") {
+            Some((tier, after_tier))
+        } else {
+            None
+        }
+    })?;
+    let dry = value_after_token(after_tier, "dry=")?;
+    Some(TierDryResult {
+        tier: tier.to_string(),
+        dry,
+        filed: value_after_token(after_tier, "filed=").unwrap_or_else(|| "0".to_string()),
+    })
+}
+
+fn value_after_token(raw: &str, token: &str) -> Option<String> {
+    let rest = raw.split_once(token)?.1;
+    let value = rest
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ';')
+        .next()
+        .unwrap_or_default();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn discovery_artifacts(repo_dir: &Path) -> Vec<DiscoveryArtifact> {
+    let root = repo_dir.join(".autospec");
+    let mut rows = Vec::new();
+    let Ok(entries) = fs::read_dir(root) else {
+        return rows;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("explore-once-") || !path.is_dir() {
+            continue;
+        }
+        let research = fs::read_to_string(path.join("research.json")).unwrap_or_default();
+        let candidates = fs::read_to_string(path.join("candidates.json")).unwrap_or_default();
+        let titles = filed_issue_titles(&candidates);
+        rows.push(DiscoveryArtifact {
+            path: path.display().to_string(),
+            proposals: json_array_object_count(&research, "proposals"),
+            candidates: json_object_strings(&candidates).len(),
+            verification_mode: extract_json_string(&research, "verification_mode")
+                .or_else(|| extract_json_string(&research, "verify_mode"))
+                .unwrap_or_default(),
+            filed_issue_titles: if titles.is_empty() {
+                filed_issue_titles(&research)
+            } else {
+                titles
+            },
+        });
+    }
+    rows.sort_by(|left, right| left.path.cmp(&right.path));
+    rows
+}
+
+fn json_array_object_count(raw: &str, key: &str) -> usize {
+    extract_json_array(raw, key)
+        .map(|array| json_object_strings(&array).len())
+        .unwrap_or(0)
+}
+
+fn filed_issue_titles(raw: &str) -> Vec<String> {
+    json_object_strings(raw)
+        .into_iter()
+        .filter_map(|object| extract_json_string(&object, "title"))
+        .filter(|title| !title.is_empty())
+        .collect()
+}
+
+fn json_bool_or_string(value: &str) -> String {
+    match value {
+        "true" | "false" => value.to_string(),
+        _ => format!("\"{}\"", json_escape(value)),
+    }
+}
+
+fn json_number_or_string(value: &str) -> String {
+    if value.chars().all(|ch| ch.is_ascii_digit()) && !value.is_empty() {
+        value.to_string()
+    } else {
+        format!("\"{}\"", json_escape(value))
+    }
+}
+
+fn empty_dash(value: &str) -> &str {
+    if value.is_empty() {
+        "-"
+    } else {
+        value
+    }
 }
 
 fn supervise(options: Options) -> Result<(), String> {
@@ -800,27 +1402,39 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     let conductor = read_unit("conductor", &layout.state_dir);
     let monitor = read_unit("monitor", &layout.state_dir);
     let supervisor = read_unit("supervisor", &layout.state_dir);
-    let state = resilience::status(&layout.repo)
+    let mut state = resilience::status(&layout.repo)
         .map_err(resilience_admission_error)?
-        .map(|state| StateMetadata {
-            status: state.status,
-            heartbeat_at: state
-                .heartbeat_at
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "null".to_string()),
-            last_cycle: state.last_cycle,
+        .map(|state| {
+            StateMetadata::ok(
+                state.status,
+                state.heartbeat_at.map(|value| value.to_string()),
+                state.last_cycle,
+            )
         })
         .unwrap_or_else(|| read_state_metadata(&layout));
+    state.fill_normalized_state(&layout);
     let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_status\":\"{}\",\"heartbeat_at\":{},\"last_cycle\":\"{}\",\"spend\":{{\"tokens\":{},\"issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&layout.repo),
-            json_escape(&state.status),
-            state.heartbeat_at,
+            state.outcome.as_str(),
+            state.status_json(),
+            state.heartbeat_at_json(),
+            state
+                .heartbeat_age_secs()
+                .map(|age| age.to_string())
+                .unwrap_or_else(|| "null".to_string()),
             json_escape(&state.last_cycle),
+            json_escape(&state.current_cycle),
+            json_escape(&state.current_tier),
+            json_escape(&state.current_action),
+            json_escape(&state.normalized_state),
+            json_escape(&state.last_blocker),
             spend.tokens,
-            spend.issues,
+            spend.budget_issues,
+            spend.filed_issues,
+            spend.budget_issues,
             unit_status_json(&conductor),
             unit_status_json(&monitor),
             unit_status_json(&supervisor)
@@ -936,7 +1550,7 @@ fn list(options: Options) -> Result<(), String> {
                 json_escape(&layout.repo),
                 conductor.running,
                 json_escape(&state.last_cycle),
-                json_escape(&state.status),
+                json_escape(state.status.as_deref().unwrap_or_default()),
                 launch,
                 unit_status_json(&conductor),
                 unit_status_json(&monitor),
@@ -1010,15 +1624,22 @@ fn timeline(options: Options) -> Result<(), String> {
     } else {
         unit.logpath.clone()
     };
-    let all_lines = timeline_all_lines(&logpath, &layout.repo)?;
+    let all_lines = timeline_all_lines(&logpath, &layout.repo, &layout.state_dir)?;
     let selected_lines = tail_lines(&all_lines, options.lines);
-    let events = timeline_events(&selected_lines);
+    let mut events = timeline_events(&selected_lines);
+    let normalized_state =
+        normalized_cycle_boundary_state(&layout, latest_cycle_number(&all_lines))
+            .unwrap_or_default();
+    if !normalized_state.is_empty() {
+        events.push(format!("time unknown - conductor {normalized_state}."));
+    }
     let forecast = timeline_forecast(&all_lines);
     let timings = timeline_timings(&all_lines);
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"timeline\",\"repo\":\"{}\",\"events\":\"{}\"}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"timeline\",\"repo\":\"{}\",\"normalized_state\":\"{}\",\"events\":\"{}\"}}",
             json_escape(&layout.repo),
+            json_escape(&normalized_state),
             json_escape(&selected_lines.join("\n"))
         );
     } else {
@@ -1713,31 +2334,51 @@ fn dispatch_foreground(
         return Ok(ForegroundDispatchResult::Lifecycle(lifecycle));
     }
     persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
-    let lease = claim::acquire_for_conductor(&layout.repo, selection.issue, &worker_id, &branch)?;
-    let state = state.transition(ConductorEvent::Claimed).map_err(|error| {
-        CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
-    })?;
-    persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
-
-    let receipt = ExecutorRequest::for_selected(layout, &options.repo_dir, selection.issue)
-        .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
-    let state = state
-        .transition(ConductorEvent::DispatchRecorded {
-            outcome: receipt.outcome.clone(),
-        })
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("cannot record executor receipt: {error}"))
+    let mut state = state;
+    loop {
+        let lease =
+            claim::acquire_for_conductor(&layout.repo, selection.issue, &worker_id, &branch)?;
+        state = state.transition(ConductorEvent::Claimed).map_err(|error| {
+            CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
         })?;
-    persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
-    claim::record_executor_outcome(
-        &lease.repo,
-        lease.issue,
-        &lease.worker_id,
-        &lease.branch,
-        &receipt.claim_step,
-    )?;
-    claim::reconcile_active_issue(&lease.repo, lease.issue)?;
-    Ok(ForegroundDispatchResult::State(state))
+        persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+
+        let receipt = ExecutorRequest::for_selected(layout, &options.repo_dir, selection.issue)
+            .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
+        state = state
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: receipt.outcome.clone(),
+            })
+            .map_err(|error| {
+                CommandFailure::diagnostic(format!("cannot record executor receipt: {error}"))
+            })?;
+        persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+        claim::record_executor_outcome(
+            &lease.repo,
+            lease.issue,
+            &lease.worker_id,
+            &lease.branch,
+            &receipt.claim_step,
+        )?;
+        claim::reconcile_active_issue(&lease.repo, lease.issue)?;
+        let (next, scheduled) =
+            schedule_foreground_retry(state).map_err(CommandFailure::diagnostic)?;
+        state = next;
+        if scheduled {
+            persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+            continue;
+        }
+        return Ok(ForegroundDispatchResult::State(state));
+    }
+}
+
+fn schedule_foreground_retry(state: ConductorState) -> Result<(ConductorState, bool), String> {
+    if state.phase() != ConductorPhase::Retry {
+        return Ok((state, false));
+    }
+    state
+        .transition(ConductorEvent::RetryScheduled)
+        .map(|state| (state, true))
 }
 
 fn foreground_worker_id() -> Result<String, String> {
@@ -1786,7 +2427,11 @@ fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
             ConductorOutcome::Succeeded => {
                 emit_executor_protocol("accepted", Some(&input), input.pr, None, 0)
             }
-            ConductorOutcome::Blocked(_) => {
+            ConductorOutcome::Blocked(_)
+            | ConductorOutcome::AllBlocked { .. }
+            | ConductorOutcome::VerifierUnavailable { .. }
+            | ConductorOutcome::ResourcePark { .. }
+            | ConductorOutcome::OperatorStop { .. } => {
                 emit_executor_protocol("blocked", Some(&input), None, input.reason.as_deref(), 20)
             }
             ConductorOutcome::Retryable(_) => {
@@ -1825,7 +2470,11 @@ impl ExecutorResultInput {
     fn outcome_name(&self) -> &'static str {
         match self.outcome {
             ConductorOutcome::Succeeded => "succeeded",
-            ConductorOutcome::Blocked(_) => "blocked",
+            ConductorOutcome::Blocked(_)
+            | ConductorOutcome::AllBlocked { .. }
+            | ConductorOutcome::VerifierUnavailable { .. }
+            | ConductorOutcome::ResourcePark { .. }
+            | ConductorOutcome::OperatorStop { .. } => "blocked",
             ConductorOutcome::Retryable(_) => "retryable",
         }
     }
@@ -2578,11 +3227,95 @@ struct IssueTiming {
     done: bool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
+enum StateMetadataOutcome {
+    Ok,
+    Unavailable,
+    MalformedState,
+}
+
+impl StateMetadataOutcome {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ok => "Ok",
+            Self::Unavailable => "Unavailable",
+            Self::MalformedState => "MalformedState",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 struct StateMetadata {
-    status: String,
-    heartbeat_at: String,
+    outcome: StateMetadataOutcome,
+    status: Option<String>,
+    heartbeat_at: Option<String>,
     last_cycle: String,
+    current_cycle: String,
+    current_tier: String,
+    current_action: String,
+    normalized_state: String,
+    last_blocker: String,
+}
+
+impl StateMetadata {
+    fn ok(status: String, heartbeat_at: Option<String>, last_cycle: String) -> Self {
+        Self {
+            outcome: StateMetadataOutcome::Ok,
+            status: Some(status),
+            heartbeat_at,
+            current_cycle: last_cycle.clone(),
+            last_cycle,
+            current_tier: String::new(),
+            current_action: String::new(),
+            normalized_state: String::new(),
+            last_blocker: String::new(),
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self::without_state(StateMetadataOutcome::Unavailable)
+    }
+
+    fn malformed() -> Self {
+        Self::without_state(StateMetadataOutcome::MalformedState)
+    }
+
+    fn without_state(outcome: StateMetadataOutcome) -> Self {
+        Self {
+            outcome,
+            status: None,
+            heartbeat_at: None,
+            last_cycle: String::new(),
+            current_cycle: String::new(),
+            current_tier: String::new(),
+            current_action: String::new(),
+            normalized_state: String::new(),
+            last_blocker: String::new(),
+        }
+    }
+
+    fn fill_normalized_state(&mut self, layout: &RunLayout) {
+        if self.normalized_state.is_empty() {
+            self.normalized_state =
+                normalized_cycle_boundary_state(layout, parse_cycle_number(&self.current_cycle))
+                    .unwrap_or_default();
+        }
+    }
+
+    fn status_json(&self) -> String {
+        optional_json_string(self.status.as_deref())
+    }
+
+    fn heartbeat_at_json(&self) -> String {
+        self.heartbeat_at
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| "null".to_string())
+    }
+
+    fn heartbeat_age_secs(&self) -> Option<u64> {
+        self.heartbeat_at.as_deref().and_then(heartbeat_age_secs)
+    }
 }
 
 impl RunLayout {
@@ -3016,6 +3749,7 @@ fn validate_repo_dir(options: &Options) -> Result<(), String> {
             }
         }
     }
+    StructuralValidator::run(StructuralCheck::RootHelperWrapperPolicy, &top)?;
     Ok(())
 }
 
@@ -3036,6 +3770,20 @@ fn git_top_level(repo_dir: &str) -> Option<PathBuf> {
     }
 }
 
+fn monitor_state_metadata(layout: &RunLayout) -> StateMetadata {
+    resilience::status(&layout.repo)
+        .ok()
+        .flatten()
+        .map(|state| {
+            StateMetadata::ok(
+                state.status,
+                state.heartbeat_at.map(|value| value.to_string()),
+                state.last_cycle,
+            )
+        })
+        .unwrap_or_else(|| read_state_metadata(layout))
+}
+
 fn read_state_metadata(layout: &RunLayout) -> StateMetadata {
     let path = env_path(
         "AUTOSPEC_AUTONOMOUS_STATE_DIR",
@@ -3043,12 +3791,157 @@ fn read_state_metadata(layout: &RunLayout) -> StateMetadata {
     )
     .join(&layout.scope)
     .join("state.json");
-    let raw = fs::read_to_string(path).unwrap_or_default();
+    let Ok(raw) = fs::read_to_string(path) else {
+        return StateMetadata::unavailable();
+    };
+    let Some(status) = extract_json_string(&raw, "status") else {
+        return StateMetadata::malformed();
+    };
+    let Some(heartbeat_at) = extract_json_number(&raw, "heartbeat_at") else {
+        return StateMetadata::malformed();
+    };
+    let Some(last_cycle) = extract_json_number(&raw, "cycle") else {
+        return StateMetadata::malformed();
+    };
+    let current_cycle = extract_json_number(&raw, "current_cycle")
+        .or_else(|| extract_json_string(&raw, "current_cycle"))
+        .unwrap_or_else(|| last_cycle.clone());
+
     StateMetadata {
-        status: extract_json_string(&raw, "status").unwrap_or_default(),
-        heartbeat_at: extract_json_number(&raw, "heartbeat_at").unwrap_or_else(|| "null".into()),
-        last_cycle: extract_json_number(&raw, "cycle").unwrap_or_default(),
+        outcome: StateMetadataOutcome::Ok,
+        status: Some(status),
+        heartbeat_at: Some(heartbeat_at),
+        last_cycle,
+        current_cycle,
+        current_tier: extract_json_string(&raw, "current_tier")
+            .or_else(|| extract_json_number(&raw, "current_tier"))
+            .or_else(|| extract_json_string(&raw, "tier"))
+            .or_else(|| extract_json_number(&raw, "tier"))
+            .unwrap_or_default(),
+        current_action: extract_json_string(&raw, "current_action")
+            .or_else(|| extract_json_string(&raw, "action"))
+            .unwrap_or_default(),
+        normalized_state: extract_json_string(&raw, "normalized_state")
+            .or_else(|| extract_json_string(&raw, "state"))
+            .unwrap_or_default(),
+        last_blocker: extract_json_string(&raw, "last_blocker").unwrap_or_default(),
     }
+}
+
+fn normalized_cycle_boundary_state(layout: &RunLayout, cycle: u64) -> Option<String> {
+    waterfall_normalized_state(layout, cycle).or_else(|| foreground_normalized_state(layout, cycle))
+}
+
+fn foreground_normalized_state(layout: &RunLayout, cycle: u64) -> Option<String> {
+    let source =
+        fs::read_to_string(foreground_state_path(layout, ConductorScope::Repository)).ok()?;
+    let state = ConductorState::parse_json(&source).ok()?;
+    Some(state.normalized_state_for_cycle(cycle))
+}
+
+fn waterfall_normalized_state(layout: &RunLayout, cycle: u64) -> Option<String> {
+    let root = layout.state_dir.join("waterfall");
+    let state = read_waterfall_state(&root, &layout.repo)?;
+    let receipt_pass_id = waterfall_receipt_pass_id(&state);
+    let receipts = state
+        .completed_receipts()
+        .iter()
+        .filter_map(|completed| {
+            read_waterfall_receipt(&root, &layout.repo, receipt_pass_id, completed.tier).ok()
+        })
+        .collect::<Vec<_>>();
+    if receipts.is_empty() {
+        return None;
+    }
+    let conductor = ConductorState::new(&layout.repo, ConductorScope::Repository, 0).ok()?;
+    if receipts.len() == NoWorkTier::ALL.len()
+        && state.current_tier() == NoWorkTier::Tier1
+        && state.next_pass_id() > 1
+        && receipts
+            .iter()
+            .all(|receipt| matches!(receipt.status(), TierStatus::Exhausted { .. }))
+    {
+        return no_work_state_for_receipts(&layout.repo, receipt_pass_id, &receipts)
+            .ok()
+            .map(|state| conductor.normalized_state_for_no_work(cycle, &state));
+    }
+    receipts
+        .last()
+        .map(|receipt| conductor.normalized_state_for_tier_receipt(cycle, receipt))
+}
+
+fn read_waterfall_state(root: &Path, repo: &str) -> Option<WaterfallState> {
+    let source = fs::read_to_string(root.join("waterfall-state.json")).ok()?;
+    WaterfallState::parse_json(&source, repo).ok()
+}
+
+fn read_waterfall_receipt(
+    root: &Path,
+    repo: &str,
+    pass_id: u64,
+    tier: NoWorkTier,
+) -> Result<TierReceipt, String> {
+    let path = root.join(autospec_core::autonomous::waterfall::receipt_reference(
+        pass_id, tier,
+    ));
+    let source = fs::read_to_string(&path)
+        .map_err(|error| format!("cannot read waterfall receipt {}: {error}", path.display()))?;
+    TierReceipt::parse_json(&source, repo, pass_id, tier)
+}
+
+fn waterfall_receipt_pass_id(state: &WaterfallState) -> u64 {
+    if state.current_tier() == NoWorkTier::Tier1 && state.next_pass_id() > 1 {
+        state.next_pass_id() - 1
+    } else {
+        state.next_pass_id()
+    }
+}
+
+fn no_work_state_for_receipts(
+    repo: &str,
+    pass_id: u64,
+    receipts: &[TierReceipt],
+) -> Result<NoWorkState, String> {
+    let evidence_digest = receipts
+        .last()
+        .map(|receipt| receipt.digest().to_string())
+        .ok_or_else(|| "no receipts for no-work state".to_string())?;
+    let tiers = receipts
+        .iter()
+        .map(|receipt| Ok((receipt.tier(), tier_outcome(receipt.status())?)))
+        .collect::<Result<Vec<_>, String>>()?;
+    NoWorkState::record(
+        None,
+        NoWorkObservation {
+            repo: repo.to_string(),
+            pass_id,
+            evidence_digest,
+            tiers,
+        },
+    )
+}
+
+fn tier_outcome(status: &TierStatus) -> Result<TierOutcome, String> {
+    match status {
+        TierStatus::Exhausted { reason } => Ok(TierOutcome::Dry { reason: *reason }),
+        TierStatus::Produced { count } => Ok(TierOutcome::Produced { count: *count }),
+        TierStatus::Failed { reason } => Ok(TierOutcome::Failed {
+            reason: reason.clone(),
+        }),
+        TierStatus::Blocked { reason } | TierStatus::NotRun { reason } => Ok(TierOutcome::NotRun {
+            reason: reason.clone(),
+        }),
+    }
+}
+
+fn latest_cycle_number(lines: &[String]) -> u64 {
+    latest_cycle(lines)
+        .and_then(|cycle| cycle.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn parse_cycle_number(value: &str) -> u64 {
+    value.parse::<u64>().unwrap_or(0)
 }
 
 fn newest_legacy_logpath() -> Option<String> {
@@ -3085,7 +3978,7 @@ fn tail_lines(lines: &[String], count: usize) -> Vec<String> {
     lines[lines.len() - count..].to_vec()
 }
 
-fn timeline_all_lines(logpath: &str, repo: &str) -> Result<Vec<String>, String> {
+fn timeline_all_lines(logpath: &str, repo: &str, state_dir: &Path) -> Result<Vec<String>, String> {
     let mut lines = if logpath.is_empty() {
         Vec::new()
     } else {
@@ -3095,6 +3988,15 @@ fn timeline_all_lines(logpath: &str, repo: &str) -> Result<Vec<String>, String> 
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
     };
+    if RepositoryScope::try_from(repo).is_ok() {
+        let state_root = state_dir.parent().unwrap_or(state_dir);
+        let drain_events = state_root
+            .join(drain::repository_progress_key(repo))
+            .join("drain-session-events.jsonl");
+        if let Ok(raw) = fs::read_to_string(drain_events) {
+            lines.extend(raw.lines().map(|line| line.to_string()));
+        }
+    }
     for dir in heartbeat_dirs(repo) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -3130,8 +4032,52 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
     let mut rows = Vec::new();
     let mut index = 0;
     let mut last_workdir = String::new();
+    let mut helper_failure_seen = false;
+    let mut helper_states = Vec::new();
+    let mut child_sessions = Vec::<ChildSessionStartup>::new();
+    let mut leader_nudge_seen = false;
+    let mut suppressed_leader_nudges = 0usize;
     while index < lines.len() {
         let line = lines[index].trim();
+        if line.contains("leader_nudge_tick") {
+            if leader_nudge_seen {
+                suppressed_leader_nudges += 1;
+            } else {
+                leader_nudge_seen = true;
+                rows.push(format!("time unknown - {}.", summarize_timeline_line(line)));
+            }
+            index += 1;
+            continue;
+        }
+        flush_suppressed_leader_nudges(&mut rows, &mut suppressed_leader_nudges);
+        if records_spawn_agent_failure(line) {
+            helper_failure_seen = true;
+            push_helper_recovery_state(
+                &mut rows,
+                &mut helper_states,
+                HelperRecoveryState::RetryingHelper,
+            );
+        }
+        record_session_reconciliation_line(&mut rows, &mut child_sessions, line);
+        if helper_failure_seen && records_helper_blocked(line) {
+            push_helper_recovery_state(
+                &mut rows,
+                &mut helper_states,
+                HelperRecoveryState::BlockedHelperSpawn,
+            );
+        } else if helper_failure_seen && records_helper_continuation(line) {
+            push_helper_recovery_state(
+                &mut rows,
+                &mut helper_states,
+                HelperRecoveryState::ContinuingWithoutHelper,
+            );
+        } else if helper_failure_seen && records_collab_wait(line) {
+            push_helper_recovery_state(
+                &mut rows,
+                &mut helper_states,
+                HelperRecoveryState::RetryingHelper,
+            );
+        }
         if let Some(rest) = line.strip_prefix("workdir:") {
             last_workdir = rest.trim().to_string();
         } else if let Some(cycle) = conductor_cycle(line) {
@@ -3187,7 +4133,215 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
         }
         index += 1;
     }
+    flush_suppressed_leader_nudges(&mut rows, &mut suppressed_leader_nudges);
     dedupe_rows(rows)
+}
+
+fn record_session_reconciliation_line(
+    rows: &mut Vec<String>,
+    child_sessions: &mut Vec<ChildSessionStartup>,
+    line: &str,
+) {
+    if let Some(start) = session_start_event(line) {
+        rows.push(format!(
+            "time unknown - session {} entered starting.",
+            start.session_id
+        ));
+        child_sessions.push(start);
+    }
+    if let Some(session_id) = session_start_reconciled_event(line) {
+        if let Some(session) = child_sessions
+            .iter_mut()
+            .rev()
+            .find(|session| session.session_id == session_id)
+        {
+            session.state = ChildStartupState::Claimed;
+        }
+        rows.push(format!(
+            "time unknown - session {session_id} entered claimed after session_start_reconciled."
+        ));
+    }
+    if let Some((session_id, retry)) = session_start_timeout_event(line) {
+        if let Some(session) = child_sessions
+            .iter_mut()
+            .rev()
+            .find(|session| session.session_id == session_id)
+        {
+            session.state = ChildStartupState::FailedStartup;
+        }
+        let retry_summary = match retry.as_deref() {
+            Some("scheduled") => "terminated and queued for retry",
+            Some("exhausted") => "terminated after retry exhaustion",
+            _ => "terminated; retry outcome was not recorded",
+        };
+        rows.push(format!(
+            "time unknown - session {session_id} entered failed-startup after an explicit session_start_timeout event; {retry_summary}."
+        ));
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ChildStartupState {
+    Starting,
+    Claimed,
+    FailedStartup,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChildSessionStartup {
+    session_id: String,
+    session_turns_zero: bool,
+    issue_claim_missing: bool,
+    state: ChildStartupState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HelperRecoveryState {
+    RetryingHelper,
+    ContinuingWithoutHelper,
+    BlockedHelperSpawn,
+}
+
+impl HelperRecoveryState {
+    fn summary(self) -> &'static str {
+        match self {
+            Self::RetryingHelper => {
+                "entered retrying-helper after SpawnAgent helper failure; wait/nudge handling is bounded by retry policy"
+            }
+            Self::ContinuingWithoutHelper => {
+                "entered continuing-without-helper after helper spawn failed; foreground loop will not wait on a missing helper"
+            }
+            Self::BlockedHelperSpawn => {
+                "entered blocked-helper-spawn after helper spawn retries were exhausted"
+            }
+        }
+    }
+}
+
+fn push_helper_recovery_state(
+    rows: &mut Vec<String>,
+    seen: &mut Vec<HelperRecoveryState>,
+    state: HelperRecoveryState,
+) {
+    if seen.contains(&state) {
+        return;
+    }
+    seen.push(state);
+    rows.push(format!("time unknown - {}.", state.summary()));
+}
+
+fn flush_suppressed_leader_nudges(rows: &mut Vec<String>, suppressed: &mut usize) {
+    if *suppressed == 0 {
+        return;
+    }
+    let suffix = if *suppressed == 1 { "" } else { "s" };
+    rows.push(format!(
+        "time unknown - suppressed {} repeated leader nudge tick{}.",
+        *suppressed, suffix
+    ));
+    *suppressed = 0;
+}
+
+const SPAWN_AGENT_MARKER: &str = "SpawnAgent";
+const SPAWN_FAILURE_MARKERS: &[&str] = &["failed", "failure", "unavailable", "error"];
+const COLLAB_WAIT_MARKERS: &[&str] = &["collab: Wait", "collab: wait"];
+const HELPER_CONTINUATION_MARKERS: &[&str] =
+    &["continuing without helper", "continue without helper"];
+const HELPER_BLOCKED_MARKERS: &[&str] = &[
+    "blocked-helper-spawn",
+    "helper spawn retries exhausted",
+    "both valid shapes fail",
+    "both valid shapes failed",
+];
+
+fn records_spawn_agent_failure(line: &str) -> bool {
+    has_marker(line, SPAWN_AGENT_MARKER) && has_any_marker(line, SPAWN_FAILURE_MARKERS)
+}
+
+fn records_collab_wait(line: &str) -> bool {
+    has_any_marker(line, COLLAB_WAIT_MARKERS)
+}
+
+fn records_helper_continuation(line: &str) -> bool {
+    has_any_marker(&line.to_ascii_lowercase(), HELPER_CONTINUATION_MARKERS)
+}
+
+fn records_helper_blocked(line: &str) -> bool {
+    has_any_marker(&line.to_ascii_lowercase(), HELPER_BLOCKED_MARKERS)
+}
+
+fn session_start_event(line: &str) -> Option<ChildSessionStartup> {
+    if has_marker(line, "session_start_reconciled")
+        || has_marker(line, "session_start_timeout")
+        || !has_marker(line, "session_start")
+    {
+        return None;
+    }
+    let session_id = line_key_value(line, "child")
+        .or_else(|| line_key_value(line, "session"))
+        .or_else(|| line_key_value(line, "session_id"))
+        .or_else(|| extract_json_string(line, "child"))
+        .or_else(|| extract_json_string(line, "session"))
+        .or_else(|| extract_json_string(line, "session_id"))
+        .unwrap_or_else(|| "unknown".to_string());
+    Some(ChildSessionStartup {
+        session_id,
+        session_turns_zero: line_key_value(line, "session_turns")
+            .or_else(|| extract_json_number(line, "session_turns"))
+            .as_deref()
+            .is_some_and(|value| value == "0"),
+        issue_claim_missing: line_key_value(line, "issue_claim")
+            .or_else(|| extract_json_string(line, "issue_claim"))
+            .as_deref()
+            .is_none_or(|value| matches!(value, "" | "none" | "null")),
+        state: ChildStartupState::Starting,
+    })
+}
+
+fn session_start_timeout_event(line: &str) -> Option<(String, Option<String>)> {
+    if !has_marker(line, "session_start_timeout") {
+        return None;
+    }
+    let session_id = line_key_value(line, "session_id")
+        .or_else(|| line_key_value(line, "child"))
+        .or_else(|| line_key_value(line, "session"))
+        .or_else(|| extract_json_string(line, "session_id"))
+        .or_else(|| extract_json_string(line, "child"))
+        .or_else(|| extract_json_string(line, "session"))?;
+    let retry = line_key_value(line, "retry").or_else(|| extract_json_string(line, "retry"));
+    Some((session_id, retry))
+}
+
+fn session_start_reconciled_event(line: &str) -> Option<String> {
+    if !has_marker(line, "session_start_reconciled") {
+        return None;
+    }
+    line_key_value(line, "child")
+        .or_else(|| line_key_value(line, "session"))
+        .or_else(|| line_key_value(line, "session_id"))
+        .or_else(|| extract_json_string(line, "child"))
+        .or_else(|| extract_json_string(line, "session"))
+        .or_else(|| extract_json_string(line, "session_id"))
+        .or_else(|| Some("unknown".to_string()))
+}
+
+fn line_key_value(line: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key}=");
+    line.split_whitespace()
+        .find_map(|part| part.strip_prefix(&prefix))
+        .map(|value| {
+            value
+                .trim_matches(|ch| matches!(ch, ',' | '"' | '\''))
+                .to_string()
+        })
+}
+
+fn has_any_marker(haystack: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| has_marker(haystack, marker))
+}
+
+fn has_marker(haystack: &str, marker: &str) -> bool {
+    haystack.contains(marker)
 }
 
 fn conductor_cycle(line: &str) -> Option<String> {
@@ -3590,6 +4744,12 @@ fn parse_github_slug(remote: &str) -> Option<String> {
     None
 }
 
+fn optional_json_string(value: Option<&str>) -> String {
+    value
+        .map(|value| format!("\"{}\"", json_escape(value)))
+        .unwrap_or_else(|| "null".to_string())
+}
+
 fn extract_json_string(raw: &str, key: &str) -> Option<String> {
     let rest = value_after_json_key(raw, key)?;
     let rest = rest.strip_prefix('"')?;
@@ -3772,6 +4932,12 @@ fn json_string_array(values: &[String]) -> String {
     format!("[{}]", items.join(","))
 }
 
+fn print_help() {
+    println!(
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
+    );
+}
+
 #[cfg(test)]
 mod foreground_tests {
     use super::*;
@@ -3803,6 +4969,60 @@ mod foreground_tests {
     }
 
     #[test]
+    fn foreground_retry_state_schedules_another_bounded_claim_attempt() {
+        let state = ConductorState::new("test/repo", ConductorScope::Slice, 1)
+            .expect("state")
+            .transition(ConductorEvent::ScanFoundWork)
+            .expect("scan")
+            .transition(ConductorEvent::SafetyReviewed)
+            .expect("review")
+            .transition(ConductorEvent::Selected {
+                issue: 42,
+                serialization_reasons: Vec::new(),
+            })
+            .expect("selected")
+            .transition(ConductorEvent::Claimed)
+            .expect("claimed")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Retryable("failed-startup".to_string()),
+            })
+            .expect("retryable");
+
+        let (state, scheduled) = schedule_foreground_retry(state).expect("schedule retry");
+
+        assert!(scheduled);
+        assert_eq!(state.phase(), ConductorPhase::Claim);
+        assert_eq!(state.retry_count(), 1);
+    }
+
+    #[test]
+    fn foreground_retry_state_stops_when_the_retry_limit_is_exhausted() {
+        let state = ConductorState::new("test/repo", ConductorScope::Slice, 0)
+            .expect("state")
+            .transition(ConductorEvent::ScanFoundWork)
+            .expect("scan")
+            .transition(ConductorEvent::SafetyReviewed)
+            .expect("review")
+            .transition(ConductorEvent::Selected {
+                issue: 42,
+                serialization_reasons: Vec::new(),
+            })
+            .expect("selected")
+            .transition(ConductorEvent::Claimed)
+            .expect("claimed")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Retryable("failed-startup".to_string()),
+            })
+            .expect("retryable");
+
+        let (state, scheduled) = schedule_foreground_retry(state).expect("inspect exhaustion");
+
+        assert!(!scheduled);
+        assert_eq!(state.phase(), ConductorPhase::Paused);
+        assert_eq!(state.pause_reason(), Some("retry_limit_exhausted"));
+    }
+
+    #[test]
     fn completed_slice_state_is_retained_on_a_fresh_foreground_invocation() {
         let state = ConductorState::new("test/repo", ConductorScope::Slice, 3)
             .expect("state")
@@ -3811,10 +5031,4 @@ mod foreground_tests {
 
         assert!(foreground_state_is_retained(&state));
     }
-}
-
-fn print_help() {
-    println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
-    );
 }

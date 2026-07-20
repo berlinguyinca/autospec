@@ -56,13 +56,16 @@ fn record_tier4_fenced(
     scan: Tier4Scan,
     policy: &WaterfallPolicy,
 ) -> Result<Tier4Progress, String> {
-    let store =
-        match WaterfallStore::acquire_with_policy(state_root.join("waterfall"), repo, policy)
-            .map_err(store_error)?
-        {
-            StoreAcquisition::Acquired(store) => store,
-            StoreAcquisition::Held => return Ok(Tier4Progress::Pending),
-        };
+    let store = WaterfallStore::acquire_for_receipts(
+        state_root.join("waterfall"),
+        repo,
+        policy.tier4_source().cloned(),
+    )
+    .map_err(store_error)?;
+    let store = match store {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => return Ok(Tier4Progress::Pending),
+    };
     let Some(state) = store.load_state().map_err(store_error)? else {
         return Ok(Tier4Progress::Pending);
     };
@@ -92,15 +95,16 @@ fn replay_tier4_fenced(
     repo: &str,
     policy: &WaterfallPolicy,
 ) -> Result<ReceiptPreflight<Tier4Progress>, String> {
-    let store =
-        match WaterfallStore::acquire_with_policy(state_root.join("waterfall"), repo, policy)
-            .map_err(store_error)?
-        {
-            StoreAcquisition::Acquired(store) => store,
-            StoreAcquisition::Held => {
-                return Ok(ReceiptPreflight::Replayed(Tier4Progress::Pending))
-            }
-        };
+    let store = WaterfallStore::acquire_for_receipts(
+        state_root.join("waterfall"),
+        repo,
+        policy.tier4_source().cloned(),
+    )
+    .map_err(store_error)?;
+    let store = match store {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => return Ok(ReceiptPreflight::Replayed(Tier4Progress::Pending)),
+    };
     let Some(state) = store.load_state().map_err(store_error)? else {
         return Ok(ReceiptPreflight::Replayed(Tier4Progress::Pending));
     };

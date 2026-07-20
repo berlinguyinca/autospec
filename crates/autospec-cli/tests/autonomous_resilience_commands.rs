@@ -9,6 +9,20 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+/// Returns the first non-empty line following a `LABEL:` header in `--help`
+/// output. Reusing the labeled-block parsing pattern from
+/// `cli_commands.rs::help_usage_invocation` (which reads the line after
+/// `USAGE:` rather than substring-searching the whole blob) avoids false
+/// matches between the intended structured field and incidental text
+/// elsewhere in the help output.
+fn help_section_first_line<'a>(help: &'a str, label: &str) -> Option<&'a str> {
+    help.lines()
+        .skip_while(|line| line.trim() != label)
+        .skip(1)
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
 #[test]
 fn resilience_help_names_the_canonical_write_slug() {
     let output = Command::new(env!("CARGO_BIN_EXE_autospec"))
@@ -17,8 +31,24 @@ fn resilience_help_names_the_canonical_write_slug() {
         .expect("run help");
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("resilience decide"));
-    assert!(help.contains("owner__repo"));
+
+    assert_eq!(
+        help_section_first_line(&help, "USAGE:"),
+        Some(
+            "autospec autonomous resilience decide --repo OWNER/REPO [--issue N] [--budget-tokens N] [--budget-issues N]"
+        ),
+        "USAGE section did not name the `resilience decide` invocation verbatim"
+    );
+
+    let writes_line = help
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("Writes resilience state only to the canonical "));
+    assert_eq!(
+        writes_line,
+        Some("Writes resilience state only to the canonical owner__repo layout."),
+        "STATE section did not name the canonical owner__repo write slug verbatim"
+    );
 }
 
 #[test]
@@ -33,7 +63,10 @@ fn resilience_decide_prefers_canonical_layout_over_legacy_fallbacks() {
     let output = fixture.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
     assert_eq!(output.status.code(), Some(20));
-    assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"held\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
+    );
     assert!(fixture.state_path("owner__repo").exists());
 }
 
@@ -48,7 +81,10 @@ fn resilience_decide_reads_underscore_and_hyphen_compatibility_layouts_without_m
     let output = underscore.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
     assert_eq!(output.status.code(), Some(20));
-    assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"held\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
+    );
     assert!(!underscore.canonical_state_path().exists());
 
     let hyphen = ResilienceFixture::new();
@@ -60,7 +96,10 @@ fn resilience_decide_reads_underscore_and_hyphen_compatibility_layouts_without_m
     let output = hyphen.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
     assert_eq!(output.status.code(), Some(20));
-    assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"held\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
+    );
     assert!(!hyphen.canonical_state_path().exists());
 }
 
@@ -237,7 +276,7 @@ fn resilience_decide_reclaims_expired_leases_at_the_documented_boundaries() {
     assert!(output.status.success());
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"reclaim\",\"reason\":\"claimed_expired\"}\n"
+        "{\"decision\":\"reclaim\",\"reason\":\"claimed_expired\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 
     let abandoned = ResilienceFixture::new();
@@ -251,7 +290,7 @@ fn resilience_decide_reclaims_expired_leases_at_the_documented_boundaries() {
     assert!(output.status.success());
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"reclaim\",\"reason\":\"abandoned\"}\n"
+        "{\"decision\":\"reclaim\",\"reason\":\"abandoned\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 }
 
@@ -272,7 +311,7 @@ fn resilience_decide_parks_at_failure_cap_and_usage_precedes_issue_cap() {
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"reject\",\"reason\":\"failure_cap\"}\n"
+        "{\"decision\":\"reject\",\"reason\":\"failure_cap\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 
     let capacity = ResilienceFixture::new();
@@ -292,7 +331,59 @@ fn resilience_decide_parks_at_failure_cap_and_usage_precedes_issue_cap() {
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"park\",\"reason\":\"usage_cap\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"usage_cap\",\"spend\":{\"tokens\":10,\"issues\":4,\"filed_issues\":0,\"budget_issues\":4}}\n"
+    );
+}
+
+#[test]
+fn resilience_decide_reports_filed_and_budget_issue_counters_separately() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_spend_counters("owner__repo", 0, 1, 1);
+
+    let first = fixture.run(&[
+        "resilience",
+        "decide",
+        "--repo",
+        "owner/repo",
+        "--budget-issues",
+        "2",
+    ]);
+
+    assert!(first.status.success());
+    assert_eq!(
+        stdout(&first),
+        "{\"decision\":\"available\",\"spend\":{\"tokens\":0,\"issues\":1,\"filed_issues\":1,\"budget_issues\":1}}\n"
+    );
+
+    fixture.write_spend_counters("owner__repo", 0, 5, 2);
+
+    let second = fixture.run(&[
+        "resilience",
+        "decide",
+        "--repo",
+        "owner/repo",
+        "--budget-issues",
+        "3",
+    ]);
+
+    assert!(
+        second.status.success(),
+        "the budget cap must use budget_issues=2, not filed_issues=5"
+    );
+    assert_eq!(
+        stdout(&second),
+        "{\"decision\":\"available\",\"spend\":{\"tokens\":0,\"issues\":2,\"filed_issues\":5,\"budget_issues\":2}}\n"
+    );
+
+    let status = fixture.run(&["status", "--repo", "owner/repo", "--json"]);
+    let status_stdout = stdout(&status);
+
+    assert!(status.status.success());
+    assert!(
+        status_stdout.contains(
+            "\"spend\":{\"tokens\":0,\"issues\":2,\"filed_issues\":5,\"budget_issues\":2}"
+        ),
+        "status JSON must expose both issue counters by distinct names: {status_stdout}"
     );
 }
 
@@ -315,7 +406,7 @@ fn resilience_decide_reads_the_legacy_spend_root_despite_a_state_root_override()
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"park\",\"reason\":\"usage_cap\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"usage_cap\",\"spend\":{\"tokens\":10,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 }
 
@@ -329,7 +420,7 @@ fn resilience_decide_uses_legacy_lifetime_caps_when_environment_is_unset() {
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"park\",\"reason\":\"usage_cap\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"usage_cap\",\"spend\":{\"tokens\":10000000,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 
     let issues = ResilienceFixture::new();
@@ -340,7 +431,7 @@ fn resilience_decide_uses_legacy_lifetime_caps_when_environment_is_unset() {
     assert_eq!(output.status.code(), Some(20));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"park\",\"reason\":\"issue_cap\"}\n"
+        "{\"decision\":\"park\",\"reason\":\"issue_cap\",\"spend\":{\"tokens\":0,\"issues\":500,\"filed_issues\":0,\"budget_issues\":500}}\n"
     );
 }
 
@@ -441,7 +532,7 @@ fn resilience_decide_accepts_legacy_decimal_string_failure_issue_identifier() {
     assert_eq!(output.status.code(), Some(3));
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"reject\",\"reason\":\"failure_cap\"}\n"
+        "{\"decision\":\"reject\",\"reason\":\"failure_cap\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 
     let mismatch = ResilienceFixture::new();
@@ -514,7 +605,7 @@ fn resilience_decide_reclaims_only_a_known_same_host_dead_pid() {
     assert!(output.status.success());
     assert_eq!(
         stdout(&output),
-        "{\"decision\":\"reclaim\",\"reason\":\"dead_same_host_pid\"}\n"
+        "{\"decision\":\"reclaim\",\"reason\":\"dead_same_host_pid\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
     );
 }
 
@@ -530,7 +621,10 @@ fn resilience_decide_holds_unknown_host_identity_even_when_pid_is_dead() {
         fixture.run_with_host("unknown", &["resilience", "decide", "--repo", "owner/repo"]);
 
     assert_eq!(output.status.code(), Some(20));
-    assert_eq!(stdout(&output), "{\"decision\":\"held\"}\n");
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"held\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
+    );
 }
 
 #[test]
@@ -541,7 +635,10 @@ fn resilience_decide_treats_legacy_released_lock_as_available() {
     let output = fixture.run(&["resilience", "decide", "--repo", "owner/repo"]);
 
     assert!(output.status.success());
-    assert_eq!(stdout(&output), "{\"decision\":\"available\"}\n");
+    assert_eq!(
+        stdout(&output),
+        "{\"decision\":\"available\",\"spend\":{\"tokens\":0,\"issues\":0,\"filed_issues\":0,\"budget_issues\":0}}\n"
+    );
 }
 
 #[test]
@@ -1414,6 +1511,87 @@ fn autonomous_start_parks_a_held_resilience_lease_without_operator_writes() {
 }
 
 #[test]
+fn autonomous_status_json_reports_unavailable_when_state_file_is_missing() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 99 repo=owner/repo\n[conductor] waterfall decision tier=4 action=run-explore-once-internet\n",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!("{}\n", logpath.display()),
+    );
+
+    let output = fixture.run_autonomous(&["status", "--repo", "owner/repo", "--json"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("status json");
+    assert_eq!(body["state_outcome"], "Unavailable");
+    assert_ne!(body["state_status"], "running");
+    assert_ne!(body["current_cycle"], "99");
+    assert_eq!(body["heartbeat_age_secs"], serde_json::Value::Null);
+}
+
+#[test]
+fn autonomous_status_json_reports_malformed_state_when_legacy_state_cannot_parse() {
+    let fixture = ResilienceFixture::new();
+    let legacy_root = fixture.root.join("legacy-state");
+    write_file(&legacy_root.join("owner_repo/state.json"), "{not-json}");
+
+    let output = fixture
+        .command()
+        .args(["status", "--repo", "owner/repo", "--json", "--repo-dir"])
+        .arg(&fixture.repo_dir)
+        .env("AUTOSPEC_HOST", "autospec-test-host")
+        .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &legacy_root)
+        .output()
+        .expect("run autonomous status against malformed legacy state");
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("status json");
+    assert_eq!(body["state_outcome"], "MalformedState");
+    assert_eq!(body["state_status"], serde_json::Value::Null);
+    assert_eq!(body["heartbeat_age_secs"], serde_json::Value::Null);
+}
+
+#[test]
+fn autonomous_status_json_reports_healthy_legacy_state_fields() {
+    let fixture = ResilienceFixture::new();
+    let legacy_root = fixture.root.join("legacy-state");
+    let heartbeat = now_secs().saturating_sub(4);
+    write_file(
+        &legacy_root.join("owner_repo/state.json"),
+        &format!(
+            r#"{{"status":"running","heartbeat_at":{heartbeat},"cycle":12,"current_cycle":13,"current_tier":"2","current_action":"run-explore-once","last_blocker":"none"}}"#
+        ),
+    );
+
+    let output = fixture
+        .command()
+        .args(["status", "--repo", "owner/repo", "--json", "--repo-dir"])
+        .arg(&fixture.repo_dir)
+        .env("AUTOSPEC_HOST", "autospec-test-host")
+        .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &legacy_root)
+        .output()
+        .expect("run autonomous status against healthy legacy state");
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("status json");
+    assert_eq!(body["state_outcome"], "Ok");
+    assert_eq!(body["state_status"], "running");
+    assert_eq!(body["last_cycle"], "12");
+    assert_eq!(body["current_cycle"], "13");
+    assert_eq!(body["current_tier"], "2");
+    assert_eq!(body["current_action"], "run-explore-once");
+    assert_eq!(body["last_blocker"], "none");
+    assert!(
+        body["heartbeat_age_secs"].as_u64().is_some(),
+        "heartbeat age should be derived from state heartbeat: {body}"
+    );
+}
+
+#[test]
 fn autonomous_status_reads_legacy_cycle_suffix_without_writing() {
     let fixture = ResilienceFixture::new();
     fixture.write_state(
@@ -1550,6 +1728,174 @@ fn explicit_zero_lifetime_budget_remains_valid() {
 }
 
 #[test]
+fn autonomous_monitor_reads_canonical_resilience_status_for_heartbeat_age() {
+    let fixture = ResilienceFixture::new();
+    let heartbeat = now_secs().saturating_sub(5);
+    fixture.write_state(
+        "owner__repo",
+        format!(
+            r#"{{"repo":"owner/repo","status":"running","heartbeat_at":{heartbeat},"cycle":12}}"#
+        ),
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["state_status"], "running");
+    assert_eq!(body["current_cycle"], "12");
+    assert!(
+        body["heartbeat_age_secs"].as_u64().is_some(),
+        "monitor should report heartbeat age from canonical resilience state: {body}"
+    );
+}
+
+#[test]
+fn autonomous_monitor_does_not_invent_dry_result_for_tier_errors() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 9 repo=owner/repo
+[conductor] waterfall decision tier=2 action=run-explore-once reason=local-discovery
+[conductor] Tier 2 explore result: ERROR helper unavailable
+",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!(
+            "{}
+",
+            logpath.display()
+        ),
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["current_tier"], "2");
+    assert_eq!(body["tier_dry_result"], serde_json::Value::Null);
+}
+
+#[test]
+fn autonomous_monitor_does_not_fall_back_to_stale_dry_result_after_tier_error() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 8 repo=owner/repo
+[conductor] Tier 2 explore result: dry=true filed=0
+[conductor] cycle 9 repo=owner/repo
+[conductor] waterfall decision tier=2 action=run-explore-once reason=local-discovery
+[conductor] Tier 2 explore result: ERROR helper unavailable
+",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!(
+            "{}
+",
+            logpath.display()
+        ),
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["current_tier"], "2");
+    assert_eq!(body["tier_dry_result"], serde_json::Value::Null);
+}
+
+#[test]
+fn autonomous_monitor_distinguishes_launch_dry_run_from_tier_dry_result() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 7 repo=owner/repo\n\
+[conductor] waterfall decision tier=2 action=run-explore-once reason=local-discovery\n\
+[conductor] Tier 2 explore result: dry=true filed=0\n",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.pid"),
+        "999999\n",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!("{}\n", logpath.display()),
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/launch.json"),
+        "{\"repo\":\"owner/repo\",\"repo_dir\":\".\",\"argv\":[\"autospec\",\"autonomous\",\"start\",\"--repo\",\"owner/repo\",\"--dry-run\"],\"conductor_argv\":[\"autospec\",\"autonomous\",\"run-foreground\",\"--dry-run\"]}\n",
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["run_mode"], "dry-run");
+    assert_eq!(body["current_tier"], "2");
+    assert_eq!(body["current_action"], "run-explore-once");
+    assert_eq!(body["tier_dry_result"]["dry"], true);
+    assert_eq!(body["tier_dry_result"]["filed"], 0);
+    assert!(body["tier_dry_result"]["explanation"]
+        .as_str()
+        .expect("dry explanation")
+        .contains("tier produced no filed candidates"));
+}
+
+#[test]
+fn autonomous_monitor_falls_back_to_logs_and_discovery_artifacts() {
+    let fixture = ResilienceFixture::new();
+    let logpath = fixture.root.join("conductor.log");
+    write_file(
+        &logpath,
+        "[conductor] cycle 8 repo=owner/repo\n\
+[conductor] waterfall decision tier=4 action=run-explore-once-internet reason=internet-discovery\n\
+[conductor] Tier 4 explore result: dry=false filed=2\n",
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.logpath"),
+        &format!("{}\n", logpath.display()),
+    );
+    write_file(
+        &fixture.operator_root.join("owner_repo/launch.json"),
+        "{\"repo\":\"owner/repo\",\"repo_dir\":\".\",\"argv\":[\"autospec\",\"autonomous\",\"start\",\"--repo\",\"owner/repo\"],\"conductor_argv\":[\"autospec\",\"autonomous\",\"run-foreground\"]}\n",
+    );
+    write_file(
+        &fixture.repo_dir.join(".autospec/explore-once-101/research.json"),
+        "{\"verification_mode\":\"verified\",\"proposals\":[{\"title\":\"Fix flaky drain\"},{\"title\":\"Improve monitor output\"}]}",
+    );
+    write_file(
+        &fixture
+            .repo_dir
+            .join(".autospec/explore-once-101/candidates.json"),
+        "[{\"title\":\"Fix flaky drain\"},{\"title\":\"Improve monitor output\"}]",
+    );
+
+    let output = fixture.run_autonomous(&["monitor", "--repo", "owner/repo", "--json", "--once"]);
+
+    assert!(output.status.success());
+    let body: serde_json::Value = serde_json::from_str(&stdout(&output)).expect("monitor json");
+    assert_eq!(body["run_mode"], "real");
+    assert_eq!(body["current_cycle"], "8");
+    assert_eq!(body["current_tier"], "4");
+    assert_eq!(body["current_action"], "run-explore-once-internet");
+    assert_eq!(body["discovery_artifacts"][0]["proposals"], 2);
+    assert_eq!(body["discovery_artifacts"][0]["candidates"], 2);
+    assert_eq!(
+        body["discovery_artifacts"][0]["verification_mode"],
+        "verified"
+    );
+    assert_eq!(
+        body["discovery_artifacts"][0]["filed_issue_titles"][0],
+        "Fix flaky drain"
+    );
+}
+
+#[test]
 fn resilience_source_keeps_shell_resilience_authority_out_of_rust() {
     let source = fs::read_to_string(
         workspace_root().join("crates/autospec-cli/src/commands/autonomous/resilience.rs"),
@@ -1640,7 +1986,12 @@ impl ResilienceFixture {
             .env("AUTOSPEC_STATE_DIR", &self.state_root)
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", &self.spend_root)
             .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &self.operator_root)
-            .env("HOME", &self.root);
+            .env("HOME", &self.root)
+            .env_remove("AUTOSPEC_STOP_FLAG_FILE")
+            .env_remove("AUTOSPEC_RUN_ONLY_ISSUES")
+            .env_remove("AUTOSPEC_RUN_CMD")
+            .env_remove("AUTOSPEC_EXPLORE_CMD")
+            .env_remove("AUTOSPEC_EXPLORE_VERIFY_CMD");
         command
     }
 
@@ -1818,6 +2169,15 @@ esac
             slug,
             tokens,
             issues,
+        );
+    }
+
+    fn write_spend_counters(&self, slug: &str, tokens: u64, filed_issues: u64, budget_issues: u64) {
+        write_file(
+            &self.spend_root.join(slug).join("spend.json"),
+            &format!(
+                "{{\"schema\":1,\"tokens\":{tokens},\"filed_issues\":{filed_issues},\"budget_issues\":{budget_issues},\"parked\":false}}"
+            ),
         );
     }
 

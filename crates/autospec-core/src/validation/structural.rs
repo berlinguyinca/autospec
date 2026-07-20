@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use super::catalog::StructuralCheck;
 
@@ -118,6 +119,9 @@ impl StructuralValidator {
             StructuralCheck::SelfUpdateDuo => Self::validate_duo_self_update_sections(root),
             StructuralCheck::CodexSkillsInstall => Self::validate_codex_skills_install(root),
             StructuralCheck::SharedScriptInstall => Self::validate_shared_script_install(root),
+            StructuralCheck::RootHelperWrapperPolicy => {
+                Self::validate_root_helper_wrapper_policy(root)
+            }
             StructuralCheck::StartupPreflight => Self::validate_startup_preflight(root),
         }
     }
@@ -2083,6 +2087,51 @@ impl StructuralValidator {
         Ok(())
     }
 
+    pub fn validate_root_helper_wrapper_policy(root: &Path) -> Result<(), String> {
+        let scripts = root.join("scripts");
+        if !scripts.is_dir() {
+            return Ok(());
+        }
+
+        let output = Command::new("git")
+            .args([
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--",
+                "scripts",
+            ])
+            .current_dir(root)
+            .output();
+        let Ok(output) = output else {
+            return Ok(());
+        };
+        if !output.status.success() {
+            return Ok(());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let offenders = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|path| path.starts_with("scripts/"))
+            .filter(|path| {
+                let absolute = root.join(path);
+                absolute.is_file() && !has_skill_canonical_source(root, path)
+            })
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+
+        if offenders.is_empty() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "root helper wrapper policy: unsupported untracked root-level helper copy without canonical source: {}. Use the autospec Rust binary or install helpers from tracked skill/shared script sources instead of restoring root wrappers.",
+            offenders.join(", ")
+        ))
+    }
+
     pub fn validate_startup_preflight(root: &Path) -> Result<(), String> {
         let template = root.join("templates/skill-blocks/startup-self-update.md");
         if !template.is_file() {
@@ -2434,6 +2483,31 @@ fn referenced_shared_helpers(root: &Path, skill_dir: &Path) -> Result<BTreeSet<S
     Ok(helpers)
 }
 
+fn has_skill_canonical_source(root: &Path, script_path: &str) -> bool {
+    let Some(helper_name) = Path::new(script_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+
+    if root
+        .join("skills/autospec-shared/scripts")
+        .join(helper_name)
+        .is_file()
+    {
+        return true;
+    }
+
+    let skills_root = root.join("skills");
+    let Ok(entries) = fs::read_dir(skills_root) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .any(|entry| entry.path().join("scripts").join(helper_name).is_file())
+}
+
 fn files_under(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
     let mut files = Vec::new();
     let mut directories = vec![root.to_path_buf()];
@@ -2526,21 +2600,31 @@ fn is_flag_token_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
 }
 
-fn contains_docs_drift_note(document: &str) -> bool {
-    let drift_gate = document.match_indices("drift").any(|(index, _)| {
-        let remainder = &document[index + "drift".len()..];
-        remainder.len() >= 5 && remainder.as_bytes()[1..].starts_with(b"gate")
-    });
-    let doc_before_drift = document
-        .find("doc")
-        .zip(document.rfind("drift"))
-        .is_some_and(|(doc, drift)| doc <= drift);
-    let drift_before_stage = document
-        .find("drift")
-        .zip(document.rfind("stage 2.5"))
-        .is_some_and(|(drift, stage)| drift <= stage);
+/// True when `left` is followed, after exactly one separator character
+/// (e.g. a space or hyphen), by `right` — the single-gap phrase primitive
+/// used to recognize both the "drift-gate" and "drift gate" spellings of
+/// the same term without hard-coding either separator.
+fn adjacent_with_single_gap(document: &str, left: &str, right: &str) -> bool {
+    document.match_indices(left).any(|(index, _)| {
+        let remainder = &document[index + left.len()..];
+        remainder.len() > right.len() && remainder.as_bytes()[1..].starts_with(right.as_bytes())
+    })
+}
 
-    drift_gate || document.contains("check-doc-drift") || doc_before_drift || drift_before_stage
+/// True when the first occurrence of `earlier` appears at or before the
+/// last occurrence of `later` in the document.
+fn precedes(document: &str, earlier: &str, later: &str) -> bool {
+    document
+        .find(earlier)
+        .zip(document.rfind(later))
+        .is_some_and(|(first, last)| first <= last)
+}
+
+fn contains_docs_drift_note(document: &str) -> bool {
+    adjacent_with_single_gap(document, "drift", "gate")
+        || document.contains("check-doc-drift")
+        || precedes(document, "doc", "drift")
+        || precedes(document, "drift", "stage 2.5")
 }
 
 fn autospec_script_references(document: &str) -> Vec<String> {
@@ -2669,7 +2753,7 @@ fn strip_first_blank_line(document: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::StructuralValidator;
+    use super::{contains_docs_drift_note, StructuralValidator};
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -2738,5 +2822,41 @@ Each summary row records `command`, `cwd`, `duration`, `status`, and
 
         StructuralValidator::validate_autospec_explore_parallel_validation_contract(&root)
             .expect("complete bounded validation contract passes");
+    }
+
+    #[test]
+    fn docs_drift_note_matches_hyphenated_and_spaced_spellings() {
+        assert!(contains_docs_drift_note("stage 2.5 drift gate"));
+        assert!(contains_docs_drift_note(
+            "**stage 2.5 + docs drift-gate composition:** ..."
+        ));
+    }
+
+    #[test]
+    fn docs_drift_note_matches_the_literal_script_reference() {
+        assert!(contains_docs_drift_note(
+            "the drift-gate is powered by check-doc-drift.sh"
+        ));
+    }
+
+    #[test]
+    fn docs_drift_note_matches_doc_mentioned_before_drift() {
+        assert!(contains_docs_drift_note(
+            "see the doc section further below for background, then drift happens"
+        ));
+    }
+
+    #[test]
+    fn docs_drift_note_matches_drift_mentioned_before_stage_2_5() {
+        assert!(contains_docs_drift_note(
+            "drift happens sometime before stage 2.5 runs"
+        ));
+    }
+
+    #[test]
+    fn docs_drift_note_rejects_unrelated_prose() {
+        assert!(!contains_docs_drift_note(
+            "this section has nothing to do with the gate keyword at all"
+        ));
     }
 }

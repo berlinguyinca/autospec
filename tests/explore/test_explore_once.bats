@@ -39,9 +39,22 @@ exit 0
 GHEOF
     chmod +x "$TMP/bin/gh"
 
-    cat > "$TMP/bin/autospec" <<'AUTOSPECEOF'
+cat > "$TMP/bin/autospec" <<'AUTOSPECEOF'
 #!/usr/bin/env bash
 echo "autospec $*" >> "$AUTOSPEC_REPO_ROOT/.autospec/gh-calls.log"
+if [ "${1:-}" = "explore" ] && [ "${2:-}" = "verifier-outcome" ]; then
+    tier=""; cycle=""; artifact=""
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --tier) tier="${2:-}"; shift 2 ;;
+            --cycle) cycle="${2:-}"; shift 2 ;;
+            --artifact) artifact="${2:-}"; shift 2 ;;
+            *) shift ;;
+        esac
+    done
+    printf '{"outcome":"NotRun","reason":"missing_AUTOSPEC_EXPLORE_VERIFY_CMD","tier":"%s","cycle":%s,"artifact_path":"%s","sealed":true,"dry":false,"may_mutate_github":false}\n' "$tier" "${cycle:-0}" "$artifact"
+    exit 0
+fi
 if [ "${1:-}" != "queue" ] || [ "${2:-}" != "review-safety" ]; then
     exit 41
 fi
@@ -385,6 +398,14 @@ d = json.loads(lines[-1])
 assert d['filed'] == 0, d
 assert d['dry'] is True, d
 assert d['reason'] == 'verify-unavailable-failclosed', d
+assert d['verifier_outcome']['outcome'] == 'NotRun', d
+assert d['verifier_outcome']['reason'] == 'missing_AUTOSPEC_EXPLORE_VERIFY_CMD', d
+assert d['verifier_outcome']['tier'] == 'local', d
+assert d['verifier_outcome']['cycle'] == 1, d
+assert d['verifier_outcome']['artifact_path'].endswith('/research.json'), d
+assert d['verifier_outcome']['sealed'] is True, d
+assert d['verifier_outcome']['dry'] is False, d
+assert d['verifier_outcome']['may_mutate_github'] is False, d
 "
     # No issue was created (fail-closed filed nothing).
     ! grep -q 'issue create' "$TMP/.autospec/gh-calls.log" 2>/dev/null

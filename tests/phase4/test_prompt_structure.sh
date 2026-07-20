@@ -37,4 +37,42 @@ if ! grep -qF "autospec:v2-flow" "$prompt"; then
     exit 1
 fi
 
+# UI/browser validation must use the shared three-state vocabulary and require
+# remediation issues when harness metadata, not the app, prevents real browser
+# verification.
+for state in "browser-verified" "fallback-smoke-only" "not-run"; do
+    if ! grep -qF "$state" "$prompt"; then
+        echo "FAIL: browser verification state missing from prompt: $state"
+        exit 1
+    fi
+done
+
+if ! grep -qiE 'remediation issue.*browser|browser.*remediation issue' "$prompt"; then
+    echo "FAIL: browser verification harness skip remediation issue is not documented"
+    exit 1
+fi
+
+if ! grep -qiE 'redact|saniti[sz]e' "$prompt"; then
+    echo "FAIL: browser verification error capture must require redaction before GitHub publication"
+    exit 1
+fi
+
+if ! grep -qF 'gh pr view <PR> --json body' "$prompt" || ! grep -qF 'browser_state_count' "$prompt"; then
+    echo "FAIL: browser verification merge gate must include deterministic PR-body validation"
+    exit 1
+fi
+
+# UI cleanup/refactor work must audit child chrome before edits so implementers
+# remove nested layout artifacts instead of wrapping them in another shell.
+for required in \
+    "UI cohesion audit" \
+    "cards-in-cards" \
+    "desktop and mobile screenshots"
+do
+    if ! grep -qF "$required" "$prompt"; then
+        echo "FAIL: UI cohesion audit prompt text missing: $required"
+        exit 1
+    fi
+done
+
 echo "PASS"
