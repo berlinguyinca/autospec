@@ -627,6 +627,36 @@ Extends the Phase 4 self-heal loop classifier with doc-drift categories:
 `failing_doc_drift`, `missing_doc_scope`, `failing_visual_stale`, `failing_ai_review_stale`,
 `failing_manifest_stale`.
 
+## Autonomous premerge admission (`autospec autonomous premerge evaluate`)
+
+The Rust command evaluates one claimed lane from typed QA and security evidence:
+
+```
+autospec autonomous premerge evaluate --repo OWNER/REPO --repo-dir DIR \
+  --issue N --worker-id ID --claim-id ID [--json]
+```
+
+Evidence is produced by the fixed Rust schema-1 producers `autospec-qa` and
+`autospec-secaudit` and must be present at
+`.autospec/evidence/premerge/<lane-digest>/qa.json` and `security.json`. The
+Each document contains exactly `schema`, `kind`, `producer`, `repo`, `issue`,
+`worker_id`, `claim_id`, `branch`, `commit`, `run_id`, `completed_at`,
+`verdict`, `finding_codes`, and `reason`; QA uses kind `qa`, security uses kind
+`security-audit`, and verdict is exactly `pass`, `blocked` with bounded
+`finding_codes`, or `failed` with a bounded `reason`.
+working tree must be attached to a named branch with no tracked staged or
+unstaged changes; fixed untracked evidence files are allowed. The command writes
+immutable decisions at
+`.autospec/autonomous-operator/<scope>/premerge/lanes/<lane-digest>/decisions/<evidence-digest>.json`,
+with `latest.json` and blocked-lane `quarantine.json` beside the decisions.
+Missing, malformed, mismatched, or unavailable evidence fails closed. Exit 0 is
+Pass, exit 20 is Blocked (the receipt is quarantined; orchestration to continue
+another lane remains supervised-executor follow-up), and exit 2 is a
+diagnostic/admission failure. A pass receipt is observability and admission
+evidence only; it does not itself run the foreground executor. Explicit claim
+success additionally requires `--claim-id` and `--premerge-receipt`; the receipt
+commit must equal the GitHub PR `headRefOid`.
+
 ## Validation (`autospec validate`)
 
 <!-- autospec-doc-scope:

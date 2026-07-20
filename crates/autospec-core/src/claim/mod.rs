@@ -1032,6 +1032,7 @@ pub struct OpenPullRequest {
     pub number: u64,
     pub body: String,
     pub head_ref_name: String,
+    pub head_ref_oid: String,
 }
 
 pub fn parse_open_pull_requests_json(input: &str) -> Result<Vec<OpenPullRequest>, String> {
@@ -1043,13 +1044,15 @@ pub fn parse_open_pull_requests_json(input: &str) -> Result<Vec<OpenPullRequest>
         .map(|(index, value)| {
             let context = format!("GitHub open pull requests[{index}]");
             let mut object = value.into_object(&context)?;
-            require_only_keys(&object, &["number", "body", "headRefName"])?;
+            require_only_keys(&object, &["number", "body", "headRefName", "headRefOid"])?;
             Ok(OpenPullRequest {
                 number: take_required(&mut object, "number")?
                     .into_number(&format!("{context} number"))?,
                 body: take_optional_string(&mut object, "body", &context)?.unwrap_or_default(),
                 head_ref_name: take_optional_string(&mut object, "headRefName", &context)?
                     .unwrap_or_default(),
+                head_ref_oid: take_required(&mut object, "headRefOid")?
+                    .into_string(&format!("{context} headRefOid"))?,
             })
         })
         .collect()
@@ -1087,6 +1090,9 @@ pub struct ExecutorResultEvidence {
     pub pr: Option<u64>,
     pub step: String,
     pub receipt_id: String,
+    pub claim_id: Option<String>,
+    pub commit: Option<String>,
+    pub premerge_receipt: Option<String>,
 }
 
 impl ExecutorResultEvidence {
@@ -1100,6 +1106,9 @@ impl ExecutorResultEvidence {
         pr: Option<u64>,
         step: impl Into<String>,
         receipt_id: impl Into<String>,
+        claim_id: Option<String>,
+        commit: Option<String>,
+        premerge_receipt: Option<String>,
     ) -> Self {
         Self {
             repo: repo.into(),
@@ -1110,6 +1119,9 @@ impl ExecutorResultEvidence {
             pr,
             step: step.into(),
             receipt_id: receipt_id.into(),
+            claim_id,
+            commit,
+            premerge_receipt,
         }
     }
 
@@ -1124,8 +1136,11 @@ impl ExecutorResultEvidence {
         let pr = self
             .pr
             .map_or_else(|| "null".to_string(), |pr| pr.to_string());
+        let claim_id = optional_json_string(self.claim_id.as_deref());
+        let commit = optional_json_string(self.commit.as_deref());
+        let premerge_receipt = optional_json_string(self.premerge_receipt.as_deref());
         format!(
-            "{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"outcome\":\"{}\",\"pr\":{},\"step\":\"{}\",\"receipt_id\":\"{}\"}}",
+            "{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"outcome\":\"{}\",\"pr\":{},\"step\":\"{}\",\"receipt_id\":\"{}\",\"claim_id\":{claim_id},\"commit\":{commit},\"premerge_receipt\":{premerge_receipt}}}",
             escape_json(&self.repo),
             self.issue,
             escape_json(&self.worker_id),
@@ -1153,6 +1168,9 @@ impl ExecutorResultEvidence {
                 "pr",
                 "step",
                 "receipt_id",
+                "claim_id",
+                "commit",
+                "premerge_receipt",
             ],
         )?;
         let schema = take_required(&mut object, "schema")?.into_number("executor result schema")?;
@@ -1176,6 +1194,13 @@ impl ExecutorResultEvidence {
             step: take_required(&mut object, "step")?.into_string("executor result step")?,
             receipt_id: take_required(&mut object, "receipt_id")?
                 .into_string("executor result receipt_id")?,
+            claim_id: take_optional_string(&mut object, "claim_id", "executor result")?,
+            commit: take_optional_string(&mut object, "commit", "executor result")?,
+            premerge_receipt: take_optional_string(
+                &mut object,
+                "premerge_receipt",
+                "executor result",
+            )?,
         };
         evidence.validate()?;
         Ok(evidence)
@@ -1196,6 +1221,41 @@ impl ExecutorResultEvidence {
             if value.trim().is_empty() {
                 return Err(format!("executor result {name} must not be empty"));
             }
+        }
+        let success_binding = [
+            self.claim_id.as_deref(),
+            self.commit.as_deref(),
+            self.premerge_receipt.as_deref(),
+        ];
+        if self.outcome == "succeeded" && success_binding.iter().any(Option::is_none) {
+            return Err(
+                "succeeded executor result requires claim_id, commit, and premerge_receipt"
+                    .to_string(),
+            );
+        }
+        if self.outcome != "succeeded" && success_binding.iter().any(Option::is_some) {
+            return Err(
+                "non-succeeded executor result rejects claim_id, commit, and premerge_receipt"
+                    .to_string(),
+            );
+        }
+        for (name, value) in [
+            ("claim_id", self.claim_id.as_deref()),
+            ("commit", self.commit.as_deref()),
+        ] {
+            if value.is_some_and(|value| value.trim().is_empty()) {
+                return Err(format!("executor result {name} must not be empty"));
+            }
+        }
+        if self.premerge_receipt.as_deref().is_some_and(|digest| {
+            digest.len() != 64
+                || !digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        }) {
+            return Err(
+                "executor result premerge_receipt must be 64-character lowercase hex".to_string(),
+            );
         }
         Ok(())
     }
@@ -1599,4 +1659,11 @@ fn escape_json(value: &str) -> String {
             character => vec![character],
         })
         .collect()
+}
+
+fn optional_json_string(value: Option<&str>) -> String {
+    value.map_or_else(
+        || "null".to_string(),
+        |value| format!("\"{}\"", escape_json(value)),
+    )
 }

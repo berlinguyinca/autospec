@@ -1,7 +1,10 @@
 use autospec_core::claim::{
-    claim_losing_worker_comment_id, executor_wait_failure_relinquishes_claim,
-    lowest_marked_comment, select_run_state, ExecutorResultEvidence, RemoteComment, RunStateRecord,
+    claim_losing_worker_comment_id, executor_result_evidence_exists,
+    executor_wait_failure_relinquishes_claim, lowest_marked_comment, parse_open_pull_requests_json,
+    select_run_state, ExecutorResultEvidence, RemoteComment, RunStateRecord,
 };
+
+const RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn marked_comment(id: u64, worker_id: &str) -> RemoteComment {
     let record = RunStateRecord::new(
@@ -94,6 +97,9 @@ fn wait_failure_evidence_relinquishes_only_the_exact_claim_generation() {
         None,
         "implementer_wait_failed",
         "implementer-wait-failed:claim-generation-a:session-7",
+        None,
+        None,
+        None,
     );
     let prior_generation = ExecutorResultEvidence::new(
         "testorg/testrepo",
@@ -104,6 +110,9 @@ fn wait_failure_evidence_relinquishes_only_the_exact_claim_generation() {
         None,
         "implementer_wait_failed",
         "implementer-wait-failed:claim-generation-prior:session-6",
+        None,
+        None,
+        None,
     );
 
     assert!(executor_wait_failure_relinquishes_claim(
@@ -130,4 +139,59 @@ fn wait_failure_evidence_relinquishes_only_the_exact_claim_generation() {
         )],
         &legacy_claim,
     ));
+}
+
+#[test]
+fn executor_result_pull_request_requires_the_head_commit_oid() {
+    let pull_requests = parse_open_pull_requests_json(
+        r#"[{"number":17,"body":"Closes #42","headRefName":"feat/claim","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+    )
+    .expect("parse exact open pull request evidence");
+
+    assert_eq!(
+        pull_requests[0].head_ref_oid,
+        "0123456789abcdef0123456789abcdef01234567"
+    );
+    assert!(parse_open_pull_requests_json(
+        r#"[{"number":17,"body":"Closes #42","headRefName":"feat/claim"}]"#
+    )
+    .is_err());
+}
+
+#[test]
+fn executor_result_evidence_is_bound_to_one_claim_generation_commit_and_receipt() {
+    let exact = ExecutorResultEvidence::new(
+        "testorg/testrepo",
+        42,
+        "worker-a",
+        "feat/test",
+        "succeeded",
+        Some(17),
+        "executor_succeeded",
+        "result-17",
+        Some("claim-generation-a".to_string()),
+        Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        Some(RECEIPT.to_string()),
+    );
+    let successor = ExecutorResultEvidence::new(
+        "testorg/testrepo",
+        42,
+        "worker-a",
+        "feat/test",
+        "succeeded",
+        Some(17),
+        "executor_succeeded",
+        "result-17",
+        Some("claim-generation-b".to_string()),
+        Some("0123456789abcdef0123456789abcdef01234567".to_string()),
+        Some(RECEIPT.to_string()),
+    );
+    let comments = [RemoteComment::new(
+        101,
+        exact.to_marked_comment(),
+        "2026-01-01T00:00:01Z",
+    )];
+
+    assert!(executor_result_evidence_exists(&comments, &exact));
+    assert!(!executor_result_evidence_exists(&comments, &successor));
 }
