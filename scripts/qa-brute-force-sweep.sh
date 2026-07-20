@@ -167,12 +167,14 @@ existing_issue_status() {
 pending_issue_match() {
     local pending_prefix="$1" match
     match="$(jq -r --arg prefix "$pending_prefix" --arg state "open" '
-        [.[] as $issue | ($issue.body | split("\n")[] | select(startswith($prefix) and endswith(" -->"))) as $pending
-         | [$state, ($issue.number | tostring), $pending] | @tsv][0] // empty' "$OPEN_ISSUES")"
+        [.[] as $issue
+         | select(any($issue.body | split("\n")[]; startswith($prefix) and endswith(" -->")))
+         | [$state, ($issue.number | tostring)] | @tsv][0] // empty' "$OPEN_ISSUES")"
     if [ -n "$match" ]; then printf '%s\n' "$match"; return 0; fi
     match="$(jq -r --arg prefix "$pending_prefix" --arg state "closed" '
-        [.[] as $issue | ($issue.body | split("\n")[] | select(startswith($prefix) and endswith(" -->"))) as $pending
-         | [$state, ($issue.number | tostring), $pending] | @tsv][0] // empty' "$CLOSED_ISSUES")"
+        [.[] as $issue
+         | select(any($issue.body | split("\n")[]; startswith($prefix) and endswith(" -->")))
+         | [$state, ($issue.number | tostring)] | @tsv][0] // empty' "$CLOSED_ISSUES")"
     if [ -n "$match" ]; then printf '%s\n' "$match"; return 0; fi
     return 1
 }
@@ -189,18 +191,16 @@ write_recurrence_body() {
 }
 
 remove_pending_line() {
-    local source="$1" pending_marker="$2" output="$3"
-    jq -Rrs --arg pending_marker "$pending_marker" \
-        'split("\n") | map(select(. != $pending_marker)) | join("\n")' "$source" > "$output"
+    local source="$1" pending_prefix="$2" output="$3"
+    jq -Rrs --arg pending_prefix "$pending_prefix" \
+        'split("\n") | map(select(startswith($pending_prefix) | not)) | join("\n")' "$source" > "$output"
 }
 
 resume_pending() {
-    local pending_match="$1"
-    local state remainder number pending_marker catalog source cleaned
+    local pending_match="$1" pending_prefix="$2"
+    local state number catalog source cleaned
     state="${pending_match%%$'\t'*}"
-    remainder="${pending_match#*$'\t'}"
-    number="${remainder%%$'\t'*}"
-    pending_marker="${remainder#*$'\t'}"
+    number="${pending_match#*$'\t'}"
     if [ "$state" = "open" ]; then catalog="$OPEN_ISSUES"; else catalog="$CLOSED_ISSUES"; fi
     if [ "$state" = "closed" ] && ! repo_gh issue reopen "$number" >/dev/null 2>&1; then
         printf '%s\n' "not-filed-reopen-failed"; return 0
@@ -208,7 +208,7 @@ resume_pending() {
     source="$(mktemp "$SWEEP_TMP/pending-body.XXXXXX")"
     cleaned="$(mktemp "$SWEEP_TMP/clean-body.XXXXXX")"
     jq -r --argjson number "$number" '.[] | select(.number == $number) | .body' "$catalog" > "$source"
-    remove_pending_line "$source" "$pending_marker" "$cleaned"
+    remove_pending_line "$source" "$pending_prefix" "$cleaned"
     if ! repo_gh issue edit "$number" --body-file "$cleaned" >/dev/null 2>&1; then
         printf '%s\n' "not-filed-cleanup-failed"; return 0
     fi
@@ -245,7 +245,7 @@ handle_recurrence() {
     if ! repo_gh issue reopen "$issue_number" >/dev/null 2>&1; then
         printf '%s\n' "not-filed-reopen-failed"; return 0
     fi
-    remove_pending_line "$state_body" "$pending_marker" "$clean_body"
+    remove_pending_line "$state_body" "$pending_prefix" "$clean_body"
     if ! repo_gh issue edit "$issue_number" --body-file "$clean_body" >/dev/null 2>&1; then
         printf '%s\n' "not-filed-cleanup-failed"; return 0
     fi
@@ -268,7 +268,7 @@ handle_open_recurrence() {
     if ! repo_gh issue edit "$issue_number" --body-file "$state_body" >/dev/null 2>&1; then
         printf '%s\n' "not-filed-edit-failed"; return 0
     fi
-    remove_pending_line "$state_body" "$pending_marker" "$clean_body"
+    remove_pending_line "$state_body" "$pending_prefix" "$clean_body"
     if ! repo_gh issue edit "$issue_number" --body-file "$clean_body" >/dev/null 2>&1; then
         printf '%s\n' "not-filed-cleanup-failed"; return 0
     fi
@@ -314,7 +314,7 @@ file_issue() {
     pending_prefix="<!-- autospec-qa-brute-force:pending-reopen:v1 rule=$rule_id path=$file scope=$scope blob="
     pending_marker="$pending_prefix$blob -->"
     if pending_match="$(pending_issue_match "$pending_prefix")"; then
-        pending_status="$(resume_pending "$pending_match")"
+        pending_status="$(resume_pending "$pending_match" "$pending_prefix")"
         if [ "$pending_status" != "pending-recovered" ]; then printf '%s\n' "$pending_status"; return 0; fi
         load_issue_catalogs
         if [ "$CATALOG_STATUS" != "ready" ]; then printf '%s\n' "not-filed-catalog"; return 0; fi

@@ -267,6 +267,40 @@ run_sweep() {
     ! issue_body 50 | grep -q 'pending-reopen'
 }
 
+@test "literal backslash pending retry cleans once and then stays mutation free" {
+    weird_path='src/a\nfile.py'
+    mv "$REPO_FIXTURE/src/classify.py" "$REPO_FIXTURE/$weird_path"
+    current_blob="$(git -C "$REPO_FIXTURE" hash-object "$weird_path")"
+    catalog "$CLOSED_JSON" 51 CLOSED \
+        "$(marker_for_path '<file>' 0000000000000000000000000000000000000000 "$weird_path")"
+    export GH_REOPEN_FAIL=1
+
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GH_LOG")" = $'comment:51\nedit:51\nreopen:51' ]
+    body="$(issue_body 51)"
+    [[ "$body" == *'autospec-qa-brute-force:pending-reopen:v1'* ]]
+    : > "$GH_LOG"
+    : > "$VERDICT"
+    export GH_REOPEN_FAIL=0
+
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ "$(cat "$GH_LOG")" = $'reopen:51\nedit:51' ]
+    ! grep -q '^create$' "$GH_LOG"
+    body="$(issue_body 51)"
+    [[ "$body" != *'autospec-qa-brute-force:pending-reopen:v1'* ]]
+    [ "$(grep -Fc 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/a\nfile.py scope=<file>' <<< "$body")" -eq 1 ]
+    [[ "$body" == *"blob=$current_blob"* ]]
+    : > "$GH_LOG"
+    : > "$VERDICT"
+
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ ! -s "$GH_LOG" ]
+    grep -q '"filing_status":"existing-open"' "$VERDICT"
+}
+
 @test "comment and hard edit failures never create a replacement issue" {
     catalog "$CLOSED_JSON" 44 CLOSED "$(marker '<file>' 0000000000000000000000000000000000000000)"
     export GH_COMMENT_FAIL=1
