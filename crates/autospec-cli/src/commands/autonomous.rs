@@ -29,6 +29,12 @@ use autospec_core::coordination::{
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use nix::sys::signal::{killpg, Signal};
+#[cfg(unix)]
+use nix::unistd::{setsid, Pid};
 
 use super::{claim, queue, CommandFailure};
 
@@ -3029,14 +3035,22 @@ impl ExecutorRequest {
                 };
             }
         }
-        let mut child = match Command::new(&self.program)
+        let mut command = Command::new(&self.program);
+        command
             .args(&self.args)
             .current_dir(&self.current_dir)
             .env_remove("AUTOSPEC_AUTONOMOUS_PREMERGE_CMD")
             .env_remove("AUTOSPEC_AUTONOMOUS_CMD")
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        unsafe {
+            command.pre_exec(|| {
+                let _ = setsid();
+                Ok(())
+            });
+        }
+        let mut child = match command.spawn()
         {
             Ok(child) => child,
             Err(_) => return ExecutorReceipt::failed(),
@@ -3047,6 +3061,8 @@ impl ExecutorRequest {
                 Ok(Some(_)) => break false,
                 Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
                 Ok(None) => {
+                    #[cfg(unix)]
+                    let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
                     let _ = child.kill();
                     break true;
                 }
