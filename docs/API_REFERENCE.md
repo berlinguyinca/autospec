@@ -120,11 +120,12 @@ Authoritative admission transaction for a canonical GitHub issue.
 Usage:
 `autospec issue promote --repo OWNER/REPO --number N [--remove-label needs-autospec-template] [--json]`
 
-The command reads the issue from GitHub, applies the repository safety policy, writes the
-canonical safety stamp, re-reads the exact issue state, and only then adds `auto-implement`.
-It performs a final re-read and rolls back labels owned by the transaction if concurrent
-title, body, author, state, or label changes are detected. Repeating a completed admission
-is idempotent.
+The command reads the issue from GitHub, applies the repository safety policy, adds the
+`safety:reviewed` label without replacing the issue body, re-reads the exact issue state,
+and only then adds `auto-implement`. Existing canonical safety sections are validated but
+left unchanged. It performs a final re-read and rolls back labels owned by the transaction
+if concurrent title, body, author, state, or label changes are detected. Repeating a
+completed admission is idempotent.
 
 The JSON response includes issue identity, `safety.decision`, `safety.reason`,
 `"auto-implement"`, `eligible`, `changed`, `final_labels`, and `blocked_by_reason`.

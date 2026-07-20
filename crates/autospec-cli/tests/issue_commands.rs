@@ -90,7 +90,7 @@ impl PromotionFixture {
 }
 
 #[test]
-fn issue_promote_stamps_rereads_and_then_adds_auto_implement() {
+fn issue_promote_labels_rereads_and_then_adds_auto_implement_without_editing_body() {
     let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
 
     let output = fixture.command().output().expect("promotion command runs");
@@ -103,16 +103,37 @@ fn issue_promote_stamps_rereads_and_then_adds_auto_implement() {
     assert_eq!(report["changed"], true);
     assert!(report.get("drainable").is_none());
     let issue = fixture.issue();
-    assert!(issue["body"].as_str().unwrap().contains("SAFETY_PASS"));
+    assert_eq!(issue["body"].as_str().unwrap(), SAFE_BODY);
     assert!(labels(&issue).contains(&"safety:reviewed"));
     assert!(labels(&issue).contains(&"auto-implement"));
     let calls = fixture.calls();
-    assert_before(&calls, "body=", "labels[]=safety:reviewed");
+    assert!(!calls.contains("--method PATCH"));
     assert_before(
         &calls,
         "labels[]=safety:reviewed",
         "labels[]=auto-implement",
     );
+}
+
+#[test]
+fn issue_promote_preserves_an_edit_at_the_safety_mutation_boundary() {
+    let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_PROMOTE_RACE", "before-safety-mutation")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ISSUE_PROMOTION_CONFLICT"));
+    let issue = fixture.issue();
+    assert!(issue["body"]
+        .as_str()
+        .unwrap()
+        .contains("Concurrent human edit."));
+    assert!(!labels(&issue).contains(&"safety:reviewed"));
+    assert!(!labels(&issue).contains(&"auto-implement"));
 }
 
 #[test]
@@ -249,6 +270,23 @@ fn issue_promote_rolls_back_auto_implement_when_final_read_fails() {
 }
 
 #[test]
+fn issue_promote_rolls_back_safety_review_when_its_verification_read_fails() {
+    let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_PROMOTE_FAILURE", "safety-get")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("gh issue read failed"));
+    let issue = fixture.issue();
+    assert!(!labels(&issue).contains(&"safety:reviewed"));
+    assert!(!labels(&issue).contains(&"auto-implement"));
+}
+
+#[test]
 fn issue_promote_surfaces_verified_rollback_failure_when_auto_label_cannot_be_removed() {
     let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
 
@@ -371,15 +409,35 @@ case "$method:$endpoint" in
       printf 'simulated final read failure\n' >&2
       exit 42
     fi
+    if [ "${AUTOSPEC_PROMOTE_FAILURE:-}" = safety-get ] \
+      && jq -e '.labels | index("safety:reviewed")' "$state" >/dev/null \
+      && ! jq -e '.labels | index("auto-implement")' "$state" >/dev/null \
+      && [ ! -e "$state.safety-get-failed" ]; then
+      : > "$state.safety-get-failed"
+      printf 'simulated safety verification read failure\n' >&2
+      exit 44
+    fi
     cat "$state"
     ;;
   PATCH:repos/test/repo/issues/1890)
+    if [ "${AUTOSPEC_PROMOTE_RACE:-}" = before-safety-mutation ] && [ ! -e "$state.safety-raced" ]; then
+      : > "$state.safety-raced"
+      jq '.body += "\nConcurrent human edit."' "$state" > "$state.tmp"
+      mv "$state.tmp" "$state"
+    fi
     body="${field#body=}"
     jq --arg body "$body" '.body=$body' "$state" > "$state.tmp"
     mv "$state.tmp" "$state"
     ;;
   POST:repos/test/repo/issues/1890/labels)
     label="${field#labels[]=}"
+    if [ "${AUTOSPEC_PROMOTE_RACE:-}" = before-safety-mutation ] \
+      && [ "$label" = safety:reviewed ] \
+      && [ ! -e "$state.safety-raced" ]; then
+      : > "$state.safety-raced"
+      jq '.body += "\nConcurrent human edit."' "$state" > "$state.tmp"
+      mv "$state.tmp" "$state"
+    fi
     jq --arg label "$label" '.labels = ((.labels + [$label]) | unique)' "$state" > "$state.tmp"
     mv "$state.tmp" "$state"
     if [ "${AUTOSPEC_PROMOTE_RACE:-}" = after-auto ] && [ "$label" = auto-implement ]; then

@@ -76,7 +76,7 @@ fn review_safety_counts_malformed_rereads_as_conflicts_without_writeback() {
 }
 
 #[test]
-fn review_safety_counts_invalid_reviewed_evidence_as_a_conflict() {
+fn review_safety_skips_safe_markerless_label_review_evidence() {
     let fixture = SafetyReviewFixture::new();
     fixture.write_issue(
         1,
@@ -92,8 +92,8 @@ fn review_safety_counts_invalid_reviewed_evidence_as_a_conflict() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"conflicted\":1"), "stdout={stdout}");
-    assert!(stdout.contains("\"skipped\":0"), "stdout={stdout}");
+    assert!(stdout.contains("\"conflicted\":0"), "stdout={stdout}");
+    assert!(stdout.contains("\"skipped\":1"), "stdout={stdout}");
     let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
     assert!(!calls.contains("PATCH"), "calls={calls}");
     assert!(!calls.contains("/labels"), "calls={calls}");

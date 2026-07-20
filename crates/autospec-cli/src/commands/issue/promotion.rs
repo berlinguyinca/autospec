@@ -15,13 +15,6 @@ pub(super) fn read_issue(repo: &str, number: u64) -> Result<RemoteIssue, Command
     })
 }
 
-pub(super) fn update_issue_body(repo: &str, number: u64, body: &str) -> Result<(), CommandFailure> {
-    let endpoint = format!("repos/{repo}/issues/{number}");
-    let body_field = format!("body={body}");
-    let output = run_gh(&["api", "--method", "PATCH", &endpoint, "-f", &body_field])?;
-    require_gh_success(&output, "gh issue safety body write")
-}
-
 pub(super) fn add_issue_label(repo: &str, number: u64, label: &str) -> Result<(), CommandFailure> {
     let endpoint = format!("repos/{repo}/issues/{number}/labels");
     let label_field = format!("labels[]={label}");

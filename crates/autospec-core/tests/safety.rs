@@ -134,6 +134,21 @@ fn issue_promotion_safety_gate_fails_closed_when_verdict_is_indeterminate() {
 }
 
 #[test]
+fn issue_promotion_safety_gate_accepts_a_reviewed_markerless_current_body() {
+    let decision = evaluate_issue_promotion(IssuePromotionPayload::new(
+        1895,
+        "Implement safe queue work",
+        "## Goal\nImplement a harmless local queue change.",
+        "contributor",
+        vec!["safety:reviewed".to_string()],
+    ));
+
+    assert_eq!(decision.safety_decision, IssuePromotionSafetyDecision::Pass);
+    assert!(decision.auto_implement);
+    assert!(decision.eligible);
+}
+
+#[test]
 fn issue_promotion_safety_gate_uses_configured_trusted_actors() {
     let decision = evaluate_issue_promotion_with_trusted_actors(
         IssuePromotionPayload::new(

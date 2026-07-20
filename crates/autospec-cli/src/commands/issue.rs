@@ -18,7 +18,7 @@ mod promotion;
 use output::promotion_decision_json;
 use promotion::{
     add_issue_label, read_issue, remove_issue_label, remove_owned_labels, restore_removed_labels,
-    rollback_owned_labels, update_issue_body,
+    rollback_owned_labels,
 };
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
@@ -217,16 +217,33 @@ fn promote_remote_issue(
     if confirmed != initial {
         return Err(promotion_conflict("issue changed before safety stamping"));
     }
-    let stamped_body = replace_safety_review_section(&initial.body, SafetyReviewDecision::Pass)
-        .map_err(|error| {
-            promotion_conflict(&format!("canonical safety review is malformed: {error}"))
-        })?;
-    update_issue_body(repo, number, &stamped_body)?;
-    add_issue_label(repo, number, "safety:reviewed")?;
+    replace_safety_review_section(&initial.body, SafetyReviewDecision::Pass).map_err(|error| {
+        promotion_conflict(&format!("canonical safety review is malformed: {error}"))
+    })?;
+    if let Err(error) = add_issue_label(repo, number, "safety:reviewed") {
+        return Err(rollback_after_error(
+            repo,
+            number,
+            &initial,
+            remove_labels,
+            error,
+        ));
+    }
 
-    let stamped = read_issue(repo, number)?;
+    let stamped = match read_issue(repo, number) {
+        Ok(issue) => issue,
+        Err(error) => {
+            return Err(rollback_after_error(
+                repo,
+                number,
+                &initial,
+                remove_labels,
+                error,
+            ))
+        }
+    };
     let stamped_labels = with_label(initial.labels.clone(), "safety:reviewed");
-    if !snapshot_matches(&stamped, &initial, &stamped_body, &stamped_labels) {
+    if !snapshot_matches(&stamped, &initial, &initial.body, &stamped_labels) {
         return Err(rollback_after_error(
             repo,
             number,
@@ -283,7 +300,7 @@ fn promote_remote_issue(
         final_labels.retain(|current| current != label);
     }
     let final_decision = evaluate(&final_issue, trusted_actors);
-    if !snapshot_matches(&final_issue, &initial, &stamped_body, &final_labels)
+    if !snapshot_matches(&final_issue, &initial, &initial.body, &final_labels)
         || !final_decision.auto_implement
         || !final_decision.eligible
     {
