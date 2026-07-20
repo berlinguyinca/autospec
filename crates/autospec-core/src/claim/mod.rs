@@ -1211,6 +1211,26 @@ pub fn executor_result_evidence_exists(
     })
 }
 
+pub fn executor_wait_failure_relinquishes_claim(
+    comments: &[RemoteComment],
+    claim: &RunStateRecord,
+) -> bool {
+    let receipt_prefix = format!("implementer-wait-failed:{}:", claim.claimed_at);
+    comments.iter().any(|comment| {
+        parse_executor_result_evidence_comment(&comment.body).is_ok_and(|evidence| {
+            evidence.repo == claim.repo
+                && evidence.issue == claim.issue
+                && evidence.worker_id == claim.worker_id
+                && evidence.branch == claim.branch
+                && evidence.outcome == "failed"
+                && evidence.pr.is_none()
+                && evidence.step == "implementer_wait_failed"
+                && evidence.receipt_id.starts_with(&receipt_prefix)
+                && evidence.receipt_id.len() > receipt_prefix.len()
+        })
+    })
+}
+
 fn parse_executor_result_evidence_comment(body: &str) -> Result<ExecutorResultEvidence, String> {
     if body.matches(EXECUTOR_RESULT_BEGIN_MARKER).count() != 1
         || body.matches(EXECUTOR_RESULT_END_MARKER).count() != 1

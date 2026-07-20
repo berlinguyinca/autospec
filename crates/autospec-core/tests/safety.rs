@@ -170,6 +170,25 @@ fn issue_promotion_safety_gate_uses_configured_trusted_actors() {
 }
 
 #[test]
+fn safety_redacts_transport_diagnostics_across_credential_forms() {
+    let diagnostic = "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99 gho_123456789012345678901234567890123456 Authorization: Bearer bearer-value api_key=key-value token:token-value user:hunter2 -----BEGIN PRIVATE KEY----- private-material -----END PRIVATE KEY-----";
+
+    let redacted = redact_secrets(diagnostic);
+
+    for secret in [
+        "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99",
+        "gho_123456789012345678901234567890123456",
+        "bearer-value",
+        "key-value",
+        "token-value",
+        "hunter2",
+        "private-material",
+    ] {
+        assert!(!redacted.contains(secret), "leaked {secret}: {redacted}");
+    }
+}
+
+#[test]
 fn session_start_git_exclude_creates_missing_exclude_when_info_dir_exists() {
     let repo = unique_temp_repo("session-start-exclude");
     std::fs::create_dir_all(repo.join(".git/info")).expect("create .git/info");

@@ -9,13 +9,14 @@ use autospec_core::autonomous_lifecycle::{
 };
 use autospec_core::claim::{
     claim_losing_worker_comment_id, executor_result_evidence_exists,
-    find_reconcilable_pull_request, is_executor_result_pull_request, is_reconcilable_pull_request,
-    lowest_marked_comment, parse_claim_issue_json, parse_open_pull_requests_json,
-    parse_paths_argument, parse_remote_comments_json, select_run_state,
-    terminal_merged_comment_exists, ExecutorResultEvidence, RunStateRecord,
-    RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
+    executor_wait_failure_relinquishes_claim, find_reconcilable_pull_request,
+    is_executor_result_pull_request, is_reconcilable_pull_request, lowest_marked_comment,
+    parse_claim_issue_json, parse_open_pull_requests_json, parse_paths_argument,
+    parse_remote_comments_json, select_run_state, terminal_merged_comment_exists,
+    ExecutorResultEvidence, RunStateRecord, RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
 };
 use autospec_core::coordination::ConductorOutcome;
+use autospec_core::safety::redact_secrets;
 
 use super::lint::claim_safety_with_config;
 use super::CommandFailure;
@@ -330,8 +331,12 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
     }
     let selected = select_run_state(&comments, &repo, options.issue);
+    let wait_failure_relinquished = selected.as_ref().is_some_and(|selected| {
+        executor_wait_failure_relinquishes_claim(&comments, &selected.record)
+    });
     let foreign_fresh_owner = selected.as_ref().and_then(|selected| {
         (selected.record.worker_id != worker_id
+            && !wait_failure_relinquished
             && !server_lease_is_stale(&selected.server_updated_at, ttl_seconds))
         .then_some(selected.record.worker_id.as_str())
     });
@@ -344,6 +349,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     let now = utc_now_iso()?;
     let claimed_at = selected
         .as_ref()
+        .filter(|_| !wait_failure_relinquished)
         .map(|state| state.record.claimed_at.clone())
         .unwrap_or_else(|| now.clone());
     let record = RunStateRecord::new(
@@ -799,7 +805,14 @@ pub(crate) fn recover_implementer_wait_failure(
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
 
-    let evidence = wait_failure_evidence(repo, issue, worker_id, branch, session_id);
+    let evidence = wait_failure_evidence(
+        repo,
+        issue,
+        worker_id,
+        branch,
+        &selected.record.claimed_at,
+        session_id,
+    );
     let already = executor_result_evidence_exists(&comments, &evidence);
     if !already {
         create_comment(repo, issue, &evidence.to_marked_comment())?;
@@ -819,7 +832,8 @@ pub(crate) fn recover_implementer_wait_failure(
         &confirmed.server_updated_at,
         worker_id,
         branch,
-    ) {
+    ) || confirmed.record.claimed_at != selected.record.claimed_at
+    {
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
 
@@ -837,6 +851,7 @@ fn wait_failure_evidence(
     issue: u64,
     worker_id: &str,
     branch: &str,
+    claimed_at: &str,
     session_id: &str,
 ) -> ExecutorResultEvidence {
     ExecutorResultEvidence::new(
@@ -847,7 +862,7 @@ fn wait_failure_evidence(
         "failed",
         None,
         "implementer_wait_failed",
-        format!("implementer-wait-failed:{session_id}"),
+        format!("implementer-wait-failed:{claimed_at}:{session_id}"),
     )
 }
 
@@ -894,25 +909,7 @@ fn comment_field(value: &str) -> String {
 }
 
 fn safe_wait_diagnostic(value: &str) -> String {
-    value
-        .split_whitespace()
-        .map(|token| {
-            let lower = token.to_ascii_lowercase();
-            let assignment_key = lower.split_once('=').map(|(key, _)| key);
-            if matches!(assignment_key, Some("token" | "password" | "secret"))
-                || lower.starts_with("ghp_")
-                || (token.starts_with("AKIA") && token.len() >= 20)
-            {
-                "[REDACTED]"
-            } else {
-                token
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(512)
-        .collect()
+    redact_secrets(value).chars().take(512).collect()
 }
 
 fn record_executor_result_with_step(

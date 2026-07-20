@@ -3727,8 +3727,26 @@ fn autonomous_implementer_wait_failed_requeues_exact_owner_with_bounded_comment(
     )
     .unwrap();
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+    let secrets = [
+        "super-secret",
+        "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99",
+        "gho_123456789012345678901234567890123456",
+        "bearer-value",
+        "key-value",
+        "token-value",
+        "hunter2",
+        "private-material",
+    ];
     let diagnostic = format!(
-        "write_stdin failed: stdin is closed token=super-secret {}",
+        "write_stdin failed: stdin is closed token={} {} {} Authorization: Bearer {} api_key={} token:{} user:{} -----BEGIN PRIVATE KEY----- {} -----END PRIVATE KEY----- {}",
+        secrets[0],
+        secrets[1],
+        secrets[2],
+        secrets[3],
+        secrets[4],
+        secrets[5],
+        secrets[6],
+        secrets[7],
         "x".repeat(800)
     );
 
@@ -3773,10 +3791,78 @@ fn autonomous_implementer_wait_failed_requeues_exact_owner_with_bounded_comment(
     assert!(remote.contains("autospec-implementer-wait-failed"));
     assert!(remote.contains("session-real-7"));
     assert!(remote.contains("[REDACTED]"));
-    assert!(!remote.contains("super-secret"));
+    for secret in secrets {
+        assert!(!remote.contains(secret), "leaked {secret}: {remote}");
+    }
     assert!(!remote.contains(&"x".repeat(513)));
     let calls = std::fs::read_to_string(log).unwrap();
     assert!(calls.contains("--remove-label\nin-progress-by-bot\n--add-label\nauto-implement"));
+}
+
+#[test]
+fn autonomous_implementer_wait_failed_requeue_allows_a_new_worker_to_acquire() {
+    let root = temp_dir("autospec-wait-reacquire");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let labels = root.join("labels.mode");
+    let log = root.join("gh.log");
+    let heartbeats = root.join("heartbeats");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    std::fs::write(&labels, "active\n").unwrap();
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+
+    let recovered = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_LABELS", &labels)
+        .output()
+        .unwrap();
+    assert!(recovered.status.success());
+    assert_eq!(std::fs::read_to_string(&labels).unwrap().trim(), "ready");
+
+    let issue_body = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Goal\nRecover the stranded issue.";
+    let acquired = autospec()
+        .args([
+            "claim",
+            "acquire",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-b",
+            "--branch",
+            "feat/next",
+        ])
+        .env(
+            "PATH",
+            format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+        )
+        .env("AUTOSPEC_WAIT_STATE", &state)
+        .env("AUTOSPEC_WAIT_LABELS", &labels)
+        .env("AUTOSPEC_WAIT_LOG", &log)
+        .env("AUTOSPEC_WAIT_ISSUE_BODY", issue_body)
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
+        .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .output()
+        .unwrap();
+
+    assert!(
+        acquired.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&acquired.stdout),
+        String::from_utf8_lossy(&acquired.stderr)
+    );
+    assert!(String::from_utf8_lossy(&acquired.stdout).contains("\"claimed\":true"));
+    let remote = std::fs::read_to_string(&state).unwrap();
+    assert!(remote.contains("\\\"worker_id\\\":\\\"worker-b\\\""));
+    assert!(remote.contains("\\\"branch\\\":\\\"feat/next\\\""));
+    assert_eq!(std::fs::read_to_string(&labels).unwrap().trim(), "active");
 }
 
 #[test]
@@ -3996,12 +4082,23 @@ fn wait_failure_terminal_comments(worker: &str, branch: &str) -> String {
 const WAIT_FAILURE_GH: &str = r#"#!/bin/sh
 set -eu
 printf '%s\n' "$@" >> "$AUTOSPEC_WAIT_LOG"
+if [ "$1" = issue ] && [ "$2" = view ]; then
+  if [ "$(cat "$AUTOSPEC_WAIT_LABELS")" = active ]; then labels='["in-progress-by-bot","safety:reviewed"]'; else labels='["auto-implement","safety:reviewed"]'; fi
+  jq -n --argjson labels "$labels" --arg body "$AUTOSPEC_WAIT_ISSUE_BODY" '{labels:$labels,title:"Recover wait failure",body:$body,author:"agent"}'; exit 0
+fi
+if [ "$1" = label ] && [ "$2" = create ]; then exit 0; fi
 if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then cat "$AUTOSPEC_WAIT_STATE"; exit 0; fi
 if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/comments/100 ]; then
   body=''; shift 2; while [ "$#" -gt 0 ]; do case "$1" in -f) body="${2#body=}"; shift 2;; *) shift;; esac; done
   jq --arg body "$body" '.[0].body=$body' "$AUTOSPEC_WAIT_STATE" > "$AUTOSPEC_WAIT_STATE.tmp" && mv "$AUTOSPEC_WAIT_STATE.tmp" "$AUTOSPEC_WAIT_STATE"; exit 0
 fi
-if [ "$1" = issue ] && [ "$2" = edit ]; then exit 0; fi
+if [ "$1" = issue ] && [ "$2" = edit ]; then
+  if [ -n "${AUTOSPEC_WAIT_LABELS:-}" ]; then
+    add=''; shift 2; while [ "$#" -gt 0 ]; do case "$1" in --add-label) add="$2"; shift 2;; *) shift;; esac; done
+    if [ "$add" = auto-implement ]; then printf ready > "$AUTOSPEC_WAIT_LABELS"; else printf active > "$AUTOSPEC_WAIT_LABELS"; fi
+  fi
+  exit 0
+fi
 if [ "$1" = issue ] && [ "$2" = comment ]; then
   body=''; shift 2; while [ "$#" -gt 0 ]; do case "$1" in --body) body="$2"; shift 2;; *) shift;; esac; done
   if [ "${AUTOSPEC_WAIT_EVIDENCE_NOOP:-0}" = 1 ] && printf '%s' "$body" | grep -Fq 'autospec-executor-result:begin'; then exit 0; fi

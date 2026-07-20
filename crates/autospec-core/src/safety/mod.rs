@@ -105,11 +105,48 @@ pub fn prepare_session_start_git_exclude(
 }
 
 pub fn redact_secrets(input: &str) -> String {
-    input
-        .split_whitespace()
-        .map(redact_token)
-        .collect::<Vec<_>>()
-        .join(" ")
+    let tokens = input.split_whitespace().collect::<Vec<_>>();
+    let mut redacted = Vec::with_capacity(tokens.len());
+    let mut index = 0;
+    while index < tokens.len() {
+        if tokens[index].eq_ignore_ascii_case("-----BEGIN") {
+            let mut end = index + 1;
+            while end < tokens.len() && !tokens[end].eq_ignore_ascii_case("-----END") {
+                end += 1;
+            }
+            if end < tokens.len() {
+                while end < tokens.len() && !tokens[end].ends_with("KEY-----") {
+                    end += 1;
+                }
+                redacted.push("[REDACTED_PRIVATE_KEY]".to_string());
+                index = (end + 1).min(tokens.len());
+                continue;
+            }
+        }
+        if tokens[index]
+            .trim_end_matches(':')
+            .eq_ignore_ascii_case("authorization")
+            && tokens
+                .get(index + 1)
+                .is_some_and(|value| value.eq_ignore_ascii_case("bearer"))
+            && index + 2 < tokens.len()
+        {
+            redacted.push(tokens[index].to_string());
+            redacted.push(tokens[index + 1].to_string());
+            redacted.push("[REDACTED]".to_string());
+            index += 3;
+            continue;
+        }
+        if tokens[index].eq_ignore_ascii_case("bearer") && index + 1 < tokens.len() {
+            redacted.push(tokens[index].to_string());
+            redacted.push("[REDACTED]".to_string());
+            index += 2;
+            continue;
+        }
+        redacted.push(redact_token(tokens[index]));
+        index += 1;
+    }
+    redacted.join(" ")
 }
 
 fn redact_token(token: &str) -> String {
@@ -117,6 +154,11 @@ fn redact_token(token: &str) -> String {
         "[REDACTED_GITHUB_TOKEN]".to_string()
     } else if is_aws_key(token) {
         "[REDACTED_AWS_KEY]".to_string()
+    } else if let Some((key, _)) = token.split_once('=').or_else(|| token.split_once(':')) {
+        if is_sensitive_key(key) {
+            return format!("{key}=[REDACTED]");
+        }
+        token.to_string()
     } else {
         token.to_string()
     }
@@ -124,7 +166,8 @@ fn redact_token(token: &str) -> String {
 
 fn is_github_token(token: &str) -> bool {
     let prefixes = ["ghp_", "gho_", "ghu_", "ghs_", "ghr_"];
-    prefixes.iter().any(|prefix| token.starts_with(prefix)) && token.len() >= 40
+    (prefixes.iter().any(|prefix| token.starts_with(prefix)) && token.len() >= 40)
+        || (token.starts_with("github_pat_") && token.len() > "github_pat_".len())
 }
 
 fn is_aws_key(token: &str) -> bool {
@@ -133,6 +176,23 @@ fn is_aws_key(token: &str) -> bool {
         && token
             .chars()
             .all(|character| character.is_ascii_uppercase() || character.is_ascii_digit())
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    matches!(
+        key.trim_matches(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .to_ascii_lowercase()
+            .as_str(),
+        "token"
+            | "password"
+            | "secret"
+            | "api_key"
+            | "apikey"
+            | "authorization"
+            | "credentials"
+            | "user"
+            | "username"
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

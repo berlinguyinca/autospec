@@ -298,7 +298,12 @@ while true:
 
   if Wait returns `write_stdin failed` with `stdin is closed`:
     inspect durable agent/session state once for a live recovery path
-    if the child is live and recovery succeeds: continue waiting for task-notification
+    if the child is reported live:
+      attempt one harness reattach to the exact failed Wait target
+      if reattach succeeds: continue waiting for task-notification
+      explicitly terminate and reap the child through the harness process API
+      if termination and reap cannot be proven: stop without typed recovery or label mutation
+    require durable proof that the child exited or was terminated and reaped
     read ISSUE, BRANCH, and WORKER_ID from the active durable claim/heartbeat
     use the actual session ID from the failed Wait target (never infer it from an environment variable)
     run `"${AUTOSPEC_BIN:-autospec}" autonomous implementer-wait-failed --repo {repo} --issue "<ISSUE>" --worker-id "<WORKER_ID>" --branch "<BRANCH>" --session-id "<ACTUAL_SESSION_ID>" --diagnostic "<REDACTED_WAIT_ERROR>"`
