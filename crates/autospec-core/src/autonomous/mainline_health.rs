@@ -84,6 +84,13 @@ pub struct CheckEvidence {
     pub required: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckVerdict {
+    Pending,
+    Passed,
+    Failed,
+}
+
 impl CheckEvidence {
     pub fn required(
         name: impl Into<String>,
@@ -108,6 +115,35 @@ impl CheckEvidence {
             status: status.into(),
             conclusion: conclusion.map(str::to_string),
             required: false,
+        }
+    }
+
+    fn verdict(&self) -> CheckVerdict {
+        if !self.status.eq_ignore_ascii_case("completed") {
+            return CheckVerdict::Pending;
+        }
+        let Some(conclusion) = self.conclusion.as_deref().map(str::trim) else {
+            return CheckVerdict::Pending;
+        };
+        if ["success", "neutral", "skipped"]
+            .iter()
+            .any(|terminal| conclusion.eq_ignore_ascii_case(terminal))
+        {
+            CheckVerdict::Passed
+        } else if [
+            "failure",
+            "error",
+            "cancelled",
+            "timed_out",
+            "action_required",
+            "startup_failure",
+        ]
+        .iter()
+        .any(|terminal| conclusion.eq_ignore_ascii_case(terminal))
+        {
+            CheckVerdict::Failed
+        } else {
+            CheckVerdict::Pending
         }
     }
 }
@@ -231,7 +267,10 @@ pub fn evaluate_health(
         };
     }
 
-    if required.iter().any(|check| check.status != "completed") {
+    if required
+        .iter()
+        .any(|check| !check.status.eq_ignore_ascii_case("completed"))
+    {
         return MainlineHealth {
             branch: branch.to_string(),
             evidence,
@@ -242,7 +281,7 @@ pub fn evaluate_health(
 
     if required
         .iter()
-        .any(|check| is_failure(check.conclusion.as_deref()))
+        .any(|check| check.verdict() == CheckVerdict::Failed)
     {
         return MainlineHealth {
             branch: branch.to_string(),
@@ -254,7 +293,7 @@ pub fn evaluate_health(
 
     if required
         .iter()
-        .any(|check| !is_success_like(check.conclusion.as_deref()))
+        .any(|check| check.verdict() == CheckVerdict::Pending)
     {
         return MainlineHealth {
             branch: branch.to_string(),
@@ -316,19 +355,6 @@ pub fn check_run_evidence(raw: &str) -> Result<Vec<CheckEvidence>, String> {
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
-}
-
-fn is_failure(conclusion: Option<&str>) -> bool {
-    matches!(
-        conclusion,
-        Some(
-            "failure" | "error" | "cancelled" | "timed_out" | "action_required" | "startup_failure"
-        )
-    )
-}
-
-fn is_success_like(conclusion: Option<&str>) -> bool {
-    matches!(conclusion, Some("success" | "neutral" | "skipped"))
 }
 
 fn object(raw: &str, context: &str) -> Result<BTreeMap<String, JsonValue>, String> {
