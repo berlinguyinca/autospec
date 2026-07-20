@@ -62,4 +62,17 @@ if ! grep -qF 'gh pr view <PR> --json body' "$prompt" || ! grep -qF 'browser_sta
     exit 1
 fi
 
+# UI cleanup/refactor work must audit child chrome before edits so implementers
+# remove nested layout artifacts instead of wrapping them in another shell.
+for required in \
+    "UI cohesion audit" \
+    "cards-in-cards" \
+    "desktop and mobile screenshots"
+do
+    if ! grep -qF "$required" "$prompt"; then
+        echo "FAIL: UI cohesion audit prompt text missing: $required"
+        exit 1
+    fi
+done
+
 echo "PASS"

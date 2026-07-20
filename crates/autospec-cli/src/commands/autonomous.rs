@@ -25,6 +25,7 @@ use autospec_core::autonomous_lifecycle::{
 use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
+use autospec_core::validation::{StructuralCheck, StructuralValidator};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -3596,6 +3597,7 @@ fn validate_repo_dir(options: &Options) -> Result<(), String> {
             }
         }
     }
+    StructuralValidator::run(StructuralCheck::RootHelperWrapperPolicy, &top)?;
     Ok(())
 }
 

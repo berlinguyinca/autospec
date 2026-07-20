@@ -1033,6 +1033,39 @@ fn validate_shadow_results_never_executes_a_local_validate_script() {
 }
 
 #[test]
+fn validate_rejects_untracked_root_helper_without_canonical_source() {
+    let root = temp_dir("validate-root-helper-wrapper-policy");
+    make_git_repo(&root, None);
+    let scripts = root.join("scripts");
+    std::fs::create_dir_all(&scripts).expect("scripts directory");
+    std::fs::write(
+        scripts.join("restored-stale-wrapper.sh"),
+        "#!/usr/bin/env bash\nprintf 'stale wrapper\\n'\n",
+    )
+    .expect("stale wrapper fixture");
+
+    let output = autospec()
+        .args(["validate", "--fast", "--json"])
+        .current_dir(&root)
+        .output()
+        .expect("validate command runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        !output.status.success(),
+        "stale root helper wrapper must fail validation"
+    );
+    assert!(
+        stdout.contains("\"id\":\"check_root_helper_wrapper_policy\""),
+        "validation output must include the root helper wrapper policy check: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"exit_code\":1"),
+        "root helper wrapper policy check must reject the fixture: {stdout}"
+    );
+}
+
+#[test]
 fn init_persists_explicit_spec_state_without_running_work() {
     let root = temp_dir("autospec-init");
     let output = autospec()

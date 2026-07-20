@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use super::catalog::StructuralCheck;
 
@@ -118,6 +119,9 @@ impl StructuralValidator {
             StructuralCheck::SelfUpdateDuo => Self::validate_duo_self_update_sections(root),
             StructuralCheck::CodexSkillsInstall => Self::validate_codex_skills_install(root),
             StructuralCheck::SharedScriptInstall => Self::validate_shared_script_install(root),
+            StructuralCheck::RootHelperWrapperPolicy => {
+                Self::validate_root_helper_wrapper_policy(root)
+            }
             StructuralCheck::StartupPreflight => Self::validate_startup_preflight(root),
         }
     }
@@ -2083,6 +2087,51 @@ impl StructuralValidator {
         Ok(())
     }
 
+    pub fn validate_root_helper_wrapper_policy(root: &Path) -> Result<(), String> {
+        let scripts = root.join("scripts");
+        if !scripts.is_dir() {
+            return Ok(());
+        }
+
+        let output = Command::new("git")
+            .args([
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--",
+                "scripts",
+            ])
+            .current_dir(root)
+            .output();
+        let Ok(output) = output else {
+            return Ok(());
+        };
+        if !output.status.success() {
+            return Ok(());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let offenders = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|path| path.starts_with("scripts/"))
+            .filter(|path| {
+                let absolute = root.join(path);
+                absolute.is_file() && !has_skill_canonical_source(root, path)
+            })
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+
+        if offenders.is_empty() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "root helper wrapper policy: unsupported untracked root-level helper copy without canonical source: {}. Use the autospec Rust binary or install helpers from tracked skill/shared script sources instead of restoring root wrappers.",
+            offenders.join(", ")
+        ))
+    }
+
     pub fn validate_startup_preflight(root: &Path) -> Result<(), String> {
         let template = root.join("templates/skill-blocks/startup-self-update.md");
         if !template.is_file() {
@@ -2432,6 +2481,31 @@ fn referenced_shared_helpers(root: &Path, skill_dir: &Path) -> Result<BTreeSet<S
     }
 
     Ok(helpers)
+}
+
+fn has_skill_canonical_source(root: &Path, script_path: &str) -> bool {
+    let Some(helper_name) = Path::new(script_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+    else {
+        return false;
+    };
+
+    if root
+        .join("skills/autospec-shared/scripts")
+        .join(helper_name)
+        .is_file()
+    {
+        return true;
+    }
+
+    let skills_root = root.join("skills");
+    let Ok(entries) = fs::read_dir(skills_root) else {
+        return false;
+    };
+    entries
+        .filter_map(Result::ok)
+        .any(|entry| entry.path().join("scripts").join(helper_name).is_file())
 }
 
 fn files_under(root: &Path) -> Result<Vec<std::path::PathBuf>, String> {
