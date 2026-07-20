@@ -130,7 +130,7 @@ Expected: the core test cannot find `to_json_with_policy_digest`, and the integr
 
 - [ ] **Step 3: Implement receipt persistence**
 
-Keep `MainlineHealth::to_json(repo)` unchanged for compatibility and add the digest-bearing serializer. In `run_foreground_with_lease`, compute the effective digest through `effective_main_health_policy_digest` after health evaluation. That helper hashes the resolved `health.branch` normally, but maps typed `default-branch-missing` evidence to the reserved invalid-ref identity `autospec:unresolved-default-branch` so an unresolved branch remains distinct from every valid Git branch without weakening `MainHealthConfig::effective_policy_digest`'s empty-branch rejection. Persist the digest-bearing main-health receipt before any retained conductor-state return. Pass the same digest through later admission persistence rather than recomputing it.
+Keep `MainlineHealth::to_json(repo)` unchanged for compatibility and add the digest-bearing serializer. In `run_foreground_with_lease`, compute the effective digest through `effective_main_health_policy_digest` after health evaluation. That helper hashes the resolved `health.branch` normally, but maps typed `default-branch-missing` evidence to the reserved invalid-ref identity `autospec:unresolved-default-branch` so an unresolved branch remains distinct from every valid Git branch without weakening `MainHealthConfig::effective_policy_digest`'s empty-branch rejection. Append the digest-bearing main-health receipt exactly once, before any issue-specific admission failure or retained conductor-state return; later persistence writes lifecycle state only.
 
 - [ ] **Step 4: Document the receipt contract**
 
