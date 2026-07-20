@@ -2277,7 +2277,7 @@ fn autonomous_timeline_rate_limits_leader_nudges_and_reports_helper_recovery() {
 }
 
 #[test]
-fn autonomous_timeline_marks_unreconciled_session_start_as_failed_startup() {
+fn autonomous_timeline_requires_an_explicit_event_before_reporting_failed_startup() {
     let temp = temp_dir("autospec-autonomous-session-start-timeout");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -2310,9 +2310,44 @@ fn autonomous_timeline_marks_unreconciled_session_start_as_failed_startup() {
     assert!(output.status.success());
     assert!(stdout.contains("session child-1850 entered starting"));
     assert!(stdout.contains("session child-1851 entered claimed"));
-    assert!(stdout.contains("failed-startup"));
+    assert!(!stdout.contains("failed-startup"));
+    assert!(!stdout.contains("terminated and queued for retry"));
+}
+
+#[test]
+fn autonomous_timeline_reports_explicit_startup_timeout_and_retry_events() {
+    let temp = temp_dir("autospec-autonomous-explicit-session-start-timeout");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let home = temp.join("home");
+    let drain_state = operator_dir.join("o13_berlinguyinca_r8_autospec");
+    std::fs::create_dir_all(&drain_state).expect("create drain state directory");
+    std::fs::write(
+        drain_state.join("drain-session-events.jsonl"),
+        "{\"event\":\"session_start_observed\",\"session_id\":\"child-1850\",\"state\":\"starting\"}\n\
+{\"event\":\"session_start_timeout\",\"session_id\":\"child-1850\",\"state\":\"failed-startup\",\"termination\":\"process_group\",\"retry\":\"scheduled\",\"attempt\":1}\n",
+    )
+    .expect("write persisted drain events");
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "timeline",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--lines",
+            "80",
+        ])
+        .env("HOME", &home)
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .output()
+        .expect("autospec autonomous timeline runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(output.status.success());
+    assert!(stdout.contains("session child-1850 entered failed-startup"));
     assert!(stdout.contains("terminated and queued for retry"));
-    assert!(!stdout.contains("session child-1851 entered failed-startup"));
 }
 
 #[test]

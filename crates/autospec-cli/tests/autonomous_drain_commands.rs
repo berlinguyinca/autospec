@@ -371,6 +371,169 @@ fn json_drain_keeps_child_output_out_of_structured_stdout() {
 }
 
 #[test]
+fn matching_session_reconciliation_cancels_the_startup_deadline() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+printf 'session_start child=child-1850 session_turns=0 issue_claim=none\n'
+printf 'session_start_reconciled child=child-1850 session_turns=1 issue_claim=1850\n'
+for step in 1 2 3 4; do
+  printf 'working step=%s\n' "$step"
+  sleep 0.4
+done
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture.run(&bin, &["--stall-secs", "1", "--poll-secs", "1", "--json"]);
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(stdout(&output).contains("\"event\":\"session_start_reconciled\""));
+    assert!(!stdout(&output).contains("session_start_timeout"));
+}
+
+#[test]
+fn unreconciled_startup_exhausts_bounded_retries_and_kills_every_process_group() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let attempts = fixture.root.join("attempts");
+    let descendant_pids = fixture.root.join("descendant-pids");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AUTOSPEC_TEST_ATTEMPTS" ]; then
+  attempt=$(cat "$AUTOSPEC_TEST_ATTEMPTS")
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" > "$AUTOSPEC_TEST_ATTEMPTS"
+sh -c 'trap "" TERM; printf "%s\n" "$$" >> "$AUTOSPEC_TEST_DESCENDANT_PIDS"; while :; do sleep 1; done' &
+printf 'session_start child=child-1850 session_turns=0 issue_claim=none\n'
+trap '' TERM
+while :; do
+  printf 'startup still active attempt=%s\n' "$attempt"
+  sleep 0.1
+done
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_ATTEMPTS", &attempts)
+        .env("AUTOSPEC_TEST_DESCENDANT_PIDS", &descendant_pids)
+        .output()
+        .expect("run drain through startup retry exhaustion");
+
+    assert_eq!(
+        output.status.code(),
+        Some(124),
+        "stderr={}",
+        stderr(&output)
+    );
+    assert_eq!(
+        fs::read_to_string(&attempts)
+            .expect("read attempt count")
+            .trim(),
+        "4"
+    );
+    assert!(stdout(&output).contains("\"event\":\"session_start_timeout\""));
+    assert!(stdout(&output).contains("\"retry\":\"scheduled\""));
+    assert!(stdout(&output).contains("\"retry\":\"exhausted\""));
+    for pid in fs::read_to_string(&descendant_pids)
+        .expect("read descendant pids")
+        .lines()
+    {
+        assert_pid_is_gone(pid);
+    }
+}
+
+#[test]
+fn startup_retry_relaunches_the_actual_omx_child_and_then_reconciles() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let attempts = fixture.root.join("attempts");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AUTOSPEC_TEST_ATTEMPTS" ]; then
+  attempt=$(cat "$AUTOSPEC_TEST_ATTEMPTS")
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" > "$AUTOSPEC_TEST_ATTEMPTS"
+printf 'session_start child=child-1850 session_turns=0 issue_claim=none\n'
+if [ "$attempt" -eq 1 ]; then
+  while :; do
+    printf 'startup still active\n'
+    sleep 0.1
+  done
+fi
+printf 'session_start_reconciled child=child-1850 session_turns=1 issue_claim=1850\n'
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let started = Instant::now();
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "10", "--json"])
+        .env("AUTOSPEC_TEST_ATTEMPTS", &attempts)
+        .output()
+        .expect("run drain through one startup retry");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(
+        started.elapsed().as_secs() < 6,
+        "startup deadline waited for the ordinary progress poll"
+    );
+    assert_eq!(
+        fs::read_to_string(attempts)
+            .expect("read attempt count")
+            .trim(),
+        "2"
+    );
+    assert!(stdout(&output).contains("\"retry\":\"scheduled\""));
+    assert!(stdout(&output).contains("\"event\":\"session_start_reconciled\""));
+}
+
+#[test]
+fn startup_event_parsing_drains_output_larger_than_pipe_capacity() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+printf 'session_start child=child-1850 session_turns=0 issue_claim=none\n'
+dd if=/dev/zero bs=65536 count=4 2>/dev/null | tr '\000' x
+printf '\nsession_start_reconciled child=child-1850 session_turns=1 issue_claim=1850\n'
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let started = Instant::now();
+    let output = fixture.run(&bin, &["--stall-secs", "2", "--poll-secs", "1", "--json"]);
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(
+        started.elapsed().as_secs() < 10,
+        "drain deadlocked on child pipes"
+    );
+    assert!(stdout(&output).contains("\"event\":\"session_start_reconciled\""));
+}
+
+#[test]
 fn quiet_child_with_github_progress_warns_and_completes() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
@@ -759,16 +922,20 @@ fn path_with(bin: &Path) -> String {
 
 fn assert_process_is_gone(pid_path: &Path) {
     let pid = fs::read_to_string(pid_path).expect("read child pid");
+    assert_pid_is_gone(pid.trim());
+}
+
+fn assert_pid_is_gone(pid: &str) {
     assert!(
         !Command::new("kill")
-            .args(["-0", pid.trim()])
+            .args(["-0", pid])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .expect("inspect child")
             .success(),
         "process {} must no longer be alive",
-        pid.trim()
+        pid
     );
 }
 

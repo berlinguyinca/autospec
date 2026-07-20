@@ -27,7 +27,7 @@ use autospec_core::coordination::{
 };
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::{claim, queue, CommandFailure};
 
@@ -81,7 +81,6 @@ mod waterfall_tests;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const DEFERRED_EXECUTOR_REASON: &str = "awaiting_typed_implementation_executor";
-const SESSION_RECONCILIATION_TIMEOUT_SECS: u64 = 300;
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -913,7 +912,8 @@ impl MonitorSnapshot {
         } else {
             conductor.logpath.clone()
         };
-        let timeline_lines = timeline_all_lines(&logpath, &layout.repo).unwrap_or_default();
+        let timeline_lines =
+            timeline_all_lines(&logpath, &layout.repo, &layout.state_dir).unwrap_or_default();
         let tier_dry_result = latest_tier_dry_result(&timeline_lines);
         let stop_flag = stop_flag_path(&layout);
         let stop_mode = read_stop_mode(&layout)
@@ -1478,7 +1478,7 @@ fn timeline(options: Options) -> Result<(), String> {
     } else {
         unit.logpath.clone()
     };
-    let all_lines = timeline_all_lines(&logpath, &layout.repo)?;
+    let all_lines = timeline_all_lines(&logpath, &layout.repo, &layout.state_dir)?;
     let selected_lines = tail_lines(&all_lines, options.lines);
     let mut events = timeline_events(&selected_lines);
     let normalized_state =
@@ -2167,31 +2167,51 @@ fn dispatch_foreground(
         return Ok(ForegroundDispatchResult::Lifecycle(lifecycle));
     }
     persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
-    let lease = claim::acquire_for_conductor(&layout.repo, selection.issue, &worker_id, &branch)?;
-    let state = state.transition(ConductorEvent::Claimed).map_err(|error| {
-        CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
-    })?;
-    persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
-
-    let receipt = ExecutorRequest::for_selected(layout, &options.repo_dir, selection.issue)
-        .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
-    let state = state
-        .transition(ConductorEvent::DispatchRecorded {
-            outcome: receipt.outcome.clone(),
-        })
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("cannot record executor receipt: {error}"))
+    let mut state = state;
+    loop {
+        let lease =
+            claim::acquire_for_conductor(&layout.repo, selection.issue, &worker_id, &branch)?;
+        state = state.transition(ConductorEvent::Claimed).map_err(|error| {
+            CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
         })?;
-    persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
-    claim::record_executor_outcome(
-        &lease.repo,
-        lease.issue,
-        &lease.worker_id,
-        &lease.branch,
-        &receipt.claim_step,
-    )?;
-    claim::reconcile_active_issue(&lease.repo, lease.issue)?;
-    Ok(ForegroundDispatchResult::State(state))
+        persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+
+        let receipt = ExecutorRequest::for_selected(layout, &options.repo_dir, selection.issue)
+            .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
+        state = state
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: receipt.outcome.clone(),
+            })
+            .map_err(|error| {
+                CommandFailure::diagnostic(format!("cannot record executor receipt: {error}"))
+            })?;
+        persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+        claim::record_executor_outcome(
+            &lease.repo,
+            lease.issue,
+            &lease.worker_id,
+            &lease.branch,
+            &receipt.claim_step,
+        )?;
+        claim::reconcile_active_issue(&lease.repo, lease.issue)?;
+        let (next, scheduled) =
+            schedule_foreground_retry(state).map_err(CommandFailure::diagnostic)?;
+        state = next;
+        if scheduled {
+            persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+            continue;
+        }
+        return Ok(ForegroundDispatchResult::State(state));
+    }
+}
+
+fn schedule_foreground_retry(state: ConductorState) -> Result<(ConductorState, bool), String> {
+    if state.phase() != ConductorPhase::Retry {
+        return Ok((state, false));
+    }
+    state
+        .transition(ConductorEvent::RetryScheduled)
+        .map(|state| (state, true))
 }
 
 fn foreground_worker_id() -> Result<String, String> {
@@ -2497,38 +2517,10 @@ impl ExecutorRequest {
     }
 
     fn run(&self) -> ExecutorReceipt {
-        self.run_with_timeout(Duration::from_secs(SESSION_RECONCILIATION_TIMEOUT_SECS))
-    }
-
-    fn run_with_timeout(&self, timeout: Duration) -> ExecutorReceipt {
-        let mut child = match Command::new(&self.program)
+        let output = Command::new(&self.program)
             .args(&self.args)
             .current_dir(&self.current_dir)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
-            Ok(child) => child,
-            Err(_) => return ExecutorReceipt::failed(),
-        };
-        let started = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if started.elapsed() >= timeout => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return ExecutorReceipt::failed_startup();
-                }
-                Ok(None) => thread::sleep(Duration::from_millis(10)),
-                Err(_) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return ExecutorReceipt::failed();
-                }
-            }
-        }
-        let output = child.wait_with_output();
+            .output();
         let expected = executor_receipt_json(&self.repo, self.issue);
         if output.is_ok_and(|output| {
             output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected
@@ -2548,13 +2540,6 @@ impl ExecutorReceipt {
         Self {
             outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
             claim_step: "executor_receipt_failed".to_string(),
-        }
-    }
-
-    fn failed_startup() -> Self {
-        Self {
-            outcome: ConductorOutcome::Retryable("failed-startup".to_string()),
-            claim_step: "failed-startup".to_string(),
         }
     }
 }
@@ -3826,7 +3811,7 @@ fn tail_lines(lines: &[String], count: usize) -> Vec<String> {
     lines[lines.len() - count..].to_vec()
 }
 
-fn timeline_all_lines(logpath: &str, repo: &str) -> Result<Vec<String>, String> {
+fn timeline_all_lines(logpath: &str, repo: &str, state_dir: &Path) -> Result<Vec<String>, String> {
     let mut lines = if logpath.is_empty() {
         Vec::new()
     } else {
@@ -3836,6 +3821,15 @@ fn timeline_all_lines(logpath: &str, repo: &str) -> Result<Vec<String>, String> 
             .map(|line| line.to_string())
             .collect::<Vec<_>>()
     };
+    if RepositoryScope::try_from(repo).is_ok() {
+        let state_root = state_dir.parent().unwrap_or(state_dir);
+        let drain_events = state_root
+            .join(drain::repository_progress_key(repo))
+            .join("drain-session-events.jsonl");
+        if let Ok(raw) = fs::read_to_string(drain_events) {
+            lines.extend(raw.lines().map(|line| line.to_string()));
+        }
+    }
     for dir in heartbeat_dirs(repo) {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
@@ -3878,7 +3872,6 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
     let mut suppressed_leader_nudges = 0usize;
     while index < lines.len() {
         let line = lines[index].trim();
-        let line_ts = line_timestamp(line);
         if line.contains("leader_nudge_tick") {
             if leader_nudge_seen {
                 suppressed_leader_nudges += 1;
@@ -3898,7 +3891,7 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
                 HelperRecoveryState::RetryingHelper,
             );
         }
-        record_session_reconciliation_line(&mut rows, &mut child_sessions, line, line_ts);
+        record_session_reconciliation_line(&mut rows, &mut child_sessions, line);
         if helper_failure_seen && records_helper_blocked(line) {
             push_helper_recovery_state(
                 &mut rows,
@@ -3971,13 +3964,7 @@ fn timeline_events(lines: &[String]) -> Vec<String> {
                 rows.push(format!("{summary}."));
             }
         }
-        if let Some(now) = line_ts {
-            record_session_startup_timeouts(&mut rows, &mut child_sessions, now);
-        }
         index += 1;
-    }
-    if let Some(now) = lines.iter().filter_map(|line| line_timestamp(line)).max() {
-        record_session_startup_timeouts(&mut rows, &mut child_sessions, now);
     }
     flush_suppressed_leader_nudges(&mut rows, &mut suppressed_leader_nudges);
     dedupe_rows(rows)
@@ -3987,9 +3974,8 @@ fn record_session_reconciliation_line(
     rows: &mut Vec<String>,
     child_sessions: &mut Vec<ChildSessionStartup>,
     line: &str,
-    line_ts: Option<u64>,
 ) {
-    if let Some(start) = session_start_event(line, line_ts) {
+    if let Some(start) = session_start_event(line) {
         rows.push(format!(
             "time unknown - session {} entered starting.",
             start.session_id
@@ -4008,6 +3994,23 @@ fn record_session_reconciliation_line(
             "time unknown - session {session_id} entered claimed after session_start_reconciled."
         ));
     }
+    if let Some((session_id, retry)) = session_start_timeout_event(line) {
+        if let Some(session) = child_sessions
+            .iter_mut()
+            .rev()
+            .find(|session| session.session_id == session_id)
+        {
+            session.state = ChildStartupState::FailedStartup;
+        }
+        let retry_summary = match retry.as_deref() {
+            Some("scheduled") => "terminated and queued for retry",
+            Some("exhausted") => "terminated after retry exhaustion",
+            _ => "terminated; retry outcome was not recorded",
+        };
+        rows.push(format!(
+            "time unknown - session {session_id} entered failed-startup after an explicit session_start_timeout event; {retry_summary}."
+        ));
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4020,36 +4023,9 @@ enum ChildStartupState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ChildSessionStartup {
     session_id: String,
-    started_at: Option<u64>,
     session_turns_zero: bool,
     issue_claim_missing: bool,
     state: ChildStartupState,
-}
-
-fn record_session_startup_timeouts(
-    rows: &mut Vec<String>,
-    sessions: &mut [ChildSessionStartup],
-    now: u64,
-) {
-    for session in sessions {
-        if session.state != ChildStartupState::Starting {
-            continue;
-        }
-        let Some(started_at) = session.started_at else {
-            continue;
-        };
-        if now.saturating_sub(started_at) < SESSION_RECONCILIATION_TIMEOUT_SECS {
-            continue;
-        }
-        if !session.session_turns_zero || !session.issue_claim_missing {
-            continue;
-        }
-        session.state = ChildStartupState::FailedStartup;
-        rows.push(format!(
-            "time unknown - session {} entered failed-startup after unreconciled session_start timeout; terminated and queued for retry.",
-            session.session_id
-        ));
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4127,8 +4103,11 @@ fn records_helper_blocked(line: &str) -> bool {
     has_any_marker(&line.to_ascii_lowercase(), HELPER_BLOCKED_MARKERS)
 }
 
-fn session_start_event(line: &str, started_at: Option<u64>) -> Option<ChildSessionStartup> {
-    if has_marker(line, "session_start_reconciled") || !has_marker(line, "session_start") {
+fn session_start_event(line: &str) -> Option<ChildSessionStartup> {
+    if has_marker(line, "session_start_reconciled")
+        || has_marker(line, "session_start_timeout")
+        || !has_marker(line, "session_start")
+    {
         return None;
     }
     let session_id = line_key_value(line, "child")
@@ -4140,7 +4119,6 @@ fn session_start_event(line: &str, started_at: Option<u64>) -> Option<ChildSessi
         .unwrap_or_else(|| "unknown".to_string());
     Some(ChildSessionStartup {
         session_id,
-        started_at,
         session_turns_zero: line_key_value(line, "session_turns")
             .or_else(|| extract_json_number(line, "session_turns"))
             .as_deref()
@@ -4151,6 +4129,20 @@ fn session_start_event(line: &str, started_at: Option<u64>) -> Option<ChildSessi
             .is_none_or(|value| matches!(value, "" | "none" | "null")),
         state: ChildStartupState::Starting,
     })
+}
+
+fn session_start_timeout_event(line: &str) -> Option<(String, Option<String>)> {
+    if !has_marker(line, "session_start_timeout") {
+        return None;
+    }
+    let session_id = line_key_value(line, "session_id")
+        .or_else(|| line_key_value(line, "child"))
+        .or_else(|| line_key_value(line, "session"))
+        .or_else(|| extract_json_string(line, "session_id"))
+        .or_else(|| extract_json_string(line, "child"))
+        .or_else(|| extract_json_string(line, "session"))?;
+    let retry = line_key_value(line, "retry").or_else(|| extract_json_string(line, "retry"));
+    Some((session_id, retry))
 }
 
 fn session_start_reconciled_event(line: &str) -> Option<String> {
@@ -4555,53 +4547,6 @@ fn summarize_timeline_line(line: &str) -> String {
     }
 }
 
-fn line_timestamp(line: &str) -> Option<u64> {
-    if let Some(ts) = extract_json_number(line, "ts").and_then(|value| value.parse().ok()) {
-        return Some(ts);
-    }
-    let stamp = line.get(..20)?;
-    if !stamp.ends_with('Z') || stamp.as_bytes().get(10) != Some(&b'T') {
-        return None;
-    }
-    let year = stamp.get(0..4)?.parse::<i64>().ok()?;
-    let month = stamp.get(5..7)?.parse::<u32>().ok()?;
-    let day = stamp.get(8..10)?.parse::<u32>().ok()?;
-    let hour = stamp.get(11..13)?.parse::<u32>().ok()?;
-    let minute = stamp.get(14..16)?.parse::<u32>().ok()?;
-    let second = stamp.get(17..19)?.parse::<u32>().ok()?;
-    if stamp.as_bytes().get(4) != Some(&b'-')
-        || stamp.as_bytes().get(7) != Some(&b'-')
-        || stamp.as_bytes().get(13) != Some(&b':')
-        || stamp.as_bytes().get(16) != Some(&b':')
-        || !(1..=12).contains(&month)
-        || !(1..=31).contains(&day)
-        || hour > 23
-        || minute > 59
-        || second > 59
-    {
-        return None;
-    }
-    let days = days_from_civil(year, month, day)?;
-    let seconds = days
-        .checked_mul(86_400)?
-        .checked_add(i64::from(hour) * 3_600 + i64::from(minute) * 60 + i64::from(second))?;
-    u64::try_from(seconds).ok()
-}
-
-fn days_from_civil(year: i64, month: u32, day: u32) -> Option<i64> {
-    let year = year - i64::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let year_of_era = year - era * 400;
-    let month = i64::from(month);
-    let day = i64::from(day);
-    let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    if !(0..=365).contains(&day_of_year) {
-        return None;
-    }
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    Some(era * 146_097 + day_of_era - 719_468)
-}
-
 fn resolve_repo(options: &Options) -> String {
     if options.repo != "unknown" && !options.repo.is_empty() {
         return options.repo.clone();
@@ -4857,22 +4802,57 @@ mod foreground_tests {
     }
 
     #[test]
-    fn executor_startup_timeout_becomes_retryable_failed_startup() {
-        let request = ExecutorRequest {
-            program: PathBuf::from("sh"),
-            args: vec!["-c".to_string(), "sleep 10".to_string()],
-            current_dir: std::env::temp_dir(),
-            repo: "test/repo".to_string(),
-            issue: 42,
-        };
+    fn foreground_retry_state_schedules_another_bounded_claim_attempt() {
+        let state = ConductorState::new("test/repo", ConductorScope::Slice, 1)
+            .expect("state")
+            .transition(ConductorEvent::ScanFoundWork)
+            .expect("scan")
+            .transition(ConductorEvent::SafetyReviewed)
+            .expect("review")
+            .transition(ConductorEvent::Selected {
+                issue: 42,
+                serialization_reasons: Vec::new(),
+            })
+            .expect("selected")
+            .transition(ConductorEvent::Claimed)
+            .expect("claimed")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Retryable("failed-startup".to_string()),
+            })
+            .expect("retryable");
 
-        let receipt = request.run_with_timeout(Duration::from_millis(20));
+        let (state, scheduled) = schedule_foreground_retry(state).expect("schedule retry");
 
-        assert_eq!(
-            receipt.outcome,
-            ConductorOutcome::Retryable("failed-startup".to_string())
-        );
-        assert_eq!(receipt.claim_step, "failed-startup");
+        assert!(scheduled);
+        assert_eq!(state.phase(), ConductorPhase::Claim);
+        assert_eq!(state.retry_count(), 1);
+    }
+
+    #[test]
+    fn foreground_retry_state_stops_when_the_retry_limit_is_exhausted() {
+        let state = ConductorState::new("test/repo", ConductorScope::Slice, 0)
+            .expect("state")
+            .transition(ConductorEvent::ScanFoundWork)
+            .expect("scan")
+            .transition(ConductorEvent::SafetyReviewed)
+            .expect("review")
+            .transition(ConductorEvent::Selected {
+                issue: 42,
+                serialization_reasons: Vec::new(),
+            })
+            .expect("selected")
+            .transition(ConductorEvent::Claimed)
+            .expect("claimed")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Retryable("failed-startup".to_string()),
+            })
+            .expect("retryable");
+
+        let (state, scheduled) = schedule_foreground_retry(state).expect("inspect exhaustion");
+
+        assert!(!scheduled);
+        assert_eq!(state.phase(), ConductorPhase::Paused);
+        assert_eq!(state.pause_reason(), Some("retry_limit_exhausted"));
     }
 
     #[test]
