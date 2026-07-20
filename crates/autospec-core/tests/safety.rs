@@ -1,7 +1,7 @@
 use autospec_core::claim::render_safety_review_section;
 use autospec_core::safety::{
-    evaluate_issue_promotion, redact_secrets, IssuePromotionPayload, IssuePromotionSafetyDecision,
-    SafetyPolicy, UnsafeOperation,
+    evaluate_issue_promotion, evaluate_issue_promotion_with_trusted_actors, redact_secrets,
+    IssuePromotionPayload, IssuePromotionSafetyDecision, SafetyPolicy, UnsafeOperation,
 };
 
 #[test]
@@ -29,7 +29,7 @@ fn safety_redacts_secret_like_values() {
 }
 
 #[test]
-fn issue_promotion_safety_gate_allows_safe_payload_and_marks_it_drainable() {
+fn issue_promotion_safety_gate_allows_safe_payload_and_marks_it_eligible() {
     let decision = evaluate_issue_promotion(IssuePromotionPayload::new(
         1890,
         "Add a typed issue promotion command",
@@ -47,8 +47,8 @@ fn issue_promotion_safety_gate_allows_safe_payload_and_marks_it_drainable() {
         "auto-implement is granted only after the final payload passes safety"
     );
     assert!(
-        decision.drainable,
-        "a safely promoted issue should be accepted by the ready queue selector"
+        decision.eligible,
+        "a safely promoted payload should be eligible for queue admission"
     );
     assert!(decision
         .final_labels
@@ -75,7 +75,7 @@ fn issue_promotion_safety_gate_returns_ambiguous_without_auto_implement() {
         IssuePromotionSafetyDecision::Ambiguous
     );
     assert!(!decision.auto_implement);
-    assert!(!decision.drainable);
+    assert!(!decision.eligible);
     assert!(!decision
         .final_labels
         .iter()
@@ -98,7 +98,7 @@ fn issue_promotion_safety_gate_groups_blocked_payloads_by_inner_safety_reason() 
         IssuePromotionSafetyDecision::Blocked
     );
     assert!(!decision.auto_implement);
-    assert!(!decision.drainable);
+    assert!(!decision.eligible);
     assert_eq!(
         decision
             .blocked_by_reason
@@ -123,7 +123,7 @@ fn issue_promotion_safety_gate_fails_closed_when_verdict_is_indeterminate() {
         IssuePromotionSafetyDecision::Indeterminate
     );
     assert!(!decision.auto_implement);
-    assert!(!decision.drainable);
+    assert!(!decision.eligible);
     assert_eq!(
         decision
             .blocked_by_reason
@@ -131,6 +131,27 @@ fn issue_promotion_safety_gate_fails_closed_when_verdict_is_indeterminate() {
             .copied(),
         Some(1)
     );
+}
+
+#[test]
+fn issue_promotion_safety_gate_uses_configured_trusted_actors() {
+    let decision = evaluate_issue_promotion_with_trusted_actors(
+        IssuePromotionPayload::new(
+            1894,
+            "Reset test database",
+            format!(
+                "## Goal\n\nDelete the local test database and repopulate it from fixtures.\n\nOnly test, local, and fixture data are in scope. Production is out of scope.\n\n{}",
+                render_safety_review_section(autospec_core::claim::SafetyReviewDecision::Pass)
+            ),
+            "release-operator",
+            vec!["safety:reviewed".to_string()],
+        ),
+        &["berlinguyinca", "release-operator"],
+    );
+
+    assert_eq!(decision.safety_decision, IssuePromotionSafetyDecision::Pass);
+    assert!(decision.auto_implement);
+    assert!(decision.eligible);
 }
 
 #[test]

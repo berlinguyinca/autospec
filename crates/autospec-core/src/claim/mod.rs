@@ -845,10 +845,29 @@ fn ordered_pair_start(text: &str, first: &str, second: &str) -> Option<usize> {
 /// is not suppressed because the cue is in the previous clause.
 fn prohibition_precedes(line: &str, match_index: usize) -> bool {
     const CUES: &[&str] = &[
-        "no ", "not ", "n't", "never", "without", "cannot", "can not", "do not",
-        "does not", "must not", "should not", "may not", "will not", "avoid ",
-        "prohibit", "forbid", "prevent", "refuse", "disallow", "keep every",
-        "keep all", "leave every", "leave all",
+        "no ",
+        "not ",
+        "n't",
+        "never",
+        "without",
+        "cannot",
+        "can not",
+        "do not",
+        "does not",
+        "must not",
+        "should not",
+        "may not",
+        "will not",
+        "avoid ",
+        "prohibit",
+        "forbid",
+        "prevent",
+        "refuse",
+        "disallow",
+        "keep every",
+        "keep all",
+        "leave every",
+        "leave all",
     ];
     let prefix = &line[..match_index];
     let clause_start = [
@@ -911,7 +930,6 @@ fn ordered_contains(text: &str, first: &str, second: &str) -> bool {
         .and_then(|index| text[index + first.len()..].find(second))
         .is_some()
 }
-
 
 fn word_positions(text: &str, word: &str) -> Vec<usize> {
     let mut positions = Vec::new();
@@ -1439,10 +1457,7 @@ pub fn lowest_marked_comment(comments: &[RemoteComment]) -> Option<&RemoteCommen
 /// `worker_id` is literally equal to its own ID. This keeps dotted IDs distinct
 /// from near-collisions and prevents regex-like matching from deleting another
 /// worker's comment.
-pub fn claim_losing_worker_comment_id(
-    comments: &[RemoteComment],
-    worker_id: &str,
-) -> Option<u64> {
+pub fn claim_losing_worker_comment_id(comments: &[RemoteComment], worker_id: &str) -> Option<u64> {
     let lowest = lowest_marked_comment(comments).map(|comment| comment.id);
     comments
         .iter()

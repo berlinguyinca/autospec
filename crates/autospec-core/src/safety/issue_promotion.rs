@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::claim::{evaluate_claim_safety, ClaimSafetyInput};
+use crate::claim::{evaluate_claim_safety_with_trusted_actors, ClaimSafetyInput};
 use crate::coordination::{
-    plan_ready_queue, PullRequestEvidence, QueuePolicy, ReadyQueueInput, RemoteIssue,
+    plan_ready_queue_with_trusted_actors, PullRequestEvidence, QueuePolicy, ReadyQueueInput,
+    RemoteIssue,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,19 +59,29 @@ pub struct IssuePromotionDecision {
     pub safety_decision: IssuePromotionSafetyDecision,
     pub safety_reason: String,
     pub auto_implement: bool,
-    pub drainable: bool,
+    pub eligible: bool,
     pub final_labels: Vec<String>,
     pub blocked_by_reason: BTreeMap<String, usize>,
 }
 
 pub fn evaluate_issue_promotion(payload: IssuePromotionPayload) -> IssuePromotionDecision {
+    evaluate_issue_promotion_with_trusted_actors(payload, &["berlinguyinca"])
+}
+
+pub fn evaluate_issue_promotion_with_trusted_actors(
+    payload: IssuePromotionPayload,
+    trusted_actors: &[&str],
+) -> IssuePromotionDecision {
     let labels_for_final_verdict = with_label(payload.labels.clone(), "auto-implement");
-    let safety = evaluate_claim_safety(&ClaimSafetyInput::new(
-        labels_for_final_verdict,
-        payload.title.clone(),
-        payload.body.clone(),
-        payload.author.clone(),
-    ));
+    let safety = evaluate_claim_safety_with_trusted_actors(
+        &ClaimSafetyInput::new(
+            labels_for_final_verdict,
+            payload.title.clone(),
+            payload.body.clone(),
+            payload.author.clone(),
+        ),
+        trusted_actors,
+    );
     let safety_decision = classify_issue_promotion_safety(safety.allowed, safety.reason);
     let auto_implement = safety_decision == IssuePromotionSafetyDecision::Pass;
     let final_labels = if auto_implement {
@@ -78,7 +89,8 @@ pub fn evaluate_issue_promotion(payload: IssuePromotionPayload) -> IssuePromotio
     } else {
         without_label(payload.labels.clone(), "auto-implement")
     };
-    let drainable = auto_implement && promoted_payload_is_drainable(&payload, final_labels.clone());
+    let eligible = auto_implement
+        && promoted_payload_is_eligible(&payload, final_labels.clone(), trusted_actors);
     let mut blocked_by_reason = BTreeMap::new();
     if matches!(
         safety_decision,
@@ -95,7 +107,7 @@ pub fn evaluate_issue_promotion(payload: IssuePromotionPayload) -> IssuePromotio
         safety_decision,
         safety_reason: safety.reason.to_string(),
         auto_implement,
-        drainable,
+        eligible,
         final_labels,
         blocked_by_reason,
     }
@@ -116,9 +128,10 @@ fn classify_issue_promotion_safety(allowed: bool, reason: &str) -> IssuePromotio
     }
 }
 
-fn promoted_payload_is_drainable(
+fn promoted_payload_is_eligible(
     payload: &IssuePromotionPayload,
     final_labels: Vec<String>,
+    trusted_actors: &[&str],
 ) -> bool {
     let issue = RemoteIssue::open(
         payload.number,
@@ -127,13 +140,16 @@ fn promoted_payload_is_drainable(
         final_labels,
         payload.author.clone(),
     );
-    let plan = plan_ready_queue(&ReadyQueueInput {
-        candidates: vec![issue],
-        active: Vec::new(),
-        dependencies: BTreeMap::new(),
-        pull_requests: PullRequestEvidence::Available(Vec::new()),
-        policy: QueuePolicy::new(1, 0),
-    });
+    let plan = plan_ready_queue_with_trusted_actors(
+        &ReadyQueueInput {
+            candidates: vec![issue],
+            active: Vec::new(),
+            dependencies: BTreeMap::new(),
+            pull_requests: PullRequestEvidence::Available(Vec::new()),
+            policy: QueuePolicy::new(1, 0),
+        },
+        trusted_actors,
+    );
     plan.ready
         .iter()
         .any(|ready| ready.issue.number == payload.number)

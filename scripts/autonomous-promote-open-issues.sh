@@ -16,23 +16,23 @@
 # never cause a promotion):
 #   1. classify (unlabeled/needs-classify): add ctx:/reasoning:, drop needs-classify.
 #   2. eligibility:
-#        eligible       → promote now (add auto-implement, drop needs-autospec-template)
+#        eligible       → ask Rust to stamp and atomically transition owned labels
 #        needs-template → deterministic codex template-fill (groom-fill.sh), then:
 #                           fill fails        → hold:needs-human (fail-closed)
 #                           template-promote ∈ govern active set (graduated)
 #                                             → auto: apply filled body, add interim
-#                                               auto-implement, then Rust safety review
+#                                               candidate, then Rust-owned safety admission
 #                           else (seed)       → canary: apply filled body,
 #                                               add groom:proposed (human approves via
-#                                               auto-implement / rejects via groom:rejected),
+#                                               admission / rejects via groom:rejected),
 #                                               drop needs-autospec-template
 #                         Candidates already carrying groom:proposed/groom:rejected are
 #                         skipped (already-groomed) before any decision (no re-fill).
 #        epic           → route:split (do NOT decompose here)
 #        hold / error   → hold:needs-human
-#   3. Rust safety writeback runs only after `auto-implement` is added. The
-#      ready queue blocks the interim issue until a typed Rust pass adds
-#      `safety:reviewed`; ambiguous and blocking outcomes remain unclaimable.
+#   3. Rust owns safety stamping and the `auto-implement` transition. It
+#      re-reads canonical GitHub state before and after each mutation and rolls
+#      the queue label back if the final payload drifts.
 #   4. every non-safety routing mutation posts an audit comment stating decision + reason.
 #
 # POLICY GATE (replaces the old AUTOSPEC_PROMOTE_OPEN_ISSUES_APPLY double-env-gate):
@@ -266,18 +266,17 @@ finalize_ready() {
 }
 
 review_admitted_issue() {
-    # $1 = issue number. Queue admission comes first so Rust can evaluate the
-    # exact candidate. A merely admitted issue is still unclaimable until Rust
-    # writes a passing `safety:reviewed` label and re-reads the issue.
+    # $1 = issue number. Rust performs the authoritative safety stamp, canonical
+    # re-reads, queue-label transition, and rollback as one fail-closed command.
     rai_num="$1"
-    rai_out="$("$GROOM_SAFETY_BIN" queue review-safety --repo "$repo" --limit 1 --issue "$rai_num" 2>/dev/null || printf '')"
-    rai_pass="$(printf '%s' "$rai_out" | jq -r '.pass // 0' 2>/dev/null || printf '0')"
-    if [ "$rai_pass" = "1" ]; then
+    rai_out="$("$GROOM_SAFETY_BIN" issue promote --repo "$repo" --number "$rai_num" --remove-label needs-autospec-template --json 2>/dev/null || printf '')"
+    rai_pass="$(printf '%s' "$rai_out" | jq -r '(."auto-implement" == true) and (.eligible == true)' 2>/dev/null || printf 'false')"
+    if [ "$rai_pass" = "true" ]; then
         rust_safety_result="pass"
         return 0
     fi
-    rai_block="$(printf '%s' "$rai_out" | jq -r '.block // 0' 2>/dev/null || printf '0')"
-    if [ "$rai_block" = "1" ]; then
+    rai_decision="$(printf '%s' "$rai_out" | jq -r '.safety.decision // "hold"' 2>/dev/null || printf 'hold')"
+    if [ "$rai_decision" = "blocked" ]; then
         rust_safety_result="block"
         return 1
     fi
@@ -302,9 +301,6 @@ admit_with_rust_safety() {
     rust_safety_result="hold"
     finalize_ready "$aws_num" "$aws_body" "$aws_labels" || return 1
     ensure_label "auto-implement"
-    gh issue edit "$aws_num" --repo "$repo" \
-        --add-label "auto-implement" \
-        --remove-label "needs-autospec-template" >/dev/null 2>&1 || return 1
     review_admitted_issue "$aws_num"
 }
 

@@ -4,8 +4,8 @@ use std::path::Path;
 mod issue_promotion;
 
 pub use issue_promotion::{
-    evaluate_issue_promotion, IssuePromotionDecision, IssuePromotionPayload,
-    IssuePromotionSafetyDecision,
+    evaluate_issue_promotion, evaluate_issue_promotion_with_trusted_actors, IssuePromotionDecision,
+    IssuePromotionPayload, IssuePromotionSafetyDecision,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

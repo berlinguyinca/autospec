@@ -115,15 +115,22 @@ than being ignored.
 
 ### `autospec issue promote`
 
-Typed admission gate for a final issue payload before `auto-implement` is added.
+Authoritative admission transaction for a canonical GitHub issue.
 
 Usage:
-`autospec issue promote --number N --title TITLE (--body BODY | --body-file PATH) --author LOGIN [--label LABEL ...] [--labels CSV] [--json]`
+`autospec issue promote --repo OWNER/REPO --number N [--remove-label needs-autospec-template] [--json]`
+
+The command reads the issue from GitHub, applies the repository safety policy, writes the
+canonical safety stamp, re-reads the exact issue state, and only then adds `auto-implement`.
+It performs a final re-read and rolls back labels owned by the transaction if concurrent
+title, body, author, state, or label changes are detected. Repeating a completed admission
+is idempotent.
 
 The JSON response includes issue identity, `safety.decision`, `safety.reason`,
-`"auto-implement"`, `drainable`, `final_labels`, and `blocked_by_reason`. The
-command grants `"auto-implement": true` only when the exact final payload passes
-the claim safety verdict; ambiguous, blocked, or indeterminate verdicts fail closed.
+`"auto-implement"`, `eligible`, `changed`, `final_labels`, and `blocked_by_reason`.
+`eligible` describes the final issue payload's queue-policy eligibility; it is not a live
+claim or worker-capacity result. Unsupported custom policy regexes and malformed canonical
+safety state fail closed before `auto-implement` is added.
 
 ### `autospec queue ready`
 
