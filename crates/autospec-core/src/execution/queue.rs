@@ -146,6 +146,65 @@ pub struct ExecutionQueue {
     pub(super) entries: Vec<QueueEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OneShotIssueSelector {
+    issue: u64,
+    consumed: bool,
+}
+
+impl OneShotIssueSelector {
+    pub fn new(issue: u64) -> Result<Self, String> {
+        if issue == 0 {
+            return Err("one-shot selector issue must be positive".to_string());
+        }
+        Ok(Self {
+            issue,
+            consumed: false,
+        })
+    }
+
+    pub fn issue(&self) -> u64 {
+        self.issue
+    }
+
+    pub fn consumed(&self) -> bool {
+        self.consumed
+    }
+
+    pub fn matches(&self, issue: u64) -> bool {
+        !self.consumed && self.issue == issue
+    }
+
+    pub fn observe_status(&mut self, issue: u64, status: &QueueStatus) -> Result<bool, String> {
+        if issue != self.issue {
+            return Ok(false);
+        }
+        if self.consumed {
+            return Ok(false);
+        }
+        if matches!(
+            status,
+            QueueStatus::Passed
+                | QueueStatus::Blocked
+                | QueueStatus::Deferred
+                | QueueStatus::Superseded
+        ) {
+            self.consumed = true;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    pub fn status_json(&self) -> String {
+        format!(
+            "{{\"issue\":{},\"consumed\":{},\"scope\":\"{}\"}}",
+            self.issue,
+            self.consumed,
+            if self.consumed { "unscoped" } else { "active" }
+        )
+    }
+}
+
 impl ExecutionQueue {
     pub fn new(run_id: impl Into<String>, spec_ids: Vec<String>) -> Self {
         Self::new_at(run_id, spec_ids, now())

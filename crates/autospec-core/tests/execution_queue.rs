@@ -4,9 +4,31 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use autospec_core::agent::AgentResult;
 use autospec_core::execution::{
-    AgentOutcome, ExecutionQueue, FailureKind, IngestedAgentResult, QueueResultApplication,
-    QueueStatus, QueueValidationResult, QueueValidationStatus,
+    AgentOutcome, ExecutionQueue, FailureKind, IngestedAgentResult, OneShotIssueSelector,
+    QueueResultApplication, QueueStatus, QueueValidationResult, QueueValidationStatus,
 };
+
+#[test]
+fn one_shot_scope_consumed_once_after_terminal_outcome() {
+    let mut selector = OneShotIssueSelector::new(42).expect("positive issue selector");
+    assert!(selector.matches(42));
+    assert!(!selector.observe_status(42, &QueueStatus::Running).unwrap());
+    assert!(selector.observe_status(42, &QueueStatus::Passed).unwrap());
+    assert!(!selector.matches(42));
+    assert!(!selector.observe_status(42, &QueueStatus::Blocked).unwrap());
+    assert_eq!(
+        selector.status_json(),
+        r#"{"issue":42,"consumed":true,"scope":"unscoped"}"#
+    );
+}
+
+#[test]
+fn one_shot_scope_does_not_consume_other_issue_or_retryable_failure() {
+    let mut selector = OneShotIssueSelector::new(42).expect("positive issue selector");
+    assert!(!selector.observe_status(7, &QueueStatus::Blocked).unwrap());
+    assert!(!selector.observe_status(42, &QueueStatus::Failed).unwrap());
+    assert!(selector.matches(42));
+}
 
 static NEXT_TEMP_ROOT: AtomicU64 = AtomicU64::new(0);
 
