@@ -167,27 +167,28 @@ impl StopMode {
     }
 }
 
+type EarlyRouteHandler = fn(&[String]) -> Result<(), CommandFailure>;
+
+const EARLY_ROUTES: [(&str, EarlyRouteHandler); 6] = [
+    ("premerge", |args| premerge::run(&args[1..])),
+    ("implementer-wait-failed", |args| {
+        implementer_wait_failed(&args[1..])
+    }),
+    ("blast-radius", blast_radius),
+    ("resilience", |args| resilience::run(&args[1..])),
+    ("executor-result", executor_result),
+    ("lifecycle", lifecycle),
+];
+
+fn dispatch_early_route(args: &[String]) -> Option<Result<(), CommandFailure>> {
+    let route_name = args.first()?.as_str();
+    let (_, handler) = EARLY_ROUTES.iter().find(|(name, _)| *name == route_name)?;
+    Some(handler(args))
+}
+
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
-    if args.first().is_some_and(|arg| arg == "premerge") {
-        return premerge::run(&args[1..]);
-    }
-    if args
-        .first()
-        .is_some_and(|arg| arg == "implementer-wait-failed")
-    {
-        return implementer_wait_failed(&args[1..]);
-    }
-    if args.first().is_some_and(|arg| arg == "blast-radius") {
-        return blast_radius(args);
-    }
-    if args.first().is_some_and(|arg| arg == "resilience") {
-        return resilience::run(&args[1..]);
-    }
-    if args.first().is_some_and(|arg| arg == "executor-result") {
-        return executor_result(args);
-    }
-    if args.first().is_some_and(|arg| arg == "lifecycle") {
-        return lifecycle(args);
+    if let Some(result) = dispatch_early_route(args) {
+        return result;
     }
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print_help();
