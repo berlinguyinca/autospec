@@ -13,7 +13,7 @@
 - No new dependencies.
 - Do not call or modify shell/Python autonomous authority, `omx`, `/autospec-run`, or `scripts/autonomous-premerge-gate.sh`.
 - Never accept caller-supplied branch, commit, arbitrary artifact paths, or a repository-global quarantine sentinel.
-- Derive branch and commit with direct `git -C <repo-dir>` argv; reject dirty or detached worktrees.
+- Derive branch and commit with direct `git -C <repo-dir>` argv; reject tracked/staged dirt or detached worktrees while allowing the fixed untracked evidence directory.
 - Bind every decision to repository, issue, worker, claim ID, branch, and commit.
 - Read evidence only from `.autospec/evidence/premerge/<lane-digest>/{qa,security}.json` beneath the canonical checkout.
 - Missing, unreadable, malformed, incomplete, foreign-producer, or identity-mismatched evidence is Failed and cannot record success.
@@ -162,7 +162,7 @@ Add fixtures for:
 autospec autonomous premerge evaluate --repo test/repo --repo-dir <worktree> --issue 42 --worker-id worker-42 --claim-id claim-42 --json
 ```
 
-Cover: clean attached branch derives exact branch/HEAD; dirty or detached worktree fails before receipt creation; only the fixed lane-digest paths are read; missing/malformed/foreign evidence returns Failed; blocking evidence creates `quarantine.json`; passing evidence creates no quarantine; decisions are create-once and idempotent; attempts to replace an existing immutable decision fail closed; blocked lane A does not affect passing lane B; and poisoned `bash`, `sh`, `omx`, `/autospec-run`, and legacy-script markers are never invoked.
+Cover: clean attached branch derives exact branch/HEAD; tracked or staged dirt and detached worktrees fail before receipt creation; untracked files in the fixed evidence directory remain readable; only the fixed lane-digest paths are read; missing/malformed/foreign evidence returns Failed; blocking evidence creates `quarantine.json`; passing evidence creates no quarantine; decisions are create-once and idempotent; attempts to replace an existing immutable decision fail closed; blocked lane A does not affect passing lane B; and poisoned `bash`, `sh`, `omx`, `/autospec-run`, and legacy-script markers are never invoked.
 
 - [ ] **Step 2: Run and verify RED**
 
@@ -174,7 +174,7 @@ Expected: `premerge evaluate` is an unknown subcommand.
 
 - [ ] **Step 3: Implement the closed command boundary**
 
-Route `args.first() == "premerge"` to the new module. Accept only subcommand `evaluate` and flags `--repo`, `--repo-dir`, `--issue`, `--worker-id`, `--claim-id`, and optional `--json`, each exactly once. Canonicalize `--repo-dir`; use direct `git -C <repo-dir> symbolic-ref --quiet --short HEAD`, `git -C <repo-dir> rev-parse HEAD`, and `git -C <repo-dir> status --porcelain`; reject detached or dirty state.
+Route `args.first() == "premerge"` to the new module. Accept only subcommand `evaluate` and flags `--repo`, `--repo-dir`, `--issue`, `--worker-id`, `--claim-id`, and optional `--json`, each exactly once. Canonicalize `--repo-dir`; use direct `git -C <repo-dir> symbolic-ref --quiet --short HEAD`, `git -C <repo-dir> rev-parse HEAD`, and `git -C <repo-dir> status --porcelain --untracked-files=no`; reject detached or tracked/staged dirty state without rejecting required untracked evidence artifacts.
 
 Build `PremergeLaneIdentity`, then call a new read-only `claim::active_claim_generation_matches(repo, issue, worker_id, claim_id, branch) -> Result<bool, CommandFailure>` helper before reading evidence. The helper reuses the existing comment selection and freshness logic and requires exact repo/issue/worker/claim/branch identity without writing comments, labels, or run state. Then read only:
 
