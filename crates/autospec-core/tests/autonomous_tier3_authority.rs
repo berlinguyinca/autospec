@@ -5,12 +5,16 @@ use std::path::{Path, PathBuf};
 mod guard;
 #[path = "support/tier2_authority_matcher.rs"]
 mod matcher;
+#[path = "support/tier4_authority_scanner.rs"]
+#[allow(dead_code)]
+mod scanner;
 
 use guard::assert_no_execution_authority;
 use matcher::{
     code_tokens, contains_path_symbol, contains_qualified_path, has_forbidden_std_module,
     has_module_escape,
 };
+use scanner::{code_without_comments_and_literals, has_write_capable_github_argv, production_code};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -39,111 +43,19 @@ fn temporary_module_root() -> PathBuf {
     std::env::temp_dir().join(format!("autospec-tier3-authority-{}", std::process::id()))
 }
 
-fn code_without_comments_and_literals(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut code = String::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if let Some(end) = raw_string_end(bytes, index) {
-            code.push(' ');
-            index = end;
-            continue;
-        }
-        match bytes[index..] {
-            [b'/', b'/', ..] => {
-                index += 2;
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
-                }
-                code.push(' ');
-            }
-            [b'/', b'*', ..] => {
-                index = block_comment_end(bytes, index + 2);
-                code.push(' ');
-            }
-            [b'\"', ..] => {
-                index = quoted_end(bytes, index + 1);
-                code.push(' ');
-            }
-            _ => {
-                code.push(bytes[index] as char);
-                index += 1;
-            }
-        }
-    }
-    code
-}
-
-fn block_comment_end(bytes: &[u8], mut index: usize) -> usize {
-    let mut depth = 1;
-    while index < bytes.len() && depth > 0 {
-        match bytes[index..] {
-            [b'/', b'*', ..] => {
-                depth += 1;
-                index += 2;
-            }
-            [b'*', b'/', ..] => {
-                depth -= 1;
-                index += 2;
-            }
-            _ => index += 1,
-        }
-    }
-    index
-}
-
-fn quoted_end(bytes: &[u8], mut index: usize) -> usize {
-    while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            index += 2;
-        } else if bytes[index] == b'\"' {
-            return index + 1;
-        } else {
-            index += 1;
-        }
-    }
-    index
-}
-
-fn raw_string_end(bytes: &[u8], index: usize) -> Option<usize> {
-    let mut cursor = match bytes.get(index) {
-        Some(b'r') => index + 1,
-        Some(b'b') if bytes.get(index + 1) == Some(&b'r') => index + 2,
-        _ => return None,
-    };
-    let hash_start = cursor;
-    while bytes.get(cursor) == Some(&b'#') {
-        cursor += 1;
-    }
-    if bytes.get(cursor) != Some(&b'\"') {
-        return None;
-    }
-    let hashes = cursor - hash_start;
-    cursor += 1;
-    while cursor < bytes.len() {
-        let end = cursor.saturating_add(hashes + 1);
-        if bytes[cursor] == b'\"'
-            && end <= bytes.len()
-            && bytes[cursor + 1..end].iter().all(|byte| *byte == b'#')
-        {
-            return Some(end);
-        }
-        cursor += 1;
-    }
-    Some(cursor)
-}
-
 fn contains_code_token(code: &str, token: &str) -> bool {
     code_tokens(code).iter().any(|candidate| candidate == token)
 }
 
 fn production_source(relative: &str) -> String {
-    fs::read_to_string(workspace_root().join(relative))
-        .expect("read Tier 3 production source")
-        .split("\n#[cfg(test)]")
-        .next()
-        .expect("production source before tests")
-        .to_string()
+    let source =
+        fs::read_to_string(workspace_root().join(relative)).expect("read Tier 3 production source");
+    let production = production_code(&source, relative);
+    assert!(
+        !has_write_capable_github_argv(&production),
+        "{relative} retains write-capable GitHub argv literals"
+    );
+    production
 }
 
 fn tier3_receipt_verifier_sources() -> [(&'static str, bool); 4] {
@@ -250,9 +162,10 @@ fn pure_tier3_sources_reject_external_and_mutation_authority() {
     assert!(!documents.contains("pub source:"));
     let mut saw_documents = false;
     for source in sources {
-        let code = code_without_comments_and_literals(
-            &fs::read_to_string(&source).expect("read pure Tier 3 source"),
-        );
+        let contents = fs::read_to_string(&source).expect("read pure Tier 3 source");
+        let production = production_code(&contents, &source.display().to_string());
+        assert!(!has_write_capable_github_argv(&production));
+        let code = code_without_comments_and_literals(&production);
         assert!(
             !has_module_escape(&code),
             "{} escapes the guarded Tier 3 module tree",
@@ -380,7 +293,7 @@ fn cutover_plan_states_tier3_foundation_and_remaining_gates() {
     for required in [
         "Tier 3 typed metadata foundation and checked-in disabled receipt policy are complete.",
         "Metadata-source activation requires a trusted typed metadata source and #1602 typed configuration.",
-        "Foreground wiring, Tier 4, ideation, and legacy deletion remain separately gated.",
+        "Trusted metadata activation, Tier 4 source activation, ideation, and legacy deletion remain separately gated.",
         "This foundation does not permit legacy deletion.",
     ] {
         assert!(plan.contains(required), "cutover plan omits: {required}");

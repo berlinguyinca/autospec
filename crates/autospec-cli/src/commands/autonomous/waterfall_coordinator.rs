@@ -11,6 +11,7 @@ use super::resilience::{with_current_lifecycle_lease, ConductorLease};
 use super::waterfall::{
     StoreAcquisition, Tier1EvidenceArtifact, WaterfallStore, WaterfallStoreError,
 };
+use super::waterfall_policy::WaterfallPolicy;
 
 const PRODUCER_VERSION: &str = "rust-foreground-tier1-v1";
 
@@ -19,6 +20,7 @@ pub(super) enum Tier1QueueEvidence<'a> {
     Failed(&'a str),
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum Tier1Progress {
     Pending,
     Advanced,
@@ -37,21 +39,26 @@ pub(super) fn record_tier_one(
     state_root: &Path,
     repo: &str,
     lease: &ConductorLease,
+    policy: &WaterfallPolicy,
     evidence: Tier1QueueEvidence<'_>,
 ) -> Result<Tier1Progress, String> {
-    with_current_lifecycle_lease(lease, || record_tier_one_fenced(state_root, repo, evidence))
+    with_current_lifecycle_lease(lease, || {
+        record_tier_one_fenced(state_root, repo, policy, evidence)
+    })
 }
 
 fn record_tier_one_fenced(
     state_root: &Path,
     repo: &str,
+    policy: &WaterfallPolicy,
     evidence: Tier1QueueEvidence<'_>,
 ) -> Result<Tier1Progress, String> {
     let root = state_root.join("waterfall");
-    let store = match WaterfallStore::acquire(&root, repo).map_err(store_error)? {
-        StoreAcquisition::Acquired(store) => store,
-        StoreAcquisition::Held => return Ok(Tier1Progress::Pending),
-    };
+    let store =
+        match WaterfallStore::acquire_with_policy(&root, repo, policy).map_err(store_error)? {
+            StoreAcquisition::Acquired(store) => store,
+            StoreAcquisition::Held => return Ok(Tier1Progress::Pending),
+        };
     let state = store
         .load_state()
         .map_err(store_error)?
@@ -97,6 +104,16 @@ fn record_tier_one_fenced(
             settle_tier1_receipt(&store, &state, receipt)
         }
     }
+}
+
+#[cfg(test)]
+pub(super) fn record_tier_one_unfenced_for_test(
+    state_root: &Path,
+    repo: &str,
+    policy: &WaterfallPolicy,
+    evidence: Tier1QueueEvidence<'_>,
+) -> Result<Tier1Progress, String> {
+    record_tier_one_fenced(state_root, repo, policy, evidence)
 }
 
 fn existing_tier1_receipt(

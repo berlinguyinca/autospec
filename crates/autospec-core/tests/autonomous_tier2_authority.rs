@@ -4,10 +4,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "support/tier2_authority_matcher.rs"]
 mod matcher;
+#[path = "support/tier4_authority_scanner.rs"]
+#[allow(dead_code)]
+mod scanner;
 
 use matcher::{
     contains_path_symbol, contains_qualified_path, has_forbidden_std_module, has_module_escape,
 };
+use scanner::{code_without_comments_and_literals, has_write_capable_github_argv, production_code};
 
 fn pure_tier2_sources() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -34,100 +38,6 @@ fn collect_rust_sources(directory: &Path, sources: &mut Vec<PathBuf>) {
             sources.push(path);
         }
     }
-}
-
-fn code_without_comments_and_literals(source: &str) -> String {
-    let bytes = source.as_bytes();
-    let mut code = String::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if let Some(end) = raw_string_end(bytes, index) {
-            code.push(' ');
-            index = end;
-            continue;
-        }
-        match bytes[index..] {
-            [b'/', b'/', ..] => {
-                index += 2;
-                while index < bytes.len() && bytes[index] != b'\n' {
-                    index += 1;
-                }
-                code.push(' ');
-            }
-            [b'/', b'*', ..] => {
-                index = block_comment_end(bytes, index + 2);
-                code.push(' ');
-            }
-            [b'\"', ..] => {
-                index = quoted_end(bytes, index + 1);
-                code.push(' ');
-            }
-            _ => {
-                code.push(bytes[index] as char);
-                index += 1;
-            }
-        }
-    }
-    code
-}
-
-fn block_comment_end(bytes: &[u8], mut index: usize) -> usize {
-    let mut depth = 1;
-    while index < bytes.len() && depth > 0 {
-        match bytes[index..] {
-            [b'/', b'*', ..] => {
-                depth += 1;
-                index += 2;
-            }
-            [b'*', b'/', ..] => {
-                depth -= 1;
-                index += 2;
-            }
-            _ => index += 1,
-        }
-    }
-    index
-}
-
-fn quoted_end(bytes: &[u8], mut index: usize) -> usize {
-    while index < bytes.len() {
-        if bytes[index] == b'\\' {
-            index += 2;
-        } else if bytes[index] == b'\"' {
-            return index + 1;
-        } else {
-            index += 1;
-        }
-    }
-    index
-}
-
-fn raw_string_end(bytes: &[u8], index: usize) -> Option<usize> {
-    let mut cursor = match bytes.get(index) {
-        Some(b'r') => index + 1,
-        Some(b'b') if bytes.get(index + 1) == Some(&b'r') => index + 2,
-        _ => return None,
-    };
-    let hash_start = cursor;
-    while bytes.get(cursor) == Some(&b'#') {
-        cursor += 1;
-    }
-    if bytes.get(cursor) != Some(&b'\"') {
-        return None;
-    }
-    let hashes = cursor - hash_start;
-    cursor += 1;
-    while cursor < bytes.len() {
-        let end = cursor.saturating_add(hashes + 1);
-        if bytes[cursor] == b'\"'
-            && end <= bytes.len()
-            && bytes[cursor + 1..end].iter().all(|byte| *byte == b'#')
-        {
-            return Some(end);
-        }
-        cursor += 1;
-    }
-    Some(cursor)
 }
 
 fn contains_code_token(code: &str, token: &str) -> bool {
@@ -230,7 +140,9 @@ fn pure_tier2_sources_reject_external_and_mutation_authority() {
     let mut saw_roi_rank_renderer = false;
     for source in sources {
         let contents = fs::read_to_string(&source).expect("read pure Tier 2 source");
-        let code = code_without_comments_and_literals(&contents);
+        let production = production_code(&contents, &source.display().to_string());
+        assert!(!has_write_capable_github_argv(&production));
+        let code = code_without_comments_and_literals(&production);
         assert!(
             !has_module_escape(&code),
             "{} escapes the guarded Tier 2 module tree",
@@ -328,11 +240,9 @@ fn strict_collector_source_is_read_only_and_legacy_free() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = fs::read_to_string(root.join("src/explore/specialists/strict.rs"))
         .expect("read strict collector source");
-    let production = source
-        .split("\n#[cfg(test)]")
-        .next()
-        .expect("production source before module tests");
-    let code = code_without_comments_and_literals(production);
+    let production = production_code(&source, "strict collector");
+    assert!(!has_write_capable_github_argv(&production));
+    let code = code_without_comments_and_literals(&production);
     for module in ["env", "process", "net"] {
         assert!(
             !has_forbidden_std_module(&code, module),
@@ -437,7 +347,7 @@ fn cutover_plan_states_tier2_completion_and_remaining_gates() {
         "Tier 2 strict collection, pure typed funnel, sealed receipt replay, and checked-in disabled policy are complete.",
         "A disabled policy produces `NotRun`, retains Tier 2, and is not a dry result.",
         "Live model activation remains a separate direct-child safety gate.",
-        "Legacy deletion remains blocked on broader native producer, foreground, and parity work.",
+        "Legacy deletion remains blocked on broader native producer activation and parity work.",
     ] {
         assert!(plan.contains(required), "cutover plan omits: {required}");
     }
