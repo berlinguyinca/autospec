@@ -88,8 +88,10 @@ EOF
     OUT_JSON="$TEST_TMP/audit.json"
     OUT_MD="$TEST_TMP/audit.md"
     FOREIGN="$TEST_TMP/foreign-worktree"
-    mkdir -p "$REPO/src/app/components" "$FOREIGN/src/app/components" "$TEST_TMP/bin"
+    UNRELATED="$TEST_TMP/unrelated"
+    mkdir -p "$REPO/src/app/components" "$UNRELATED/src" "$TEST_TMP/bin"
     touch "$REPO/src/app/components/panel.component.html"
+    touch "$REPO/src/shared.html"
     cat > "$REPO/package.json" <<'EOF'
 {
   "engines": { "node": ">=20" },
@@ -101,6 +103,12 @@ EOF
   }
 }
 EOF
+    git -C "$REPO" init -q
+    git -C "$REPO" config user.email fixture@example.com
+    git -C "$REPO" config user.name Fixture
+    git -C "$REPO" add .
+    git -C "$REPO" commit -qm fixture
+    git -C "$REPO" worktree add -q -b foreign-fixture "$FOREIGN"
     cat > "$TEST_TMP/bin/npm" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
@@ -108,8 +116,9 @@ case "\$*" in
   "run -s test"|"run -s typecheck"|"run -s lint") exit 0 ;;
   "run -s lint:templates")
     echo "$FOREIGN/src/app/components/panel.component.html:7: template guard [alert-primary]"
-    echo "$FOREIGN/missing-one/shared.html:8: template guard [alert-secondary]"
-    echo "$FOREIGN/missing-two/shared.html:9: template guard [alert-warning]"
+    echo "$UNRELATED/src/shared.html:8: template guard [alert-secondary]"
+    echo "/outside/unrelated/etc/passwd.html:9: template guard [alert-warning]"
+    echo "/../../../etc/passwd.html:10: template guard [alert-danger]"
     exit 1
     ;;
 esac
@@ -134,7 +143,8 @@ EOF
     run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD" --file-issues
     [ "$status" -eq 0 ]
     jq -e '.findings[] | select(.probe=="design-template-guard" and .file=="src/app/components/panel.component.html" and .normalized_path=="src/app/components/panel.component.html" and .normalized_title=="design-template-guard-failure-in-src-app-components-panel-component-html" and (.dedupe_key | contains("|path=src/app/components/panel.component.html|title=design-template-guard-failure-in-src-app-components-panel-component-html")))' "$OUT_JSON"
-    jq -e '[.findings[] | select(.probe=="design-template-guard" and (.normalized_path | startswith("external/shared.html-"))) | .normalized_path] | (length==2 and (unique|length)==2)' "$OUT_JSON"
+    jq -e '[.findings[] | select(.probe=="design-template-guard" and (.normalized_path | startswith("external/"))) | .normalized_path] | (length==3 and (unique|length)==3)' "$OUT_JSON"
+    ! jq -e '.findings[] | select(.normalized_path=="src/shared.html")' "$OUT_JSON"
     ! jq -e '[.findings[] | .file, .title, .dedupe_key] | any(contains("/tmp/"))' "$OUT_JSON"
     ! grep -q '/tmp/' "$GH_LOG"
 }
@@ -143,11 +153,17 @@ EOF
     OUT_JSON="$TEST_TMP/audit.json"
     OUT_MD="$TEST_TMP/audit.md"
     FOREIGN="$TEST_TMP/new-worktree"
-    mkdir -p "$REPO/src/app/components" "$FOREIGN/src/app/components" "$TEST_TMP/bin"
+    mkdir -p "$REPO/src/app/components" "$TEST_TMP/bin"
     touch "$REPO/src/app/components/panel.component.html"
     cat > "$REPO/package.json" <<'EOF'
 {"engines":{"node":">=20"},"scripts":{"test":"node --test","typecheck":"tsc --noEmit","lint":"eslint .","lint:templates":"node guard.js"}}
 EOF
+    git -C "$REPO" init -q
+    git -C "$REPO" config user.email fixture@example.com
+    git -C "$REPO" config user.name Fixture
+    git -C "$REPO" add .
+    git -C "$REPO" commit -qm fixture
+    git -C "$REPO" worktree add -q -b legacy-fixture "$FOREIGN"
     cat > "$TEST_TMP/bin/npm" <<EOF
 #!/usr/bin/env bash
 case "\$*" in
@@ -186,6 +202,36 @@ EOF
     grep -q 'issue reopen 5' "$GH_LOG"
     ! grep -q 'issue create --title autospec audit: design/template guard failure' "$GH_LOG"
     jq -e '.issue_links[] | select(.url=="https://github.com/example/repo/issues/5" and .existing==true and .reopened==true)' "$OUT_JSON"
+}
+
+@test "audit reopens a legacy embedded-path storage identity only on full semantic match" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    mkdir -p "$TEST_TMP/bin"
+    export GH_LOG="$TEST_TMP/gh.log"
+    cat > "$TEST_TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$GH_LOG"
+case "$*" in
+  *"issue list --state open"*) printf '[]\n'; exit 0 ;;
+  *"issue list --state closed"*) printf '%s\n' '[{"number":8,"state":"CLOSED","title":"autospec audit: security-sensitive browser storage in /tmp/old-worktree/src/app.js","body":"- dedupe_key: security-sensitive-storage:/tmp/old-worktree/src/app.js:localStorage:token:token","url":"https://github.com/example/repo/issues/8"},{"number":9,"state":"CLOSED","title":"autospec audit: security-sensitive browser storage in /tmp/other/src/other.js","body":"- dedupe_key: security-sensitive-storage:/tmp/other/src/other.js:sessionStorage:credential","url":"https://github.com/example/repo/issues/9"}]'; exit 0 ;;
+  *"label create"*) exit 0 ;;
+  *"issue comment 8 --body-file"*) exit 0 ;;
+  *"issue reopen 8"*) exit 0 ;;
+  *"issue create"*) echo "https://github.com/example/repo/issues/10"; exit 0 ;;
+esac
+exit 0
+EOF
+    chmod +x "$TEST_TMP/bin/gh"
+    export PATH="$TEST_TMP/bin:$PATH"
+    export AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES=1
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD" --file-issues
+    [ "$status" -eq 0 ]
+    grep -q 'issue comment 8 --body-file' "$GH_LOG"
+    grep -q 'issue reopen 8' "$GH_LOG"
+    ! grep -q 'issue comment 9\|issue reopen 9' "$GH_LOG"
+    jq -e '.issue_links[] | select(.url=="https://github.com/example/repo/issues/8" and .existing==true and .reopened==true)' "$OUT_JSON"
 }
 
 @test "audit comments exact closed matches before reopening without creating a replacement" {
@@ -295,7 +341,7 @@ EOF
     done
 }
 
-@test "audit never creates a replacement when closed recurrence mutation fails" {
+@test "audit never creates a replacement when closed comment or reopen mutation fails" {
     mkdir -p "$TEST_TMP/bin"
     export PATH="$TEST_TMP/bin:$PATH"
     export AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES=1
@@ -307,21 +353,25 @@ case "$*" in
   *"issue list --state open"*) printf '[]\n'; exit 0 ;;
   *"issue list --state closed"*) printf '%s\n' '[{"number":5,"state":"CLOSED","title":"autospec audit: focused test markers present","body":"<!-- autospec-quality-audit-dedupe:v2:focused-skipped-tests:tests/app.spec.js|path=tests/app.spec.js|title=focused-test-markers-present -->","url":"https://github.com/example/repo/issues/5"}]'; exit 0 ;;
   *"label create"*) exit 0 ;;
-  *"issue comment 5 --body-file"*) exit 1 ;;
+  *"issue comment 5 --body-file"*) [ "$MUTATION_MODE" = "comment-fails" ] && exit 1 || exit 0 ;;
+  *"issue reopen 5"*) [ "$MUTATION_MODE" = "reopen-fails" ] && exit 1 || exit 0 ;;
   *"issue create"*) echo "https://github.com/example/repo/issues/10"; exit 0 ;;
 esac
 exit 0
 EOF
     chmod +x "$TEST_TMP/bin/gh"
-    OUT_JSON="$TEST_TMP/audit.json"
-    OUT_MD="$TEST_TMP/audit.md"
-
-    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD" --file-issues
-    [ "$status" -eq 0 ]
-    grep -q 'issue comment 5 --body-file' "$GH_LOG"
-    ! grep -q 'issue reopen 5\|issue create --title autospec audit: focused test markers present' "$GH_LOG"
-    ! jq -e '.issue_links[] | select(.url=="https://github.com/example/repo/issues/5")' "$OUT_JSON"
-    jq -e '.residual_risks[] | select(contains("focused test markers present"))' "$OUT_JSON"
+    for MUTATION_MODE in comment-fails reopen-fails; do
+        export MUTATION_MODE
+        export GH_LOG="$TEST_TMP/gh-$MUTATION_MODE.log"
+        OUT_JSON="$TEST_TMP/audit-$MUTATION_MODE.json"
+        OUT_MD="$TEST_TMP/audit-$MUTATION_MODE.md"
+        run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD" --file-issues
+        [ "$status" -eq 0 ]
+        grep -q 'issue comment 5 --body-file' "$GH_LOG"
+        ! grep -q 'issue create --title autospec audit: focused test markers present' "$GH_LOG"
+        ! jq -e '.issue_links[] | select(.url=="https://github.com/example/repo/issues/5")' "$OUT_JSON"
+        jq -e '.residual_risks[] | select(contains("focused test markers present"))' "$OUT_JSON"
+    done
 }
 
 

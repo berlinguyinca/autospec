@@ -68,9 +68,9 @@ trap cleanup EXIT
 ACCEPTED_FILE="$REPO/.autospec/quality-audit-accepted.json"
 
 is_accepted() {
-  key="$1"
+  accepted_key="$1"
   [ -f "$ACCEPTED_FILE" ] || return 1
-  jq -e --arg key "$key" '(.accepted_debt // []) | index($key)' "$ACCEPTED_FILE" >/dev/null 2>&1
+  jq -e --arg key "$accepted_key" '(.accepted_debt // []) | index($key)' "$ACCEPTED_FILE" >/dev/null 2>&1
 }
 
 json_append() {
@@ -304,26 +304,48 @@ add_maintainability_hotspot_finding() {
     '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key,rank:$rank,score:$score,hotspot_kind:$kind,lines:$lines,any_count:$any_count,any_density:$any_density,debug_logging_count:$debug_count,disabled_test_count:$disabled_count,eslint_disable_count:$eslint_count,ts_ignore_count:$ts_ignore_count,recent_touch:$recent_touch,test_signal:$test_signal,remediation:"bounded refactor follow-up; behavior locks/regression tests required before cleanup edits"}'
 }
 
+external_path_identity() {
+  path="$1"
+  base="${path##*/}"
+  [ -n "$base" ] || base="unknown"
+  identity="$(printf '%s' "$path" | cksum | awk '{print $1}')"
+  printf 'external/%s-%s' "$base" "$identity"
+}
+
+canonical_git_common_dir() {
+  root="$1"
+  common="$(git -C "$root" rev-parse --git-common-dir 2>/dev/null)" || return 1
+  case "$common" in /*) : ;; *) common="$root/$common" ;; esac
+  (cd "$common" 2>/dev/null && pwd -P)
+}
+
 normalize_repo_path() {
   path="$1"
   case "$path" in
+    /*) case "/$path/" in */../*) external_path_identity "$path"; return 0 ;; esac ;;
+  esac
+  case "$path" in
     "$REPO"/*) printf '%s' "${path#"$REPO"/}"; return 0 ;;
     /*)
-      suffix="${path#/}"
-      while [ -n "$suffix" ]; do
-        if [ -e "$REPO/$suffix" ]; then
-          printf '%s' "$suffix"
-          return 0
+      container="$(dirname "$path")"
+      foreign_root="$(git -C "$container" rev-parse --show-toplevel 2>/dev/null || true)"
+      if [ -n "$foreign_root" ]; then
+        foreign_root="$(cd "$foreign_root" 2>/dev/null && pwd -P || true)"
+        repo_common="$(canonical_git_common_dir "$REPO" || true)"
+        foreign_common="$(canonical_git_common_dir "$foreign_root" || true)"
+        if [ -n "$repo_common" ] && [ "$repo_common" = "$foreign_common" ]; then
+          case "$path" in
+            "$foreign_root"/*)
+              relative="${path#"$foreign_root"/}"
+              if [ -e "$REPO/$relative" ]; then
+                printf '%s' "$relative"
+                return 0
+              fi
+              ;;
+          esac
         fi
-        case "$suffix" in
-          */*) suffix="${suffix#*/}" ;;
-          *) break ;;
-        esac
-      done
-      base="${path##*/}"
-      [ -n "$base" ] || base="unknown"
-      identity="$(printf '%s' "$path" | cksum | awk '{print $1}')"
-      printf 'external/%s-%s' "$base" "$identity"
+      fi
+      external_path_identity "$path"
       ;;
     ./*) printf '%s' "${path#./}" ;;
     *) printf '%s' "$path" ;;
@@ -1323,6 +1345,7 @@ existing_issue_for_finding() {
   key="$1"; title="$2"; semantic_seed="${key%%|path=*}"
   key_path="${key#*|path=}"
   key_path="${key_path%%|title=*}"
+  key_title="${key##*|title=}"
   marker="<!-- autospec-quality-audit-dedupe:v2:$key -->"
   while IFS= read -r candidate; do
     [ -n "$candidate" ] || continue
@@ -1338,19 +1361,31 @@ existing_issue_for_finding() {
       -e 's/^[[:space:]]*-[[:space:]]*dedupe_key:[[:space:]]*//p' \
       -e 's/^[[:space:]]*dedupe_key:[[:space:]]*//p' | head -1)"
     [ -n "$legacy_key" ] || continue
-    seed_prefix="$(jq -nr --arg seed "$semantic_seed" --arg path "$key_path" '$seed | rtrimstr($path)')"
-    if [ "$seed_prefix" = "$semantic_seed" ]; then
+    path_occurrences="$(jq -nr --arg seed "$semantic_seed" --arg path "$key_path" '$seed | split($path) | length - 1')"
+    if [ "$path_occurrences" -ne 1 ]; then
       [ "$legacy_key" = "$semantic_seed" ] || continue
       legacy_path=""
     else
-      case "$legacy_key" in "$seed_prefix"*) legacy_path="${legacy_key#"$seed_prefix"}" ;; *) continue ;; esac
-      [ "$(normalize_repo_path "$legacy_path")" = "$key_path" ] || continue
+      seed_prefix="$(jq -nr --arg seed "$semantic_seed" --arg path "$key_path" '$seed | split($path)[0]')"
+      seed_suffix="$(jq -nr --arg seed "$semantic_seed" --arg path "$key_path" '$seed | split($path)[1]')"
+      legacy_path="$(jq -nr --arg legacy "$legacy_key" --arg prefix "$seed_prefix" --arg suffix "$seed_suffix" '
+        if ($legacy | startswith($prefix)) and ($legacy | endswith($suffix))
+        then $legacy | ltrimstr($prefix) | rtrimstr($suffix)
+        else empty end
+      ')"
+      [ -n "$legacy_path" ] || continue
+      if [ "$legacy_path" != "$key_path" ]; then
+        case "$legacy_path" in /*/"$key_path") : ;; *) continue ;; esac
+      fi
+      normalized_seed="$(printf '%s' "$legacy_key" | jq -Rr --arg raw "$legacy_path" --arg path "$key_path" 'split($raw) | join($path)')"
+      [ "$normalized_seed" = "$semantic_seed" ] || continue
     fi
     candidate_title="$(printf '%s' "$candidate" | jq -r '.title // ""')"
     if [ -n "$legacy_path" ]; then
       candidate_title="$(printf '%s' "$candidate_title" | jq -Rr --arg raw "$legacy_path" --arg path "$key_path" 'split($raw) | join($path)')"
     fi
-    [ "$candidate_title" = "$title" ] || continue
+    candidate_title="${candidate_title#autospec audit: }"
+    [ "$(normalize_title_identity "$candidate_title")" = "$key_title" ] || continue
     printf '%s' "$candidate"
     return 0
   done <<EOF
