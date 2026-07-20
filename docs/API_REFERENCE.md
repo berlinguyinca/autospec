@@ -639,6 +639,10 @@ autospec autonomous premerge evaluate --repo OWNER/REPO --repo-dir DIR \
 Evidence is produced by the fixed Rust schema-1 producers `autospec-qa` and
 `autospec-secaudit` and must be present at
 `.autospec/evidence/premerge/<lane-digest>/qa.json` and `security.json`. The
+Each document contains exactly `schema`, `kind`, `producer`, `lane`, `run_id`,
+`completed_at`, and `verdict`; QA uses kind `qa`, security uses kind `security`,
+and verdict is exactly `pass`, `blocked` with bounded `finding_codes`, or
+`failed` with a bounded `reason`.
 working tree must be attached to a named branch with no tracked staged or
 unstaged changes; fixed untracked evidence files are allowed. The command writes
 immutable decisions at

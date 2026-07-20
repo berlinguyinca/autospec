@@ -14,7 +14,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[path = "autonomous_premerge_authority.rs"]
 mod authority;
-
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 struct Fixture {
     root: PathBuf,
@@ -185,10 +184,7 @@ fn git_stdout(repo_dir: &Path, args: &[&str]) -> String {
         .output()
         .expect("git starts");
     assert!(output.status.success(), "git {args:?}");
-    String::from_utf8(output.stdout)
-        .expect("git output is UTF-8")
-        .trim()
-        .to_string()
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 fn write_executable(path: &Path, contents: &[u8]) {
     fs::write(path, contents).expect("executable fixture");

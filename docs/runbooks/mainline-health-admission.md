@@ -65,7 +65,10 @@ autospec autonomous premerge evaluate --repo OWNER/REPO --repo-dir DIR \
 ```
 
 The `autospec-qa` and `autospec-secaudit` producers write schema-1 JSON only to the fixed untracked paths
-`.autospec/evidence/premerge/<lane-digest>/qa.json` and `security.json`. Tracked
+`.autospec/evidence/premerge/<lane-digest>/qa.json` and `security.json`.
+Each document has exactly `schema`, `kind`, `producer`, `lane`, `run_id`,
+`completed_at`, and `verdict`; verdicts are `pass`, bounded-code `blocked`, or
+bounded-reason `failed`, with the producer/kind pair fixed per file. Tracked
 staged or unstaged changes reject admission, as do detached or non-attached
 worktrees; those two untracked evidence files are intentionally permitted. The
 evaluator verifies canonical lane and evidence digests, writes immutable
@@ -73,7 +76,9 @@ decisions under
 `.autospec/autonomous-operator/<scope>/premerge/lanes/<lane-digest>/decisions/<evidence-digest>.json`,
 plus `latest.json` and blocked-lane `quarantine.json`. Any missing, malformed,
 mismatched, or unavailable evidence fails closed. Exit 0 is pass, 20 is
-blocked/quarantined (another lane may continue), and 2 is diagnostic failure.
+blocked/quarantined, and 2 is diagnostic failure. Quarantine-and-continue
+orchestration remains supervised-executor follow-up; this command only records
+the lane decision.
 
 The receipt is an observability/admission artifact, not a foreground executor:
 the supervised Rust executor and live QA/security producers remain follow-up
