@@ -21,6 +21,7 @@ const GITHUB_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
 const OBSERVER_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const SESSION_RECONCILIATION_TIMEOUT_SECS: u64 = 300;
 const SESSION_STARTUP_RETRY_LIMIT: u32 = 3;
+const STARTUP_RETRY_STATE_FILE: &str = "drain-startup-retry.json";
 
 enum ChildTermination {
     Exited(ExitStatus),
@@ -60,6 +61,7 @@ enum SessionOutputEvent {
 struct SessionStartupTracker {
     pending: HashMap<String, Instant>,
     reconciled: HashMap<String, Instant>,
+    matched_reconciliation: bool,
 }
 
 enum StartupRetryDecision {
@@ -79,6 +81,36 @@ struct StartupRetryState {
 }
 
 impl StartupRetryState {
+    fn load(layout: &RunLayout) -> Result<Self, CommandFailure> {
+        let path = layout.state_dir.join(STARTUP_RETRY_STATE_FILE);
+        let raw = match fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(error) => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "cannot read {}: {error}",
+                    path.display()
+                )))
+            }
+        };
+        let schema = super::extract_json_number(&raw, "schema");
+        let repo = super::extract_json_string(&raw, "repo");
+        let failures = super::extract_json_number(&raw, "failures")
+            .and_then(|value| value.parse::<u32>().ok());
+        if schema.as_deref() != Some("1") || repo.as_deref() != Some(&layout.repo) {
+            return Err(CommandFailure::diagnostic(format!(
+                "cannot recover startup retry state from {}",
+                path.display()
+            )));
+        }
+        failures.map(|failures| Self { failures }).ok_or_else(|| {
+            CommandFailure::diagnostic(format!(
+                "cannot recover startup retry state from {}",
+                path.display()
+            ))
+        })
+    }
+
     fn record_failure(&mut self) -> StartupRetryDecision {
         self.failures += 1;
         if self.failures <= SESSION_STARTUP_RETRY_LIMIT {
@@ -90,6 +122,41 @@ impl StartupRetryState {
 
     fn attempt(&self) -> u32 {
         self.failures + 1
+    }
+
+    fn exhausted(&self) -> bool {
+        self.failures > SESSION_STARTUP_RETRY_LIMIT
+    }
+
+    fn persist(&self, layout: &RunLayout) -> Result<(), CommandFailure> {
+        let path = layout.state_dir.join(STARTUP_RETRY_STATE_FILE);
+        let body = format!(
+            "{{\"schema\":1,\"repo\":\"{}\",\"failures\":{}}}\n",
+            json_escape(&layout.repo),
+            self.failures
+        );
+        super::atomic_write(&path, &body).map_err(CommandFailure::diagnostic)
+    }
+
+    fn reset(&mut self, layout: &RunLayout) -> Result<(), CommandFailure> {
+        if self.failures == 0 {
+            return Ok(());
+        }
+        let path = layout.state_dir.join(STARTUP_RETRY_STATE_FILE);
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                self.failures = 0;
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                self.failures = 0;
+                Ok(())
+            }
+            Err(error) => Err(CommandFailure::diagnostic(format!(
+                "cannot clear {}: {error}",
+                path.display()
+            ))),
+        }
     }
 }
 
@@ -125,7 +192,11 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
 
     let startup_timeout =
         Duration::from_secs(SESSION_RECONCILIATION_TIMEOUT_SECS.min(options.drain_stall_secs));
-    let mut startup_retry = StartupRetryState::default();
+    let mut startup_retry = StartupRetryState::load(&layout)?;
+    if startup_retry.exhausted() {
+        emit_recovered_retry_exhaustion(&options, startup_retry.failures);
+        return Err(CommandFailure::status(String::new(), 124));
+    }
 
     'attempt: loop {
         let mut child = spawn_child(&options)?;
@@ -160,6 +231,9 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                     startup_timeout,
                     Duration::from_secs(options.drain_poll_secs),
                 )?;
+                if session_tracker.matched_reconciliation {
+                    startup_retry.reset(&layout)?;
+                }
                 if let Some(status) = child.try_wait().map_err(child_status_error)? {
                     break 'supervise DrainAttemptEnd::Complete(status);
                 }
@@ -242,7 +316,9 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
 
         match attempt_end {
             DrainAttemptEnd::Complete(status) => {
-                return complete(
+                let _ = terminate_child(&mut child)?;
+                let successful = status.success();
+                let result = complete(
                     &layout,
                     &options,
                     status,
@@ -250,11 +326,16 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                     &mut readers,
                     &mut session_tracker,
                     startup_timeout,
-                )
+                );
+                if successful || session_tracker.matched_reconciliation {
+                    startup_retry.reset(&layout)?;
+                }
+                return result;
             }
             DrainAttemptEnd::StartupTimedOut { session_id } => {
                 let attempt = startup_retry.attempt();
                 let retry = startup_retry.record_failure();
+                startup_retry.persist(&layout)?;
                 persist_and_emit_startup_timeout(&layout, &options, &session_id, attempt, &retry)?;
                 join_readers(&mut readers);
                 match retry {
@@ -401,7 +482,7 @@ fn record_session_event(
             observed_at,
             requires_reconciliation,
         } => {
-            tracker.record_start(&session_id, observed_at, requires_reconciliation, timeout);
+            tracker.record_start(&session_id, observed_at, requires_reconciliation);
             persist_and_emit_session_state(
                 layout,
                 options,
@@ -466,19 +547,14 @@ impl SessionStartupTracker {
         session_id: &str,
         observed_at: Instant,
         requires_reconciliation: bool,
-        timeout: Duration,
     ) {
         if !requires_reconciliation {
             return;
         }
-        let already_reconciled = self
-            .reconciled
-            .remove(session_id)
-            .is_some_and(|reconciled_at| {
-                reconciled_at >= observed_at
-                    && reconciled_at.saturating_duration_since(observed_at) <= timeout
-            });
-        if !already_reconciled {
+        let already_reconciled = self.reconciled.remove(session_id).is_some();
+        if already_reconciled {
+            self.matched_reconciliation = true;
+        } else {
             self.pending.insert(session_id.to_string(), observed_at);
         }
     }
@@ -490,12 +566,14 @@ impl SessionStartupTracker {
         timeout: Duration,
     ) -> bool {
         self.reconciled.insert(session_id.to_string(), observed_at);
-        let reconciled_in_time = self
-            .pending
-            .get(session_id)
-            .is_none_or(|started_at| observed_at.saturating_duration_since(*started_at) <= timeout);
+        let pending_start = self.pending.get(session_id).copied();
+        let reconciled_in_time = pending_start
+            .is_none_or(|started_at| observed_at.saturating_duration_since(started_at) <= timeout);
         if reconciled_in_time {
             self.pending.remove(session_id);
+            if pending_start.is_some() {
+                self.matched_reconciliation = true;
+            }
         }
         reconciled_in_time
     }
@@ -568,6 +646,18 @@ fn persist_and_emit_startup_timeout(
         );
     }
     Ok(())
+}
+
+fn emit_recovered_retry_exhaustion(options: &Options, failures: u32) {
+    if options.json {
+        println!(
+            "{{\"command\":\"autonomous\",\"subcommand\":\"drain\",\"decision\":\"startup_retry_exhausted\",\"attempt\":{failures}}}"
+        );
+    } else {
+        eprintln!(
+            "autospec autonomous drain: startup retry budget already exhausted at attempt {failures}"
+        );
+    }
 }
 
 fn persist_session_event(layout: &RunLayout, body: &str) -> Result<(), CommandFailure> {
@@ -663,11 +753,14 @@ fn emit_termination(layout: &RunLayout, options: &Options, elapsed_secs: u64) {
 }
 
 fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure> {
-    if let Some(status) = child.try_wait().map_err(child_status_error)? {
-        return Ok(ChildTermination::Exited(status));
-    }
     let pid = child.id();
     let process_group = format!("-{pid}");
+    let leader_status = child.try_wait().map_err(child_status_error)?;
+    if !process_group_is_alive(&process_group)? {
+        return Ok(leader_status
+            .or(child.try_wait().map_err(child_status_error)?)
+            .map_or(ChildTermination::Terminated, ChildTermination::Exited));
+    }
     let status = Command::new("kill")
         .args(["-TERM", "--", &process_group])
         .status()
@@ -675,6 +768,12 @@ fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure
             CommandFailure::diagnostic(format!("cannot terminate drain child: {error}"))
         })?;
     if !status.success() {
+        if !process_group_is_alive(&process_group)? {
+            if let Some(status) = leader_status.or(child.try_wait().map_err(child_status_error)?) {
+                return Ok(ChildTermination::Exited(status));
+            }
+            return Ok(ChildTermination::Terminated);
+        }
         if let Some(status) = child.try_wait().map_err(child_status_error)? {
             return Ok(ChildTermination::Exited(status));
         }
@@ -683,13 +782,19 @@ fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure
         ));
     }
     if wait_for_process_group_exit(child, &process_group)? {
-        return Ok(ChildTermination::Terminated);
+        return Ok(leader_status.map_or(ChildTermination::Terminated, ChildTermination::Exited));
     }
     let status = Command::new("kill")
         .args(["-KILL", "--", &process_group])
         .status()
         .map_err(|error| CommandFailure::diagnostic(format!("cannot kill drain child: {error}")))?;
     if !status.success() {
+        if !process_group_is_alive(&process_group)? {
+            if let Some(status) = leader_status.or(child.try_wait().map_err(child_status_error)?) {
+                return Ok(ChildTermination::Exited(status));
+            }
+            return Ok(ChildTermination::Terminated);
+        }
         if let Some(status) = child.try_wait().map_err(child_status_error)? {
             return Ok(ChildTermination::Exited(status));
         }
@@ -702,7 +807,7 @@ fn terminate_child(child: &mut Child) -> Result<ChildTermination, CommandFailure
             "drain child process group did not exit".to_string(),
         ));
     }
-    Ok(ChildTermination::Terminated)
+    Ok(leader_status.map_or(ChildTermination::Terminated, ChildTermination::Exited))
 }
 
 fn wait_for_process_group_exit(
@@ -1066,7 +1171,7 @@ mod tests {
         let reconciled_at = started_at + Duration::from_millis(1);
 
         tracker.record_reconciliation("child-1850", reconciled_at, Duration::from_secs(1));
-        tracker.record_start("child-1850", started_at, true, Duration::from_secs(1));
+        tracker.record_start("child-1850", started_at, true);
 
         assert!(tracker.pending.is_empty());
     }

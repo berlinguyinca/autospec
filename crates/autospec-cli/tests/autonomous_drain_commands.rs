@@ -397,6 +397,33 @@ done
 }
 
 #[test]
+fn matching_reconciliation_from_the_other_pipe_cancels_an_inverted_delivery() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+printf 'session_start_reconciled child=child-cross-pipe-1850 session_turns=1 issue_claim=1850\n' >&2
+sleep 0.1
+printf 'session_start child=child-cross-pipe-1850 session_turns=0 issue_claim=none\n'
+for step in 1 2 3 4; do
+  printf 'working step=%s\n' "$step"
+  sleep 0.4
+done
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture.run(&bin, &["--stall-secs", "1", "--poll-secs", "1", "--json"]);
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(stdout(&output).contains("\"event\":\"session_start_reconciled\""));
+    assert!(!stdout(&output).contains("session_start_timeout"));
+}
+
+#[test]
 fn unreconciled_startup_exhausts_bounded_retries_and_kills_every_process_group() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
@@ -504,6 +531,130 @@ printf 'session_start_reconciled child=child-1850 session_turns=1 issue_claim=18
     );
     assert!(stdout(&output).contains("\"retry\":\"scheduled\""));
     assert!(stdout(&output).contains("\"event\":\"session_start_reconciled\""));
+}
+
+#[test]
+fn startup_retry_exhaustion_survives_separate_drain_invocations() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let attempts = fixture.root.join("attempts");
+    let phase = fixture.root.join("phase");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    fs::write(&phase, "first\n").expect("write first invocation phase");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AUTOSPEC_TEST_ATTEMPTS" ]; then
+  attempt=$(cat "$AUTOSPEC_TEST_ATTEMPTS")
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" > "$AUTOSPEC_TEST_ATTEMPTS"
+if [ "$(cat "$AUTOSPEC_TEST_PHASE")" = first ] && [ "$attempt" -eq 2 ]; then
+  exit 7
+fi
+printf 'session_start child=child-persisted-1850 session_turns=0 issue_claim=none\n'
+trap '' TERM
+while :; do
+  printf 'startup still active attempt=%s\n' "$attempt"
+  sleep 0.1
+done
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let first = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_ATTEMPTS", &attempts)
+        .env("AUTOSPEC_TEST_PHASE", &phase)
+        .output()
+        .expect("run first drain invocation");
+    assert_eq!(first.status.code(), Some(7), "stderr={}", stderr(&first));
+    assert!(stdout(&first).contains("\"attempt\":1"));
+
+    fs::write(&phase, "second\n").expect("write second invocation phase");
+    let second = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_ATTEMPTS", &attempts)
+        .env("AUTOSPEC_TEST_PHASE", &phase)
+        .output()
+        .expect("run second drain invocation");
+
+    assert_eq!(
+        second.status.code(),
+        Some(124),
+        "stderr={}",
+        stderr(&second)
+    );
+    assert!(stdout(&second).contains("\"retry\":\"exhausted\",\"attempt\":4"));
+    assert_eq!(
+        fs::read_to_string(&attempts)
+            .expect("read total process launches")
+            .trim(),
+        "5",
+        "the second command must resume at persisted startup failure 1"
+    );
+
+    let third = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_ATTEMPTS", &attempts)
+        .env("AUTOSPEC_TEST_PHASE", &phase)
+        .output()
+        .expect("run after persisted retry exhaustion");
+    assert_eq!(third.status.code(), Some(124), "stderr={}", stderr(&third));
+    assert_eq!(
+        fs::read_to_string(&attempts)
+            .expect("read launches after persisted exhaustion")
+            .trim(),
+        "5",
+        "an exhausted restart must not launch another child"
+    );
+}
+
+#[test]
+fn successful_command_clears_recovered_startup_failures_without_session_output() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let attempts = fixture.root.join("attempts");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+attempt=0
+if [ -f "$AUTOSPEC_TEST_ATTEMPTS" ]; then
+  attempt=$(cat "$AUTOSPEC_TEST_ATTEMPTS")
+fi
+attempt=$((attempt + 1))
+printf '%s\n' "$attempt" > "$AUTOSPEC_TEST_ATTEMPTS"
+if [ "$attempt" -gt 1 ]; then
+  exit 0
+fi
+printf 'session_start child=child-reset-1850 session_turns=0 issue_claim=none\n'
+while :; do
+  printf 'startup still active\n'
+  sleep 0.1
+done
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "1", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_ATTEMPTS", &attempts)
+        .output()
+        .expect("run timeout followed by successful child");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(
+        !fixture.startup_retry_path().exists(),
+        "a successful command must clear prior startup failures"
+    );
 }
 
 #[test]
@@ -762,6 +913,42 @@ wait
 }
 
 #[test]
+fn completed_leader_terminates_a_descendant_that_keeps_both_pipes_open() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let descendant_pid = fixture.root.join("descendant-pid");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+(
+  trap '' TERM
+  exec sleep 8
+) &
+printf '%s\n' "$!" > "$AUTOSPEC_TEST_DESCENDANT_PID"
+exit 0
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let started = Instant::now();
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "30", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_DESCENDANT_PID", &descendant_pid)
+        .output()
+        .expect("run drain after leader exits with inherited pipes");
+
+    assert!(output.status.success(), "stderr={}", stderr(&output));
+    assert!(
+        started.elapsed().as_secs() < 5,
+        "drain joined inherited pipes before terminating the process group: {:?}",
+        started.elapsed()
+    );
+    assert_process_is_gone(&descendant_pid);
+}
+
+#[test]
 fn child_exit_is_not_blocked_by_a_hung_github_snapshot() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
@@ -867,6 +1054,12 @@ impl DrainFixture {
         self.operator_root
             .join("o5_owner_r4_repo")
             .join("drain-observation.json")
+    }
+
+    fn startup_retry_path(&self) -> PathBuf {
+        self.operator_root
+            .join("o5_owner_r4_repo")
+            .join("drain-startup-retry.json")
     }
 
     fn initialize_git_remote(&self) {

@@ -15,6 +15,38 @@ teardown() {
   rm -rf "$TEST_TMP"
 }
 
+@test "operator cli: default foreground drain dispatches the typed autonomous command" {
+  local scripts_dir="$TEST_TMP/scripts"
+  local bin_dir="$TEST_TMP/bin"
+  local args_file="$TEST_TMP/autospec-args"
+  mkdir -p "$scripts_dir/lib" "$bin_dir"
+  cp "$CLI" "$scripts_dir/autospec-autonomous.sh"
+  chmod +x "$scripts_dir/autospec-autonomous.sh"
+  cat > "$scripts_dir/lib/autospec-loop.sh" <<'EOF'
+autospec_conductor_run() {
+  bash -c "$AUTOSPEC_RUN_CMD"
+}
+EOF
+  cat > "$bin_dir/autospec" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$@" > "$AUTOSPEC_TEST_ARGS_FILE"
+EOF
+  chmod +x "$bin_dir/autospec"
+
+  unset AUTOSPEC_RUN_CMD
+  AUTOSPEC_TEST_ARGS_FILE="$args_file" PATH="$bin_dir:$PATH" run \
+    bash "$scripts_dir/autospec-autonomous.sh" run-foreground \
+      --repo berlinguyinca/autospec --repo-dir "$REPO_ROOT"
+
+  [ "$status" -eq 0 ]
+  [ "$(sed -n '1p' "$args_file")" = "autonomous" ]
+  [ "$(sed -n '2p' "$args_file")" = "drain" ]
+  [ "$(sed -n '3p' "$args_file")" = "--repo" ]
+  [ "$(sed -n '4p' "$args_file")" = "berlinguyinca/autospec" ]
+  [ "$(sed -n '5p' "$args_file")" = "--repo-dir" ]
+  [ "$(sed -n '6p' "$args_file")" = "$REPO_ROOT" ]
+}
+
 @test "operator cli: status emits machine-readable stopped state" {
   run bash "$CLI" status --json
 
