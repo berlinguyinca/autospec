@@ -231,6 +231,43 @@ fn issue_promote_rolls_back_auto_implement_when_post_write_state_drifts() {
 }
 
 #[test]
+fn issue_promote_rolls_back_auto_implement_when_final_read_fails() {
+    let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_PROMOTE_FAILURE", "final-get")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("gh issue read failed"));
+    assert!(!labels(&fixture.issue()).contains(&"auto-implement"));
+    let calls = fixture.calls();
+    assert_before(&calls, "labels[]=auto-implement", "labels/auto-implement");
+    assert!(calls.rfind("--method GET").unwrap() > calls.rfind("labels/auto-implement").unwrap());
+}
+
+#[test]
+fn issue_promote_surfaces_verified_rollback_failure_when_auto_label_cannot_be_removed() {
+    let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_PROMOTE_RACE", "after-auto")
+        .env("AUTOSPEC_PROMOTE_FAILURE", "rollback-delete")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ISSUE_PROMOTION_ROLLBACK_FAILED"));
+    assert!(labels(&fixture.issue()).contains(&"auto-implement"));
+    let calls = fixture.calls();
+    assert_before(&calls, "labels[]=auto-implement", "labels/auto-implement");
+    assert!(calls.rfind("--method GET").unwrap() > calls.rfind("labels/auto-implement").unwrap());
+}
+
+#[test]
 fn issue_promote_fails_closed_for_unsupported_repository_policy() {
     let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
     let policy = fixture.policy(
@@ -327,6 +364,13 @@ case "$method:$endpoint" in
       jq '.title += " (changed)"' "$state" > "$state.tmp"
       mv "$state.tmp" "$state"
     fi
+    if [ "${AUTOSPEC_PROMOTE_FAILURE:-}" = final-get ] \
+      && jq -e '.labels | index("auto-implement")' "$state" >/dev/null \
+      && [ ! -e "$state.final-get-failed" ]; then
+      : > "$state.final-get-failed"
+      printf 'simulated final read failure\n' >&2
+      exit 42
+    fi
     cat "$state"
     ;;
   PATCH:repos/test/repo/issues/1890)
@@ -345,6 +389,10 @@ case "$method:$endpoint" in
     ;;
   DELETE:repos/test/repo/issues/1890/labels/*)
     label="${endpoint##*/}"
+    if [ "${AUTOSPEC_PROMOTE_FAILURE:-}" = rollback-delete ] && [ "$label" = auto-implement ]; then
+      printf 'simulated rollback delete failure\n' >&2
+      exit 43
+    fi
     jq --arg label "$label" '.labels = [.labels[] | select(. != $label)]' "$state" > "$state.tmp"
     mv "$state.tmp" "$state"
     ;;

@@ -71,12 +71,60 @@ pub(super) fn rollback_owned_labels(
     number: u64,
     initial: &RemoteIssue,
     removed_labels: &[String],
-) {
-    let _ = remove_issue_label(repo, number, "auto-implement");
-    if !has_label(initial, "safety:reviewed") {
-        let _ = remove_issue_label(repo, number, "safety:reviewed");
+) -> Result<(), CommandFailure> {
+    let mut mutation_failures = Vec::new();
+    if let Err(error) = remove_issue_label(repo, number, "auto-implement") {
+        mutation_failures.push(error.message);
     }
-    restore_removed_labels(repo, initial, removed_labels);
+    if !has_label(initial, "safety:reviewed") {
+        if let Err(error) = remove_issue_label(repo, number, "safety:reviewed") {
+            mutation_failures.push(error.message);
+        }
+    }
+    for label in removed_labels {
+        if has_label(initial, label) {
+            if let Err(error) = add_issue_label(repo, number, label) {
+                mutation_failures.push(error.message);
+            }
+        }
+    }
+
+    let current = match read_issue(repo, number) {
+        Ok(issue) => issue,
+        Err(error) => {
+            return Err(rollback_failure(
+                mutation_failures,
+                format!("could not verify rollback state: {}", error.message),
+            ))
+        }
+    };
+    let mut residual_state = Vec::new();
+    if has_label(&current, "auto-implement") {
+        residual_state.push("auto-implement remains present".to_string());
+    }
+    if has_label(&current, "safety:reviewed") != has_label(initial, "safety:reviewed") {
+        residual_state.push("safety:reviewed was not restored to its initial state".to_string());
+    }
+    for label in removed_labels {
+        if has_label(initial, label) && !has_label(&current, label) {
+            residual_state.push(format!("{label} remains absent"));
+        }
+    }
+    if residual_state.is_empty() {
+        return Ok(());
+    }
+    Err(rollback_failure(
+        mutation_failures,
+        residual_state.join("; "),
+    ))
+}
+
+fn rollback_failure(mut mutation_failures: Vec<String>, verification: String) -> CommandFailure {
+    mutation_failures.push(verification);
+    CommandFailure::diagnostic(format!(
+        "ISSUE_PROMOTION_ROLLBACK_FAILED: {}",
+        mutation_failures.join("; ")
+    ))
 }
 
 fn run_gh(args: &[&str]) -> Result<Output, CommandFailure> {

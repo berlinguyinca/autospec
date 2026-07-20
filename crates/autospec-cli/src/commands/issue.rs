@@ -227,8 +227,13 @@ fn promote_remote_issue(
     let stamped = read_issue(repo, number)?;
     let stamped_labels = with_label(initial.labels.clone(), "safety:reviewed");
     if !snapshot_matches(&stamped, &initial, &stamped_body, &stamped_labels) {
-        rollback_owned_labels(repo, number, &initial, remove_labels);
-        return Err(promotion_conflict("issue changed while safety was stamped"));
+        return Err(rollback_after_error(
+            repo,
+            number,
+            &initial,
+            remove_labels,
+            promotion_conflict("issue changed while safety was stamped"),
+        ));
     }
     let stamped_decision = evaluate(&stamped, trusted_actors);
     if !stamped_decision.auto_implement || !stamped_decision.eligible {
@@ -238,17 +243,41 @@ fn promote_remote_issue(
         });
     }
 
-    add_issue_label(repo, number, "auto-implement")?;
+    if let Err(error) = add_issue_label(repo, number, "auto-implement") {
+        return Err(rollback_after_error(
+            repo,
+            number,
+            &initial,
+            remove_labels,
+            error,
+        ));
+    }
     for label in remove_labels {
         if has_label(&stamped, label) {
             if let Err(error) = remove_issue_label(repo, number, label) {
-                rollback_owned_labels(repo, number, &initial, remove_labels);
-                return Err(error);
+                return Err(rollback_after_error(
+                    repo,
+                    number,
+                    &initial,
+                    remove_labels,
+                    error,
+                ));
             }
         }
     }
 
-    let final_issue = read_issue(repo, number)?;
+    let final_issue = match read_issue(repo, number) {
+        Ok(issue) => issue,
+        Err(error) => {
+            return Err(rollback_after_error(
+                repo,
+                number,
+                &initial,
+                remove_labels,
+                error,
+            ))
+        }
+    };
     let mut final_labels = with_label(stamped_labels, "auto-implement");
     for label in remove_labels {
         final_labels.retain(|current| current != label);
@@ -258,15 +287,37 @@ fn promote_remote_issue(
         || !final_decision.auto_implement
         || !final_decision.eligible
     {
-        rollback_owned_labels(repo, number, &initial, remove_labels);
-        return Err(promotion_conflict(
-            "issue changed after auto-implement transition; label rolled back",
+        return Err(rollback_after_error(
+            repo,
+            number,
+            &initial,
+            remove_labels,
+            promotion_conflict("issue changed after auto-implement transition; label rolled back"),
         ));
     }
     Ok(PromotionResult {
         decision: final_decision,
         changed: true,
     })
+}
+
+fn rollback_after_error(
+    repo: &str,
+    number: u64,
+    initial: &RemoteIssue,
+    remove_labels: &[String],
+    original: CommandFailure,
+) -> CommandFailure {
+    match rollback_owned_labels(repo, number, initial, remove_labels) {
+        Ok(()) => original,
+        Err(rollback) => CommandFailure::status(
+            format!(
+                "{}; original failure: {}",
+                rollback.message, original.message
+            ),
+            rollback.exit_code,
+        ),
+    }
 }
 
 fn verify_owned_cleanup(

@@ -113,6 +113,9 @@ EOF
 
     cat > "$TMP/bin/groom-config.sh" <<'EOF'
 #!/usr/bin/env bash
+if [ "${AUTOSPEC_GROOM_CONFIG_FAIL:-}" = "1" ]; then
+  exit 42
+fi
 case "$*" in
   *"policy"*) printf '%s\n' "${AUTOSPEC_GROOMING_POLICY:-auto}" ;;
   *"budget.max_issues_per_cycle"*) printf '5\n' ;;
@@ -165,6 +168,16 @@ teardown() {
     [ "$(echo "$output" | jq -r '.dry')" = "true" ]
     [ "$(echo "$output" | jq -r '.filed')" = "0" ]
     ! grep -q 'issue edit' "$GH_LOG"
+}
+
+@test "apply stays report-only when the policy resolver fails" {
+    AUTOSPEC_GROOM_CONFIG_FAIL=1 run bash "$SCRIPT" --repo owner/repo --apply
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e . >/dev/null
+    [ "$(echo "$output" | jq -r '.dry')" = "true" ]
+    [ "$(echo "$output" | jq -r '.filed')" = "0" ]
+    ! grep -q 'issue edit' "$GH_LOG"
+    ! grep -q 'autospec issue promote' "$GH_LOG"
 }
 
 # ── Apply mode enabled (both gates) ────────────────────────────────────────────

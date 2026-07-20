@@ -118,8 +118,8 @@ fi
 [ -n "$repo" ] || die "--repo is required when gh cannot infer it"
 
 # ── Policy gate: apply iff --apply AND policy ∈ {auto,on} ──────────────────────
-policy="$(bash "$GROOM_CONFIG" --key policy 2>/dev/null || printf 'auto')"
-[ -n "$policy" ] || policy="auto"
+policy="$(bash "$GROOM_CONFIG" --key policy 2>/dev/null || printf 'off')"
+[ -n "$policy" ] || policy="off"
 
 apply_enabled=0
 if [ "$apply_flag" = "1" ]; then
