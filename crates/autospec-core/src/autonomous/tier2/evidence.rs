@@ -1,3 +1,7 @@
+use std::collections::BTreeSet;
+
+use sha2::{Digest, Sha256};
+
 use super::model::{
     StrictCollectorEvidence, Tier2Deduplication, Tier2Evaluation, Tier2Failure,
     Tier2GeneratedProposals, Tier2Observation, Tier2Proposal, Tier2RankedProposal,
@@ -5,6 +9,71 @@ use super::model::{
     TIER2_SCHEMA,
 };
 use super::partial::PartialEvidenceState;
+
+const EXCLUSION_DIGEST_VERSION: &str = "autospec-tier2-exclusion-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier2PollutionCode {
+    ProhibitedVendorPath,
+}
+
+impl Tier2PollutionCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProhibitedVendorPath => "prohibited_vendor_path",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tier2PollutionFinding {
+    pub path: String,
+    pub excluded_component: String,
+    pub finding: Tier2PollutionCode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tier2ExclusionReport {
+    pub(super) policy_digest: String,
+    pub(super) excluded_path_count: u64,
+    pub(super) pollution_findings: Vec<Tier2PollutionFinding>,
+}
+
+impl Tier2ExclusionReport {
+    pub fn policy_digest(&self) -> &str {
+        &self.policy_digest
+    }
+
+    pub fn excluded_path_count(&self) -> u64 {
+        self.excluded_path_count
+    }
+
+    pub fn pollution_findings(&self) -> &[Tier2PollutionFinding] {
+        &self.pollution_findings
+    }
+}
+
+pub(super) fn exclusion_policy_digest(components: &BTreeSet<String>) -> String {
+    let mut digest = Sha256::new();
+    for value in
+        std::iter::once(EXCLUSION_DIGEST_VERSION).chain(components.iter().map(String::as_str))
+    {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub(super) fn valid_exclusion_component(value: &str) -> bool {
+    super::model::bounded_text(value, super::model::FIELD_SCALAR_LIMIT)
+        && !matches!(value, "." | "..")
+        && !value.contains(['/', '\\'])
+        && value.trim() == value
+}
 
 /// Read-only canonical receipts derived from one evaluator-sealed outcome.
 pub struct Tier2EvidenceDocuments<'a> {
@@ -58,7 +127,15 @@ impl Tier2Failure {
 
 impl Tier2EvidenceDocuments<'_> {
     pub fn collector_json(&self) -> Option<String> {
-        self.collector().map(collector_json)
+        match self.source {
+            DocumentSource::Observation(observation) => Some(collector_json(
+                observation.collector(),
+                Some(observation.exclusion_report()),
+            )),
+            DocumentSource::Failure(failure) => self
+                .collector()
+                .map(|collector| collector_json(collector, failure.exclusion_report.as_ref())),
+        }
     }
 
     pub fn generated_json(&self, predecessor_digest: &str) -> Result<Option<String>, String> {
@@ -154,22 +231,50 @@ pub(super) fn render_tier2_evaluation_json(evaluation: &Tier2Evaluation) -> Stri
             text(not_run.reason())
         ),
         Tier2Evaluation::Complete(observation) => format!(
-            "{{\"schema\":{TIER2_SCHEMA},\"kind\":\"tier2_evaluation\",\"result\":\"complete\",\"funnel\":{},\"ranked\":[{}]}}\n",
+            "{{\"schema\":{TIER2_SCHEMA},\"kind\":\"tier2_evaluation\",\"result\":\"complete\",\"exclusion_policy\":{},\"funnel\":{},\"ranked\":[{}]}}\n",
+            exclusion_report_json(observation.exclusion_report()),
             funnel_json(observation.funnel()),
             observation.ranked().iter().map(ranked_json).collect::<Vec<_>>().join(",")
         ),
     }
 }
 
-fn collector_json(collector: &StrictCollectorEvidence) -> String {
+fn exclusion_report_json(report: &super::Tier2ExclusionReport) -> String {
+    let findings = report
+        .pollution_findings()
+        .iter()
+        .map(|finding| {
+            format!(
+                "{{\"finding\":{},\"path\":{},\"excluded_component\":{}}}",
+                text(finding.finding.as_str()),
+                text(&finding.path),
+                text(&finding.excluded_component),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"policy_digest\":{},\"excluded_path_count\":{},\"pollution_findings\":[{findings}]}}",
+        text(report.policy_digest()),
+        report.excluded_path_count(),
+    )
+}
+
+fn collector_json(
+    collector: &StrictCollectorEvidence,
+    exclusion_report: Option<&Tier2ExclusionReport>,
+) -> String {
     let domains = collector
         .domains
         .iter()
         .map(domain_json)
         .collect::<Vec<_>>()
         .join(",");
+    let exclusion_policy = exclusion_report
+        .map(exclusion_report_json)
+        .unwrap_or_else(|| "null".to_string());
     format!(
-        "{{\"schema\":{TIER2_SCHEMA},\"kind\":\"tier2_collector\",\"collector_version\":{},\"canonical_repo_scope\":{},\"domains\":[{domains}]}}\n",
+        "{{\"schema\":{TIER2_SCHEMA},\"kind\":\"tier2_collector\",\"collector_version\":{},\"canonical_repo_scope\":{},\"exclusion_policy\":{exclusion_policy},\"domains\":[{domains}]}}\n",
         text(&collector.collector_version),
         text(&collector.canonical_repo_scope),
     )

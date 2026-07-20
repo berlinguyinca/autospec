@@ -5,6 +5,8 @@ use crate::autonomous::waterfall::FunnelCounts;
 
 use super::{evidence, partial::Tier2PartialEvidence, DISABLED_REASON};
 
+pub use super::evidence::{Tier2ExclusionReport, Tier2PollutionCode, Tier2PollutionFinding};
+
 pub use crate::explore::specialists::StrictCollectorEvidence;
 
 pub const TIER2_SCHEMA: u64 = 1;
@@ -12,6 +14,73 @@ pub const TIER2_RANK_LIMIT: u64 = IDEATION_CANDIDATE_LIMIT;
 pub const TIER2_NORMALIZATION_VERSION: u64 = 1;
 pub(super) const FIELD_SCALAR_LIMIT: usize = 200;
 pub(super) const REASON_SCALAR_LIMIT: usize = 240;
+const DEFAULT_EXCLUDED_COMPONENTS: &[&str] = &[
+    ".cache",
+    ".git",
+    ".next",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tier2ExclusionPolicy {
+    excluded_components: BTreeSet<String>,
+    digest: String,
+}
+
+impl Tier2ExclusionPolicy {
+    pub fn with_repository_additions<I, S>(additions: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut components = DEFAULT_EXCLUDED_COMPONENTS
+            .iter()
+            .map(|value| value.to_string())
+            .collect::<Vec<_>>();
+        components.extend(
+            additions
+                .into_iter()
+                .map(|value| value.as_ref().to_string()),
+        );
+        Self::from_components(components)
+    }
+
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+
+    pub fn excludes_component(&self, component: &str) -> bool {
+        self.excluded_components.contains(component)
+    }
+
+    pub(super) fn matching_component<'a>(&self, path: &'a str) -> Option<&'a str> {
+        path.split('/')
+            .find(|component| self.excludes_component(component))
+    }
+
+    fn from_components<I, S>(components: I) -> Result<Self, String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut excluded_components = BTreeSet::new();
+        for component in components {
+            let component = component.as_ref();
+            if !evidence::valid_exclusion_component(component) {
+                return Err("Tier 2 exclusion must be one bounded directory component".into());
+            }
+            excluded_components.insert(component.to_string());
+        }
+        let digest = evidence::exclusion_policy_digest(&excluded_components);
+        Ok(Self {
+            excluded_components,
+            digest,
+        })
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)] // Keeps the plan's explicit typed stage-input constructor.
@@ -237,6 +306,7 @@ pub struct Tier2Failure {
     pub(super) detail: String,
     partial: Box<Tier2PartialEvidence>,
     sealed: bool,
+    pub(super) exclusion_report: Option<Tier2ExclusionReport>,
 }
 
 impl Tier2Failure {
@@ -283,6 +353,7 @@ impl Tier2Failure {
             detail: detail.into(),
             partial: Box::new(Tier2PartialEvidence::none()),
             sealed: false,
+            exclusion_report: None,
         }
     }
 
@@ -293,6 +364,11 @@ impl Tier2Failure {
 
     pub(super) fn seal(mut self) -> Self {
         self.sealed = true;
+        self
+    }
+
+    pub(super) fn with_exclusion_report(mut self, report: Tier2ExclusionReport) -> Self {
+        self.exclusion_report = Some(report);
         self
     }
 
@@ -354,6 +430,7 @@ pub struct Tier2Observation {
     pub(super) roi: Vec<Tier2RoiDecision>,
     pub(super) ranked: Vec<Tier2RankedProposal>,
     pub(super) funnel: FunnelCounts,
+    pub(super) exclusion_report: Tier2ExclusionReport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -375,6 +452,10 @@ impl Tier2Observation {
 
     pub fn evidence_json(&self) -> String {
         Tier2Evaluation::Complete(self.clone()).evidence_json()
+    }
+
+    pub fn exclusion_report(&self) -> &Tier2ExclusionReport {
+        &self.exclusion_report
     }
 }
 

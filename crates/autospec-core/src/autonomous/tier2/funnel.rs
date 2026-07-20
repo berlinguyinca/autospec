@@ -14,7 +14,10 @@ use super::model::{
 use super::partial::Tier2PartialEvidence;
 use crate::autonomous::waterfall::FunnelCounts;
 
-pub fn evaluate_tier2(input: Tier2Input) -> Result<Tier2Evaluation, Tier2Failure> {
+pub(super) fn evaluate_tier2(
+    input: Tier2Input,
+    exclusion_report: super::Tier2ExclusionReport,
+) -> Result<Tier2Evaluation, Tier2Failure> {
     match input {
         Tier2Input::DisabledByCheckedInPolicy => {
             Ok(Tier2Evaluation::NotRun(super::Tier2NotRun::disabled()))
@@ -24,9 +27,8 @@ pub fn evaluate_tier2(input: Tier2Input) -> Result<Tier2Evaluation, Tier2Failure
             generator,
             verifier,
             roi_policy,
-        } => {
-            evaluate_enabled(collector, generator, verifier, roi_policy).map_err(Tier2Failure::seal)
-        }
+        } => evaluate_enabled(collector, generator, verifier, roi_policy, exclusion_report)
+            .map_err(Tier2Failure::seal),
     }
 }
 
@@ -35,6 +37,7 @@ fn evaluate_enabled(
     generator: Tier2StageResult<Tier2GeneratedProposals>,
     verifier: Tier2StageResult<Tier2VerifierVerdicts>,
     roi_policy: super::Tier2RoiPolicy,
+    exclusion_report: super::Tier2ExclusionReport,
 ) -> Result<Tier2Evaluation, Tier2Failure> {
     let collector = complete(collector, Tier2Stage::Collector, empty_partial())?;
     let collector_rows = validate_collector(&collector)?;
@@ -97,6 +100,7 @@ fn evaluate_enabled(
         roi,
         ranked,
         funnel,
+        exclusion_report,
     }))
 }
 
