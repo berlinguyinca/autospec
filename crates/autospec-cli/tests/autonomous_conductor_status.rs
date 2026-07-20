@@ -15,7 +15,11 @@ const REPO: &str = "test/repo";
 #[test]
 fn status_json_and_timeline_render_normalized_conductor_state() {
     let fixture = StatusFixture::new();
-    fixture.write_foreground_state(all_blocked_state());
+    fixture.write_foreground_state(
+        all_blocked_state()
+            .record_no_progress_cycle("tier1_all_blocked")
+            .expect("no-progress diagnostic"),
+    );
 
     let status = fixture
         .command("status")
@@ -30,6 +34,8 @@ fn status_json_and_timeline_render_normalized_conductor_state() {
     let stdout = String::from_utf8_lossy(&status.stdout);
     assert!(stdout.contains("\"normalized_state\":\"cycle 0: all-blocked;"));
     assert!(stdout.contains("affected issues=#42,#43"));
+    assert!(stdout.contains("\"no_progress_reason\":\"tier1_all_blocked\""));
+    assert!(stdout.contains("\"no_progress_cycles\":1"));
 
     let timeline = fixture.command("timeline").output().expect("timeline");
     assert!(

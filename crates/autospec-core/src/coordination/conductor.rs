@@ -5,6 +5,7 @@ mod persistence;
 const CONDUCTOR_SCHEMA: u64 = 1;
 const RETRY_LIMIT_EXHAUSTED: &str = "retry_limit_exhausted";
 pub const BLOCKED_BACKLOG_THRESHOLD: u32 = 5;
+const MAX_NO_PROGRESS_REASON_LENGTH: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConductorScope {
@@ -88,6 +89,8 @@ pub struct ConductorState {
     blocked_backlog_cycles: u32,
     blocked_backlog_reason: Option<String>,
     blocked_backlog_issues: Vec<u64>,
+    no_progress_cycles: u32,
+    no_progress_reason: Option<String>,
 }
 
 impl ConductorState {
@@ -115,6 +118,8 @@ impl ConductorState {
             blocked_backlog_cycles: 0,
             blocked_backlog_reason: None,
             blocked_backlog_issues: Vec::new(),
+            no_progress_cycles: 0,
+            no_progress_reason: None,
         })
     }
 
@@ -170,6 +175,38 @@ impl ConductorState {
         &self.blocked_backlog_issues
     }
 
+    pub fn no_progress_cycles(&self) -> u32 {
+        self.no_progress_cycles
+    }
+
+    pub fn no_progress_reason(&self) -> Option<&str> {
+        self.no_progress_reason.as_deref()
+    }
+
+    pub fn record_no_progress_cycle(mut self, reason: impl Into<String>) -> Result<Self, String> {
+        let reason = reason.into();
+        if reason.trim().is_empty() || reason.chars().count() > MAX_NO_PROGRESS_REASON_LENGTH {
+            return Err(format!(
+                "no-progress reason must contain 1..={MAX_NO_PROGRESS_REASON_LENGTH} characters"
+            ));
+        }
+        self.no_progress_cycles = if self.no_progress_reason.as_deref() == Some(reason.as_str()) {
+            self.no_progress_cycles.saturating_add(1)
+        } else {
+            1
+        };
+        self.no_progress_reason = Some(reason);
+        self.validate()?;
+        Ok(self)
+    }
+
+    pub fn clear_no_progress_diagnostic(mut self) -> Result<Self, String> {
+        self.no_progress_cycles = 0;
+        self.no_progress_reason = None;
+        self.validate()?;
+        Ok(self)
+    }
+
     /// Record one complete Tier 1 blocked cycle. Repeated cycles with a new
     /// issue set or reason reset the governor; five identical cycles seal the
     /// state as `AllBlocked` and prevent descent into discovery tiers.
@@ -179,7 +216,7 @@ impl ConductorState {
         mut issues: Vec<u64>,
     ) -> Result<Self, String> {
         let reason = reason.into();
-        if reason.trim().is_empty() || issues.iter().any(|issue| *issue == 0) {
+        if reason.trim().is_empty() || issues.contains(&0) {
             return Err(
                 "blocked backlog requires a non-empty reason and positive issue ids".to_string(),
             );
