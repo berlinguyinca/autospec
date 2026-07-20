@@ -1042,7 +1042,9 @@ start_foreground() {
     export AUTOSPEC_REPO_DIR="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
     export CONDUCTOR_SCRIPTS_DIR="${CONDUCTOR_SCRIPTS_DIR:-$SCRIPT_DIR}"
     export AUTOSPEC_SCRIPTS_DIR="${AUTOSPEC_SCRIPTS_DIR:-$SCRIPT_DIR}"
-    export AUTOSPEC_RUN_CMD="${AUTOSPEC_RUN_CMD:-$SCRIPT_DIR/autospec-autonomous-run-drain.sh}"
+    _drain_repo="${CONDUCTOR_REPO:-$(detect_repo_slug)}"
+    _typed_drain_cmd="$(shell_quote "${AUTOSPEC_BIN:-autospec}") autonomous drain --repo $(shell_quote "$_drain_repo") --repo-dir $(shell_quote "$AUTOSPEC_REPO_DIR")"
+    export AUTOSPEC_RUN_CMD="${AUTOSPEC_RUN_CMD:-$_typed_drain_cmd}"
     export AUTOSPEC_PERSONA_SOURCES_CMD="${AUTOSPEC_PERSONA_SOURCES_CMD:-$SCRIPT_DIR/autonomous-persona-sources.sh}"
     # Tier-2/3/4 discovery must run the explore SKILL through the LLM harness
     # (mirroring AUTOSPEC_RUN_CMD's drain wrapper). Without this, the loop falls
