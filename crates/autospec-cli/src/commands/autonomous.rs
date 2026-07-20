@@ -1695,7 +1695,7 @@ fn main_health(options: Options) -> Result<(), String> {
     let config = load_autonomous_config(&options.repo_dir)?;
     let layout = RunLayout::new(&options)?;
     let health = load_main_health(&layout, &options, &config)?;
-    let policy_digest = config.main_health.effective_policy_digest(&health.branch)?;
+    let policy_digest = effective_main_health_policy_digest(&config, &health)?;
     persist_main_health(&layout, &health, &policy_digest)?;
     print_main_health(&layout.repo, &health, options.json);
     if health.outcome == MainlineHealthOutcome::Halt {
@@ -1705,6 +1705,20 @@ fn main_health(options: Options) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+const UNRESOLVED_DEFAULT_BRANCH_POLICY_IDENTITY: &str = "autospec:unresolved-default-branch";
+
+fn effective_main_health_policy_digest(
+    config: &AutonomousConfig,
+    health: &MainlineHealth,
+) -> Result<String, String> {
+    let branch_identity = if health.diagnostic == MainlineHealthDiagnostic::DefaultBranchMissing {
+        UNRESOLVED_DEFAULT_BRANCH_POLICY_IDENTITY
+    } else {
+        &health.branch
+    };
+    config.main_health.effective_policy_digest(branch_identity)
 }
 
 fn load_autonomous_config(repo_dir: &str) -> Result<AutonomousConfig, String> {
@@ -2043,10 +2057,8 @@ fn run_foreground_with_lease(
         return Ok(ForegroundCompletion::Lifecycle(preflight));
     }
     let health = load_main_health(layout, options, config).map_err(CommandFailure::diagnostic)?;
-    let policy_digest = config
-        .main_health
-        .effective_policy_digest(&health.branch)
-        .map_err(CommandFailure::diagnostic)?;
+    let policy_digest =
+        effective_main_health_policy_digest(config, &health).map_err(CommandFailure::diagnostic)?;
     persist_main_health(layout, &health, &policy_digest).map_err(CommandFailure::diagnostic)?;
     input = input.with_health(lifecycle_health(health.outcome.clone()));
     let mut lifecycle = decide_lifecycle(&input);

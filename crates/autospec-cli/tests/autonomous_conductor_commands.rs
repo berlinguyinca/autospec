@@ -727,6 +727,50 @@ fn main_health_reads_the_same_repository_config_as_foreground_admission() {
 }
 
 #[test]
+fn missing_default_branch_keeps_its_typed_policy_bound_health_receipt() {
+    let fixture = ForegroundFixture::new();
+
+    let output = fixture
+        .unbranched_main_health_command()
+        .env("AUTOSPEC_FOREGROUND_NO_DEFAULT_BRANCH", "1")
+        .output()
+        .expect("run main-health without GitHub default branch metadata");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("default-branch-missing"));
+    let receipts = fs::read_to_string(fixture.main_health_observations_path())
+        .expect("missing branch health must retain a policy-bound observation");
+    let lines = receipts.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("\"diagnostic\":\"default-branch-missing\""));
+    assert!(!json_string_field(lines[0], "effective_policy_digest").is_empty());
+}
+
+#[test]
+fn foreground_missing_default_branch_applies_typed_halt_after_recording_policy() {
+    let fixture = ForegroundFixture::new();
+
+    let output = fixture
+        .unbranched_foreground_command()
+        .env("AUTOSPEC_FOREGROUND_NO_DEFAULT_BRANCH", "1")
+        .output()
+        .expect("run foreground without GitHub default branch metadata");
+
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"decision\":\"park\",\"reason\":\"health_halt\"}\n"
+    );
+    let receipts = fs::read_to_string(fixture.main_health_observations_path())
+        .expect("foreground health halt must retain a policy-bound observation");
+    let lines = receipts.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].contains("\"diagnostic\":\"default-branch-missing\""));
+    assert!(!json_string_field(lines[0], "effective_policy_digest").is_empty());
+    assert!(!fixture.state_path().exists());
+}
+
+#[test]
 fn retained_foreground_state_reloads_and_records_repository_policy() {
     let fixture = ForegroundFixture::new();
     fixture.write_autonomous_config(
@@ -1378,7 +1422,11 @@ if [ "$1" = api ] && [ "$2" = graphql ]; then
   exit 0
 fi
 if [ "$1" = repo ] && [ "$2" = view ]; then
-  printf '%s\n' main
+  if [ "${AUTOSPEC_FOREGROUND_NO_DEFAULT_BRANCH:-0}" = 1 ]; then
+    printf '\n'
+  else
+    printf '%s\n' main
+  fi
   exit 0
 fi
 if [ "$1" = api ] && [ "$2" = repos/test/repo/branches/main ]; then
