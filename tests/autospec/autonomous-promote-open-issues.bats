@@ -58,15 +58,15 @@ SH
   # ── Rust safety writer + eligibility stubs are per-test (below) ─────────────
   mk_safety() {
     case "$1" in
-      SAFETY_PASS) review_json='{"pass":1,"ambiguous":0,"block":0,"stale":0,"conflicted":0,"skipped":0}' ;;
-      SAFETY_AMBIGUOUS) review_json='{"pass":0,"ambiguous":1,"block":0,"stale":0,"conflicted":0,"skipped":0}' ;;
-      SAFETY_BLOCK) review_json='{"pass":0,"ambiguous":0,"block":1,"stale":0,"conflicted":0,"skipped":0}' ;;
+      SAFETY_PASS) review_json='{"safety":{"decision":"pass"},"auto-implement":true,"eligible":true}' ;;
+      SAFETY_AMBIGUOUS) review_json='{"safety":{"decision":"ambiguous"},"auto-implement":false,"eligible":false}' ;;
+      SAFETY_BLOCK) review_json='{"safety":{"decision":"blocked"},"auto-implement":false,"eligible":false}' ;;
       *) return 1 ;;
     esac
     cat > "$TMP/bin/safety.sh" <<SH
 #!/usr/bin/env bash
 printf '%s\\n' "autospec \$*" >> "\$GH_LOG"
-if [ "\${1:-}" != "queue" ] || [ "\${2:-}" != "review-safety" ]; then
+if [ "\${1:-}" != "issue" ] || [ "\${2:-}" != "promote" ]; then
   exit 41
 fi
 printf '%s\\n' '$review_json'
@@ -105,16 +105,14 @@ SH
 }
 teardown() { rm -rf "$TMP"; }
 
-@test "eligible needs-classify issue adds auto-implement before exact Rust safety review" {
+@test "eligible needs-classify issue delegates admission to exact Rust promotion" {
   mk_safety "SAFETY_PASS"; mk_elig "eligible"
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  grep -q 'add-label auto-implement' "$GH_LOG"
+  ! grep -q 'add-label auto-implement' "$GH_LOG"
   grep -q 'remove-label needs-classify' "$GH_LOG"
-  grep -q 'autospec queue review-safety --repo o/r --limit 1 --issue 42' "$GH_LOG"
-  auto_line="$(grep -n 'add-label auto-implement' "$GH_LOG" | head -1 | cut -d: -f1)"
-  review_line="$(grep -n 'autospec queue review-safety --repo o/r --limit 1 --issue 42' "$GH_LOG" | head -1 | cut -d: -f1)"
-  [ "$auto_line" -lt "$review_line" ]
+  grep -q 'autospec issue promote --repo o/r --number 42' "$GH_LOG"
+  ! grep -Fq -- '--body-file' "$GH_LOG"
   grep -q 'issue comment' "$GH_LOG"
 }
 
@@ -122,8 +120,8 @@ teardown() { rm -rf "$TMP"; }
   mk_safety "SAFETY_BLOCK"; mk_elig "eligible"
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  grep -q 'add-label auto-implement' "$GH_LOG"
-  grep -q 'autospec queue review-safety --repo o/r --limit 1 --issue 42' "$GH_LOG"
+  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  grep -q 'autospec issue promote --repo o/r --number 42' "$GH_LOG"
   ! grep -q 'add-label security:quarantined' "$GH_LOG"
   printf '%s' "$output" | jq -e '.quarantined[] | select(.issue==42 and .reason=="rust-safety-block")' >/dev/null
   printf '%s' "$output" | jq -e '.promoted | length == 0' >/dev/null
@@ -138,20 +136,22 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
   grep -q 'add-label groom:proposed' "$GH_LOG"
-  grep -q 'remove-label needs-autospec-template' "$GH_LOG"
+  ! grep -q 'remove-label needs-autospec-template' "$GH_LOG"
+  grep -q 'issue comment 42 .*--body-file' "$GH_LOG"
+  ! grep -q 'issue edit 42 .*--body-file' "$GH_LOG"
   ! grep -q 'add-label auto-implement' "$GH_LOG"
   printf '%s' "$output" | jq -e '.routed[] | select(.action=="groom-canary")' >/dev/null
 }
 
-@test "needs-template + template-promote active → auto: auto-implement, no groom:proposed" {
+@test "needs-template + template-promote active still remains a human proposal" {
   mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote","template-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  grep -q 'add-label auto-implement' "$GH_LOG"
-  grep -q 'remove-label needs-autospec-template' "$GH_LOG"
-  ! grep -q 'add-label groom:proposed' "$GH_LOG"
-  printf '%s' "$output" | jq -e '.routed[] | select(.action=="groom-auto")' >/dev/null
+  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  ! grep -q 'remove-label needs-autospec-template' "$GH_LOG"
+  grep -q 'add-label groom:proposed' "$GH_LOG"
+  printf '%s' "$output" | jq -e '.routed[] | select(.action=="groom-canary")' >/dev/null
 }
 
 @test "needs-template + fill fails → hold:needs-human (no promote)" {
@@ -198,65 +198,65 @@ teardown() { rm -rf "$TMP"; }
   echo "$output" | jq -e '.dry == true'
 }
 
-@test "canary persists its draft without an exact Rust safety review" {
+@test "canary comments its draft without classifying or admitting it" {
   mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
   grep -q 'add-label groom:proposed' "$GH_LOG"
-  grep -q 'add-label ctx:' "$GH_LOG"
-  grep -q 'reasoning:' "$GH_LOG"
+  grep -q 'issue comment 42 .*--body-file' "$GH_LOG"
+  ! grep -q 'add-label ctx:' "$GH_LOG"
+  ! grep -q 'reasoning:' "$GH_LOG"
   ! grep -q 'add-label auto-implement' "$GH_LOG"
-  ! grep -q 'autospec queue review-safety --repo o/r --limit 1 --issue 42' "$GH_LOG"
+  ! grep -q 'autospec issue promote' "$GH_LOG"
 }
 
 @test "non-passing Rust safety review holds an eligible issue without shell writeback" {
   mk_safety "SAFETY_AMBIGUOUS"; mk_elig "eligible"
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  grep -q 'add-label auto-implement' "$GH_LOG"
+  ! grep -q 'add-label auto-implement' "$GH_LOG"
   ! grep -q 'add-label security:quarantined' "$GH_LOG"
   printf '%s' "$output" | jq -e '.held[] | select(.issue==42 and .reason=="rust-safety-review")' >/dev/null
 }
 
-@test "final-body write failure stays held after an earlier Rust safety block" {
+@test "removed body-write seam cannot interrupt multiple Rust safety decisions" {
   mk_safety "SAFETY_BLOCK"; mk_elig "eligible"; mk_two_candidates
   export TEST_BODY_WRITE_FAIL_ISSUE=43
   run bash "$SCRIPT" --repo o/r --apply
   unset TEST_BODY_WRITE_FAIL_ISSUE
   [ "$status" -eq 0 ]
   printf '%s' "$output" | jq -e '.quarantined[] | select(.issue==42 and .reason=="rust-safety-block")' >/dev/null
-  printf '%s' "$output" | jq -e '.held[] | select(.issue==43 and .reason=="rust-safety-review")' >/dev/null
+  printf '%s' "$output" | jq -e '.quarantined[] | select(.issue==43 and .reason=="rust-safety-block")' >/dev/null
+  ! grep -Fq -- '--body-file' "$GH_LOG"
 }
 
-@test "classify runs for a needs-template candidate with no ctx/reasoning labels" {
+@test "generated template proposal does not classify the unapplied body" {
   mk_safety "SAFETY_PASS"; mk_elig "needs-template"; mk_fill ok
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote"]}'
   mk_view_labels '{"name":"needs-autospec-template"}'
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  grep -q 'add-label ctx:' "$GH_LOG"
-  grep -q 'reasoning:' "$GH_LOG"
-  grep -q 'remove-label needs-classify' "$GH_LOG"
+  ! grep -q 'add-label ctx:' "$GH_LOG"
+  ! grep -q 'reasoning:' "$GH_LOG"
+  ! grep -q 'remove-label needs-classify' "$GH_LOG"
 }
 
-@test "Rust safety block reports a graduated filled candidate as quarantined" {
+@test "graduated filled candidate remains proposed without invoking Rust admission" {
   mk_safety "SAFETY_BLOCK"; mk_elig "needs-template"; mk_fill ok
   export GROOM_GOVERN_ACTIVE='{"active":["eligible-promote","template-promote"]}'
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  grep -q 'add-label auto-implement' "$GH_LOG"
-  ! grep -q 'add-label groom:proposed' "$GH_LOG"
-  ! grep -q 'add-label security:quarantined' "$GH_LOG"
-  printf '%s' "$output" | jq -e '.quarantined[] | select(.issue==42 and .reason=="rust-safety-block")' >/dev/null
+  ! grep -q 'add-label auto-implement' "$GH_LOG"
+  grep -q 'add-label groom:proposed' "$GH_LOG"
+  ! grep -q 'autospec issue promote' "$GH_LOG"
+  printf '%s' "$output" | jq -e '.routed[] | select(.issue==42 and .action=="groom-canary")' >/dev/null
 }
 
-@test "apply retries bounded interim Rust safety reviews before grooming new candidates" {
+@test "apply performs no broad legacy safety preflight" {
   mk_safety "SAFETY_PASS"; mk_elig "eligible"
   run bash "$SCRIPT" --repo o/r --apply
   [ "$status" -eq 0 ]
-  grep -q 'autospec queue review-safety --repo o/r --limit 5$' "$GH_LOG"
-  retry_line="$(grep -n 'autospec queue review-safety --repo o/r --limit 5$' "$GH_LOG" | head -1 | cut -d: -f1)"
-  exact_line="$(grep -n 'autospec queue review-safety --repo o/r --limit 1 --issue 42' "$GH_LOG" | head -1 | cut -d: -f1)"
-  [ "$retry_line" -lt "$exact_line" ]
+  ! grep -q 'autospec queue review-safety' "$GH_LOG"
+  grep -q 'autospec issue promote --repo o/r --number 42' "$GH_LOG"
 }

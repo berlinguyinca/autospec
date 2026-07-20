@@ -111,7 +111,29 @@ Exit codes: `0=SAFETY_PASS`, `1=SAFETY_AMBIGUOUS`, `2=SAFETY_BLOCK`, `64=usage e
 The built-in safety policy is evaluated natively in Rust. A config file may add trusted
 actors for the scoped test-reset exception; duplicate built-in patterns are harmless.
 An unsupported custom regex returns the fail-closed `invalid-policy-regex` block rather
-than being ignored.
+than being ignored. The built-in policy is used only when the implicit default
+`.autospec/autospec.yml` is absent; an explicit, unreadable, or malformed config fails
+closed instead of silently selecting defaults.
+
+### `autospec issue promote`
+
+Authoritative admission transaction for a canonical GitHub issue.
+
+Usage:
+`autospec issue promote --repo OWNER/REPO --number N [--remove-label needs-autospec-template] [--json]`
+
+The command reads the issue from GitHub, applies the repository safety policy, adds the
+`safety:reviewed` label without replacing the issue body, re-reads the exact issue state,
+and only then adds `auto-implement`. Existing canonical safety sections are validated but
+left unchanged. It performs a final re-read and rolls back labels owned by the transaction
+if concurrent title, body, author, state, or label changes are detected. Repeating a
+completed admission is idempotent.
+
+The JSON response includes issue identity, `safety.decision`, `safety.reason`,
+`"auto-implement"`, `eligible`, `changed`, `final_labels`, and `blocked_by_reason`.
+`eligible` describes the final issue payload's queue-policy eligibility; it is not a live
+claim or worker-capacity result. Unsupported custom policy regexes and malformed canonical
+safety state fail closed before `auto-implement` is added.
 
 ### `autospec queue ready`
 

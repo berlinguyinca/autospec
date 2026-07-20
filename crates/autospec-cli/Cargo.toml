@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 autospec-core = { path = "../autospec-core" }
+yaml-edit = "=0.2.3" # why: reject malformed explicit safety-policy YAML instead of defaulting open
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal"] } # why: safe PID probes and descriptor-relative runtime-state operations

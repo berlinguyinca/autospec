@@ -492,7 +492,7 @@ pub(crate) fn ready_plan_for(
     let mut policy = QueuePolicy::new(batch_size, max_repo_workers());
     policy.only_issues = only_issues.clone();
     policy.non_blocking_dependency_labels = non_blocking_dependency_labels();
-    let safety_policy = load_issue_safety_policy(None);
+    let safety_policy = load_issue_safety_policy(None)?;
     if safety_policy.has_unsupported_pattern {
         return Err(CommandFailure::diagnostic(
             "queue safety policy contains unsupported custom regex",

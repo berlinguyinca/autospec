@@ -22,18 +22,27 @@ fn marked_comment(id: u64, worker_id: &str) -> RemoteComment {
 
 #[test]
 fn lowest_comment_id_wins_even_when_api_order_is_descending() {
-    let comments = vec![marked_comment(101, "worker-b"), marked_comment(100, "worker-a")];
+    let comments = vec![
+        marked_comment(101, "worker-b"),
+        marked_comment(100, "worker-a"),
+    ];
 
     let selected = select_run_state(&comments, "testorg/testrepo", 42).expect("run state");
 
     assert_eq!(selected.comment_id, 100);
     assert_eq!(selected.record.worker_id, "worker-a");
-    assert_eq!(lowest_marked_comment(&comments).map(|comment| comment.id), Some(100));
+    assert_eq!(
+        lowest_marked_comment(&comments).map(|comment| comment.id),
+        Some(100)
+    );
 }
 
 #[test]
 fn higher_id_worker_loses_and_self_cleanup_targets_only_that_comment() {
-    let comments = vec![marked_comment(101, "worker-b"), marked_comment(100, "worker-a")];
+    let comments = vec![
+        marked_comment(101, "worker-b"),
+        marked_comment(100, "worker-a"),
+    ];
 
     assert_eq!(
         claim_losing_worker_comment_id(&comments, "worker-b"),

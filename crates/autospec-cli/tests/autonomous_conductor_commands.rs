@@ -1417,7 +1417,7 @@ exit 1
             .env("AUTOSPEC_HEARTBEAT_DIR", &self.heartbeats)
             .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
             .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
-            .env("AUTOSPEC_CONFIG_FILE", self.root.join("missing.yml"));
+            .env_remove("AUTOSPEC_CONFIG_FILE");
         command
     }
 
