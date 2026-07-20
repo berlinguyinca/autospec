@@ -364,6 +364,7 @@ fn parse_implementer_wait_failed(
 fn blast_radius(args: &[String]) -> Result<(), CommandFailure> {
     let mut changed_files = String::new();
     let mut fenced_surfaces = String::new();
+    let mut protected_override = false;
     let mut json = false;
     let mut index = 1;
     while index < args.len() {
@@ -381,9 +382,10 @@ fn blast_radius(args: &[String]) -> Result<(), CommandFailure> {
                 })?;
             }
             "--json" => json = true,
+            "--human-reviewed-protected" => protected_override = true,
             "-h" | "--help" => {
                 println!(
-                    "USAGE:\n    autospec autonomous blast-radius --changed-files <FILE> [--fenced-surfaces <YML>] [--json]"
+                    "USAGE:\n    autospec autonomous blast-radius --changed-files <FILE> [--fenced-surfaces <YML>] [--human-reviewed-protected] [--json]"
                 );
                 return Ok(());
             }
@@ -401,8 +403,9 @@ fn blast_radius(args: &[String]) -> Result<(), CommandFailure> {
 
     let paths =
         read_changed_files(Path::new(&changed_files)).map_err(CommandFailure::diagnostic)?;
-    let (registry, registry_name) =
+    let (mut registry, registry_name) =
         load_blast_radius_registry(&fenced_surfaces).map_err(CommandFailure::diagnostic)?;
+    apply_protected_path_override(&mut registry, protected_override);
     let classification = classify_paths_with_registry_name(paths, &registry, registry_name);
     if json {
         println!(
@@ -435,6 +438,15 @@ fn blast_radius(args: &[String]) -> Result<(), CommandFailure> {
         Err(CommandFailure::status(String::new(), 1))
     } else {
         Ok(())
+    }
+}
+
+fn apply_protected_path_override(
+    registry: &mut Vec<autospec_core::autonomous::blast_radius::FencedSurface>,
+    override_present: bool,
+) {
+    if override_present {
+        registry.retain(|surface| surface.id != "protected-paths");
     }
 }
 
@@ -5530,6 +5542,27 @@ fn print_help() {
 #[cfg(test)]
 mod foreground_tests {
     use super::*;
+
+    #[test]
+    fn protected_path_override_removes_only_the_protected_surface() {
+        let mut registry = vec![
+            autospec_core::autonomous::blast_radius::FencedSurface {
+                id: "protected-paths".to_string(),
+                severity: "fenced".to_string(),
+                reason: "protected".to_string(),
+                paths: vec!["src/secret/**".to_string()],
+            },
+            autospec_core::autonomous::blast_radius::FencedSurface {
+                id: "autospec-policy-config".to_string(),
+                severity: "fenced".to_string(),
+                reason: "policy".to_string(),
+                paths: vec![".autospec/**".to_string()],
+            },
+        ];
+        apply_protected_path_override(&mut registry, true);
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry[0].id, "autospec-policy-config");
+    }
 
     #[test]
     fn lifecycle_atomic_temp_paths_are_unique_per_write() {
