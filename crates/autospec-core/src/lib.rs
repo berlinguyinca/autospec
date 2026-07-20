@@ -2,6 +2,7 @@ pub mod agent;
 pub mod autonomous {
     pub mod audit;
     pub mod blast_radius;
+    pub mod executor;
     pub mod config;
     pub mod drain;
     pub mod mainline_health;
