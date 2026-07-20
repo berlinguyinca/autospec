@@ -155,7 +155,7 @@ impl ForegroundWaterfallFixture {
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", self.root.join("spend"))
             .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", self.root.join("health"))
             .env("AUTOSPEC_HEARTBEAT_DIR", self.root.join("heartbeats"))
-            .env("AUTOSPEC_CONFIG_FILE", self.root.join("missing.yml"));
+            .env_remove("AUTOSPEC_CONFIG_FILE");
         if fs::read_to_string(&self.mode).is_ok_and(|mode| mode.trim() == "active-cap") {
             command.env("AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS", "1");
         }
