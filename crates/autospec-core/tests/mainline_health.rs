@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use autospec_core::autonomous::mainline_health::{
-    apply_ignored_checks, resolve_health_branch, CheckEvidence, HealthBranchInput,
-    MainlineHealthDiagnostic, MainlineHealthOutcome,
+    apply_ignored_checks, check_run_evidence, evaluate_health, resolve_health_branch,
+    CheckEvidence, HealthBranchInput, MainlineHealthDiagnostic, MainlineHealthOutcome,
 };
 
 #[test]
@@ -72,6 +72,53 @@ fn pending_required_check_blocks_mainline_health_admission() {
         observation.diagnostic,
         MainlineHealthDiagnostic::RequiredCheckPending
     );
+}
+
+#[test]
+fn check_run_fixtures_classify_pending_and_terminal_verdicts() {
+    let cases = [
+        (
+            r#"{"check_runs":[{"name":"ci","status":"COMPLETED","conclusion":""}]}"#,
+            MainlineHealthOutcome::Wait,
+        ),
+        (
+            r#"{"check_runs":[{"name":"ci","status":"IN_PROGRESS","conclusion":null}]}"#,
+            MainlineHealthOutcome::Wait,
+        ),
+        (
+            r#"{"check_runs":[{"name":"ci","status":"COMPLETED","conclusion":"success"}]}"#,
+            MainlineHealthOutcome::Continue,
+        ),
+        (
+            r#"{"check_runs":[{"name":"ci","status":"COMPLETED","conclusion":"failure"}]}"#,
+            MainlineHealthOutcome::Halt,
+        ),
+        (
+            r#"{"check_runs":[{"name":"ci","status":"COMPLETED","conclusion":"cancelled"}]}"#,
+            MainlineHealthOutcome::Halt,
+        ),
+        (
+            r#"{"check_runs":[{"name":"ci","status":"COMPLETED","conclusion":"timed_out"}]}"#,
+            MainlineHealthOutcome::Halt,
+        ),
+        (
+            r#"{"check_runs":[{"name":"ci","status":"COMPLETED","conclusion":"action_required"}]}"#,
+            MainlineHealthOutcome::Halt,
+        ),
+        (
+            r#"{"check_runs":[{"name":"waiting","status":"COMPLETED","conclusion":""},{"name":"failed","status":"COMPLETED","conclusion":"failure"}]}"#,
+            MainlineHealthOutcome::Halt,
+        ),
+    ];
+
+    for (fixture, expected) in cases {
+        let checks = check_run_evidence(fixture).expect("valid check-run fixture");
+        assert_eq!(
+            evaluate_health("main", true, checks).outcome,
+            expected,
+            "fixture: {fixture}"
+        );
+    }
 }
 
 #[test]
