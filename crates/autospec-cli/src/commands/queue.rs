@@ -8,7 +8,7 @@ use autospec_core::claim::{
 use autospec_core::coordination::{
     dependency_numbers, parse_dependency_issue_json, parse_remote_issue_page_json,
     parse_remote_pull_request_page_json, plan_ready_queue_with_trusted_actors, PullRequestEvidence,
-    QueueIssueView, QueuePolicy, ReadyQueueInput, ReadyQueuePlan, RemoteIssue,
+    QueueIssueView, QueuePolicy, ReadyQueueInput, ReadyQueuePlan, RemoteIssue, RemoteIssuePage,
 };
 
 use super::claim::{
@@ -625,6 +625,7 @@ fn infer_repo() -> Result<String, CommandFailure> {
 
 fn list_issues(repo: &str, label: &str) -> Result<Vec<RemoteIssue>, CommandFailure> {
     const PAGE_SIZE: usize = 100;
+    const PAGE_RETRIES: usize = 3;
     const ISSUE_FIELDS: &str = "{raw_count:length, items:[.[] | select(.pull_request == null) | {number, title:(.title // \"\"), body:(.body // \"\"), labels:[.labels[].name], author:{login:(.user.login // \"\")}}]}";
 
     let mut issues = Vec::new();
@@ -633,19 +634,23 @@ fn list_issues(repo: &str, label: &str) -> Result<Vec<RemoteIssue>, CommandFailu
         let endpoint = format!(
             "repos/{repo}/issues?state=open&labels={label}&per_page={PAGE_SIZE}&page={page}"
         );
-        let output = run_gh(&["api", "--method", "GET", &endpoint, "--jq", ISSUE_FIELDS])?;
-        if !output.status.success() {
-            return Err(CommandFailure::diagnostic(format!(
-                "gh issue page {page} for {label} failed: {}",
-                command_error(&output)
-            )));
-        }
-        let issue_page = parse_remote_issue_page_json(&String::from_utf8_lossy(&output.stdout))
-            .map_err(|error| {
-                CommandFailure::diagnostic(format!(
-                    "could not parse GitHub {label} issue page {page}: {error}"
-                ))
-            })?;
+        let issue_page = fetch_issue_page_with_retries(PAGE_RETRIES, || {
+            let output = run_gh(&["api", "--method", "GET", &endpoint, "--jq", ISSUE_FIELDS])
+                .map_err(|error| error.message)?;
+            if !output.status.success() {
+                return Err(command_error(&output));
+            }
+            let body = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if body.is_empty() {
+                return Err("empty GitHub issue page response".to_string());
+            }
+            parse_remote_issue_page_json(&body).map_err(|error| error.to_string())
+        })
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not fetch GitHub {label} issue page {page} after {PAGE_RETRIES} attempts: {error}"
+            ))
+        })?;
         let is_last_page = issue_page.raw_count < PAGE_SIZE;
         issues.extend(issue_page.issues);
         if is_last_page {
@@ -655,6 +660,26 @@ fn list_issues(repo: &str, label: &str) -> Result<Vec<RemoteIssue>, CommandFailu
             CommandFailure::diagnostic(format!("GitHub {label} issue page number overflowed"))
         })?;
     }
+}
+
+fn fetch_issue_page_with_retries<F>(
+    attempts: usize,
+    mut fetch: F,
+) -> Result<RemoteIssuePage, String>
+where
+    F: FnMut() -> Result<RemoteIssuePage, String>,
+{
+    if attempts == 0 {
+        return Err("issue page retry budget must be positive".to_string());
+    }
+    let mut last_error = String::new();
+    for _ in 0..attempts {
+        match fetch() {
+            Ok(page) => return Ok(page),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
 }
 
 fn load_dependencies(repo: &str, candidates: &[RemoteIssue]) -> BTreeMap<u64, RemoteIssue> {
@@ -1174,4 +1199,38 @@ fn print_help() {
     println!(
         "autospec queue\n\nUSAGE:\n    autospec queue ready [--repo OWNER/REPO] [--batch-size N]\n    autospec queue review-safety [--repo OWNER/REPO] [--limit N] [--issue N]\n\nCOMMANDS:\n    ready            Compute the safe, dependency-aware GitHub issue batch\n    review-safety    Write bounded Rust safety-review outcomes to GitHub issues"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fetch_issue_page_with_retries;
+    use autospec_core::coordination::parse_remote_issue_page_json;
+
+    #[test]
+    fn issue_page_retry_recovers_from_transient_empty_and_invalid_pages() {
+        let mut calls = 0;
+        let page = fetch_issue_page_with_retries(3, || {
+            calls += 1;
+            match calls {
+                1 => Err("empty response".to_string()),
+                2 => Err("invalid json".to_string()),
+                _ => parse_remote_issue_page_json(r#"{"raw_count":0,"items":[]}"#),
+            }
+        })
+        .expect("third attempt succeeds");
+        assert_eq!(calls, 3);
+        assert_eq!(page.raw_count, 0);
+    }
+
+    #[test]
+    fn issue_page_retry_fails_after_budget() {
+        let mut calls = 0;
+        let error = fetch_issue_page_with_retries(3, || {
+            calls += 1;
+            Err::<autospec_core::coordination::RemoteIssuePage, _>("still invalid".to_string())
+        })
+        .expect_err("retry budget is bounded");
+        assert_eq!(calls, 3);
+        assert_eq!(error, "still invalid");
+    }
 }

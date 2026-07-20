@@ -57,11 +57,17 @@ fn blocked_backlog_governor_can_resume_after_issue_set_changes() {
             .record_blocked_backlog_cycle("missing_safety_reviewed", vec![42])
             .expect("block cycle");
     }
-    assert_eq!(state.phase(), autospec_core::coordination::ConductorPhase::AllBlocked);
+    assert_eq!(
+        state.phase(),
+        autospec_core::coordination::ConductorPhase::AllBlocked
+    );
     let resumed = state
         .record_blocked_backlog_cycle("missing_safety_reviewed", vec![99])
         .expect("changed issue set resumes scan");
-    assert_eq!(resumed.phase(), autospec_core::coordination::ConductorPhase::Scan);
+    assert_eq!(
+        resumed.phase(),
+        autospec_core::coordination::ConductorPhase::Scan
+    );
     assert_eq!(resumed.blocked_backlog_cycles(), 1);
 }
 
