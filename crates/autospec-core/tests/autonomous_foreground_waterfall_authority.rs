@@ -9,7 +9,7 @@ mod matcher;
 mod scanner;
 
 use matcher::{code_tokens, contains_path_symbol, has_module_escape};
-use scanner::code_without_comments_and_literals;
+use scanner::{code_without_comments_and_literals, has_write_capable_github_argv, production_code};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -42,8 +42,13 @@ fn collect_rust_sources_if_present(directory: &Path, sources: &mut Vec<PathBuf>)
 
 fn production_tokens(path: &Path) -> Vec<String> {
     let source = fs::read_to_string(path).expect("read foreground authority source");
-    let production = source.split("\n#[cfg(test)]").next().unwrap_or(&source);
-    code_tokens(&code_without_comments_and_literals(production))
+    let production = production_code(&source, &path.display().to_string());
+    assert!(
+        !has_write_capable_github_argv(&production),
+        "{} retains write-capable GitHub argv literals",
+        path.display()
+    );
+    code_tokens(&code_without_comments_and_literals(&production))
 }
 
 fn function_tokens(path: &Path, name: &str) -> Vec<String> {
@@ -236,6 +241,56 @@ fn recursive_inventory_finds_nested_helpers_and_ignores_inert_text() {
         assert_no_foreground_authority(&production_tokens(&source), "fixture");
     }
     fs::remove_dir_all(root).expect("remove foreground fixture");
+}
+
+#[test]
+fn production_authority_after_cfg_test_item_cannot_evade_scan() {
+    let root = std::env::temp_dir().join(format!(
+        "autospec-foreground-post-test-authority-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create post-test authority fixture");
+    let source = root.join("foreground_waterfall.rs");
+    fs::write(
+        &source,
+        "fn guarded() {}\n#[cfg(test)] fn helper() {}\nfn hidden() { Command::new(\"gh\"); }\n",
+    )
+    .expect("write post-test authority fixture");
+
+    assert!(
+        std::panic::catch_unwind(|| {
+            assert_no_foreground_authority(&production_tokens(&source), "fixture")
+        })
+        .is_err(),
+        "production authority after a cfg(test) item evaded the scan"
+    );
+    fs::remove_dir_all(root).expect("remove post-test authority fixture");
+}
+
+#[test]
+fn write_capable_github_argv_literals_cannot_evade_scan() {
+    let root = std::env::temp_dir().join(format!(
+        "autospec-foreground-github-argv-authority-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("create GitHub argv authority fixture");
+    let source = root.join("foreground_waterfall.rs");
+    fs::write(
+        &source,
+        r#"fn hidden() {
+        let executable = "gh";
+        let arguments = ["api", "repos/o/r/issues/1", "--method", "POST"];
+    }"#,
+    )
+    .expect("write GitHub argv authority fixture");
+
+    assert!(
+        std::panic::catch_unwind(|| production_tokens(&source)).is_err(),
+        "write-capable GitHub argv literals evaded the scan"
+    );
+    fs::remove_dir_all(root).expect("remove GitHub argv authority fixture");
 }
 
 #[test]
