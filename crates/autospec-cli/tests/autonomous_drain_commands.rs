@@ -658,6 +658,58 @@ done
 }
 
 #[test]
+fn session_event_persistence_failure_terminates_the_live_process_group() {
+    let fixture = DrainFixture::new();
+    let bin = fixture.root.join("bin");
+    let leader_pid = fixture.root.join("leader-pid");
+    let descendant_pid = fixture.root.join("descendant-pid");
+    fs::create_dir_all(&bin).expect("create fake bin");
+    fs::create_dir_all(fixture.session_events_path())
+        .expect("make the event journal path unwritable as a file");
+    write_executable(
+        &bin.join("omx"),
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$$" > "$AUTOSPEC_TEST_LEADER_PID"
+(
+  trap '' TERM
+  exec sleep 30
+) &
+printf '%s\n' "$!" > "$AUTOSPEC_TEST_DESCENDANT_PID"
+trap '' TERM
+printf 'session_start child=child-persist-error-1850 session_turns=0 issue_claim=none\n'
+while :; do
+  printf 'startup still active\n'
+  sleep 0.1
+done
+"#,
+    );
+    write_executable(&bin.join("gh"), "#!/bin/sh\nprintf '[]\\n'\n");
+
+    let output = fixture
+        .command(&bin)
+        .args(["--stall-secs", "30", "--poll-secs", "1", "--json"])
+        .env("AUTOSPEC_TEST_LEADER_PID", &leader_pid)
+        .env("AUTOSPEC_TEST_DESCENDANT_PID", &descendant_pid)
+        .output()
+        .expect("run drain with an unwritable event journal");
+
+    assert!(!output.status.success());
+    assert!(
+        stderr(&output).contains("cannot open"),
+        "stderr={}",
+        stderr(&output)
+    );
+    let leader_was_alive = pid_path_is_alive(&leader_pid);
+    let descendant_was_alive = pid_path_is_alive(&descendant_pid);
+    kill_recorded_process_group(&leader_pid);
+    assert!(
+        !leader_was_alive && !descendant_was_alive,
+        "persistence error leaked process group: leader_alive={leader_was_alive} descendant_alive={descendant_was_alive}"
+    );
+}
+
+#[test]
 fn startup_event_parsing_drains_output_larger_than_pipe_capacity() {
     let fixture = DrainFixture::new();
     let bin = fixture.root.join("bin");
@@ -1062,6 +1114,12 @@ impl DrainFixture {
             .join("drain-startup-retry.json")
     }
 
+    fn session_events_path(&self) -> PathBuf {
+        self.operator_root
+            .join("o5_owner_r4_repo")
+            .join("drain-session-events.jsonl")
+    }
+
     fn initialize_git_remote(&self) {
         let init = Command::new("git")
             .args([
@@ -1130,6 +1188,27 @@ fn assert_pid_is_gone(pid: &str) {
         "process {} must no longer be alive",
         pid
     );
+}
+
+fn pid_path_is_alive(pid_path: &Path) -> bool {
+    let pid = fs::read_to_string(pid_path).expect("read recorded pid");
+    Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("inspect recorded process")
+        .success()
+}
+
+fn kill_recorded_process_group(pid_path: &Path) {
+    let pid = fs::read_to_string(pid_path).expect("read process-group leader pid");
+    let group = format!("-{}", pid.trim());
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &group])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn stdout(output: &Output) -> String {

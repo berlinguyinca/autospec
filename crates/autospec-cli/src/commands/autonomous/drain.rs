@@ -45,6 +45,18 @@ struct OutputReaders {
     session_events: Receiver<SessionOutputEvent>,
 }
 
+struct DrainAttemptGuard {
+    child: Child,
+    readers: OutputReaders,
+}
+
+impl Drop for DrainAttemptGuard {
+    fn drop(&mut self) {
+        let _ = terminate_child(&mut self.child);
+        join_readers(&mut self.readers);
+    }
+}
+
 enum SessionOutputEvent {
     Started {
         session_id: String,
@@ -201,8 +213,15 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
     'attempt: loop {
         let mut child = spawn_child(&options)?;
         let output_progress = Arc::new(AtomicBool::new(false));
-        let mut readers =
-            take_output_readers(&mut child, Arc::clone(&output_progress), options.json)?;
+        let readers =
+            match take_output_readers(&mut child, Arc::clone(&output_progress), options.json) {
+                Ok(readers) => readers,
+                Err(error) => {
+                    let _ = terminate_child(&mut child);
+                    return Err(error);
+                }
+            };
+        let mut attempt = DrainAttemptGuard { child, readers };
         let mut session_tracker = SessionStartupTracker::default();
         let mut last_activity = Instant::now();
         let mut last_progress = DrainProgress::None;
@@ -210,7 +229,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
         let mut heartbeat = heartbeat_signature(&layout.repo);
         let mut artifact = artifact_signature(&artifact_paths);
         let mut initial_exit = None;
-        let mut github = match github_snapshot(&layout.repo, &mut child)? {
+        let mut github = match github_snapshot(&layout.repo, &mut attempt.child)? {
             GithubSnapshot::Available(snapshot) => Some(snapshot),
             GithubSnapshot::ChildExited(status) => {
                 initial_exit = Some(status);
@@ -226,7 +245,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                 let startup_timeout_session = wait_for_session_deadline(
                     &layout,
                     &options,
-                    &readers.session_events,
+                    &attempt.readers.session_events,
                     &mut session_tracker,
                     startup_timeout,
                     Duration::from_secs(options.drain_poll_secs),
@@ -234,13 +253,13 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                 if session_tracker.matched_reconciliation {
                     startup_retry.reset(&layout)?;
                 }
-                if let Some(status) = child.try_wait().map_err(child_status_error)? {
+                if let Some(status) = attempt.child.try_wait().map_err(child_status_error)? {
                     break 'supervise DrainAttemptEnd::Complete(status);
                 }
 
                 if let Some(session_id) = startup_timeout_session {
                     break 'supervise termination_attempt_end(
-                        terminate_child(&mut child)?,
+                        terminate_child(&mut attempt.child)?,
                         DrainAttemptEnd::StartupTimedOut { session_id },
                     );
                 }
@@ -277,7 +296,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                 if elapsed_secs < options.drain_stall_secs {
                     continue;
                 }
-                match github_snapshot(&layout.repo, &mut child)? {
+                match github_snapshot(&layout.repo, &mut attempt.child)? {
                     GithubSnapshot::Available(next_github)
                         if github
                             .as_ref()
@@ -297,7 +316,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                     }
                     GithubSnapshot::Available(_) | GithubSnapshot::Unavailable => {}
                 }
-                if let Some(status) = child.try_wait().map_err(child_status_error)? {
+                if let Some(status) = attempt.child.try_wait().map_err(child_status_error)? {
                     break 'supervise DrainAttemptEnd::Complete(status);
                 }
 
@@ -308,7 +327,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                 );
                 debug_assert_eq!(decide(&observation), DrainDecision::TerminateStalled);
                 break 'supervise termination_attempt_end(
-                    terminate_child(&mut child)?,
+                    terminate_child(&mut attempt.child)?,
                     DrainAttemptEnd::Stalled { elapsed_secs },
                 );
             }
@@ -316,14 +335,14 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
 
         match attempt_end {
             DrainAttemptEnd::Complete(status) => {
-                let _ = terminate_child(&mut child)?;
+                let _ = terminate_child(&mut attempt.child)?;
                 let successful = status.success();
                 let result = complete(
                     &layout,
                     &options,
                     status,
                     last_progress,
-                    &mut readers,
+                    &mut attempt.readers,
                     &mut session_tracker,
                     startup_timeout,
                 );
@@ -333,11 +352,17 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                 return result;
             }
             DrainAttemptEnd::StartupTimedOut { session_id } => {
-                let attempt = startup_retry.attempt();
+                let retry_attempt = startup_retry.attempt();
                 let retry = startup_retry.record_failure();
                 startup_retry.persist(&layout)?;
-                persist_and_emit_startup_timeout(&layout, &options, &session_id, attempt, &retry)?;
-                join_readers(&mut readers);
+                persist_and_emit_startup_timeout(
+                    &layout,
+                    &options,
+                    &session_id,
+                    retry_attempt,
+                    &retry,
+                )?;
+                join_readers(&mut attempt.readers);
                 match retry {
                     StartupRetryDecision::Scheduled => continue 'attempt,
                     StartupRetryDecision::Exhausted => {
@@ -353,7 +378,7 @@ pub(super) fn run(options: Options) -> Result<(), CommandFailure> {
                     false,
                 )?;
                 emit_termination(&layout, &options, elapsed_secs);
-                join_readers(&mut readers);
+                join_readers(&mut attempt.readers);
                 return Err(CommandFailure::status(String::new(), 124));
             }
         }
