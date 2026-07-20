@@ -2614,9 +2614,13 @@ fn executor_child_result(
     }
     if outcome == "succeeded" {
         for (flag, name) in [("--pr", "pr"), ("--claim-id", "claim_id"), ("--premerge-receipt", "premerge_receipt")] {
-            let result = field(name)
-                .ok_or_else(|| CommandFailure::diagnostic(format!("executor success requires {name}")))?;
-            args.extend([flag.to_string(), result.to_string()]);
+            let result = if name == "pr" {
+                value.get(name).and_then(serde_json::Value::as_u64).map(|number| number.to_string())
+            } else {
+                field(name).map(str::to_string)
+            }
+            .ok_or_else(|| CommandFailure::diagnostic(format!("executor success requires {name}")))?;
+            args.extend([flag.to_string(), result]);
         }
     }
     executor_result(&args)

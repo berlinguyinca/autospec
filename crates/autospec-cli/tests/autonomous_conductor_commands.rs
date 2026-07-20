@@ -1231,6 +1231,51 @@ fn executor_result_accepts_a_claim_owner_success_with_linked_closeout_evidence()
 }
 
 #[test]
+fn supervised_executor_child_accepts_a_typed_success_result() {
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+    fixture.set_valid_open_pull_request(EXECUTOR_COMMIT);
+    fixture.persist_pass_receipt(
+        "pass",
+        EXECUTOR_CLAIM_ID,
+        "rust-foreground-conductor-1",
+        "autonomous/issue-42",
+        EXECUTOR_COMMIT,
+        false,
+    );
+    fs::create_dir_all(fixture.repo_dir.join(".autospec")).expect("executor state directory");
+    fs::write(
+        fixture.repo_dir.join(".autospec/executor-result.json"),
+        format!(
+            "{{\"repo\":\"test/repo\",\"issue\":42,\"worker_id\":\"rust-foreground-conductor-1\",\"branch\":\"autonomous/issue-42\",\"claim_id\":\"{EXECUTOR_CLAIM_ID}\",\"outcome\":\"succeeded\",\"pr\":17,\"premerge_receipt\":\"{PREMERGE_RECEIPT}\"}}"
+        ),
+    )
+    .expect("typed executor result");
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "executor-child",
+            "--repo",
+            "test/repo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "rust-foreground-conductor-1",
+            "--branch",
+            "autonomous/issue-42",
+            "--claim-id",
+            EXECUTOR_CLAIM_ID,
+            "--invocation-id",
+            "42-claim-42",
+        ])
+        .output()
+        .expect("run typed executor child");
+    assert!(output.status.success(), "stderr={}", String::from_utf8_lossy(&output.stderr));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"accepted\""));
+}
+
+#[test]
 fn executor_result_success_requires_receipt_binding_flags_and_other_outcomes_reject_them() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
