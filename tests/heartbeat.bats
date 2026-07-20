@@ -113,6 +113,78 @@ teardown() {
     echo "$output" | grep -q 'session binding requires --session-id, --claim-id, and --worker-id'
 }
 
+@test "heartbeat session binding rejects a different generation and preserves the original" {
+    bash "$HB_WRITE" --issue 42 --step claimed --branch feat/test --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-generation-old --session-id session-shared
+    session_key="$(printf '%s' session-shared | od -An -tx1 | tr -d ' \n')"
+    binding="$TEST_TMP/testorg__testrepo/sessions/${session_key}.json"
+    original="$(cat "$binding")"
+
+    run bash "$HB_WRITE" --issue 42 --step claimed --branch feat/test --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-generation-new --session-id session-shared
+
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q 'session binding identity conflict'
+    [ "$(cat "$binding")" = "$original" ]
+    grep -q '"claim_id":"claim-generation-old"' "$TEST_TMP/testorg__testrepo/42.json"
+}
+
+@test "heartbeat session binding accepts an identical identity refresh without replacing the sidecar" {
+    bash "$HB_WRITE" --issue 42 --step claimed --branch feat/test --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-generation-old --session-id session-shared
+    session_key="$(printf '%s' session-shared | od -An -tx1 | tr -d ' \n')"
+    binding="$TEST_TMP/testorg__testrepo/sessions/${session_key}.json"
+    original="$(cat "$binding")"
+
+    run bash "$HB_WRITE" --issue 42 --step tests_started --branch feat/test --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-generation-old --session-id session-shared
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$binding")" = "$original" ]
+    grep -q '"step":"tests_started"' "$TEST_TMP/testorg__testrepo/42.json"
+}
+
+@test "concurrent heartbeat writers cannot overwrite one session identity" {
+    set +e
+    (bash "$HB_WRITE" --issue 42 --step claimed --branch feat/a --repo testorg/testrepo \
+        --worker-id worker-a --claim-id claim-a --session-id session-race; printf '%s' "$?" > "$TEST_TMP/a.rc") &
+    a_pid=$!
+    (bash "$HB_WRITE" --issue 43 --step claimed --branch feat/b --repo testorg/testrepo \
+        --worker-id worker-b --claim-id claim-b --session-id session-race; printf '%s' "$?" > "$TEST_TMP/b.rc") &
+    b_pid=$!
+    wait "$a_pid"
+    wait "$b_pid"
+    set -e
+
+    a_rc="$(cat "$TEST_TMP/a.rc")"
+    b_rc="$(cat "$TEST_TMP/b.rc")"
+    [ $((a_rc + b_rc)) -ne 0 ]
+    [ $((a_rc * b_rc)) -eq 0 ]
+    binding="$(bash "$HB_READ" --session-id session-race --repo testorg/testrepo)"
+    echo "$binding" | jq -e '(.claim_id == "claim-a" and .issue == "42") or (.claim_id == "claim-b" and .issue == "43")' >/dev/null
+}
+
+@test "heartbeat writer rejects non-canonical issue values without path traversal" {
+    for issue in '../escape' '0' '-1' 'abc' '01'; do
+        run bash "$HB_WRITE" --issue "$issue" --step claimed --repo testorg/testrepo
+        [ "$status" -ne 0 ]
+        echo "$output" | grep -q -- '--issue must be a canonical positive integer'
+    done
+    [ ! -e "$TEST_TMP/escape.json" ]
+    [ ! -e "$TEST_TMP/testorg__testrepo/0.json" ]
+}
+
+@test "heartbeat reader rejects non-canonical issue values without reading outside the repo directory" {
+    mkdir -p "$TEST_TMP/testorg__testrepo"
+    printf 'outside-secret\n' > "$TEST_TMP/escape.json"
+    for issue in '../escape' '0' '-1' 'abc' '01'; do
+        run bash "$HB_READ" --issue "$issue" --repo testorg/testrepo
+        [ "$status" -ne 0 ]
+        echo "$output" | grep -q -- '--issue must be a canonical positive integer'
+        ! echo "$output" | grep -q 'outside-secret'
+    done
+}
+
 # ── heartbeat-read.sh ─────────────────────────────────────────────────────────
 
 @test "heartbeat-read.sh is executable" {

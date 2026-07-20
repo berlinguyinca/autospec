@@ -49,6 +49,14 @@ if [ -n "$ISSUE" ] && [ -n "$SESSION_ID" ]; then
     printf 'heartbeat-read: --issue and --session-id are mutually exclusive\n' >&2
     exit 1
 fi
+if [ -n "$ISSUE" ]; then
+    case "$ISSUE" in
+        *[!0-9]*|0|0*)
+            printf 'heartbeat-read: --issue must be a canonical positive integer\n' >&2
+            exit 1
+            ;;
+    esac
+fi
 
 # ── Canonical repo-slug helper (F4) ───────────────────────────────────────────
 # Source repo-slug.sh so this READER resolves the canonical owner__name dir

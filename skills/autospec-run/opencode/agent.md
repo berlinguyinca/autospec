@@ -825,7 +825,7 @@ do not fall back to an inline label-swap path.
 > Keep a progress heartbeat so the monitor can prove forward movement:
 > - Create/update `~/.autospec/process-heartbeats/<repo-slug>/<ISSUE>.json` at each major step:
 >   - `claimed`, `expand_start`, `worktree_ready`, `tests_started`, `tests_passed`, `pr_created`, `smoke_retry`, `reviewed`, `merged`, `failed`
-> - Recovery-bound schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}","host":"<HOST>","worker_id":"<WORKER_ID>","claim_id":"<CLAIM_ID>","session_id":"<WAIT_TARGET_SESSION_ID>"}`. `heartbeat-write.sh` also updates an exact-session sidecar; legacy heartbeats without that sidecar remain valid only for liveness and fail closed for Wait recovery.
+> - Recovery-bound schema: `{"issue":"<ISSUE>","branch":"<BRANCH>","step":"<STEP>","ts":<unix_epoch>,"pr":"<PR>","repo":"{repo}","host":"<HOST>","worker_id":"<WORKER_ID>","claim_id":"<CLAIM_ID>","session_id":"<WAIT_TARGET_SESSION_ID>"}`. `heartbeat-write.sh` creates the exact-session sidecar once: an identical identity refresh preserves it, while any session/issue/worker/branch/claim mismatch fails closed before updating liveness. Legacy heartbeats without that sidecar remain valid only for liveness and fail closed for Wait recovery.
 > - Delete this file on terminal SUCCESS/FAILURE in both clean and failure paths.
 > - Transition notifications: on `tests_passed`, `pr_created`, `merged`, and `failed` call
 >   `bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "<title>" "<body>" || true`

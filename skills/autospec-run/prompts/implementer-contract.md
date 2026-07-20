@@ -129,6 +129,12 @@ heartbeat-write.sh --issue <N> --step <step> [--branch <b>] [--pr <p>] --repo <o
   reads that sidecar by the failed target's actual session ID; it never derives
   a claim generation from the currently active issue claim. Legacy heartbeats
   remain liveness-only and are ineligible for recovery.
+- The exact-session sidecar is create-once. A refresh with the same
+  session/issue/worker/branch/claim identity is idempotent and updates only the
+  per-issue liveness file; a conflicting identity fails closed without replacing
+  either record.
+- `--issue` accepts only canonical positive integers before any heartbeat path
+  is constructed.
 
 ## Worktree / branch rules
 

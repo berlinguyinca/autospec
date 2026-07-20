@@ -59,6 +59,12 @@ if [ -z "$ISSUE" ]; then
     printf 'heartbeat-write: --issue is required\n' >&2
     exit 1
 fi
+case "$ISSUE" in
+    *[!0-9]*|0|0*)
+        printf 'heartbeat-write: --issue must be a canonical positive integer\n' >&2
+        exit 1
+        ;;
+esac
 if [ -z "$STEP" ]; then
     printf 'heartbeat-write: --step is required\n' >&2
     exit 1
@@ -137,18 +143,32 @@ NOW_TS="$(date -u +%s)"
 HOST_VAL="${AUTOSPEC_HOST:-$(hostname 2>/dev/null || echo "")}"
 
 if [ "$binding_fields" -eq 3 ]; then
-    printf '{"issue":"%s","branch":"%s","step":"%s","ts":%s,"pr":"%s","repo":"%s","host":"%s","worker_id":"%s","claim_id":"%s","session_id":"%s"}\n' \
-        "$ISSUE" "${BRANCH:-}" "$STEP" "$NOW_TS" "${PR_VAL:-}" "$REPO_FULL" "$HOST_VAL" \
-        "$WORKER_ID" "$CLAIM_ID" "$SESSION_ID" > "${TARGET_DIR}/${ISSUE}.json"
-
     session_key="$(LC_ALL=C printf '%s' "$SESSION_ID" | od -An -tx1 | tr -d ' \n')"
     [ -n "$session_key" ] || { printf 'heartbeat-write: --session-id must not be empty\n' >&2; exit 1; }
     session_dir="${TARGET_DIR}/sessions"
     session_file="${session_dir}/${session_key}.json"
     session_tmp="${session_file}.tmp.$$"
     mkdir -p "$session_dir"
-    cp "${TARGET_DIR}/${ISSUE}.json" "$session_tmp"
-    mv "$session_tmp" "$session_file"
+    printf '{"issue":"%s","branch":"%s","step":"%s","ts":%s,"pr":"%s","repo":"%s","host":"%s","worker_id":"%s","claim_id":"%s","session_id":"%s"}\n' \
+        "$ISSUE" "${BRANCH:-}" "$STEP" "$NOW_TS" "${PR_VAL:-}" "$REPO_FULL" "$HOST_VAL" \
+        "$WORKER_ID" "$CLAIM_ID" "$SESSION_ID" > "$session_tmp"
+    if ! ln "$session_tmp" "$session_file" 2>/dev/null; then
+        if ! command -v jq >/dev/null 2>&1; then
+            rm -f "$session_tmp"
+            printf 'heartbeat-write: jq is required to verify an existing session binding\n' >&2
+            exit 2
+        fi
+        if ! jq -e --arg session_id "$SESSION_ID" --arg issue "$ISSUE" \
+            --arg worker_id "$WORKER_ID" --arg branch "${BRANCH:-}" --arg claim_id "$CLAIM_ID" \
+            '.session_id == $session_id and .issue == $issue and .worker_id == $worker_id and .branch == $branch and .claim_id == $claim_id' \
+            "$session_file" >/dev/null 2>&1; then
+            rm -f "$session_tmp"
+            printf 'heartbeat-write: session binding identity conflict\n' >&2
+            exit 1
+        fi
+    fi
+    cp "$session_tmp" "${TARGET_DIR}/${ISSUE}.json"
+    rm -f "$session_tmp"
 else
     printf '{"issue":"%s","branch":"%s","step":"%s","ts":%s,"pr":"%s","repo":"%s","host":"%s"}\n' \
         "$ISSUE" "${BRANCH:-}" "$STEP" "$NOW_TS" "${PR_VAL:-}" "$REPO_FULL" "$HOST_VAL" \

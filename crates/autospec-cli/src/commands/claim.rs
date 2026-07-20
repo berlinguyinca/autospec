@@ -1,4 +1,6 @@
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -294,7 +296,6 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     )
     .is_err()
     {
-        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         return unavailable_claim(
             options.issue,
             &repo,
@@ -1892,9 +1893,7 @@ fn write_startup_heartbeat(
         json_escape(worker_id),
         json_escape(claim_id),
     );
-    fs::write(directory.join(format!("{issue}.json")), &body).map_err(|error| {
-        CommandFailure::diagnostic(format!("could not write claim startup heartbeat: {error}"))
-    })?;
+    let mut created_session_binding = None;
     if let Some(session_id) = session_id {
         let sessions = directory.join("sessions");
         fs::create_dir_all(&sessions).map_err(|error| {
@@ -1904,20 +1903,112 @@ fn write_startup_heartbeat(
             ))
         })?;
         let path = sessions.join(format!("{}.json", heartbeat_session_key(session_id)));
-        let temporary = sessions.join(format!(
-            ".{}.tmp-{}",
-            heartbeat_session_key(session_id),
-            std::process::id()
-        ));
-        fs::write(&temporary, body).map_err(|error| {
-            CommandFailure::diagnostic(format!("could not write claim session binding: {error}"))
-        })?;
-        fs::rename(&temporary, &path).map_err(|error| {
-            let _ = fs::remove_file(&temporary);
-            CommandFailure::diagnostic(format!("could not publish claim session binding: {error}"))
-        })?;
+        let identity = SessionBindingIdentity::new(session_id, issue, worker_id, branch, claim_id);
+        let created = publish_session_binding(&path, body.as_bytes(), &identity)?;
+        created_session_binding = created.then_some(path);
+    }
+    if let Err(error) = fs::write(directory.join(format!("{issue}.json")), &body) {
+        if let Some(path) = created_session_binding {
+            let _ = fs::remove_file(path);
+        }
+        return Err(CommandFailure::diagnostic(format!(
+            "could not write claim startup heartbeat: {error}"
+        )));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionBindingIdentity {
+    session_id: String,
+    issue: String,
+    worker_id: String,
+    branch: String,
+    claim_id: String,
+}
+
+impl SessionBindingIdentity {
+    fn new(session_id: &str, issue: u64, worker_id: &str, branch: &str, claim_id: &str) -> Self {
+        Self {
+            session_id: session_id.to_string(),
+            issue: issue.to_string(),
+            worker_id: worker_id.to_string(),
+            branch: branch.to_string(),
+            claim_id: claim_id.to_string(),
+        }
+    }
+
+    fn from_document(document: &[u8]) -> Result<Self, CommandFailure> {
+        let value: serde_json::Value = serde_json::from_slice(document).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "existing claim session binding is malformed: {error}"
+            ))
+        })?;
+        let field = |name: &str| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    CommandFailure::diagnostic(format!(
+                        "existing claim session binding has invalid {name}"
+                    ))
+                })
+        };
+        Ok(Self {
+            session_id: field("session_id")?,
+            issue: field("issue")?,
+            worker_id: field("worker_id")?,
+            branch: value
+                .get("branch")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    CommandFailure::diagnostic(
+                        "existing claim session binding has invalid branch".to_string(),
+                    )
+                })?,
+            claim_id: field("claim_id")?,
+        })
+    }
+}
+
+fn publish_session_binding(
+    path: &Path,
+    document: &[u8],
+    expected: &SessionBindingIdentity,
+) -> Result<bool, CommandFailure> {
+    let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = fs::read(path).map_err(|read_error| {
+                CommandFailure::diagnostic(format!(
+                    "could not read existing claim session binding: {read_error}"
+                ))
+            })?;
+            let observed = SessionBindingIdentity::from_document(&existing)?;
+            if observed == *expected {
+                return Ok(false);
+            }
+            return Err(CommandFailure::diagnostic(
+                "claim session binding identity conflict".to_string(),
+            ));
+        }
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not create claim session binding: {error}"
+            )))
+        }
+    };
+    if let Err(error) = file.write_all(document).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(CommandFailure::diagnostic(format!(
+            "could not persist claim session binding: {error}"
+        )));
+    }
+    Ok(true)
 }
 
 fn heartbeat_session_key(session_id: &str) -> String {
@@ -2316,7 +2407,8 @@ fn print_state_help() {
 
 #[cfg(test)]
 mod tests {
-    use super::claim_settle_millis;
+    use super::{claim_settle_millis, publish_session_binding, SessionBindingIdentity};
+    use std::sync::{Arc, Barrier};
 
     #[test]
     fn claim_settle_millis_preserves_decimal_second_configuration() {
@@ -2330,5 +2422,74 @@ mod tests {
         assert_eq!(claim_settle_millis(Some("17"), Some("0.2")), Some(17));
         assert_eq!(claim_settle_millis(None, Some("-0.2")), None);
         assert_eq!(claim_settle_millis(None, Some("not-a-duration")), None);
+    }
+
+    #[test]
+    fn session_binding_is_create_once_and_idempotent_for_the_same_identity() {
+        let directory = std::env::temp_dir().join(format!(
+            "autospec-session-binding-{}-{}",
+            std::process::id(),
+            super::UNIQUE_ID_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("session binding fixture");
+        let path = directory.join("session.json");
+        let original = SessionBindingIdentity::new("session", 42, "worker", "feat/a", "claim-a");
+        let successor = SessionBindingIdentity::new("session", 42, "worker", "feat/a", "claim-b");
+
+        let original_document = br#"{"issue":"42","branch":"feat/a","worker_id":"worker","claim_id":"claim-a","session_id":"session"}"#;
+        let refresh_document = br#"{"issue":"42","branch":"feat/a","worker_id":"worker","claim_id":"claim-a","session_id":"session","step":"refresh"}"#;
+        let successor_document = br#"{"issue":"42","branch":"feat/a","worker_id":"worker","claim_id":"claim-b","session_id":"session"}"#;
+        publish_session_binding(&path, original_document, &original).expect("initial binding");
+        publish_session_binding(&path, refresh_document, &original).expect("idempotent refresh");
+        assert!(publish_session_binding(&path, successor_document, &successor).is_err());
+        assert_eq!(
+            std::fs::read(&path).expect("preserved binding"),
+            original_document
+        );
+        std::fs::remove_dir_all(directory).expect("remove session binding fixture");
+    }
+
+    #[test]
+    fn concurrent_session_binding_publishers_cannot_overwrite_the_winner() {
+        let directory = std::env::temp_dir().join(format!(
+            "autospec-session-binding-race-{}-{}",
+            std::process::id(),
+            super::UNIQUE_ID_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("session binding fixture");
+        let path = Arc::new(directory.join("session.json"));
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = [
+            (
+                "claim-a",
+                br#"{"issue":"42","branch":"feat/a","worker_id":"worker","claim_id":"claim-a","session_id":"session"}"#.as_slice(),
+            ),
+            (
+                "claim-b",
+                br#"{"issue":"42","branch":"feat/a","worker_id":"worker","claim_id":"claim-b","session_id":"session"}"#.as_slice(),
+            ),
+        ]
+            .into_iter()
+            .map(|(claim_id, document)| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let identity =
+                        SessionBindingIdentity::new("session", 42, "worker", "feat/a", claim_id);
+                    barrier.wait();
+                    publish_session_binding(&path, document, &identity)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("publisher thread"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        let stored = std::fs::read_to_string(&*path).expect("winning session binding");
+        assert!(stored.contains("claim-a") || stored.contains("claim-b"));
+        std::fs::remove_dir_all(directory).expect("remove session binding fixture");
     }
 }
