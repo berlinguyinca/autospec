@@ -177,7 +177,7 @@ fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() 
         1,
         "foreground must reuse its captured ready-queue snapshot"
     );
-    for forbidden in ["issue\nedit", "issue\ncomment", "executor_deferred"] {
+    for forbidden in ["issue\nedit", "issue\ncomment", "executor_pending"] {
         assert!(
             !calls.contains(forbidden),
             "empty Tier 1 must not invoke remote mutation: {forbidden}"
@@ -316,12 +316,12 @@ fn foreground_records_a_typed_deferred_receipt_and_keeps_the_selected_issue() {
     assert_eq!(
         state.last_outcome(),
         Some(&ConductorOutcome::Blocked(
-            "awaiting_typed_implementation_executor".to_string()
+            "implementation_executor_pending".to_string()
         ))
     );
     assert_eq!(
         state.pause_reason(),
-        Some("awaiting_typed_implementation_executor")
+        Some("implementation_executor_pending")
     );
     let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
     let review = calls
@@ -329,7 +329,11 @@ fn foreground_records_a_typed_deferred_receipt_and_keeps_the_selected_issue() {
         .expect("issue reread");
     let claim = calls.find("issue\nedit\n42").expect("claim label change");
     assert!(review < claim, "safety review must precede claim selection");
-    assert!(calls.contains("executor_deferred"));
+    assert!(calls.contains("executor_pending"));
+    let invocations = fs::read_dir(fixture.repo_dir.join(".autospec/executor-invocations"))
+        .expect("invocation receipts")
+        .count();
+    assert_eq!(invocations, 1, "one invocation receipt is persisted");
 
     let second = fixture.run_foreground();
     assert!(
@@ -338,6 +342,13 @@ fn foreground_records_a_typed_deferred_receipt_and_keeps_the_selected_issue() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert_eq!(fixture.read_state(), state);
+    assert_eq!(
+        fs::read_dir(fixture.repo_dir.join(".autospec/executor-invocations"))
+            .expect("replayed invocation receipts")
+            .count(),
+        1,
+        "restart replays the terminal invocation"
+    );
 }
 
 #[test]
@@ -521,7 +532,7 @@ fn foreground_stops_before_executor_when_main_health_blocks() {
     assert!(fixture.operator.join("test_repo/lifecycle.json").exists());
     assert!(!fs::read_to_string(&fixture.calls)
         .expect("read GitHub calls")
-        .contains("executor_deferred"));
+        .contains("executor_pending"));
 }
 
 #[test]
@@ -584,7 +595,7 @@ fn ignored_failed_check_is_advisory_for_foreground_admission() {
     );
     assert!(fs::read_to_string(&fixture.calls)
         .expect("read GitHub calls")
-        .contains("executor_deferred"));
+        .contains("executor_pending"));
 }
 
 #[test]
@@ -603,7 +614,7 @@ fn malformed_repository_config_fails_before_foreground_dispatch() {
     assert!(!fixture.state_path().exists());
     let calls = fs::read_to_string(&fixture.calls).unwrap_or_default();
     assert!(!calls.contains("repos/test/repo/branches/"));
-    assert!(!calls.contains("executor_deferred"));
+    assert!(!calls.contains("executor_pending"));
     assert!(!calls.contains("issue\nedit\n42"));
     assert!(!calls.contains("issue\ncomment\n42"));
 }
@@ -628,7 +639,7 @@ fn unreadable_repository_config_fails_before_foreground_dispatch() {
     assert!(!calls.contains("repos/test/repo/branches/"));
     assert!(!calls.contains("issue\nedit\n42"));
     assert!(!calls.contains("issue\ncomment\n42"));
-    assert!(!calls.contains("executor_deferred"));
+    assert!(!calls.contains("executor_pending"));
 }
 
 #[test]
@@ -950,7 +961,7 @@ fn executor_result_emits_the_typed_deferred_receipt() {
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "{\"repo\":\"test/repo\",\"issue\":42,\"outcome\":\"blocked\",\"reason\":\"awaiting_typed_implementation_executor\"}\n"
+        "{\"repo\":\"test/repo\",\"issue\":42,\"outcome\":\"blocked\",\"reason\":\"implementation_executor_pending\"}\n"
     );
 }
 
@@ -1716,7 +1727,7 @@ if [ "$1" = api ]; then
     repos/test/repo/issues/comments/100)
       body=""
       for value in "$@"; do case "$value" in body=*) body="${value#body=}" ;; esac; done
-      if [ "${AUTOSPEC_FOREGROUND_STEAL_ON_OUTCOME:-0}" = 1 ] && printf '%s' "$body" | grep -q executor_deferred; then
+      if [ "${AUTOSPEC_FOREGROUND_STEAL_ON_OUTCOME:-0}" = 1 ] && printf '%s' "$body" | grep -q executor_pending; then
         body='<!-- autospec-run-state:begin -->
 {"schema":1,"repo":"test/repo","issue":42,"worker_id":"foreign-worker","state":"claimed","branch":"foreign/issue-42","pr":"","step":"claimed","paths":[],"claimed_at":"2026-07-15T00:00:00Z","updated_at":"2026-07-15T00:00:00Z","ttl_seconds":10800}
 <!-- autospec-run-state:end -->'

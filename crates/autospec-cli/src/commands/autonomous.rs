@@ -90,7 +90,7 @@ mod waterfall_policy_tests;
 mod waterfall_tests;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
-const DEFERRED_EXECUTOR_REASON: &str = "awaiting_typed_implementation_executor";
+const EXECUTOR_PENDING_REASON: &str = "implementation_executor_pending";
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -2370,8 +2370,15 @@ fn dispatch_foreground(
         })?;
         persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
 
-        let receipt = ExecutorRequest::for_selected(layout, &options.repo_dir, selection.issue)
-            .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
+        let receipt = ExecutorRequest::for_selected(
+            layout,
+            &options.repo_dir,
+            selection.issue,
+            &lease.worker_id,
+            &lease.branch,
+            &lease.claim_id,
+        )
+        .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
         state = state
             .transition(ConductorEvent::DispatchRecorded {
                 outcome: receipt.outcome.clone(),
@@ -2656,6 +2663,7 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
     let mut reason = None;
     let mut claim_id = None;
     let mut premerge_receipt = None;
+    let mut invocation_id = None;
     let mut index = 1;
 
     while index < args.len() {
@@ -2664,6 +2672,9 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
         match flag.as_str() {
             "--repo" => set_executor_result_value(&mut repo, value, "--repo")?,
             "--issue" => set_executor_result_number(&mut issue, value, "--issue")?,
+            "--invocation-id" => {
+                set_executor_result_value(&mut invocation_id, value, "--invocation-id")?
+            }
             "--worker-id" => set_executor_result_value(&mut worker_id, value, "--worker-id")?,
             "--branch" => set_executor_result_value(&mut branch, value, "--branch")?,
             "--outcome" => set_executor_result_value(&mut outcome, value, "--outcome")?,
@@ -2837,6 +2848,10 @@ struct ExecutorRequest {
     current_dir: PathBuf,
     repo: String,
     issue: u64,
+    worker_id: String,
+    branch: String,
+    claim_id: String,
+    invocation_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2846,7 +2861,15 @@ struct ExecutorReceipt {
 }
 
 impl ExecutorRequest {
-    fn for_selected(layout: &RunLayout, repo_dir: &str, issue: u64) -> Result<Self, String> {
+    fn for_selected(
+        layout: &RunLayout,
+        repo_dir: &str,
+        issue: u64,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+    ) -> Result<Self, String> {
+        let invocation_id = format!("{}-{}", issue, claim_id);
         Ok(Self {
             program: std::env::current_exe()
                 .map_err(|error| format!("cannot resolve Rust executor program: {error}"))?,
@@ -2857,25 +2880,51 @@ impl ExecutorRequest {
                 layout.repo.clone(),
                 "--issue".to_string(),
                 issue.to_string(),
+                "--invocation-id".to_string(),
+                invocation_id.clone(),
             ],
             current_dir: PathBuf::from(repo_dir),
             repo: layout.repo.clone(),
             issue,
+            worker_id: worker_id.to_string(),
+            branch: branch.to_string(),
+            claim_id: claim_id.to_string(),
+            invocation_id,
         })
     }
 
     fn run(&self) -> ExecutorReceipt {
+        let invocation_dir = self.current_dir.join(".autospec/executor-invocations");
+        let invocation_path = invocation_dir.join(format!("{}.json", self.invocation_id));
+        if let Ok(existing) = fs::read_to_string(&invocation_path) {
+            if existing.contains("\"terminal\":true") {
+                return ExecutorReceipt {
+                    outcome: ConductorOutcome::Blocked(EXECUTOR_PENDING_REASON.to_string()),
+                    claim_step: "executor_replayed".to_string(),
+                };
+            }
+        }
         let output = Command::new(&self.program)
             .args(&self.args)
             .current_dir(&self.current_dir)
             .output();
+        let _ = fs::create_dir_all(&invocation_dir);
         let expected = executor_receipt_json(&self.repo, self.issue);
         if output.is_ok_and(|output| {
             output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == expected
         }) {
+            let _ = fs::write(
+                &invocation_path,
+                format!(
+                    "{{\"terminal\":true,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"claim_id\":\"{}\",\"invocation_id\":\"{}\"}}\n",
+                    json_escape(&self.repo), self.issue, json_escape(&self.worker_id),
+                    json_escape(&self.branch), json_escape(&self.claim_id),
+                    json_escape(&self.invocation_id)
+                ),
+            );
             ExecutorReceipt {
-                outcome: ConductorOutcome::Blocked(DEFERRED_EXECUTOR_REASON.to_string()),
-                claim_step: "executor_deferred".to_string(),
+                outcome: ConductorOutcome::Blocked(EXECUTOR_PENDING_REASON.to_string()),
+                claim_step: "executor_pending".to_string(),
             }
         } else {
             ExecutorReceipt::failed()
@@ -2897,7 +2946,7 @@ fn executor_receipt_json(repo: &str, issue: u64) -> String {
         "{{\"repo\":\"{}\",\"issue\":{},\"outcome\":\"blocked\",\"reason\":\"{}\"}}",
         json_escape(repo),
         issue,
-        DEFERRED_EXECUTOR_REASON,
+        EXECUTOR_PENDING_REASON,
     )
 }
 
@@ -5136,6 +5185,10 @@ mod foreground_tests {
             current_dir: std::env::temp_dir(),
             repo: "test/repo".to_string(),
             issue: 42,
+            worker_id: "worker-42".to_string(),
+            branch: "autonomous/issue-42".to_string(),
+            claim_id: "claim-42".to_string(),
+            invocation_id: "test-invocation".to_string(),
         };
 
         let receipt = request.run();
