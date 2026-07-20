@@ -15,6 +15,7 @@ use super::tier2_receipts_tests::{TempRoot, REPO};
 use super::tier4_receipts_tests::seed_tier_four_cursor;
 use super::waterfall::{StoreAcquisition, WaterfallStore};
 use super::waterfall_coordinator::Tier1QueueEvidence;
+use super::waterfall_policy::WaterfallPolicy;
 
 const CLOSED_ORDER: [NoWorkTier; 5] = [
     NoWorkTier::Tier1,
@@ -93,6 +94,7 @@ fn nonempty_tier4_config_remains_disabled_production_data() {
     seed_tier_four_cursor(&root);
     let lease = acquire_test_lifecycle(root.path(), REPO).expect("lifecycle lease");
     let config = configured_tier4();
+    let policy = WaterfallPolicy::from_config(&config).expect("derive policy");
     let plan = empty_plan();
 
     let progress = run_one_tier(
@@ -100,6 +102,7 @@ fn nonempty_tier4_config_remains_disabled_production_data() {
         REPO,
         &lease,
         &config,
+        &policy,
         Tier1QueueEvidence::EmptyPage(&plan),
     )
     .expect("disabled Tier 4 dispatch");
@@ -124,13 +127,16 @@ fn waterfall_lock_contention_is_pending_and_never_blocked() {
         StoreAcquisition::Acquired(store) => store,
         StoreAcquisition::Held => panic!("fresh fixture lock is unexpectedly held"),
     };
+    let config = AutonomousConfig::default();
+    let policy = WaterfallPolicy::from_config(&config).expect("derive policy");
     let plan = empty_plan();
 
     let progress = run_one_tier(
         root.path(),
         REPO,
         &lease,
-        &AutonomousConfig::default(),
+        &config,
+        &policy,
         Tier1QueueEvidence::EmptyPage(&plan),
     )
     .expect("contended dispatch");
@@ -150,13 +156,16 @@ fn stale_lease_cannot_probe_or_create_waterfall_state() {
     let operator_root = TempRoot::new();
     let lease = acquire_test_lifecycle(lease_root.path(), REPO).expect("lifecycle lease");
     replace_test_lifecycle_generation(&lease).expect("replace lease generation");
+    let config = AutonomousConfig::default();
+    let policy = WaterfallPolicy::from_config(&config).expect("derive policy");
     let plan = empty_plan();
 
     let error = run_one_tier(
         operator_root.path(),
         REPO,
         &lease,
-        &AutonomousConfig::default(),
+        &config,
+        &policy,
         Tier1QueueEvidence::EmptyPage(&plan),
     )
     .expect_err("stale lease must fail before cursor probing");

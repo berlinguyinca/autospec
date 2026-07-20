@@ -35,10 +35,10 @@ mod resilience;
 // Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
 #[allow(dead_code)]
 mod tier15;
-// Task 2 persists sealed observations but has no foreground caller by design.
+// Tier 1.5 is read-only foreground discovery; retained receipts replay before collection.
 #[allow(dead_code)]
 mod tier15_receipts;
-// Task 3 adds a private Tier 2 persistence seam without foreground wiring.
+// Tier 2 participates in foreground traversal but remains disabled by checked-in policy.
 #[allow(dead_code)]
 mod tier2;
 #[allow(dead_code)]
@@ -54,7 +54,7 @@ mod tier2_receipts_tests;
 mod tier3;
 #[allow(dead_code)]
 mod tier3_receipts;
-// Tier 4 remains a sealed receipt boundary without foreground wiring.
+// Tier 4 participates in foreground traversal but remains disabled by checked-in policy.
 #[cfg(test)]
 mod tier3_receipts_failure_prefix_tests;
 #[cfg(test)]
@@ -1598,6 +1598,7 @@ fn scan_foreground(
                 &layout.repo,
                 lease,
                 config,
+                policy,
                 waterfall_coordinator::Tier1QueueEvidence::EmptyPage(&initial_plan),
             )? {
                 foreground_waterfall::ForegroundWaterfallProgress::Pending { .. }

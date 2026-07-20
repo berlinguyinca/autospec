@@ -51,11 +51,11 @@ pub(super) fn run_one_tier(
     repo: &str,
     lease: &ConductorLease,
     config: &AutonomousConfig,
+    policy: &WaterfallPolicy,
     tier1_evidence: Tier1QueueEvidence<'_>,
 ) -> Result<ForegroundWaterfallProgress, String> {
-    let policy = WaterfallPolicy::from_config(config)?;
     let cursor =
-        with_current_lifecycle_lease(lease, || read_cursor_fenced(state_root, repo, &policy))?;
+        with_current_lifecycle_lease(lease, || read_cursor_fenced(state_root, repo, policy))?;
     if !cursor.trusted {
         return Ok(ForegroundWaterfallProgress::Pending { tier: cursor.tier });
     }
@@ -68,12 +68,12 @@ pub(super) fn run_one_tier(
                 repo,
                 lease,
                 config,
-                &policy,
+                policy,
                 tier1_evidence,
             )
         },
         || {
-            with_current_lifecycle_lease(lease, || read_cursor_fenced(state_root, repo, &policy))
+            with_current_lifecycle_lease(lease, || read_cursor_fenced(state_root, repo, policy))
                 .map(|cursor| cursor.tier)
         },
     )
