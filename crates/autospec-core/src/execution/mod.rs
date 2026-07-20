@@ -6,7 +6,7 @@ pub mod report;
 pub mod result;
 
 pub use queue::{
-    ExecutionQueue, FailureKind, QueueEntry, QueueResultApplication, QueueStatus,
-    QueueValidationResult, QueueValidationStatus,
+    ExecutionQueue, FailureKind, OneShotIssueSelector, QueueEntry, QueueResultApplication,
+    QueueStatus, QueueValidationResult, QueueValidationStatus,
 };
 pub use result::{AgentOutcome, IngestedAgentResult};
