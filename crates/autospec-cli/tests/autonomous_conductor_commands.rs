@@ -795,6 +795,35 @@ fn retained_foreground_state_reloads_and_records_repository_policy() {
 }
 
 #[test]
+fn post_health_issue_admission_failure_keeps_the_evaluated_policy_receipt() {
+    let fixture = ForegroundFixture::new();
+    fs::write(&fixture.mode, "reviewed\n").expect("make the queued issue safety-ready");
+    fixture.write_autonomous_config("main_health:\n  branch: main\n");
+
+    let output = fixture
+        .unbranched_foreground_command()
+        .env("AUTOSPEC_FOREGROUND_CORRUPT_SPEND_AFTER_QUEUE", "1")
+        .output()
+        .expect("run foreground with a post-health admission failure");
+
+    assert!(!output.status.success());
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        diagnostic.contains("malformed_spend"),
+        "expected issue-admission failure, got {diagnostic}"
+    );
+    let receipts = fs::read_to_string(fixture.main_health_observations_path())
+        .expect("health evaluation must be recorded before issue admission");
+    let lines = receipts.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1);
+    assert!(!json_string_field(lines[0], "effective_policy_digest").is_empty());
+}
+
+#[test]
 fn invalid_configured_branch_does_not_fall_back_to_github_default() {
     let fixture = ForegroundFixture::new();
     fixture.write_autonomous_config("main_health:\n  branch: missing\n");
@@ -1380,6 +1409,10 @@ if [ "$1" = api ]; then
         *labels=in-progress-by-bot*) printf '%s\n' '{"raw_count":0,"items":[]}' ;;
         *labels=auto-implement*)
           if [ "${AUTOSPEC_FOREGROUND_QUEUE_FAILURE:-0}" = 1 ]; then exit 1; fi
+          if [ "${AUTOSPEC_FOREGROUND_CORRUPT_SPEND_AFTER_QUEUE:-0}" = 1 ]; then
+            mkdir -p "$AUTOSPEC_AUTONOMOUS_SPEND_DIR/test_repo"
+            printf '%s\n' '{malformed' > "$AUTOSPEC_AUTONOMOUS_SPEND_DIR/test_repo/spend.json"
+          fi
           if [ "${AUTOSPEC_FOREGROUND_EMPTY_QUEUE:-0}" = 1 ]; then
             printf '%s\n' '{"raw_count":0,"items":[]}'
           else

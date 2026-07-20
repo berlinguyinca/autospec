@@ -2047,6 +2047,7 @@ fn run_foreground_with_lease(
         .main_health
         .effective_policy_digest(&health.branch)
         .map_err(CommandFailure::diagnostic)?;
+    persist_main_health(layout, &health, &policy_digest).map_err(CommandFailure::diagnostic)?;
     input = input.with_health(lifecycle_health(health.outcome.clone()));
     let mut lifecycle = decide_lifecycle(&input);
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
@@ -2056,7 +2057,6 @@ fn run_foreground_with_lease(
                 layout.state_dir.display()
             ))
         })?;
-        persist_main_health(layout, &health, &policy_digest).map_err(CommandFailure::diagnostic)?;
         persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
         return Ok(ForegroundCompletion::Lifecycle(lifecycle));
     }
@@ -2077,12 +2077,12 @@ fn run_foreground_with_lease(
             )?;
             lifecycle = decide_lifecycle(&input);
             if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
-                persist_foreground_admission(layout, &health, &policy_digest, &lifecycle)?;
+                persist_foreground_lifecycle(layout, &lifecycle)?;
                 return Ok(ForegroundCompletion::Lifecycle(lifecycle));
             }
         }
     }
-    persist_foreground_admission(layout, &health, &policy_digest, &lifecycle)?;
+    persist_foreground_lifecycle(layout, &lifecycle)?;
     let scope = foreground_scope();
     let state_path = foreground_state_path(layout, scope);
     let state =
@@ -2846,10 +2846,8 @@ fn lifecycle_decision_with_admission(
     Ok(decision)
 }
 
-fn persist_foreground_admission(
+fn persist_foreground_lifecycle(
     layout: &RunLayout,
-    health: &MainlineHealth,
-    policy_digest: &str,
     lifecycle: &LifecycleDecision,
 ) -> Result<(), CommandFailure> {
     fs::create_dir_all(&layout.state_dir).map_err(|error| {
@@ -2858,7 +2856,6 @@ fn persist_foreground_admission(
             layout.state_dir.display()
         ))
     })?;
-    persist_main_health(layout, health, policy_digest).map_err(CommandFailure::diagnostic)?;
     persist_lifecycle_decision(layout, lifecycle).map_err(CommandFailure::diagnostic)
 }
 
