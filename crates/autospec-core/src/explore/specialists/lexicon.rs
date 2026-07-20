@@ -104,6 +104,9 @@ const SKIP_DIRS: &[&str] = &[
     "target",
     "dist",
     "build",
+    "coverage",
+    "out",
+    ".cache",
     ".autospec",
     "__pycache__",
 ];

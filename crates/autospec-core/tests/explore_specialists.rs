@@ -167,6 +167,32 @@ fn strict_collector_is_deterministic_and_ranks_domains_and_evidence() {
 }
 
 #[test]
+fn strict_collector_excludes_generated_and_vendor_trees() {
+    let repo = temp_repo("strict-exclusions");
+    fs::write(repo.join("README.md"), "plain application\n").unwrap();
+    for directory in ["node_modules", ".next", "coverage", "out"] {
+        fs::create_dir_all(repo.join(directory)).unwrap();
+        fs::write(
+            repo.join(directory).join("README.md"),
+            "ccxt stripe oauth kubernetes\n",
+        )
+        .unwrap();
+    }
+
+    let evidence = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap();
+    let files = evidence
+        .domains
+        .iter()
+        .flat_map(|domain| domain.evidence.iter().map(|item| item.file.as_str()))
+        .collect::<Vec<_>>();
+    assert!(files.iter().all(|file| {
+        !["node_modules/", ".next/", "coverage/", "out/"]
+            .iter()
+            .any(|prefix| file.starts_with(prefix))
+    }));
+}
+
+#[test]
 fn strict_collector_accepts_a_valid_zero_domain_snapshot() {
     let repo = temp_repo("strict-empty");
     fs::write(
