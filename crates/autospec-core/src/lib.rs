@@ -4,6 +4,7 @@ pub mod autonomous {
     pub mod blast_radius;
     pub mod config;
     pub mod drain;
+    pub mod executor;
     pub mod mainline_health;
     pub mod no_work;
     pub mod premerge;
