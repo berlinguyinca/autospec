@@ -393,6 +393,25 @@ fn lane_and_evidence_digests_are_stable_and_identity_bound() {
 }
 
 #[test]
+fn golden_digests_pin_lane_and_qa_before_security_evidence_order() {
+    let lane = lane(42, "claim-42", COMMIT_A);
+    assert_eq!(
+        lane.lane_digest(),
+        "a929c51112cfb9752b0aae3dd2d5433220f2c08580c45bfed35abd262502e137"
+    );
+
+    let decision = evaluate_premerge(
+        &lane,
+        EvidenceAvailability::Present(qa(&lane, "pass", &[], "")),
+        EvidenceAvailability::Present(security(&lane, "pass", &[], "")),
+    );
+    assert_eq!(
+        decision_digest(&decision),
+        "6af7bf4582771543d3418fc4e88cdf00292133c91cbf85abcb3e7b7ca99abf11"
+    );
+}
+
+#[test]
 fn a_blocked_lane_does_not_affect_an_independent_passing_lane() {
     let lane_a = lane(15, "claim-15", COMMIT_A);
     let lane_b = lane(16, "claim-16", COMMIT_B);
