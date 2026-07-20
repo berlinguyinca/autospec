@@ -98,6 +98,36 @@ emit_to() {
   fi
 }
 
+# Per-source byte cap for code-aware gather (issue #1727). Files larger than
+# this are skipped so a huge generated/vendored file never dominates the bundle.
+: "${AUTOSPEC_PERSONA_SOURCE_MAX_BYTES:=65536}"
+
+# emit_code_source OUT SOURCE PRECEDENCE PATH
+#   Like emit_to, but for code-aware text sources (issue #1727): skips vendored
+#   paths, binary/empty files, and files exceeding AUTOSPEC_PERSONA_SOURCE_MAX_BYTES.
+emit_code_source() {
+  local _out="$1"
+  local _source="$2"
+  local _prec="$3"
+  local _path="$4"
+
+  [ -f "$_path" ] || return 0
+  case "$_path" in
+    */node_modules/*|*/target/*|*/vendor/*|*/dist/*|*/build/*|*/.git/*) return 0 ;;
+  esac
+  # Binary/empty guard: grep -I reports no match for binary files; `-q .`
+  # additionally requires at least one line of text content.
+  grep -Iq . "$_path" 2>/dev/null || return 0
+  local _size
+  _size="$(wc -c < "$_path" 2>/dev/null | tr -d '[:space:]')"
+  case "$_size" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$_size" -le "$AUTOSPEC_PERSONA_SOURCE_MAX_BYTES" ] || return 0
+
+  emit_to "$_out" "$_source" "$_prec" "$_path"
+}
+
 # ---- global-base inputs (operator-level) ----
 
 # Precedence 0: supervised interview answers
@@ -131,6 +161,40 @@ _per_repo_overlay="$REPO_ROOT/.autospec/persona-overlay.md"
 if [ -f "$_per_repo_overlay" ]; then
   emit_to "$_overlay_jsonl" "per-repo-overlay" 2 "$_per_repo_overlay"
 fi
+
+# ---- code-aware overlay inputs (issue #1727) ----
+# Repo intent frequently lives in agent-instruction files, the README, design
+# specs, and build manifests rather than in AGENTS.md alone. Gather them so a
+# repo with (e.g.) only CLAUDE.md still yields a non-empty bundle. Ranked in the
+# overlay (precedence >= 1), always below the precedence-0 interview answers.
+
+# Precedence 1: agent-instruction files (peers of AGENTS.md).
+for _agent_file in CLAUDE.md GEMINI.md .cursorrules; do
+  emit_code_source "$_overlay_jsonl" "agent-instructions" 1 "$REPO_ROOT/$_agent_file"
+done
+
+# Precedence 2: README (first existing variant only).
+for _readme in README.md README.markdown README.rst README.txt README; do
+  if [ -f "$REPO_ROOT/$_readme" ]; then
+    emit_code_source "$_overlay_jsonl" "readme" 2 "$REPO_ROOT/$_readme"
+    break
+  fi
+done
+
+# Precedence 2: design specs under docs/specs (intent, hard rules, doctrine).
+if [ -d "$REPO_ROOT/docs/specs" ]; then
+  for _spec in "$REPO_ROOT"/docs/specs/*.md; do
+    if [ -f "$_spec" ]; then
+      emit_code_source "$_overlay_jsonl" "design-spec" 2 "$_spec"
+    fi
+  done
+fi
+
+# Precedence 2: deterministic stack signal — root build manifests name the
+# language/framework/domain conventions as real evidence files (not prose).
+for _manifest in Cargo.toml package.json go.mod pyproject.toml requirements.txt pom.xml build.sbt; do
+  emit_code_source "$_overlay_jsonl" "stack-manifest" 2 "$REPO_ROOT/$_manifest"
+done
 
 # ---- emit final bundle, each sub-bundle sorted by precedence ----
 _global_json="$(jq -s 'sort_by(.precedence)' "$_global_jsonl")"

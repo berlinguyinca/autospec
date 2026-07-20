@@ -295,3 +295,57 @@ count_source_in() {
       '[.overlay[] | select(.path == $p)] | length')"
     [ "$_found" -eq 1 ]
 }
+
+# ---------------------------------------------------------------------------
+# Code-aware gather (issue #1727)
+# ---------------------------------------------------------------------------
+
+@test "code-aware: CLAUDE.md alone yields a non-empty overlay bundle" {
+    printf '# Project rules\nUse Decimal for money.\n' > "$FAKE_REPO/CLAUDE.md"
+    run_sources
+    [ "$status" -eq 0 ]
+    [ "$(count_source_in overlay agent-instructions)" -eq 1 ]
+    [ "$(echo "$output" | jq '.meta.source_count')" -gt 0 ]
+}
+
+@test "code-aware: docs/specs markdown files are gathered as design-spec" {
+    mkdir -p "$FAKE_REPO/docs/specs"
+    printf '# Spec A\nintent\n' > "$FAKE_REPO/docs/specs/a.md"
+    printf '# Spec B\nintent\n' > "$FAKE_REPO/docs/specs/b.md"
+    run_sources
+    [ "$status" -eq 0 ]
+    [ "$(count_source_in overlay design-spec)" -eq 2 ]
+}
+
+@test "code-aware: binary files are excluded from the gather" {
+    mkdir -p "$FAKE_REPO/docs/specs"
+    printf '\x00\x01\x02binary\x00' > "$FAKE_REPO/docs/specs/blob.md"
+    printf '# real spec\n' > "$FAKE_REPO/docs/specs/real.md"
+    run_sources
+    [ "$status" -eq 0 ]
+    [ "$(count_source_in overlay design-spec)" -eq 1 ]
+}
+
+@test "code-aware: per-source byte cap skips oversized files" {
+    export AUTOSPEC_PERSONA_SOURCE_MAX_BYTES=8
+    printf 'this content is definitely longer than eight bytes\n' > "$FAKE_REPO/CLAUDE.md"
+    run_sources
+    [ "$status" -eq 0 ]
+    [ "$(count_source_in overlay agent-instructions)" -eq 0 ]
+}
+
+@test "code-aware: root stack manifests are gathered as stack-manifest" {
+    printf '[package]\nname = "x"\n' > "$FAKE_REPO/Cargo.toml"
+    run_sources
+    [ "$status" -eq 0 ]
+    [ "$(count_source_in overlay stack-manifest)" -eq 1 ]
+}
+
+@test "code-aware: interview answers stay precedence 0 above code sources" {
+    printf '{"decision_style":"cautious"}\n' > "$FAKE_AUTOSPEC/operator-persona.answers.json"
+    printf '# rules\n' > "$FAKE_REPO/CLAUDE.md"
+    run_sources
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | jq '.global[] | select(.source=="interview-answers") | .precedence')" -eq 0 ]
+    [ "$(echo "$output" | jq '.overlay[] | select(.source=="agent-instructions") | .precedence')" -ge 1 ]
+}
