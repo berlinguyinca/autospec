@@ -627,6 +627,25 @@ Extends the Phase 4 self-heal loop classifier with doc-drift categories:
 `failing_doc_drift`, `missing_doc_scope`, `failing_visual_stale`, `failing_ai_review_stale`,
 `failing_manifest_stale`.
 
+## Autonomous premerge admission (`autospec autonomous premerge evaluate`)
+
+The Rust command evaluates one claimed lane from typed QA and security evidence:
+
+```
+autospec autonomous premerge evaluate --repo OWNER/REPO --repo-dir DIR \
+  --issue N --worker-id ID --claim-id ID [--json]
+```
+
+Evidence is produced by the fixed Rust schema-1 producers and must be present at
+`.autospec/evidence/premerge/<lane-digest>/qa.json` and `security.json`. The
+working tree must have no tracked staged or unstaged changes; fixed untracked
+evidence files are allowed. The command writes immutable, lane-bound receipts
+under repo-scoped `.autospec/state/premerge/` and quarantines blocked lanes.
+Missing, malformed, mismatched, or unavailable evidence is fail-closed. A pass
+receipt is observability and admission evidence only; it does not itself run the
+foreground executor. Explicit claim success additionally requires the receipt
+digest and claim id, and the receipt commit must equal the GitHub PR head commit.
+
 ## Validation (`autospec validate`)
 
 <!-- autospec-doc-scope:

@@ -53,3 +53,27 @@ If no configured, explicit, or GitHub default branch can be resolved, the
 `autospec autonomous run-foreground` completes this Rust admission gate before
 entering its bounded Rust conductor cycle, so missing branches or required
 failed/pending checks cannot dispatch ready work.
+
+## Premerge evidence admission
+
+Before a claimed executor result can close a claim, run the typed Rust premerge
+gate for the exact repository, issue, worker, claim, branch, and commit lane:
+
+```
+autospec autonomous premerge evaluate --repo OWNER/REPO --repo-dir DIR \
+  --issue N --worker-id ID --claim-id ID --json
+```
+
+QA and security producers write schema-1 JSON only to the fixed untracked paths
+`.autospec/evidence/premerge/<lane-digest>/qa.json` and `security.json`. Tracked
+staged or unstaged changes reject admission; those two untracked evidence files
+are intentionally permitted. The evaluator verifies canonical lane and evidence
+digests, writes immutable receipts and a latest pointer, and quarantines blocked
+lanes under repo-scoped autonomous state. Any missing, malformed, mismatched, or
+unavailable evidence fails closed.
+
+The receipt is an observability/admission artifact, not a foreground executor:
+the supervised Rust executor and live QA/security producers remain follow-up
+work. Claim success must include the exact claim id and receipt digest, and the
+receipt commit must match the GitHub PR `headRefOid`; otherwise the claim remains
+non-successful.
