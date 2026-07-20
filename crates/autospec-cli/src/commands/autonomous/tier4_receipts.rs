@@ -3,16 +3,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
 use autospec_core::autonomous::tier4::{
-    Tier4EvidenceDocuments, Tier4Failure, Tier4Observation, Tier4SourcePolicy, DISABLED_REASON,
+    Tier4EvidenceDocuments, Tier4Failure, Tier4Observation, DISABLED_REASON,
 };
 use autospec_core::autonomous::waterfall::{
     FunnelCounts, SealedEvidence, TierReceipt, TierStatus, WaterfallState,
 };
 
+use super::resilience::{with_current_lifecycle_lease, ConductorLease};
+use super::tier15_receipts::ReceiptPreflight;
 use super::tier4::Tier4Scan;
 use super::waterfall::{
     StoreAcquisition, Tier4EvidenceArtifact, WaterfallStore, WaterfallStoreError,
 };
+use super::waterfall_policy::WaterfallPolicy;
 
 const DISABLED_PRODUCER_VERSION: &str = "rust-tier4-disabled-policy-v1";
 const PRODUCER_VERSION: &str = "rust-tier4-external-discovery-receipts-v1";
@@ -26,33 +29,37 @@ pub(super) enum Tier4Progress {
     NotRun(String),
 }
 
-pub(super) fn record_tier4(
+pub(super) fn replay_tier4_with_lease(
     state_root: &Path,
     repo: &str,
-    scan: Tier4Scan,
-) -> Result<Tier4Progress, String> {
-    record_tier4_with_optional_source_policy(state_root, repo, scan, None)
+    lease: &ConductorLease,
+    policy: &WaterfallPolicy,
+) -> Result<ReceiptPreflight<Tier4Progress>, String> {
+    with_current_lifecycle_lease(lease, || replay_tier4_fenced(state_root, repo, policy))
 }
 
-pub(super) fn record_tier4_with_source_policy(
+pub(super) fn record_tier4_with_lease(
     state_root: &Path,
     repo: &str,
+    lease: &ConductorLease,
+    policy: &WaterfallPolicy,
     scan: Tier4Scan,
-    expected_source_policy: Tier4SourcePolicy,
 ) -> Result<Tier4Progress, String> {
-    record_tier4_with_optional_source_policy(state_root, repo, scan, Some(expected_source_policy))
+    with_current_lifecycle_lease(lease, || {
+        record_tier4_fenced(state_root, repo, scan, policy)
+    })
 }
 
-fn record_tier4_with_optional_source_policy(
+fn record_tier4_fenced(
     state_root: &Path,
     repo: &str,
     scan: Tier4Scan,
-    expected_source_policy: Option<Tier4SourcePolicy>,
+    policy: &WaterfallPolicy,
 ) -> Result<Tier4Progress, String> {
     let store = WaterfallStore::acquire_for_receipts(
         state_root.join("waterfall"),
         repo,
-        expected_source_policy,
+        policy.tier4_source().cloned(),
     )
     .map_err(store_error)?;
     let store = match store {
@@ -81,6 +88,33 @@ fn record_tier4_with_optional_source_policy(
         .map_err(store_error)?;
     store.persist_receipt(&receipt).map_err(store_error)?;
     settle_receipt(&store, &state, receipt)
+}
+
+fn replay_tier4_fenced(
+    state_root: &Path,
+    repo: &str,
+    policy: &WaterfallPolicy,
+) -> Result<ReceiptPreflight<Tier4Progress>, String> {
+    let store = WaterfallStore::acquire_for_receipts(
+        state_root.join("waterfall"),
+        repo,
+        policy.tier4_source().cloned(),
+    )
+    .map_err(store_error)?;
+    let store = match store {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => return Ok(ReceiptPreflight::Replayed(Tier4Progress::Pending)),
+    };
+    let Some(state) = store.load_state().map_err(store_error)? else {
+        return Ok(ReceiptPreflight::Replayed(Tier4Progress::Pending));
+    };
+    if state.current_tier() != NoWorkTier::Tier4 {
+        return Ok(ReceiptPreflight::Replayed(Tier4Progress::Pending));
+    }
+    match existing_receipt(&store, &state)? {
+        Some(receipt) => settle_receipt(&store, &state, receipt).map(ReceiptPreflight::Replayed),
+        None => Ok(ReceiptPreflight::NeedsCollection),
+    }
 }
 
 fn existing_receipt(
@@ -387,6 +421,29 @@ fn store_error(error: WaterfallStoreError) -> String {
 }
 
 #[cfg(test)]
+pub(super) fn record_tier4(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier4Scan,
+) -> Result<Tier4Progress, String> {
+    let policy = WaterfallPolicy::from_config(
+        &autospec_core::autonomous::config::AutonomousConfig::default(),
+    )?;
+    record_tier4_fenced(state_root, repo, scan, &policy)
+}
+
+#[cfg(test)]
+pub(super) fn record_tier4_with_source_policy(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier4Scan,
+    expected_source_policy: autospec_core::autonomous::tier4::Tier4SourcePolicy,
+) -> Result<Tier4Progress, String> {
+    let policy = WaterfallPolicy::from_tier4_source_for_test(expected_source_policy);
+    record_tier4_fenced(state_root, repo, scan, &policy)
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn receipt_coordinator_keeps_only_local_receipt_authority() {
@@ -396,6 +453,10 @@ mod tests {
             .next()
             .expect("production source");
         assert!(production.contains("WaterfallStore"));
+        assert!(
+            production.contains("fn record_tier4_fenced"),
+            "authority scan must include the Tier 4 fenced recorder"
+        );
         let gh_cli = ["\"", "g", "h "].concat();
         for forbidden in [
             "std::env",

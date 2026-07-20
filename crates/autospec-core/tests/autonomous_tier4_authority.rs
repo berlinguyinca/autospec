@@ -14,7 +14,7 @@ use guard::assert_no_execution_authority;
 use matcher::{code_tokens, contains_qualified_path, has_forbidden_std_module, has_module_escape};
 use scanner::{
     code_without_comments_and_literals, collect_rust_sources, collect_tier4_verifier_sources,
-    production_code,
+    has_write_capable_github_argv, production_code,
 };
 use tier4_cli::{assert_local_io, assert_no_direct_file_mutation, authority_sources, LocalIo};
 
@@ -132,11 +132,16 @@ fn pure_tier4_sources() -> Vec<PathBuf> {
 }
 
 fn production_source(relative: &str) -> String {
-    production_code(
+    let production = production_code(
         &fs::read_to_string(workspace_root().join(relative))
             .expect("read Tier 4 production source"),
         relative,
-    )
+    );
+    assert!(
+        !has_write_capable_github_argv(&production),
+        "{relative} retains write-capable GitHub argv literals"
+    );
+    production
 }
 
 #[test]
@@ -249,10 +254,34 @@ fn authority_guard_rejects_transport_model_facades_and_raw_byte_wrappers() {
 fn authority_source_after_test_module_cannot_evade_scan() {
     let source =
         "fn guarded() {}\n#[cfg(test)] mod tests {}\nfn hidden() { crate::http::get(source); }";
+    let production = production_code(source, "fixture");
     assert!(
-        std::panic::catch_unwind(|| production_code(source, "fixture")).is_err(),
+        std::panic::catch_unwind(|| {
+            assert_tier4_purity(
+                &code_without_comments_and_literals(&production),
+                "fixture",
+                false,
+            )
+        })
+        .is_err(),
         "production authority after a test module evaded the scan"
     );
+}
+
+#[test]
+fn github_write_argv_detection_ignores_inert_prose_but_rejects_commands() {
+    assert!(!has_write_capable_github_argv(
+        r#"let note = "POST alone is inert";"#
+    ));
+    for fixture in [
+        r#"let args = ["issue", "edit", "1", "--body", body];"#,
+        r#"let args = ["api", route, "-X", "DELETE"];"#,
+    ] {
+        assert!(
+            has_write_capable_github_argv(fixture),
+            "GitHub write argv escaped detection: {fixture}"
+        );
+    }
 }
 
 #[test]
@@ -341,9 +370,9 @@ fn cutover_plan_states_tier4_foundation_without_claiming_activation() {
     for required in [
         "Tier 4 typed source policy, pure typed funnel, sealed receipt replay, and checked-in disabled policy are complete.",
         "A nonempty parsed source configuration is data, not activation.",
-        "Activation requires a trusted typed source policy and policy-aware Tier 1.",
+        "Activation requires direct bounded retrieval and a trusted typed source policy.",
         "This foundation is not a full Rust cutover.",
-        "Live retrieval, source activation, foreground wiring, Task 8 ideation, executor/premerge parity, validation/installer migration, and legacy deletion remain unchecked.",
+        "Live retrieval, source activation, Task 8 ideation, executor/premerge parity, validation/installer migration, and legacy deletion remain unchecked.",
         "Tier 1.5 pure observation, read-only paginated collection, and sealed receipt replay are complete.",
         "Tier 1.5 foreground admission and mutation remain unchecked.",
     ] {

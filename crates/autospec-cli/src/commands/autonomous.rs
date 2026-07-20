@@ -32,14 +32,19 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
+// Task 3 wires the closed dispatcher into the foreground cycle.
+#[allow(dead_code)]
+mod foreground_waterfall;
+#[cfg(test)]
+mod foreground_waterfall_tests;
 mod resilience;
 // Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
 #[allow(dead_code)]
 mod tier15;
-// Task 2 persists sealed observations but has no foreground caller by design.
+// Tier 1.5 is read-only foreground discovery; retained receipts replay before collection.
 #[allow(dead_code)]
 mod tier15_receipts;
-// Task 3 adds a private Tier 2 persistence seam without foreground wiring.
+// Tier 2 participates in foreground traversal but remains disabled by checked-in policy.
 #[allow(dead_code)]
 mod tier2;
 #[allow(dead_code)]
@@ -55,7 +60,7 @@ mod tier2_receipts_tests;
 mod tier3;
 #[allow(dead_code)]
 mod tier3_receipts;
-// Tier 4 remains a sealed receipt boundary without foreground wiring.
+// Tier 4 participates in foreground traversal but remains disabled by checked-in policy.
 #[cfg(test)]
 mod tier3_receipts_failure_prefix_tests;
 #[cfg(test)]
@@ -76,6 +81,9 @@ mod tier4_receipts_state_tests;
 mod tier4_receipts_tests;
 mod waterfall;
 mod waterfall_coordinator;
+mod waterfall_policy;
+#[cfg(test)]
+mod waterfall_policy_tests;
 #[cfg(test)]
 mod waterfall_tests;
 
@@ -2077,8 +2085,17 @@ fn run_foreground_with_lease(
         .into());
     }
 
-    let (state, found_work) =
-        scan_foreground(layout, lease, state, initial_plan).map_err(CommandFailure::diagnostic)?;
+    let waterfall_policy = waterfall_policy::WaterfallPolicy::from_config(config)
+        .map_err(CommandFailure::diagnostic)?;
+    let (state, found_work) = scan_foreground(
+        layout,
+        lease,
+        config,
+        &waterfall_policy,
+        state,
+        initial_plan,
+    )
+    .map_err(CommandFailure::diagnostic)?;
     if !found_work {
         persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
@@ -2168,6 +2185,8 @@ enum ForegroundDispatchResult {
 fn scan_foreground(
     layout: &RunLayout,
     lease: &resilience::ConductorLease,
+    config: &AutonomousConfig,
+    policy: &waterfall_policy::WaterfallPolicy,
     state: ConductorState,
     initial_plan: Result<autospec_core::coordination::ReadyQueuePlan, String>,
 ) -> Result<(ConductorState, bool), String> {
@@ -2179,6 +2198,7 @@ fn scan_foreground(
                     &layout.state_dir,
                     &layout.repo,
                     lease,
+                    policy,
                     waterfall_coordinator::Tier1QueueEvidence::Failed(&reason),
                 )? {
                     waterfall_coordinator::Tier1Progress::Failed(reason) => Err(reason),
@@ -2191,15 +2211,24 @@ fn scan_foreground(
     };
     if initial_plan.gate_counts.candidate == 0 {
         if state.scope() == ConductorScope::Repository {
-            match waterfall_coordinator::record_tier_one(
+            if !waterfall_coordinator::should_start_tier_one(&initial_plan) {
+                return Ok((state, false));
+            }
+            match foreground_waterfall::run_one_tier(
                 &layout.state_dir,
                 &layout.repo,
                 lease,
+                config,
+                policy,
                 waterfall_coordinator::Tier1QueueEvidence::EmptyPage(&initial_plan),
             )? {
-                waterfall_coordinator::Tier1Progress::Advanced
-                | waterfall_coordinator::Tier1Progress::Pending => return Ok((state, false)),
-                waterfall_coordinator::Tier1Progress::Failed(reason) => return Err(reason),
+                foreground_waterfall::ForegroundWaterfallProgress::Pending { .. }
+                | foreground_waterfall::ForegroundWaterfallProgress::Produced { .. }
+                | foreground_waterfall::ForegroundWaterfallProgress::Failed { .. }
+                | foreground_waterfall::ForegroundWaterfallProgress::Blocked { .. }
+                | foreground_waterfall::ForegroundWaterfallProgress::NotRun { .. } => {
+                    return Ok((state, false));
+                }
             }
         }
         let state = state

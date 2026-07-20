@@ -5,6 +5,7 @@ use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
 use autospec_core::autonomous::tier15::Tier15Observation;
 use autospec_core::autonomous::waterfall::{FunnelCounts, SealedEvidence, TierReceipt, TierStatus};
 
+use super::resilience::{with_current_lifecycle_lease, ConductorLease};
 use super::tier15::Tier15Scan;
 use super::waterfall::{
     StoreAcquisition, Tier15EvidenceArtifact, WaterfallStore, WaterfallStoreError,
@@ -20,7 +21,29 @@ pub(super) enum Tier15Progress {
     Failed(String),
 }
 
-pub(super) fn record_tier15(
+pub(super) enum ReceiptPreflight<T> {
+    Replayed(T),
+    NeedsCollection,
+}
+
+pub(super) fn replay_tier15_with_lease(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+) -> Result<ReceiptPreflight<Tier15Progress>, String> {
+    with_current_lifecycle_lease(lease, || replay_tier15_fenced(state_root, repo))
+}
+
+pub(super) fn record_tier15_with_lease(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+    scan: Tier15Scan,
+) -> Result<Tier15Progress, String> {
+    with_current_lifecycle_lease(lease, || record_tier15_fenced(state_root, repo, scan))
+}
+
+fn record_tier15_fenced(
     state_root: &Path,
     repo: &str,
     scan: Tier15Scan,
@@ -57,6 +80,28 @@ pub(super) fn record_tier15(
     let receipt = receipt(&state, status, funnel, evidence)?;
     store.persist_receipt(&receipt).map_err(store_error)?;
     settle_receipt(&store, &state, receipt)
+}
+
+fn replay_tier15_fenced(
+    state_root: &Path,
+    repo: &str,
+) -> Result<ReceiptPreflight<Tier15Progress>, String> {
+    let store = match WaterfallStore::acquire(state_root.join("waterfall"), repo)
+        .map_err(store_error)?
+    {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => return Ok(ReceiptPreflight::Replayed(Tier15Progress::Pending)),
+    };
+    let Some(state) = store.load_state().map_err(store_error)? else {
+        return Ok(ReceiptPreflight::Replayed(Tier15Progress::Pending));
+    };
+    if state.current_tier() != NoWorkTier::Tier1_5 {
+        return Ok(ReceiptPreflight::Replayed(Tier15Progress::Pending));
+    }
+    match existing_receipt(&store, &state)? {
+        Some(receipt) => settle_receipt(&store, &state, receipt).map(ReceiptPreflight::Replayed),
+        None => Ok(ReceiptPreflight::NeedsCollection),
+    }
 }
 
 fn existing_receipt(
@@ -184,6 +229,15 @@ fn store_error(error: WaterfallStoreError) -> String {
         | WaterfallStoreError::InvalidReceipt(reason)
         | WaterfallStoreError::InvalidState(reason) => reason,
     }
+}
+
+#[cfg(test)]
+pub(super) fn record_tier15(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier15Scan,
+) -> Result<Tier15Progress, String> {
+    record_tier15_fenced(state_root, repo, scan)
 }
 
 #[cfg(test)]
@@ -473,6 +527,10 @@ mod tests {
             .split("\n#[cfg(test)]")
             .next()
             .expect("production source before module tests");
+        assert!(
+            source.contains("fn replay_tier15_fenced"),
+            "authority scan must include the replay preflight"
+        );
         let forbidden = [
             "queue",
             "claim",

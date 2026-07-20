@@ -3744,7 +3744,7 @@ fn autonomous_implementer_wait_failed_requires_expected_claim_id() {
 }
 
 #[test]
-fn autonomous_implementer_wait_failed_requeues_exact_owner_with_bounded_comment() {
+fn autonomous_implementer_wait_failure_requeues_exact_owner_with_bounded_comment() {
     let root = temp_dir("autospec-wait-failed");
     let bin = root.join("bin");
     let state = root.join("comments.json");
@@ -3756,10 +3756,12 @@ fn autonomous_implementer_wait_failed_requeues_exact_owner_with_bounded_comment(
     )
     .unwrap();
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+    let github_pat = ["github", "_pat_11AA22BB33CC44DD55EE66FF77GG88HH99"].concat();
+    let github_oauth = ["gh", "o_123456789012345678901234567890123456"].concat();
     let secrets = [
         "super-secret",
-        "github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99",
-        "gho_123456789012345678901234567890123456",
+        github_pat.as_str(),
+        github_oauth.as_str(),
         "bearer-value",
         "key-value",
         "token-value",

@@ -162,6 +162,25 @@ exit 0
 SLEEPSHIM
     chmod +x "$workdir/bin/sleep"
 
+    # Route the guarded-merge chokepoint back through the fake `gh` command so
+    # this control-flow test observes the final merge without bypassing the
+    # production blast-radius wrapper.
+    cat > "$workdir/bin/autospec-guarded-merge.sh" <<'MERGESHIM'
+#!/usr/bin/env bash
+set -eu
+pr=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --pr) shift; pr="$1" ;;
+        --repo) shift ;;
+    esac
+    shift
+done
+[ -n "$pr" ]
+gh pr merge "$pr" --admin --squash --delete-branch
+MERGESHIM
+    chmod +x "$workdir/bin/autospec-guarded-merge.sh"
+
     # Substitute placeholders <PR> and <issue> with concrete values so the
     # extracted block is executable shell.
     runner="$workdir/run.sh"
@@ -170,6 +189,7 @@ SLEEPSHIM
         printf 'set +e\n'
         printf 'export WORKDIR=%s\n' "$workdir"
         printf 'export PATH=%s/bin:$PATH\n' "$workdir"
+        printf 'export AUTOSPEC_SCRIPTS_DIR=%s/bin\n' "$workdir"
         # Allow shorter cap for the third scenario via env var.
         if [ -n "${AUTOSPEC_REBASE_MAX_ATTEMPTS:-}" ]; then
             printf 'export AUTOSPEC_REBASE_MAX_ATTEMPTS=%s\n' "$AUTOSPEC_REBASE_MAX_ATTEMPTS"

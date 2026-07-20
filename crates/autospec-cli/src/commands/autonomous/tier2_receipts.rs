@@ -9,6 +9,8 @@ use autospec_core::autonomous::waterfall::{
     FunnelCounts, SealedEvidence, TierReceipt, TierStatus, WaterfallState,
 };
 
+use super::resilience::{with_current_lifecycle_lease, ConductorLease};
+use super::tier15_receipts::ReceiptPreflight;
 use super::tier2::Tier2Scan;
 use super::waterfall::{
     StoreAcquisition, Tier2EvidenceArtifact, WaterfallStore, WaterfallStoreError,
@@ -26,7 +28,24 @@ pub(super) enum Tier2Progress {
     NotRun(String),
 }
 
-pub(super) fn record_tier2(
+pub(super) fn replay_tier2_with_lease(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+) -> Result<ReceiptPreflight<Tier2Progress>, String> {
+    with_current_lifecycle_lease(lease, || replay_tier2_fenced(state_root, repo))
+}
+
+pub(super) fn record_tier2_with_lease(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+    scan: Tier2Scan,
+) -> Result<Tier2Progress, String> {
+    with_current_lifecycle_lease(lease, || record_tier2_fenced(state_root, repo, scan))
+}
+
+fn record_tier2_fenced(
     state_root: &Path,
     repo: &str,
     scan: Tier2Scan,
@@ -57,6 +76,28 @@ pub(super) fn record_tier2(
         .map_err(store_error)?;
     store.persist_receipt(&receipt).map_err(store_error)?;
     settle_receipt(&store, &state, receipt)
+}
+
+fn replay_tier2_fenced(
+    state_root: &Path,
+    repo: &str,
+) -> Result<ReceiptPreflight<Tier2Progress>, String> {
+    let store = match WaterfallStore::acquire(state_root.join("waterfall"), repo)
+        .map_err(store_error)?
+    {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => return Ok(ReceiptPreflight::Replayed(Tier2Progress::Pending)),
+    };
+    let Some(state) = store.load_state().map_err(store_error)? else {
+        return Ok(ReceiptPreflight::Replayed(Tier2Progress::Pending));
+    };
+    if state.current_tier() != NoWorkTier::Tier2 {
+        return Ok(ReceiptPreflight::Replayed(Tier2Progress::Pending));
+    }
+    match existing_receipt(&store, &state)? {
+        Some(receipt) => settle_receipt(&store, &state, receipt).map(ReceiptPreflight::Replayed),
+        None => Ok(ReceiptPreflight::NeedsCollection),
+    }
 }
 
 fn existing_receipt(
@@ -350,6 +391,15 @@ fn store_error(error: WaterfallStoreError) -> String {
 }
 
 #[cfg(test)]
+pub(super) fn record_tier2(
+    state_root: &Path,
+    repo: &str,
+    scan: Tier2Scan,
+) -> Result<Tier2Progress, String> {
+    record_tier2_fenced(state_root, repo, scan)
+}
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn receipt_coordinator_keeps_only_local_persistence_authority() {
@@ -361,6 +411,10 @@ mod tests {
         assert!(
             production.contains("WaterfallStore"),
             "Tier 2 coordinator owns the local waterfall persistence boundary"
+        );
+        assert!(
+            production.contains("fn record_tier2_fenced"),
+            "authority scan must include the Tier 2 fenced recorder"
         );
         let gh_cli = ["\"", "g", "h "].concat();
         for forbidden in [
