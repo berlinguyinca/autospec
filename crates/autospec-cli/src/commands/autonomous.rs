@@ -2893,6 +2893,7 @@ struct ExecutorRequest {
     branch: String,
     claim_id: String,
     invocation_id: String,
+    expected_commit: String,
 }
 
 #[derive(Debug, Clone)]
@@ -2911,6 +2912,16 @@ impl ExecutorRequest {
         claim_id: &str,
     ) -> Result<Self, String> {
         let invocation_id = format!("{}-{}", issue, claim_id);
+        let expected_commit = Command::new("git")
+            .arg("-C")
+            .arg(repo_dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .filter(|commit| commit.len() == 40 || commit.len() == 64)
+            .unwrap_or_else(|| "0".repeat(40));
         Ok(Self {
             program: std::env::current_exe()
                 .map_err(|error| format!("cannot resolve Rust executor program: {error}"))?,
@@ -2931,6 +2942,7 @@ impl ExecutorRequest {
             branch: branch.to_string(),
             claim_id: claim_id.to_string(),
             invocation_id,
+            expected_commit,
         })
     }
 
@@ -2987,10 +2999,10 @@ impl ExecutorRequest {
             let _ = fs::write(
                 &invocation_path,
                 format!(
-                    "{{\"terminal\":true,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"claim_id\":\"{}\",\"invocation_id\":\"{}\"}}\n",
+                    "{{\"terminal\":true,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"claim_id\":\"{}\",\"invocation_id\":\"{}\",\"expected_commit\":\"{}\"}}\n",
                     json_escape(&self.repo), self.issue, json_escape(&self.worker_id),
                     json_escape(&self.branch), json_escape(&self.claim_id),
-                    json_escape(&self.invocation_id)
+                    json_escape(&self.invocation_id), json_escape(&self.expected_commit)
                 ),
             );
             ExecutorReceipt {
@@ -5260,6 +5272,7 @@ mod foreground_tests {
             branch: "autonomous/issue-42".to_string(),
             claim_id: "claim-42".to_string(),
             invocation_id: "test-invocation".to_string(),
+            expected_commit: "a".repeat(40),
         };
 
         let receipt = request.run();
