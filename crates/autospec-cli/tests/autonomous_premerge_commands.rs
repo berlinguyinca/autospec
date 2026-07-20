@@ -501,8 +501,7 @@ fn evaluate_rejects_unknown_duplicate_and_extra_arguments() {
 #[test]
 fn source_has_no_legacy_authority() {
     let source = fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("src/commands/autonomous/premerge.rs"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands/autonomous/premerge.rs"),
     )
     .expect("read premerge command source");
 
@@ -513,7 +512,10 @@ fn source_has_no_legacy_authority() {
         "&[\"status\", \"--porcelain\", \"--untracked-files=no\"]",
         "evaluate_premerge(&lane, qa, security)",
     ] {
-        assert!(source.contains(required), "missing Rust authority: {required}");
+        assert!(
+            source.contains(required),
+            "missing Rust authority: {required}"
+        );
     }
     for forbidden in [
         "Command::new(\"bash\")",
