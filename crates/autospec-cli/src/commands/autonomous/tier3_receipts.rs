@@ -10,6 +10,7 @@ use autospec_core::autonomous::waterfall::{
 };
 
 use super::resilience::{with_current_lifecycle_lease, ConductorLease};
+use super::tier15_receipts::ReceiptPreflight;
 use super::tier3::Tier3Scan;
 use super::waterfall::{
     StoreAcquisition, Tier3EvidenceArtifact, WaterfallStore, WaterfallStoreError,
@@ -25,6 +26,14 @@ pub(super) enum Tier3Progress {
     Produced(u64),
     Failed(String),
     NotRun(String),
+}
+
+pub(super) fn replay_tier3_with_lease(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+) -> Result<ReceiptPreflight<Tier3Progress>, String> {
+    with_current_lifecycle_lease(lease, || replay_tier3_fenced(state_root, repo))
 }
 
 pub(super) fn record_tier3_with_lease(
@@ -74,6 +83,28 @@ fn record_tier3_fenced(
         .map_err(store_error)?;
     store.persist_receipt(&receipt).map_err(store_error)?;
     settle_receipt(&store, &state, receipt)
+}
+
+fn replay_tier3_fenced(
+    state_root: &Path,
+    repo: &str,
+) -> Result<ReceiptPreflight<Tier3Progress>, String> {
+    let store = match WaterfallStore::acquire(state_root.join("waterfall"), repo)
+        .map_err(store_error)?
+    {
+        StoreAcquisition::Acquired(store) => store,
+        StoreAcquisition::Held => return Ok(ReceiptPreflight::Replayed(Tier3Progress::Pending)),
+    };
+    let Some(state) = store.load_state().map_err(store_error)? else {
+        return Ok(ReceiptPreflight::Replayed(Tier3Progress::Pending));
+    };
+    if state.current_tier() != NoWorkTier::Tier3 {
+        return Ok(ReceiptPreflight::Replayed(Tier3Progress::Pending));
+    }
+    match existing_receipt(&store, &state)? {
+        Some(receipt) => settle_receipt(&store, &state, receipt).map(ReceiptPreflight::Replayed),
+        None => Ok(ReceiptPreflight::NeedsCollection),
+    }
 }
 
 fn existing_receipt(

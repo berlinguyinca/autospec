@@ -6,9 +6,11 @@ use autospec_core::autonomous::no_work::NoWorkTier;
 use autospec_core::coordination::{QueueGateCounts, ReadyQueuePlan, WorkerCap};
 
 use super::foreground_waterfall::{
-    run_injected, run_one_tier, ForegroundWaterfallProgress, InjectedProgress,
+    collect_after_preflight, run_injected, run_one_tier, ForegroundWaterfallProgress,
+    InjectedProgress,
 };
 use super::resilience::{acquire_test_lifecycle, replace_test_lifecycle_generation};
+use super::tier15_receipts::ReceiptPreflight;
 use super::tier2_receipts_tests::{TempRoot, REPO};
 use super::tier4_receipts_tests::seed_tier_four_cursor;
 use super::waterfall::{StoreAcquisition, WaterfallStore};
@@ -49,6 +51,23 @@ fn driver_retains_pending_produced_failed_blocked_and_not_run() {
         assert_eq!(calls, vec![NoWorkTier::Tier2]);
         assert_eq!(fixture.cursor(), NoWorkTier::Tier2);
         assert_eq!(fixture.reloads.get(), 0);
+    }
+}
+
+#[test]
+fn retained_progress_precedes_later_tier_producer_construction() {
+    for retained in DriverFixture::retained_outcomes() {
+        let constructed = Cell::new(false);
+
+        let progress =
+            collect_after_preflight(ReceiptPreflight::Replayed(retained.clone()), || {
+                constructed.set(true);
+                Ok(InjectedProgress::Advanced)
+            })
+            .expect("replay retained progress");
+
+        assert_eq!(progress, retained);
+        assert!(!constructed.get());
     }
 }
 

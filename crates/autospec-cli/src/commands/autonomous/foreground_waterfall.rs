@@ -7,13 +7,15 @@ use autospec_core::autonomous::waterfall::WaterfallState;
 
 use super::resilience::{with_current_lifecycle_lease, ConductorLease};
 use super::tier15;
-use super::tier15_receipts::{record_tier15_with_lease, Tier15Progress};
+use super::tier15_receipts::{
+    record_tier15_with_lease, replay_tier15_with_lease, ReceiptPreflight, Tier15Progress,
+};
 use super::tier2;
-use super::tier2_receipts::{record_tier2_with_lease, Tier2Progress};
+use super::tier2_receipts::{record_tier2_with_lease, replay_tier2_with_lease, Tier2Progress};
 use super::tier3;
-use super::tier3_receipts::{record_tier3_with_lease, Tier3Progress};
+use super::tier3_receipts::{record_tier3_with_lease, replay_tier3_with_lease, Tier3Progress};
 use super::tier4;
-use super::tier4_receipts::{record_tier4_with_lease, Tier4Progress};
+use super::tier4_receipts::{record_tier4_with_lease, replay_tier4_with_lease, Tier4Progress};
 use super::waterfall::{StoreAcquisition, WaterfallStore, WaterfallStoreError};
 use super::waterfall_coordinator::{record_tier_one, Tier1Progress, Tier1QueueEvidence};
 use super::waterfall_policy::WaterfallPolicy;
@@ -91,31 +93,57 @@ fn dispatch_tier(
             record_tier_one(state_root, repo, lease, policy, tier1_evidence).map(map_tier1)
         }
         NoWorkTier::Tier1_5 => {
-            let scan = tier15::scan(repo, TIER15_OBSERVATION_BUDGET);
-            record_tier15_with_lease(state_root, repo, lease, scan).map(map_tier15)
+            collect_after_preflight(replay_tier15_with_lease(state_root, repo, lease)?, || {
+                let scan = tier15::scan(repo, TIER15_OBSERVATION_BUDGET);
+                record_tier15_with_lease(state_root, repo, lease, scan)
+            })
+            .map(map_tier15)
         }
-        NoWorkTier::Tier2 => record_tier2_with_lease(
-            state_root,
-            repo,
-            lease,
-            tier2::disabled_by_checked_in_policy(),
-        )
-        .map(map_tier2),
-        NoWorkTier::Tier3 => record_tier3_with_lease(
-            state_root,
-            repo,
-            lease,
-            tier3::disabled_by_checked_in_policy(),
-        )
-        .map(map_tier3),
-        NoWorkTier::Tier4 => record_tier4_with_lease(
-            state_root,
-            repo,
-            lease,
-            policy,
-            tier4::disabled_by_checked_in_policy(&config.tier4),
+        NoWorkTier::Tier2 => {
+            collect_after_preflight(replay_tier2_with_lease(state_root, repo, lease)?, || {
+                record_tier2_with_lease(
+                    state_root,
+                    repo,
+                    lease,
+                    tier2::disabled_by_checked_in_policy(),
+                )
+            })
+            .map(map_tier2)
+        }
+        NoWorkTier::Tier3 => {
+            collect_after_preflight(replay_tier3_with_lease(state_root, repo, lease)?, || {
+                record_tier3_with_lease(
+                    state_root,
+                    repo,
+                    lease,
+                    tier3::disabled_by_checked_in_policy(),
+                )
+            })
+            .map(map_tier3)
+        }
+        NoWorkTier::Tier4 => collect_after_preflight(
+            replay_tier4_with_lease(state_root, repo, lease, policy)?,
+            || {
+                record_tier4_with_lease(
+                    state_root,
+                    repo,
+                    lease,
+                    policy,
+                    tier4::disabled_by_checked_in_policy(&config.tier4),
+                )
+            },
         )
         .map(map_tier4),
+    }
+}
+
+pub(super) fn collect_after_preflight<T>(
+    preflight: ReceiptPreflight<T>,
+    collect: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    match preflight {
+        ReceiptPreflight::Replayed(progress) => Ok(progress),
+        ReceiptPreflight::NeedsCollection => collect(),
     }
 }
 

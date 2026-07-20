@@ -1,6 +1,7 @@
 use autospec_core::autonomous::no_work::NoWorkTier;
 use autospec_core::autonomous::waterfall::{TierReceipt, WaterfallState};
 use autospec_core::coordination::{ConductorPhase, ConductorState};
+use std::collections::BTreeMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -220,6 +221,23 @@ impl ForegroundWaterfallFixture {
         usize::from(self.receipt_path(NoWorkTier::Tier2).exists())
     }
 
+    pub fn tier15_reads(&self) -> usize {
+        fs::read_to_string(&self.calls)
+            .expect("read calls")
+            .lines()
+            .filter(|line| {
+                line.contains("issues?state=open") || line.contains("issues?state=closed")
+            })
+            .count()
+    }
+
+    pub fn waterfall_snapshot(&self) -> BTreeMap<PathBuf, Vec<u8>> {
+        let root = self.waterfall_root();
+        let mut snapshot = BTreeMap::new();
+        collect_files(&root, &root, &mut snapshot);
+        snapshot
+    }
+
     pub fn assert_no_forbidden_waterfall_side_effects(&self) {
         let calls = fs::read_to_string(&self.calls).expect("read calls");
         for forbidden in [
@@ -301,6 +319,27 @@ fn write_executable(path: &Path, contents: &str) {
 
 fn path_with(bin: &Path) -> String {
     format!("{}:{}", bin.display(), std::env::var("PATH").expect("PATH"))
+}
+
+fn collect_files(root: &Path, current: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
+    let mut entries = fs::read_dir(current)
+        .unwrap_or_else(|error| panic!("read {}: {error}", current.display()))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|error| panic!("read entry under {}: {error}", current.display()));
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(root, &path, snapshot);
+        } else {
+            snapshot.insert(
+                path.strip_prefix(root)
+                    .expect("waterfall-relative path")
+                    .to_path_buf(),
+                fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display())),
+            );
+        }
+    }
 }
 
 const FAKE_GH: &str = r####"#!/bin/sh
