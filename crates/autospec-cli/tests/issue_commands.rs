@@ -386,6 +386,52 @@ fn issue_promote_fails_closed_for_unsupported_repository_policy() {
 }
 
 #[test]
+fn issue_promote_fails_closed_when_explicit_policy_is_missing() {
+    let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_CONFIG_FILE", fixture.root.join("missing.yml"))
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not read issue safety policy"));
+    assert!(fixture.calls().is_empty());
+}
+
+#[test]
+fn issue_promote_fails_closed_when_explicit_policy_is_unreadable() {
+    let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_CONFIG_FILE", &fixture.root)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not read issue safety policy"));
+    assert!(fixture.calls().is_empty());
+}
+
+#[test]
+fn issue_promote_fails_closed_when_explicit_policy_is_malformed() {
+    let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k"]);
+    let policy = fixture.policy("safety: [\n");
+
+    let output = fixture
+        .command()
+        .env("AUTOSPEC_CONFIG_FILE", policy)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not parse issue safety policy"));
+    assert!(fixture.calls().is_empty());
+}
+
+#[test]
 fn issue_promote_uses_configured_trusted_actor_policy() {
     let fixture = PromotionFixture::new(RESET_BODY, "release-operator", &["ctx:32k"]);
     let policy = fixture.policy(
@@ -402,6 +448,26 @@ fn issue_promote_uses_configured_trusted_actor_policy() {
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["safety"]["decision"], "pass");
     assert_eq!(report["auto-implement"], true);
+}
+
+#[test]
+fn issue_promote_reports_observed_labels_when_queue_policy_withholds_admission() {
+    let fixture = PromotionFixture::new(SAFE_BODY, "berlinguyinca", &["ctx:32k", "needs-classify"]);
+
+    let output = fixture.command().output().unwrap();
+
+    assert_success(&output);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["safety"]["decision"], "pass");
+    assert_eq!(report["eligible"], false);
+    assert_eq!(report["auto-implement"], false);
+    assert_eq!(
+        report["final_labels"],
+        serde_json::json!(["ctx:32k", "needs-classify", "safety:reviewed"])
+    );
+    let issue = fixture.issue();
+    assert!(!labels(&issue).contains(&"auto-implement"));
+    assert_eq!(report["final_labels"], issue["labels"]);
 }
 
 fn labels(issue: &serde_json::Value) -> Vec<&str> {

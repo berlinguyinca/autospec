@@ -156,7 +156,7 @@ esac
             .env("AUTOSPEC_REVIEW_AMBIGUOUS_COMMENT", &self.ambiguous_comment)
             .env("AUTOSPEC_REVIEW_BLOCKED_COMMENT", &self.blocked_comment)
             .env("AUTOSPEC_REVIEW_CALLS", &self.calls)
-            .env("AUTOSPEC_CONFIG_FILE", self.root.join("missing.yml"));
+            .env_remove("AUTOSPEC_CONFIG_FILE");
         command
     }
 

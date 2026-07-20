@@ -111,7 +111,9 @@ Exit codes: `0=SAFETY_PASS`, `1=SAFETY_AMBIGUOUS`, `2=SAFETY_BLOCK`, `64=usage e
 The built-in safety policy is evaluated natively in Rust. A config file may add trusted
 actors for the scoped test-reset exception; duplicate built-in patterns are harmless.
 An unsupported custom regex returns the fail-closed `invalid-policy-regex` block rather
-than being ignored.
+than being ignored. The built-in policy is used only when the implicit default
+`.autospec/autospec.yml` is absent; an explicit, unreadable, or malformed config fails
+closed instead of silently selecting defaults.
 
 ### `autospec issue promote`
 

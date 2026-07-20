@@ -6,10 +6,8 @@
 # stitches together the deterministic grooming pipeline (Tasks 1-5):
 #
 #   list-groomable.sh   → candidate set (needs-classify|needs-template|unlabeled)
-#   autospec queue review-safety → exact Rust-owned issue-intent writeback
 #   classify-model-fit.sh→ ctx:/reasoning: model-fit labels
 #   promote-eligibility.sh→ eligible|needs-template|epic|hold routing decision
-#   grooming-govern.sh  → self-governance active-gate set (template-promote?)
 #   grooming-config.sh  → policy (auto|on|off) + budget
 #
 # Per candidate (SAFETY-CRITICAL — fail-closed everywhere; a pipeline error must
@@ -18,14 +16,9 @@
 #   2. eligibility:
 #        eligible       → ask Rust to stamp and atomically transition owned labels
 #        needs-template → deterministic codex template-fill (groom-fill.sh), then:
-#                           fill fails        → hold:needs-human (fail-closed)
-#                           template-promote ∈ govern active set (graduated)
-#                                             → auto: apply filled body, add interim
-#                                               candidate, then Rust-owned safety admission
-#                           else (seed)       → canary: apply filled body,
-#                                               add groom:proposed (human approves via
-#                                               admission / rejects via groom:rejected),
-#                                               drop needs-autospec-template
+#                           fill fails → hold:needs-human (fail-closed)
+#                           fill passes → comment-only groom:proposed for a human
+#                                         to apply; never replace the issue body
 #                         Candidates already carrying groom:proposed/groom:rejected are
 #                         skipped (already-groomed) before any decision (no re-fill).
 #        epic           → route:split (do NOT decompose here)
@@ -71,7 +64,6 @@ GROOM_LIST="${AUTOSPEC_GROOM_LIST_SCRIPT:-$SCRIPT_DIR/list-groomable.sh}"
 GROOM_SAFETY_BIN="${AUTOSPEC_GROOM_SAFETY_BIN:-${AUTOSPEC_BIN:-autospec}}"
 GROOM_CLASSIFY="${AUTOSPEC_GROOM_CLASSIFY_SCRIPT:-$SCRIPT_DIR/classify-model-fit.sh}"
 GROOM_ELIGIBILITY="${AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT:-$SCRIPT_DIR/promote-eligibility.sh}"
-GROOM_GOVERN="${AUTOSPEC_GROOM_GOVERN_SCRIPT:-$SHARED_DIR/grooming-govern.sh}"
 GROOM_CONFIG="${AUTOSPEC_GROOM_CONFIG_SCRIPT:-$SHARED_DIR/grooming-config.sh}"
 GROOM_FILL="${AUTOSPEC_GROOM_FILL_SCRIPT:-$SCRIPT_DIR/groom-fill.sh}"
 
@@ -189,15 +181,6 @@ emit_json() {
           quarantined:$quarantined[0], routed:$routed[0], reason:$reason}'
 }
 
-# ── Retry bounded interim Rust reviews before selecting new candidates ─────────
-# list-groomable deliberately excludes auto-implement issues, so a transient
-# review failure would otherwise strand an interim issue forever. Rust still
-# owns every resulting mutation; this merely asks it to revisit at most one
-# grooming budget of existing candidates before this cycle handles new work.
-if [ "$apply_enabled" = "1" ]; then
-    "$GROOM_SAFETY_BIN" queue review-safety --repo "$repo" --limit "$budget" >/dev/null 2>&1 || true
-fi
-
 # ── Fetch candidate set from the deterministic selector ───────────────────────
 list_json="$(bash "$GROOM_LIST" --repo "$repo" --budget "$budget" 2>/dev/null || printf '')"
 if [ -z "$list_json" ]; then
@@ -239,8 +222,9 @@ ensure_label() {
 }
 
 finalize_ready() {
-    # $1 = issue number, $2 = FINAL body file (exact text that will live on the issue),
-    # $3 = existing labels csv.
+    # $1 = issue number, $2 = authoritative body file used for classification,
+    # $3 = existing labels csv. Body replacement is deliberately not supported:
+    # GitHub issue updates have no server-enforced compare-and-swap primitive.
     fr_num="$1"; fr_body="$2"; fr_labels="$3"
 
     # 1. Model-fit classify (skip if BOTH ctx:* and reasoning:* already present).
@@ -260,9 +244,6 @@ finalize_ready() {
             ;;
     esac
 
-    # 2. Persist the exact final body before Rust evaluates it. This is a normal
-    #    grooming write; Rust exclusively owns safety decisions and their labels.
-    gh issue edit "$fr_num" --repo "$repo" --body-file "$fr_body" >/dev/null 2>&1
 }
 
 review_admitted_issue() {
@@ -296,7 +277,7 @@ record_rust_safety_result() {
 }
 
 admit_with_rust_safety() {
-    # $1 = issue number, $2 = final body file, $3 = existing labels csv.
+    # $1 = issue number, $2 = authoritative body file, $3 = existing labels csv.
     aws_num="$1"; aws_body="$2"; aws_labels="$3"
     rust_safety_result="hold"
     finalize_ready "$aws_num" "$aws_body" "$aws_labels" || return 1
@@ -306,8 +287,7 @@ admit_with_rust_safety() {
 
 route_template_candidate() {
     # $1 = issue number, $2 = existing labels, $3 = eligibility reason.
-    rtc_num="$1"; rtc_labels="$2"; rtc_reason="$3"
-    rtc_active="$(bash "$GROOM_GOVERN" show 2>/dev/null | jq -r '.active // [] | join(" ")' 2>/dev/null || printf '')"
+    rtc_num="$1"; rtc_reason="$3"
     rtc_fill="$(bash "$GROOM_FILL" --issue "$rtc_num" --repo "$repo" 2>/dev/null || printf '')"
     rtc_ok="$(printf '%s' "$rtc_fill" | jq -r '.ok // false' 2>/dev/null || printf 'false')"
     if [ "$rtc_ok" != "true" ]; then
@@ -330,27 +310,14 @@ route_template_candidate() {
 
     rtc_file="$(mktemp "${TMPDIR:-/tmp}/groom-body.XXXXXX")"
     printf '%s' "$rtc_body" > "$rtc_file"
-    case " $rtc_active " in
-        *" template-promote "*)
-            if admit_with_rust_safety "$rtc_num" "$rtc_file" "$rtc_labels"; then
-                audit_comment "$rtc_num" "grooming: auto-template-groomed — template-promote gate active (${rtc_reason})."
-                promoted_nums="${promoted_nums}${promoted_nums:+ }${rtc_num}"
-                record_routed "$rtc_num" "groom-auto" "needs-template:${rtc_reason}"
-            else
-                record_rust_safety_result "$rtc_num"
-            fi
-            ;;
-        *)
-            if finalize_ready "$rtc_num" "$rtc_file" "$rtc_labels"; then
-                ensure_label "groom:proposed"
-                gh issue edit "$rtc_num" --repo "$repo" --add-label "groom:proposed" --remove-label "needs-autospec-template" >/dev/null 2>&1 || true
-                audit_comment "$rtc_num" "grooming: template drafted for human approval (canary) — approve by adding auto-implement, reject with groom:rejected (${rtc_reason})."
-                record_routed "$rtc_num" "groom-canary" "needs-template:${rtc_reason}"
-            else
-                record_held "$rtc_num" "final-body-write"
-            fi
-            ;;
-    esac
+    if gh issue comment "$rtc_num" --repo "$repo" --body-file "$rtc_file" >/dev/null 2>&1; then
+        ensure_label "groom:proposed"
+        gh issue edit "$rtc_num" --repo "$repo" --add-label "groom:proposed" >/dev/null 2>&1 || true
+        audit_comment "$rtc_num" "grooming: generated template left as a human proposal; apply it before admission (${rtc_reason})."
+        record_routed "$rtc_num" "groom-canary" "needs-template:${rtc_reason}"
+    else
+        record_held "$rtc_num" "template-proposal-comment"
+    fi
     rm -f "$rtc_file"
 }
 
@@ -429,10 +396,9 @@ while [ "$i" -lt "$cand_count" ]; do
             promoted_nums="${promoted_nums}${promoted_nums:+ }${num}"
             ;;
         needs-template)
-            # Deterministic LLM template-fill (codex exec via groom-fill.sh),
-            # then route by the govern ratchet: canary (seed) proposes for a human;
-            # auto (graduated: template-promote active) queues straight into
-            # auto-implement. Fail-closed: any fill failure holds for a human.
+            # Deterministic LLM template-fill (codex exec via groom-fill.sh)
+            # produces a comment-only human proposal. Without a server-side CAS,
+            # this path never replaces the issue body or admits the proposal.
             route_template_candidate "$num" "$labels_csv" "$ereason"
             ;;
         epic)

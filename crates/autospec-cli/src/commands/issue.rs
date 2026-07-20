@@ -56,7 +56,7 @@ fn promote(args: &[String]) -> Result<(), CommandFailure> {
     let number = options
         .number
         .ok_or_else(|| CommandFailure::diagnostic("--number is required"))?;
-    let policy = load_issue_safety_policy(None);
+    let policy = load_issue_safety_policy(None)?;
     if policy.has_unsupported_pattern {
         return Err(CommandFailure::diagnostic(
             "issue safety policy contains unsupported custom regex",
@@ -192,7 +192,7 @@ fn promote_remote_issue(
             ));
         }
         return Ok(PromotionResult {
-            decision: evaluate(&reread, trusted_actors),
+            decision: observed_remote_decision(evaluate(&reread, trusted_actors), &reread),
             changed: true,
         });
     }
@@ -258,7 +258,7 @@ fn promote_remote_issue(
     let stamped_decision = evaluate(&stamped, trusted_actors);
     if !stamped_decision.auto_implement || !stamped_decision.eligible {
         return Ok(PromotionResult {
-            decision: stamped_decision,
+            decision: observed_remote_decision(stamped_decision, &stamped),
             changed: true,
         });
     }
@@ -419,6 +419,15 @@ fn evaluate(issue: &RemoteIssue, trusted_actors: &[&str]) -> IssuePromotionDecis
         ),
         trusted_actors,
     )
+}
+
+fn observed_remote_decision(
+    mut decision: IssuePromotionDecision,
+    issue: &RemoteIssue,
+) -> IssuePromotionDecision {
+    decision.auto_implement = has_label(issue, "auto-implement");
+    decision.final_labels = issue.labels.clone();
+    decision
 }
 
 fn safety_input(issue: &RemoteIssue) -> ClaimSafetyInput {

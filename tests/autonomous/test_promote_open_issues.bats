@@ -107,9 +107,21 @@ EOF
 
     cat > "$TMP/bin/groom-eligibility.sh" <<'EOF'
 #!/usr/bin/env bash
-printf '{"decision":"eligible","reason":"test"}\n'
+printf '{"decision":"%s","reason":"test"}\n' "${AUTOSPEC_GROOM_ELIGIBILITY:-eligible}"
 EOF
     chmod +x "$TMP/bin/groom-eligibility.sh"
+
+    cat > "$TMP/bin/groom-fill.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"ok":true,"body":"## Goal\nUse the human-reviewed template proposal.\n"}'
+EOF
+    chmod +x "$TMP/bin/groom-fill.sh"
+
+    cat > "$TMP/bin/groom-govern.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"active":["eligible-promote","template-promote"]}'
+EOF
+    chmod +x "$TMP/bin/groom-govern.sh"
 
     cat > "$TMP/bin/groom-config.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -129,6 +141,8 @@ EOF
     export AUTOSPEC_GROOM_CLASSIFY_SCRIPT="$TMP/bin/groom-classify.sh"
     export AUTOSPEC_GROOM_ELIGIBILITY_SCRIPT="$TMP/bin/groom-eligibility.sh"
     export AUTOSPEC_GROOM_CONFIG_SCRIPT="$TMP/bin/groom-config.sh"
+    export AUTOSPEC_GROOM_FILL_SCRIPT="$TMP/bin/groom-fill.sh"
+    export AUTOSPEC_GROOM_GOVERN_SCRIPT="$TMP/bin/groom-govern.sh"
 }
 
 teardown() {
@@ -199,6 +213,22 @@ teardown() {
     grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'reasoning:'
     grep -q 'autospec issue promote --repo owner/repo --number 101 --remove-label needs-autospec-template --json' "$GH_LOG"
     ! grep -E 'issue edit 101 .*--add-label' "$GH_LOG" | grep -q 'auto-implement'
+    ! grep -Fq -- '--body-file' "$GH_LOG"
+    ! grep -q 'autospec queue review-safety' "$GH_LOG"
+}
+
+@test "generated template remains a human proposal even when template promotion is active" {
+    AUTOSPEC_GROOMING_POLICY=auto AUTOSPEC_GROOM_ELIGIBILITY=needs-template \
+        run bash "$SCRIPT" --repo owner/repo --apply
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e . >/dev/null
+    [ "$(echo "$output" | jq -r '.filed')" = "0" ]
+    echo "$output" | jq -e '.routed[] | select(.issue == 101 and .action == "groom-canary")' >/dev/null
+    grep -q 'issue edit 101 .*--add-label groom:proposed' "$GH_LOG"
+    grep -q 'issue comment 101 .*--body-file' "$GH_LOG"
+    ! grep -q 'issue edit 101 .*--body-file' "$GH_LOG"
+    ! grep -q 'autospec issue promote' "$GH_LOG"
+    ! grep -q 'remove-label needs-autospec-template' "$GH_LOG"
 }
 
 # ── Selector exclusions ────────────────────────────────────────────────────────
