@@ -368,19 +368,38 @@ has_proper_rep_library() {
     esac
 }
 
-# Heuristic: count substring-style checks in the file (used only for
-# STRING_MATCH_DOMAIN_LOGIC which remains a file-scope heuristic — the
-# proper-rep-library import already scopes it).
-count_substring_checks() {
+# Emit numbered substring-style candidate lines after removing evidence that
+# only verifies or reports output. STRING_MATCH_DOMAIN_LOGIC remains a
+# file-scope heuristic — the proper-rep-library import already scopes it.
+substring_candidate_lines() {
     local file="$1" lang="$2"
+    local pattern
     case "$lang" in
-        python)     grep -cE '\bin (name|s|x|input|text|target)\b' "$file" || true ;;
-        javascript) grep -cE '\.(includes|indexOf|startsWith|endsWith)\(' "$file" || true ;;
-        go)         grep -cE '\bcontains\(.*"[^"]+"\)|strings\.Contains' "$file" || true ;;
-        java)       grep -cE '\.contains\("[^"]+"\)' "$file" || true ;;
-        scala)      grep -cE '\.contains\("[^"]+"\)' "$file" || true ;;
-        rust)       grep -cE '\.contains\("[^"]+"\)' "$file" || true ;;
+        python)     pattern='\bin (name|s|x|input|text|target)\b' ;;
+        javascript) pattern='\.(includes|indexOf|startsWith|endsWith)\(' ;;
+        go)         pattern='\bcontains\(.*"[^"]+"\)|strings\.Contains' ;;
+        java)       pattern='\.contains\("[^"]+"\)' ;;
+        scala)      pattern='\.contains\("[^"]+"\)' ;;
+        rust)       pattern='\.contains\("[^"]+"\)' ;;
+        *)          return 0 ;;
     esac
+    grep -nE "$pattern" "$file" 2>/dev/null | awk '
+        {
+            text = $0
+            sub(/^[0-9]+:/, "", text)
+            lower = tolower(text)
+            trimmed = lower
+            sub(/^[[:space:]]+/, "", trimmed)
+
+            if (trimmed ~ /^(#|\/\/|\/\*|\*)/) next
+            if (lower ~ /(^|[^[:alnum:]_])([[:alnum:]_]*assert[[:alnum:]_]*|expect[[:alnum:]_]*|[[:alnum:]_]*snapshot[[:alnum:]_]*)([[:space:]]*\(|[[:space:]]*!)/) next
+            if (lower ~ /(^|[^[:alnum:]_])(print|println|eprint|eprintln|debug|info|warn|error|trace)!?[[:space:]]*\(/) next
+            if (lower ~ /(console|log|logger)\.(log|debug|info|warn|error|trace)[[:space:]]*\(/) next
+            if (lower ~ /system\.(out|err)\.print(ln)?[[:space:]]*\(/) next
+
+            print $0
+        }
+    ' || true
 }
 
 # ---- per-function range parsing (issue #640) ----
@@ -633,11 +652,12 @@ dominant_branch_shape() {
 
 scan_file_string_match() {
     local file="$1" lang="$2"
-    local subs line
-    subs=$(count_substring_checks "$file" "$lang")
+    local candidates subs line
+    candidates="$(substring_candidate_lines "$file" "$lang")"
+    subs="$(printf '%s\n' "$candidates" | awk 'NF { count++ } END { print count + 0 }')"
     subs="${subs:-0}"
     if [ "$subs" -ge 3 ] && has_proper_rep_library "$file" "$lang"; then
-        line=$(grep -nE '\b(contains|includes|in name|in s)\b' "$file" 2>/dev/null | head -1 | cut -d: -f1)
+        line="$(printf '%s\n' "$candidates" | head -1 | cut -d: -f1)"
         line="${line:-1}"
         process_finding "$file" "$lang" "STRING_MATCH_DOMAIN_LOGIC" "$line" "<file>" "$DIRECTIVE_STRING_MATCH"
     fi
