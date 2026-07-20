@@ -135,12 +135,24 @@ impl MainlineHealth {
     }
 
     pub fn to_json(&self, repo: &str) -> String {
+        self.render_json(repo, None)
+    }
+
+    pub fn to_json_with_policy_digest(&self, repo: &str, policy_digest: &str) -> String {
+        self.render_json(repo, Some(policy_digest))
+    }
+
+    fn render_json(&self, repo: &str, policy_digest: Option<&str>) -> String {
+        let policy_digest = policy_digest
+            .map(|digest| format!(",\"effective_policy_digest\":\"{}\"", escape_json(digest)))
+            .unwrap_or_default();
         format!(
-            "{{\"repo\":\"{}\",\"branch\":\"{}\",\"outcome\":\"{}\",\"diagnostic\":\"{}\",\"evidence\":[{}]}}",
+            "{{\"repo\":\"{}\",\"branch\":\"{}\",\"outcome\":\"{}\",\"diagnostic\":\"{}\"{},\"evidence\":[{}]}}",
             escape_json(repo),
             escape_json(&self.branch),
             self.outcome.as_str(),
             self.diagnostic.as_str(),
+            policy_digest,
             self.evidence
                 .iter()
                 .map(check_json)

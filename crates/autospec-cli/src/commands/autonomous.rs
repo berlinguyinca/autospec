@@ -1695,7 +1695,8 @@ fn main_health(options: Options) -> Result<(), String> {
     let config = load_autonomous_config(&options.repo_dir)?;
     let layout = RunLayout::new(&options)?;
     let health = load_main_health(&layout, &options, &config)?;
-    persist_main_health(&layout, &health)?;
+    let policy_digest = config.main_health.effective_policy_digest(&health.branch)?;
+    persist_main_health(&layout, &health, &policy_digest)?;
     print_main_health(&layout.repo, &health, options.json);
     if health.outcome == MainlineHealthOutcome::Halt {
         return Err(format!(
@@ -1858,7 +1859,11 @@ fn gh_api(endpoint: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn persist_main_health(layout: &RunLayout, health: &MainlineHealth) -> Result<(), String> {
+fn persist_main_health(
+    layout: &RunLayout,
+    health: &MainlineHealth,
+    policy_digest: &str,
+) -> Result<(), String> {
     let dir = env_path(
         "AUTOSPEC_AUTONOMOUS_STATE_DIR",
         &[".autospec", "autonomous"],
@@ -1872,8 +1877,12 @@ fn persist_main_health(layout: &RunLayout, health: &MainlineHealth) -> Result<()
         .append(true)
         .open(&path)
         .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
-    writeln!(file, "{}", health.to_json(&layout.repo))
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))
+    writeln!(
+        file,
+        "{}",
+        health.to_json_with_policy_digest(&layout.repo, policy_digest)
+    )
+    .map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
 fn print_main_health(repo: &str, health: &MainlineHealth, json: bool) {
@@ -2034,6 +2043,10 @@ fn run_foreground_with_lease(
         return Ok(ForegroundCompletion::Lifecycle(preflight));
     }
     let health = load_main_health(layout, options, config).map_err(CommandFailure::diagnostic)?;
+    let policy_digest = config
+        .main_health
+        .effective_policy_digest(&health.branch)
+        .map_err(CommandFailure::diagnostic)?;
     input = input.with_health(lifecycle_health(health.outcome.clone()));
     let mut lifecycle = decide_lifecycle(&input);
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
@@ -2043,7 +2056,7 @@ fn run_foreground_with_lease(
                 layout.state_dir.display()
             ))
         })?;
-        persist_main_health(layout, &health).map_err(CommandFailure::diagnostic)?;
+        persist_main_health(layout, &health, &policy_digest).map_err(CommandFailure::diagnostic)?;
         persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
         return Ok(ForegroundCompletion::Lifecycle(lifecycle));
     }
@@ -2064,12 +2077,12 @@ fn run_foreground_with_lease(
             )?;
             lifecycle = decide_lifecycle(&input);
             if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
-                persist_lifecycle_decision(layout, &lifecycle)
-                    .map_err(CommandFailure::diagnostic)?;
+                persist_foreground_admission(layout, &health, &policy_digest, &lifecycle)?;
                 return Ok(ForegroundCompletion::Lifecycle(lifecycle));
             }
         }
     }
+    persist_foreground_admission(layout, &health, &policy_digest, &lifecycle)?;
     let scope = foreground_scope();
     let state_path = foreground_state_path(layout, scope);
     let state =
@@ -2097,7 +2110,6 @@ fn run_foreground_with_lease(
     )
     .map_err(CommandFailure::diagnostic)?;
     if !found_work {
-        persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
         return Ok(ForegroundCompletion::State(state));
     }
@@ -2110,11 +2122,9 @@ fn run_foreground_with_lease(
         ForegroundSelectionResult::State(state, selected) => (state, selected),
     };
     let Some(selected) = selected else {
-        persist_foreground_admission(layout, &health, &lifecycle)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
         return Ok(ForegroundCompletion::State(state));
     };
-    persist_foreground_admission(layout, &health, &lifecycle)?;
     persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
     match dispatch_foreground(layout, options, lease, &state_path, state, selected)? {
         ForegroundDispatchResult::State(state) => Ok(ForegroundCompletion::State(state)),
@@ -2839,6 +2849,7 @@ fn lifecycle_decision_with_admission(
 fn persist_foreground_admission(
     layout: &RunLayout,
     health: &MainlineHealth,
+    policy_digest: &str,
     lifecycle: &LifecycleDecision,
 ) -> Result<(), CommandFailure> {
     fs::create_dir_all(&layout.state_dir).map_err(|error| {
@@ -2847,7 +2858,7 @@ fn persist_foreground_admission(
             layout.state_dir.display()
         ))
     })?;
-    persist_main_health(layout, health).map_err(CommandFailure::diagnostic)?;
+    persist_main_health(layout, health, policy_digest).map_err(CommandFailure::diagnostic)?;
     persist_lifecycle_decision(layout, lifecycle).map_err(CommandFailure::diagnostic)
 }
 

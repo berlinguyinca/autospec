@@ -727,6 +727,74 @@ fn main_health_reads_the_same_repository_config_as_foreground_admission() {
 }
 
 #[test]
+fn retained_foreground_state_reloads_and_records_repository_policy() {
+    let fixture = ForegroundFixture::new();
+    fixture.write_autonomous_config(
+        "main_health:\n  branch: main\n  ignore_checks:\n    - Unit Tests\n",
+    );
+
+    let first = fixture
+        .unbranched_foreground_command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run first configured foreground cycle");
+    assert!(
+        first.status.success(),
+        "status={:?} stdout={} stderr={}",
+        first.status.code(),
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let first_receipts = fs::read_to_string(fixture.main_health_observations_path())
+        .expect("read first health observation");
+    let first_lines = first_receipts.lines().collect::<Vec<_>>();
+    assert_eq!(first_lines.len(), 1);
+    let first_digest = json_string_field(first_lines[0], "effective_policy_digest");
+
+    fixture.write_autonomous_config(
+        "main_health:\n  branch: master_ai\n  ignore_checks:\n    - E2E Tests\n",
+    );
+    let second = fixture
+        .unbranched_foreground_command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run retained foreground cycle with changed config");
+    assert!(
+        second.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let second_receipts = fs::read_to_string(fixture.main_health_observations_path())
+        .expect("read reloaded health observations");
+    let second_lines = second_receipts.lines().collect::<Vec<_>>();
+    assert_eq!(
+        second_lines.len(),
+        2,
+        "retained state must not suppress the next cycle policy receipt"
+    );
+    assert_ne!(
+        first_digest,
+        json_string_field(second_lines[1], "effective_policy_digest"),
+        "changed effective repository policy must change its receipt binding"
+    );
+
+    fixture.write_autonomous_config("main_health:\n  ignore_checks: malformed\n");
+    let before_malformed = second_receipts;
+    let malformed = fixture
+        .unbranched_foreground_command()
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("run malformed repository config");
+    assert_eq!(malformed.status.code(), Some(2));
+    assert_eq!(
+        fs::read_to_string(fixture.main_health_observations_path())
+            .expect("read unchanged health observations"),
+        before_malformed,
+        "invalid config must fail before appending a policy receipt"
+    );
+}
+
+#[test]
 fn invalid_configured_branch_does_not_fall_back_to_github_default() {
     let fixture = ForegroundFixture::new();
     fixture.write_autonomous_config("main_health:\n  branch: missing\n");
@@ -1468,6 +1536,12 @@ exit 1
         fs::write(config_dir.join("autonomous.yml"), source).expect("write autonomous config");
     }
 
+    fn main_health_observations_path(&self) -> PathBuf {
+        self.health
+            .join("test_repo")
+            .join("main-health-observations.jsonl")
+    }
+
     fn initialize_git_remote(&self) {
         let init = Command::new("git")
             .args([
@@ -1646,6 +1720,15 @@ exit 1
         TierReceipt::parse_json(&source, "test/repo", pass_id, NoWorkTier::Tier1)
             .expect("parse Tier 1 waterfall receipt")
     }
+}
+
+fn json_string_field(document: &str, field: &str) -> String {
+    let marker = format!("\"{field}\":\"");
+    document
+        .split_once(&marker)
+        .and_then(|(_, remainder)| remainder.split_once('"'))
+        .map(|(value, _)| value.to_string())
+        .unwrap_or_else(|| panic!("missing string field {field} in {document}"))
 }
 
 impl Drop for ForegroundFixture {
