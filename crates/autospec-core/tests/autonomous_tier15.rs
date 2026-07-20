@@ -1,7 +1,42 @@
 use autospec_core::autonomous::tier15::{
     observe_tier15, Tier15Classification, Tier15Decision, Tier15HoldReason, Tier15Input,
-    Tier15QuarantineReason, Tier15Route, Tier15RouteReason, Tier15SkipReason,
+    Tier15QuarantineReason, Tier15Readiness, Tier15Route, Tier15RouteReason, Tier15SkipReason,
 };
+
+#[test]
+fn observer_records_candidate_readiness_without_mutating_labels() {
+    let observation = observe_tier15(Tier15Input::new(
+        vec![
+            open(1, "Candidate", "fix: candidate with a bounded scope", &[]),
+            open(
+                2,
+                "Verified",
+                "fix: verified candidate with a bounded scope",
+                &["autospec:verified"],
+            ),
+            open(
+                3,
+                "Reviewed",
+                "fix: reviewed candidate with a bounded scope",
+                &["autospec:verified", "safety:reviewed"],
+            ),
+        ],
+        Vec::new(),
+        3,
+    ))
+    .expect("readiness observation succeeds");
+
+    assert_eq!(observation.readiness(1), Some(Tier15Readiness::Candidate));
+    assert_eq!(observation.readiness(2), Some(Tier15Readiness::Verified));
+    assert_eq!(
+        observation.readiness(3),
+        Some(Tier15Readiness::SafetyReviewed)
+    );
+    let evidence = observation.evidence_json();
+    assert!(evidence.contains("\"1\":\"candidate\""));
+    assert!(evidence.contains("\"2\":\"verified\""));
+    assert!(evidence.contains("\"3\":\"safety_reviewed\""));
+}
 use autospec_core::coordination::RemoteIssue;
 use std::fs;
 use std::path::Path;
