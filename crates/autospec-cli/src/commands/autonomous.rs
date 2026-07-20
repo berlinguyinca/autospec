@@ -457,17 +457,40 @@ fn load_blast_radius_registry(
         None
     };
 
-    let Some(registry_path) = registry_path else {
-        return Ok((default_legacy_registry(), "legacy-defaults".to_string()));
-    };
-    let source = fs::read_to_string(&registry_path)
-        .map_err(|error| format!("{}: {error}", registry_path.display()))?;
-    let parsed = parse_fenced_surfaces(&source)?;
-    if parsed.is_empty() {
-        Ok((default_legacy_registry(), "legacy-defaults".to_string()))
+    let (mut surfaces, mut registry_name) = if let Some(registry_path) = registry_path {
+        let source = fs::read_to_string(&registry_path)
+            .map_err(|error| format!("{}: {error}", registry_path.display()))?;
+        let parsed = parse_fenced_surfaces(&source)?;
+        if parsed.is_empty() {
+            (default_legacy_registry(), "legacy-defaults".to_string())
+        } else {
+            (parsed, registry_path.display().to_string())
+        }
     } else {
-        Ok((parsed, registry_path.display().to_string()))
+        (default_legacy_registry(), "legacy-defaults".to_string())
+    };
+
+    let protected_paths = Path::new(".autospec/protected-paths.txt");
+    if protected_paths.is_file() {
+        let source = fs::read_to_string(protected_paths)
+            .map_err(|error| format!("{}: {error}", protected_paths.display()))?;
+        let paths = source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if !paths.is_empty() {
+            surfaces.push(autospec_core::autonomous::blast_radius::FencedSurface {
+                id: "protected-paths".to_string(),
+                severity: "fenced".to_string(),
+                reason: "protected path requires human review".to_string(),
+                paths,
+            });
+            registry_name.push_str("+protected-paths");
+        }
     }
+    Ok((surfaces, registry_name))
 }
 
 fn read_changed_files(path: &Path) -> Result<Vec<String>, String> {
