@@ -157,8 +157,8 @@ EOF
     jq -e '.verification.lanes["lint:templates"].status == "configured but failing"' "$OUT_JSON"
     jq -e '.findings[] | select(.probe=="design-template-guard" and .classification=="design-template-contract" and .guard_script=="lint:styles" and .file=="src/app/shared-components/correction-report-panel/correction-report-panel.component.html" and .line==1 and .["class"]=="my-2")' "$OUT_JSON"
     jq -e '.findings[] | select(.probe=="design-template-guard" and .guard_script=="lint:templates" and .rule=="alert-primary" and .["class"]=="alert-primary")' "$OUT_JSON"
-    jq -e '.issue_links | map(select(.dedupe_key=="design-template-guard:lint:styles:src/app/shared-components/correction-report-panel/correction-report-panel.component.html")) | length == 1' "$OUT_JSON"
-    jq -e '.issue_links | map(select(.dedupe_key=="design-template-guard:lint:templates:src/app/shared-components/correction-report-panel/correction-report-panel.component.html")) | length == 1' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="design-template-guard:lint:styles:src/app/shared-components/correction-report-panel/correction-report-panel.component.html|path=src/app/shared-components/correction-report-panel/correction-report-panel.component.html|title=design-template-guard-failure-in-src-app-shared-components-correction-report-panel-correction-report-panel-component-html")) | length == 1' "$OUT_JSON"
+    jq -e '.issue_links | map(select(.dedupe_key=="design-template-guard:lint:templates:src/app/shared-components/correction-report-panel/correction-report-panel.component.html|path=src/app/shared-components/correction-report-panel/correction-report-panel.component.html|title=design-template-guard-failure-in-src-app-shared-components-correction-report-panel-correction-report-panel-component-html")) | length == 1' "$OUT_JSON"
     grep -q 'design-template-guard / design-template-contract' "$OUT_MD"
 }
 
