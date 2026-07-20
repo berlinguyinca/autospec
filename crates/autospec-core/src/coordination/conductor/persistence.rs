@@ -137,7 +137,7 @@ impl ConductorOutcome {
 impl ConductorState {
     pub fn to_json(&self) -> String {
         format!(
-            "{{\"schema\":{CONDUCTOR_SCHEMA},\"repo\":\"{}\",\"scope\":\"{}\",\"phase\":\"{}\",\"state\":\"{}\",\"selected_issue\":{},\"serialization_reasons\":[{}],\"retry_count\":{},\"retry_limit\":{},\"last_outcome\":{},\"pause_reason\":{},\"terminal_reason\":{},\"resume_phase\":{},\"blocked_backlog_cycles\":{},\"blocked_backlog_reason\":{},\"blocked_backlog_issues\":[{}]}}",
+            "{{\"schema\":{CONDUCTOR_SCHEMA},\"repo\":\"{}\",\"scope\":\"{}\",\"phase\":\"{}\",\"state\":\"{}\",\"selected_issue\":{},\"serialization_reasons\":[{}],\"retry_count\":{},\"retry_limit\":{},\"last_outcome\":{},\"pause_reason\":{},\"terminal_reason\":{},\"resume_phase\":{},\"no_progress_cycles\":{},\"no_progress_reason\":{},\"blocked_backlog_cycles\":{},\"blocked_backlog_reason\":{},\"blocked_backlog_issues\":[{}]}}",
             escape_json(&self.repo),
             self.scope.as_str(),
             self.phase.as_str(),
@@ -158,6 +158,8 @@ impl ConductorState {
             self.resume_phase
                 .as_ref()
                 .map_or_else(|| "null".to_string(), |phase| format!("\"{}\"", phase.as_str())),
+            self.no_progress_cycles,
+            optional_string_json(self.no_progress_reason.as_deref()),
             self.blocked_backlog_cycles,
             optional_string_json(self.blocked_backlog_reason.as_deref()),
             self.blocked_backlog_issues
@@ -188,6 +190,8 @@ impl ConductorState {
                 "pause_reason",
                 "terminal_reason",
                 "resume_phase",
+                "no_progress_cycles",
+                "no_progress_reason",
                 "blocked_backlog_cycles",
                 "blocked_backlog_reason",
                 "blocked_backlog_issues",
@@ -246,6 +250,20 @@ impl ConductorState {
             take_required(&mut object, "resume_phase", "conductor state")?,
             "conductor state.resume_phase",
         )?;
+        let no_progress_cycles = object
+            .remove("no_progress_cycles")
+            .map(|value| {
+                value
+                    .into_number("conductor state.no_progress_cycles")?
+                    .try_into()
+                    .map_err(|_| "conductor state.no_progress_cycles exceeds u32".to_string())
+            })
+            .transpose()?
+            .unwrap_or(0);
+        let no_progress_reason = optional_string(
+            object.remove("no_progress_reason"),
+            "conductor state.no_progress_reason",
+        )?;
         let blocked_backlog_cycles = object
             .remove("blocked_backlog_cycles")
             .map(|value| {
@@ -276,6 +294,8 @@ impl ConductorState {
             pause_reason,
             terminal_reason,
             resume_phase,
+            no_progress_cycles,
+            no_progress_reason,
             blocked_backlog_cycles,
             blocked_backlog_reason,
             blocked_backlog_issues,

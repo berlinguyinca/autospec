@@ -1,5 +1,6 @@
 use super::{
-    ConductorOutcome, ConductorPhase, ConductorScope, ConductorState, RETRY_LIMIT_EXHAUSTED,
+    ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
+    MAX_NO_PROGRESS_REASON_LENGTH, RETRY_LIMIT_EXHAUSTED,
 };
 
 impl ConductorState {
@@ -30,7 +31,7 @@ impl ConductorState {
         {
             return Err("blocked backlog metadata requires a positive cycle count".to_string());
         }
-        if self.blocked_backlog_issues.iter().any(|issue| *issue == 0)
+        if self.blocked_backlog_issues.contains(&0)
             || self
                 .blocked_backlog_issues
                 .windows(2)
@@ -42,6 +43,23 @@ impl ConductorState {
             && self.phase != ConductorPhase::AllBlocked
         {
             return Err("threshold blocked backlog must be sealed as all-blocked".to_string());
+        }
+        match (self.no_progress_cycles, self.no_progress_reason.as_deref()) {
+            (0, None) => {}
+            (0, Some(_)) | (_, None) => {
+                return Err(
+                    "no-progress reason and cycle count must be recorded together".to_string(),
+                )
+            }
+            (_, Some(reason))
+                if reason.trim().is_empty()
+                    || reason.chars().count() > MAX_NO_PROGRESS_REASON_LENGTH =>
+            {
+                return Err(format!(
+                    "no-progress reason must contain 1..={MAX_NO_PROGRESS_REASON_LENGTH} characters"
+                ))
+            }
+            _ => {}
         }
         Ok(())
     }

@@ -1465,7 +1465,7 @@ fn status(options: Options) -> Result<(), CommandFailure> {
     let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"no_progress_reason\":{},\"no_progress_cycles\":{},\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&layout.repo),
             state.outcome.as_str(),
             state.status_json(),
@@ -1480,6 +1480,8 @@ fn status(options: Options) -> Result<(), CommandFailure> {
             json_escape(&state.current_action),
             json_escape(&state.normalized_state),
             json_escape(&state.last_blocker),
+            optional_json_string(state.no_progress_reason.as_deref()),
+            state.no_progress_cycles,
             spend.tokens,
             spend.budget_issues,
             spend.filed_issues,
@@ -2149,7 +2151,7 @@ fn run_foreground_with_lease(
     let state =
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
     if foreground_state_is_retained(&state) {
-        return Ok(ForegroundCompletion::State(state));
+        return Ok(ForegroundCompletion::State(Box::new(state)));
     }
     if state.phase() != ConductorPhase::Scan {
         return Err(CommandFailure::diagnostic(format!(
@@ -2171,8 +2173,15 @@ fn run_foreground_with_lease(
     )
     .map_err(CommandFailure::diagnostic)?;
     if !found_work {
+        let reason = state
+            .terminal_reason()
+            .unwrap_or("scan_no_progress")
+            .to_string();
+        let state = state
+            .record_no_progress_cycle(reason)
+            .map_err(CommandFailure::diagnostic)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
-        return Ok(ForegroundCompletion::State(state));
+        return Ok(ForegroundCompletion::State(Box::new(state)));
     }
     let state = review_foreground(layout, state).map_err(CommandFailure::diagnostic)?;
     let selection = select_foreground(layout, options, lease, state)?;
@@ -2180,11 +2189,11 @@ fn run_foreground_with_lease(
         ForegroundSelectionResult::Lifecycle(lifecycle) => {
             return Ok(ForegroundCompletion::Lifecycle(lifecycle));
         }
-        ForegroundSelectionResult::State(state, selected) => (state, selected),
+        ForegroundSelectionResult::State(state, selected) => (*state, selected),
     };
     let Some(selected) = selected else {
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
-        return Ok(ForegroundCompletion::State(state));
+        return Ok(ForegroundCompletion::State(Box::new(state)));
     };
     persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
     match dispatch_foreground(layout, options, lease, &state_path, state, selected)? {
@@ -2217,7 +2226,7 @@ struct ForegroundSelection {
 }
 
 enum ForegroundCompletion {
-    State(ConductorState),
+    State(Box<ConductorState>),
     Lifecycle(LifecycleDecision),
 }
 
@@ -2244,12 +2253,12 @@ impl From<claim::ConductorClaimError> for ForegroundFailure {
 }
 
 enum ForegroundSelectionResult {
-    State(ConductorState, Option<ForegroundSelection>),
+    State(Box<ConductorState>, Option<ForegroundSelection>),
     Lifecycle(LifecycleDecision),
 }
 
 enum ForegroundDispatchResult {
-    State(ConductorState),
+    State(Box<ConductorState>),
     Lifecycle(LifecycleDecision),
 }
 
@@ -2308,6 +2317,8 @@ fn scan_foreground(
         return Ok((state, false));
     }
     let state = state
+        .clear_no_progress_diagnostic()
+        .map_err(|error| format!("cannot clear foreground no-progress diagnostic: {error}"))?
         .transition(ConductorEvent::ScanFoundWork)
         .map_err(|error| format!("cannot record foreground scan: {error}"))?;
     Ok((state, true))
@@ -2338,7 +2349,7 @@ fn select_foreground(
             .map_err(|error| {
                 CommandFailure::diagnostic(format!("cannot pause foreground conductor: {error}"))
             })?;
-        return Ok(ForegroundSelectionResult::State(state, None));
+        return Ok(ForegroundSelectionResult::State(Box::new(state), None));
     };
     let selection = ForegroundSelection {
         issue: selected.issue.number,
@@ -2366,7 +2377,10 @@ fn select_foreground(
         .map_err(|error| {
             CommandFailure::diagnostic(format!("cannot select foreground issue: {error}"))
         })?;
-    Ok(ForegroundSelectionResult::State(state, Some(selection)))
+    Ok(ForegroundSelectionResult::State(
+        Box::new(state),
+        Some(selection),
+    ))
 }
 
 fn dispatch_foreground(
@@ -2463,7 +2477,7 @@ fn dispatch_foreground(
             persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
             continue;
         }
-        return Ok(ForegroundDispatchResult::State(state));
+        return Ok(ForegroundDispatchResult::State(Box::new(state)));
     }
 }
 
@@ -3792,6 +3806,8 @@ struct StateMetadata {
     current_action: String,
     normalized_state: String,
     last_blocker: String,
+    no_progress_reason: Option<String>,
+    no_progress_cycles: u32,
 }
 
 impl StateMetadata {
@@ -3806,6 +3822,8 @@ impl StateMetadata {
             current_action: String::new(),
             normalized_state: String::new(),
             last_blocker: String::new(),
+            no_progress_reason: None,
+            no_progress_cycles: 0,
         }
     }
 
@@ -3828,6 +3846,8 @@ impl StateMetadata {
             current_action: String::new(),
             normalized_state: String::new(),
             last_blocker: String::new(),
+            no_progress_reason: None,
+            no_progress_cycles: 0,
         }
     }
 
@@ -3836,6 +3856,10 @@ impl StateMetadata {
             self.normalized_state =
                 normalized_cycle_boundary_state(layout, parse_cycle_number(&self.current_cycle))
                     .unwrap_or_default();
+        }
+        if let Some(state) = foreground_conductor_state(layout) {
+            self.no_progress_reason = state.no_progress_reason().map(str::to_string);
+            self.no_progress_cycles = state.no_progress_cycles();
         }
     }
 
@@ -4362,6 +4386,10 @@ fn read_state_metadata(layout: &RunLayout) -> StateMetadata {
             .or_else(|| extract_json_string(&raw, "state"))
             .unwrap_or_default(),
         last_blocker: extract_json_string(&raw, "last_blocker").unwrap_or_default(),
+        no_progress_reason: extract_json_string(&raw, "no_progress_reason"),
+        no_progress_cycles: extract_json_number(&raw, "no_progress_cycles")
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
     }
 }
 
@@ -4370,10 +4398,14 @@ fn normalized_cycle_boundary_state(layout: &RunLayout, cycle: u64) -> Option<Str
 }
 
 fn foreground_normalized_state(layout: &RunLayout, cycle: u64) -> Option<String> {
+    let state = foreground_conductor_state(layout)?;
+    Some(state.normalized_state_for_cycle(cycle))
+}
+
+fn foreground_conductor_state(layout: &RunLayout) -> Option<ConductorState> {
     let source =
         fs::read_to_string(foreground_state_path(layout, ConductorScope::Repository)).ok()?;
-    let state = ConductorState::parse_json(&source).ok()?;
-    Some(state.normalized_state_for_cycle(cycle))
+    ConductorState::parse_json(&source).ok()
 }
 
 fn waterfall_normalized_state(layout: &RunLayout, cycle: u64) -> Option<String> {

@@ -9,6 +9,49 @@ use autospec_core::coordination::{
 const BLOCKED_BACKLOG_THRESHOLD: u32 = 5;
 
 #[test]
+fn no_progress_diagnostic_persists_counts_and_resets_deterministically() {
+    let state = conductor(ConductorScope::Repository)
+        .record_no_progress_cycle("waterfall_pending")
+        .expect("first no-progress cycle")
+        .record_no_progress_cycle("waterfall_pending")
+        .expect("repeated no-progress cycle");
+    assert_eq!(state.no_progress_reason(), Some("waterfall_pending"));
+    assert_eq!(state.no_progress_cycles(), 2);
+
+    let restored = ConductorState::parse_json(&state.to_json()).expect("diagnostic persists");
+    assert_eq!(restored.no_progress_reason(), Some("waterfall_pending"));
+    assert_eq!(restored.no_progress_cycles(), 2);
+
+    let changed = restored
+        .record_no_progress_cycle("repository_empty")
+        .expect("changed reason resets count");
+    assert_eq!(changed.no_progress_reason(), Some("repository_empty"));
+    assert_eq!(changed.no_progress_cycles(), 1);
+
+    let cleared = changed
+        .clear_no_progress_diagnostic()
+        .expect("work advancement clears diagnostic");
+    assert_eq!(cleared.no_progress_reason(), None);
+    assert_eq!(cleared.no_progress_cycles(), 0);
+}
+
+#[test]
+fn no_progress_diagnostic_is_bounded_and_legacy_state_defaults_empty() {
+    let legacy = conductor(ConductorScope::Repository)
+        .to_json()
+        .replace("\"no_progress_cycles\":0,", "")
+        .replace("\"no_progress_reason\":null,", "");
+    let restored = ConductorState::parse_json(&legacy).expect("legacy state parses");
+    assert_eq!(restored.no_progress_reason(), None);
+    assert_eq!(restored.no_progress_cycles(), 0);
+
+    assert!(conductor(ConductorScope::Repository)
+        .record_no_progress_cycle("x".repeat(257))
+        .expect_err("oversized diagnostic is rejected")
+        .contains("256"));
+}
+
+#[test]
 fn blocked_backlog_governor_seals_after_repeated_identical_cycles() {
     let mut state = conductor(ConductorScope::Repository);
     for cycle in 1..=BLOCKED_BACKLOG_THRESHOLD {
