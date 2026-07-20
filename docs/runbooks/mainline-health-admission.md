@@ -53,3 +53,37 @@ If no configured, explicit, or GitHub default branch can be resolved, the
 `autospec autonomous run-foreground` completes this Rust admission gate before
 entering its bounded Rust conductor cycle, so missing branches or required
 failed/pending checks cannot dispatch ready work.
+
+## Premerge evidence admission
+
+Before a claimed executor result can close a claim, run the typed Rust premerge
+gate for the exact repository, issue, worker, claim, branch, and commit lane:
+
+```
+autospec autonomous premerge evaluate --repo OWNER/REPO --repo-dir DIR \
+  --issue N --worker-id ID --claim-id ID --json
+```
+
+The `autospec-qa` and `autospec-secaudit` producers write schema-1 JSON only to the fixed untracked paths
+`.autospec/evidence/premerge/<lane-digest>/qa.json` and `security.json`.
+Each document has exactly `schema`, `kind`, `producer`, `repo`, `issue`,
+`worker_id`, `claim_id`, `branch`, `commit`, `run_id`, `completed_at`,
+`verdict`, `finding_codes`, and `reason`; kind is `qa` or `security-audit`, and
+verdicts are `pass`, bounded-code `blocked`, or bounded-reason `failed`, with the
+producer/kind pair fixed per file. Tracked
+staged or unstaged changes reject admission, as do detached or non-attached
+worktrees; those two untracked evidence files are intentionally permitted. The
+evaluator verifies canonical lane and evidence digests, writes immutable
+decisions under
+`.autospec/autonomous-operator/<scope>/premerge/lanes/<lane-digest>/decisions/<evidence-digest>.json`,
+plus `latest.json` and blocked-lane `quarantine.json`. Any missing, malformed,
+mismatched, or unavailable evidence fails closed. Exit 0 is pass, 20 is
+blocked/quarantined, and 2 is diagnostic failure. Quarantine-and-continue
+orchestration remains supervised-executor follow-up; this command only records
+the lane decision.
+
+The receipt is an observability/admission artifact, not a foreground executor:
+the supervised Rust executor and live QA/security producers remain follow-up
+work. Claim success must include `--claim-id` and `--premerge-receipt`, and the
+receipt commit must match the GitHub PR `headRefOid`; otherwise the claim remains
+non-successful.

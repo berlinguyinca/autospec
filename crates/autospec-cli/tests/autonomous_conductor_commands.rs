@@ -1,4 +1,5 @@
 use autospec_core::autonomous::no_work::NoWorkTier;
+use autospec_core::autonomous::premerge::PremergeLaneIdentity;
 use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus, WaterfallState};
 use autospec_core::claim::{parse_remote_comments_json, select_run_state, RunStateRecord};
 use autospec_core::coordination::{ConductorOutcome, ConductorPhase, ConductorState};
@@ -8,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
+const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
+const PREMERGE_RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn workspace_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1107,7 +1112,15 @@ fn executor_result_rejects_success_without_exactly_one_closeout_report() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42","headRefName":"autonomous/issue-42"}]"#,
+        r#"[{"number":17,"body":"Closes #42","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+    );
+    fixture.persist_pass_receipt(
+        "pass",
+        EXECUTOR_CLAIM_ID,
+        "rust-foreground-conductor-1",
+        "autonomous/issue-42",
+        EXECUTOR_COMMIT,
+        false,
     );
     let before = fs::read_to_string(&fixture.comments).expect("read initial comments");
 
@@ -1128,6 +1141,10 @@ fn executor_result_rejects_success_without_exactly_one_closeout_report() {
             "succeeded",
             "--pr",
             "17",
+            "--claim-id",
+            EXECUTOR_CLAIM_ID,
+            "--premerge-receipt",
+            PREMERGE_RECEIPT,
         ])
         .output()
         .expect("record unverified success");
@@ -1150,7 +1167,15 @@ fn executor_result_accepts_a_claim_owner_success_with_linked_closeout_evidence()
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     let before = fixture.claim_record();
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+    );
+    fixture.persist_pass_receipt(
+        "pass",
+        EXECUTOR_CLAIM_ID,
+        "rust-foreground-conductor-1",
+        "autonomous/issue-42",
+        EXECUTOR_COMMIT,
+        false,
     );
 
     let output = fixture
@@ -1170,6 +1195,10 @@ fn executor_result_accepts_a_claim_owner_success_with_linked_closeout_evidence()
             "succeeded",
             "--pr",
             "17",
+            "--claim-id",
+            EXECUTOR_CLAIM_ID,
+            "--premerge-receipt",
+            PREMERGE_RECEIPT,
         ])
         .output()
         .expect("record verified success");
@@ -1181,9 +1210,204 @@ fn executor_result_accepts_a_claim_owner_success_with_linked_closeout_evidence()
     );
     let record = fixture.claim_record();
     assert_eq!(record, before);
-    assert!(fs::read_to_string(&fixture.comments)
-        .expect("read executor evidence")
-        .contains("<!-- autospec-executor-result:begin -->"));
+    let comments = parse_remote_comments_json(
+        &fs::read_to_string(&fixture.comments).expect("read executor evidence"),
+    )
+    .expect("parse executor evidence comments");
+    assert!(comments.iter().any(|comment| comment.body.contains(&format!(
+            "\"claim_id\":\"{EXECUTOR_CLAIM_ID}\",\"commit\":\"{EXECUTOR_COMMIT}\",\"premerge_receipt\":\"{PREMERGE_RECEIPT}\""
+        ))));
+}
+
+#[test]
+fn executor_result_success_requires_receipt_binding_flags_and_other_outcomes_reject_them() {
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+    let before = fs::read_to_string(&fixture.comments).expect("read initial comments");
+
+    for args in [
+        vec![
+            "autonomous",
+            "executor-result",
+            "--repo",
+            "test/repo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "rust-foreground-conductor-1",
+            "--branch",
+            "autonomous/issue-42",
+            "--outcome",
+            "succeeded",
+            "--pr",
+            "17",
+        ],
+        vec![
+            "autonomous",
+            "executor-result",
+            "--repo",
+            "test/repo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "rust-foreground-conductor-1",
+            "--branch",
+            "autonomous/issue-42",
+            "--outcome",
+            "blocked",
+            "--reason",
+            "waiting",
+            "--claim-id",
+            EXECUTOR_CLAIM_ID,
+            "--premerge-receipt",
+            PREMERGE_RECEIPT,
+        ],
+    ] {
+        let output = fixture
+            .configured_command()
+            .args(args)
+            .output()
+            .expect("run receipt-binding protocol rejection");
+        assert_eq!(output.status.code(), Some(2));
+        assert!(String::from_utf8_lossy(&output.stdout).starts_with("{\"status\":\"malformed\""));
+        assert_eq!(fs::read_to_string(&fixture.comments).unwrap(), before);
+    }
+}
+
+#[test]
+fn executor_result_rejects_nonpass_quarantined_and_foreign_premerge_receipts() {
+    for (decision, claim_id, worker_id, branch, quarantine) in [
+        (
+            "blocked",
+            EXECUTOR_CLAIM_ID,
+            "rust-foreground-conductor-1",
+            "autonomous/issue-42",
+            false,
+        ),
+        (
+            "pass",
+            EXECUTOR_CLAIM_ID,
+            "rust-foreground-conductor-1",
+            "autonomous/issue-42",
+            true,
+        ),
+        (
+            "pass",
+            "other-claim",
+            "rust-foreground-conductor-1",
+            "autonomous/issue-42",
+            false,
+        ),
+        (
+            "pass",
+            EXECUTOR_CLAIM_ID,
+            "other-worker",
+            "autonomous/issue-42",
+            false,
+        ),
+        (
+            "pass",
+            EXECUTOR_CLAIM_ID,
+            "rust-foreground-conductor-1",
+            "other/issue-42",
+            false,
+        ),
+    ] {
+        let fixture = ForegroundFixture::new();
+        fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+        fixture.set_valid_open_pull_request(EXECUTOR_COMMIT);
+        fixture.persist_pass_receipt(
+            decision,
+            claim_id,
+            worker_id,
+            branch,
+            EXECUTOR_COMMIT,
+            quarantine,
+        );
+        let before = fs::read_to_string(&fixture.comments).expect("read claim");
+
+        let output = fixture
+            .explicit_success_command()
+            .output()
+            .expect("submit invalid receipt");
+
+        assert_eq!(output.status.code(), Some(20));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("success_evidence_unavailable"));
+        assert_eq!(fs::read_to_string(&fixture.comments).unwrap(), before);
+    }
+}
+
+#[test]
+fn executor_result_rejects_pr_head_mismatch_and_successor_claim_replay() {
+    let mismatch = ForegroundFixture::new();
+    mismatch.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+    mismatch.set_valid_open_pull_request("ffffffffffffffffffffffffffffffffffffffff");
+    mismatch.persist_pass_receipt(
+        "pass",
+        EXECUTOR_CLAIM_ID,
+        "rust-foreground-conductor-1",
+        "autonomous/issue-42",
+        EXECUTOR_COMMIT,
+        false,
+    );
+    assert_eq!(
+        mismatch
+            .explicit_success_command()
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(20)
+    );
+
+    let replay = ForegroundFixture::new();
+    replay.seed_claim_with_id(
+        "rust-foreground-conductor-1",
+        "autonomous/issue-42",
+        "successor-claim",
+    );
+    replay.set_valid_open_pull_request(EXECUTOR_COMMIT);
+    replay.persist_pass_receipt(
+        "pass",
+        EXECUTOR_CLAIM_ID,
+        "rust-foreground-conductor-1",
+        "autonomous/issue-42",
+        EXECUTOR_COMMIT,
+        false,
+    );
+    let output = replay
+        .explicit_success_command()
+        .output()
+        .expect("replay prior receipt");
+    assert_eq!(output.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("claim_ownership_lost"));
+}
+
+#[test]
+fn executor_result_rejects_a_self_declared_noncanonical_lane_digest() {
+    const FORGED_LANE: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let fixture = ForegroundFixture::new();
+    fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+    fixture.set_valid_open_pull_request(EXECUTOR_COMMIT);
+    fixture.persist_pass_receipt_in_lane(
+        "pass",
+        EXECUTOR_CLAIM_ID,
+        "rust-foreground-conductor-1",
+        "autonomous/issue-42",
+        EXECUTOR_COMMIT,
+        false,
+        FORGED_LANE,
+    );
+    let before = fs::read_to_string(&fixture.comments).expect("read claim before forged receipt");
+
+    let output = fixture
+        .success_command()
+        .output()
+        .expect("submit self-declared forged lane receipt");
+
+    assert_eq!(output.status.code(), Some(20));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("success_evidence_unavailable"));
+    assert_eq!(fs::read_to_string(&fixture.comments).unwrap(), before);
 }
 
 #[test]
@@ -1238,7 +1462,7 @@ fn executor_result_rejects_an_expired_matching_lease_without_mutating_claim() {
     );
     let before = fs::read_to_string(&fixture.comments).expect("read expired claim");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
     );
 
     let output = fixture
@@ -1261,7 +1485,7 @@ fn executor_result_rejects_a_terminal_claim_without_mutating_claim() {
     fixture.append_terminal_merged_marker();
     let before = fs::read_to_string(&fixture.comments).expect("read terminal claim");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
     );
 
     let output = fixture
@@ -1283,7 +1507,7 @@ fn executor_result_rejects_a_valid_closeout_pr_from_a_foreign_branch() {
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     let before = fs::read_to_string(&fixture.comments).expect("read claimed run state");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"foreign/issue-42"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"foreign/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
     );
 
     let output = fixture
@@ -1305,7 +1529,7 @@ fn executor_result_does_not_overwrite_a_takeover_after_validating_the_result() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
     );
 
     let output = fixture
@@ -1326,7 +1550,7 @@ fn executor_result_reports_a_post_write_confirmation_failure_as_blocked() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
     );
 
     let output = fixture
@@ -1350,7 +1574,7 @@ fn executor_result_reports_a_pre_write_failure_as_blocked() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
     );
     let before = fs::read_to_string(&fixture.comments).expect("read claim before failed evidence");
 
@@ -1662,7 +1886,17 @@ exit 1
     }
 
     fn seed_claim(&self, worker_id: &str, branch: &str) {
-        self.seed_claim_at(worker_id, branch, &fresh_iso_timestamp());
+        self.seed_claim_with_id(worker_id, branch, EXECUTOR_CLAIM_ID);
+    }
+
+    fn seed_claim_with_id(&self, worker_id: &str, branch: &str, claim_id: &str) {
+        self.seed_claim_state_with_id(
+            worker_id,
+            branch,
+            "claimed",
+            &fresh_iso_timestamp(),
+            claim_id,
+        );
     }
 
     fn seed_claim_at(&self, worker_id: &str, branch: &str, updated_at: &str) {
@@ -1670,6 +1904,17 @@ exit 1
     }
 
     fn seed_claim_state(&self, worker_id: &str, branch: &str, state: &str, updated_at: &str) {
+        self.seed_claim_state_with_id(worker_id, branch, state, updated_at, EXECUTOR_CLAIM_ID);
+    }
+
+    fn seed_claim_state_with_id(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        state: &str,
+        updated_at: &str,
+        claim_id: &str,
+    ) {
         let record = RunStateRecord::new(
             "test/repo",
             42,
@@ -1682,7 +1927,8 @@ exit 1
             updated_at,
             updated_at,
             10_800,
-        );
+        )
+        .with_claim_id(claim_id);
         fs::write(
             &self.comments,
             format!(
@@ -1711,7 +1957,94 @@ exit 1
         fs::write(&self.pull_requests, pull_requests).expect("write open pull requests");
     }
 
+    fn set_valid_open_pull_request(&self, commit: &str) {
+        self.set_open_pull_requests(&format!(
+            "[{{\"number\":17,\"body\":\"Closes #42\\n\\n## Closeout report\\n\\nResult: shipped\",\"headRefName\":\"autonomous/issue-42\",\"headRefOid\":\"{commit}\"}}]"
+        ));
+    }
+
+    fn persist_pass_receipt(
+        &self,
+        decision: &str,
+        claim_id: &str,
+        worker_id: &str,
+        branch: &str,
+        commit: &str,
+        quarantine: bool,
+    ) {
+        let lane_digest =
+            PremergeLaneIdentity::new("test/repo", 42, worker_id, claim_id, branch, commit)
+                .expect("valid premerge receipt lane")
+                .lane_digest();
+        self.persist_pass_receipt_in_lane(
+            decision,
+            claim_id,
+            worker_id,
+            branch,
+            commit,
+            quarantine,
+            &lane_digest,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn persist_pass_receipt_in_lane(
+        &self,
+        decision: &str,
+        claim_id: &str,
+        worker_id: &str,
+        branch: &str,
+        commit: &str,
+        quarantine: bool,
+        lane_digest: &str,
+    ) {
+        let lane = self
+            .operator
+            .join("test_repo/premerge/lanes")
+            .join(lane_digest);
+        let decisions = lane.join("decisions");
+        fs::create_dir_all(&decisions).expect("create premerge receipt directory");
+        let receipt = format!(
+            "{{\"schema\":1,\"decision\":\"{decision}\",\"repo\":\"test/repo\",\"issue\":42,\"worker_id\":\"{worker_id}\",\"claim_id\":\"{claim_id}\",\"branch\":\"{branch}\",\"commit\":\"{commit}\",\"lane_digest\":\"{lane_digest}\",\"evidence_digest\":\"{PREMERGE_RECEIPT}\",\"reason\":\"\",\"finding_codes\":[]}}\n"
+        );
+        fs::write(decisions.join(format!("{PREMERGE_RECEIPT}.json")), &receipt)
+            .expect("persist immutable Pass receipt");
+        if quarantine {
+            fs::write(lane.join("quarantine.json"), receipt).expect("persist lane quarantine");
+        }
+    }
+
     fn explicit_success_command(&self) -> Command {
+        let lane_digest = PremergeLaneIdentity::new(
+            "test/repo",
+            42,
+            "rust-foreground-conductor-1",
+            EXECUTOR_CLAIM_ID,
+            "autonomous/issue-42",
+            EXECUTOR_COMMIT,
+        )
+        .expect("valid executor lane")
+        .lane_digest();
+        let receipt = self
+            .operator
+            .join("test_repo/premerge/lanes")
+            .join(lane_digest)
+            .join("decisions")
+            .join(format!("{PREMERGE_RECEIPT}.json"));
+        if !receipt.exists() {
+            self.persist_pass_receipt(
+                "pass",
+                EXECUTOR_CLAIM_ID,
+                "rust-foreground-conductor-1",
+                "autonomous/issue-42",
+                EXECUTOR_COMMIT,
+                false,
+            );
+        }
+        self.success_command()
+    }
+
+    fn success_command(&self) -> Command {
         let mut command = self.configured_command();
         command.args([
             "autonomous",
@@ -1728,6 +2061,10 @@ exit 1
             "succeeded",
             "--pr",
             "17",
+            "--claim-id",
+            EXECUTOR_CLAIM_ID,
+            "--premerge-receipt",
+            PREMERGE_RECEIPT,
         ]);
         command
     }

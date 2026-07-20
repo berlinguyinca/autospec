@@ -14,6 +14,7 @@ use autospec_core::autonomous::mainline_health::{
     MainlineHealthDiagnostic, MainlineHealthOutcome,
 };
 use autospec_core::autonomous::no_work::{NoWorkObservation, NoWorkState, NoWorkTier, TierOutcome};
+use autospec_core::autonomous::premerge::{PremergeDecisionKind, PremergeDecisionReceipt};
 use autospec_core::autonomous::waterfall::{TierReceipt, TierStatus, WaterfallState};
 use autospec_core::autonomous_lifecycle::{
     decide as decide_lifecycle, Budget as LifecycleBudget, CapacityDecision, ClaimBranch,
@@ -32,6 +33,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
+mod premerge;
 // Task 3 wires the closed dispatcher into the foreground cycle.
 #[allow(dead_code)]
 mod foreground_waterfall;
@@ -166,6 +168,9 @@ impl StopMode {
 }
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
+    if args.first().is_some_and(|arg| arg == "premerge") {
+        return premerge::run(&args[1..]);
+    }
     if args
         .first()
         .is_some_and(|arg| arg == "implementer-wait-failed")
@@ -2414,6 +2419,99 @@ fn foreground_worker_id() -> Result<String, String> {
     ))
 }
 
+fn persisted_pass_commit(input: &ExecutorResultInput) -> Result<Option<String>, CommandFailure> {
+    let (Some(claim_id), Some(receipt_digest)) =
+        (input.claim_id.as_deref(), input.premerge_receipt.as_deref())
+    else {
+        return Ok(None);
+    };
+    let layout = RunLayout::new(&Options {
+        repo: input.repo.clone(),
+        ..Options::default()
+    })
+    .map_err(CommandFailure::diagnostic)?;
+    let lanes_dir = layout.state_dir.join("premerge/lanes");
+    let entries = match fs::read_dir(&lanes_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(CommandFailure::diagnostic(error.to_string())),
+    };
+    let candidates = premerge_receipt_candidates(entries, receipt_digest)?;
+    let [(lane_digest, lane_path, receipt_path)] = candidates.as_slice() else {
+        return Ok(None);
+    };
+    if lane_path.join("quarantine.json").exists() {
+        return Ok(None);
+    }
+    parse_pass_receipt(input, claim_id, receipt_digest, lane_digest, receipt_path)
+}
+
+fn premerge_receipt_candidates(
+    entries: fs::ReadDir,
+    receipt_digest: &str,
+) -> Result<Vec<(String, PathBuf, PathBuf)>, CommandFailure> {
+    let mut candidates = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        if !entry
+            .file_type()
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?
+            .is_dir()
+        {
+            continue;
+        }
+        let Some(lane_digest) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        let decisions_path = entry.path().join("decisions");
+        if !fs::symlink_metadata(&decisions_path)
+            .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        {
+            continue;
+        }
+        let receipt_path = decisions_path.join(format!("{receipt_digest}.json"));
+        match fs::symlink_metadata(&receipt_path) {
+            Ok(metadata) if metadata.is_file() && !metadata.file_type().is_symlink() => {
+                candidates.push((lane_digest, entry.path(), receipt_path));
+            }
+            Ok(_) => continue,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(CommandFailure::diagnostic(error.to_string())),
+        }
+    }
+    Ok(candidates)
+}
+
+fn parse_pass_receipt(
+    input: &ExecutorResultInput,
+    claim_id: &str,
+    receipt_digest: &str,
+    lane_digest: &str,
+    receipt_path: &Path,
+) -> Result<Option<String>, CommandFailure> {
+    let source = fs::read_to_string(receipt_path)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    let Ok(receipt) = PremergeDecisionReceipt::parse(&source) else {
+        return Ok(None);
+    };
+    let exact = receipt.decision == PremergeDecisionKind::Pass
+        && receipt.lane.repo == input.repo
+        && receipt.lane.issue == input.issue
+        && receipt.lane.worker_id == input.worker_id
+        && receipt.lane.claim_id == claim_id
+        && receipt.lane.branch == input.branch
+        && receipt.lane_digest == lane_digest
+        && receipt.evidence_digest == receipt_digest;
+    Ok(exact.then_some(receipt.lane.commit))
+}
+
+fn is_lower_hex_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
     let input = match parse_executor_result_input(args) {
         Ok(ExecutorResultInvocation::Deferred { repo, issue }) => {
@@ -2424,6 +2522,44 @@ fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
         Err(reason) => return emit_executor_protocol("malformed", None, None, Some(&reason), 2),
     };
 
+    let commit = if matches!(input.outcome, ConductorOutcome::Succeeded) {
+        match persisted_pass_commit(&input) {
+            Ok(Some(commit)) => Some(commit),
+            Ok(None) => {
+                return emit_executor_protocol(
+                    "blocked",
+                    Some(&input),
+                    None,
+                    Some("success_evidence_unavailable"),
+                    20,
+                )
+            }
+            Err(_) => {
+                return emit_executor_protocol(
+                    "blocked",
+                    Some(&input),
+                    None,
+                    Some("result_recording_failed"),
+                    20,
+                )
+            }
+        }
+    } else {
+        None
+    };
+    let success = commit
+        .as_deref()
+        .map(|commit| claim::ExecutorSuccessBinding {
+            claim_id: input
+                .claim_id
+                .as_deref()
+                .expect("validated success claim ID"),
+            commit,
+            premerge_receipt: input
+                .premerge_receipt
+                .as_deref()
+                .expect("validated success receipt"),
+        });
     let recorded = match claim::record_executor_result(
         &input.repo,
         input.issue,
@@ -2431,6 +2567,7 @@ fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
         &input.branch,
         &input.outcome,
         input.pr,
+        success,
     ) {
         Ok(recorded) => recorded,
         Err(_) => {
@@ -2486,6 +2623,8 @@ struct ExecutorResultInput {
     outcome: ConductorOutcome,
     pr: Option<u64>,
     reason: Option<String>,
+    claim_id: Option<String>,
+    premerge_receipt: Option<String>,
 }
 
 impl ExecutorResultInput {
@@ -2515,6 +2654,8 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
     let mut outcome = None;
     let mut pr = None;
     let mut reason = None;
+    let mut claim_id = None;
+    let mut premerge_receipt = None;
     let mut index = 1;
 
     while index < args.len() {
@@ -2528,6 +2669,13 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
             "--outcome" => set_executor_result_value(&mut outcome, value, "--outcome")?,
             "--pr" => set_executor_result_number(&mut pr, value, "--pr")?,
             "--reason" => set_executor_result_value(&mut reason, value, "--reason")?,
+            "--claim-id" => set_executor_result_value(&mut claim_id, value, "--claim-id")?,
+            "--premerge-receipt" => {
+                if !is_lower_hex_digest(&value) {
+                    return Err("--premerge-receipt must be 64-character lowercase hex".to_string());
+                }
+                set_executor_result_value(&mut premerge_receipt, value, "--premerge-receipt")?
+            }
             unknown => return Err(format!("unknown executor-result option: {unknown}")),
         }
         index += 1;
@@ -2537,7 +2685,9 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
         || branch.is_some()
         || outcome.is_some()
         || pr.is_some()
-        || reason.is_some();
+        || reason.is_some()
+        || claim_id.is_some()
+        || premerge_receipt.is_some();
     if !has_explicit_field {
         return match (repo, issue) {
             (Some(repo), Some(issue)) if repo != "unknown" => {
@@ -2556,8 +2706,15 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
     let branch = branch.ok_or_else(|| "executor-result requires --branch".to_string())?;
     let outcome = outcome.ok_or_else(|| "executor-result requires --outcome".to_string())?;
     let (outcome, pr, reason) = match outcome.as_str() {
-        "succeeded" if pr.is_some() && reason.is_none() => (ConductorOutcome::Succeeded, pr, None),
-        "blocked" if pr.is_none() => {
+        "succeeded"
+            if pr.is_some()
+                && reason.is_none()
+                && claim_id.is_some()
+                && premerge_receipt.is_some() =>
+        {
+            (ConductorOutcome::Succeeded, pr, None)
+        }
+        "blocked" if pr.is_none() && claim_id.is_none() && premerge_receipt.is_none() => {
             let reason =
                 reason.ok_or_else(|| "blocked executor-result requires --reason".to_string())?;
             (
@@ -2566,7 +2723,7 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
                 Some(reason),
             )
         }
-        "retryable" if pr.is_none() => {
+        "retryable" if pr.is_none() && claim_id.is_none() && premerge_receipt.is_none() => {
             let reason =
                 reason.ok_or_else(|| "retryable executor-result requires --reason".to_string())?;
             (
@@ -2576,11 +2733,11 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
             )
         }
         "succeeded" => {
-            return Err("succeeded executor-result requires --pr and rejects --reason".to_string())
+            return Err("succeeded executor-result requires --pr, --claim-id, and --premerge-receipt and rejects --reason".to_string())
         }
         "blocked" | "retryable" => {
             return Err(
-                "blocked and retryable executor-results require --reason and reject --pr"
+                "blocked and retryable executor-results require --reason and reject --pr, --claim-id, and --premerge-receipt"
                     .to_string(),
             )
         }
@@ -2599,6 +2756,8 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
         outcome,
         pr,
         reason,
+        claim_id,
+        premerge_receipt,
     }))
 }
 
