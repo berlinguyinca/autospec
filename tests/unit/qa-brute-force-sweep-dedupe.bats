@@ -156,7 +156,12 @@ SH
 
 marker() {
     local scope="$1" blob="$2" rule="${3:-STRING_MATCH_DOMAIN_LOGIC}"
-    printf '<!-- autospec-qa-brute-force:v1 rule=%s path=src/classify.py scope=%s blob=%s -->' "$rule" "$scope" "$blob"
+    marker_for_path "$scope" "$blob" "src/classify.py" "$rule"
+}
+
+marker_for_path() {
+    local scope="$1" blob="$2" path="$3" rule="${4:-STRING_MATCH_DOMAIN_LOGIC}"
+    printf '<!-- autospec-qa-brute-force:v1 rule=%s path=%s scope=%s blob=%s -->' "$rule" "$path" "$scope" "$blob"
 }
 
 issue_body() {
@@ -245,6 +250,21 @@ run_sweep() {
     [ "$status" -eq 0 ]
     [ ! -s "$GH_LOG" ]
     grep -q '"filing_status":"existing-open"' "$VERDICT"
+}
+
+@test "literal backslash path survives recurrence and pending cleanup" {
+    weird_path='src/a\nfile.py'
+    mv "$REPO_FIXTURE/src/classify.py" "$REPO_FIXTURE/$weird_path"
+    blob="$(git -C "$REPO_FIXTURE" hash-object "$weird_path")"
+    catalog "$CLOSED_JSON" 50 CLOSED "$(marker_for_path '<file>' 0000000000000000000000000000000000000000 "$weird_path")"
+
+    run_sweep
+
+    [ "$status" -eq 0 ]
+    ! grep -q '^create$' "$GH_LOG"
+    [ "$(issue_body 50 | grep -Fc 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/a\nfile.py scope=<file>')" -eq 1 ]
+    issue_body 50 | grep -Fq "blob=$blob"
+    ! issue_body 50 | grep -q 'pending-reopen'
 }
 
 @test "comment and hard edit failures never create a replacement issue" {
@@ -351,8 +371,17 @@ run_sweep() {
 
     run_sweep
     [ "$status" -eq 0 ]
-    [ "$(cat "$GH_LOG")" = 'edit:49' ]
     ! grep -q '^create$' "$GH_LOG"
+    ! issue_body 49 | grep -q 'pending-reopen'
+
+    : > "$GH_LOG"
+    : > "$VERDICT"
+    current_blob="$(git -C "$REPO_FIXTURE" hash-object src/classify.py)"
+    run_sweep
+    [ "$status" -eq 0 ]
+    [ ! -s "$GH_LOG" ]
+    [ "$(issue_body 49 | grep -c 'autospec-qa-brute-force:v1 rule=STRING_MATCH_DOMAIN_LOGIC path=src/classify.py scope=<file>')" -eq 1 ]
+    issue_body 49 | grep -q "blob=$current_blob"
     ! issue_body 49 | grep -q 'pending-reopen'
 }
 

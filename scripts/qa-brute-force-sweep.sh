@@ -180,15 +180,18 @@ pending_issue_match() {
 write_recurrence_body() {
     local catalog="$1" number="$2" semantic_prefix="$3" pending_prefix="$4"
     local marker="$5" pending_marker="$6" output="$7"
-    jq -r --argjson number "$number" '.[] | select(.number == $number) | .body' "$catalog" \
-        | awk -v marker_prefix="$semantic_prefix" -v pending_prefix="$pending_prefix" \
-            'index($0, marker_prefix) != 1 && index($0, pending_prefix) != 1 { print }' > "$output"
-    printf '\n%s\n%s\n' "$marker" "$pending_marker" >> "$output"
+    jq -r --argjson number "$number" --arg marker_prefix "$semantic_prefix" \
+        --arg pending_prefix "$pending_prefix" --arg marker "$marker" --arg pending "$pending_marker" '
+        .[] | select(.number == $number) | .body | split("\n")
+        | map(select((startswith($marker_prefix) or startswith($pending_prefix)) | not))
+        | . + ["", $marker, $pending] | join("\n")
+    ' "$catalog" > "$output"
 }
 
 remove_pending_line() {
     local source="$1" pending_marker="$2" output="$3"
-    awk -v pending_marker="$pending_marker" '$0 != pending_marker { print }' "$source" > "$output"
+    jq -Rrs --arg pending_marker "$pending_marker" \
+        'split("\n") | map(select(. != $pending_marker)) | join("\n")' "$source" > "$output"
 }
 
 resume_pending() {
@@ -212,18 +215,24 @@ resume_pending() {
     printf '%s\n' "pending-recovered"
 }
 
-handle_recurrence() {
-    local semantic_match="$1" marker="$2" blob="$3" semantic_prefix="$4"
-    local pending_prefix="$5" pending_marker="$6"
-    local issue_number old_marker old_blob recurrence_file state_body clean_body
-    issue_number="${semantic_match%%$'\t'*}"
-    old_marker="${semantic_match#*$'\t'}"
+comment_recurrence() {
+    local issue_number="$1" old_marker="$2" blob="$3" marker="$4"
+    local old_blob recurrence_file
     old_blob="${old_marker##* blob=}"
     old_blob="${old_blob% -->}"
     recurrence_file="$(mktemp "$SWEEP_TMP/recurrence.XXXXXX")"
     printf 'The same brute-force heuristic recurred at a new Git blob.\n\nPrevious blob: `%s`\nCurrent blob: `%s`\n\n%s\n' \
         "$old_blob" "$blob" "$marker" > "$recurrence_file"
-    if ! repo_gh issue comment "$issue_number" --body-file "$recurrence_file" >/dev/null 2>&1; then
+    repo_gh issue comment "$issue_number" --body-file "$recurrence_file" >/dev/null 2>&1
+}
+
+handle_recurrence() {
+    local semantic_match="$1" marker="$2" blob="$3" semantic_prefix="$4"
+    local pending_prefix="$5" pending_marker="$6"
+    local issue_number old_marker state_body clean_body
+    issue_number="${semantic_match%%$'\t'*}"
+    old_marker="${semantic_match#*$'\t'}"
+    if ! comment_recurrence "$issue_number" "$old_marker" "$blob" "$marker"; then
         printf '%s\n' "not-filed-comment-failed"; return 0
     fi
     state_body="$(mktemp "$SWEEP_TMP/issue-body.XXXXXX")"
@@ -241,6 +250,29 @@ handle_recurrence() {
         printf '%s\n' "not-filed-cleanup-failed"; return 0
     fi
     printf '%s\n' "reopened"
+}
+
+handle_open_recurrence() {
+    local semantic_match="$1" marker="$2" blob="$3" semantic_prefix="$4"
+    local pending_prefix="$5" pending_marker="$6"
+    local issue_number old_marker state_body clean_body
+    issue_number="${semantic_match%%$'\t'*}"
+    old_marker="${semantic_match#*$'\t'}"
+    if ! comment_recurrence "$issue_number" "$old_marker" "$blob" "$marker"; then
+        printf '%s\n' "not-filed-comment-failed"; return 0
+    fi
+    state_body="$(mktemp "$SWEEP_TMP/open-body.XXXXXX")"
+    clean_body="$(mktemp "$SWEEP_TMP/clean-body.XXXXXX")"
+    write_recurrence_body "$OPEN_ISSUES" "$issue_number" "$semantic_prefix" "$pending_prefix" \
+        "$marker" "$pending_marker" "$state_body"
+    if ! repo_gh issue edit "$issue_number" --body-file "$state_body" >/dev/null 2>&1; then
+        printf '%s\n' "not-filed-edit-failed"; return 0
+    fi
+    remove_pending_line "$state_body" "$pending_marker" "$clean_body"
+    if ! repo_gh issue edit "$issue_number" --body-file "$clean_body" >/dev/null 2>&1; then
+        printf '%s\n' "not-filed-cleanup-failed"; return 0
+    fi
+    printf '%s\n' "updated-open"
 }
 
 create_or_recheck_issue() {
@@ -267,7 +299,8 @@ create_or_recheck_issue() {
 
 file_issue() {
     local file="$1" lang="$2" rule_id="$3" line="$4" scope="$5" blob="$6" directive="$7" marker="$8"
-    local title body existing_status semantic_prefix semantic_match pending_prefix pending_marker pending_match
+    local title body existing_status semantic_prefix semantic_match open_match
+    local pending_prefix pending_marker pending_match pending_status
     if [ "$CATALOG_STATUS" = "lock-failed" ]; then
         printf '%s\n' "not-filed-lock"; return 0
     fi
@@ -281,12 +314,20 @@ file_issue() {
     pending_prefix="<!-- autospec-qa-brute-force:pending-reopen:v1 rule=$rule_id path=$file scope=$scope blob="
     pending_marker="$pending_prefix$blob -->"
     if pending_match="$(pending_issue_match "$pending_prefix")"; then
-        resume_pending "$pending_match"; return 0
+        pending_status="$(resume_pending "$pending_match")"
+        if [ "$pending_status" != "pending-recovered" ]; then printf '%s\n' "$pending_status"; return 0; fi
+        load_issue_catalogs
+        if [ "$CATALOG_STATUS" != "ready" ]; then printf '%s\n' "not-filed-catalog"; return 0; fi
     fi
     if existing_status="$(existing_issue_status "$marker")"; then
         printf '%s\n' "$existing_status"; return 0
     fi
     semantic_prefix="<!-- autospec-qa-brute-force:v1 rule=$rule_id path=$file scope=$scope blob="
+    open_match="$(semantic_issue_match "$OPEN_ISSUES" "$semantic_prefix")"
+    if [ -n "$open_match" ]; then
+        handle_open_recurrence "$open_match" "$marker" "$blob" "$semantic_prefix" \
+            "$pending_prefix" "$pending_marker"; return 0
+    fi
     semantic_match="$(semantic_issue_match "$CLOSED_ISSUES" "$semantic_prefix")"
     if [ -n "$semantic_match" ]; then
         handle_recurrence "$semantic_match" "$marker" "$blob" "$semantic_prefix" \
