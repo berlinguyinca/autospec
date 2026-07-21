@@ -261,6 +261,27 @@ Write the agreed design to `docs/specs/YYYY-MM-DD-<topic>-design.md`, then run a
 
 The spec must be implementable end-to-end by an agent reading only the spec.
 
+### Diagnostic assistant
+
+When the request describes a chat or assistant that answers questions about
+domain entities backed by real data, such as jobs, samples, logs, or incidents,
+require the design spec to capture the current page and entity scope before
+opening a full-page assistant view. The assistant must preserve that scope
+across pop-out and full-page routes so a navigation change cannot silently
+widen or replace the entity being diagnosed.
+
+Require a backend tool registry that defines named tools, input and output
+schemas, authorization rules, a bounded per-turn call cap, and how sanitized
+tool evidence is injected into the final provider prompt. Separate
+deterministic keyword-triggered tool plans from a bounded model-planned
+diagnostic step; the model-planned step may run only when deterministic routing
+finds no plan. When a question maps to a registered tool, the final assistant
+answer must be grounded in tool evidence, not retrieval citations alone.
+
+Require the spec's Testing section to cover nested-context extraction,
+deterministic intent-keyword coverage, scoped-entity diagnostics, and provider
+refusal and fallback behavior.
+
 ### Documentation visualization
 
 When the requested work creates or regenerates documentation, the design spec
