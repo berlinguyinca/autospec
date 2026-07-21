@@ -66,36 +66,24 @@ setup() {
     run grep -F "### Diagnostic assistant" "$SKILL"
     [ "$status" -eq 0 ]
 
-    run grep -F "jobs, samples, logs, or incidents" <<<"$DIAGNOSTIC_ASSISTANT"
+    run grep -F "When the request describes a chat or assistant that answers questions about domain entities backed by real data" <<<"$DIAGNOSTIC_ASSISTANT"
     [ "$status" -eq 0 ]
 
-    run grep -F "page and entity scope" <<<"$DIAGNOSTIC_ASSISTANT"
+    run grep -F "require the design spec to capture the current page and entity scope before opening a full-page assistant view. The assistant must preserve that scope across pop-out and full-page routes" <<<"$DIAGNOSTIC_ASSISTANT"
     [ "$status" -eq 0 ]
 
-    run grep -F "pop-out and full-page routes" <<<"$DIAGNOSTIC_ASSISTANT"
+    run grep -F "Require a backend tool registry that defines named tools, input and output schemas, authorization rules, a bounded per-turn call cap" <<<"$DIAGNOSTIC_ASSISTANT"
     [ "$status" -eq 0 ]
 
-    run grep -F "named tools, input and output schemas, authorization rules" <<<"$DIAGNOSTIC_ASSISTANT"
+    run grep -F "how sanitized tool evidence is injected into the final provider prompt" <<<"$DIAGNOSTIC_ASSISTANT"
     [ "$status" -eq 0 ]
 
-    run grep -F "bounded per-turn call cap" <<<"$DIAGNOSTIC_ASSISTANT"
+    run grep -F "Separate deterministic keyword-triggered tool plans from a bounded model-planned diagnostic step; the model-planned step may run only when deterministic routing finds no plan." <<<"$DIAGNOSTIC_ASSISTANT"
     [ "$status" -eq 0 ]
 
-    run grep -F "sanitized tool evidence" <<<"$DIAGNOSTIC_ASSISTANT"
+    run grep -F "Require the spec's Testing section to cover nested-context extraction, deterministic intent-keyword coverage, scoped-entity diagnostics, and provider refusal and fallback behavior." <<<"$DIAGNOSTIC_ASSISTANT"
     [ "$status" -eq 0 ]
 
-    run grep -F "deterministic keyword-triggered tool plans" <<<"$DIAGNOSTIC_ASSISTANT"
-    [ "$status" -eq 0 ]
-
-    run grep -F "only when deterministic routing finds no plan" <<<"$DIAGNOSTIC_ASSISTANT"
-    [ "$status" -eq 0 ]
-
-    run grep -F "nested-context extraction, deterministic intent-keyword coverage" <<<"$DIAGNOSTIC_ASSISTANT"
-    [ "$status" -eq 0 ]
-
-    run grep -F "scoped-entity diagnostics, and provider refusal and fallback behavior" <<<"$DIAGNOSTIC_ASSISTANT"
-    [ "$status" -eq 0 ]
-
-    run grep -F "grounded in tool evidence, not retrieval citations alone" <<<"$DIAGNOSTIC_ASSISTANT"
+    run grep -F "When a question maps to a registered tool, the final assistant answer must be grounded in tool evidence, not retrieval citations alone." <<<"$DIAGNOSTIC_ASSISTANT"
     [ "$status" -eq 0 ]
 }
