@@ -90,6 +90,14 @@ teardown() {
     echo "$output" | grep -q "feedback_bash_set_e_short_circuit"
 }
 
+@test "failure diagnostics: returns generic failure diagnostics lesson" {
+    local repo_memory_dir="${BATS_TEST_DIRNAME}/../docs/memory"
+
+    run bash "$SCRIPT" --context "failure diagnostics" --memory-dir "$repo_memory_dir" --top-k 5
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "feedback_generic_failure_diagnostics_flow"
+}
+
 # ── top-k limit ───────────────────────────────────────────────────────────────
 
 @test "top-k 1: returns at most 1 result" {
