@@ -4,7 +4,7 @@
 # Usage:
 #   bash scripts/install-implementer-precommit.sh <worktree-path>
 #
-# Writes .git/hooks/pre-commit into <worktree-path> and chmods it +x.
+# Writes Git's resolved hooks/pre-commit for <worktree-path> and chmods it +x.
 # The hook runs lint-implementation.sh --pre-commit --staged and blocks
 # commits that contain RULE_ID violations.
 #
@@ -31,23 +31,15 @@ if [ ! -d "$WORKTREE/.git" ] && [ ! -f "$WORKTREE/.git" ]; then
     exit 1
 fi
 
-# Resolve the hooks directory (supports both regular repos and worktrees)
-if [ -f "$WORKTREE/.git" ]; then
-    # Worktree: .git is a file pointing to the gitdir
-    GITDIR="$(grep '^gitdir:' "$WORKTREE/.git" | sed 's/^gitdir: //')"
-    # Make absolute if relative
-    case "$GITDIR" in
-        /*) ;;
-        *) GITDIR="$WORKTREE/$GITDIR" ;;
-    esac
-    HOOKS_DIR="$GITDIR/hooks"
-else
-    HOOKS_DIR="$WORKTREE/.git/hooks"
-fi
-
-mkdir -p "$HOOKS_DIR"
-
-HOOK_PATH="$HOOKS_DIR/pre-commit"
+HOOK_PATH="$(git -C "$WORKTREE" rev-parse --git-path hooks/pre-commit)" || {
+    echo "ERROR: failed to resolve Git hooks path for $WORKTREE" >&2
+    exit 1
+}
+case "$HOOK_PATH" in
+    /*) ;;
+    *) HOOK_PATH="$WORKTREE/$HOOK_PATH" ;;
+esac
+mkdir -p "$(dirname "$HOOK_PATH")"
 
 cat > "$HOOK_PATH" <<'HOOK_EOF'
 #!/usr/bin/env bash
@@ -58,7 +50,20 @@ STAGED=$(git diff --cached --name-only)
 OUT=$(mktemp -t autospec-precommit.XXXXXX)
 trap 'rm -f "$OUT"' EXIT
 
-if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" --pre-commit --staged > "$OUT" 2>&1; then
+ISSUE_ARGS=()
+BRANCH=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+BRANCH_SEGMENT=${BRANCH##*/}
+case "$BRANCH" in
+  */[0-9]*-*)
+    ISSUE_NUMBER=${BRANCH_SEGMENT%%-*}
+    case "$ISSUE_NUMBER" in
+      ''|*[!0-9]*) ;;
+      *) ISSUE_ARGS=(--issue "$ISSUE_NUMBER") ;;
+    esac
+    ;;
+esac
+
+if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" --pre-commit --staged "${ISSUE_ARGS[@]}" > "$OUT" 2>&1; then
   echo "Pre-commit lint FAILED. Findings:" >&2
   cat "$OUT" >&2
   echo "" >&2
