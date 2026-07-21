@@ -367,12 +367,12 @@ fn claim_state_reconcile_records_a_linked_pr_before_posting_one_handoff_blocker(
     std::fs::create_dir_all(&bin).expect("fake bin directory");
     write_executable(
         &bin.join("gh"),
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; elif [ \"$1\" = pr ] && [ \"$2\" = list ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_PRS\"; fi\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; elif [ \"$1\" = pr ] && [ \"$2\" = list ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_PRS\"; elif [ \"$1\" = pr ] && [ \"$2\" = checks ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_CHECKS\"; fi\n",
     );
-    let comments = r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"feat/test\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#;
+    let comments = r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"feat/test\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"},{"id":101,"updated_at":"2026-07-14T00:01:00Z","body":"<!-- autospec-executor-result:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"branch\":\"feat/test\",\"outcome\":\"succeeded\",\"pr\":75,\"step\":\"executor_succeeded\",\"receipt_id\":\"result-75\",\"claim_id\":\"claim-a\",\"commit\":\"7575757575757575757575757575757575757575\",\"premerge_receipt\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n<!-- autospec-executor-result:end -->"}]"#;
     let pull_requests = r#"[
-      {"number":77,"body":"Fixes #42\n\n## Closeout report\n\n## Closeout report"},
-      {"number":75,"body":"Closes #42\n\n## Closeout report\n\n**Result** shipped."}
+      {"number":77,"body":"Fixes #42\n\n## Closeout report\n\n## Closeout report","headRefName":"feat/other","headRefOid":"7777777777777777777777777777777777777777"},
+      {"number":75,"body":"Closes #42\n\n## Closeout report\n\n**Result** shipped.","headRefName":"feat/test","headRefOid":"7575757575757575757575757575757575757575"}
     ]"#;
 
     let output = autospec()
@@ -388,6 +388,10 @@ fn claim_state_reconcile_records_a_linked_pr_before_posting_one_handoff_blocker(
         .env("PATH", path_with(&bin))
         .env("AUTOSPEC_CLAIM_COMMENTS", comments)
         .env("AUTOSPEC_CLAIM_PRS", pull_requests)
+        .env(
+            "AUTOSPEC_CLAIM_CHECKS",
+            r#"[{"name":"CI","state":"SUCCESS"}]"#,
+        )
         .env("AUTOSPEC_CLAIM_LOG", &log)
         .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
         .output()

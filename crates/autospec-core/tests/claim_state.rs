@@ -1,6 +1,8 @@
 use autospec_core::claim::{
-    find_reconcilable_pull_request, parse_open_pull_requests_json, parse_remote_comments_json,
-    select_run_state, terminal_merged_comment_exists, RemoteComment, RunStateRecord,
+    evaluate_merge_ready_claim_recovery, find_reconcilable_pull_request,
+    parse_open_pull_requests_json, parse_remote_comments_json, select_run_state,
+    terminal_merged_comment_exists, ClaimRecoveryBlock, ClaimRecoveryDecision,
+    ExecutorResultEvidence, OpenPullRequest, RemoteComment, RequiredCheck, RunStateRecord,
 };
 
 const BEGIN: &str = "<!-- autospec-run-state:begin -->";
@@ -14,6 +16,47 @@ fn record(worker_id: &str) -> String {
     format!(
         r#"{{"schema":1,"repo":"testorg/testrepo","issue":42,"worker_id":"{worker_id}","state":"claimed","branch":"feat/test","pr":"","step":"claimed","paths":["crates/autospec-core/src/claim/mod.rs"],"claimed_at":"2026-07-14T00:00:00Z","updated_at":"2026-07-14T00:00:00Z","ttl_seconds":10800}}"#
     )
+}
+
+fn recovery_claim() -> RunStateRecord {
+    RunStateRecord::new(
+        "testorg/testrepo",
+        42,
+        "worker-a",
+        "claimed",
+        "feat/test",
+        "",
+        "executor_succeeded",
+        Vec::new(),
+        "2026-07-14T00:00:00Z",
+        "2026-07-14T00:00:00Z",
+        10_800,
+    )
+}
+
+fn recovery_evidence() -> ExecutorResultEvidence {
+    ExecutorResultEvidence::new(
+        "testorg/testrepo",
+        42,
+        "worker-a",
+        "feat/test",
+        "succeeded",
+        Some(75),
+        "executor_succeeded",
+        "result-75",
+        Some("claim-a".to_string()),
+        Some("7575757575757575757575757575757575757575".to_string()),
+        Some("a".repeat(64)),
+    )
+}
+
+fn recovery_pull_request() -> OpenPullRequest {
+    OpenPullRequest {
+        number: 75,
+        body: "Closes #42\n\n## Closeout report\n\nshipped".to_string(),
+        head_ref_name: "feat/test".to_string(),
+        head_ref_oid: "7575757575757575757575757575757575757575".to_string(),
+    }
 }
 
 #[test]
@@ -145,4 +188,89 @@ fn recognizes_only_a_valid_merged_terminal_record() {
         "2026-07-14T00:00:00Z",
     )];
     assert!(!terminal_merged_comment_exists(&malformed));
+}
+
+#[test]
+fn recovers_an_expired_merge_ready_claim_with_exact_identity() {
+    let decision = evaluate_merge_ready_claim_recovery(
+        &recovery_claim(),
+        &recovery_evidence(),
+        &recovery_pull_request(),
+        &[RequiredCheck::new("CI", "SUCCESS")],
+        false,
+    );
+
+    assert_eq!(
+        decision,
+        ClaimRecoveryDecision::Recover { pull_request: 75 }
+    );
+}
+
+#[test]
+fn blocks_recovery_when_any_claim_identity_field_differs() {
+    let claim = recovery_claim();
+    let pull_request = recovery_pull_request();
+    let checks = [RequiredCheck::new("CI", "SUCCESS")];
+
+    for evidence in [
+        ExecutorResultEvidence {
+            repo: "other/repo".to_string(),
+            ..recovery_evidence()
+        },
+        ExecutorResultEvidence {
+            issue: 43,
+            ..recovery_evidence()
+        },
+        ExecutorResultEvidence {
+            worker_id: "worker-b".to_string(),
+            ..recovery_evidence()
+        },
+        ExecutorResultEvidence {
+            pr: Some(76),
+            ..recovery_evidence()
+        },
+    ] {
+        assert_eq!(
+            evaluate_merge_ready_claim_recovery(&claim, &evidence, &pull_request, &checks, false,),
+            ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::IdentityMismatch)
+        );
+    }
+}
+
+#[test]
+fn blocks_recovery_while_the_prior_worker_lease_is_live() {
+    assert_eq!(
+        evaluate_merge_ready_claim_recovery(
+            &recovery_claim(),
+            &recovery_evidence(),
+            &recovery_pull_request(),
+            &[RequiredCheck::new("CI", "SUCCESS")],
+            true,
+        ),
+        ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::LiveLease)
+    );
+}
+
+#[test]
+fn blocks_recovery_for_missing_pending_or_failing_required_checks() {
+    let claim = recovery_claim();
+    let evidence = recovery_evidence();
+    let pull_request = recovery_pull_request();
+
+    for (checks, reason) in [
+        (Vec::new(), ClaimRecoveryBlock::MissingRequiredChecks),
+        (
+            vec![RequiredCheck::new("CI", "PENDING")],
+            ClaimRecoveryBlock::RequiredCheckPending,
+        ),
+        (
+            vec![RequiredCheck::new("CI", "FAILURE")],
+            ClaimRecoveryBlock::RequiredCheckFailed,
+        ),
+    ] {
+        assert_eq!(
+            evaluate_merge_ready_claim_recovery(&claim, &evidence, &pull_request, &checks, false,),
+            ClaimRecoveryDecision::Blocked(reason)
+        );
+    }
 }

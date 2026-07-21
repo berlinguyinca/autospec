@@ -1035,6 +1035,115 @@ pub struct OpenPullRequest {
     pub head_ref_oid: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequiredCheck {
+    pub name: String,
+    pub state: String,
+}
+
+impl RequiredCheck {
+    pub fn new(name: impl Into<String>, state: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            state: state.into(),
+        }
+    }
+}
+
+pub fn parse_required_checks_json(input: &str) -> Result<Vec<RequiredCheck>, String> {
+    JsonParser::new(input)
+        .parse()?
+        .into_array("GitHub required checks")?
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let context = format!("GitHub required checks[{index}]");
+            let mut object = value.into_object(&context)?;
+            require_only_keys(&object, &["name", "state"])?;
+            Ok(RequiredCheck::new(
+                take_required(&mut object, "name")?.into_string(&format!("{context} name"))?,
+                take_required(&mut object, "state")?.into_string(&format!("{context} state"))?,
+            ))
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimRecoveryBlock {
+    LiveLease,
+    IdentityMismatch,
+    PullRequestNotMergeReady,
+    MissingRequiredChecks,
+    RequiredCheckPending,
+    RequiredCheckFailed,
+}
+
+impl ClaimRecoveryBlock {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LiveLease => "live_lease",
+            Self::IdentityMismatch => "identity_mismatch",
+            Self::PullRequestNotMergeReady => "pull_request_not_merge_ready",
+            Self::MissingRequiredChecks => "missing_required_checks",
+            Self::RequiredCheckPending => "required_check_pending",
+            Self::RequiredCheckFailed => "required_check_failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimRecoveryDecision {
+    Recover { pull_request: u64 },
+    Blocked(ClaimRecoveryBlock),
+}
+
+pub fn evaluate_merge_ready_claim_recovery(
+    claim: &RunStateRecord,
+    evidence: &ExecutorResultEvidence,
+    pull_request: &OpenPullRequest,
+    required_checks: &[RequiredCheck],
+    lease_is_live: bool,
+) -> ClaimRecoveryDecision {
+    if lease_is_live {
+        return ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::LiveLease);
+    }
+
+    let exact_identity = claim.state == "claimed"
+        && claim.repo == evidence.repo
+        && claim.issue == evidence.issue
+        && claim.worker_id == evidence.worker_id
+        && claim.branch == evidence.branch
+        && evidence.outcome == "succeeded"
+        && evidence.pr == Some(pull_request.number)
+        && (claim.pr.is_empty() || claim.pr == pull_request.number.to_string())
+        && pull_request.head_ref_name == claim.branch
+        && evidence.commit.as_deref() == Some(pull_request.head_ref_oid.as_str());
+    if !exact_identity {
+        return ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::IdentityMismatch);
+    }
+    if !is_reconcilable_pull_request(pull_request, claim.issue) {
+        return ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::PullRequestNotMergeReady);
+    }
+    if required_checks.is_empty() {
+        return ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::MissingRequiredChecks);
+    }
+    if required_checks
+        .iter()
+        .any(|check| check.state.eq_ignore_ascii_case("PENDING"))
+    {
+        return ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::RequiredCheckPending);
+    }
+    if required_checks
+        .iter()
+        .any(|check| !check.state.eq_ignore_ascii_case("SUCCESS"))
+    {
+        return ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::RequiredCheckFailed);
+    }
+    ClaimRecoveryDecision::Recover {
+        pull_request: pull_request.number,
+    }
+}
+
 pub fn parse_open_pull_requests_json(input: &str) -> Result<Vec<OpenPullRequest>, String> {
     JsonParser::new(input)
         .parse()?
@@ -1269,6 +1378,22 @@ pub fn executor_result_evidence_exists(
         parse_executor_result_evidence_comment(&comment.body)
             .is_ok_and(|evidence| evidence == *expected)
     })
+}
+
+pub fn successful_executor_result_for_pull_request(
+    comments: &[RemoteComment],
+    pull_request: u64,
+) -> Option<ExecutorResultEvidence> {
+    let mut matching = comments.iter().filter_map(|comment| {
+        parse_executor_result_evidence_comment(&comment.body)
+            .ok()
+            .filter(|evidence| evidence.outcome == "succeeded" && evidence.pr == Some(pull_request))
+    });
+    let evidence = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    Some(evidence)
 }
 
 pub fn executor_wait_failure_relinquishes_claim(

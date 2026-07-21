@@ -10,12 +10,14 @@ use autospec_core::autonomous_lifecycle::{
     WorkerId, ABANDONED_LEASE_SECS, STALE_LEASE_SECS,
 };
 use autospec_core::claim::{
-    claim_losing_worker_comment_id, executor_result_evidence_exists,
-    executor_wait_failure_relinquishes_claim, find_reconcilable_pull_request,
-    is_executor_result_pull_request, is_reconcilable_pull_request, lowest_marked_comment,
-    parse_claim_issue_json, parse_open_pull_requests_json, parse_paths_argument,
-    parse_remote_comments_json, select_run_state, terminal_merged_comment_exists,
-    ExecutorResultEvidence, RunStateRecord, RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
+    claim_losing_worker_comment_id, evaluate_merge_ready_claim_recovery,
+    executor_result_evidence_exists, executor_wait_failure_relinquishes_claim,
+    find_reconcilable_pull_request, is_executor_result_pull_request, is_reconcilable_pull_request,
+    lowest_marked_comment, parse_claim_issue_json, parse_open_pull_requests_json,
+    parse_paths_argument, parse_remote_comments_json, parse_required_checks_json, select_run_state,
+    successful_executor_result_for_pull_request, terminal_merged_comment_exists,
+    ClaimRecoveryDecision, ExecutorResultEvidence, RunStateRecord, RUN_TERMINAL_BEGIN_MARKER,
+    RUN_TERMINAL_END_MARKER,
 };
 use autospec_core::coordination::ConductorOutcome;
 use autospec_core::safety::redact_secrets;
@@ -1167,8 +1169,42 @@ fn reconcile_linked_pr_record(
             reason: "no_linked_pr_with_one_closeout".to_string(),
         });
     };
+    if worker_id.is_some_and(|worker_id| worker_id != selected.record.worker_id) {
+        return Ok(ReconcileOutcome {
+            reconciled: false,
+            pr: Some(pull_request.number.to_string()),
+            reason: "identity_mismatch".to_string(),
+        });
+    }
+    let Some(evidence) =
+        successful_executor_result_for_pull_request(&comments, pull_request.number)
+    else {
+        return Ok(ReconcileOutcome {
+            reconciled: false,
+            pr: Some(pull_request.number.to_string()),
+            reason: "missing_exact_executor_result".to_string(),
+        });
+    };
+    let required_checks = list_required_checks(repo, pull_request.number)?;
+    let lease_is_live =
+        server_lease_is_fresh(&selected.server_updated_at, selected.record.ttl_seconds);
+    match evaluate_merge_ready_claim_recovery(
+        &selected.record,
+        &evidence,
+        pull_request,
+        &required_checks,
+        lease_is_live,
+    ) {
+        ClaimRecoveryDecision::Recover { .. } => {}
+        ClaimRecoveryDecision::Blocked(reason) => {
+            return Ok(ReconcileOutcome {
+                reconciled: false,
+                pr: Some(pull_request.number.to_string()),
+                reason: reason.as_str().to_string(),
+            });
+        }
+    }
     let mut record = selected.record;
-    record.worker_id = worker_id.map_or(record.worker_id, ToOwned::to_owned);
     record.state = "claimed".to_string();
     record.step = "post_pr_handoff_failed".to_string();
     record.pr = pull_request.number.to_string();
@@ -1808,6 +1844,36 @@ fn list_open_pull_requests(
         CommandFailure::diagnostic(format!(
             "could not parse GitHub open pull requests: {error}"
         ))
+    })
+}
+
+fn list_required_checks(
+    repo: &str,
+    pull_request: u64,
+) -> Result<Vec<autospec_core::claim::RequiredCheck>, CommandFailure> {
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "checks",
+            &pull_request.to_string(),
+            "--repo",
+            repo,
+            "--required",
+            "--json",
+            "name,state",
+        ])
+        .output()
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("could not run gh pr checks: {error}"))
+        })?;
+    if output.stdout.is_empty() {
+        return Err(CommandFailure::diagnostic(format!(
+            "gh pr checks returned no required-check evidence: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    parse_required_checks_json(&String::from_utf8_lossy(&output.stdout)).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not parse GitHub required checks: {error}"))
     })
 }
 
