@@ -4,7 +4,6 @@ use serde::Serialize;
 
 use super::{
     ComposeExport, ComposePlan, EnvironmentIdentity, IsolationDiagnostic, RuntimeEnvError,
-    RuntimeManifest,
 };
 
 mod edit;
@@ -84,7 +83,7 @@ impl ComposeNormalizer {
         })?;
         let manifest = manifest::load_or_default(&repo)?;
         let identity = EnvironmentIdentity::resolve(&repo, "local", None)?;
-        let resources = RuntimeManifest::resource_plan_for_repo(&repo, &identity)?;
+        let resources = super::resource_plan::for_repo_allow_empty(&repo, &identity)?;
         let compose = resources.compose.ok_or_else(|| {
             RuntimeEnvError::new("NORMALIZE_COMPOSE_NOT_FOUND: no Compose file was detected")
         })?;

@@ -12,12 +12,37 @@ pub(super) fn for_repo(
     for_repo_with_overrides(repo, identity, None, None, false).map(|(plan, _)| plan)
 }
 
+pub(super) fn for_repo_allow_empty(
+    repo: &Path,
+    identity: &EnvironmentIdentity,
+) -> Result<ResourcePlan, RuntimeEnvError> {
+    build_for_repo_with_overrides(repo, identity, None, None, false, false).map(|(plan, _)| plan)
+}
+
 pub(super) fn for_repo_with_overrides(
     repo: &Path,
     identity: &EnvironmentIdentity,
     maven_override: Option<&str>,
     compose_override: Option<&str>,
     whole_environment_disabled: bool,
+) -> Result<(ResourcePlan, bool), RuntimeEnvError> {
+    build_for_repo_with_overrides(
+        repo,
+        identity,
+        maven_override,
+        compose_override,
+        whole_environment_disabled,
+        true,
+    )
+}
+
+fn build_for_repo_with_overrides(
+    repo: &Path,
+    identity: &EnvironmentIdentity,
+    maven_override: Option<&str>,
+    compose_override: Option<&str>,
+    whole_environment_disabled: bool,
+    require_runtime_action: bool,
 ) -> Result<(ResourcePlan, bool), RuntimeEnvError> {
     let manifest = read_optional_manifest(repo)?;
     let selected_mode = if manifest.modes.is_empty() {
@@ -33,7 +58,9 @@ pub(super) fn for_repo_with_overrides(
         whole_environment_disabled,
     )?;
     reject_dual_compose_authority(&manifest, selected_mode, plan.compose.as_ref())?;
-    require_managed_resource_or_command(selected_mode, &plan)?;
+    if require_runtime_action {
+        require_managed_resource_or_command(selected_mode, &plan)?;
+    }
     Ok((plan, bypassed))
 }
 

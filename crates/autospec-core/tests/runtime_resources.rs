@@ -601,6 +601,16 @@ impl Drop for TempRepo {
 }
 
 #[test]
+fn normalize_without_compose_reports_compose_not_found() {
+    let repo = TempRepo::with_files(&[]);
+
+    let error = ComposeNormalizer::plan(repo.path())
+        .expect_err("normalization requires a root Compose file or runtime manifest");
+
+    assert!(error.to_string().contains("NORMALIZE_COMPOSE_NOT_FOUND"));
+}
+
+#[test]
 fn generation_token_prevents_path_reuse_from_adopting_state() {
     let repo = TempRepo::with_files(&[]);
     let first = EnvironmentIdentity::resolve(repo.path(), "local", Some("gen-a")).unwrap();
