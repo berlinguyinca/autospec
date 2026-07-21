@@ -264,13 +264,26 @@ opening a full-page assistant view. The assistant must preserve that scope
 across pop-out and full-page routes so a navigation change cannot silently
 widen or replace the entity being diagnosed.
 
+Require a server-side session runner to admit the user's input together with
+captured context, plan registered tool calls, execute them, settle sanitized
+evidence, and only then call the provider, even for a small in-repo
+implementation. Store context-source metadata alongside every assistant turn,
+covering the page, entity, job, and sample scope used for that turn so the
+answer's diagnostic boundary remains explainable.
+
 Require a backend tool registry that defines named tools, input and output
 schemas, authorization rules, a bounded per-turn call cap, and how sanitized
-tool evidence is injected into the final provider prompt. Separate
+tool evidence is injected into the final provider prompt. Each typed tool
+registry entry must declare a name, schema, execution mode, permission scope,
+and bounded output size. Separate
 deterministic keyword-triggered tool plans from a bounded model-planned
 diagnostic step; the model-planned step may run only when deterministic routing
-finds no plan. When a question maps to a registered tool, the final assistant
-answer must be grounded in tool evidence, not retrieval citations alone.
+finds no plan. Reject stale or unknown model-proposed tool calls before
+execution, and enforce the bounded tool-call cap on every turn. Keep provider
+secrets and all tool execution server-side; the frontend must never receive
+provider keys or direct diagnostic tool access. When a question maps to a
+registered tool, the final assistant answer must be grounded in tool evidence,
+not retrieval citations alone.
 
 Require the spec's Testing section to cover nested-context extraction,
 deterministic intent-keyword coverage, scoped-entity diagnostics, and provider
