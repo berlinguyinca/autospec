@@ -2,12 +2,13 @@
 # tests/mutation-integration.bats — integration tests for M5 (negative-path + density floor).
 # Issue #442: feat(mutation-m5): negative-path heuristic + assertion-density floor + integration tests
 #
-# Test plan (8 cases):
+# Test plan (9 cases):
 #   1-3: negative-path pair detection (paired, unpaired-positive, unpaired-negative-only)
 #   4-5: assertion-density floor (empty test block, asserts-present)
 #   6:   integration: synthetic bash target vacuous test → M1 catches it
 #   7:   integration: synthetic node target surviving mutant → M3/lint warns
 #   8:   integration: synthetic python target combined → density floor flags zero-assert
+#   9:   pre-commit: generated hash fixture with no test block → clean exit
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
@@ -150,4 +151,22 @@ EOF
     run bash "$LINT_SCRIPT" --diff-file "$WORK/py.diff" --assertion-density
     # Zero-assertion bats test block in python fixture should trigger ASSERTION_DENSITY
     printf '%s\n' "$output" | grep -qE "ASSERTION_DENSITY|VACUOUS_NO_ASSERT"
+}
+
+# ─────────────────────────────────────────────────────────────────
+# 9. Pre-commit: generated test fixture with no test block → clean exit
+# ──────────────────────────────────────────────────────────────────
+@test "lint --pre-commit: generated hash fixture without test block exits cleanly" {
+    printf '%s\n' \
+        'diff --git a/tests/fixtures/skill-goldens/example.sha256 b/tests/fixtures/skill-goldens/example.sha256' \
+        'new file mode 100644' \
+        '--- /dev/null' \
+        '+++ b/tests/fixtures/skill-goldens/example.sha256' \
+        '@@ -0,0 +1 @@' \
+        '+0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef' \
+        > "$WORK/hash-fixture.diff"
+
+    run bash "$LINT_SCRIPT" --diff-file "$WORK/hash-fixture.diff" --pre-commit
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }

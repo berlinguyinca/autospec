@@ -1033,7 +1033,9 @@ _density_scan_file() {
 $(get_added_lines_with_lineno "$diff_file")
 EOF
     # Flush last open block
-    [ "$in_block" -eq 1 ] && _density_flush "$diff_file" "$block_start" "$has_assert"
+    if [ "$in_block" -eq 1 ]; then
+        _density_flush "$diff_file" "$block_start" "$has_assert"
+    fi
 }
 
 detect_assertion_density() {
