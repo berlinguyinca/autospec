@@ -86,4 +86,19 @@ setup() {
 
     run grep -F "When a question maps to a registered tool, the final assistant answer must be grounded in tool evidence, not retrieval citations alone." <<<"$DIAGNOSTIC_ASSISTANT"
     [ "$status" -eq 0 ]
+
+    run grep -F "admit the user's input together with captured context, plan registered tool calls, execute them, settle sanitized evidence, and only then call the provider" <<<"$DIAGNOSTIC_ASSISTANT"
+    [ "$status" -eq 0 ]
+
+    run grep -F "Each typed tool registry entry must declare a name, schema, execution mode, permission scope, and bounded output size." <<<"$DIAGNOSTIC_ASSISTANT"
+    [ "$status" -eq 0 ]
+
+    run grep -F "Reject stale or unknown model-proposed tool calls before execution, and enforce the bounded tool-call cap on every turn." <<<"$DIAGNOSTIC_ASSISTANT"
+    [ "$status" -eq 0 ]
+
+    run grep -F "Keep provider secrets and all tool execution server-side; the frontend must never receive provider keys or direct diagnostic tool access." <<<"$DIAGNOSTIC_ASSISTANT"
+    [ "$status" -eq 0 ]
+
+    run grep -F "Store context-source metadata alongside every assistant turn, covering the page, entity, job, and sample scope used for that turn" <<<"$DIAGNOSTIC_ASSISTANT"
+    [ "$status" -eq 0 ]
 }
