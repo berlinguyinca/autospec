@@ -46,7 +46,9 @@ skill's README rather than silently approximating its output.
 
 The first slice supports React Router route elements with literal `path` attributes.
 It discovers nested routes, records lazy route evidence, merges duplicate discoveries
-under one canonical path, and excludes catch-all routes with a reason. It also reads:
+under one canonical path, and excludes catch-all routes with a reason. JavaScript and
+TypeScript comments are ignored without modifying quoted strings, and common generated
+trees (`dist`, `build`, `.next`, `out`, `coverage`, `target`) are not scanned. It also reads:
 
 - `to` and `href` literals from files whose names contain `nav` or `menu`;
 - `<loc>` entries from sitemap XML files;
@@ -54,7 +56,8 @@ under one canonical path, and excludes catch-all routes with a reason. It also r
 
 The helper writes `route-inventory.json` and `route-inventory.md` to the configured
 output directory. Registry-only and route-only paths are mismatches with reasons; they
-are never silently dropped.
+are never silently dropped. Query strings and fragments are removed before matching,
+and duplicate mismatch evidence is combined into one record with all source locations.
 
 The command fails closed before writing artifacts when it finds a cyclic route
 collection, a duplicate final record, or a missing classification. Exit `2` means bad

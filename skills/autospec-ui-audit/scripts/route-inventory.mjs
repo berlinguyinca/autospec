@@ -5,7 +5,9 @@ import path from "node:path";
 import process from "node:process";
 
 const SOURCE_EXTENSIONS = new Set([".js", ".jsx", ".ts", ".tsx"]);
-const SKIP_DIRECTORIES = new Set([".git", "node_modules"]);
+const SKIP_DIRECTORIES = new Set([
+  ".git", ".next", ".turbo", "build", "coverage", "dist", "node_modules", "out", "target",
+]);
 
 class RouteInventoryError extends Error {
   constructor(code, message, exitCode = 1) {
@@ -58,6 +60,45 @@ function lineNumber(source, offset) {
   return source.slice(0, offset).split("\n").length;
 }
 
+function stripComments(source) {
+  let result = "";
+  let quote = "";
+  let lineComment = false;
+  let blockComment = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+    const previous = source[index - 1];
+    if (lineComment) {
+      if (char === "\n") {
+        lineComment = false;
+        result += char;
+      } else result += " ";
+    } else if (blockComment) {
+      if (char === "*" && next === "/") {
+        result += "  ";
+        index += 1;
+        blockComment = false;
+      } else result += char === "\n" ? "\n" : " ";
+    } else if (quote) {
+      result += char;
+      if (char === quote && previous !== "\\") quote = "";
+    } else if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      result += char;
+    } else if (char === "/" && next === "/") {
+      result += "  ";
+      index += 1;
+      lineComment = true;
+    } else if (char === "/" && next === "*") {
+      result += "  ";
+      index += 1;
+      blockComment = true;
+    } else result += char;
+  }
+  return result;
+}
+
 function routeTags(source) {
   const tags = [];
   const startPattern = /<\/?Route\b/g;
@@ -86,6 +127,11 @@ function normalizeRoute(value) {
   return `/${segments.join("/")}` || "/";
 }
 
+function normalizeRegistryPath(value) {
+  const url = new URL(value, "https://autospec.invalid");
+  return normalizeRoute(url.pathname);
+}
+
 function joinRoute(parent, child) {
   if (child.startsWith("/")) return normalizeRoute(child);
   if (parent === "/") return normalizeRoute(`/${child}`);
@@ -95,7 +141,7 @@ function joinRoute(parent, child) {
 function discoverReactRouter(files, repo) {
   const discoveries = [];
   for (const file of files.filter((candidate) => SOURCE_EXTENSIONS.has(path.extname(candidate)))) {
-    const source = fs.readFileSync(file, "utf8");
+    const source = stripComments(fs.readFileSync(file, "utf8"));
     const parents = [];
     for (const tag of routeTags(source)) {
       if (tag.raw.startsWith("</")) {
@@ -121,7 +167,7 @@ function discoverReactRouter(files, repo) {
 function assertNoRouteCollectionCycles(files, repo) {
   const graph = new Map();
   for (const file of files.filter((candidate) => SOURCE_EXTENSIONS.has(path.extname(candidate)))) {
-    const source = fs.readFileSync(file, "utf8");
+    const source = stripComments(fs.readFileSync(file, "utf8"));
     const declarations = [...source.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\[/g)];
     for (const declaration of declarations) {
       const name = declaration[1];
@@ -133,6 +179,7 @@ function assertNoRouteCollectionCycles(files, repo) {
         else if (source[end] === "]") depth -= 1;
       }
       const body = source.slice(start, end - 1);
+      if (!/\bpath\s*:/.test(body)) continue;
       const children = [...body.matchAll(/\bchildren\s*:\s*([A-Za-z_$][\w$]*)/g)].map(
         (match) => match[1],
       );
@@ -144,7 +191,6 @@ function assertNoRouteCollectionCycles(files, repo) {
       });
     }
   }
-  const byName = new Map([...graph.values()].map((node) => [node.name, node]));
   const visiting = new Set();
   const visited = new Set();
   function visit(node, trail) {
@@ -155,7 +201,7 @@ function assertNoRouteCollectionCycles(files, repo) {
     if (visited.has(node)) return;
     visiting.add(node);
     for (const childName of node.children) {
-      const child = byName.get(childName);
+      const child = graph.get(`${node.file}:${childName}`);
       if (child) visit(child, [...trail, node.display]);
     }
     visiting.delete(node);
@@ -169,21 +215,33 @@ function registryEntries(files, repo) {
   for (const file of files) {
     const relative = path.relative(repo, file);
     const lower = relative.toLowerCase();
-    const source = fs.readFileSync(file, "utf8");
+    const rawSource = fs.readFileSync(file, "utf8");
+    const source = SOURCE_EXTENSIONS.has(path.extname(file)) ? stripComments(rawSource) : rawSource;
     if (/(^|\/)[^/]*(nav|menu)[^/]*\.(jsx?|tsx?)$/.test(lower)) {
       for (const match of source.matchAll(/\b(?:to|href)\s*=\s*(["'])(\/[^"']*)\1/g)) {
-        entries.push({ path: normalizeRoute(match[2]), registry: "navigation", source: relative });
+        entries.push({
+          path: normalizeRegistryPath(match[2]),
+          registry: "navigation",
+          source: `${relative}:${lineNumber(source, match.index)}`,
+        });
       }
     }
     if (/sitemap[^/]*\.xml$/.test(lower)) {
       for (const match of source.matchAll(/<loc>\s*([^<]+)\s*<\/loc>/g)) {
-        const url = new URL(match[1]);
-        entries.push({ path: normalizeRoute(url.pathname), registry: "sitemap", source: relative });
+        entries.push({
+          path: normalizeRegistryPath(match[1]),
+          registry: "sitemap",
+          source: `${relative}:${lineNumber(source, match.index)}`,
+        });
       }
     }
     if (/(^|\/)(e2e|tests?)\//.test(lower) || /\.(spec|test)\.[jt]sx?$/.test(lower)) {
       for (const match of source.matchAll(/\b(?:goto|visit)\(\s*(["'])(\/[^"']*)\1/g)) {
-        entries.push({ path: normalizeRoute(match[2]), registry: "e2e", source: relative });
+        entries.push({
+          path: normalizeRegistryPath(match[2]),
+          registry: "e2e",
+          source: `${relative}:${lineNumber(source, match.index)}`,
+        });
       }
     }
   }
@@ -203,6 +261,20 @@ function routeMatches(routePath, concretePath) {
   return new RegExp(`^${pattern}/?$`).test(concretePath);
 }
 
+function recordMismatch(records, mismatch) {
+  const key = `${mismatch.kind}\u0000${mismatch.path}\u0000${mismatch.reason}`;
+  const record = records.get(key) ?? {
+    path: mismatch.path,
+    kind: mismatch.kind,
+    reason: mismatch.reason,
+    sources: [],
+  };
+  for (const source of mismatch.sources) {
+    if (!record.sources.includes(source)) record.sources.push(source);
+  }
+  records.set(key, record);
+}
+
 function reconcile(discoveries, registries) {
   const routesByPath = new Map();
   for (const discovery of discoveries) {
@@ -218,17 +290,17 @@ function reconcile(discoveries, registries) {
     if (!record.sources.includes(discovery.source)) record.sources.push(discovery.source);
     routesByPath.set(discovery.path, record);
   }
-  const mismatches = [];
+  const mismatchesByKey = new Map();
   for (const entry of registries) {
     const matches = [...routesByPath.values()].filter(
       (route) => route.status === "runtime-eligible" && routeMatches(route.path, entry.path),
     );
     if (matches.length === 0) {
-      mismatches.push({
+      recordMismatch(mismatchesByKey, {
         path: entry.path,
         kind: "registry-only",
         reason: `${entry.registry} entry has no discovered React Router route`,
-        source: entry.source,
+        sources: [entry.source],
       });
     } else {
       for (const route of matches) {
@@ -239,11 +311,11 @@ function reconcile(discoveries, registries) {
   }
   for (const route of routesByPath.values()) {
     if (route.status === "runtime-eligible" && route.registries.length === 0) {
-      mismatches.push({
+      recordMismatch(mismatchesByKey, {
         path: route.path,
         kind: "route-only",
         reason: "route is absent from navbar/menu, sitemap, and E2E registries",
-        source: route.sources[0],
+        sources: route.sources,
       });
     }
   }
@@ -259,7 +331,11 @@ function reconcile(discoveries, registries) {
     route.sources.sort();
     route.registries.sort();
   }
-  mismatches.sort((left, right) => left.path.localeCompare(right.path));
+  const mismatches = [...mismatchesByKey.values()].sort((left, right) => {
+    const pathOrder = left.path.localeCompare(right.path);
+    return pathOrder || left.kind.localeCompare(right.kind);
+  });
+  for (const mismatch of mismatches) mismatch.sources.sort();
   return { routes, mismatches };
 }
 

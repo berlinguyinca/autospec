@@ -47,5 +47,17 @@ if [ "$HARNESS" = codex ] || [ "$HARNESS" = all ]; then
     remove_file "$CODEX_ROOT/prompts/$SKILL_NAME.md"
     remove_file "$CODEX_ROOT/skills/$SKILL_NAME/SKILL.md"
 fi
-remove_file "$SCRIPTS_ROOT/autospec-ui-route-inventory.mjs"
+
+consumer_remains() {
+    [ -f "$CLAUDE_ROOT/skills/$SKILL_NAME/SKILL.md" ] ||
+        [ -f "$OPENCODE_ROOT/agent/$SKILL_NAME.md" ] ||
+        [ -f "$CODEX_ROOT/prompts/$SKILL_NAME.md" ] ||
+        [ -f "$CODEX_ROOT/skills/$SKILL_NAME/SKILL.md" ]
+}
+
+if [ "$HARNESS" = all ] || ! consumer_remains; then
+    remove_file "$SCRIPTS_ROOT/autospec-ui-route-inventory.mjs"
+else
+    printf 'retained shared helper for remaining harness consumers\n'
+fi
 printf 'uninstalled %s for %s\n' "$SKILL_NAME" "$HARNESS"

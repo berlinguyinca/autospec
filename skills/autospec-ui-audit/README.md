@@ -20,3 +20,7 @@ node "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-ui-route-invento
 Exit codes: `0` is a reconciled inventory, `1` is an invariant/discovery failure,
 and `2` is invalid input. Angular, Next.js, browser evidence, scoring, and remediation
 are intentionally deferred.
+
+Generated build trees and commented JSX are ignored. Registry query strings and
+fragments reconcile by pathname. Uninstalling one harness retains the shared helper
+until the last installed harness consumer is removed; `--harness all` removes it.
