@@ -6,6 +6,7 @@
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     SKILL="$REPO_ROOT/skills/autospec-define/SKILL.md"
+    COHESION="$(sed -n '/^### Design cohesion$/,/^If this is a fresh repo/p' "$SKILL" | tr '\n' ' ')"
 }
 
 @test "autospec-define Phase 2 includes website app Design cohesion guidance" {
@@ -29,6 +30,9 @@ setup() {
     run grep -F "**Artifact cleanup.**" "$SKILL"
     [ "$status" -eq 0 ]
 
+    run grep -F "remove inline styles, duplicate class attributes, and legacy table or card chrome" <<<"$COHESION"
+    [ "$status" -eq 0 ]
+
     run grep -F "**Positive design-system adoption.**" "$SKILL"
     [ "$status" -eq 0 ]
 
@@ -38,7 +42,19 @@ setup() {
     run grep -F "controls, date ranges, tables, empty states, and notices" "$SKILL"
     [ "$status" -eq 0 ]
 
+    run grep -F "use them instead of raw page-local layouts" <<<"$COHESION"
+    [ "$status" -eq 0 ]
+
     run grep -F "an executable positive guard that fails when a raw toggle, date, or table" "$SKILL"
+    [ "$status" -eq 0 ]
+
+    run grep -F "control does not use the project's design-system classes" <<<"$COHESION"
+    [ "$status" -eq 0 ]
+
+    run grep -F 'Cross-reference the `autospec-qa` revalidation plan' <<<"$COHESION"
+    [ "$status" -eq 0 ]
+
+    run grep -F "**UI and UX Behavior** item" <<<"$COHESION"
     [ "$status" -eq 0 ]
 
     run grep -F "artifact absence and canonical primitive presence" "$SKILL"
