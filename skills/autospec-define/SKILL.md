@@ -287,6 +287,19 @@ primitives the spec expects agents to reuse — forms, filter bars, segmented
 controls, tables, stat cards, empty states, charts, and navbars — and state
 where each primitive applies.
 
+**Artifact cleanup.** Require the spec to remove inline styles, duplicate class
+attributes, and legacy table or card chrome that bypasses the shared design
+system.
+
+**Positive design-system adoption.** Require the spec to name the project's
+canonical primitives and classes for page shells, filter panels, segmented
+controls, date ranges, tables, empty states, and notices, then require agents to
+use them instead of raw page-local layouts. The Acceptance Criteria MUST include
+an executable positive guard that fails when a raw toggle, date, or table
+control does not use the project's design-system classes. Cross-reference the
+`autospec-qa` revalidation plan's **UI and UX Behavior** item and require it to
+check both artifact absence and canonical primitive presence.
+
 The spec MUST flag full-document horizontal overflow as a defect unless the
 overflow is inside an intentional bounded scroller such as a table or chart
 viewport. Empty states must be visually lighter than data-rich panels so missing
