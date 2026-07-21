@@ -24,6 +24,7 @@ const EXCLUSION_POLICY_KEYS: [&str; 3] =
 const POLLUTION_FINDING_KEYS: [&str; 3] = ["finding", "path", "excluded_component"];
 const DOMAIN_KEYS: [&str; 3] = ["name", "score", "evidence"];
 const FILE_LINE_KEYS: [&str; 3] = ["file", "line", "match"];
+const FIELD_SCALAR_LIMIT: usize = 200;
 
 pub(super) fn verify_tier2(
     root: &Path,
@@ -187,19 +188,45 @@ fn validate_collector(
         || !string(policy, "policy_digest").is_some_and(is_digest)
         || number(policy, "excluded_path_count") != u64::try_from(findings.len()).ok()
         || findings.iter().any(|finding| {
-            let JsonValue::Object(finding) = finding else {
-                return true;
-            };
-            !exact_keys(finding, &POLLUTION_FINDING_KEYS)
-                || string(finding, "finding") != Some("prohibited_vendor_path")
-                || !string(finding, "path").is_some_and(|value| !value.is_empty())
-                || !string(finding, "excluded_component").is_some_and(|value| !value.is_empty())
+            !matches!(finding, JsonValue::Object(finding) if valid_pollution_finding(finding))
         })
         || !collector_nested_keys_are_canonical(object, contents, findings.len())
     {
         return invalid("Tier 2 collector exclusion policy is invalid");
     }
     Ok(())
+}
+
+fn valid_pollution_finding(finding: &BTreeMap<String, JsonValue>) -> bool {
+    let Some(path) = string(finding, "path") else {
+        return false;
+    };
+    let Some(excluded_component) = string(finding, "excluded_component") else {
+        return false;
+    };
+    exact_keys(finding, &POLLUTION_FINDING_KEYS)
+        && string(finding, "finding") == Some("prohibited_vendor_path")
+        && valid_repository_relative(path)
+        && valid_exclusion_component(excluded_component)
+        && path
+            .split('/')
+            .any(|component| component == excluded_component)
+}
+
+fn valid_repository_relative(path: &str) -> bool {
+    !path.starts_with('/')
+        && !path.contains('\\')
+        && path
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+}
+
+fn valid_exclusion_component(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.chars().count() <= FIELD_SCALAR_LIMIT
+        && value.trim() == value
+        && !matches!(value, "." | "..")
+        && !value.contains(['/', '\\'])
 }
 
 fn collector_nested_keys_are_canonical(

@@ -71,6 +71,49 @@ fn tier2_replay_rejects_forged_pollution_findings() {
 }
 
 #[test]
+fn tier2_replay_rejects_semantically_forged_pollution_findings() {
+    for (path, excluded_component) in [("../outside", ".."), ("src/app.rs", "node_modules")] {
+        let root = TempRoot::new();
+        seed_tier_two_cursor(&root);
+        assert_eq!(
+            record_tier2(
+                root.path(),
+                REPO,
+                Tier2Scan::Complete(observation(Vec::new(), Vec::new()))
+            )
+            .expect("typed exclusion policy receipt"),
+            Tier2Progress::Advanced
+        );
+        let receipt_store = store(&root);
+        let prior = receipt_store
+            .load_receipt(1, NoWorkTier::Tier2)
+            .expect("receipt")
+            .expect("sealed receipt");
+        let collector_path = root
+            .path()
+            .join("waterfall")
+            .join(&prior.evidence()[0].reference);
+        let forged = fs::read_to_string(collector_path)
+            .expect("collector evidence")
+            .replacen(
+                "\"excluded_path_count\":0,\"pollution_findings\":[]",
+                &format!(
+                    "\"excluded_path_count\":1,\"pollution_findings\":[{{\"finding\":\"prohibited_vendor_path\",\"path\":\"{path}\",\"excluded_component\":\"{excluded_component}\"}}]"
+                ),
+                1,
+            );
+        let forged_receipt = replace_evidence_chain(&root, &receipt_store, &prior, forged);
+
+        assert!(
+            receipt_store
+                .verify_tier2_evidence(1, &forged_receipt)
+                .is_err(),
+            "semantic forgery {path:?}/{excluded_component:?} must fail"
+        );
+    }
+}
+
+#[test]
 fn tier2_replays_pre_cursor_receipts_and_ignores_unreferenced_disk_files() {
     let root = TempRoot::new();
     seed_tier_two_cursor(&root);
@@ -427,6 +470,39 @@ fn replace_evidence(
         .expect("rehashed evidence");
     let replacement = receipt_with(prior.status().clone(), prior.funnel().clone(), evidence);
     fs::write(root.path().join("waterfall").join(reference), contents).expect("replace evidence");
+    fs::write(
+        store.receipt_path(prior).expect("receipt path"),
+        format!("{}\n", replacement.to_json()),
+    )
+    .expect("replace receipt");
+    replacement
+}
+
+fn replace_evidence_chain(
+    root: &TempRoot,
+    store: &super::waterfall::WaterfallStore,
+    prior: &TierReceipt,
+    collector: String,
+) -> TierReceipt {
+    let mut evidence = prior.evidence().to_vec();
+    let mut contents = collector;
+    for index in 0..evidence.len() {
+        let reference = evidence[index].reference.clone();
+        if index > 0 {
+            contents = fs::read_to_string(root.path().join("waterfall").join(&reference))
+                .expect("downstream evidence")
+                .replacen(
+                    &prior.evidence()[index - 1].digest,
+                    &evidence[index - 1].digest,
+                    1,
+                );
+        }
+        evidence[index] = SealedEvidence::new(&reference, sha256_hex(contents.as_bytes()))
+            .expect("rehashed evidence");
+        fs::write(root.path().join("waterfall").join(reference), &contents)
+            .expect("replace chained evidence");
+    }
+    let replacement = receipt_with(prior.status().clone(), prior.funnel().clone(), evidence);
     fs::write(
         store.receipt_path(prior).expect("receipt path"),
         format!("{}\n", replacement.to_json()),
