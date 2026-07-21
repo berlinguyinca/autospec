@@ -60,7 +60,19 @@ function lineNumber(source, offset) {
   return source.slice(0, offset).split("\n").length;
 }
 
-function stripComments(source) {
+function isEscaped(source, offset) {
+  let backslashes = 0;
+  for (let index = offset - 1; index >= 0 && source[index] === "\\"; index -= 1) backslashes += 1;
+  return backslashes % 2 === 1;
+}
+
+function startsQuote(source, offset) {
+  const char = source[offset];
+  if (char !== '"' && char !== "'" && char !== "`") return false;
+  return !(char === "'" && /[A-Za-z0-9]/.test(source[offset - 1] ?? "") && /[A-Za-z0-9]/.test(source[offset + 1] ?? ""));
+}
+
+function lexicalMask(source, maskStrings) {
   let result = "";
   let quote = "";
   let lineComment = false;
@@ -68,7 +80,6 @@ function stripComments(source) {
   for (let index = 0; index < source.length; index += 1) {
     const char = source[index];
     const next = source[index + 1];
-    const previous = source[index - 1];
     if (lineComment) {
       if (char === "\n") {
         lineComment = false;
@@ -81,11 +92,11 @@ function stripComments(source) {
         blockComment = false;
       } else result += char === "\n" ? "\n" : " ";
     } else if (quote) {
-      result += char;
-      if (char === quote && previous !== "\\") quote = "";
-    } else if (char === '"' || char === "'" || char === "`") {
+      result += maskStrings && char !== "\n" ? " " : char;
+      if (char === quote && !isEscaped(source, index)) quote = "";
+    } else if (startsQuote(source, index)) {
       quote = char;
-      result += char;
+      result += maskStrings ? " " : char;
     } else if (char === "/" && next === "/") {
       result += "  ";
       index += 1;
@@ -101,17 +112,17 @@ function stripComments(source) {
 
 function routeTags(source) {
   const tags = [];
+  const searchable = lexicalMask(source, true);
   const startPattern = /<\/?Route\b/g;
-  for (const match of source.matchAll(startPattern)) {
+  for (const match of searchable.matchAll(startPattern)) {
     let quote = "";
     let braces = 0;
     let cursor = match.index;
     for (; cursor < source.length; cursor += 1) {
       const char = source[cursor];
-      const previous = source[cursor - 1];
       if (quote) {
-        if (char === quote && previous !== "\\") quote = "";
-      } else if (char === '"' || char === "'") quote = char;
+        if (char === quote && !isEscaped(source, cursor)) quote = "";
+      } else if (startsQuote(source, cursor)) quote = char;
       else if (char === "{") braces += 1;
       else if (char === "}") braces -= 1;
       else if (char === ">" && braces === 0) break;
@@ -141,7 +152,7 @@ function joinRoute(parent, child) {
 function discoverReactRouter(files, repo) {
   const discoveries = [];
   for (const file of files.filter((candidate) => SOURCE_EXTENSIONS.has(path.extname(candidate)))) {
-    const source = stripComments(fs.readFileSync(file, "utf8"));
+    const source = fs.readFileSync(file, "utf8");
     const parents = [];
     for (const tag of routeTags(source)) {
       if (tag.raw.startsWith("</")) {
@@ -165,9 +176,12 @@ function discoverReactRouter(files, repo) {
 }
 
 function assertNoRouteCollectionCycles(files, repo) {
-  const graph = new Map();
   for (const file of files.filter((candidate) => SOURCE_EXTENSIONS.has(path.extname(candidate)))) {
-    const source = stripComments(fs.readFileSync(file, "utf8"));
+    const source = lexicalMask(fs.readFileSync(file, "utf8"), true);
+    const roots = [...source.matchAll(/\b(?:useRoutes|createBrowserRouter|createHashRouter)\s*\(\s*([A-Za-z_$][\w$]*)/g)]
+      .map((match) => match[1]);
+    if (roots.length === 0) continue;
+    const graph = new Map();
     const declarations = [...source.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*\[/g)];
     for (const declaration of declarations) {
       const name = declaration[1];
@@ -179,35 +193,24 @@ function assertNoRouteCollectionCycles(files, repo) {
         else if (source[end] === "]") depth -= 1;
       }
       const body = source.slice(start, end - 1);
-      if (!/\bpath\s*:/.test(body)) continue;
       const children = [...body.matchAll(/\bchildren\s*:\s*([A-Za-z_$][\w$]*)/g)].map(
         (match) => match[1],
       );
-      graph.set(`${file}:${name}`, {
-        file,
-        name,
-        children,
-        display: `${path.relative(repo, file)}:${name}`,
-      });
+      graph.set(name, { name, children, display: `${path.relative(repo, file)}:${name}` });
     }
+    const visiting = new Set();
+    const visited = new Set();
+    function visit(name, trail) {
+      const node = graph.get(name);
+      if (!node || visited.has(name)) return;
+      if (visiting.has(name)) fail("ROUTE_INVENTORY_CYCLE", [...trail, node.display].join(" -> "));
+      visiting.add(name);
+      for (const childName of node.children) visit(childName, [...trail, node.display]);
+      visiting.delete(name);
+      visited.add(name);
+    }
+    for (const root of roots) visit(root, []);
   }
-  const visiting = new Set();
-  const visited = new Set();
-  function visit(node, trail) {
-    if (visiting.has(node)) {
-      const cycle = [...trail, node.display].join(" -> ");
-      fail("ROUTE_INVENTORY_CYCLE", cycle);
-    }
-    if (visited.has(node)) return;
-    visiting.add(node);
-    for (const childName of node.children) {
-      const child = graph.get(`${node.file}:${childName}`);
-      if (child) visit(child, [...trail, node.display]);
-    }
-    visiting.delete(node);
-    visited.add(node);
-  }
-  for (const node of graph.values()) visit(node, []);
 }
 
 function registryEntries(files, repo) {
@@ -216,7 +219,7 @@ function registryEntries(files, repo) {
     const relative = path.relative(repo, file);
     const lower = relative.toLowerCase();
     const rawSource = fs.readFileSync(file, "utf8");
-    const source = SOURCE_EXTENSIONS.has(path.extname(file)) ? stripComments(rawSource) : rawSource;
+    const source = SOURCE_EXTENSIONS.has(path.extname(file)) ? lexicalMask(rawSource, false) : rawSource;
     if (/(^|\/)[^/]*(nav|menu)[^/]*\.(jsx?|tsx?)$/.test(lower)) {
       for (const match of source.matchAll(/\b(?:to|href)\s*=\s*(["'])(\/[^"']*)\1/g)) {
         entries.push({

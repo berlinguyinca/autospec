@@ -18,12 +18,18 @@ setup() {
 const fs = require("node:fs");
 const inventory = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
 if (inventory.framework !== "react-router") throw new Error("wrong adapter");
-if (inventory.routes.length !== 6) throw new Error(`expected 6 routes, got ${inventory.routes.length}`);
+if (inventory.routes.length !== 7) throw new Error(`expected 7 routes, got ${inventory.routes.length}`);
 const paths = inventory.routes.map((route) => route.path);
 if (new Set(paths).size !== paths.length) throw new Error("final routes are not unique");
 if (paths.includes("/retired")) throw new Error("commented JSX was parsed as a route");
 if (paths.includes("/deleted-but-built")) throw new Error("generated dist route was parsed");
 if (!paths.includes("/strings")) throw new Error("comment markers inside strings corrupted JSX");
+for (const path of ["/single-string", "/double-string", "/template-string", "/retired-after-even-backslashes"]) {
+  if (paths.includes(path)) throw new Error(`lexical noise was parsed as a route: ${path}`);
+}
+if (!paths.includes("/after-lexical-noise")) {
+  throw new Error("contraction or even-backslash quote handling hid later JSX");
+}
 const project = inventory.routes.find((route) => route.path === "/projects/:id");
 if (!project || project.status !== "runtime-eligible" || project.sources.length !== 2) {
   throw new Error("duplicate nested project route was not reconciled exactly once");

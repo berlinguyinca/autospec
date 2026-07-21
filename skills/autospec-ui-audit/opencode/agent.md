@@ -46,9 +46,10 @@ skill's README rather than silently approximating its output.
 
 The first slice supports React Router route elements with literal `path` attributes.
 It discovers nested routes, records lazy route evidence, merges duplicate discoveries
-under one canonical path, and excludes catch-all routes with a reason. JavaScript and
-TypeScript comments are ignored without modifying quoted strings, and common generated
-trees (`dist`, `build`, `.next`, `out`, `coverage`, `target`) are not scanned. It also reads:
+under one canonical path, and excludes catch-all routes with a reason. Route-shaped
+content inside JavaScript/TypeScript comments, strings, and templates is ignored without
+hiding later authored JSX, and common generated trees (`dist`, `build`, `.next`, `out`,
+`coverage`, `target`) are not scanned. It also reads:
 
 - `to` and `href` literals from files whose names contain `nav` or `menu`;
 - `<loc>` entries from sitemap XML files;
@@ -60,7 +61,9 @@ are never silently dropped. Query strings and fragments are removed before match
 and duplicate mismatch evidence is combined into one record with all source locations.
 
 The command fails closed before writing artifacts when it finds a cyclic route
-collection, a duplicate final record, or a missing classification. Exit `2` means bad
+collection proven to feed `useRoutes`, `createBrowserRouter`, or `createHashRouter`, a
+duplicate final record, or a missing classification. Unrelated object arrays are not
+treated as router graphs. Exit `2` means bad
 arguments or a missing repository; exit `1` means the inventory could not be proven;
 exit `0` means the artifacts satisfy the reconciliation invariants.
 

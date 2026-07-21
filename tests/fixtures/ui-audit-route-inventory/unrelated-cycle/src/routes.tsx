@@ -1,7 +1,7 @@
 import { Routes, Route } from "react-router-dom";
 
-const alpha = [{ name: "alpha", children: beta }];
-const beta = [{ name: "beta", children: alpha }];
+const alpha = [{ path: "alpha", children: beta }];
+const beta = [{ path: "beta", children: alpha }];
 
 export function AppRoutes() {
   return (
