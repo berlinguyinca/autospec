@@ -280,11 +280,12 @@ else
         printf 'ERROR: failed to fetch diff for PR %s\n' "$PR_NUMBER" >&2
         exit 1
     }
-    # Fetch issue body for skip-directive parsing
-    if [ -n "$ISSUE_NUMBER" ]; then
-        gh issue view "$ISSUE_NUMBER" --json body --jq '.body' > "$TMP_ISSUE" 2>/dev/null || true
-        parse_skip_directives "$TMP_ISSUE"
-    fi
+fi
+
+# Fetch issue body for skip-directive parsing in every diff source mode.
+if [ -n "$ISSUE_NUMBER" ]; then
+    gh issue view "$ISSUE_NUMBER" --json body --jq '.body' > "$TMP_ISSUE" 2>/dev/null || true
+    parse_skip_directives "$TMP_ISSUE"
 fi
 
 # ── per-RULE_ID emit cap tracking ─────────────────────────────────────────────
