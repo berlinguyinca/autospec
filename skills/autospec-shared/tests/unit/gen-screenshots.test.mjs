@@ -132,15 +132,25 @@ test('serveFixture: serves HTML file on localhost, returns URL', async () => {
 
 // ── Real Playwright screenshot test ──────────────────────────────────────────
 
-test('captureScreenshots: real Playwright + fixture → 2 PNGs per route (desktop + mobile)', async (t) => {
+test('captureScreenshots: real Playwright + fixture → 2 PNGs per route (desktop + mobile)', async () => {
   const playwrightPath = findPlaywrightPath();
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'autospec-ss-real-'));
   if (!playwrightPath) {
-    t.skip('Playwright not installed; skipping real capture test');
+    await assert.rejects(
+      () => captureScreenshots({
+        baseUrl: 'http://127.0.0.1:1',
+        routes: ['/'],
+        forbiddenPatterns: [],
+        outputDir: tmpDir,
+      }),
+      /Playwright not found/,
+      'missing Playwright must produce the documented installation error'
+    );
+    fs.rmSync(tmpDir, { recursive: true, force: true });
     return;
   }
 
   const fixturePath = path.join(FIXTURES_DIR, 'route-sample.html');
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'autospec-ss-real-'));
   let fixtureServer = null;
 
   try {
@@ -183,48 +193,23 @@ test('captureScreenshots: real Playwright + fixture → 2 PNGs per route (deskto
 
 // ── CLI transcript fallback test ──────────────────────────────────────────────
 
-test('captureTranscripts: when asciinema absent, falls back to script -c (or skips gracefully)', async (t) => {
-  const scriptAvailable = hasScript();
-  if (!scriptAvailable) {
-    t.skip('script not available; skipping transcript test');
-    return;
-  }
-
+test('captureTranscripts: records a transcript or reports unavailable tools', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'autospec-transcript-'));
   try {
     // Use a simple, fast command that always succeeds
     const cmds = ['echo autospec-transcript-test'];
     const result = captureTranscripts(cmds, tmpDir);
 
-    // If asciinema is absent, should use 'script'
-    if (!hasAsciinema()) {
-      assert.strictEqual(result.tool, 'script', 'must fall back to script when asciinema absent');
+    if (!hasAsciinema() && !hasScript()) {
+      assert.deepStrictEqual(result, { recorded: [], tool: 'none' });
+      return;
     }
 
-    // Either tool must have recorded something
-    if (result.tool !== 'none') {
-      assert.ok(result.recorded.length > 0 || result.recorded.length === 0,
-        'recorded may be empty if script fails on this platform but must not throw');
-    }
+    assert.ok(['asciinema', 'script'].includes(result.tool), 'must report the selected recorder');
+    assert.strictEqual(result.recorded.length, 1, 'one command must produce one transcript');
+    assert.ok(fs.existsSync(result.recorded[0]), 'recorded transcript must exist');
+    assert.ok(fs.statSync(result.recorded[0]).size > 0, 'recorded transcript must be non-empty');
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
-  }
-});
-
-test('captureTranscripts: asciinema absent → tool is "script" or "none"', () => {
-  // This test verifies the branching logic without actually running transcripts
-  const asc = hasAsciinema();
-  const scr = hasScript();
-
-  if (!asc && scr) {
-    // On this machine (asciinema absent, script present): tool should be 'script'
-    // We verify via hasAsciinema/hasScript contract
-    assert.ok(!asc, 'asciinema must be absent for this branch');
-    assert.ok(scr, 'script must be present as fallback');
-  } else if (!asc && !scr) {
-    assert.ok(!asc && !scr, 'neither tool: captureTranscripts will return tool=none');
-  } else {
-    // asciinema present — normal path
-    assert.ok(asc, 'asciinema is available on this machine');
   }
 });
