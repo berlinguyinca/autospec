@@ -14,6 +14,63 @@ use super::tier2_receipts_tests::{
 use super::waterfall::Tier2EvidenceArtifact;
 
 #[test]
+fn tier2_replay_accepts_typed_exclusion_policy_receipts() {
+    let root = TempRoot::new();
+    seed_tier_two_cursor(&root);
+
+    assert_eq!(
+        record_tier2(
+            root.path(),
+            REPO,
+            Tier2Scan::Complete(observation(Vec::new(), Vec::new()))
+        )
+        .expect("typed exclusion policy receipt"),
+        Tier2Progress::Advanced
+    );
+    assert!(store(&root).load_state().is_ok());
+}
+
+#[test]
+fn tier2_replay_rejects_forged_pollution_findings() {
+    let root = TempRoot::new();
+    seed_tier_two_cursor(&root);
+    assert_eq!(
+        record_tier2(
+            root.path(),
+            REPO,
+            Tier2Scan::Complete(observation(Vec::new(), Vec::new()))
+        )
+        .expect("typed exclusion policy receipt"),
+        Tier2Progress::Advanced
+    );
+    let receipt_store = store(&root);
+    let prior = receipt_store
+        .load_receipt(1, NoWorkTier::Tier2)
+        .expect("receipt")
+        .expect("sealed receipt");
+    let collector_path = root
+        .path()
+        .join("waterfall")
+        .join(&prior.evidence()[0].reference);
+    let forged = fs::read_to_string(&collector_path)
+        .expect("collector evidence")
+        .replacen(
+            "\"pollution_findings\":[]",
+            "\"pollution_findings\":[{\"finding\":\"prohibited_vendor_path\",\"path\":\"node_modules/pkg\",\"excluded_component\":\"node_modules\"}]",
+            1,
+        );
+    assert_ne!(
+        forged,
+        fs::read_to_string(collector_path).expect("original collector evidence")
+    );
+    let forged_receipt = replace_evidence(&root, &receipt_store, &prior, 0, forged);
+
+    assert!(receipt_store
+        .verify_tier2_evidence(1, &forged_receipt)
+        .is_err());
+}
+
+#[test]
 fn tier2_replays_pre_cursor_receipts_and_ignores_unreferenced_disk_files() {
     let root = TempRoot::new();
     seed_tier_two_cursor(&root);

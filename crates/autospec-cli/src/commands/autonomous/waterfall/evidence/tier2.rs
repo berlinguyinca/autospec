@@ -19,6 +19,11 @@ const FUNNEL_KEYS: [&str; 5] = [
     "roi_approved",
     "ranked",
 ];
+const EXCLUSION_POLICY_KEYS: [&str; 3] =
+    ["policy_digest", "excluded_path_count", "pollution_findings"];
+const POLLUTION_FINDING_KEYS: [&str; 3] = ["finding", "path", "excluded_component"];
+const DOMAIN_KEYS: [&str; 3] = ["name", "score", "evidence"];
+const FILE_LINE_KEYS: [&str; 3] = ["file", "line", "match"];
 
 pub(super) fn verify_tier2(
     root: &Path,
@@ -135,8 +140,11 @@ fn validate_document(
     }
     match artifact {
         Tier2EvidenceArtifact::Policy => validate_policy(&object, contents, predecessor, receipt)?,
-        Tier2EvidenceArtifact::Collector if predecessor.is_some() => {
-            return invalid("Tier 2 collector evidence has an invalid dependency link");
+        Tier2EvidenceArtifact::Collector => {
+            validate_collector(&object, contents)?;
+            if predecessor.is_some() {
+                return invalid("Tier 2 collector evidence has an invalid dependency link");
+            }
         }
         Tier2EvidenceArtifact::Generated
         | Tier2EvidenceArtifact::Dedup
@@ -163,6 +171,78 @@ fn validate_document(
         }
     }
     Ok(())
+}
+
+fn validate_collector(
+    object: &BTreeMap<String, JsonValue>,
+    contents: &str,
+) -> Result<(), WaterfallStoreError> {
+    let Some(JsonValue::Object(policy)) = object.get("exclusion_policy") else {
+        return invalid("Tier 2 collector evidence is missing its exclusion policy");
+    };
+    let Some(JsonValue::Array(findings)) = policy.get("pollution_findings") else {
+        return invalid("Tier 2 collector exclusion policy has invalid pollution findings");
+    };
+    if !exact_keys(policy, &EXCLUSION_POLICY_KEYS)
+        || !string(policy, "policy_digest").is_some_and(is_digest)
+        || number(policy, "excluded_path_count") != u64::try_from(findings.len()).ok()
+        || findings.iter().any(|finding| {
+            let JsonValue::Object(finding) = finding else {
+                return true;
+            };
+            !exact_keys(finding, &POLLUTION_FINDING_KEYS)
+                || string(finding, "finding") != Some("prohibited_vendor_path")
+                || !string(finding, "path").is_some_and(|value| !value.is_empty())
+                || !string(finding, "excluded_component").is_some_and(|value| !value.is_empty())
+        })
+        || !collector_nested_keys_are_canonical(object, contents, findings.len())
+    {
+        return invalid("Tier 2 collector exclusion policy is invalid");
+    }
+    Ok(())
+}
+
+fn collector_nested_keys_are_canonical(
+    object: &BTreeMap<String, JsonValue>,
+    contents: &str,
+    finding_count: usize,
+) -> bool {
+    let Some(JsonValue::Array(domains)) = object.get("domains") else {
+        return false;
+    };
+    let mut expected: Vec<&[&str]> = vec![keys(Tier2EvidenceArtifact::Collector)];
+    expected.push(&EXCLUSION_POLICY_KEYS);
+    expected.extend(std::iter::repeat_n(
+        POLLUTION_FINDING_KEYS.as_slice(),
+        finding_count,
+    ));
+    for domain in domains {
+        let JsonValue::Object(domain) = domain else {
+            return false;
+        };
+        let Some(JsonValue::Array(evidence)) = domain.get("evidence") else {
+            return false;
+        };
+        expected.push(&DOMAIN_KEYS);
+        if evidence
+            .iter()
+            .any(|row| !matches!(row, JsonValue::Object(_)))
+        {
+            return false;
+        }
+        expected.extend(std::iter::repeat_n(
+            FILE_LINE_KEYS.as_slice(),
+            evidence.len(),
+        ));
+    }
+    canonical::matches_object_key_orders(contents, &expected)
+}
+
+fn is_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_policy(
@@ -283,6 +363,7 @@ fn keys(artifact: Tier2EvidenceArtifact) -> &'static [&'static str] {
             "kind",
             "collector_version",
             "canonical_repo_scope",
+            "exclusion_policy",
             "domains",
         ],
         Tier2EvidenceArtifact::Generated => &[
