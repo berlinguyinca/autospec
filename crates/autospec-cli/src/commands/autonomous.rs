@@ -29,7 +29,9 @@ use autospec_core::coordination::{
 use autospec_core::execution::{OneShotIssueSelector, QueueStatus};
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
 #[cfg(unix)]
-use nix::sys::signal::{killpg, Signal};
+use nix::errno::Errno;
+#[cfg(unix)]
+use nix::sys::signal::{kill, killpg, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid;
 #[cfg(unix)]
@@ -1013,12 +1015,12 @@ fn restart_after_lease(
     persist_lifecycle_decision(layout, lifecycle).map_err(CommandFailure::diagnostic)?;
     let mut stopped = 0;
     for name in ["supervisor", "monitor", "conductor"] {
-        let unit = read_unit(name, &layout.state_dir);
+        let unit = read_unit(name, layout);
         if unit.running && terminate_pid(&unit.pid) {
             stopped += 1;
         }
     }
-    wait_for_scope_stopped(&layout.state_dir);
+    wait_for_scope_stopped(layout);
     clear_stop_flag(layout).map_err(CommandFailure::diagnostic)?;
     write_launch_json(layout, options, &foreground, &commands)
         .map_err(CommandFailure::diagnostic)?;
@@ -1099,7 +1101,7 @@ struct DiscoveryArtifact {
 impl MonitorSnapshot {
     fn read(options: &Options) -> Result<Self, String> {
         let layout = RunLayout::new(options)?;
-        let conductor = read_unit("conductor", &layout.state_dir);
+        let conductor = read_unit("conductor", &layout);
         let state = monitor_state_metadata(&layout);
         let launch = read_launch_json(&layout.state_dir);
         let logpath = if conductor.logpath.is_empty() {
@@ -1402,7 +1404,7 @@ fn supervise(options: Options) -> Result<(), String> {
     loop {
         iteration += 1;
         let layout = RunLayout::new(&options)?;
-        let recorded = read_unit("conductor", &layout.state_dir);
+        let recorded = read_unit("conductor", &layout);
         let watched_pid = if options.pid.is_empty() {
             recorded.pid.as_str()
         } else {
@@ -1448,9 +1450,12 @@ fn status(options: Options) -> Result<(), CommandFailure> {
         return list(options).map_err(CommandFailure::diagnostic);
     }
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
-    let conductor = read_unit("conductor", &layout.state_dir);
-    let monitor = read_unit("monitor", &layout.state_dir);
-    let supervisor = read_unit("supervisor", &layout.state_dir);
+    let conductor = read_unit("conductor", &layout);
+    let monitor = read_unit("monitor", &layout);
+    let supervisor = read_unit("supervisor", &layout);
+    for unit in [&conductor, &monitor, &supervisor] {
+        remove_stale_unit_metadata(unit).map_err(CommandFailure::diagnostic)?;
+    }
     let mut state = resilience::status(&layout.repo)
         .map_err(resilience_admission_error)?
         .map(|state| {
@@ -1511,7 +1516,7 @@ fn stop(options: Options) -> Result<(), String> {
         StopMode::Immediate => &["supervisor", "monitor", "conductor"],
     };
     for name in units {
-        let unit = read_unit(name, &layout.state_dir);
+        let unit = read_unit(name, &layout);
         if unit.running && terminate_pid(&unit.pid) {
             stopped += 1;
         }
@@ -1583,9 +1588,6 @@ fn list(options: Options) -> Result<(), String> {
                 continue;
             }
             let scope = entry.file_name().to_string_lossy().to_string();
-            let conductor = read_unit("conductor", &path);
-            let monitor = read_unit("monitor", &path);
-            let supervisor = read_unit("supervisor", &path);
             let launch = read_launch_json(&path);
             let layout = RunLayout {
                 state_dir: path.clone(),
@@ -1593,6 +1595,9 @@ fn list(options: Options) -> Result<(), String> {
                 scope: scope.clone(),
                 repo: extract_json_string(&launch, "repo").unwrap_or_else(|| scope.clone()),
             };
+            let conductor = read_unit("conductor", &layout);
+            let monitor = read_unit("monitor", &layout);
+            let supervisor = read_unit("supervisor", &layout);
             let state = read_state_metadata(&layout);
             rows.push(format!(
                 "{{\"scope\":\"{}\",\"slug\":\"{}\",\"repo\":\"{}\",\"alive\":{},\"last_cycle\":\"{}\",\"park_state\":\"{}\",\"launch\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
@@ -1627,7 +1632,7 @@ fn list(options: Options) -> Result<(), String> {
 
 fn logs(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
-    let unit = read_unit("conductor", &layout.state_dir);
+    let unit = read_unit("conductor", &layout);
     let logpath = if unit.logpath.is_empty() {
         newest_legacy_logpath().unwrap_or_default()
     } else {
@@ -1658,7 +1663,7 @@ fn watch(options: Options) -> Result<(), String> {
         return logs(options);
     }
     let layout = RunLayout::new(&options)?;
-    let unit = read_unit("conductor", &layout.state_dir);
+    let unit = read_unit("conductor", &layout);
     let logpath = if unit.logpath.is_empty() {
         newest_legacy_logpath().unwrap_or_default()
     } else {
@@ -1669,7 +1674,7 @@ fn watch(options: Options) -> Result<(), String> {
 
 fn timeline(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
-    let unit = read_unit("conductor", &layout.state_dir);
+    let unit = read_unit("conductor", &layout);
     let logpath = if unit.logpath.is_empty() {
         newest_legacy_logpath().unwrap_or_default()
     } else {
@@ -1718,17 +1723,8 @@ fn cleanup(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
     let mut removed = 0;
     for name in ["conductor", "monitor", "supervisor"] {
-        let unit = read_unit(name, &layout.state_dir);
-        if unit.running {
-            continue;
-        }
-        for path in [&unit.pid_file, &unit.logpath_file] {
-            if path.exists() {
-                fs::remove_file(path)
-                    .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
-                removed += 1;
-            }
-        }
+        let unit = read_unit(name, &layout);
+        removed += remove_stale_unit_metadata(&unit)?;
     }
     if options.json {
         println!(
@@ -1740,6 +1736,21 @@ fn cleanup(options: Options) -> Result<(), String> {
         println!("autospec autonomous cleanup: removed {removed}");
     }
     Ok(())
+}
+
+fn remove_stale_unit_metadata(unit: &UnitStatus) -> Result<usize, String> {
+    if !unit.metadata_state.cleanup_eligible() {
+        return Ok(0);
+    }
+    let mut removed = 0;
+    for path in [&unit.pid_file, &unit.logpath_file] {
+        if path.exists() {
+            fs::remove_file(path)
+                .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 fn main_health(options: Options) -> Result<(), String> {
@@ -3759,9 +3770,40 @@ struct UnitStatus {
     running: bool,
     stale_pid: bool,
     metadata_only: bool,
+    metadata_state: UnitMetadataState,
     pid_file: PathBuf,
     logpath: String,
     logpath_file: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnitMetadataState {
+    Absent,
+    Live,
+    Stale,
+    Ambiguous,
+}
+
+impl UnitMetadataState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Live => "live",
+            Self::Stale => "stale",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+
+    fn cleanup_eligible(self) -> bool {
+        self == Self::Stale
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProcessProbe {
+    Alive,
+    Missing,
+    Indeterminate,
 }
 
 #[derive(Debug, Clone)]
@@ -3942,7 +3984,7 @@ fn spawn_unit(
     name: &str,
     command: &ForegroundCommand,
     repo_dir: &str,
-    state_dir: &Path,
+    layout: &RunLayout,
     log_dir: &Path,
     log_override: Option<&str>,
     lease_token: Option<&str>,
@@ -3972,9 +4014,15 @@ fn spawn_unit(
         .spawn()
         .map_err(|error| format!("cannot spawn {name} command: {error}"))?;
     let pid = child.id().to_string();
-    let pid_file = state_dir.join(format!("{name}.pid"));
-    let logpath_file = state_dir.join(format!("{name}.logpath"));
-    if let Err(error) = fs::write(&pid_file, format!("{pid}\n")) {
+    let pid_file = layout.state_dir.join(format!("{name}.pid"));
+    let logpath_file = layout.state_dir.join(format!("{name}.logpath"));
+    let pid_metadata = format!(
+        "{{\"pid\":{},\"repo\":\"{}\",\"scope\":\"{}\"}}\n",
+        pid,
+        json_escape(&layout.repo),
+        json_escape(&layout.scope)
+    );
+    if let Err(error) = fs::write(&pid_file, pid_metadata) {
         let _ = child.kill();
         let _ = child.wait();
         return Err(format!("cannot write {}: {error}", pid_file.display()));
@@ -4003,7 +4051,7 @@ fn launch_units(
         "conductor",
         foreground,
         &options.repo_dir,
-        &layout.state_dir,
+        layout,
         &layout.log_dir,
         log_override_for("conductor", options),
         Some(lease.token()),
@@ -4021,7 +4069,7 @@ fn launch_units(
         "monitor",
         &commands.monitor,
         &options.repo_dir,
-        &layout.state_dir,
+        layout,
         &layout.log_dir,
         log_override_for("monitor", options),
         None,
@@ -4036,7 +4084,7 @@ fn launch_units(
         "supervisor",
         &commands.supervisor,
         &options.repo_dir,
-        &layout.state_dir,
+        layout,
         &layout.log_dir,
         log_override_for("supervisor", options),
         None,
@@ -4054,7 +4102,7 @@ fn launch_units(
 fn prepare_start_scope(layout: &RunLayout, options: &Options) -> Result<(), String> {
     let live_units = ["conductor", "monitor", "supervisor"]
         .into_iter()
-        .map(|name| (name, read_unit(name, &layout.state_dir)))
+        .map(|name| (name, read_unit(name, layout)))
         .filter(|(_, unit)| unit.running)
         .collect::<Vec<_>>();
     if live_units.is_empty() {
@@ -4074,7 +4122,7 @@ fn prepare_start_scope(layout: &RunLayout, options: &Options) -> Result<(), Stri
     for (_, unit) in live_units {
         let _ = terminate_pid(&unit.pid);
     }
-    wait_for_scope_stopped(&layout.state_dir);
+    wait_for_scope_stopped(layout);
     Ok(())
 }
 
@@ -4178,24 +4226,33 @@ fn read_launch_json(state_dir: &Path) -> String {
     }
 }
 
-fn read_unit(name: &str, state_dir: &Path) -> UnitStatus {
-    let pid_file = state_dir.join(format!("{name}.pid"));
-    let logpath_file = state_dir.join(format!("{name}.logpath"));
-    let pid = fs::read_to_string(&pid_file)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
+fn read_unit(name: &str, layout: &RunLayout) -> UnitStatus {
+    let pid_file = layout.state_dir.join(format!("{name}.pid"));
+    let logpath_file = layout.state_dir.join(format!("{name}.logpath"));
+    let raw_pid = fs::read_to_string(&pid_file).unwrap_or_default();
+    let raw_pid = raw_pid.trim();
+    let pid = metadata_pid(raw_pid).unwrap_or_else(|| raw_pid.to_string());
     let logpath = fs::read_to_string(&logpath_file)
         .unwrap_or_default()
         .trim()
         .to_string();
-    let running = process_alive(&pid);
-    let stale_pid = !pid.is_empty() && !running;
+    let metadata_state = if raw_pid.is_empty() {
+        if logpath.is_empty() {
+            UnitMetadataState::Absent
+        } else {
+            UnitMetadataState::Ambiguous
+        }
+    } else {
+        classify_unit_metadata(raw_pid, &layout.repo, &layout.scope, probe_process(&pid))
+    };
+    let running = metadata_state == UnitMetadataState::Live;
+    let stale_pid = metadata_state == UnitMetadataState::Stale;
     let metadata_only = !running && (!pid.is_empty() || !logpath.is_empty());
     UnitStatus {
         running,
         stale_pid,
         metadata_only,
+        metadata_state,
         pid,
         pid_file,
         logpath,
@@ -4215,10 +4272,11 @@ fn unit_json(unit: &UnitRecord) -> String {
 
 fn unit_status_json(unit: &UnitStatus) -> String {
     format!(
-        "{{\"running\":{},\"stale_pid\":{},\"metadata_only\":{},\"pid\":\"{}\",\"pid_file\":\"{}\",\"logpath\":\"{}\",\"logpath_file\":\"{}\"}}",
+        "{{\"running\":{},\"stale_pid\":{},\"metadata_only\":{},\"metadata_state\":\"{}\",\"pid\":\"{}\",\"pid_file\":\"{}\",\"logpath\":\"{}\",\"logpath_file\":\"{}\"}}",
         unit.running,
         unit.stale_pid,
         unit.metadata_only,
+        unit.metadata_state.as_str(),
         json_escape(&unit.pid),
         json_escape(&unit.pid_file.display().to_string()),
         json_escape(&unit.logpath),
@@ -4255,16 +4313,50 @@ fn scope_slug(repo: &str, repo_dir: &str) -> String {
         .collect()
 }
 
-fn process_alive(pid: &str) -> bool {
-    if pid.is_empty() {
-        return false;
+fn metadata_pid(raw: &str) -> Option<String> {
+    extract_json_number(raw, "pid").filter(|pid| pid.parse::<i32>().is_ok_and(|pid| pid > 0))
+}
+
+fn classify_unit_metadata(
+    raw: &str,
+    expected_repo: &str,
+    expected_scope: &str,
+    probe: ProcessProbe,
+) -> UnitMetadataState {
+    let Some(_) = metadata_pid(raw) else {
+        return UnitMetadataState::Ambiguous;
+    };
+    if extract_json_string(raw, "repo").as_deref() != Some(expected_repo)
+        || extract_json_string(raw, "scope").as_deref() != Some(expected_scope)
+    {
+        return UnitMetadataState::Ambiguous;
     }
-    Command::new("kill")
-        .args(["-0", pid])
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    match probe {
+        ProcessProbe::Alive => UnitMetadataState::Live,
+        ProcessProbe::Missing => UnitMetadataState::Stale,
+        ProcessProbe::Indeterminate => UnitMetadataState::Ambiguous,
+    }
+}
+
+#[cfg(unix)]
+fn probe_process(pid: &str) -> ProcessProbe {
+    let Some(pid) = pid.parse::<i32>().ok().filter(|pid| *pid > 0) else {
+        return ProcessProbe::Indeterminate;
+    };
+    match kill(Pid::from_raw(pid), None) {
+        Ok(()) => ProcessProbe::Alive,
+        Err(Errno::ESRCH) => ProcessProbe::Missing,
+        Err(_) => ProcessProbe::Indeterminate,
+    }
+}
+
+#[cfg(not(unix))]
+fn probe_process(_pid: &str) -> ProcessProbe {
+    ProcessProbe::Indeterminate
+}
+
+fn process_alive(pid: &str) -> bool {
+    probe_process(pid) == ProcessProbe::Alive
 }
 
 fn terminate_pid(pid: &str) -> bool {
@@ -4281,11 +4373,11 @@ fn terminate_pid(pid: &str) -> bool {
     false
 }
 
-fn wait_for_scope_stopped(state_dir: &Path) {
+fn wait_for_scope_stopped(layout: &RunLayout) {
     for _ in 0..20 {
         let any_running = ["conductor", "monitor", "supervisor"]
             .iter()
-            .any(|name| read_unit(name, state_dir).running);
+            .any(|name| read_unit(name, layout).running);
         if !any_running {
             return;
         }
@@ -5563,6 +5655,94 @@ fn print_help() {
     println!(
         "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
     );
+}
+
+#[cfg(test)]
+mod autonomous_metadata_tests {
+    use super::*;
+
+    const REPO: &str = "test/repo";
+    const SCOPE: &str = "test_repo";
+
+    fn metadata(pid: u32, repo: &str, scope: &str) -> String {
+        format!(r#"{{"pid":{pid},"repo":"{repo}","scope":"{scope}"}}"#)
+    }
+
+    #[test]
+    fn autonomous_metadata_is_live_only_for_the_scoped_process_identity() {
+        assert_eq!(
+            classify_unit_metadata(&metadata(42, REPO, SCOPE), REPO, SCOPE, ProcessProbe::Alive,),
+            UnitMetadataState::Live
+        );
+    }
+
+    #[test]
+    fn autonomous_metadata_is_stale_only_when_the_scoped_process_is_missing() {
+        assert_eq!(
+            classify_unit_metadata(
+                &metadata(42, REPO, SCOPE),
+                REPO,
+                SCOPE,
+                ProcessProbe::Missing,
+            ),
+            UnitMetadataState::Stale
+        );
+    }
+
+    #[test]
+    fn autonomous_metadata_fails_closed_for_legacy_foreign_and_indeterminate_records() {
+        for (raw, probe) in [
+            ("42".to_string(), ProcessProbe::Missing),
+            (metadata(42, "other/repo", SCOPE), ProcessProbe::Missing),
+            (metadata(42, REPO, "other_scope"), ProcessProbe::Missing),
+            (metadata(42, REPO, SCOPE), ProcessProbe::Indeterminate),
+        ] {
+            assert_eq!(
+                classify_unit_metadata(&raw, REPO, SCOPE, probe),
+                UnitMetadataState::Ambiguous
+            );
+        }
+    }
+
+    #[test]
+    fn autonomous_cleanup_removes_only_stale_scoped_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "autospec-autonomous-metadata-{}-{}",
+            std::process::id(),
+            ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).expect("create fixture");
+
+        for (state, removed) in [
+            (UnitMetadataState::Stale, true),
+            (UnitMetadataState::Live, false),
+            (UnitMetadataState::Ambiguous, false),
+        ] {
+            let pid_file = root.join(format!("{}.pid", state.as_str()));
+            let logpath_file = root.join(format!("{}.logpath", state.as_str()));
+            fs::write(&pid_file, "metadata").expect("write pid fixture");
+            fs::write(&logpath_file, "log").expect("write log fixture");
+            let unit = UnitStatus {
+                pid: "42".to_string(),
+                running: state == UnitMetadataState::Live,
+                stale_pid: state == UnitMetadataState::Stale,
+                metadata_only: state != UnitMetadataState::Live,
+                metadata_state: state,
+                pid_file: pid_file.clone(),
+                logpath: "log".to_string(),
+                logpath_file: logpath_file.clone(),
+            };
+
+            assert_eq!(
+                remove_stale_unit_metadata(&unit).expect("cleanup"),
+                if removed { 2 } else { 0 }
+            );
+            assert_eq!(pid_file.exists(), !removed);
+            assert_eq!(logpath_file.exists(), !removed);
+        }
+
+        fs::remove_dir_all(root).expect("remove fixture");
+    }
 }
 
 #[cfg(test)]
