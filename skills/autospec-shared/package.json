@@ -4,7 +4,7 @@
   "description": "Cross-skill shared tooling for autospec — tree-sitter walker, doc generators, and utilities.",
   "type": "module",
   "scripts": {
-    "test": "node --test tests/unit/tree-sitter-walk.test.mjs tests/unit/scan-doc-scope.test.mjs"
+    "test": "node --test tests/unit/tree-sitter-walk.test.mjs tests/unit/scan-doc-scope.test.mjs tests/unit/gen-screenshots.test.mjs"
   },
   "bin": {
     "tree-sitter-walk": "./bin/tree-sitter-walk"

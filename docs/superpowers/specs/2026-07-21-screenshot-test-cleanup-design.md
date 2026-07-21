@@ -25,5 +25,5 @@ The tests retain real Playwright and transcript execution when their tools are p
 ## Verification
 
 - `node --test skills/autospec-shared/tests/unit/gen-screenshots.test.mjs`
-- The existing `skills/autospec-shared/package.json` test command
+- `npm test --prefix skills/autospec-shared` (including the screenshot suite)
 - Repository validator and scoped static checks
