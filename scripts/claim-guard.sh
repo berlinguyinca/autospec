@@ -24,7 +24,7 @@
 #
 # Atomicity: a per-key `.lock` DIR is created with mkdir(2) (POSIX-atomic,
 # bash-3.2 safe) before the JSON is written. Multi-path acquire sorts keys and
-# takes them in order (deadlock-free), releasing already-taken keys on any
+# takes them in order (deadlock-free), releasing already-taken keys on each
 # conflict (all-or-nothing).
 #
 # Strictness: AUTOSPEC_CLAIM_GUARD=off|warn|strict (default warn).
@@ -181,7 +181,7 @@ key_to_filename() {
 #   anything else                              -> path:<normalized>
 resolve_key() {
     p="$1"
-    # Strip a leading ./ and any trailing slash for normalization.
+    # Strip a leading ./ and a trailing slash for normalization.
     p="${p#./}"
     case "$p" in
         skills/*/*|skills/*)
@@ -213,7 +213,7 @@ resolve_key() {
 CLAIM_DIR=""           # set by ensure_store
 STORE_OK=0             # 1 when the store dir is usable
 
-# Prepare the per-repo store dir. On any failure, STORE_OK stays 0 so callers
+# Prepare the per-repo store dir. On each failure, STORE_OK stays 0 so callers
 # degrade to a no-op (never block work).
 ensure_store() {
     slug="$(repo_slug)"
@@ -545,10 +545,10 @@ cmd_status() {
     ensure_store
     # status is read-only: an unwritable/empty store just prints nothing.
     if [ ! -d "$CLAIM_DIR" ]; then exit 0; fi
-    any=0
+    has_claims=0
     for cf in "$CLAIM_DIR"/*.json; do
         [ -e "$cf" ] || continue
-        any=1
+        has_claims=1
         key="$(jq -r '.lock_key // empty' "$cf" 2>/dev/null || true)"
         owner="$(jq -r '.owner_session // empty' "$cf" 2>/dev/null || true)"
         host="$(jq -r '.host // empty' "$cf" 2>/dev/null || true)"
@@ -558,7 +558,7 @@ cmd_status() {
         printf '%s\towner=%s\thost=%s\tupdated_at=%s\t%s\n' \
             "$key" "$owner" "$host" "$updated" "$flag"
     done
-    [ "$any" -eq 1 ] || printf '%s: no live claims for this repo\n' "$PROG"
+    [ "$has_claims" -eq 1 ] || printf '%s: no live claims for this repo\n' "$PROG"
     exit 0
 }
 
@@ -579,7 +579,7 @@ cmd_scan() {
     target_keys="$(for a in "$@"; do resolve_key "$a"; printf '\n'; done | sort -u)"
 
     # ------------------------------------------------------------------ #
-    # 1. Live claim files: any claim whose lock_key matches a target key  #
+    # 1. Live claim files: each claim whose lock_key matches a target key  #
     #    and belongs to a different, non-stale session.                   #
     # ------------------------------------------------------------------ #
     ensure_store
@@ -632,7 +632,7 @@ cmd_scan() {
                             && [ "$wt_path" != "$current_wt" ] \
                             && [ "$wt_branch" != "$current_branch" ]; then
                         # Only emit if the worktree branch name contains a
-                        # fragment of any target key name (heuristic; not a
+                        # fragment of a target key name (heuristic; not a
                         # hard conflict check).
                         for tk in $target_keys; do
                             skill_name="${tk#skill:}"
