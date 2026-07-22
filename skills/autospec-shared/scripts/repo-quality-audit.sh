@@ -751,6 +751,13 @@ probe_npm_audit_script() {
   record_verification_lane "audit" "passed" "$command_text" "command probe exited 0"
 }
 
+has_non_npm_package_manifest() {
+  for manifest in Cargo.toml pyproject.toml requirements.txt go.mod pom.xml build.gradle build.sbt; do
+    [ -f "$REPO/$manifest" ] && return 0
+  done
+  return 1
+}
+
 version_compare_key() {
   printf '%s' "$1" | sed 's/^v//; s/[^0-9.].*$//' | awk -F. '{printf "%06d%06d%06d", $1+0, $2+0, $3+0}'
 }
@@ -1147,13 +1154,19 @@ EOF
       "runtime-engine:node-missing"
   fi
 else
-  add_finding "package-manager-scripts" "autospec-process-gap" "medium" "." 0 \
-    "missing package manager manifest" \
-    "No package.json was found; JS/TS verification probes cannot discover scripts." \
-    "package-manifest:missing"
-  for script in test lint typecheck audit; do
-    record_verification_lane "$script" "not configured" "" "package.json missing"
-  done
+  if has_non_npm_package_manifest; then
+    for script in test lint typecheck audit; do
+      record_verification_lane "$script" "not applicable" "" "non-npm package manifest detected"
+    done
+  else
+    add_finding "package-manager-scripts" "autospec-process-gap" "medium" "." 0 \
+      "missing package manager manifest" \
+      "No supported package manager manifest was found; JS/TS verification probes cannot discover scripts." \
+      "package-manifest:missing"
+    for script in test lint typecheck audit; do
+      record_verification_lane "$script" "not configured" "" "package manifest missing"
+    done
+  fi
 fi
 
 # Probe: route coverage.

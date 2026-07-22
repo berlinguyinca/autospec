@@ -29,6 +29,29 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "quality audit does not flag npm scripts when a supported non-npm manifest exists" {
+    printf '[package]\nname = "fixture"\nversion = "0.1.0"\n' > "$REPO/Cargo.toml"
+    run env bash "$AUDIT_SCRIPT" --repo "$REPO" --json "$JSON_OUT" --markdown "$MD_OUT"
+    [ "$status" -eq 0 ]
+    run jq -e '[.findings[] | select(.dedupe_key == "package-manifest:missing")] | length == 0' "$JSON_OUT"
+    [ "$status" -eq 0 ]
+    run jq -e '.verification.lanes.test.status == "not applicable"' "$JSON_OUT"
+    [ "$status" -eq 0 ]
+}
+
+@test "quality audit recognizes canonical Python and Gradle manifests" {
+    for manifest in setup.py setup.cfg build.gradle.kts Gemfile; do
+        rm -f "$REPO"/Cargo.toml "$REPO"/setup.py "$REPO"/setup.cfg "$REPO"/build.gradle.kts "$REPO"/Gemfile
+        printf '# fixture\n' > "$REPO/$manifest"
+        run env bash "$AUDIT_SCRIPT" --repo "$REPO" --json "$JSON_OUT" --markdown "$MD_OUT"
+        [ "$status" -eq 0 ]
+        run jq -e '[.findings[] | select(.dedupe_key == "package-manifest:missing")] | length == 0' "$JSON_OUT"
+        [ "$status" -eq 0 ]
+        run jq -e '.verification.lanes.test.status == "not applicable"' "$JSON_OUT"
+        [ "$status" -eq 0 ]
+    done
+}
+
 @test "quality audit reports focused test markers with their source line" {
     printf 'describe.only("focused", () => {});\n' > "$REPO/src/example.spec.ts"
     run env bash "$AUDIT_SCRIPT" --repo "$REPO" --json "$JSON_OUT" --markdown "$MD_OUT"
