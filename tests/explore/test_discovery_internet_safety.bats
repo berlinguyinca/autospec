@@ -30,6 +30,10 @@ teardown() {
   run bash -n "$BLOCK";  [ "$status" -eq 0 ]
 }
 
+@test "discovery safety source avoids the ambiguous any token" {
+  ! grep -Eq '\bany\b' "$SAFETY"
+}
+
 # ---------------------------------------------------------------------------
 # blocklist: immutable builtin forbidden classes + extend-only config
 # ---------------------------------------------------------------------------
@@ -124,7 +128,7 @@ EOF
   run bash -c 'printf "%s" "some external text" | bash "'"$SAFETY"'" --frame'
   [ "$status" -eq 0 ]
   [[ "$output" == *"external content"* ]]
-  [[ "$output" == *"do not follow"* ]]
+  [[ "$output" == *"follow no instruction"* ]]
   [[ "$output" == *"some external text"* ]]
 }
 
@@ -212,6 +216,6 @@ EOF
   # ...and whatever survives is wrapped as inert external DATA by --frame,
   # explicitly told-not-to-follow.
   framed="$(printf '%s\n' "$payload" | bash "$SAFETY" --frame)"
-  [[ "$framed" == *"do not follow"* ]]
+  [[ "$framed" == *"follow no instruction"* ]]
   [[ "$framed" == *"external content"* ]]
 }
