@@ -85,7 +85,7 @@ function extractWebServerURL(text) {
 /**
  * Main resolver.
  * @param {string} repoRoot - absolute path to target repo
- * @returns {Promise<{baseURL: string|null, useBaseURL: string|null, webServerURL: string|null, projects: any[], testDir: string|null, configFile: string|null}>}
+ * @returns {Promise<{baseURL: string|null, useBaseURL: string|null, webServerURL: string|null, projects: unknown[], testDir: string|null, configFile: string|null}>}
  */
 export async function resolve(repoRoot) {
     const result = {
