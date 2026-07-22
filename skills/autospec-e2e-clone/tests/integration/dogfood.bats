@@ -119,6 +119,11 @@ PYEOF
   bash -n "$PII_ASSERT_SH"
 }
 
+@test "dogfood: pii-assertions.sh has no untyped any marker" {
+  run grep -En '(^|[^[:alnum:]_])any([^[:alnum:]_]|$)' "$PII_ASSERT_SH"
+  [ "$status" -eq 1 ]
+}
+
 @test "dogfood: mode-ii-real compose stack starts and app is reachable" {
   _start_compose
   local http_code
