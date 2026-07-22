@@ -133,8 +133,7 @@ try {
   var data   = JSON.parse(fs.readFileSync('$tmpfile',     'utf8'));
   var ajv    = new Ajv2020({strict: false, allErrors: true});
   var valid  = ajv.validate(schema, data);
-  if (valid) { console.log('valid'); process.exit(0); }
-  else { console.error(ajv.errorsText()); process.exit(2); }
+  if (!valid) { console.error(ajv.errorsText()); process.exitCode = 2; }
 } catch(e) { console.error(e.message); process.exit(1); }
 " 2>&1)
     local ajv_rc=$?
