@@ -23,6 +23,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  unlinkSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -334,6 +335,33 @@ function formatCsvLine(fields) {
   return fields.map(formatCsvField).join(',');
 }
 
+function removeIfPresent(path) {
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+}
+
+// Windows refuses to rename a file over an existing path. Move the original
+// aside first, then restore it if installing the anonymized output fails.
+function replaceFilePortable(tmpPath, filePath) {
+  const backupPath = `${filePath}.anonymize-backup`;
+  removeIfPresent(backupPath);
+  renameSync(filePath, backupPath);
+  try {
+    renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      renameSync(backupPath, filePath);
+    } catch (restoreErr) {
+      err.message += `; could not restore original: ${restoreErr.message}`;
+    }
+    throw err;
+  }
+  removeIfPresent(backupPath);
+}
+
 /**
  * Process a CSV snapshot file for a given table's anonymize rules.
  * Reads <file>, writes <file>.anon, then replaces the original.
@@ -345,6 +373,7 @@ async function processCsvFile(filePath, tableRule) {
   if (colEntries.length === 0) return;
 
   const tmpPath = filePath + '.anon';
+  removeIfPresent(tmpPath);
   const input = createReadStream(filePath, { encoding: 'utf8' });
   const output = createWriteStream(tmpPath, { encoding: 'utf8' });
   const rl = createInterface({ input, crlfDelay: Infinity });
@@ -388,8 +417,7 @@ async function processCsvFile(filePath, tableRule) {
 
   await new Promise((res, rej) => output.end((err) => (err ? rej(err) : res())));
 
-  // Replace original with anonymized
-  renameSync(tmpPath, filePath);
+  replaceFilePortable(tmpPath, filePath);
 
   console.log(`anonymize: processed ${lineCount} rows in ${filePath}`);
 }
@@ -407,6 +435,7 @@ async function processCsvFile(filePath, tableRule) {
  */
 async function processSqlFile(filePath, rulesByTable) {
   const tmpPath = filePath + '.anon';
+  removeIfPresent(tmpPath);
   const input = createReadStream(filePath, { encoding: 'utf8' });
   const output = createWriteStream(tmpPath, { encoding: 'utf8' });
   const rl = createInterface({ input, crlfDelay: Infinity });
@@ -456,7 +485,7 @@ async function processSqlFile(filePath, rulesByTable) {
 
   await new Promise((res, rej) => output.end((err) => (err ? rej(err) : res())));
 
-  renameSync(tmpPath, filePath);
+  replaceFilePortable(tmpPath, filePath);
   console.log(`anonymize: processed ${rowCount} INSERT rows in ${filePath}`);
 }
 
@@ -568,7 +597,22 @@ async function main() {
   console.log(`anonymize: done`);
 }
 
+function cleanupTemporaryOutputs(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) cleanupTemporaryOutputs(full);
+    else if (entry.name.endsWith('.anon') || entry.name.endsWith('.anonymize-backup')) {
+      removeIfPresent(full);
+    }
+  }
+}
+
 main().catch((err) => {
+  try {
+    cleanupTemporaryOutputs(resolvedSnapshot);
+  } catch (cleanupErr) {
+    err.message += `; temporary output cleanup failed: ${cleanupErr.message}`;
+  }
   console.error(`anonymize: fatal: ${err.message}`);
   process.exit(1);
 });
