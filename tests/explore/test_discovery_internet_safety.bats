@@ -31,7 +31,7 @@ teardown() {
 }
 
 @test "discovery safety source avoids the ambiguous any token" {
-  ! grep -Eq '\bany\b' "$SAFETY"
+  ! grep -Eq '(^|[^[:alnum:]_])any([^[:alnum:]_]|$)' "$SAFETY"
 }
 
 # ---------------------------------------------------------------------------
