@@ -119,10 +119,10 @@ autospec_loop_harvest_next_prompt() {
 
 # Keep loop-summary row formatting identical across success and error paths.
 _autospec_loop_append_table_row() {
-    local rows="$1" iteration="$2" source="$3" harvested="$4" status="$5" row
+    local rows="$1" iteration="$2" source="$3" harvested="$4" merged_prs="$5" status="$6" row
     row="$(printf '| %4d | %-21s | %-60s | %10s | %4s | %-20s |' \
         "$iteration" "$(printf '%s' "$source" | head -c 21)" \
-        "$(printf '%s' "$harvested" | head -c 60)" "0" "-" "$status")"
+        "$(printf '%s' "$harvested" | head -c 60)" "$merged_prs" "-" "$status")"
     if [ -z "$rows" ]; then printf '%s' "$row"; else printf '%s\n%s' "$rows" "$row"; fi
 }
 
@@ -206,7 +206,7 @@ autospec_loop_run() {
             status="iteration_error"
             row_status="iteration_error"
             table_rows="$(_autospec_loop_append_table_row "$table_rows" "$iter" "$cur_source" \
-                "handoff failed rc=$refine_status" "iteration_error")"
+                "handoff failed rc=$refine_status" "0" "iteration_error")"
             break
         fi
 
@@ -234,7 +234,7 @@ autospec_loop_run() {
                 echo "code_health:$stale_reason path=$report_path" >&2
                 status="iteration_error"
                 table_rows="$(_autospec_loop_append_table_row "$table_rows" "$iter" "$cur_source" \
-                    "$stale_reason" "iteration_error")"
+                    "$stale_reason" "0" "iteration_error")"
                 break
             fi
         fi
@@ -295,7 +295,7 @@ EOF
         fi
 
         table_rows="$(_autospec_loop_append_table_row "$table_rows" "$iter" "$cur_source" \
-            "$row_harvested_short" "$row_status")"
+            "$row_harvested_short" "0" "$row_status")"
 
         if [ "$row_status" = "evidence_based_stop" ]; then
             status="evidence_based_stop"

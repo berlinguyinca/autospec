@@ -67,6 +67,12 @@ teardown() {
     grep -q 'lib/autospec-loop\.sh' "${BATS_TEST_DIRNAME}/../../scripts/autospec-continue.sh"
 }
 
+@test "summary row preserves the supplied merged PR count" {
+    run bash -c ". '$LOOP_LIB'; _autospec_loop_append_table_row '' 3 source.md next 7 convergence_clean"
+    [ "$status" -eq 0 ]
+    [[ "$output" =~ \|[[:space:]]+7[[:space:]]+\| ]]
+}
+
 @test "convergence_clean: empty Next steps → convergence_clean status" {
     cat > "$SIM_DIR/iter-1-report.md" <<'EOF'
 # autospec run summary
