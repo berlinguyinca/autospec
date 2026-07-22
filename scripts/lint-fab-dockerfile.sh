@@ -35,7 +35,7 @@ fi
 # FROM lines may reference earlier build stages by name (FROM base AS …);
 # those are local stages, not registry images — allow them. A registry image
 # reference (contains a registry/repo path or a known image name) must carry
-# @sha256. We enforce: any FROM whose image token is not a prior stage name and
+# @sha256. We enforce: each FROM whose image token is not a prior stage name and
 # is not already a build-arg-driven digest must contain '@sha256:'.
 stage_names=""
 while IFS= read -r line; do
@@ -70,7 +70,7 @@ while IFS= read -r line; do
     [ -n "$alias" ] && stage_names="$stage_names $alias"
 done < "$DOCKERFILE"
 
-# --- 2b. Any *_DIGEST ARG default must itself be a real sha256 digest, so an
+# --- 2b. Each *_DIGEST ARG default must itself be a real sha256 digest, so an
 #         ARG-driven FROM (@${UBUNTU_DIGEST}) can't smuggle a floating value. ---
 while IFS= read -r dl; do
     case "$dl" in \#*) continue ;; esac
@@ -106,7 +106,7 @@ while IFS= read -r raw; do
             *\\) : ;;
             *)
                 in_apt=0
-                # Strip everything up to and including 'install', and any && tail.
+                # Strip everything up to and including 'install', plus an && tail.
                 pkgs="${apt_block#*install}"
                 pkgs="${pkgs%%&&*}"
                 for tok in $pkgs; do
