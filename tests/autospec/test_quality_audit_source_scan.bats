@@ -50,3 +50,15 @@ teardown() {
     run jq -e '[.findings[] | select(.probe == "any-usage" and .file == "skills/autospec-run/scripts/docs-completeness-gaps.sh")] | length == 0' "$JSON_OUT"
     [ "$status" -eq 0 ]
 }
+
+@test "Playwright author linter has no explicit any type usage" {
+    local helper="${BATS_TEST_DIRNAME}/../../skills/autospec-test/scripts/lint-playwright-author.mjs"
+    local audit_root="${TMP_DIR}/audit-repo"
+    mkdir -p "${audit_root}/skills/autospec-test/scripts"
+    cp "$helper" "${audit_root}/skills/autospec-test/scripts/lint-playwright-author.mjs"
+    run env bash "$AUDIT_SCRIPT" --repo "$audit_root" \
+        --json "$JSON_OUT" --markdown "$MD_OUT"
+    [ "$status" -eq 0 ]
+    run jq -e '[.findings[] | select(.probe == "any-usage" and .file == "skills/autospec-test/scripts/lint-playwright-author.mjs")] | length == 0' "$JSON_OUT"
+    [ "$status" -eq 0 ]
+}
