@@ -103,7 +103,7 @@ process.stderr.write(\`[reverse-engineer] step 1/5: found \${entries.length} sou
 
 if (entries.length === 0) {
   process.stderr.write('[reverse-engineer] no source files found; emitting empty manifest\n');
-  process.stdout.write(`${JSON.stringify({ written: [], skipped: [], manifest: [] })}\n`);
+  process.stdout.write(JSON.stringify({ written: [], skipped: [], manifest: [] }) + '\n');
   process.exit(0);
 }
 
@@ -133,7 +133,7 @@ process.stderr.write(\`[reverse-engineer] step 4/5: written=\${emitResult.writte
 
 // Step 5: Manifest to stdout
 process.stderr.write('[reverse-engineer] step 5/5: done\n');
-process.stdout.write(`${JSON.stringify(emitResult, null, 2)}\n`);
+process.stdout.write(JSON.stringify(emitResult, null, 2) + '\n');
 JSEOF
 )"
 
