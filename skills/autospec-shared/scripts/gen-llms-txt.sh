@@ -68,7 +68,7 @@ if [[ -n "$CLUSTER_JSON" ]] && [[ -f "$CLUSTER_JSON" ]]; then
         if (ep.kind === 'cli_command') entries.push(ep.identifier);
       }
     }
-    console.log(entries.join('\n'));
+    process.stdout.write(entries.join('\\n') + '\\n');
   " 2>/dev/null || true)"
 fi
 
