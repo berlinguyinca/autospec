@@ -98,6 +98,14 @@ teardown() {
     echo "$output" | grep -q "feedback_generic_failure_diagnostics_flow"
 }
 
+@test "provider routing: returns operational assistant routing lesson" {
+    local repo_memory_dir="${BATS_TEST_DIRNAME}/../docs/memory"
+
+    run bash "$SCRIPT" --context "assistant provider routing NATS health" --memory-dir "$repo_memory_dir" --top-k 5
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "feedback_operational_assistant_provider_routing"
+}
+
 # ── top-k limit ───────────────────────────────────────────────────────────────
 
 @test "top-k 1: returns at most 1 result" {
