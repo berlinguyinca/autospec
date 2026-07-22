@@ -14,11 +14,30 @@ Responsibilities:
 - Validate browser variance across Chromium, WebKit, Firefox where applicable.
 - Defer functional-coverage gaps to `functional-coverage`.
 
+## Screenshot audit
+
+Capture every spec route at desktop (1280), tablet (768), and mobile (375)
+using `skills/autospec-shared/scripts/gen-screenshots.mjs`. For each route and
+viewport, record `clientWidth`, `scrollWidth`, an `horizontal_overflow` boolean,
+and bounding boxes for major sections, cards, tables, tabs, and charts. Keep
+console errors and page errors beside these metrics so a visual finding is
+reproducible from one artifact. A screenshot verdict may use these generic
+responsive cohesion categories:
+
+- `document-overflow` — remove page-level horizontal overflow or constrain the offending region.
+- `clipped-tab` — make tab labels reachable with wrapping, scrolling, or a responsive alternative.
+- `inconsistent-gutter` — align route gutters to the shared responsive spacing tokens.
+- `mixed-control-style` — apply one control treatment across equivalent actions and breakpoints.
+- `unresponsive-table` — provide a responsive table layout, scrolling container, or compact columns.
+- `chart-squeeze` — preserve chart readability by resizing, reflowing, or offering a summary view.
+- `unanchored-control` — keep controls anchored to their associated content across viewport changes.
+- `density-overload` — reduce or reflow crowded content so touch targets and reading order remain usable.
+
 Output JSON shape:
 ```json
 {
   "cluster": "accessibility-and-responsive",
-  "category": "a11y_violation|viewport_overflow|browser_variance|visual_fidelity",
+  "category": "a11y_violation|viewport_overflow|browser_variance|visual_fidelity|document-overflow|clipped-tab|inconsistent-gutter|mixed-control-style|unresponsive-table|chart-squeeze|unanchored-control|density-overload",
   "rule": "color-contrast",
   "route": "/dashboard",
   "evidence": "…"
@@ -27,6 +46,12 @@ Output JSON shape:
 
 Verify-first: pass each finding through `scripts/qa-verify-finding.sh`
 (`--category failing_test`).
+
+Tablet/mobile findings in any of the eight responsive cohesion categories are
+release-blocking when their verdict status is `FAIL`, even if the desktop
+viewport passes. The `--blocking-on FAIL` default in
+`scripts/qa-visual-findings.sh` enforces this rule; use `--blocking-on PARTIAL`
+when a stricter release gate is explicitly required.
 
 ## Visual fidelity (does the UI *look* right, not just *work*)
 
