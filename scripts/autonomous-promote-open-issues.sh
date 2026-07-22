@@ -20,7 +20,7 @@
 #                           fill passes → comment-only groom:proposed for a human
 #                                         to apply; never replace the issue body
 #                         Candidates already carrying groom:proposed/groom:rejected are
-#                         skipped (already-groomed) before any decision (no re-fill).
+#                         skipped (already-groomed) before routing (no re-fill).
 #        epic           → route:split (do NOT decompose here)
 #        hold / error   → hold:needs-human
 #   3. Rust owns safety stamping and the `auto-implement` transition. It
@@ -369,7 +369,7 @@ while [ "$i" -lt "$cand_count" ]; do
     labels_csv="$(printf '%s' "$detail" | jq -r '[.labels[]?.name] | join(",")' 2>/dev/null || printf '')"
     printf '%s' "$body" > "$BODY_FILE"
 
-    # ── 0. Already-groomed skip (before any decision → no re-fill) ────────────
+    # ── 0. Already-groomed skip (before routing → no re-fill) ─────────────────
     # A candidate that already carries the canary proposal (`groom:proposed`) or
     # a human rejection (`groom:rejected`) is a completed grooming outcome; never
     # re-fill or re-route it.
