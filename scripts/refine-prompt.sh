@@ -8,7 +8,7 @@
 # Lenses (default order): repo-grounding → clarity-ac → sizing → adversarial.
 # If --rounds exceeds the lens list length, the adversarial lens repeats.
 #
-# Termination — round loop exits when ANY of:
+# Termination — round loop exits when one of:
 #   - converged          round N == round N-1 byte-identical
 #   - round_cap_reached  --rounds N capped at AUTOSPEC_REFINE_MAX_ROUNDS (10)
 #   - completed          all requested rounds executed cleanly
@@ -135,7 +135,7 @@ fi
 #      symlinks and canonicalize `..` segments.
 #   2. Check BOTH the literal input and the resolved target against the
 #      forbidden patterns — a safe-looking symlink to .env must reject.
-#   3. Reject any post-canonicalization `..` segments (defense in depth).
+#   3. Reject post-canonicalization `..` segments (defense in depth).
 _match_forbidden() {
     local p="$1"
     case "$p" in
@@ -193,7 +193,7 @@ check_path_allowed() {
     if [ -n "$resolved" ] && [ "$resolved" != "$p" ]; then
         if _match_forbidden "$resolved"; then return 1; fi
     fi
-    # Reject any residual .. segment.
+    # Reject residual .. segments.
     case "$resolved" in
         *..*) return 1 ;;
     esac
@@ -422,7 +422,7 @@ run_continue_loop() {
         local refine_log="$iter_artifact_subdir/refine.log"
         local refine_status=0
 
-        # Staleness guard (issue #692 fix 2): capture mtime of any pre-existing
+        # Staleness guard (issue #692 fix 2): capture mtime of each pre-existing
         # run-summary.md and move it aside so this iteration must produce a
         # fresh, non-empty file with newer mtime. Real-mode only.
         local run_summary="$REPO_ROOT/.autospec/run-summary.md"
@@ -732,7 +732,7 @@ load_memory_feedback() {
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         check_path_allowed "$f" || continue
-        # Keyword match: any whitespace token from prompt ≥4 chars present in file.
+        # Keyword match: each whitespace token from prompt ≥4 chars present in file.
         local matched=0
         for tok in $PROMPT; do
             [ "${#tok}" -ge 4 ] || continue
@@ -862,7 +862,7 @@ _resolve_lens_mode() {
     #
     # Precedence (issue #1024): the --lens-mode flag wins over the
     # AUTOSPEC_REFINE_LENS_MODE env hatch, which wins over the default (auto).
-    # All three values are allow-listed; any out-of-list value is fatal so a
+    # All three values are allow-listed; an out-of-list value is fatal so a
     # typo never silently degrades to a different code path.
     #
     #   deterministic — legacy template lenses only; never dispatch the LLM
@@ -1183,7 +1183,7 @@ echo "refine-prompt: status=$STATUS rounds_executed=$ROUNDS_EXECUTED artifact=$A
 # `claude` (slash-command dispatcher) if available, falling back to the
 # `autospec` binary on PATH. Test harnesses stub both.
 #
-# Path-safety (issue #681 Finding 6): reject any resolved dispatcher that
+# Path-safety (issue #681 Finding 6): reject each resolved dispatcher that
 # lives under /tmp/ or the operator's home tmpdir unless explicitly
 # overridden via AUTOSPEC_HANDOFF_DISPATCHER=1. This blocks the common
 # PATH-stub attack where a writable temp directory shadows a system binary.
