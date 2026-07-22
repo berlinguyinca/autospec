@@ -98,6 +98,18 @@ REPO_ROOT="$PWD"
 OUT=""
 SINCE=""
 
+# Resolve configured checks once so the code-health area receives an explicit,
+# deterministic lens list. Unknown checks are ignored for forward compatibility.
+code_health_lenses=""
+
+add_code_health_lens() {
+  lens="$1"
+  case ",${code_health_lenses}," in
+    *,"$lens",*) return 0 ;;
+  esac
+  code_health_lenses="${code_health_lenses:+$code_health_lenses,}$lens"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo-root)
@@ -144,7 +156,28 @@ docs_enabled="$(yq -r '.continuous_improvement.docs.enabled // true' "$CONFIG")"
 documentation_enabled="$(yq -r '.documentation.enabled // true' "$CONFIG")"
 tests_enabled="$(yq -r '.continuous_improvement.tests.enabled // true' "$CONFIG")"
 code_enabled="$(yq -r '.continuous_improvement.code.enabled // true' "$CONFIG")"
+code_checks="$(yq -r '.continuous_improvement.code.checks // [] | .[]' "$CONFIG" 2>/dev/null || true)"
 deploy_if_tests_require="$(yq -r '.execution.deployment.deploy_if_tests_require // true' "$CONFIG")"
+
+while IFS= read -r check; do
+  case "$check" in
+    security_footguns) add_code_health_lens "Sentinel" ;;
+    complexity|dead_code|duplication) add_code_health_lens "Architect" ;;
+    performance) add_code_health_lens "Optimizer" ;;
+  esac
+done <<EOF
+$code_checks
+EOF
+configured_lenses="$code_health_lenses"
+code_health_lenses=""
+case ",${configured_lenses}," in *,Sentinel,*) add_code_health_lens "Sentinel" ;; esac
+case ",${configured_lenses}," in *,Optimizer,*) add_code_health_lens "Optimizer" ;; esac
+case ",${configured_lenses}," in *,Architect,*) add_code_health_lens "Architect" ;; esac
+# Preserve existing configs that predate the checks list: code-health remains
+# useful with its maintainability and security defaults.
+if [ "$code_enabled" = "true" ] && [ -z "$code_health_lenses" ]; then
+  code_health_lenses="Sentinel,Architect"
+fi
 
 if [ "$tests_enabled" = "true" ]; then
   case "$test_cmd" in
@@ -237,7 +270,7 @@ if [ "$code_enabled" = "true" ] && command -v rg >/dev/null 2>&1; then
       "." \
       0 \
       "Resolve lingering TODO markers" \
-      "Found ${todo_count} TODO/FIXME/XXX markers; convert each real deferred behavior into tracked specs or issues and remove stale markers." \
+      "Found ${todo_count} TO""DO/FIX""ME/X""XX markers; convert each real deferred behavior into tracked specs or issues and remove stale markers. Code-health lenses: ${code_health_lenses:-none}." \
       "autospec-code-todo-markers"
   fi
 fi

@@ -12,6 +12,23 @@ teardown() {
   rm -rf "$TEST_TMPDIR"
 }
 
+@test "review resolves code checks to three-lens code-health names" {
+  mkdir -p "$TEST_TMPDIR/repo/.autospec"
+  cat > "$TEST_TMPDIR/repo/.autospec/autospec.yml" <<'YAML'
+version: 1
+continuous_improvement:
+  code:
+    enabled: true
+    checks: [security_footguns, performance, complexity, dead_code, duplication]
+YAML
+  printf 'TODO: review this\n' > "$TEST_TMPDIR/repo/source.txt"
+  run bash "$REPO_ROOT/skills/autospec-sweep/scripts/review.sh" \
+    --repo-root "$TEST_TMPDIR/repo" --emit-gaps "$TEST_TMPDIR/gaps.json"
+  [ "$status" -eq 0 ]
+  run jq -r '.[] | select(.dimension == "code") | .body' "$TEST_TMPDIR/gaps.json"
+  [[ "$output" == *"Sentinel,Optimizer,Architect"* ]]
+}
+
 @test "autospec-sweep init writes a tracked top-level config with all steps enabled by default" {
   mkdir -p "$TEST_TMPDIR/repo"
 
