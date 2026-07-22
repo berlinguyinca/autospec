@@ -1,4 +1,6 @@
 use std::fs;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use autospec_core::autonomous::config::{AutonomousConfig, Tier4SourceDescriptor};
 use autospec_core::autonomous::no_work::{DryReason, NoWorkTier};
@@ -72,6 +74,40 @@ pub(super) fn tier4_store(root: &TempRoot) -> WaterfallStore {
         StoreAcquisition::Acquired(store) => store,
         StoreAcquisition::Held => panic!("test store remained locked for one second"),
     }
+}
+
+#[test]
+fn concurrent_tier4_fixture_owners_use_distinct_integer_tagged_roots() {
+    let start = Arc::new(Barrier::new(3));
+    let roots_ready = Arc::new(Barrier::new(2));
+    let owners = [0_u64, 1].map(|owner| {
+        let start = Arc::clone(&start);
+        let roots_ready = Arc::clone(&roots_ready);
+        thread::spawn(move || {
+            start.wait();
+            let root = TempRoot::new();
+            roots_ready.wait();
+            assert!(root.path().is_dir(), "owner {owner} lost its fixture root");
+            let path = root.path().to_path_buf();
+            let integer_tag = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.rsplit('-').next())
+                .and_then(|tag| tag.parse::<u64>().ok())
+                .expect("integer-tagged fixture root");
+            fs::write(root.path().join("owner"), owner.to_string()).expect("owner marker");
+            assert_eq!(
+                fs::read_to_string(root.path().join("owner")).expect("read owner marker"),
+                owner.to_string()
+            );
+            (path, integer_tag)
+        })
+    });
+
+    start.wait();
+    let [first, second] = owners.map(|owner| owner.join().expect("fixture owner"));
+    assert_ne!(first.0, second.0, "concurrent owners shared one fixture root");
+    assert_ne!(first.1, second.1, "concurrent owners reused one integer tag");
 }
 
 fn alternate_source_policy() -> Tier4SourcePolicy {
