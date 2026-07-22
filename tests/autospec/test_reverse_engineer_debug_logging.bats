@@ -11,6 +11,19 @@ SCRIPT="$BATS_TEST_DIRNAME/../../skills/autospec-shared/scripts/reverse-engineer
   ! grep -Eq 'console\.(log|debug|info|warn|error)|(^|[^[:alnum:]_])debugger([^[:alnum:]_]|$)' "$inventory"
 }
 
+@test "reverse-engineer cluster avoids debug logging APIs" {
+  cluster="$BATS_TEST_DIRNAME/../../skills/autospec-shared/scripts/reverse-engineer/cluster.mjs"
+  ! grep -Eq 'console\.(log|debug|info|warn|error)|(^|[^[:alnum:]_])debugger([^[:alnum:]_]|$)' "$cluster"
+}
+
+@test "reverse-engineer cluster emits JSON through stdout" {
+  cluster="$BATS_TEST_DIRNAME/../../skills/autospec-shared/scripts/reverse-engineer/cluster.mjs"
+  run bash -c "printf '%s' '[]' | node '$cluster'"
+  [ "$status" -eq 0 ]
+  run jq -e '.significant == [] and .trivial == []' <<<"$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "reverse-engineer orchestrator remains shell-parseable" {
   run bash -n "$SCRIPT"
   [ "$status" -eq 0 ]
