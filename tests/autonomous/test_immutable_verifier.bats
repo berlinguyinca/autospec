@@ -40,6 +40,12 @@ STUB
     chmod +x "$STUB_DIR/gh"
 }
 
+@test "guardrails avoids ambiguous any token in its source" {
+    run grep -nE '\bany\b' "$GUARDRAILS"
+
+    [ "$status" -eq 1 ]
+}
+
 teardown() {
     rm -rf "$TMP"
 }
