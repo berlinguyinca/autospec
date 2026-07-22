@@ -38,3 +38,15 @@ teardown() {
     run jq -e '.findings[] | select(.probe == "focused-skipped-tests" and .file == "src/example.spec.ts") | .line == 1' "$JSON_OUT"
     [ "$status" -eq 0 ]
 }
+
+@test "docs completeness helper has no false-positive any usage finding" {
+    local helper="${BATS_TEST_DIRNAME}/../../skills/autospec-run/scripts/docs-completeness-gaps.sh"
+    local audit_root="${TMP_DIR}/audit-repo"
+    mkdir -p "${audit_root}/skills/autospec-run/scripts"
+    cp "$helper" "${audit_root}/skills/autospec-run/scripts/docs-completeness-gaps.sh"
+    run env bash "$AUDIT_SCRIPT" --repo "$audit_root" \
+        --json "$JSON_OUT" --markdown "$MD_OUT"
+    [ "$status" -eq 0 ]
+    run jq -e '[.findings[] | select(.probe == "any-usage" and .file == "skills/autospec-run/scripts/docs-completeness-gaps.sh")] | length == 0' "$JSON_OUT"
+    [ "$status" -eq 0 ]
+}
