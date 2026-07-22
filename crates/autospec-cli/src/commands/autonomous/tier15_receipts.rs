@@ -402,6 +402,36 @@ mod tests {
         store
             .verify_tier15_evidence(1, &receipt)
             .expect("receipt evidence");
+        let evidence = fs::read_to_string(
+            root.path()
+                .join("waterfall")
+                .join(&receipt.evidence()[0].reference),
+        )
+        .expect("observation evidence");
+        assert!(evidence.contains("\"readiness\":{\"7\":\"candidate\"}"));
+    }
+
+    #[test]
+    fn readiness_tampering_is_rejected_during_tier15_replay() {
+        let root = TempRoot::new();
+        seed_tier_one_point_five_cursor(&root);
+        assert_eq!(
+            record_tier15(root.path(), REPO, produced_scan()).expect("record produced scan"),
+            Tier15Progress::Produced(1)
+        );
+        let store = store(&root);
+        let receipt = store
+            .load_receipt(1, NoWorkTier::Tier1_5)
+            .expect("receipt")
+            .expect("sealed receipt");
+        let path = root
+            .path()
+            .join("waterfall")
+            .join(&receipt.evidence()[0].reference);
+        let evidence = fs::read_to_string(&path).expect("observation evidence");
+        fs::write(&path, evidence.replace("\"candidate\"", "\"forged\""))
+            .expect("tamper readiness state");
+        assert!(store.verify_tier15_evidence(1, &receipt).is_err());
     }
 
     #[test]

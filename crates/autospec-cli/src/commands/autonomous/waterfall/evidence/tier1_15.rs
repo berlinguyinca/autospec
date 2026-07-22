@@ -141,6 +141,12 @@ fn validate_observation(contents: &str, receipt: &TierReceipt) -> Result<(), Wat
     let open_deduplicated = take_number(&mut object, "open_deduplicated")?;
     let closed_observed = take_number(&mut object, "closed_observed")?;
     let budget = take_number(&mut object, "budget")?;
+    let readiness_present = object.contains_key("readiness");
+    let readiness = if readiness_present {
+        take_object(&mut object, "readiness")?
+    } else {
+        BTreeMap::new()
+    };
     let decisions = take_array(&mut object, "decisions")?;
     if !object.is_empty()
         || schema != 1
@@ -161,6 +167,25 @@ fn validate_observation(contents: &str, receipt: &TierReceipt) -> Result<(), Wat
         produced += u64::from(is_produced);
         rendered.push(document);
     }
+    let mut rendered_readiness = Vec::with_capacity(readiness.len());
+    for (number, value) in readiness {
+        let parsed = number.parse::<u64>().map_err(|_| {
+            WaterfallStoreError::InvalidReceipt("Tier 1.5 readiness key is invalid".into())
+        })?;
+        if parsed == 0 || !numbers.contains(&parsed) {
+            return invalid("Tier 1.5 readiness must identify a decision");
+        }
+        let state = value
+            .into_string("Tier 1.5 readiness")
+            .map_err(WaterfallStoreError::InvalidReceipt)?;
+        if !matches!(state.as_str(), "candidate" | "verified" | "safety_reviewed") {
+            return invalid("Tier 1.5 readiness value is invalid");
+        }
+        rendered_readiness.push(format!("\"{number}\":\"{state}\""));
+    }
+    if readiness_present && rendered_readiness.len() != numbers.len() {
+        return invalid("Tier 1.5 readiness must cover every decision");
+    }
     let observed = open_observed
         .checked_add(closed_observed)
         .ok_or_else(|| WaterfallStoreError::InvalidReceipt("Tier 1.5 count overflow".into()))?;
@@ -175,8 +200,13 @@ fn validate_observation(contents: &str, receipt: &TierReceipt) -> Result<(), Wat
     if receipt.funnel() != &expected_funnel || !status_matches {
         return invalid("Tier 1.5 observation does not reconstruct its receipt");
     }
+    let readiness_field = if !readiness_present {
+        String::new()
+    } else {
+        format!("\"readiness\":{{{}}},", rendered_readiness.join(","))
+    };
     let expected = format!(
-        "{{\"schema\":1,\"kind\":\"tier15_observation\",\"open_observed\":{open_observed},\"open_deduplicated\":{open_deduplicated},\"closed_observed\":{closed_observed},\"budget\":{budget},\"decisions\":[{}]}}\n",
+        "{{\"schema\":1,\"kind\":\"tier15_observation\",\"open_observed\":{open_observed},\"open_deduplicated\":{open_deduplicated},\"closed_observed\":{closed_observed},\"budget\":{budget},{readiness_field}\"decisions\":[{}]}}\n",
         rendered.join(",")
     );
     if contents != expected {
