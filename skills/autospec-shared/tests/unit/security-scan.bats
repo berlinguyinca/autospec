@@ -165,13 +165,10 @@ EOF
     ! printf '%s' "$output" | grep -q 'eval-detected'
 }
 
-@test "scan_pii flags PII written to a log sink (nice-to-have)" {
+@test "scan_pii ignores PII data that is not written to a log sink" {
     run bash "$SCAN" --tree --root "$FIX" --only pii
     [ "$status" -eq 0 ]
-    # pii-log.js logs ssn/email as values → nice-to-have pii candidate
-    # (FP-prone heuristic; LLM triage upgrades real findings)
-    printf '%s' "$output" | grep -E 'pii-log.js' | grep -q '"dimension":"pii"'
-    printf '%s' "$output" | grep -E 'pii-log.js' | grep -q '"severity":"nice-to-have"'
+    ! printf '%s' "$output" | grep -q 'pii-log.js'
 }
 
 @test "scan_pii does not flag bare PII words or non-logged PII (low false positives)" {
