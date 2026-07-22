@@ -26,6 +26,12 @@ const { generate: generateArchitecture } = await import(path.join(GEN_DOCS_DIR, 
 const { generateDocs }                   = await import(path.join(SCRIPTS_DIR, 'gen-docs-from-spec.mjs'));
 const { parse: parseScopeBlocks }        = await import(path.join(SCRIPTS_DIR, 'scan-doc-scope.mjs'));
 
+test('gen-docs CLI writes JSON through stdout without console logging', () => {
+  const source = fs.readFileSync(path.join(SCRIPTS_DIR, 'gen-docs-from-spec.mjs'), 'utf8');
+  assert.doesNotMatch(source, /console\.(log|error)\s*\(/, 'CLI output must use explicit streams');
+  assert.match(source, /process\.stdout\.write\(/, 'CLI output should be written to stdout');
+});
+
 // ── Fixture data ──────────────────────────────────────────────────────────────
 
 const BAIT_DIR = path.resolve(__dirname, '../fixtures/reverse-engineer-bait');
