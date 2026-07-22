@@ -141,7 +141,12 @@ fn validate_observation(contents: &str, receipt: &TierReceipt) -> Result<(), Wat
     let open_deduplicated = take_number(&mut object, "open_deduplicated")?;
     let closed_observed = take_number(&mut object, "closed_observed")?;
     let budget = take_number(&mut object, "budget")?;
-    let readiness = take_object(&mut object, "readiness")?;
+    let readiness_present = object.contains_key("readiness");
+    let readiness = if readiness_present {
+        take_object(&mut object, "readiness")?
+    } else {
+        BTreeMap::new()
+    };
     let decisions = take_array(&mut object, "decisions")?;
     if !object.is_empty()
         || schema != 1
@@ -178,7 +183,7 @@ fn validate_observation(contents: &str, receipt: &TierReceipt) -> Result<(), Wat
         }
         rendered_readiness.push(format!("\"{number}\":\"{state}\""));
     }
-    if rendered_readiness.len() != numbers.len() {
+    if readiness_present && rendered_readiness.len() != numbers.len() {
         return invalid("Tier 1.5 readiness must cover every decision");
     }
     let observed = open_observed
@@ -195,9 +200,13 @@ fn validate_observation(contents: &str, receipt: &TierReceipt) -> Result<(), Wat
     if receipt.funnel() != &expected_funnel || !status_matches {
         return invalid("Tier 1.5 observation does not reconstruct its receipt");
     }
+    let readiness_field = if !readiness_present {
+        String::new()
+    } else {
+        format!("\"readiness\":{{{}}},", rendered_readiness.join(","))
+    };
     let expected = format!(
-        "{{\"schema\":1,\"kind\":\"tier15_observation\",\"open_observed\":{open_observed},\"open_deduplicated\":{open_deduplicated},\"closed_observed\":{closed_observed},\"budget\":{budget},\"readiness\":{{{}}},\"decisions\":[{}]}}\n",
-        rendered_readiness.join(","),
+        "{{\"schema\":1,\"kind\":\"tier15_observation\",\"open_observed\":{open_observed},\"open_deduplicated\":{open_deduplicated},\"closed_observed\":{closed_observed},\"budget\":{budget},{readiness_field}\"decisions\":[{}]}}\n",
         rendered.join(",")
     );
     if contents != expected {
