@@ -143,7 +143,7 @@ function scanConcepts(repoRoot) {
  * Generate the manifest object from cluster output.
  *
  * @param {{
- *   clusters: { significant: ClusterUnit[], trivial: any[] },
+ *   clusters: { significant: ClusterUnit[], trivial: unknown[] },
  *   repo?: string,
  *   repoRoot: string,
  * }} opts
