@@ -19,7 +19,7 @@ function getVersion() {
 }
 
 function usage() {
-  console.log(`autospec v${getVersion()}
+  process.stdout.write(`autospec v${getVersion()}
 
 Usage: autospec <subcommand> [options]
 
@@ -74,7 +74,7 @@ switch (cmd) {
     break;
   case '--version':
   case '-v':
-    console.log(getVersion());
+    process.stdout.write(`${getVersion()}\n`);
     break;
   case '--help':
   case '-h':
@@ -82,7 +82,7 @@ switch (cmd) {
     usage();
     break;
   default:
-    console.error(`autospec: unknown subcommand '${cmd}'`);
-    console.error("Run 'autospec --help' for usage.");
+    process.stderr.write(`autospec: unknown subcommand '${cmd}'\n`);
+    process.stderr.write("Run 'autospec --help' for usage.\n");
     process.exit(1);
 }
