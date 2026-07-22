@@ -121,6 +121,7 @@ test('serveFixture: serves HTML file on localhost, returns URL', async () => {
         res.on('data', (chunk) => { data += chunk; });
         res.on('end', () => {
           assert.ok(data.includes('Autospec Route Sample'), 'must serve fixture HTML content');
+          assert.ok(data.includes('href="/about"'), 'must serve the /about route link');
           resolve();
         });
       }).on('error', reject);
