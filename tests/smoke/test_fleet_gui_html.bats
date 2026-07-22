@@ -35,6 +35,11 @@ setup() {
     grep -q '/api/config' "$GUI_HTML"
 }
 
+@test "fleet-gui does not persist the launch token in browser storage" {
+    ! grep -q 'localStorage' "$GUI_HTML"
+    grep -q 'history.replaceState' "$GUI_HTML"
+}
+
 @test "fleet-gui has Select all visible and Clear all controls" {
     grep -q 'select-all' "$GUI_HTML"
     grep -q 'clear-all' "$GUI_HTML"

@@ -162,8 +162,13 @@
 
   // ── Token ─────────────────────────────────────────────────────────────────
   const qs = new URLSearchParams(location.search);
-  const token = qs.get('t') || localStorage.getItem('autospecGuiToken') || '';
-  if (token) localStorage.setItem('autospecGuiToken', token);
+  const token = qs.get('t') || '';
+  // Keep the one-time launch token in memory only. Persisting credentials in
+  // browser storage would expose them to every script running on this origin.
+  // Remove it from the address bar/history after parsing to limit URL leakage.
+  if (token && window.history && window.history.replaceState) {
+    window.history.replaceState({}, document.title, location.pathname || '/');
+  }
 
   const headers = { 'X-Autospec-Token': token };
 
