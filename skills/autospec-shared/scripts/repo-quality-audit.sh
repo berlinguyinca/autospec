@@ -1205,12 +1205,13 @@ while IFS="$(printf '\t')" read -r tag file line_no line_text; do
   add_sensitive_storage_finding "$rel" "${line_no:-0}" "$storage_api" "$sensitive_term" "$storage_key" "$excerpt"
 done < "$METRICS_TSV"
 
-while IFS="$(printf '\t')" read -r tag file lines disabled_count focus_first_line any_count any_first_line debug_count debug_first_line eslint_count eslint_first_line ts_ignore_count ts_ignore_first_line; do
+while IFS="$(printf '\t')" read -r tag file lines focus_count focus_first_line any_count any_first_line debug_count debug_first_line eslint_count eslint_first_line ts_ignore_count ts_ignore_first_line; do
   [ "$tag" = "summary" ] || continue
   [ -n "$file" ] || continue
   rel="$(rel_path "$file")"
   kind="$(file_kind_for "$rel")"
-  if [ "$disabled_count" -gt 0 ]; then
+  disabled_count="$focus_count"
+  if [ "$focus_count" -gt 0 ]; then
     add_finding "focused-skipped-tests" "app-follow-up" "medium" "$rel" "${focus_first_line:-0}" \
       "focused test markers present" \
       "Focused or skipped tests can hide regressions from autospec verification." \
