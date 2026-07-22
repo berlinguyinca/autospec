@@ -12,7 +12,7 @@
 #   {"candidates":[{"number":N,"title":"...","class":"needs-classify|needs-template|unlabeled"}],
 #    "skipped":[{"number":N,"reason":"..."}]}
 #
-# Fail-closed: any empty/malformed `gh` output yields
+# Fail-closed: empty or malformed `gh` output yields
 #   {"candidates":[],"skipped":[]}
 #
 # Exit codes:
@@ -130,7 +130,7 @@ filtered_json="$(printf '%s' "$open_json" | jq -c --argjson excluded "$excluded_
             number: $issue.number,
             title: ($issue.title // ""),
             body: ($issue.body // ""),
-            excluded: (($labelnames | any(is_excluded_label))),
+            excluded: (($labelnames | map(select(is_excluded_label)) | length) > 0),
             class: (
                 if ($labelnames | index("needs-autospec-template")) != null then "needs-template"
                 elif ($labelnames | index("needs-classify")) != null then "needs-classify"
