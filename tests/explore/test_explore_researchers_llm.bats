@@ -79,6 +79,11 @@ EOF
     assert_well_formed "$output"
 }
 
+@test "source-analysis: does not contain ambiguous any token" {
+    run grep -nE '\bany\b' "$REPO_ROOT/scripts/explore-research/source-analysis.sh"
+    [ "$status" -eq 1 ]
+}
+
 @test "internet: stubbed LLM produces well-formed JSON proposals with citation" {
     cat > README.md <<'EOF'
 # Sample

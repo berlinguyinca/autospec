@@ -4,7 +4,7 @@
 # Input: README + AGENTS.md + `tree -L 3` + last-7d commits → LLM call.
 # Output: JSON {"source":"source-analysis","proposals":[…]} on stdout.
 #
-# Graceful degradation: any LLM error / unparseable output / missing harness
+# Graceful degradation: all LLM errors / unparseable output / missing harness
 # → 0 proposals + a warn to stderr (loop continues per spec).
 #
 # Test seam: AUTOSPEC_LLM_STUB_OUTPUT — if set, treated as the LLM's raw
