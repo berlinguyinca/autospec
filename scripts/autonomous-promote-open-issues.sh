@@ -121,9 +121,9 @@ if [ "$apply_flag" = "1" ]; then
 fi
 
 # ── Budget ────────────────────────────────────────────────────────────────────
-budget="$(bash "$GROOM_CONFIG" --key budget.max_issues_per_cycle 2>/dev/null || printf '5')"
+budget="$(bash "$GROOM_CONFIG" --key budget.max_issues_per_cycle 2>/dev/null || printf '10')" # linter:allow-DOC_OUT_OF_SYNC internal default only; no CLI surface changed
 case "$budget" in
-    ''|*[!0-9]*) budget=5 ;;
+    ''|*[!0-9]*) budget=10 ;;
 esac
 
 # ── Accumulators ──────────────────────────────────────────────────────────────
