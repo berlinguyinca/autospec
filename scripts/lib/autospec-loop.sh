@@ -117,6 +117,15 @@ autospec_loop_harvest_next_prompt() {
     printf ''
 }
 
+# Keep loop-summary row formatting identical across success and error paths.
+_autospec_loop_append_table_row() {
+    local rows="$1" iteration="$2" source="$3" harvested="$4" status="$5" row
+    row="$(printf '| %4d | %-21s | %-60s | %10s | %4s | %-20s |' \
+        "$iteration" "$(printf '%s' "$source" | head -c 21)" \
+        "$(printf '%s' "$harvested" | head -c 60)" "0" "-" "$status")"
+    if [ -z "$rows" ]; then printf '%s' "$row"; else printf '%s\n%s' "$rows" "$row"; fi
+}
+
 # autospec_loop_run: the canonical multi-iteration driver. Reads globals
 # (PROMPT, ARTIFACT_DIR, REPO_ROOT, MEMORY_ROOT, MAX_ITERATIONS, ROUNDS,
 # SIM_ITER_DIR, SIM_TOKENS, TOKEN_CAP, TIME_CAP, SCRIPT_PATH) and writes:
@@ -196,11 +205,8 @@ autospec_loop_run() {
         if [ -z "${SIM_ITER_DIR:-}" ] && [ "$refine_status" -ne 0 ]; then
             status="iteration_error"
             row_status="iteration_error"
-            local row
-            row="$(printf '| %4d | %-21s | %-60s | %10s | %4s | %-20s |' \
-                "$iter" "$(printf '%s' "$cur_source" | head -c 21)" \
-                "handoff failed rc=$refine_status" "0" "-" "iteration_error")"
-            if [ -z "$table_rows" ]; then table_rows="$row"; else table_rows="$table_rows"$'\n'"$row"; fi
+            table_rows="$(_autospec_loop_append_table_row "$table_rows" "$iter" "$cur_source" \
+                "handoff failed rc=$refine_status" "iteration_error")"
             break
         fi
 
@@ -227,11 +233,8 @@ autospec_loop_run() {
             if [ -n "$stale_reason" ]; then
                 echo "code_health:$stale_reason path=$report_path" >&2
                 status="iteration_error"
-                local row
-                row="$(printf '| %4d | %-21s | %-60s | %10s | %4s | %-20s |' \
-                    "$iter" "$(printf '%s' "$cur_source" | head -c 21)" \
-                    "$stale_reason" "0" "-" "iteration_error")"
-                if [ -z "$table_rows" ]; then table_rows="$row"; else table_rows="$table_rows"$'\n'"$row"; fi
+                table_rows="$(_autospec_loop_append_table_row "$table_rows" "$iter" "$cur_source" \
+                    "$stale_reason" "iteration_error")"
                 break
             fi
         fi
@@ -291,15 +294,8 @@ EOF
             iter_records="$iter_records,$record"
         fi
 
-        local row
-        row="$(printf '| %4d | %-21s | %-60s | %10s | %4s | %-20s |' \
-            "$iter" "$(printf '%s' "$cur_source" | head -c 21)" \
-            "$row_harvested_short" "0" "-" "$row_status")"
-        if [ -z "$table_rows" ]; then
-            table_rows="$row"
-        else
-            table_rows="$table_rows"$'\n'"$row"
-        fi
+        table_rows="$(_autospec_loop_append_table_row "$table_rows" "$iter" "$cur_source" \
+            "$row_harvested_short" "$row_status")"
 
         if [ "$row_status" = "evidence_based_stop" ]; then
             status="evidence_based_stop"
