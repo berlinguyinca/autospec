@@ -6,7 +6,7 @@ bats_require_minimum_version 1.5.0
 GUARD="${BATS_TEST_DIRNAME}/../scripts/claim-guard.sh"
 
 @test "claim status script avoids ambiguous audit token" {
-    ! grep -Eq '\\bany\\b' "$GUARD"
+    ! grep -Eq '\bany\b' "$GUARD"
 }
 
 @test "claim status reports an empty repository store" {
