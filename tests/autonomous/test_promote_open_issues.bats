@@ -294,3 +294,9 @@ EOF
     [ "$(echo "$output" | jq -r '.dry | type')" = "boolean" ]
     [ "$(echo "$output" | jq -r '.promoted | type')" = "array" ]
 }
+
+@test "promote script avoids ambiguous any token flagged by audit" {
+    if grep -Eiq '\bany\b' "$SCRIPT"; then
+        return 1
+    fi
+}
