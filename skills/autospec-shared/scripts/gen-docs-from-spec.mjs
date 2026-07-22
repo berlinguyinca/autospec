@@ -292,11 +292,11 @@ if (isMain) {
     process.stdin.on('end', async () => {
       const clusters = JSON.parse(input);
       const result = await generateDocs({ clusters, outputDir });
-      console.log(JSON.stringify(result, null, 2));
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     });
   } else {
     const clusters = JSON.parse(fs.readFileSync(fixtureFile, 'utf8'));
     const result = await generateDocs({ clusters, outputDir });
-    console.log(JSON.stringify(result, null, 2));
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   }
 }
