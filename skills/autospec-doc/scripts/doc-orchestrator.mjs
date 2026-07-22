@@ -134,6 +134,20 @@ async function regenerateLlmsFull(cfg, repoRoot) {
 
 const CHECK_DRIFT_SH = path.resolve(__dirname, '../../../scripts/check-doc-drift.sh');
 
+function reportWarnings(warnings) {
+  for (const warning of warnings || []) {
+    process.stderr.write(`[autospec-doc] warning: ${warning}\n`);
+  }
+}
+
+async function regenerateLlmsFullSafely(cfg, repoRoot) {
+  try {
+    await regenerateLlmsFull(cfg, repoRoot);
+  } catch (error) {
+    process.stderr.write(`[autospec-doc] llms-full regen error: ${error.message}\n`);
+  }
+}
+
 /**
  * Run check-doc-drift.sh --working-tree and parse the JSON gate output.
  * Returns the changed-scope set as an array of scope identifiers.
@@ -183,7 +197,7 @@ async function handleIncremental(_opts) {
 
   console.log(`[autospec-doc] incremental: ${changedScopes.length} changed scope(s) detected for audiences [${names}]; regenerating affected scopes: ${changedScopes.join(', ')}`);
   // Regenerate llms-full.txt from any already-generated pages (cheap concat).
-  await regenerateLlmsFull(cfg, projRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
+  await regenerateLlmsFullSafely(cfg, projRoot);
   return 0;
 }
 
@@ -328,10 +342,10 @@ async function handleFull(_opts) {
     `[autospec-doc] full: regenerated every audience [${names}] — `
     + `${written} page(s) written, ${features.length} feature(s), ${cfg.audiences.length} audience(s).`,
   );
-  for (const w of warnings) process.stderr.write(`[autospec-doc] warning: ${w}\n`);
+  reportWarnings(warnings);
 
   // Regenerate llms-full.txt from the freshly written pages.
-  await regenerateLlmsFull(cfg, projRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
+  await regenerateLlmsFullSafely(cfg, projRoot);
 
   // Run the deterministic completeness audit and print its summary.
   const report = await runAudit(cfg, projRoot, features);
@@ -400,9 +414,9 @@ async function handleAudience(opts) {
     `[autospec-doc] audience: regenerated "${opts.audience}" only — `
     + `${written} page(s) written, ${features.length} feature(s).`,
   );
-  for (const w of warnings) process.stderr.write(`[autospec-doc] warning: ${w}\n`);
+  reportWarnings(warnings);
 
-  await regenerateLlmsFull(cfg, projRoot).catch(e => process.stderr.write(`[autospec-doc] llms-full regen error: ${e.message}\n`));
+  await regenerateLlmsFullSafely(cfg, projRoot);
   return 0;
 }
 

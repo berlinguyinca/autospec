@@ -373,6 +373,19 @@ EOF
   [[ "$output" == *"not a known audience"* ]]
 }
 
+@test "generation keeps the command successful when llms-full output cannot be written" {
+  seed_gen_config
+  # A directory at the output path deterministically makes writeLlmsFull fail
+  # with EISDIR; the orchestrator must report the warning without losing the
+  # audience generation result.
+  mkdir llms-full.txt
+  run node "$ORCH" --audience developer
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"audience: regenerated"* ]]
+  [[ "$output" == *"llms-full regen error"* ]]
+  [ -s docs/developer/features/export-pipeline.md ]
+}
+
 # ── Answerability / domain-term coverage audit (doc-coverage.mjs) ───────────────
 
 # Seed a config + a source file containing a SCREAMING_SNAKE enum constant that
