@@ -18,7 +18,7 @@ SH
 teardown() { rm -rf "$TMP"; }
 
 @test "source avoids ambiguous any token while retaining exclusion behavior" {
-  ! grep -Eq '\\bany\\b' "$SCRIPT"
+  ! grep -Eq '\bany\b' "$SCRIPT"
   export GH_ISSUES_FIXTURE="$TMP/open.json"
   printf '%s\n' '[{"number":1,"title":"held","body":"x","labels":[{"name":"hold:test"}]},{"number":2,"title":"ready","body":"y","labels":[]}]' > "$GH_ISSUES_FIXTURE"
   run bash "$SCRIPT" --repo o/r --budget 10
