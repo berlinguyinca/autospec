@@ -31,6 +31,16 @@ test('prioritizes coverage changes over assertion matching', () => {
   assert.equal(verdicts[0].bucket, 'LOOSENING');
 });
 
+test('detects focused Jasmine selectors without flagging adapter source markers', () => {
+  const verdicts = bucket(
+    diff(["describe('coverage', () => {})"], ["fdescribe('coverage', () => {})"]),
+    'example.js',
+  );
+
+  assert.equal(verdicts.length, 1);
+  assert.equal(verdicts[0].bucket, 'LOOSENING');
+});
+
 test('classifies unpaired assertions and tolerance changes', () => {
   const removed = bucket(diff(['assert value == 1'], []), 'test_example.py');
   const tolerance = bucket(
