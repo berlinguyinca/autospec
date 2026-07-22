@@ -817,5 +817,5 @@ if (isMain) {
   for (const w of (result.warnings || [])) {
     process.stderr.write(`warning: ${w}\n`);
   }
-  console.log(JSON.stringify({ files: result.files.map(f => ({ path: f.path, written: f.written, preserved_sections: f.preserved_sections })), warnings: result.warnings || [] }, null, 2));
+  process.stdout.write(`${JSON.stringify({ files: result.files.map(f => ({ path: f.path, written: f.written, preserved_sections: f.preserved_sections })), warnings: result.warnings || [] }, null, 2)}\n`);
 }
