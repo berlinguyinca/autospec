@@ -62,6 +62,7 @@ import os
 import subprocess
 import sys
 from html.parser import HTMLParser
+from typing import TypeAlias, TypedDict
 
 # Default Anthropic model for the api backend, env-overridable via
 # $AUTOSPEC_FAB_VISION_MODEL. claude-opus-4-8 supports base64 image content
@@ -73,13 +74,31 @@ _DEFAULT_MODEL = "claude-opus-4-8"
 # the cap only trims the resolved list the (none) backend ignores.
 _DEFAULT_MAX_IMAGES = 16
 
+ImagePath: TypeAlias = str
+JsonObject: TypeAlias = dict[str, object]
+
+
+class Observation(TypedDict, total=False):
+    observation: str
+    severity: str
+    view: str
+    rule: str
+
+
+class JudgeResult(TypedDict):
+    observations: list[Observation]
+
+
+class VerifyResult(TypedDict):
+    confirmed: bool
+
 
 class _ImgSrcParser(HTMLParser):
     """Collect every <img src="..."> value in document order."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.srcs: list = []
+        self.srcs: list[str] = []
 
     def handle_starttag(self, tag, attrs):
         if tag.lower() != "img":
@@ -101,7 +120,7 @@ def _max_images() -> int:
     return n if n > 0 else _DEFAULT_MAX_IMAGES
 
 
-def resolve_images(sheet_path: str) -> list:
+def resolve_images(sheet_path: str) -> list[ImagePath]:
     """
     Resolve the contact sheet HTML into a list of on-disk PNG paths.
 
@@ -128,7 +147,7 @@ def resolve_images(sheet_path: str) -> list:
         return []
 
     sheet_dir = os.path.dirname(os.path.abspath(sheet_path))
-    resolved = []
+    resolved: list[ImagePath] = []
     for src in parser.srcs:
         # Keep the referenced basename, resolved relative to the sheet dir.
         candidate = os.path.normpath(os.path.join(sheet_dir, src))
@@ -283,9 +302,9 @@ def _read_rules(rules_path: str | None) -> str:
         return ""
 
 
-def _image_blocks(images: list) -> list:
+def _image_blocks(images: list[ImagePath]) -> list[JsonObject]:
     """Build base64 image content blocks for the resolved PNG paths."""
-    blocks = []
+    blocks: list[JsonObject] = []
     for path in images:
         try:
             with open(path, "rb") as f:
@@ -304,7 +323,8 @@ def _image_blocks(images: list) -> list:
 
 
 def _stub_call(mode: str, sheet_path: str, rules_path: str | None,
-               images: list, stdin_obj) -> dict | None:
+               images: list[ImagePath], stdin_obj: JsonObject | None
+               ) -> JsonObject | None:
     """
     Delegate the model call to the $AUTOSPEC_FAB_VISION_STUB executable.
 
@@ -321,7 +341,7 @@ def _stub_call(mode: str, sheet_path: str, rules_path: str | None,
     argv = [stub, mode, sheet_path]
     if rules_path:
         argv.append(rules_path)
-    payload = {
+    payload: JsonObject = {
         "mode": mode,
         "sheet": sheet_path,
         "rules": rules_path,
@@ -352,7 +372,8 @@ def _stub_call(mode: str, sheet_path: str, rules_path: str | None,
     return value if isinstance(value, dict) else None
 
 
-def _api_message(content_blocks: list, schema: dict) -> dict | None:
+def _api_message(content_blocks: list[JsonObject], schema: JsonObject
+                 ) -> JsonObject | None:
     """
     Call the real Anthropic API with the given content blocks + JSON schema.
 
@@ -389,17 +410,20 @@ def _api_message(content_blocks: list, schema: dict) -> dict | None:
     return value if isinstance(value, dict) else None
 
 
-def _normalize_judge(payload) -> dict:
+def _normalize_judge(payload: object) -> JudgeResult:
     """Coerce a backend judge payload into {"observations": [list of dicts]}."""
     if not isinstance(payload, dict):
         return {"observations": []}
     raw = payload.get("observations")
     if not isinstance(raw, list):
         return {"observations": []}
-    return {"observations": [ob for ob in raw if isinstance(ob, dict)]}
+    observations: list[Observation] = [
+        ob for ob in raw if isinstance(ob, dict)
+    ]
+    return {"observations": observations}
 
 
-def judge(sheet_path: str, rules_path: str | None) -> dict:
+def judge(sheet_path: str, rules_path: str | None) -> JudgeResult:
     """
     JUDGE pass: review the contact sheet against the rules.
 
@@ -433,7 +457,7 @@ def judge(sheet_path: str, rules_path: str | None) -> dict:
 
 
 def verify(sheet_path: str, rules_path: str | None,
-           observation: dict | None) -> dict:
+           observation: JsonObject | None) -> VerifyResult:
     """
     VERIFY pass: confirm or reject one candidate observation.
 
@@ -471,7 +495,7 @@ def verify(sheet_path: str, rules_path: str | None,
     return {"confirmed": bool(confirmed)}
 
 
-def _read_stdin_observation():
+def _read_stdin_observation() -> JsonObject | None:
     """Read one observation JSON object from stdin; None if absent/malformed."""
     try:
         raw = sys.stdin.read()
@@ -486,7 +510,7 @@ def _read_stdin_observation():
     return value if isinstance(value, dict) else None
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="fab-vision-cli.py",
         description="autospec-fab vision CLI consumer "
