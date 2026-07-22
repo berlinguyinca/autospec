@@ -545,10 +545,10 @@ cmd_status() {
     ensure_store
     # status is read-only: an unwritable/empty store just prints nothing.
     if [ ! -d "$CLAIM_DIR" ]; then exit 0; fi
-    any=0
+    has_claims=0
     for cf in "$CLAIM_DIR"/*.json; do
         [ -e "$cf" ] || continue
-        any=1
+        has_claims=1
         key="$(jq -r '.lock_key // empty' "$cf" 2>/dev/null || true)"
         owner="$(jq -r '.owner_session // empty' "$cf" 2>/dev/null || true)"
         host="$(jq -r '.host // empty' "$cf" 2>/dev/null || true)"
@@ -558,7 +558,7 @@ cmd_status() {
         printf '%s\towner=%s\thost=%s\tupdated_at=%s\t%s\n' \
             "$key" "$owner" "$host" "$updated" "$flag"
     done
-    [ "$any" -eq 1 ] || printf '%s: no live claims for this repo\n' "$PROG"
+    [ "$has_claims" -eq 1 ] || printf '%s: no live claims for this repo\n' "$PROG"
     exit 0
 }
 
