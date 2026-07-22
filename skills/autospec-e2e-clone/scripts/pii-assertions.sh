@@ -3,7 +3,7 @@
 #
 # Run post-anonymization PII assertions from the clone contract.
 # Each assertion is a SQL query that should return 0 rows / count = 0.
-# Fails closed: any non-zero count → exit 2.
+# Fails closed: every non-zero count → exit 2.
 #
 # Usage:
 #   pii-assertions.sh <snapshot-dir> [--contract <path-to-clone.yml>]
