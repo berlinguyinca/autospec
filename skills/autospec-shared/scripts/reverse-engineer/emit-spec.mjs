@@ -330,9 +330,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
     try {
       const clusterResult = JSON.parse(input);
       const result = await emitSpecs(clusterResult, { docsDir, repoRoot });
-      console.log(JSON.stringify(result, null, 2));
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } catch (err) {
-      console.error('emit-spec: failed:', err.message);
+      process.stderr.write(`emit-spec: failed: ${err.message}\n`);
       process.exit(1);
     }
   });

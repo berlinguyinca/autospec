@@ -16,6 +16,11 @@ SCRIPT="$BATS_TEST_DIRNAME/../../skills/autospec-shared/scripts/reverse-engineer
   ! grep -Eq 'console\.(log|debug|info|warn|error)|(^|[^[:alnum:]_])debugger([^[:alnum:]_]|$)' "$cluster"
 }
 
+@test "reverse-engineer emit-spec avoids debug logging APIs" {
+  emit_spec="$BATS_TEST_DIRNAME/../../skills/autospec-shared/scripts/reverse-engineer/emit-spec.mjs"
+  ! grep -Eq 'console\.(log|debug|info|warn|error)|(^|[^[:alnum:]_])debugger([^[:alnum:]_]|$)' "$emit_spec"
+}
+
 @test "reverse-engineer cluster emits JSON through stdout" {
   cluster="$BATS_TEST_DIRNAME/../../skills/autospec-shared/scripts/reverse-engineer/cluster.mjs"
   run bash -c "printf '%s' '[]' | node '$cluster'"
