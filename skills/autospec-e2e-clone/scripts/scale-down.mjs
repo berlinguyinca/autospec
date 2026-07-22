@@ -1,22 +1,4 @@
 #!/usr/bin/env node
-// skills/autospec-e2e-clone/scripts/scale-down.mjs
-//
-// Scale-down with foreign-key reachability (C5).
-//
-// Reads FK constraints from the snapshot's schema.sql (or a fk-meta.json file),
-// samples N rows per table per `tables_sample` contract declaration, then performs
-// BFS reachability closure: any row referenced via FK by a sampled row is pulled in
-// from its own snapshot CSV.  Rewrites the CSV files to include only the closure set.
-// Emits <snapshot-dir>/manifest.json with per-table included-row counts.
-//
-// Usage:
-//   node scale-down.mjs <snapshot-dir> [--contract <path>] [--repo-root <path>]
-//
-// Exit codes:
-//   0  success (or nothing-to-do)
-//   1  fatal (missing deps, bad files)
-//   2  refuse-to-run (contract invalid)
-
 import {
   existsSync,
   mkdirSync,
@@ -30,10 +12,6 @@ import { execFileSync } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { createReadStream } from 'node:fs';
 import { parseArgs } from 'node:util';
-
-// ---------------------------------------------------------------------------
-// Arg parsing
-// ---------------------------------------------------------------------------
 
 const { values: args, positionals } = parseArgs({
   args: process.argv.slice(2),
@@ -64,10 +42,6 @@ if (!existsSync(resolvedSnapshot)) {
   console.error(`scale-down: fatal: snapshot-dir not found: ${resolvedSnapshot}`);
   process.exit(1);
 }
-
-// ---------------------------------------------------------------------------
-// Locate repo root and contract
-// ---------------------------------------------------------------------------
 
 function findRepoRoot(startDir) {
   let dir = startDir;
@@ -100,10 +74,6 @@ if (!existsSync(contractPath)) {
   process.exit(2);
 }
 
-// ---------------------------------------------------------------------------
-// Load contract via yq
-// ---------------------------------------------------------------------------
-
 function requireTool(tool) {
   try {
     execFileSync('which', [tool], { stdio: 'ignore' });
@@ -127,10 +97,6 @@ try {
   process.exit(1);
 }
 
-// ---------------------------------------------------------------------------
-// Extract scale_down config and tables_sample from all sources
-// ---------------------------------------------------------------------------
-
 const scaleDownConfig = contractJson?.scale_down ?? {};
 const foreignKeyAware = scaleDownConfig.foreign_key_aware !== false; // default true
 const maxDepth = Number(scaleDownConfig.max_depth ?? 8);
@@ -152,10 +118,6 @@ if (Object.keys(tablesSample).length === 0) {
   writeManifest({});
   process.exit(0);
 }
-
-// ---------------------------------------------------------------------------
-// CSV helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Parse a CSV file into array of row-objects.  Handles quoted fields naively
@@ -238,10 +200,6 @@ function writeCsvString(headers, rows) {
   }
   return lines.join('\n') + '\n';
 }
-
-// ---------------------------------------------------------------------------
-// FK metadata: parse schema.sql or load fk-meta.json
-// ---------------------------------------------------------------------------
 
 /**
  * A FK edge: child table has a column that references parent table's column.
@@ -350,10 +308,6 @@ function parseFkEdgesFromSql(sql) {
   return edges;
 }
 
-// ---------------------------------------------------------------------------
-// Main scale-down logic
-// ---------------------------------------------------------------------------
-
 /**
  * Detect all CSV tables in the snapshot directory.
  * @returns {string[]} table names (without .csv)
@@ -374,53 +328,46 @@ function writeManifest(counts) {
   console.log(`scale-down: wrote manifest → ${manifestPath}`);
 }
 
+/** @returns {Record<string, { headers: string[], rows: Record<string, string>[] }>} */
+function loadTableData(snapshotDir, allTables, sampleConfig) {
+  const tableData = {};
+  const tables = new Set([...allTables, ...Object.keys(sampleConfig)]);
+  for (const tbl of tables) {
+    tableData[tbl] = readCsv(join(snapshotDir, `${tbl}.csv`));
+  }
+  return tableData;
+}
+
+function runNaiveSampling(snapshotDir, allTables, tableData, sampleConfig) {
+  console.log('scale-down: foreign_key_aware=false — performing naive sampling only');
+  const counts = {};
+  for (const [tbl, limit] of Object.entries(sampleConfig)) {
+    const data = tableData[tbl];
+    if (!data || data.rows.length === 0) {
+      counts[tbl] = 0;
+      continue;
+    }
+    const sampled = data.rows.slice(0, limit);
+    writeFileSync(join(snapshotDir, `${tbl}.csv`), writeCsvString(data.headers, sampled), 'utf8');
+    counts[tbl] = sampled.length;
+    console.log(`scale-down: naive sample ${tbl}: ${sampled.length} rows`);
+  }
+  for (const tbl of allTables) {
+    if (!(tbl in counts)) counts[tbl] = tableData[tbl]?.rows.length ?? 0;
+  }
+  writeManifest(counts);
+}
+
 async function main() {
   const allTables = detectSnapshotTables(resolvedSnapshot);
   console.log(`scale-down: detected snapshot tables: ${allTables.join(', ') || '(none)'}`);
   console.log(`scale-down: tables_sample: ${JSON.stringify(tablesSample)}`);
   console.log(`scale-down: foreign_key_aware=${foreignKeyAware}, max_depth=${maxDepth}`);
 
-  // Load all table CSVs into memory
-  /** @type {Record<string, { headers: string[], rows: Record<string, string>[] }>} */
-  const tableData = {};
-  for (const tbl of allTables) {
-    tableData[tbl] = readCsv(join(resolvedSnapshot, `${tbl}.csv`));
-  }
-
-  // Also load any tables listed in tables_sample that might not be in allTables yet
-  for (const tbl of Object.keys(tablesSample)) {
-    if (!tableData[tbl]) {
-      const p = join(resolvedSnapshot, `${tbl}.csv`);
-      tableData[tbl] = readCsv(p);
-    }
-  }
+  const tableData = loadTableData(resolvedSnapshot, allTables, tablesSample);
 
   if (!foreignKeyAware) {
-    // Simple sampling only — no reachability closure
-    console.log('scale-down: foreign_key_aware=false — performing naive sampling only');
-    const counts = {};
-    for (const [tbl, limit] of Object.entries(tablesSample)) {
-      const data = tableData[tbl];
-      if (!data || data.rows.length === 0) {
-        counts[tbl] = 0;
-        continue;
-      }
-      const sampled = data.rows.slice(0, limit);
-      writeFileSync(
-        join(resolvedSnapshot, `${tbl}.csv`),
-        writeCsvString(data.headers, sampled),
-        'utf8',
-      );
-      counts[tbl] = sampled.length;
-      console.log(`scale-down: naive sample ${tbl}: ${sampled.length} rows`);
-    }
-    // Tables not in tables_sample remain untouched
-    for (const tbl of allTables) {
-      if (!(tbl in counts)) {
-        counts[tbl] = tableData[tbl]?.rows.length ?? 0;
-      }
-    }
-    writeManifest(counts);
+    runNaiveSampling(resolvedSnapshot, allTables, tableData, tablesSample);
     return;
   }
 
