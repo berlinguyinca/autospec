@@ -6,6 +6,11 @@ SCRIPT="$BATS_TEST_DIRNAME/../../skills/autospec-shared/scripts/reverse-engineer
   ! grep -Eq 'console\.(log|debug|info|warn|error)|(^|[^[:alnum:]_])debugger([^[:alnum:]_]|$)' "$SCRIPT"
 }
 
+@test "reverse-engineer inventory avoids debug logging APIs" {
+  inventory="$BATS_TEST_DIRNAME/../../skills/autospec-shared/scripts/reverse-engineer/inventory.mjs"
+  ! grep -Eq 'console\.(log|debug|info|warn|error)|(^|[^[:alnum:]_])debugger([^[:alnum:]_]|$)' "$inventory"
+}
+
 @test "reverse-engineer orchestrator remains shell-parseable" {
   run bash -n "$SCRIPT"
   [ "$status" -eq 0 ]

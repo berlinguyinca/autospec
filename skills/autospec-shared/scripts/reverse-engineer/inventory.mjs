@@ -157,9 +157,9 @@ export async function inventory(repoRoot, opts = {}) {
 if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.url.replace('file://', ''))) {
   const repoRoot = process.argv[2] || process.cwd();
   inventory(repoRoot).then(entries => {
-    console.log(JSON.stringify(entries, null, 2));
+    process.stdout.write(`${JSON.stringify(entries, null, 2)}\n`);
   }).catch(err => {
-    console.error(err);
+    process.stderr.write(`${err}\n`);
     process.exit(1);
   });
 }
