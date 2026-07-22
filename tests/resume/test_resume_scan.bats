@@ -55,6 +55,11 @@ setup() {
 
 teardown() { rm -rf "$TEST_TMP"; }
 
+@test "resume scanner contains no explicit any usage" {
+    run grep -En '(^|[^[:alnum:]_])any([^[:alnum:]_]|$)' "$SCAN"
+    [ "$status" -eq 1 ]
+}
+
 write_hostname_mock() {
     cat > "$MOCK_DIR/hostname" <<EOF
 #!/usr/bin/env bash
