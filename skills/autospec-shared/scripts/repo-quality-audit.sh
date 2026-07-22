@@ -898,22 +898,22 @@ write_runtime_json() {
   done
 }
 
-scan_text_files() {
+source_scan_find() {
   find "$REPO" \
     \( -path "$REPO/.git" -o -path "$REPO/node_modules" -o -path "$REPO/.autospec" \
       -o -path "$REPO/dist" -o -path "$REPO/build" -o -path "$REPO/coverage" \
       -o -path "$REPO/.angular" -o -path "$REPO/.next" -o -path "$REPO/out" \
-      -o -path "$REPO/vendor" -o -path "$REPO/public/build" \) -prune -o \
+      -o -path "$REPO/vendor" -o -path "$REPO/public/build" \) -prune -o "$@"
+}
+
+scan_text_files() {
+  source_scan_find \
     -type f \( -name '*.js' -o -name '*.jsx' -o -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.html' -o -name '*.vue' -o -name '*.svelte' -o -name '*.py' -o -name '*.sh' \) \
-	    -print
+    -print
 }
 
 scan_text_file_metrics() {
-  find "$REPO" \
-    \( -path "$REPO/.git" -o -path "$REPO/node_modules" -o -path "$REPO/.autospec" \
-      -o -path "$REPO/dist" -o -path "$REPO/build" -o -path "$REPO/coverage" \
-      -o -path "$REPO/.angular" -o -path "$REPO/.next" -o -path "$REPO/out" \
-      -o -path "$REPO/vendor" -o -path "$REPO/public/build" \) -prune -o \
+  source_scan_find \
     -type f \( -name '*.js' -o -name '*.jsx' -o -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.html' -o -name '*.vue' -o -name '*.svelte' -o -name '*.py' -o -name '*.sh' \) \
     -exec awk '
       function emit_summary() {
@@ -1284,12 +1284,7 @@ while IFS= read -r f; do
     "File is larger than 512 KiB and may indicate generated or bundled content checked into source." \
     "large-files:$rel"
 done <<EOF
-$(find "$REPO" \
-  \( -path "$REPO/.git" -o -path "$REPO/node_modules" -o -path "$REPO/.autospec" \
-    -o -path "$REPO/dist" -o -path "$REPO/build" -o -path "$REPO/coverage" \
-    -o -path "$REPO/.angular" -o -path "$REPO/.next" -o -path "$REPO/out" \
-    -o -path "$REPO/vendor" -o -path "$REPO/public/build" \) -prune -o \
-  -type f -size +512k -print)
+$(source_scan_find -type f -size +512k -print)
 EOF
 
 ndjson_to_array() {
