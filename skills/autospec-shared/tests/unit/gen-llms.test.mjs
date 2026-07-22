@@ -261,6 +261,12 @@ test('gen-llms-txt.sh: second run is idempotent (no file change)', () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
+test('gen-llms-txt.sh: cluster extraction writes through stdout without debug logging', () => {
+  const script = fs.readFileSync(path.join(SCRIPTS_DIR, 'gen-llms-txt.sh'), 'utf8');
+  assert.doesNotMatch(script, /console\.log\s*\(/, 'generator must not contain console.log debug output');
+  assert.match(script, /process\.stdout\.write\(/, 'cluster entries must use explicit stdout output');
+});
+
 // ── Test 6: Empty clusters ────────────────────────────────────────────────────
 
 test('generateManifest: empty clusters produces valid minimal manifest', () => {
