@@ -30,3 +30,10 @@ test('CLI fixture emits its greeting without debug logging', async () => {
   assert.equal(result.stdout, 'Hello, Ada!\n');
   assert.equal(result.stderr, '');
 });
+
+test('PII fixture contains no debug logging sink', async () => {
+  const fixturePath = path.resolve(__dirname, '../fixtures/secaudit/pii-log.js');
+  const source = await readFile(fixturePath, 'utf8');
+  assert.doesNotMatch(source, /console\.(log|debug|info|warn|error)\s*\(/);
+  assert.doesNotMatch(source, /\bdebugger\b/);
+});
