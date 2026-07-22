@@ -243,3 +243,5 @@ grooming:
 - Whether the self-gov ratchet clones `advisor-govern.sh` or generalizes it into a
   shared `govern.sh` primitive (decide at plan time; prefer generalize if the
   shapes are identical).
+
+- Tier 1.5 grooming defaults to a maximum of 10 candidates per cycle; tracker and bot-owned issues remain excluded.

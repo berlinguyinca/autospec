@@ -114,7 +114,7 @@ while IFS= read -r closed_issue; do
 done > "$closed_hashes_file"
 
 # ── Classify + filter open issues via jq ────────────────────────────────────
-excluded_labels='["auto-implement","no-auto","epic","paused-by-user","autospec:needs-human","wontfix","duplicate","security:quarantined"]'
+excluded_labels='["auto-implement","no-auto","epic","type:tracker","paused-by-user","in-progress-by-bot","autospec:needs-human","wontfix","duplicate","security:quarantined"]'
 
 filtered_json="$(printf '%s' "$open_json" | jq -c --argjson excluded "$excluded_labels" '
     def is_excluded_label:
