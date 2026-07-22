@@ -46,6 +46,10 @@ _install_contract() {
   [ -x "$RUNNER" ]
 }
 
+@test "runner does not use debug console logging in embedded validation" {
+  ! grep -Eq '\\bconsole\\.(log|error|warn|debug)\\s*\\(' "$RUNNER"
+}
+
 # ── fixture 1: absent contract -> exit 0, no-op, writes nothing ───────────────
 @test "fixture 1: absent contract -> exit 0 no-op, writes nothing" {
   # No .autospec/qa-deploy.yml present.

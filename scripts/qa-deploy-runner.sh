@@ -156,14 +156,14 @@ try {
       try { Ajv2020 = require(paths[i]); break; } catch(e2) {}
     }
   }
-  if (!Ajv2020) { console.error('ajv/dist/2020 not found'); process.exit(1); }
+  if (!Ajv2020) { process.stderr.write('ajv/dist/2020 not found\\n'); process.exit(1); }
   var schema = JSON.parse(fs.readFileSync('$SCHEMA_FILE', 'utf8'));
   var data   = JSON.parse(fs.readFileSync('$CONTRACT_JSON_FILE', 'utf8'));
   var ajv    = new Ajv2020({strict: false, allErrors: true});
   var valid  = ajv.validate(schema, data);
-  if (valid) { console.log('valid'); process.exit(0); }
-  else { console.error(ajv.errorsText()); process.exit(2); }
-} catch(e) { console.error(e.message); process.exit(1); }
+  if (valid) { process.stdout.write('valid\\n'); process.exit(0); }
+  else { process.stderr.write(ajv.errorsText() + '\\n'); process.exit(2); }
+} catch(e) { process.stderr.write(e.message + '\\n'); process.exit(1); }
 " 2>&1)"
 AJV_RC=$?
 if [ "$AJV_RC" -ne 0 ]; then
