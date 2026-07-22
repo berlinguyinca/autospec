@@ -380,7 +380,7 @@ _self_originated_base_config_get() {
 # docs/specs/2026-07-10-autonomous-integration-branch-design.md §Architecture
 # item 6). Blocks a self-originated PR (per autonomous-provenance.sh resolve)
 # that targets a protected parent branch directly, instead of the autonomous
-# integration branch. Fails CLOSED: any lookup ambiguity (unresolved base ref,
+# integration branch. Fails CLOSED: every lookup ambiguity (unresolved base ref,
 # no linked issue, resolver failure, resolver output that is not exactly
 # `operator`) is treated as self on a protected base, mirroring
 # autonomous-provenance.sh's own fail-closed-to-self posture. Policy config
@@ -501,7 +501,7 @@ cmd_self_originated() {
         provenance_status=0
         provenance="$(bash "$provenance_sh" resolve --issue "$issue" --repo "$repo" 2>/dev/null)" || provenance_status=$?
         if [ "$provenance_status" -ne 0 ]; then
-            # Resolver failed — discard any partial stdout entirely and
+            # Resolver failed — discard all partial stdout entirely and
             # treat the issue as self (fail closed).
             provenance="self"
         fi
