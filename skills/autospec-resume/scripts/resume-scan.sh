@@ -22,7 +22,7 @@
 #     heartbeat host == $(hostname). Cross-host or missing host MUST
 #     clean-restart off origin/main.
 #   - Attempt cap: capped at AUTOSPEC_RESUME_MAX_ATTEMPTS (default 3) consecutive
-#     attempts without forward progress (any issue merged). Counter resets on a
+#     attempts without forward progress (an issue merged). Counter resets on a
 #     merged issue.
 #
 # Usage:
@@ -128,12 +128,12 @@ in_progress="$(gh issue list --repo "$REPO" --label in-progress-by-bot \
 # paused-by-user issues (pre-condition c):
 paused="$(gh issue list --repo "$REPO" --label paused-by-user \
     --state all --json number --jq '.[].number' 2>/dev/null || true)"
-# any open auto-implement OR in-progress issues (pre-condition d):
+# open auto-implement OR in-progress issues (pre-condition d):
 open_any="$(gh issue list --repo "$REPO" --state open \
     --label auto-implement --json number --jq '.[].number' 2>/dev/null || true)"
 open_any="$(printf '%s\n%s\n' "$open_any" "$in_progress" | sed '/^$/d' | sort -u)"
 
-# ── Pre-condition (c): any paused-by-user -> exit 0. ──────────────────────────
+# ── Pre-condition (c): a paused-by-user issue -> exit 0. ──────────────────────
 if [ -n "$paused" ]; then
     say "paused-by-user present"
     exit 0
