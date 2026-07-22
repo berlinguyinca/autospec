@@ -57,6 +57,13 @@ teardown() {
     rm -rf "$HOME" "$STUB_BIN"
 }
 
+@test "watchdog source avoids ambiguous any audit token" {
+    run grep -nE '\bany\b' "$SCRIPT"
+
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
 write_hb() {
     issue="$1"
     step="$2"

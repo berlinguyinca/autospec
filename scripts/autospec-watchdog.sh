@@ -372,7 +372,7 @@ normalize_heartbeat() {
 # (rev-parse, log) before the single per-candidate `gh` call.
 
 # True (0) if a heartbeat for $issue is live (fresh ts within the freshness
-# window). Conservative: any parse failure is treated as "not live" so it does
+# window). Conservative: a parse failure is treated as "not live" so it does
 # not by itself save a worktree — the un-pushed and issue-state guards remain.
 _gc_heartbeat_is_live() {
     issue="$1"
@@ -406,7 +406,7 @@ gc_orphaned_worktrees() {
             ''|*[!0-9]*) continue ;;
         esac
 
-        # GUARD 1 — un-pushed commits. NEVER prune if any local commit is not on
+        # GUARD 1 — un-pushed commits. NEVER prune if a local commit is not on
         # a remote. This is the load-bearing data-integrity check.
         unpushed="$(git -C "$wt" log --not --remotes --oneline 2>/dev/null || echo "x")"
         [ -z "$unpushed" ] || continue
