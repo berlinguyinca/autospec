@@ -76,7 +76,7 @@ if ! command -v gap_title_hash >/dev/null 2>&1; then
 fi
 
 # ── 1. Resolve configured audiences (name + path) via doc-config.mjs ─────────
-# Best-effort: any failure → no audience gaps (never block).
+# Best-effort: on failure, emit no audience gaps (never block).
 AUD_JSON="[]"
 DOC_CONFIG="$SCRIPT_DIR/../../autospec-doc/scripts/doc-config.mjs"
 if command -v node >/dev/null 2>&1 && [ -f "$DOC_CONFIG" ]; then
