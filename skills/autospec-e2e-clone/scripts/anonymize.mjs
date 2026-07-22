@@ -15,7 +15,18 @@
 //   2  refuse-to-run (contract invalid / no anonymize rules)
 
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  createReadStream,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -86,8 +97,6 @@ if (!existsSync(contractPath)) {
 // ---------------------------------------------------------------------------
 // Load contract (requires yq)
 // ---------------------------------------------------------------------------
-
-import { execFileSync } from 'node:child_process';
 
 function requireTool(tool) {
   try {
@@ -325,6 +334,38 @@ function formatCsvLine(fields) {
   return fields.map(formatCsvField).join(',');
 }
 
+function removeIfPresent(path) {
+  try {
+    unlinkSync(path);
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw err;
+  }
+}
+
+// Windows refuses to rename a file over an existing path. Move the original
+// aside first, then restore it if installing the anonymized output fails.
+function replaceFilePortable(tmpPath, filePath) {
+  const backupPath = `${filePath}.anonymize-backup`;
+  // Preserve a backup when an interrupted replacement left the destination
+  // missing; it may be the only remaining copy of the source data.
+  if (existsSync(backupPath)) {
+    if (existsSync(filePath)) removeIfPresent(backupPath);
+    else renameSync(backupPath, filePath);
+  }
+  renameSync(filePath, backupPath);
+  try {
+    renameSync(tmpPath, filePath);
+  } catch (err) {
+    try {
+      renameSync(backupPath, filePath);
+    } catch (restoreErr) {
+      err.message += `; could not restore original: ${restoreErr.message}`;
+    }
+    throw err;
+  }
+  removeIfPresent(backupPath);
+}
+
 /**
  * Process a CSV snapshot file for a given table's anonymize rules.
  * Reads <file>, writes <file>.anon, then replaces the original.
@@ -336,81 +377,51 @@ async function processCsvFile(filePath, tableRule) {
   if (colEntries.length === 0) return;
 
   const tmpPath = filePath + '.anon';
+  removeIfPresent(tmpPath);
   const input = createReadStream(filePath, { encoding: 'utf8' });
   const output = createWriteStream(tmpPath, { encoding: 'utf8' });
   const rl = createInterface({ input, crlfDelay: Infinity });
 
-  let headerLine = null;
   let headers = [];
   let colIndexes = {}; // colName → index
 
-  let firstLine = true;
   let lineCount = 0;
-
-  await new Promise((resolveStream, rejectStream) => {
-    rl.on('line', async (line) => {
-      try {
-        if (firstLine) {
-          firstLine = false;
-          headerLine = line;
-          headers = parseCsvLine(line);
-          // Map column names to indexes
-          for (const [colName] of colEntries) {
-            const idx = headers.findIndex(
-              (h) => h.trim().toLowerCase() === colName.toLowerCase(),
-            );
-            if (idx === -1) {
-              console.error(
-                `anonymize: warn: column '${colName}' not found in ${filePath} headers — skipping`,
-              );
-            } else {
-              colIndexes[colName] = idx;
-            }
-          }
-          output.write(line + '\n');
-          return;
+  let firstLine = true;
+  for await (const line of rl) {
+    if (firstLine) {
+      firstLine = false;
+      headers = parseCsvLine(line);
+      for (const [colName] of colEntries) {
+        const idx = headers.findIndex((h) => h.trim().toLowerCase() === colName.toLowerCase());
+        if (idx === -1) {
+          console.error(`anonymize: warn: column '${colName}' not found in ${filePath} headers — skipping`);
+        } else {
+          colIndexes[colName] = idx;
         }
-
-        if (line.trim() === '') {
-          output.write('\n');
-          return;
-        }
-
-        const fields = parseCsvLine(line);
-        lineCount++;
-
-        for (const [colName, ruleKind] of colEntries) {
-          const idx = colIndexes[colName];
-          if (idx === undefined || idx >= fields.length) continue;
-
-          const originalValue = fields[idx];
-          const tableCol = `${tableRule.table}.${colName}`;
-
-          // Handle rule as string or object with kind+params
-          let ruleKindStr = ruleKind;
-          let ruleParams = undefined;
-          if (typeof ruleKind === 'object' && ruleKind !== null) {
-            ruleKindStr = ruleKind.kind;
-            ruleParams = ruleKind.params;
-          }
-
-          fields[idx] = await applyRule(ruleKindStr, originalValue, tableCol, ruleParams);
-        }
-
-        output.write(formatCsvLine(fields) + '\n');
-      } catch (err) {
-        rejectStream(err);
       }
-    });
-    rl.on('close', () => resolveStream());
-    rl.on('error', rejectStream);
-  });
+      output.write(line + '\n');
+      continue;
+    }
+
+    if (line.trim() === '') {
+      output.write('\n');
+      continue;
+    }
+
+    const fields = parseCsvLine(line);
+    lineCount++;
+    for (const [colName, ruleKind] of colEntries) {
+      const idx = colIndexes[colName];
+      if (idx === undefined || idx >= fields.length) continue;
+      const { kind, params } = normalizeRule(ruleKind);
+      fields[idx] = await applyRule(kind, fields[idx], `${tableRule.table}.${colName}`, params);
+    }
+    output.write(formatCsvLine(fields) + '\n');
+  }
 
   await new Promise((res, rej) => output.end((err) => (err ? rej(err) : res())));
 
-  // Replace original with anonymized
-  const { renameSync } = await import('node:fs');
-  renameSync(tmpPath, filePath);
+  replaceFilePortable(tmpPath, filePath);
 
   console.log(`anonymize: processed ${lineCount} rows in ${filePath}`);
 }
@@ -428,6 +439,7 @@ async function processCsvFile(filePath, tableRule) {
  */
 async function processSqlFile(filePath, rulesByTable) {
   const tmpPath = filePath + '.anon';
+  removeIfPresent(tmpPath);
   const input = createReadStream(filePath, { encoding: 'utf8' });
   const output = createWriteStream(tmpPath, { encoding: 'utf8' });
   const rl = createInterface({ input, crlfDelay: Infinity });
@@ -437,66 +449,53 @@ async function processSqlFile(filePath, rulesByTable) {
   // Regex to match: INSERT INTO "table" (...) VALUES (...);
   const insertRe = /^INSERT INTO\s+["']?(\w+)["']?\s*\(([^)]+)\)\s+VALUES\s*\((.+)\);?\s*$/i;
 
-  await new Promise((resolveStream, rejectStream) => {
-    rl.on('line', async (line) => {
-      try {
-        const m = line.match(insertRe);
-        if (!m) {
-          output.write(line + '\n');
-          return;
-        }
+  for await (const line of rl) {
+    const m = line.match(insertRe);
+    if (!m) {
+      output.write(line + '\n');
+      continue;
+    }
 
-        const tableName = m[1];
-        const tableRule = rulesByTable[tableName.toLowerCase()];
-        if (!tableRule) {
-          output.write(line + '\n');
-          return;
-        }
+    const tableName = m[1];
+    const tableRule = rulesByTable[tableName.toLowerCase()];
+    if (!tableRule) {
+      output.write(line + '\n');
+      continue;
+    }
 
-        const cols = m[2].split(',').map((c) => c.trim().replace(/^["']|["']$/g, ''));
-        const valStr = m[3];
+    const cols = m[2].split(',').map((c) => c.trim().replace(/^["']|["']$/g, ''));
+    const valStr = m[3];
 
-        // Parse values (simplified — handles single-quoted strings, NULL, numbers)
-        const values = parseSqlValues(valStr);
-        if (!values) {
-          output.write(line + '\n');
-          return;
-        }
+    // Parse values (simplified — handles single-quoted strings, NULL, numbers)
+    const values = parseSqlValues(valStr);
+    if (!values) {
+      output.write(line + '\n');
+      continue;
+    }
 
-        const columns = tableRule.columns || {};
-        for (const [colName, ruleKind] of Object.entries(columns)) {
-          const idx = cols.findIndex((c) => c.toLowerCase() === colName.toLowerCase());
-          if (idx === -1 || idx >= values.length) continue;
+    const columns = tableRule.columns || {};
+    for (const [colName, ruleKind] of Object.entries(columns)) {
+      const idx = cols.findIndex((c) => c.toLowerCase() === colName.toLowerCase());
+      if (idx === -1 || idx >= values.length) continue;
+      const { kind, params } = normalizeRule(ruleKind);
+      values[idx] = await applyRule(kind, values[idx], `${tableName}.${colName}`, params);
+    }
 
-          let ruleKindStr = ruleKind;
-          let ruleParams;
-          if (typeof ruleKind === 'object' && ruleKind !== null) {
-            ruleKindStr = ruleKind.kind;
-            ruleParams = ruleKind.params;
-          }
-
-          const originalValue = values[idx];
-          const tableCol = `${tableName}.${colName}`;
-          values[idx] = await applyRule(ruleKindStr, originalValue, tableCol, ruleParams);
-        }
-
-        const newValStr = values.map(formatSqlValue).join(', ');
-        const colList = cols.map((c) => `"${c}"`).join(', ');
-        output.write(`INSERT INTO "${tableName}" (${colList}) VALUES (${newValStr});\n`);
-        rowCount++;
-      } catch (err) {
-        rejectStream(err);
-      }
-    });
-    rl.on('close', () => resolveStream());
-    rl.on('error', rejectStream);
-  });
+    const newValStr = values.map(formatSqlValue).join(', ');
+    const colList = cols.map((c) => `"${c}"`).join(', ');
+    output.write(`INSERT INTO "${tableName}" (${colList}) VALUES (${newValStr});\n`);
+    rowCount++;
+  }
 
   await new Promise((res, rej) => output.end((err) => (err ? rej(err) : res())));
 
-  const { renameSync } = await import('node:fs');
-  renameSync(tmpPath, filePath);
+  replaceFilePortable(tmpPath, filePath);
   console.log(`anonymize: processed ${rowCount} INSERT rows in ${filePath}`);
+}
+
+function normalizeRule(rule) {
+  if (typeof rule === 'object' && rule !== null) return { kind: rule.kind, params: rule.params };
+  return { kind: rule, params: undefined };
 }
 
 /** Parse a SQL VALUES list into an array of JS values (null or string). */
@@ -557,6 +556,7 @@ function formatSqlValue(value) {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  recoverTemporaryOutputs(resolvedSnapshot);
   const rules = anonymizeConfig.rules;
 
   // Build lookup: tableName (lower) → rule
@@ -566,8 +566,6 @@ async function main() {
   }
 
   // Walk snapshot dir for CSV and SQL files
-  const { readdirSync, statSync } = await import('node:fs');
-
   function walkDir(dir) {
     const files = [];
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -604,7 +602,30 @@ async function main() {
   console.log(`anonymize: done`);
 }
 
+function cleanupTemporaryOutputs(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) cleanupTemporaryOutputs(full);
+    else if (entry.name.endsWith('.anon')) removeIfPresent(full);
+    else if (entry.name.endsWith('.anonymize-backup')) {
+      const destination = full.slice(0, -'.anonymize-backup'.length);
+      // Restore before cleanup when the backup is the only source copy.
+      if (!existsSync(destination)) renameSync(full, destination);
+      else removeIfPresent(full);
+    }
+  }
+}
+
+function recoverTemporaryOutputs(dir) {
+  cleanupTemporaryOutputs(dir);
+}
+
 main().catch((err) => {
+  try {
+    cleanupTemporaryOutputs(resolvedSnapshot);
+  } catch (cleanupErr) {
+    err.message += `; temporary output cleanup failed: ${cleanupErr.message}`;
+  }
   console.error(`anonymize: fatal: ${err.message}`);
   process.exit(1);
 });

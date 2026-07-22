@@ -32,3 +32,9 @@ See [design spec](../../docs/specs/2026-05-22-autospec-e2e-clone-design.md) for 
 
 C1 (this PR) — Skill scaffold + contract loader + JSON Schema.
 C2–C10 — Snapshot drivers, anonymize, scale-down, seed, expose, teardown (pending).
+
+Anonymization writes through a temporary file and replaces the source with
+platform-safe backup/restore semantics. Interrupted runs remove stale `.anon`
+files and restore a leftover `.anonymize-backup` when the source is missing;
+the backup is removed only after the source exists. This is recovery-safe, not a
+transactional filesystem guarantee.
