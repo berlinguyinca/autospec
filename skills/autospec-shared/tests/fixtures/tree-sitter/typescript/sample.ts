@@ -22,7 +22,5 @@ export class Server {
     constructor(config: Config) {
         this.config = config;
     }
-    start(): void {
-        console.log(`Listening on ${this.config.host}:${this.config.port}`);
-    }
+    start(): void {}
 }

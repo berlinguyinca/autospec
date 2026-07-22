@@ -149,6 +149,16 @@ test('typescript: file_path is absolute', async () => {
     assert.ok(path.isAbsolute(result.file_path), `file_path should be absolute, got: ${result.file_path}`);
 });
 
+test('typescript fixture: contains no debug logging sinks', () => {
+    const source = fs.readFileSync(fixture('typescript', 'ts'), 'utf8');
+    assert.doesNotMatch(source, /console\s*\.\s*(log|debug|info|warn|error)\s*\(/,
+        'fixture must not retain console logging');
+    const debuggerPattern = /(^|[^A-Za-z0-9_])debugger([^A-Za-z0-9_]|$)/;
+    assert.match('debugger;', debuggerPattern, 'debugger statements must be detected');
+    assert.doesNotMatch(source, debuggerPattern,
+        'fixture must not retain debugger statements');
+});
+
 // ── JavaScript ────────────────────────────────────────────────────────────────
 
 test('javascript: detected language', async () => {
