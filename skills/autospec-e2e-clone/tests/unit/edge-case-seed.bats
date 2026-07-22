@@ -251,3 +251,19 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"nothing to do"* ]]
 }
+
+@test "edge-case-seed.mjs: seeds through the platform fallback when sqlite3 is unavailable" {
+    local fallback_bin
+    fallback_bin="$(mktemp -d -t edge-case-seed-path-XXXXXX)"
+    ln -s "$(command -v node)" "$fallback_bin/node"
+    ln -s "$(command -v python3)" "$fallback_bin/python3"
+    ln -s "$(command -v yq)" "$fallback_bin/yq"
+    ln -s "$(command -v which)" "$fallback_bin/which"
+
+    run env PATH="$fallback_bin" node "$SEED_SCRIPT" "$TEST_SNAPSHOT" \
+      --contract "$TEST_REPO/.autospec/test.yml" --repo-root "$TEST_REPO" \
+      --catalog "$CATALOG"
+    rm -rf "$fallback_bin"
+    [ "$status" -eq 0 ]
+    grep -q 'seeded' "$TEST_SNAPSHOT/seed-report.json"
+}
