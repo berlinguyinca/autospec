@@ -59,7 +59,62 @@ const ONLY_PATTERNS = [
  * Check if a line contains an assertion.
  */
 function isAssertion(line) {
-    return ASSERTION_PATTERNS.some(p => p.test(line));
+    return matchesAny(ASSERTION_PATTERNS, line);
+}
+
+function matchesAny(patterns, line) {
+    return patterns.some(pattern => pattern.test(line));
+}
+
+function classifyCoverageChange(removedLine, addedLine) {
+    const wasSkipped = matchesAny(SKIP_PATTERNS, removedLine);
+    const isSkipped = matchesAny(SKIP_PATTERNS, addedLine);
+    if (!wasSkipped && isSkipped) return 'LOOSENING';
+    if (wasSkipped && !isSkipped) return 'STRENGTHENING';
+
+    const hadOnly = matchesAny(ONLY_PATTERNS, removedLine);
+    const hasOnly = matchesAny(ONLY_PATTERNS, addedLine);
+    if (!hadOnly && hasOnly) return 'LOOSENING';
+    if (hadOnly && !hasOnly) return 'STRENGTHENING';
+    return null;
+}
+
+function classifyToleranceChange(removedLine, addedLine) {
+    for (const pattern of TOLERANCE_PATTERNS) {
+        const removedMatch = removedLine.match(pattern);
+        const addedMatch = addedLine.match(pattern);
+        if (!removedMatch || !addedMatch) continue;
+
+        const oldValue = parseFloat(removedMatch[1]);
+        const newValue = parseFloat(addedMatch[1]);
+        if (Number.isNaN(oldValue) || Number.isNaN(newValue)) return null;
+        if (newValue > oldValue) return 'LOOSENING';
+        if (newValue < oldValue) return 'STRENGTHENING';
+    }
+    return null;
+}
+
+const OPERATOR_RANK = {
+    toStrictEqual: 3,
+    toBe: 3,
+    toEqual: 2,
+    toMatchObject: 1,
+    toContain: 1,
+    toMatch: 1,
+    toBeTruthy: 0,
+    toBeDefined: 0,
+};
+
+function classifyOperatorChange(removedLine, addedLine) {
+    const removedOperator = Object.keys(OPERATOR_RANK).find(operator => removedLine.includes(operator));
+    const addedOperator = Object.keys(OPERATOR_RANK).find(operator => addedLine.includes(operator));
+    if (!removedOperator || !addedOperator || removedOperator === addedOperator) return null;
+
+    const oldRank = OPERATOR_RANK[removedOperator];
+    const newRank = OPERATOR_RANK[addedOperator];
+    if (newRank < oldRank) return 'LOOSENING';
+    if (newRank > oldRank) return 'STRENGTHENING';
+    return null;
 }
 
 /**
@@ -67,18 +122,8 @@ function isAssertion(line) {
  * Returns 'LOOSENING' | 'SHIFTING' | 'STRENGTHENING' | null
  */
 function classifyChange(removedLine, addedLine) {
-    // Check skip/only patterns FIRST — these affect test coverage regardless of assertion presence.
-    // e.g. test('x') → test.skip('x') has no assertion keywords but is still LOOSENING.
-    const wasSkipped = SKIP_PATTERNS.some(p => p.test(removedLine));
-    const isSkipped = SKIP_PATTERNS.some(p => p.test(addedLine));
-    if (!wasSkipped && isSkipped) return 'LOOSENING';  // skip added
-    if (wasSkipped && !isSkipped) return 'STRENGTHENING';  // skip removed
-
-    // .only added: LOOSENING (reduces test coverage)
-    const hadOnly = ONLY_PATTERNS.some(p => p.test(removedLine));
-    const hasOnly = ONLY_PATTERNS.some(p => p.test(addedLine));
-    if (!hadOnly && hasOnly) return 'LOOSENING';
-    if (hadOnly && !hasOnly) return 'STRENGTHENING';
+    const coverageChange = classifyCoverageChange(removedLine, addedLine);
+    if (coverageChange) return coverageChange;
 
     // Pure selector / comment fix — no assertion keyword on either side
     if (!isAssertion(removedLine) && !isAssertion(addedLine)) return null;
@@ -93,35 +138,11 @@ function classifyChange(removedLine, addedLine) {
         return 'STRENGTHENING';
     }
 
-    // Check tolerance changes
-    for (const tp of TOLERANCE_PATTERNS) {
-        const removedMatch = removedLine.match(tp);
-        const addedMatch = addedLine.match(tp);
-        if (removedMatch && addedMatch) {
-            const oldVal = parseFloat(removedMatch[1]);
-            const newVal = parseFloat(addedMatch[1]);
-            if (isNaN(oldVal) || isNaN(newVal)) break;
-            if (newVal > oldVal) return 'LOOSENING';  // wider tolerance
-            if (newVal < oldVal) return 'STRENGTHENING';  // tighter tolerance
-        }
-    }
+    const toleranceChange = classifyToleranceChange(removedLine, addedLine);
+    if (toleranceChange) return toleranceChange;
 
-    // Operator weakening patterns
-    // e.g. toStrictEqual → toEqual (looser), toBe → toEqual (looser)
-    const operatorRank = {
-        'toStrictEqual': 3, 'toBe': 3,
-        'toEqual': 2,
-        'toMatchObject': 1, 'toContain': 1, 'toMatch': 1,
-        'toBeTruthy': 0, 'toBeDefined': 0,
-    };
-    const removedOp = Object.keys(operatorRank).find(op => removedLine.includes(op));
-    const addedOp = Object.keys(operatorRank).find(op => addedLine.includes(op));
-    if (removedOp && addedOp && removedOp !== addedOp) {
-        const oldRank = operatorRank[removedOp];
-        const newRank = operatorRank[addedOp];
-        if (newRank < oldRank) return 'LOOSENING';
-        if (newRank > oldRank) return 'STRENGTHENING';
-    }
+    const operatorChange = classifyOperatorChange(removedLine, addedLine);
+    if (operatorChange) return operatorChange;
 
     // Same operator/type — value-only change → SHIFTING
     if (removedLine.trim() !== addedLine.trim()) {
