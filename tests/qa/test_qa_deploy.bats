@@ -47,7 +47,7 @@ _install_contract() {
 }
 
 @test "runner does not use debug console logging in embedded validation" {
-  ! grep -Eq '\\<console\\.(log|error|warn|debug)[[:space:]]*\\(' "$RUNNER"
+  ! grep -Eq '\<console\.(log|error|warn|debug)[[:space:]]*\(' "$RUNNER"
 }
 
 # ── fixture 1: absent contract -> exit 0, no-op, writes nothing ───────────────
