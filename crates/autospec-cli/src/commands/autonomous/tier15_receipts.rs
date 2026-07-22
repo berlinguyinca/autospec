@@ -417,11 +417,8 @@ mod tests {
         );
         let path = root.path().join("waterfall/1/tier1_5/observation.json");
         let evidence = fs::read_to_string(&path).expect("observation evidence");
-        fs::write(
-            &path,
-            evidence.replace("\"candidate\"", "\"forged\""),
-        )
-        .expect("tamper readiness state");
+        fs::write(&path, evidence.replace("\"candidate\"", "\"forged\""))
+            .expect("tamper readiness state");
         let store = store(&root);
         let receipt = store
             .load_receipt(1, NoWorkTier::Tier1_5)
