@@ -28,3 +28,13 @@ teardown() {
     run jq -e '[.findings[] | select(.file | contains("/.autospec/") or contains("/dist/"))] | length == 0' "$JSON_OUT"
     [ "$status" -eq 0 ]
 }
+
+@test "quality audit reports focused test markers with their source line" {
+    printf 'describe.only("focused", () => {});\n' > "$REPO/src/example.spec.ts"
+    run env bash "$AUDIT_SCRIPT" --repo "$REPO" --json "$JSON_OUT" --markdown "$MD_OUT"
+    [ "$status" -eq 0 ]
+    run jq -e '[.findings[] | select(.probe == "focused-skipped-tests" and .file == "src/example.spec.ts")] | length == 1' "$JSON_OUT"
+    [ "$status" -eq 0 ]
+    run jq -e '.findings[] | select(.probe == "focused-skipped-tests" and .file == "src/example.spec.ts") | .line == 1' "$JSON_OUT"
+    [ "$status" -eq 0 ]
+}
