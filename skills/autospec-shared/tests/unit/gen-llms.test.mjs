@@ -27,6 +27,11 @@ const FIXTURES_DIR = path.resolve(__dirname, '../fixtures');
 const { generateManifest, writeManifest } = await import(path.join(SCRIPTS_DIR, 'gen-llm-manifest.mjs'));
 const { generateAssistantPrompt, writeAssistantPrompt } = await import(path.join(SCRIPTS_DIR, 'gen-assistant-prompt.mjs'));
 
+test('gen-llm-manifest keeps its public JSDoc free of implicit any types', () => {
+  const source = fs.readFileSync(path.join(SCRIPTS_DIR, 'gen-llm-manifest.mjs'), 'utf8');
+  assert.doesNotMatch(source, /\bany\s*\[\]/, 'manifest generator must use explicit unknown types');
+});
+
 // ── Sample cluster (matches Phase 5 test fixture) ────────────────────────────
 
 const SAMPLE_CLUSTERS = {
