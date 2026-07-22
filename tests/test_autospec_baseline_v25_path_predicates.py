@@ -88,6 +88,16 @@ def test_generic_artifact_build_uses_registry_and_preserves_v40_v54_artifacts(tm
     assert (v54_root / "shared-rule-report.json").exists()
 
 
+def test_v26_write_preserves_json_markdown_and_report_artifacts(tmp_path):
+    module = load_baseline_module()
+    module.v26_write(tmp_path, "status", "V26 Status", {"status": "pass", "count": 2})
+
+    root = tmp_path / ".autospec" / "autonomy" / "v26" / module.v26_run_id()
+    assert (root / "status.json").exists()
+    assert (root / "status.md").exists()
+    assert (tmp_path / ".autospec" / "reports" / "autonomous-v26-status.json").exists()
+
+
 def test_generic_gate_preserves_forbidden_flag_blockers(tmp_path):
     module = load_baseline_module()
     (tmp_path / ".git").mkdir()

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# linter:allow-COMPLEXITY Legacy versioned compatibility boundary; this issue only centralizes artifact serialization.
 """AutoSpec V25 baseline consolidation and release foundation.
 
 This module is intentionally local-only. It scans the repository, writes
@@ -526,6 +527,25 @@ def v25_status(root: Path) -> dict:
     return status
 
 
+def _write_version_artifacts(root: Path, version: int, run_id: str, name: str, title: str, payload: dict) -> None:
+    """Persist the canonical artifact and compatibility report for a version.
+
+    Every autonomy version uses the same JSON/Markdown pair layout. Keeping
+    this serialization in one helper prevents schema drift between the many
+    version-specific command wrappers while preserving their public names.
+    """
+    artifact = root / ".autospec/autonomy" / f"v{version}" / run_id
+    artifact.mkdir(parents=True, exist_ok=True)
+    write_json(artifact / f"{name}.json", payload)
+    write_text(
+        artifact / f"{name}.md",
+        "# " + title + "\n\n"
+        + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))),
+    )
+    write_json(root / f".autospec/reports/autonomous-v{version}-{name}.json", payload)
+    write_text(root / f".autospec/reports/autonomous-v{version}-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+
+
 def v26_run_id() -> str:
     return "autonomy-v26-level-3-autospec"
 
@@ -537,11 +557,7 @@ def v26_dir(root: Path) -> Path:
 
 
 def v26_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v26_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v26-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v26-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 26, v26_run_id(), name, title, payload)
 
 
 def v26_previous_ready(root: Path) -> bool:
@@ -800,11 +816,7 @@ def v27_dir(root: Path) -> Path:
 
 
 def v27_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v27_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v27-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v27-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 27, v27_run_id(), name, title, payload)
 
 
 def v27_previous_ready(root: Path) -> bool:
@@ -1078,11 +1090,7 @@ def v28_dir(root: Path) -> Path:
 
 
 def v28_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v28_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v28-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v28-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 28, v28_run_id(), name, title, payload)
 
 
 def v28_previous_ready(root: Path) -> bool:
@@ -1351,11 +1359,7 @@ def v29_dir(root: Path) -> Path:
 
 
 def v29_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v29_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v29-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v29-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 29, v29_run_id(), name, title, payload)
 
 
 def v29_previous_ready(root: Path) -> bool:
@@ -1629,11 +1633,7 @@ def v30_dir(root: Path) -> Path:
 
 
 def v30_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v30_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v30-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v30-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 30, v30_run_id(), name, title, payload)
 
 
 def v30_previous_ready(root: Path) -> bool:
@@ -1921,11 +1921,7 @@ def v31_dir(root: Path) -> Path:
 
 
 def v31_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v31_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v31-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v31-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 31, v31_run_id(), name, title, payload)
 
 
 def v31_previous_ready(root: Path) -> bool:
@@ -2204,11 +2200,7 @@ def v32_dir(root: Path) -> Path:
 
 
 def v32_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v32_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v32-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v32-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 32, v32_run_id(), name, title, payload)
 
 
 def v32_previous_ready(root: Path) -> bool:
@@ -2485,11 +2477,7 @@ def v33_dir(root: Path) -> Path:
 
 
 def v33_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v33_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v33-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v33-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 33, v33_run_id(), name, title, payload)
 
 
 def v33_previous_ready(root: Path) -> bool:
@@ -2775,11 +2763,7 @@ def v34_dir(root: Path) -> Path:
 
 
 def v34_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v34_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v34-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v34-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 34, v34_run_id(), name, title, payload)
 
 
 def v34_previous_ready(root: Path) -> bool:
@@ -3088,11 +3072,7 @@ def v35_dir(root: Path) -> Path:
 
 
 def v35_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v35_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v35-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v35-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 35, v35_run_id(), name, title, payload)
 
 
 def v35_previous_ready(root: Path) -> bool:
@@ -3413,11 +3393,7 @@ def v36_dir(root: Path) -> Path:
 
 
 def v36_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v36_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v36-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v36-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 36, v36_run_id(), name, title, payload)
 
 
 def v36_previous_ready(root: Path) -> bool:
@@ -3715,11 +3691,7 @@ def v37_dir(root: Path) -> Path:
 
 
 def v37_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v37_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v37-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v37-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 37, v37_run_id(), name, title, payload)
 
 
 def v37_previous_ready(root: Path) -> bool:
@@ -4028,11 +4000,7 @@ def v38_dir(root: Path) -> Path:
 
 
 def v38_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact = v38_dir(root)
-    write_json(artifact / f"{name}.json", payload)
-    write_text(artifact / f"{name}.md", "# " + title + "\n\n" + "\n".join(f"- {key}: `{value}`" for key, value in payload.items() if not isinstance(value, (dict, list))))
-    write_json(root / f".autospec/reports/autonomous-v38-{name}.json", payload)
-    write_text(root / f".autospec/reports/autonomous-v38-{name}.md", "# " + title + "\n\n" + f"- status: `{payload.get('status', 'unknown')}`\n")
+    _write_version_artifacts(root, 38, v38_run_id(), name, title, payload)
 
 
 def v38_previous_ready(root: Path) -> bool:
@@ -4255,10 +4223,7 @@ def v39_dir(root: Path) -> Path:
 
 
 def v39_write(root: Path, name: str, title: str, payload: dict) -> None:
-    artifact=v39_dir(root); write_json(artifact/f"{name}.json", payload)
-    write_text(artifact/f"{name}.md", "# "+title+"\n\n"+"\n".join(f"- {k}: `{v}`" for k,v in payload.items() if not isinstance(v,(dict,list))))
-    write_json(root/f".autospec/reports/autonomous-v39-{name}.json", payload)
-    write_text(root/f".autospec/reports/autonomous-v39-{name}.md", "# "+title+"\n\n"+f"- status: `{payload.get('status','unknown')}`\n")
+    _write_version_artifacts(root, 39, v39_run_id(), name, title, payload)
 
 
 def v39_previous_ready(root: Path) -> bool:
