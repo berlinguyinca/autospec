@@ -29,6 +29,14 @@ const { generateAudienceDocs, pickForAudience } = await import(path.join(SCRIPTS
 const { normalizeFeature } = await import(path.join(SCRIPTS_DIR, 'doc-config.mjs'));
 const { parse: parseScopeBlocks } = await import(path.join(SHARED_SCRIPTS_DIR, 'scan-doc-scope.mjs'));
 
+test('CLI output uses stdout writes instead of debug logging', () => {
+  const source = fs.readFileSync(path.join(SCRIPTS_DIR, 'gen-audience-docs.mjs'), 'utf8');
+  assert.doesNotMatch(source, /\bconsole\.log\s*\(/,
+    'the generator must not leave console.log debug logging in application code');
+  assert.doesNotMatch(source, /\bdebugger\b/,
+    'the generator must not leave debugger statements in application code');
+});
+
 // ── Fixtures ────────────────────────────────────────────────────────────────
 
 // Force the AI-review pass into a deterministic high-confidence stub so tests
