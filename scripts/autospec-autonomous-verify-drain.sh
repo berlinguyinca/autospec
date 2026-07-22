@@ -14,7 +14,7 @@
 # (see tests/explore/test_explore_orchestrator_verify.bats write_skeptic).
 #
 # Consumer success gate: exit 0 AND a non-empty verdicts file. This wrapper
-# INVERTS the sibling drains' fail-safe-to-dry: any failure (omx absent/
+# INVERTS the sibling drains' fail-safe-to-dry: all failures (omx absent/
 # non-zero, unparseable output, stall/timeout) is FAIL-CLOSED — exit non-zero
 # and write no all-survived map. explore then refutes-by-default and files
 # nothing. NEVER emit all-"survived" on error: that would push unverified junk

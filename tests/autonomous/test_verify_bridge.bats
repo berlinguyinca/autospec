@@ -65,6 +65,10 @@ teardown() {
     rm -rf "$TMP"
 }
 
+@test "verify bridge avoids ambiguous any token in audit-sensitive shell text" {
+    ! grep -Eq '\bany\b' "$BRIDGE"
+}
+
 # ── happy path ────────────────────────────────────────────────────────────────
 
 @test "bridge writes a valid {norm_title:{verdict,reason}} map on a clean skeptic run" {
