@@ -1274,7 +1274,7 @@ $_ROLLOVER_MARKER_END"
             local fish_wrappers
             fish_wrappers="$(generated_harness_section fish "ROLLOVER WRAPPERS")"
             printf '\n%s\n' "$_ROLLOVER_MARKER_START
-set -x AUTOSPEC_AUTO_ROLLOVER 1
+set -gx AUTOSPEC_AUTO_ROLLOVER 1
 if test \"\$AUTOSPEC_AUTO_ROLLOVER\" = \"1\"; and command -v autospec-session >/dev/null 2>&1
 $fish_wrappers
 end

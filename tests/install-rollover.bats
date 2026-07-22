@@ -114,6 +114,21 @@ teardown() {
     [ "$status" -ne 0 ]
 }
 
+@test "test_fish_config_exports_rollover_without_debug_trace_flag" {
+    mkdir -p "$HOME/.config/fish"
+    touch "$HOME/.config/fish/config.fish"
+
+    source "$_ROLLOVER_HELPERS"
+
+    install_rollover_block
+
+    run grep -F "set -gx AUTOSPEC_AUTO_ROLLOVER 1" "$HOME/.config/fish/config.fish"
+    [ "$status" -eq 0 ]
+
+    run grep -F "set -x AUTOSPEC_AUTO_ROLLOVER 1" "$HOME/.config/fish/config.fish"
+    [ "$status" -ne 0 ]
+}
+
 @test "test_disable_flag_exits_zero_when_block_absent" {
     source "$_ROLLOVER_HELPERS"
 
