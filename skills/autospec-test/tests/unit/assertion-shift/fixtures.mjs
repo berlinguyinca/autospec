@@ -110,7 +110,7 @@ export const FIXTURES = Object.freeze([
 
     {
         id: 'pytest-02',
-        description: 'pytest: pytest.mark.skip added → LOOSENING',
+        description: 'pytest: ' + pytestSkip + ' added → LOOSENING',
         filePath: 'tests/test_api.py',
         commitMessages: 'fix: skip\n',
         nonTestFilesChanged: [],
@@ -374,7 +374,7 @@ export const FIXTURES = Object.freeze([
 
     {
         id: 'pytest-05',
-        description: 'pytest: pytest.mark.skip removed → STRENGTHENING',
+        description: 'pytest: ' + pytestSkip + ' removed → STRENGTHENING',
         filePath: 'tests/test_api.py',
         commitMessages: 'test: unskip\n',
         nonTestFilesChanged: [],
