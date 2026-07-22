@@ -10,8 +10,9 @@
 # Input (stdin): JSON array of vision verdicts, each:
 #   {"route":"/checkout","viewport":"desktop","status":"PASS|PARTIAL|FAIL","issues":["spacing != 8px token", ...]}
 #
-# Output (stdout): JSON array of qa-verdict findings (one per non-PASS verdict):
-#   {"category":"visual_fidelity","release_blocking":<bool>,"status":...,"summary":...,"evidence":...}
+# Output (stdout): JSON array of qa-verdict findings (one per non-PASS verdict).
+# Verdicts may use one of the responsive cohesion categories documented by the
+# accessibility-and-responsive cluster; unknown categories remain visual_fidelity.
 #
 # Usage:
 #   qa-visual-findings.sh [--blocking-on FAIL|PARTIAL]   # default FAIL
@@ -44,12 +45,13 @@ input="$(cat)"
 [ -n "$input" ] || { printf '[]'; exit 0; }
 
 out="$(printf '%s' "$input" | jq -c --arg block "$BLOCK_ON" '
+  def responsive_categories: ["document-overflow", "clipped-tab", "inconsistent-gutter", "mixed-control-style", "unresponsive-table", "chart-squeeze", "unanchored-control", "density-overload"];
   def slug(r): (r | ascii_downcase | gsub("^/";"") | gsub("[^a-z0-9]+";"_") | gsub("^_|_$";"")) as $s
                | (if $s == "" then "root" else $s end);
   [ .[]
     | select((.status // "PASS") != "PASS")
     | {
-        category: "visual_fidelity",
+        category: (.category as $category | if (responsive_categories | index($category)) then $category else "visual_fidelity" end),
         release_blocking: (.status == "FAIL" or ($block == "PARTIAL" and .status == "PARTIAL")),
         status: .status,
         summary: ("\(.route // "?") (\(.viewport // "desktop")): " + (((.issues // []) | join("; ")) | if . == "" then "visual fidelity deviates from DESIGN.md" else . end)),

@@ -49,6 +49,17 @@ run_q() { printf '%s' "$1" | bash "$Q" ${2:+--blocking-on "$2"}; }
     printf '%s' "$out" | jq -e '.[0].summary | test("DESIGN.md")' >/dev/null
 }
 
+@test "responsive defect category is preserved in finding" {
+    out="$(run_q '[{"route":"/dashboard","viewport":"mobile","status":"FAIL","category":"clipped-tab","issues":["tab is clipped"]}]')"
+    [ "$(printf '%s' "$out" | jq -r '.[0].category')" = "clipped-tab" ]
+    [ "$(printf '%s' "$out" | jq -r '.[0].release_blocking')" = "true" ]
+}
+
+@test "tablet responsive defect blocks even when category is supplied" {
+    out="$(run_q '[{"route":"/reports","viewport":"tablet","status":"FAIL","category":"unresponsive-table","issues":["table overflows"]}]')"
+    [ "$(printf '%s' "$out" | jq -r '.[0].release_blocking')" = "true" ]
+}
+
 @test "jq missing -> exit 2 (fail-closed)" {
     mkdir -p "$TMP/empty"
     run bash -c "printf '%s' '[]' | env PATH=\"$TMP/empty\" \"$BASH_BIN\" \"$Q\""
