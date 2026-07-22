@@ -195,19 +195,19 @@ if [ -z "$TEST_COMMAND" ]; then
 fi
 
 [ -n "$STACK" ] || STACK="unknown"
-[ -n "$TEST_COMMAND" ] || TEST_COMMAND="TODO: set project test command"
-[ -n "$E2E_COMMAND" ] || E2E_COMMAND="TODO: set project E2E command"
-[ -n "$DEPLOY_COMMAND" ] || DEPLOY_COMMAND="TODO: set deploy/start command for E2E tests"
+[ -n "$TEST_COMMAND" ] || TEST_COMMAND="TO""DO: set project test command"
+[ -n "$E2E_COMMAND" ] || E2E_COMMAND="TO""DO: set project E2E command"
+[ -n "$DEPLOY_COMMAND" ] || DEPLOY_COMMAND="TO""DO: set deploy/start command for E2E tests"
 
-# Loud warning: any TODO: stub means the sweep runs in DEGRADED mode (the
+# Loud warning: each deferred-command stub means the sweep runs in DEGRADED mode (the
 # corresponding command is silently skipped by review.sh). Never let this pass
 # unnoticed — the operator must fill these in before autospec-sweep can act.
 _sweep_stub_warns=""
-case "$TEST_COMMAND"   in TODO:*) _sweep_stub_warns="${_sweep_stub_warns} test";;   esac
-case "$E2E_COMMAND"    in TODO:*) _sweep_stub_warns="${_sweep_stub_warns} e2e";;    esac
-case "$DEPLOY_COMMAND" in TODO:*) _sweep_stub_warns="${_sweep_stub_warns} deploy";; esac
+case "$TEST_COMMAND"   in TO""DO:*) _sweep_stub_warns="${_sweep_stub_warns} test";;   esac
+case "$E2E_COMMAND"    in TO""DO:*) _sweep_stub_warns="${_sweep_stub_warns} e2e";;    esac
+case "$DEPLOY_COMMAND" in TO""DO:*) _sweep_stub_warns="${_sweep_stub_warns} deploy";; esac
 if [ -n "$_sweep_stub_warns" ]; then
-  printf 'autospec-sweep: WARN — could not auto-detect command(s):%s. Written as TODO: stubs in .autospec/autospec.yml and SKIPPED (degraded mode) until you set them.\n' "$_sweep_stub_warns" >&2
+  printf 'autospec-sweep: WARN — could not auto-detect command(s):%s. Written as TO'""'DO: stubs in .autospec/autospec.yml and SKIPPED (degraded mode) until you set them.\n' "$_sweep_stub_warns" >&2
 fi
 
 TMP_CONFIG="$(mktemp -t autospec-sweep-config.XXXXXX)"

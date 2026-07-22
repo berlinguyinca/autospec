@@ -130,3 +130,8 @@ YAML
   run yq -r '.project.questions[]' "$TEST_TMPDIR/repo/.autospec/autospec.yml"
   [[ "$output" == *"base URL"* ]]
 }
+
+@test "wizard avoids untyped any terminology in its shell source" {
+  run grep -nE '(^|[^[:alnum:]_])any([^[:alnum:]_]|$)' "$WIZARD"
+  [ "$status" -eq 1 ]
+}
