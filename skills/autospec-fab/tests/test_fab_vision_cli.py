@@ -25,6 +25,7 @@ Assertions:
 """
 
 import json
+import ast
 import os
 import subprocess
 import sys
@@ -121,6 +122,17 @@ def _build_real_sheet(tmpdir, present_view_names):
 
 
 class TestDegradationJudge(unittest.TestCase):
+
+    def test_public_annotations_do_not_use_bare_collection_types(self):
+        """Keep static verification precise instead of treating collections as Any."""
+        with open(_CLI, encoding="utf-8") as source:
+            tree = ast.parse(source.read(), filename=_CLI)
+        bare = []
+        for node in ast.walk(tree):
+            annotation = getattr(node, "annotation", None)
+            if isinstance(annotation, ast.Name) and annotation.id in {"list", "dict"}:
+                bare.append((node.lineno, annotation.id))
+        self.assertEqual(bare, [])
 
     def test_judge_empty_observations_exit0(self):
         with tempfile.TemporaryDirectory() as tmp:
