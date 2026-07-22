@@ -1,2 +1,2 @@
 #!/usr/bin/env node
-console.log("fixture");
+process.stdout.write("fixture\n");
