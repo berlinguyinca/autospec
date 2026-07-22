@@ -9,7 +9,7 @@ import { parseArgs } from './parser.mjs';
  */
 export function main() {
   const args = parseArgs(process.argv.slice(2));
-  console.log(greet(args.name));
+  process.stdout.write(`${greet(args.name)}\n`);
 }
 
 main();
