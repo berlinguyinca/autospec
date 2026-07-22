@@ -251,3 +251,10 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"nothing to do"* ]]
 }
+
+@test "edge-case-seed.mjs: seeds through the platform fallback when sqlite3 is unavailable" {
+    run node "$SEED_SCRIPT" "$TEST_SNAPSHOT" \
+      --contract "$TEST_CONTRACT" --catalog "$CATALOG"
+    [ "$status" -eq 0 ]
+    grep -q 'seeded' "$TEST_SNAPSHOT/seed-report.json"
+}

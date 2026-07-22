@@ -33,6 +33,12 @@ See [design spec](../../docs/specs/2026-05-22-autospec-e2e-clone-design.md) for 
 C1 (this PR) — Skill scaffold + contract loader + JSON Schema.
 C2–C10 — Snapshot drivers, anonymize, scale-down, seed, expose, teardown (pending).
 
+### Edge-case seeding
+
+`scripts/edge-case-seed.mjs` seeds required snapshot shapes from the configured
+catalog. It evaluates predicates with `sqlite3` when available and falls back to
+the Python standard-library `sqlite3` module on minimal developer installations.
+
 Anonymization writes through a temporary file and replaces the source with
 platform-safe backup/restore semantics. Interrupted runs remove stale `.anon`
 files and restore a leftover `.anonymize-backup` when the source is missing;
