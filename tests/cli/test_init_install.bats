@@ -29,3 +29,7 @@ teardown() {
   [ "$status" -eq 0 ]
   [[ "$output" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]
 }
+
+@test "CLI dispatcher has no debug console logging" {
+  ! grep -Eq 'console\.(log|debug|info|warn|error)|debugger' "$CLI_BIN"
+}
