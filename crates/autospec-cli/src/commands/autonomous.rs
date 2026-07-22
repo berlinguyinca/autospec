@@ -3677,7 +3677,10 @@ fn lifecycle_stop_mode(mode: StopMode) -> LifecycleStopMode {
 }
 
 fn foreground_scope(options: &Options, layout: &RunLayout) -> ConductorScope {
-    if options.issue.is_some() && !one_shot_selector_consumed(layout) {
+    let run_only_scope = std::env::var("AUTOSPEC_RUN_ONLY_ISSUES")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    if (options.issue.is_some() || run_only_scope) && !one_shot_selector_consumed(layout) {
         ConductorScope::Slice
     } else {
         ConductorScope::Repository
