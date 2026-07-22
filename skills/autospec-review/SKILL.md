@@ -98,6 +98,10 @@ CSV ledger, and route regressions back through `/autospec-split` with
 
 ## Remediation mode (`--remediation` / `--emit-gaps`)
 
+The Phase 5.5 typed dispatcher passes this complete slash command as one
+harness argument, so `--remediation`, `--since`, and `--emit-gaps` are not
+mistaken for native harness options.
+
 When `--remediation` (or `--emit-gaps PATH`) is passed, run a **broad-dimension** review instead of the spec-coverage-only audit, and emit a machine-readable gap list for the `/autospec-run` end-of-run gap-remediation loop.
 
 **Model tier:** Tier A (spec work) — broad review is inline analysis and needs opus turn-stamina (per `feedback_monitor_silent_exit.md`).
