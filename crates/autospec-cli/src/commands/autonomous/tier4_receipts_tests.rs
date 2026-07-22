@@ -89,6 +89,7 @@ fn concurrent_tier4_fixture_owners_use_distinct_integer_tagged_roots() {
             roots_ready.wait();
             assert!(root.path().is_dir(), "owner {owner} lost its fixture root");
             let path = root.path().to_path_buf();
+            assert!(path.is_absolute(), "fixture owner {owner} must use an isolated absolute root");
             let integer_tag = path
                 .file_name()
                 .and_then(|name| name.to_str())
