@@ -65,7 +65,7 @@ function groupHttpRoutes(httpEntries) {
  * Generate USER_MANUAL.md content.
  *
  * @param {{
- *   clusters: { significant: ClusterUnit[], trivial: any[] },
+ *   clusters: { significant: ClusterUnit[], trivial: unknown[] },
  *   specs: object[],
  *   existingDocs: { [path: string]: string }
  * }} opts
