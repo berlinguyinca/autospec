@@ -2,7 +2,23 @@
 // Each fixture: { id, description, diff, filePath, commitMessages, nonTestFilesChanged, expected }
 // expected: { gate_passed, verdicts: [{bucket}] } (verdicts may be partial)
 
-export const FIXTURES = [
+/**
+ * Keep fixture records immutable and provide defaults for the fields that are
+ * intentionally empty in most cases.  This keeps future additions focused on
+ * the behavior being exercised instead of repeating corpus bookkeeping.
+ */
+const freeze = (value) => {
+    if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+        Object.freeze(value);
+        Object.values(value).forEach(freeze);
+    }
+    return value;
+};
+
+const fixture = ({ nonTestFilesChanged = [], expected, ...record }) =>
+    freeze({ ...record, nonTestFilesChanged: [...nonTestFilesChanged], expected: { ...expected } });
+
+export const FIXTURES = Object.freeze([
 
     // ── LOOSENING fixtures ────────────────────────────────────────────────────
 
@@ -778,6 +794,6 @@ index abc..def 100644
 `,
         expected: { gate_passed: true, any_bucket: 'SHIFTING' },
     },
-];
+].map(fixture));
 
 export default FIXTURES;
