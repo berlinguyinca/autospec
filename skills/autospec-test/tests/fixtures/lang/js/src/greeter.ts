@@ -14,5 +14,4 @@ export const formatName = (first: string, last: string): string =>
 
 // Private (not exported) — should NOT appear in exported list
 function _internal(): void {
-  console.log('internal');
 }
