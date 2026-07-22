@@ -81,6 +81,13 @@ fn render_new(
     validate_rendered(file)
 }
 
+/// Runtime manifests use POSIX-style logical paths regardless of the host OS.
+/// `Path::display` emits backslashes on Windows, which would make otherwise
+/// identical migrations differ between worktrees on different platforms.
+fn logical_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 fn validate_rendered(file: &PlannedFile) -> Result<(), RuntimeEnvError> {
     let text = std::str::from_utf8(&file.rendered)
         .map_err(|_| RuntimeEnvError::new("rendered runtime manifest must be UTF-8"))?;
@@ -178,13 +185,13 @@ fn append_files(source: &str, compose: &Mapping, files: &[PathBuf], edits: &mut 
     if let Some(sequence) = compose.get_sequence("files") {
         let values = files
             .iter()
-            .map(|path| yaml_scalar(&path.display().to_string()))
+            .map(|path| yaml_scalar(&logical_path(path)))
             .collect::<Vec<_>>();
         edits.push(append_sequence(source, sequence.byte_range(), &values, 6));
     } else {
         let values = files
             .iter()
-            .map(|path| format!("      - {}\n", yaml_scalar(&path.display().to_string())))
+            .map(|path| format!("      - {}\n", yaml_scalar(&logical_path(path))))
             .collect::<String>();
         edits.push(insert_at_mapping_end(
             source,
@@ -237,7 +244,7 @@ fn compose_block(indent: usize, files: &[PathBuf], exports: &[&ComposeExport]) -
         for file in files {
             body.push_str(&format!(
                 "{pad}    - {}\n",
-                yaml_scalar(&file.display().to_string())
+                yaml_scalar(&logical_path(file))
             ));
         }
     }
