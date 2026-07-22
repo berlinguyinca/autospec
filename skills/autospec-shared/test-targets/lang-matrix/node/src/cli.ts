@@ -9,7 +9,7 @@ program
   .description('CLI greeter')
   .argument('<name>', 'name to greet')
   .action((name: string) => {
-    console.log(greet(name));
+    process.stdout.write(`${greet(name)}\n`);
   });
 
 program.parse();
