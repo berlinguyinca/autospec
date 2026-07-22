@@ -65,7 +65,7 @@ to_lower() {
     printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
-# Test whether $1 (lower-cased) contains any trigger phrase from the list on
+# Test whether $1 (lower-cased) contains a trigger phrase from the list on
 # stdin, with word-boundary anchoring (a non-word char OR start/end of input
 # on either side of the match).
 match_against_list() {
@@ -292,7 +292,7 @@ has_word() {
 }
 
 # Intent gate (D4). Returns 0 (imperative — route) or 1 (incidental — suppress).
-# Biased to false-negatives: any suppressor wins.
+# Biased to false-negatives: each suppressor wins.
 is_imperative() {
     text="$1"   # lower-cased
 

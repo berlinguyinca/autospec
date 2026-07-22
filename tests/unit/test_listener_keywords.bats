@@ -9,6 +9,10 @@ setup() {
     MATCH="$REPO_ROOT/scripts/listener-match.sh"
 }
 
+@test "listener matcher avoids ambiguous any token in source" {
+    ! grep -Eq '\bany\b' "$MATCH"
+}
+
 # ---- positive issue triggers (≥15) ---------------------------------------
 
 @test "issue: 'file an issue'" {
