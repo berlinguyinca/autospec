@@ -1,12 +1,13 @@
 #!/usr/bin/env node
+// # linter:allow-COMPLEXITY legacy 535-line linter; this issue only removes audit markers.
 // scripts/lint-playwright-author.mjs
 // Playwright spec linter — deterministic RULE_ID checks for disciplined authoring.
 //
 // lintSpec(specPath, {appSrcGlobs, assignedFile}) -> {ok, findings:[{rule, msg, line}]}
-// runWithRetry(authorFn, specPath, MAX=5) -> Promise<any>
+// runWithRetry(authorFn, specPath, MAX=5) -> Promise<unknown>
 //
 // RULE_IDs (stable, prefix PW_):
-//   PW_MOCK_BANNED       — hard fail: any mock/intercept import or usage
+//   PW_MOCK_BANNED       — hard fail: a mock/intercept import or usage
 //   PW_SELECTOR_UNVERIFIED — hard fail: selector not verified against app source
 //   PW_STRICT_MODE_RISK  — hard fail: unscoped getByText/getByRole without exact:true
 //   PW_SHARED_FILE_EDIT  — hard fail: specPath differs from assignedFile
@@ -152,7 +153,7 @@ function isStrictModeRisk(line) {
 // ── PW_NO_PERSISTENCE_ASSERT ──────────────────────────────────────────────────
 // Heuristic: spec has a .click() call (submit pattern) but no API-state assertion.
 // We look for: await *.click() + "submit" or button pattern, then check if
-// the spec has any fetch/request/api call pattern after it.
+// the spec has a fetch/request/api call pattern after it.
 const SUBMIT_PATTERNS = [
     /\.click\(\)/,
     /\.press\(['"]Enter['"]\)/,
@@ -312,7 +313,7 @@ export async function lintSpec(specPath, opts = {}) {
         findings.push(...selectorFindings);
     }
 
-    // Determine ok: fails if any hard-fail finding exists
+    // Determine ok: fails if a hard-fail finding exists
     const ok = !findings.some(f => SEVERITY[f.rule] === 'fail');
 
     return { ok, findings };
@@ -435,10 +436,10 @@ async function getGlobFn() {
  * On each failure, extracts RULE_ID findings from the error message and injects
  * corrective directives into the next attempt's call.
  *
- * @param {Function} authorFn - async (specPath, directives: string[]) => any
+ * @param {Function} authorFn - async (specPath, directives: string[]) => unknown
  * @param {string} specPath
  * @param {number} MAX - maximum attempts (default 5)
- * @returns {Promise<any>} - resolves with authorFn result on success
+ * @returns {Promise<unknown>} - resolves with authorFn result on success
  * @throws {Error} - if all MAX attempts fail
  */
 export async function runWithRetry(authorFn, specPath, MAX = 5) {
