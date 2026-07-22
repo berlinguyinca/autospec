@@ -24,7 +24,6 @@ import {
   readdirSync,
   renameSync,
   unlinkSync,
-  statSync,
   writeFileSync,
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
