@@ -219,9 +219,9 @@ if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.met
     try {
       const walkerOutputs = JSON.parse(input);
       const result = cluster(walkerOutputs);
-      console.log(JSON.stringify(result, null, 2));
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
     } catch (err) {
-      console.error('cluster: failed to parse input:', err.message);
+      process.stderr.write(`cluster: failed to parse input: ${err.message}\n`);
       process.exit(1);
     }
   });
