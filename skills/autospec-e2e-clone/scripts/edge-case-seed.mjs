@@ -3,13 +3,15 @@ import {
   existsSync,
   writeFileSync,
   readdirSync,
-  appendFileSync,
 } from 'node:fs';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { readCsv, toCsvLine } from './edge-case-seed/csv.mjs';
 import { countMatchingRows } from './edge-case-seed/sqlite.mjs';
+import {
+  appendSyntheticRows,
+} from './edge-case-seed/csv.mjs';
+import { generateSyntheticRows } from './edge-case-seed/shapes.mjs';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const { values: args, positionals } = parseArgs({
@@ -203,97 +205,8 @@ async function getFaker() {
  * The catalog entry's `template` map provides column -> value expressions.
  * Falls back to sensible defaults per shape name if no template is provided.
  */
-async function generateSyntheticRows(shapeName, catalogEntry, existingHeaders, count) {
-  const f = await getFaker();
-  const template = catalogEntry.template ?? {};
-  const rows = [];
-  for (let i = 0; i < count; i++) {
-    const row = {};
-    for (const [col, expr] of Object.entries(template)) {
-      if (typeof expr === 'string' && expr.startsWith('faker:')) {
-        const method = expr.slice(6); // e.g. "date.recent"
-        row[col] = f ? resolveFaker(f, method) : `synthetic_${col}_${i}`;
-      } else {
-        row[col] = expr;
-      }
-    }
-    applyShapeDefaults(shapeName, row, i, f);
-    row['_autospec_synthetic'] = 'true';
-    rows.push(row);
-  }
-  return rows;
-}
-function resolveFaker(f, dotPath) {
-  const parts = dotPath.split('.');
-  let obj = f;
-  for (const part of parts) {
-    if (obj == null) return `synthetic_${dotPath}`;
-    obj = obj[part];
-  }
-  return typeof obj === 'function' ? obj() : String(obj ?? `synthetic_${dotPath}`);
-}
-/**
- * Applies sensible defaults per known shape name if the template didn't set the column.
- */
-function applyShapeDefaults(shapeName, row, idx, f) {
-  const now = new Date();
-  const todayIso = now.toISOString().slice(0, 10);
-  const yesterdayIso = new Date(now - 86400000).toISOString().slice(0, 10);
-  switch (shapeName) {
-    case 'task_done_today':
-      row.done_at ??= `${todayIso}T12:00:00Z`;
-      break;
-    case 'task_done_yesterday':
-      row.done_at ??= `${yesterdayIso}T12:00:00Z`;
-      break;
-    case 'task_done_2_to_6_days_ago': {
-      const daysAgo = 2 + (idx % 5);
-      const d = new Date(now - daysAgo * 86400000);
-      row.done_at ??= d.toISOString().slice(0, 10) + 'T12:00:00Z';
-      break;
-    }
-    case 'task_done_around_midnight':
-      row.done_at ??= `${todayIso}T23:57:00Z`;
-      break;
-    case 'multiple_tasks_same_day':
-      row.done_at ??= `${todayIso}T${String(10 + idx).padStart(2, '0')}:00:00Z`;
-      break;
-    case 'task_in_collapsed_foldout':
-      row.foldout_collapsed ??= '1';
-      break;
-    case 'last_item_in_long_list':
-      row.list_position ??= String(51 + idx);
-      break;
-    default:
-      break;
-  }
-}
-/**
- * Rewrites a CSV file to add the _autospec_synthetic column if absent.
- * Returns the (possibly updated) headers array.
- */
-async function ensureSyntheticColumn(csvPath) {
-  const { headers, rows } = await readCsv(csvPath);
-  if (headers.includes('_autospec_synthetic')) return headers;
-  const newHeaders = [...headers, '_autospec_synthetic'];
-  const newRows = rows.map((r) => [...r, '']);
-  const lines = [
-    toCsvLine(newHeaders),
-    ...newRows.map(toCsvLine),
-  ].join('\n') + '\n';
-  writeFileSync(csvPath, lines, 'utf8');
-  console.log(`edge-case-seed: added _autospec_synthetic column to ${csvPath}`);
-  return newHeaders;
-}
-async function appendSyntheticRows(csvPath, syntheticRows) {
-  const headers = await ensureSyntheticColumn(csvPath);
-  const lines = syntheticRows.map((row) => {
-    const fields = headers.map((h) => row[h] ?? '');
-    return toCsvLine(fields);
-  });
-  appendFileSync(csvPath, lines.join('\n') + '\n', 'utf8');
-  console.log(`edge-case-seed: inserted ${syntheticRows.length} synthetic row(s) into ${csvPath}`);
-}
+// CSV serialization and shape generation live in reusable modules so the CLI
+// and direct module consumers exercise the same behavior.
 const results = [];
 for (const { name: shapeName, count_min: countMin, entity } of requireShapes) {
   const catalogEntry = mergedCatalog[shapeName];
@@ -346,8 +259,13 @@ for (const { name: shapeName, count_min: countMin, entity } of requireShapes) {
     results.push({ shape: shapeName, status: 'surplus', currentCount, countMin });
     continue;
   }
-  const syntheticRows = await generateSyntheticRows(shapeName, catalogEntry, [], shortfall);
-  await appendSyntheticRows(csvPath, syntheticRows);
+  const syntheticRows = await generateSyntheticRows(
+    shapeName,
+    catalogEntry,
+    shortfall,
+    await getFaker(),
+  );
+  appendSyntheticRows(csvPath, syntheticRows);
   results.push({ shape: shapeName, status: 'seeded', inserted: shortfall, currentCount, countMin });
 }
 const reportPath = join(resolvedSnapshot, 'seed-report.json');
