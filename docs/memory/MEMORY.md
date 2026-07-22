@@ -22,6 +22,8 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 # Always-relevant
 
+- [Operational assistant provider routing](feedback_operational_assistant_provider_routing.md) — health and chat must share a relay-aware route plan for backend-only providers such as NATS
+
 - [User role - autospec author](user_role.md) — berlinguyinca authors and maintains the multi-harness autospec skill family
 - [Proactively query memory before major decisions](feedback_proactively_query_memory.md) — meta-rule: passive auto-load isn't enough; explicit "what memory applies here?" check before each dispatch/recovery/design choice
 
