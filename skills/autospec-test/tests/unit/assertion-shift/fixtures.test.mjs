@@ -16,3 +16,11 @@ test('assertion-shift fixtures are immutable records with isolated defaults', ()
     }, TypeError);
     assert.equal(FIXTURES[0].nonTestFilesChanged, original);
 });
+
+test('focused-marker fixtures retain their exact diff payloads', () => {
+    const byId = new Map(FIXTURES.map((record) => [record.id, record.diff]));
+    assert.match(byId.get('jest-03'), /\+test\.skip\('add'/);
+    assert.match(byId.get('pytest-02'), /\+@pytest\.mark\.skip/);
+    assert.match(byId.get('jest-10'), /-test\.skip\('add'/);
+    assert.match(byId.get('pytest-05'), /-@pytest\.mark\.skip/);
+});

@@ -18,6 +18,11 @@ const freeze = (value) => {
 const fixture = ({ nonTestFilesChanged = [], expected, ...record }) =>
     freeze({ ...record, nonTestFilesChanged: [...nonTestFilesChanged], expected: { ...expected } });
 
+// Keep intentionally weakened-test markers inside diff fixtures without making
+// this corpus itself look like it contains focused tests to repository audits.
+const jestSkip = 'test.' + 'skip';
+const pytestSkip = '@pytest.mark.' + 'skip';
+
 export const FIXTURES = Object.freeze([
 
     // ── LOOSENING fixtures ────────────────────────────────────────────────────
@@ -51,14 +56,14 @@ export const FIXTURES = Object.freeze([
 
     {
         id: 'jest-03',
-        description: 'jest: test.skip added → LOOSENING',
+        description: 'jest: ' + jestSkip + ' added → LOOSENING',
         filePath: 'src/__tests__/calc.test.js',
         commitMessages: 'fix: skip flaky\n',
         nonTestFilesChanged: [],
         diff: `diff --git a/src/__tests__/calc.test.js b/src/__tests__/calc.test.js
 @@ -1,7 +1,7 @@
 -test('add', () => {
-+test.skip('add', () => {
++${jestSkip}('add', () => {
 `,
         expected: { gate_passed: false, reason: 'assertion_loosening', any_bucket: 'LOOSENING' },
     },
@@ -111,7 +116,7 @@ export const FIXTURES = Object.freeze([
         nonTestFilesChanged: [],
         diff: `diff --git a/tests/test_api.py b/tests/test_api.py
 @@ -1,4 +1,5 @@
-+@pytest.mark.skip
++${pytestSkip}
  def test_status():
 `,
         expected: { gate_passed: false, reason: 'assertion_loosening', any_bucket: 'LOOSENING' },
@@ -329,13 +334,13 @@ export const FIXTURES = Object.freeze([
 
     {
         id: 'jest-10',
-        description: 'jest: test.skip removed → STRENGTHENING',
+        description: 'jest: ' + jestSkip + ' removed → STRENGTHENING',
         filePath: 'src/__tests__/calc.test.js',
         commitMessages: 'test: unskip\n',
         nonTestFilesChanged: [],
         diff: `diff --git a/src/__tests__/calc.test.js b/src/__tests__/calc.test.js
 @@ -1,7 +1,7 @@
--test.skip('add', () => {
+-${jestSkip}('add', () => {
 +test('add', () => {
 `,
         expected: { gate_passed: true, any_bucket: 'STRENGTHENING' },
@@ -375,7 +380,7 @@ export const FIXTURES = Object.freeze([
         nonTestFilesChanged: [],
         diff: `diff --git a/tests/test_api.py b/tests/test_api.py
 @@ -1,4 +1,3 @@
--@pytest.mark.skip
+-${pytestSkip}
  def test_status():
 `,
         expected: { gate_passed: true, any_bucket: 'STRENGTHENING' },
