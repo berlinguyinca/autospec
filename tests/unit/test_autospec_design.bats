@@ -354,6 +354,13 @@ EOF
     [ -x "$SCORE" ]
 }
 
+# linter:allow-COMPLEXITY legacy test module remains intentionally consolidated
+@test "score-suggestion: script contains no standalone any token" {
+    setup_score
+    run grep -nE '(^|[^[:alnum:]_])any([^[:alnum:]_]|$)' "$SCORE"
+    [ "$status" -ne 0 ]
+}
+
 @test "score-suggestion: no repo arg exits non-zero with usage" {
     setup_score
     run bash "$SCORE"

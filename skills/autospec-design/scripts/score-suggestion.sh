@@ -5,7 +5,7 @@
 #
 # Scans a repo for framework / brand / domain signals, scores every catalog
 # vendor against the repo using a fixed rubric, and prints the top 3 with a
-# one-line rationale. Read-only — never modifies any file in the target repo.
+# one-line rationale. Read-only — never modifies files in the target repo.
 #
 # Usage:
 #   score-suggestion.sh <repo-root>
@@ -133,7 +133,7 @@ score_vendor() {
         parts="${parts}brand(+1) "
     fi
 
-    # Domain match (+1): any vendor-name token (len >= 4) overlaps repo text,
+    # Domain match (+1): a vendor-name token (len >= 4) overlaps repo text,
     # distinct from a full brand hit (covers multi-word / partial overlap).
     local token matched_domain=0
     for token in $(printf '%s' "$norm" | tr -c 'a-z0-9' ' '); do
