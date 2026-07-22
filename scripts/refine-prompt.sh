@@ -1312,7 +1312,7 @@ if [ "$DRY_RUN" != 1 ]; then
     write_artifact
     if [ "$HANDOFF_RC" != "0" ] && [ "$HANDOFF_RC" != "127" ]; then
         # 127 = no dispatcher on PATH — preserve legacy behavior (warn,
-        # exit 0). Any other non-zero is a real failure and must propagate.
+        # exit 0). Every other non-zero is a real failure and must propagate.
         echo "refine-prompt: handoff failed rc=$HANDOFF_RC" >&2
         exit "$HANDOFF_RC"
     fi

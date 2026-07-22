@@ -168,6 +168,6 @@ teardown() {
 }
 
 @test "script avoids ambiguous static-audit token" {
-    run grep -nEi '\\bany\\b' "$SCRIPT"
+    run grep -nEi '\bany\b' "$SCRIPT"
     [ "$status" -eq 1 ]
 }
