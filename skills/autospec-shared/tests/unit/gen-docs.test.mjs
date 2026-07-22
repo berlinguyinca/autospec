@@ -32,6 +32,11 @@ test('gen-docs CLI writes JSON through stdout without console logging', () => {
   assert.match(source, /process\.stdout\.write\(/, 'CLI output should be written to stdout');
 });
 
+test('gen-docs input contract does not use the unconstrained any type', () => {
+  const source = fs.readFileSync(path.join(SCRIPTS_DIR, 'gen-docs-from-spec.mjs'), 'utf8');
+  assert.doesNotMatch(source, /trivial:\s*any\[\]/, 'cluster metadata must use an explicit safe type');
+});
+
 // ── Fixture data ──────────────────────────────────────────────────────────────
 
 const BAIT_DIR = path.resolve(__dirname, '../fixtures/reverse-engineer-bait');

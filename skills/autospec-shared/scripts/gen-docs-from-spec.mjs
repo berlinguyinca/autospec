@@ -193,7 +193,7 @@ export function mergeWithExisting(newContent, existingContent) {
  * Generate all three docs from cluster output, preserving human edits.
  *
  * @param {{
- *   clusters: { significant: ClusterUnit[], trivial: any[] },
+ *   clusters: { significant: ClusterUnit[], trivial: unknown[] },
  *   specs?: object[],
  *   existingDocs?: { [relPath: string]: string },
  *   outputDir?: string,
