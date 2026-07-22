@@ -45,6 +45,11 @@ make_fake_repo() {
 
 # ── validate-contract.sh: fixture acceptance/rejection ───────────────────────
 
+@test "validate-contract: embedded schema validator has no debug logging" {
+    run grep -En 'console\.(log|debug|info|warn)|(^|[^[:alnum:]_])debugger([^[:alnum:]_]|$)' "$SCRIPTS_DIR/validate-contract.sh"
+    [ "$status" -eq 1 ]
+}
+
 @test "validate-contract: minimal-valid contract exits 0" {
     # Convert YAML fixture to JSON for validate-contract
     run bash -c "yq -o=json '.' '$FIXTURES_DIR/minimal-valid.yml' | '$SCRIPTS_DIR/validate-contract.sh' - '$SCHEMA'"
