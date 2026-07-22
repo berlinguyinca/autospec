@@ -9,7 +9,7 @@
  *   const recorder = attachRecorder(page, '^/api/household/timeline$');
  *   await page.goto(url);
  *   // ... wait for requests ...
- *   console.log(recorder.requests); // [{ url, method, path, params }]
+ *   inspect(recorder.requests); // [{ url, method, path, params }]
  *
  * Idempotent: calling attachRecorder twice on the same page with the same
  * pattern string does NOT register a duplicate handler (keyed by pattern).
