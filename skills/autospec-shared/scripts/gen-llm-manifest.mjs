@@ -230,5 +230,5 @@ if (isMain) {
 
   const result = await writeManifest({ clusters, repoRoot, outputPath });
   process.stderr.write(`[gen-llm-manifest] ${result.written ? 'written' : 'unchanged'}: ${result.path}\n`);
-  console.log(JSON.stringify(result.manifest, null, 2));
+  process.stdout.write(`${JSON.stringify(result.manifest, null, 2)}\n`);
 }
