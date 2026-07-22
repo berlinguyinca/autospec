@@ -133,7 +133,7 @@ PROFILE="$OUT/discovered-tokens.json"
     node -e "
       const p=JSON.parse(require('fs').readFileSync('$PROFILE','utf8'));
       (p.inconsistencies||[]).forEach(function(item){
-        console.log('- **' + item.category + '**: ' + item.detail);
+        process.stdout.write('- **' + item.category + '**: ' + item.detail + '\n');
       });
     " 2>/dev/null || true
   fi
@@ -146,9 +146,9 @@ PROFILE="$OUT/discovered-tokens.json"
     const p=JSON.parse(require('fs').readFileSync('$PROFILE','utf8'));
     const btns=(p.components&&p.components.button)||[];
     if(btns.length===0){
-      console.log('No button components detected.');
+      process.stdout.write('No button components detected.\n');
     } else {
-      btns.forEach(function(b){ console.log('- ' + b.selector); });
+      btns.forEach(function(b){ process.stdout.write('- ' + b.selector + '\n'); });
     }
   " 2>/dev/null || echo "No component data."
   echo ""
@@ -158,13 +158,13 @@ PROFILE="$OUT/discovered-tokens.json"
   echo ""
   node -e "
     const p=JSON.parse(require('fs').readFileSync('$PROFILE','utf8'));
-    console.log('| Category | Count |');
-    console.log('|---|---|');
-    console.log('| palette | ' + (p.palette||[]).length + ' |');
-    console.log('| type_scale | ' + (p.type_scale||[]).length + ' |');
-    console.log('| spacing | ' + (p.spacing||[]).length + ' |');
-    console.log('| radii | ' + (p.radii||[]).length + ' |');
-    console.log('| shadows | ' + (p.shadows||[]).length + ' |');
+    process.stdout.write('| Category | Count |\n');
+    process.stdout.write('|---|---|\n');
+    process.stdout.write('| palette | ' + (p.palette||[]).length + ' |\n');
+    process.stdout.write('| type_scale | ' + (p.type_scale||[]).length + ' |\n');
+    process.stdout.write('| spacing | ' + (p.spacing||[]).length + ' |\n');
+    process.stdout.write('| radii | ' + (p.radii||[]).length + ' |\n');
+    process.stdout.write('| shadows | ' + (p.shadows||[]).length + ' |\n');
   " 2>/dev/null || true
 
 } > "$OUT/inventory.md"
