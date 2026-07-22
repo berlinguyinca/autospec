@@ -3,4 +3,3 @@ import { greet } from '../src/greeter';
 
 const result = greet('World');
 console.assert(result === 'Hello, World!', 'greet works');
-console.log('greeter tests passed');
