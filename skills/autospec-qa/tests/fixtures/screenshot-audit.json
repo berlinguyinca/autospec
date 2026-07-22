@@ -1,0 +1,1 @@
+{"generatedAt":"2026-07-22","routes":[{"route":"/dashboard","status":"ok","authShell":false,"overflow":true,"primitiveCounts":{"table":1},"screenshots":{"desktop":"/shots/dashboard.png"},"consoleFindings":[]},{"route":"/about","status":"ok","authShell":false,"overflow":false,"primitiveCounts":{}}]}
