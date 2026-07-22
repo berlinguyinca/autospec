@@ -307,6 +307,19 @@ teardown() {
   [ ! -e "$TEST_SNAPSHOT/events.csv.anonymize-backup" ]
 }
 
+@test "anonymize.mjs: restores a leftover backup before retrying" {
+  cp "$TEST_SNAPSHOT/users.csv" "$TEST_SNAPSHOT/users.csv.anonymize-backup"
+  rm "$TEST_SNAPSHOT/users.csv"
+
+  run node "$ANONYMIZE" "$TEST_SNAPSHOT" \
+      --contract "$TEST_REPO/.autospec/clone.yml" \
+      --repo-root "$TEST_REPO"
+  [ "$status" -eq 0 ]
+  [ -f "$TEST_SNAPSHOT/users.csv" ]
+  [ ! -e "$TEST_SNAPSHOT/users.csv.anonymize-backup" ]
+  ! grep -q 'alice@example.com' "$TEST_SNAPSHOT/users.csv"
+}
+
 @test "anonymize.mjs: exits 1 when snapshot-dir does not exist" {
   run node "$ANONYMIZE" "/nonexistent/dir" \
       --contract "$TEST_REPO/.autospec/clone.yml" \

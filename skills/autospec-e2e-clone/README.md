@@ -35,4 +35,6 @@ C2–C10 — Snapshot drivers, anonymize, scale-down, seed, expose, teardown (pe
 
 Anonymization writes through a temporary file and replaces the source with
 platform-safe backup/restore semantics. Interrupted runs remove stale `.anon`
-and `.anonymize-backup` files before reporting failure.
+files and restore a leftover `.anonymize-backup` when the source is missing;
+the backup is removed only after the source exists. This is recovery-safe, not a
+transactional filesystem guarantee.

@@ -347,7 +347,12 @@ function removeIfPresent(path) {
 // aside first, then restore it if installing the anonymized output fails.
 function replaceFilePortable(tmpPath, filePath) {
   const backupPath = `${filePath}.anonymize-backup`;
-  removeIfPresent(backupPath);
+  // Preserve a backup when an interrupted replacement left the destination
+  // missing; it may be the only remaining copy of the source data.
+  if (existsSync(backupPath)) {
+    if (existsSync(filePath)) removeIfPresent(backupPath);
+    else renameSync(backupPath, filePath);
+  }
   renameSync(filePath, backupPath);
   try {
     renameSync(tmpPath, filePath);
@@ -552,6 +557,7 @@ function formatSqlValue(value) {
 // ---------------------------------------------------------------------------
 
 async function main() {
+  recoverTemporaryOutputs(resolvedSnapshot);
   const rules = anonymizeConfig.rules;
 
   // Build lookup: tableName (lower) → rule
@@ -601,10 +607,18 @@ function cleanupTemporaryOutputs(dir) {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const full = join(dir, entry.name);
     if (entry.isDirectory()) cleanupTemporaryOutputs(full);
-    else if (entry.name.endsWith('.anon') || entry.name.endsWith('.anonymize-backup')) {
-      removeIfPresent(full);
+    else if (entry.name.endsWith('.anon')) removeIfPresent(full);
+    else if (entry.name.endsWith('.anonymize-backup')) {
+      const destination = full.slice(0, -'.anonymize-backup'.length);
+      // Restore before cleanup when the backup is the only source copy.
+      if (!existsSync(destination)) renameSync(full, destination);
+      else removeIfPresent(full);
     }
   }
+}
+
+function recoverTemporaryOutputs(dir) {
+  cleanupTemporaryOutputs(dir);
 }
 
 main().catch((err) => {
