@@ -164,9 +164,9 @@ fn validate_observation(contents: &str, receipt: &TierReceipt) -> Result<(), Wat
     }
     let mut rendered_readiness = Vec::with_capacity(readiness.len());
     for (number, value) in readiness {
-        let parsed = number
-            .parse::<u64>()
-            .map_err(|_| WaterfallStoreError::InvalidReceipt("Tier 1.5 readiness key is invalid".into()))?;
+        let parsed = number.parse::<u64>().map_err(|_| {
+            WaterfallStoreError::InvalidReceipt("Tier 1.5 readiness key is invalid".into())
+        })?;
         if parsed == 0 || !numbers.contains(&parsed) {
             return invalid("Tier 1.5 readiness must identify a decision");
         }
