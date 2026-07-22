@@ -101,6 +101,8 @@ fn normalize_without_manifest_checks_then_creates_v2_manifest() {
         "{}",
         String::from_utf8_lossy(&apply.stderr)
     );
+    let rendered = std::fs::read_to_string(&manifest).unwrap();
+    assert!(!rendered.contains('\\'), "manifest paths must be portable");
     let rendered = std::fs::read_to_string(manifest).unwrap();
     let parsed = autospec_core::runtime_env::RuntimeManifest::parse(&rendered).unwrap();
     assert_eq!(
