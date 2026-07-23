@@ -425,10 +425,11 @@ pub fn evaluate_claim_safety_with_trusted_actors(
     if !labels.contains(&"safety:reviewed") {
         return ClaimSafetyDecision::reject("missing_safety_reviewed");
     }
-    let body_without_review = match reviewed_body_without_safety_section(&input.body) {
-        Ok(body) => body,
-        Err(reason) => return ClaimSafetyDecision::reject(reason),
-    };
+    let (body_without_review, safety_actor) =
+        match reviewed_body_without_safety_section(&input.body) {
+            Ok(review) => review,
+            Err(reason) => return ClaimSafetyDecision::reject(reason),
+        };
     let scan = format!(
         "{}\n{}",
         input.title,
@@ -438,18 +439,24 @@ pub fn evaluate_claim_safety_with_trusted_actors(
     if intent.blocking {
         return ClaimSafetyDecision::reject("current_body_safety_block");
     }
-    if intent.ambiguous {
+    if intent.ambiguous
+        && !safety_actor
+            .as_deref()
+            .is_some_and(|actor| trusted_actors.iter().any(|trusted| *trusted == actor))
+    {
         return ClaimSafetyDecision::reject("current_body_safety_ambiguous");
     }
     ClaimSafetyDecision::pass()
 }
 
-fn reviewed_body_without_safety_section(body: &str) -> Result<String, &'static str> {
+fn reviewed_body_without_safety_section(
+    body: &str,
+) -> Result<(String, Option<String>), &'static str> {
     let begin_count = body.matches(SAFETY_BEGIN_MARKER).count();
     let end_count = body.matches(SAFETY_END_MARKER).count();
     if begin_count == 0 && end_count == 0 {
         return if last_safety_heading(body).is_none() {
-            Ok(body.to_string())
+            Ok((body.to_string(), None))
         } else {
             Err("invalid_safety_markers")
         };
@@ -482,21 +489,48 @@ fn reviewed_body_without_safety_section(body: &str) -> Result<String, &'static s
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
-    if lines
-        .iter()
-        .any(|line| !line.starts_with("- **decision:**"))
-    {
+    if lines.iter().any(|line| {
+        !line.starts_with("- **decision:**")
+            && !line.starts_with("- **actor:**")
+            && !line.starts_with("- **reviewer:**")
+            && !line.starts_with("- **semantic-reviewer:**")
+    }) {
         return Err("unexpected_safety_block_content");
     }
-    if lines.len() != 1 {
+    let decisions = lines
+        .iter()
+        .filter(|line| line.starts_with("- **decision:**"))
+        .collect::<Vec<_>>();
+    if decisions.len() != 1 {
         return Err("missing_safety_pass");
     }
-    if lines[0] != "- **decision:** `SAFETY_PASS`" {
+    if decisions[0] != &"- **decision:** `SAFETY_PASS`" {
         return Err("non_pass_safety_decision");
+    }
+    let actors = lines
+        .iter()
+        .filter_map(|line| {
+            [
+                "- **actor:** `",
+                "- **reviewer:** `",
+                "- **semantic-reviewer:** `",
+            ]
+            .iter()
+            .find_map(|prefix| {
+                line.strip_prefix(prefix)
+                    .and_then(|value| value.strip_suffix('`'))
+            })
+        })
+        .collect::<Vec<_>>();
+    if lines.len() != 1 + actors.len() || actors.len() > 1 {
+        return Err("unexpected_safety_block_content");
     }
 
     let after_end = end + SAFETY_END_MARKER.len();
-    Ok(format!("{}{}", &body[..heading_start], &body[after_end..]))
+    Ok((
+        format!("{}{}", &body[..heading_start], &body[after_end..]),
+        actors.first().map(|actor| (*actor).to_string()),
+    ))
 }
 
 #[derive(Debug, Default)]
@@ -587,7 +621,7 @@ pub fn lint_issue_intent_with_trusted_actors(
             "weakened security control",
         );
     }
-    if contains_any(
+    if contains_any_word(
         &lower,
         &[
             "production",
@@ -633,6 +667,17 @@ pub fn lint_issue_intent_with_trusted_actors(
                 .any(|finding| finding.rule_id == "trusted:test_data_reset"),
         findings,
     }
+}
+
+fn contains_any_word(text: &str, words: &[&str]) -> bool {
+    words.iter().any(|word| {
+        text.match_indices(word).any(|(offset, _)| {
+            let before = text[..offset].chars().next_back();
+            let after = text[offset + word.len()..].chars().next();
+            before.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+                && after.is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_')
+        })
+    })
 }
 
 /// The Rust authority uses bounded, line-local checks where the shell

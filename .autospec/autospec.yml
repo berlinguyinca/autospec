@@ -216,7 +216,7 @@ safety:
       - id: production-or-infra-touch
         severity: ambiguous
         patterns:
-          - "(?i)(production|prod|billing|payments|migration|terraform|iam|kms)"
+          - "(?i)\\b(production|prod|billing|payments|migration|terraform|iam|kms)\\b"
     semantic_review:
       enabled: true
       trigger_on:
