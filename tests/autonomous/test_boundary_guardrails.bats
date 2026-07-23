@@ -25,6 +25,11 @@ SQL
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="CONTRACT_DRIFT")] | length')" -eq 1 ]
     [[ "$output" == *"garden"* ]]
+
+    printf "ALTER TABLE ai_chat_sessions ADD CONSTRAINT ai_chat_sessions_domain_check CHECK (domain IN ('chat', 'garden'));\n" > "$TMP/repo/migrations/002_chat.sql"
+    run bash "$SCRIPT" scan --repo-root "$TMP/repo"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="CONTRACT_DRIFT")] | length')" -eq 0 ]
 }
 
 @test "scan detects silent success on error branches" {
@@ -40,6 +45,11 @@ PY
 
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="SILENT_FAILURE")] | length')" -eq 1 ]
+
+    sed -i 's/return None/print("warning: device sync failed")\n        return None/' "$TMP/repo/src/sync.py"
+    run bash "$SCRIPT" scan --repo-root "$TMP/repo"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="SILENT_FAILURE")] | length')" -eq 0 ]
 }
 
 @test "scan detects typed fake tests that miss raw decode boundary" {
@@ -62,6 +72,17 @@ PY
 
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="BOUNDARY_TEST_MISSING")] | length')" -eq 1 ]
+
+    cat >> "$TMP/repo/tests/test_external_client.py" <<'PY'
+import json
+
+def test_raw_payload_boundary():
+    payload = '{"vacation_mode":"false"}'
+    assert json.loads(payload)["vacation_mode"] == "false"
+PY
+    run bash "$SCRIPT" scan --repo-root "$TMP/repo"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="BOUNDARY_TEST_MISSING")] | length')" -eq 0 ]
 }
 
 @test "scan detects completed integrations without replayable real-response evidence" {
