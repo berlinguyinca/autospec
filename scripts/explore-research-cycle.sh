@@ -44,6 +44,17 @@ REPO_ROOT="${AUTOSPEC_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RESEARCH_DIR="${AUTOSPEC_RESEARCH_DIR:-$SCRIPT_DIR/explore-research}"
 
+classify_repo() {
+    if [ -f "$REPO_ROOT/.git/archived" ]; then printf 'archived'; return; fi
+    if [ -f "$REPO_ROOT/README.md" ] && find "$REPO_ROOT" -maxdepth 2 -type f -name '*.md' | grep -q . && ! find "$REPO_ROOT" -maxdepth 2 -type f \( -name 'package.json' -o -name 'Cargo.toml' -o -name 'pom.xml' \) | grep -q .; then printf 'docs'; return; fi
+    if find "$REPO_ROOT" -maxdepth 3 -type f \( -name '*.ipynb' -o -name '*.rmd' \) | grep -q .; then printf 'data-study'; return; fi
+    if [ -f "$REPO_ROOT/docker-compose.yml" ] || [ -d "$REPO_ROOT/terraform" ] || [ -d "$REPO_ROOT/k8s" ]; then printf 'infra'; return; fi
+    if [ -f "$REPO_ROOT/package.json" ] && find "$REPO_ROOT" -maxdepth 3 -type f \( -name '*.tsx' -o -name '*.jsx' \) | grep -q .; then printf 'frontend'; return; fi
+    if [ -f "$REPO_ROOT/Cargo.toml" ] || [ -f "$REPO_ROOT/pom.xml" ] || [ -f "$REPO_ROOT/go.mod" ]; then printf 'library'; return; fi
+    printf 'unknown'
+}
+REPO_CLASS="${AUTOSPEC_REPO_CLASS:-$(classify_repo)}"
+
 usage() {
     cat <<'EOF'
 Usage: explore-research-cycle.sh [options]
@@ -134,7 +145,8 @@ while [ "$#" -gt 0 ]; do
         --research-sources)     SOURCES="$2"; shift 2 ;;
         --ledger)               LEDGER="$2"; shift 2 ;;
         --out)                  OUT="$2"; shift 2 ;;
-        --org)                  ORG="$2"; shift 2 ;;
+    --org)                  ORG="$2"; shift 2 ;;
+        --repo-class)           REPO_CLASS="$2"; shift 2 ;;
         --org-max-age)          ORG_MAX_AGE="$2"; shift 2 ;;
         --specialists-mode)     SPECIALISTS_MODE="$2"; shift 2 ;;
         --num-specialists)      NUM_SPECIALISTS="$2"; shift 2 ;;
@@ -1060,8 +1072,12 @@ if [ -n "$OUT" ]; then
     mv "$work_dir/final.json" "$abs.tmp"
     mv "$abs.tmp" "$abs"
 else
-    cat "$work_dir/final.json"
+    :
 fi
+
+# Attach the deterministic classification to each proposal and the aggregate.
+jq --arg repo_class "$REPO_CLASS" '(.repo_class=$repo_class | .proposals |= map(.repo_class=$repo_class))' "${OUT:-$work_dir/final.json}" > "$work_dir/classified.json" 2>/dev/null && mv "$work_dir/classified.json" "${OUT:-$work_dir/final.json}" || true
+if [ -z "$OUT" ]; then cat "$work_dir/final.json"; fi
 
 # Persist an org-scoped learning report after a completed sweep. The directory
 # is deliberately below the repository state root so separate repositories and

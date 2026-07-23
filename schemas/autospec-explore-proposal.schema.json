@@ -26,6 +26,10 @@
     "source": {
       "type": "string"
     },
+    "repo_class": {
+      "type": "string",
+      "enum": ["active-service", "library", "frontend", "infra", "data-study", "docs", "notebook-research", "archived", "superseded", "unknown"]
+    },
     "severity": {
       "type": "string",
       "description": "Impact band, highest to lowest: silent-wrong > correctness > stability > operability > feature > nicety. The enum order is load-bearing — it is the primary ranking key. Legacy researchers that omit this field are defaulted to `feature` by the aggregator.",

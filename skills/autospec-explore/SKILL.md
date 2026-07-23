@@ -5,6 +5,12 @@ description: Use when the user wants /autospec-explore to start a perpetual auto
 
 # autospec-explore workflow (harness-neutral)
 
+Research-cycle output includes a deterministic `repo_class` classification
+(for example `library`, `frontend`, `infra`, `data-study`, `docs`, or
+`archived`) derived from local repository evidence. Pass `--repo-class` to
+override it in controlled tests; governance-only classes are intended for
+read-only proposal tracks.
+
 Start a perpetual autonomous research + ship loop. `/autospec-explore "<initial prompt>"`
 creates an isolated sandbox branch (`autospec/explore/<date>-<slug>`) off `origin/main`,
 runs a roster of parallel researchers each round — **7 universal** (spec-vs-code,
