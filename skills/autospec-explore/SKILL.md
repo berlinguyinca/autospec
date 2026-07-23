@@ -895,3 +895,10 @@ makes promotion contingent on a sandbox-HEAD QA verdict.
 autospec validate
 bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-sandbox.sh --slug smoke-test
 ```
+# Organization learning reports
+
+Pass `--org <name>` (or set `AUTOSPEC_EXPLORE_ORG`) to persist each completed
+sweep under `.autospec/org-audits/<name>/`. The generated `report.json` and
+human-readable `report.md` are accompanied by append-only `ledger.jsonl`; a
+future sweep can inspect these files to seed source weights and detect stale
+reports before deciding whether a full recheck is needed.
