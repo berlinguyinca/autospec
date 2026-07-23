@@ -64,3 +64,26 @@ PY
     [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="BOUNDARY_TEST_MISSING")] | length')" -eq 1 ]
 }
 
+@test "scan detects completed integrations without replayable real-response evidence" {
+    cat > "$TMP/repo/src/weather_client.py" <<'PY'
+import requests
+
+def fetch_weather():
+    return requests.get("https://api.example.test/weather").json()
+PY
+    cat > "$TMP/repo/integration-status.md" <<'MD'
+area:integration
+status: done
+MD
+
+    run bash "$SCRIPT" scan --repo-root "$TMP/repo"
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="REAL_RESPONSE_EVIDENCE_MISSING")] | length')" -eq 1 ]
+
+    mkdir -p "$TMP/repo/tests/fixtures"
+    printf '{"weather": {"temperature": "21"}}\n' > "$TMP/repo/tests/fixtures/weather-response.json"
+    run bash "$SCRIPT" scan --repo-root "$TMP/repo"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq '[.findings[] | select(.rule_id=="REAL_RESPONSE_EVIDENCE_MISSING")] | length')" -eq 0 ]
+}
