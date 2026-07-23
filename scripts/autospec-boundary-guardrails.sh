@@ -128,5 +128,32 @@ if decode_sources:
     if has_fake and not has_raw_boundary:
         add("BOUNDARY_TEST_MISSING", decode_sources[0], "external decode path has typed fake tests but no raw payload boundary test", {"decode_sources": decode_sources})
 
+# G4: an external integration marked complete needs a replayable response
+# artifact.  The marker is intentionally lightweight so repositories can use
+# issue/spec markdown without adopting a new manifest format; fixture files
+# remain local and offline-safe.
+integration_done = any(
+    re.search(r"area\s*:\s*integration", source, re.IGNORECASE)
+    and re.search(r"status\s*:\s*done|integration\s+(?:is\s+)?(?:complete|done)", source, re.IGNORECASE)
+    for path, source in text_files()
+)
+external_sources = [
+    (path, source) for path, source in text_files()
+    if path.suffix in {".py", ".js", ".ts", ".go", ".rs", ".java", ".scala"}
+    and re.search(r"https?://|requests\.|fetch\(|axios|http\.|HttpClient|ureq|reqwest", source, re.IGNORECASE)
+]
+replay_artifacts = [
+    rel(path) for path, source in text_files()
+    if "fixtures" in path.parts or "recordings" in path.parts or path.suffix.lower() in {".har"}
+    or re.search(r"real[-_ ]?(?:response|payload)|recorded[-_ ]?(?:response|payload)", path.name, re.IGNORECASE)
+]
+if integration_done and external_sources and not replay_artifacts:
+    add(
+        "REAL_RESPONSE_EVIDENCE_MISSING",
+        rel(external_sources[0][0]),
+        "completed external integration has no replayable real-response fixture",
+        {"integration_sources": [rel(path) for path, _ in external_sources]},
+    )
+
 print(json.dumps({"schema": "autospec-boundary-guardrails/v1", "findings": findings}, indent=2, sort_keys=True))
 PY
