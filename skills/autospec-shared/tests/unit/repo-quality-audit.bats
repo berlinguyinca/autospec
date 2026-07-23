@@ -38,6 +38,67 @@ EOF
     ! jq -e '.findings[] | select(.probe=="mock-policy")' "$TEST_TMP/audit.json"
 }
 
+@test "async-aware lock probe reports only locks with async evidence" {
+    mkdir -p "$REPO/src"
+    cat > "$REPO/src/locks.rs" <<'EOF'
+async fn worker(lock: std::sync::Mutex<i32>) { let _guard = lock.lock().unwrap(); do_work().await; }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+fn callback(lock: std::sync::Mutex<i32>) { let _guard = lock.lock().unwrap(); }
+EOF
+    OUT_JSON="$TEST_TMP/locks.json"; OUT_MD="$TEST_TMP/locks.md"
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    jq -e '.findings[] | select(.probe=="sync-lock-async-aware" and .classification=="production-async-lock")' "$OUT_JSON"
+    ! jq -e '.findings[] | select(.probe=="sync-lock-async-aware" and .file=="src/locks.rs" and .line>1)' "$OUT_JSON"
+}
+
+@test "annotated synchronous boundary and test-only locks are classified" {
+    mkdir -p "$REPO/src" "$REPO/tests"
+    printf '%s\n' 'fn callback(lock: std::sync::Mutex<i32>) { // quality-audit: sync-boundary callback' 'let _guard = lock.lock().unwrap(); }' > "$REPO/src/callback.rs"
+    printf '%s\n' 'async fn test_lock(lock: std::sync::Mutex<i32>) { let _guard = lock.lock().unwrap(); work().await; }' > "$REPO/tests/locks.rs"
+    OUT_JSON="$TEST_TMP/locks.json"; OUT_MD="$TEST_TMP/locks.md"
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+    [ "$status" -eq 0 ]
+    ! jq -e '.findings[] | select(.file=="src/callback.rs" and .probe=="sync-lock-async-aware")' "$OUT_JSON"
+    jq -e '.findings[] | select(.file=="tests/locks.rs" and .classification=="test-only-async-lock")' "$OUT_JSON"
+}
+
 @test "repo-quality-audit.sh is executable and prints help" {
     [ -x "$AUDIT" ]
     run bash "$AUDIT" --help

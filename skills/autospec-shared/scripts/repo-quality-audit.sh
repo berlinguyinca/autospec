@@ -1358,6 +1358,32 @@ VERIFICATION_JSON="$TMP_DIR/verification-lanes.json"
 canonicalize_findings "$FINDINGS_ND"
 canonicalize_findings "$SUPPRESSED_ND"
 ndjson_to_array "$FINDINGS_ND" > "$FINDINGS_JSON"
+
+# Async-aware Rust lock probe: only report std locks in an async function or
+# when the acquisition scope contains an await. Synchronous callbacks can
+# explicitly document the boundary with quality-audit: sync-boundary.
+while IFS= read -r rust_file; do
+  rel="${rust_file#"$REPO"/}"
+  test_only=0; case "$rel" in tests/*|*/tests/*) test_only=1;; esac
+  line_no=0
+  while IFS= read -r line; do
+    line_no=$((line_no + 1))
+    printf '%s' "$line" | grep -Eq 'std::sync::(Mutex|RwLock).*(lock|read|write)|\.((lock)|(read)|(write))\(\)' || continue
+    context="synchronous"
+    start=$((line_no - 20)); [ "$start" -lt 1 ] && start=1
+    end=$((line_no + 20))
+    snippet="$(sed -n "${start},${end}p" "$rust_file")"
+    if printf '%s' "$snippet" | grep -Eq 'async[[:space:]]+fn|\.await'; then context="async-boundary"; fi
+    if printf '%s' "$snippet" | grep -Fq 'quality-audit: sync-boundary'; then continue; fi
+    [ "$context" = async-boundary ] || continue
+    class="production-async-lock"; [ "$test_only" -eq 1 ] && class="test-only-async-lock"
+    add_finding "sync-lock-async-aware" "$class" medium "$rel" "$line_no" \
+      "std::sync lock crosses an async boundary" \
+      "Replace with tokio::sync equivalent; evidence: $context" \
+      "sync-lock-async-aware:$rel:$line_no"
+  done < "$rust_file"
+done < <(find "$REPO" -type f -name '*.rs' -not -path '*/target/*' -print)
+ndjson_to_array "$FINDINGS_ND" > "$FINDINGS_JSON"
 ndjson_to_array "$SUPPRESSED_ND" > "$SUPPRESSED_JSON"
 ndjson_to_array "$VERIFICATION_ND" > "$VERIFICATION_JSON"
 [ -f "$ARTIFACTS_JSON" ] || printf '{}\n' > "$ARTIFACTS_JSON"
