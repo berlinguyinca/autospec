@@ -299,6 +299,19 @@ Known limits:
 
 For the current autonomous platform source of truth, see
 [`docs/specs/2026-07-06-autospec-autonomous-platform-design.md`](docs/specs/2026-07-06-autospec-autonomous-platform-design.md).
+
+### Autonomous preview
+
+Run `scripts/autospec-local autonomous preview` to generate a ranked,
+non-mutating candidate list. The result is written to
+`.autospec/reports/autonomous-preview.json` with `filed: 0`. Review it, then
+run `scripts/autospec-local autonomous start --confirm-preview` to permit live
+implementation. `AUTOSPEC_AUTONOMOUS_PREVIEW_TIMEOUT_SEC` bounds the discovery
+pass (default: 120 seconds).
+
+Implementation-lint results can be cached by content with
+`scripts/lint-implementation-cached.sh --staged`; unchanged staged diffs reuse
+the prior result from `.autospec/cache/lint/`.
 For companion repository boundaries, see
 [`docs/companion-repositories.md`](docs/companion-repositories.md).
 

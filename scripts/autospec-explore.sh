@@ -52,6 +52,7 @@ AUTONOMOUS=0
 QA_GATE=0
 QA_GATE_PASS_ON_PARTIAL=0
 ONCE=0
+PREVIEW=0
 SKIP_INITIAL_HANDOFF="${AUTOSPEC_EXPLORE_SKIP_INITIAL_HANDOFF:-0}"
 HANDOFF_TIMEOUT_SEC="${AUTOSPEC_EXPLORE_HANDOFF_TIMEOUT_SEC:-900}"
 PROMPT=""
@@ -116,6 +117,7 @@ while [ "$#" -gt 0 ]; do
         --qa-gate)               QA_GATE=1 ;;
         --qa-gate-pass-on-partial) QA_GATE_PASS_ON_PARTIAL=1 ;;
         --once)                  ONCE=1 ;;
+        --preview)               PREVIEW=1 ;;
         --no-initial-handoff)    SKIP_INITIAL_HANDOFF=1 ;;
         --handoff-timeout-sec)   shift; HANDOFF_TIMEOUT_SEC="$1" ;;
         -h|--help)               usage; exit 0 ;;
@@ -125,6 +127,10 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+if [ "$PREVIEW" -eq 1 ]; then
+    export AUTOSPEC_EXPLORE_PREVIEW=1
+fi
 
 if [ -z "$PROMPT" ]; then
     if [ "$ONCE" -eq 1 ]; then
@@ -447,6 +453,13 @@ PY
         _once_seen="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('proposals_total', 0))" "$_once_out" 2>/dev/null || echo 0)"
     fi
     _once_new="$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$_once_candidates" 2>/dev/null || echo 0)"
+    if [ "$PREVIEW" -eq 1 ] && [ "$_once_new" -eq 0 ] && [ -x "$SCRIPT_DIR/autospec-preview-discover.sh" ]; then
+        "$SCRIPT_DIR/autospec-preview-discover.sh" "$REPO_ROOT" \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); out=[]; [out.append(dict(x, body="Preview-only repository signal; verify before implementation.", labels=["explore"])) for x in d.get("candidates",[])]; print(json.dumps(out))' \
+            > "$_once_candidates"
+        _once_new="$(python3 -c "import json,sys; print(len(json.load(open(sys.argv[1]))))" "$_once_candidates" 2>/dev/null || echo 0)"
+        _once_seen="$_once_new"
+    fi
     # Did the cycle fail closed (autonomous + no skeptic verdicts)? This is
     # distinct from a genuine dry well — surfacing it stops the conductor from
     # misreading "verify unavailable" as "repo exhausted".
@@ -474,7 +487,7 @@ except Exception:
 
     # File surviving candidates as issues (best-effort; never blocks the mode).
     _once_filed=0
-    if [ "$_once_new" -gt 0 ] && [ -f "$_once_candidates" ] && command -v gh >/dev/null 2>&1; then
+    if [ "$_once_new" -gt 0 ] && [ "$PREVIEW" -ne 1 ] && [ -f "$_once_candidates" ] && command -v gh >/dev/null 2>&1; then
         _once_filed="$(python3 - "$_once_candidates" <<'PY'
 import json, os, subprocess, sys
 try:

@@ -57,6 +57,7 @@ Commands:
 Options:
   --max-cycles N          Set CONDUCTOR_MAX_CYCLES.
   --dry-run               Run conductor cycles without invoking autospec-run.
+  --confirm-preview       Resume from the latest preview and allow implementation.
   --no-digest             Skip daily digest writes.
   --poll-interval-sec N   Set CONDUCTOR_POLL_INTERVAL.
   --budget-tokens N       Set AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS.
@@ -1225,6 +1226,9 @@ while [ $# -gt 0 ]; do
             ;;
         --dry-run)
             CONDUCTOR_DRY_RUN=1; export CONDUCTOR_DRY_RUN
+            ;;
+        --confirm-preview)
+            CONDUCTOR_DRY_RUN=0; export CONDUCTOR_DRY_RUN
             ;;
         --no-digest)
             CONDUCTOR_NO_DIGEST=1; export CONDUCTOR_NO_DIGEST
