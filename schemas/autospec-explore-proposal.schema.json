@@ -80,6 +80,14 @@
       "type": "string",
       "enum": ["governance", "testability", "architecture", "product"],
       "description": "Governance track used for independent caps and merge priority. Legacy proposals default to product."
+    },
+    "kind": {
+      "type": "string",
+      "description": "Restricted repository safety-mode proposal kind."
+    },
+    "preservation_rollback_plan": {
+      "type": "string",
+      "description": "Required preservation and rollback plan for restricted data-file implementations."
     }
   }
 }

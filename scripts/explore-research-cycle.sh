@@ -128,6 +128,7 @@ Env:
   AUTOSPEC_EXPLORE_TRACK_PRIORITY
                                  Comma-separated track order (default governance,
                                  testability,architecture,product).
+  AUTOSPEC_EXPLORE_REPO_CLASS     data-study or notebook-research enables safety mode.
 EOF
 }
 
@@ -419,6 +420,7 @@ GAP_REPO_ROOT="$REPO_ROOT" \
 GAP_CLAIMING_SOURCES="${AUTOSPEC_EXPLORE_GAP_CLAIMING_SOURCES:-}" \
 TRACK_CAPS="${AUTOSPEC_EXPLORE_TRACK_CAPS:-}" \
 TRACK_PRIORITY="${AUTOSPEC_EXPLORE_TRACK_PRIORITY:-governance,testability,architecture,product}" \
+REPO_CLASS="${AUTOSPEC_EXPLORE_REPO_CLASS:-${AUTOSPEC_REPO_CLASS:-}}" \
 python3 - <<'PY' > "$work_dir/final.json"
 import json, os, re, glob, datetime
 
@@ -445,6 +447,9 @@ def proposal_track(p, source):
         return "testability"
     if source.startswith("specialist:arch") or source == "architecture": return "architecture"
     return "product"
+repo_class = os.environ.get("REPO_CLASS", "").strip().lower()
+RESTRICTED_CLASSES = {"data-study", "notebook-research"}
+RESTRICTED_KINDS = {"schema-documentation", "checksum-manifest", "data-dictionary", "notebook-execution-metadata", "environment-capture", "reproducible-pipeline-wrapper"}
 
 # Static source priors per the spec — the defensive fallback used verbatim when
 # no dynamic weights are available (no ledger / weights script absent / broken).
@@ -473,6 +478,21 @@ if _wj:
 else:
     SRC_WEIGHTS = DEFAULT_SRC_WEIGHTS
 COMPLEXITY = {"small": 1.0, "medium": 2.0, "large": 4.0}
+restricted_rejections = []
+def restricted_reason(p):
+    if repo_class not in RESTRICTED_CLASSES:
+        return ""
+    kind = str(p.get("kind", p.get("proposal_kind", ""))).strip().lower()
+    text = " ".join(str(p.get(k, "")) for k in ("title", "evidence", "description")).lower()
+    if kind in RESTRICTED_KINDS:
+        return ""
+    if any(x in text for x in ("rewrite data", "reformat notebook", "generated-data", "generated data")):
+        return "mass rewrite or generated-data modification is forbidden"
+    touches = bool(p.get("touches_data_file")) or any(x in text for x in ("data file", "dataset", ".csv", ".parquet", ".jsonl", ".ipynb"))
+    impl = bool(p.get("implementation_type")) or kind in {"implementation", "code-change", "feature"}
+    if impl and touches and not str(p.get("preservation_rollback_plan", p.get("rollback_plan", ""))).strip():
+        return "data-file implementation requires preservation_rollback_plan"
+    return "proposal kind is required and must be explicitly allowed"
 
 # Severity bands, highest impact -> lowest. Lower numeric value = higher
 # priority (primary sort key). Mirrors schemas/autospec-explore-proposal.schema
@@ -623,6 +643,10 @@ else:
         if not isinstance(p, dict): continue
         title = (p.get("title") or "").strip()
         if not title: continue
+        reason = restricted_reason(p)
+        if reason:
+            restricted_rejections.append({"title": title, "reason": reason})
+            continue
         comp = (p.get("estimated_complexity") or "medium").lower()
         try:
             conf = float(p.get("confidence", 0.5))
@@ -1100,6 +1124,8 @@ out = {
     "proposals_after_verify": len(verified),
     "proposals_refuted": refuted_count,
     "proposals_after_roi": len(roi_kept),
+    "restricted_mode": repo_class in RESTRICTED_CLASSES,
+    "restricted_rejections": restricted_rejections,
     "structural_fixes": structural_fixes,
     "proposals_after_constitution": len(constitutional),
     "proposals_after_recent_filter": len(filtered),

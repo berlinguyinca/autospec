@@ -912,3 +912,8 @@ reports before deciding whether a full recheck is needed.
 
 Organization sweeps assign proposals to governance or domain tracks, apply
 independent caps and priorities, and preserve the track metadata in output.
+
+# Data-study safety mode
+
+Repositories classified as `data-study` or `notebook-research` use a restricted
+proposal allowlist and require preservation or rollback plans for data changes.
