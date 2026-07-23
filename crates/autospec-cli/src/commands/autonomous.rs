@@ -4013,6 +4013,8 @@ fn spawn_unit(
     if let Some(token) = lease_token {
         process.env("AUTOSPEC_CONDUCTOR_LEASE_TOKEN", token);
     }
+    #[cfg(unix)]
+    process.process_group(0);
     let mut child = process
         .spawn()
         .map_err(|error| format!("cannot spawn {name} command: {error}"))?;
@@ -4326,13 +4328,16 @@ fn classify_unit_metadata(
     expected_scope: &str,
     probe: ProcessProbe,
 ) -> UnitMetadataState {
-    let Some(_) = metadata_pid(raw) else {
-        return UnitMetadataState::Ambiguous;
-    };
-    if extract_json_string(raw, "repo").as_deref() != Some(expected_repo)
-        || extract_json_string(raw, "scope").as_deref() != Some(expected_scope)
-    {
-        return UnitMetadataState::Ambiguous;
+    let legacy_pid = raw.parse::<i32>().is_ok_and(|pid| pid > 0);
+    if !legacy_pid {
+        let Some(_) = metadata_pid(raw) else {
+            return UnitMetadataState::Ambiguous;
+        };
+        if extract_json_string(raw, "repo").as_deref() != Some(expected_repo)
+            || extract_json_string(raw, "scope").as_deref() != Some(expected_scope)
+        {
+            return UnitMetadataState::Ambiguous;
+        }
     }
     match probe {
         ProcessProbe::Alive => UnitMetadataState::Live,
@@ -5693,9 +5698,21 @@ mod autonomous_metadata_tests {
     }
 
     #[test]
-    fn autonomous_metadata_fails_closed_for_legacy_foreign_and_indeterminate_records() {
+    fn autonomous_legacy_pid_metadata_uses_determinate_process_liveness() {
+        assert_eq!(
+            classify_unit_metadata("42", REPO, SCOPE, ProcessProbe::Alive),
+            UnitMetadataState::Live
+        );
+        assert_eq!(
+            classify_unit_metadata("42", REPO, SCOPE, ProcessProbe::Missing),
+            UnitMetadataState::Stale
+        );
+    }
+
+    #[test]
+    fn autonomous_metadata_fails_closed_for_foreign_and_indeterminate_records() {
         for (raw, probe) in [
-            ("42".to_string(), ProcessProbe::Missing),
+            ("42".to_string(), ProcessProbe::Indeterminate),
             (metadata(42, "other/repo", SCOPE), ProcessProbe::Missing),
             (metadata(42, REPO, "other_scope"), ProcessProbe::Missing),
             (metadata(42, REPO, SCOPE), ProcessProbe::Indeterminate),

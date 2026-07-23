@@ -3638,16 +3638,85 @@ fn workspace_root() -> std::path::PathBuf {
         .expect("workspace root")
 }
 
+#[test]
+fn cleanup_pids_terminates_scoped_json_and_legacy_pid_records() {
+    let scope = temp_dir("autospec-cleanup-pids");
+    let scoped = Command::new("sleep")
+        .arg("20")
+        .spawn()
+        .expect("scoped fixture process");
+    let legacy = Command::new("sleep")
+        .arg("20")
+        .spawn()
+        .expect("legacy fixture process");
+    let scoped_pid = scoped.id().to_string();
+    let legacy_pid = legacy.id().to_string();
+    let mut scoped = FixtureChild::new(scoped);
+    let mut legacy = FixtureChild::new(legacy);
+    std::fs::write(
+        scope.join("conductor.pid"),
+        format!(
+            "{{\"pid\":{scoped_pid},\"repo\":\"test/repo\",\"scope\":\"test_repo\"}}\n"
+        ),
+    )
+    .expect("scoped pid metadata");
+    std::fs::write(scope.join("monitor.pid"), format!("{legacy_pid}\n"))
+        .expect("legacy pid metadata");
+
+    cleanup_pids(&scope);
+    assert!(
+        fixture_child_stops(&mut scoped),
+        "scoped JSON PID was not terminated"
+    );
+    assert!(
+        fixture_child_stops(&mut legacy),
+        "legacy plain PID was not terminated"
+    );
+}
+
+fn fixture_child_stops(child: &mut FixtureChild) -> bool {
+    for _ in 0..20 {
+        if !child.is_running() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    false
+}
+
 fn cleanup_pids(scope: &std::path::Path) {
     for name in ["conductor", "monitor", "supervisor"] {
         let pid_file = scope.join(format!("{name}.pid"));
-        if let Ok(pid) = std::fs::read_to_string(pid_file) {
-            let pid = pid.trim();
-            if !pid.is_empty() {
-                let _ = Command::new("kill").arg(pid).stderr(Stdio::null()).status();
-            }
+        if let Ok(metadata) = std::fs::read_to_string(pid_file) {
+            let Some(pid) = cleanup_pid(&metadata) else {
+                continue;
+            };
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{pid}")])
+                .stderr(Stdio::null())
+                .status();
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &pid])
+                .stderr(Stdio::null())
+                .status();
         }
     }
+}
+
+fn cleanup_pid(metadata: &str) -> Option<String> {
+    let metadata = metadata.trim();
+    if metadata
+        .parse::<u32>()
+        .is_ok_and(|candidate| candidate > 0)
+    {
+        return Some(metadata.to_string());
+    }
+    serde_json::from_str::<serde_json::Value>(metadata)
+        .ok()?
+        .get("pid")?
+        .as_u64()
+        .filter(|pid| *pid > 0)
+        .map(|pid| pid.to_string())
 }
 
 fn json_path(path: &std::path::Path) -> String {
