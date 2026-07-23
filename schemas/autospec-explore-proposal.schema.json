@@ -75,6 +75,11 @@
     "priority": {
       "type": "boolean",
       "description": "When true, the aggregator applies AUTOSPEC_PRIORITY_BOOST (default 1.5) to this proposal's score before ranking, bounded so it cannot exceed max_non_boosted_score * multiplier. Proposals with source==\"steer\" are also treated as priority-aligned."
+    },
+    "track": {
+      "type": "string",
+      "enum": ["governance", "testability", "architecture", "product"],
+      "description": "Governance track used for independent caps and merge priority. Legacy proposals default to product."
     }
   }
 }

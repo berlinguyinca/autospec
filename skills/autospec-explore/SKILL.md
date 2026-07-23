@@ -908,3 +908,7 @@ sweep under `.autospec/org-audits/<name>/`. The generated `report.json` and
 human-readable `report.md` are accompanied by append-only `ledger.jsonl`; a
 future sweep can inspect these files to seed source weights and detect stale
 reports before deciding whether a full recheck is needed.
+# Governance and domain proposal tracks
+
+Organization sweeps assign proposals to governance or domain tracks, apply
+independent caps and priorities, and preserve the track metadata in output.
