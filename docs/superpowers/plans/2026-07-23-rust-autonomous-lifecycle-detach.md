@@ -24,6 +24,7 @@
 - Modify: `crates/autospec-cli/src/commands/autonomous.rs`
 - Modify: `crates/autospec-cli/tests/autonomous_conductor_commands.rs`
 - Modify: `crates/autospec-cli/tests/cli_commands.rs`
+- Modify: `docs/superpowers/plans/2026-07-23-rust-autonomous-lifecycle-detach.md`
 
 **Interfaces:**
 - Consumes: `spawn_unit()`, `classify_unit_metadata()`, `ProcessProbe`, and the existing detached lifecycle fixture.
