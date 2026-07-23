@@ -26,6 +26,34 @@ EOF
     jq -e '.findings[] | select(.probe=="mock-policy" and .classification=="mock-policy-integration" and (.body|contains("wiremock")) and (.body|contains("broker/DB")))' "$TEST_TMP/audit.json"
 }
 
+@test "f64 invariant probe classifies monetary and statistical fields" {
+    printf '%s\n' 'Numeric invariants: money and statistical metrics must use Decimal.' > "$REPO/AGENTS.md"
+    mkdir -p "$REPO/crates/pricing/src" "$REPO/tests"
+    cat > "$REPO/crates/pricing/Cargo.toml" <<'EOF'
+[package]
+name = "pricing"
+EOF
+    printf 'pub struct Quote { pub price: f64, pub sharpe: f64 }\n' > "$REPO/crates/pricing/src/lib.rs"
+    printf 'let price: f64 = 1.0;\n' > "$REPO/tests/fixture.rs"
+    run bash "$AUDIT" --repo "$REPO" --json "$TEST_TMP/audit.json" --markdown "$TEST_TMP/audit.md"
+    [ "$status" -eq 0 ]
+    run jq -e '[.findings[] | select(.probe=="f64-numeric-invariant" and (.classification=="money/price" or .classification=="statistical metric"))] | length >= 1' "$TEST_TMP/audit.json"
+    [ "$status" -eq 0 ]
+}
+
+@test "f64 bridge annotation suppresses invariant finding" {
+    printf '%s\n' 'Numeric invariant: prices use Decimal.' > "$REPO/AGENTS.md"
+    mkdir -p "$REPO/crates/bridge/src"
+    cat > "$REPO/crates/bridge/Cargo.toml" <<'EOF'
+[package]
+name = "bridge"
+EOF
+    printf 'pub fn price_bridge() { let price: f64 = 1.0; } // quality-audit: f64-bridge external API\n' > "$REPO/crates/bridge/src/lib.rs"
+    run bash "$AUDIT" --repo "$REPO" --json "$TEST_TMP/audit.json" --markdown "$TEST_TMP/audit.md"
+    [ "$status" -eq 0 ]
+    ! jq -e '.findings[] | select(.probe=="f64-numeric-invariant")' "$TEST_TMP/audit.json"
+}
+
 @test "mock policy exception annotation suppresses finding" {
     printf '%s\n' 'Real-service testing is required; tests must not use broker or DB mocks.' > "$REPO/AGENTS.md"
     mkdir -p "$REPO/tests/integration"
