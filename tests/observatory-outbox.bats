@@ -34,9 +34,31 @@ jsonl_path() {
   [ -s "$(jsonl_path)" ]
   [ "$(wc -l < "$(jsonl_path)" | tr -d ' ')" -eq 2 ]
 
-  jq -e 'select(.event_type == "RunStarted" and .sequence == 1 and .run_id == "run-test-1618")' "$(jsonl_path)" >/dev/null
-  jq -e 'select(.event_type == "WorkerHeartbeat" and .sequence == 2 and .worker_id == "worker-test-1618")' "$(jsonl_path)" >/dev/null
+  run jq -s -c '[.[].event_type]' "$(jsonl_path)"
+  [ "$status" -eq 0 ]
+  [ "$output" = '["RunStarted","WorkerHeartbeat"]' ]
+  jq -se '.[0] | .event_type == "RunStarted" and .sequence == 1 and .run_id == "run-test-1618"' "$(jsonl_path)" >/dev/null
+  jq -se '.[1] | .event_type == "WorkerHeartbeat" and .sequence == 2 and .worker_id == "worker-test-1618"' "$(jsonl_path)" >/dev/null
   jq -e 'select(.issue_url == "https://github.com/berlinguyinca/autospec/issues/1618")' "$(jsonl_path)" >/dev/null
+}
+
+@test "offline dry-run has deterministic event shape across runs" {
+  first="$TEST_TMP/first"
+  second="$TEST_TMP/second"
+  mkdir -p "$first" "$second"
+
+  run env AUTOSPEC_OBSERVATORY_DIR="$first/.autospec/observatory" AUTOSPEC_OBSERVATORY_OFFLINE=1 \
+    bash "$SCRIPT" dry-run --run-id "$AUTOSPEC_RUN_ID" --worker-id "$AUTOSPEC_WORKER_ID" \
+      --repository-id "berlinguyinca/autospec" --issue-url "https://github.com/berlinguyinca/autospec/issues/1618"
+  [ "$status" -eq 0 ]
+  run env AUTOSPEC_OBSERVATORY_DIR="$second/.autospec/observatory" AUTOSPEC_OBSERVATORY_OFFLINE=1 \
+    bash "$SCRIPT" dry-run --run-id "$AUTOSPEC_RUN_ID" --worker-id "$AUTOSPEC_WORKER_ID" \
+      --repository-id "berlinguyinca/autospec" --issue-url "https://github.com/berlinguyinca/autospec/issues/1618"
+  [ "$status" -eq 0 ]
+
+  first_shape="$(jq -c 'del(.event_id, .occurred_at, .received_at)' "$first/.autospec/observatory/outbox/$AUTOSPEC_RUN_ID.jsonl")"
+  second_shape="$(jq -c 'del(.event_id, .occurred_at, .received_at)' "$second/.autospec/observatory/outbox/$AUTOSPEC_RUN_ID.jsonl")"
+  [ "$first_shape" = "$second_shape" ]
 }
 
 @test "duplicate event ids are skipped and checkpoint records next sequence" {
