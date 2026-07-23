@@ -59,6 +59,9 @@ pub enum MainlineHealthDiagnostic {
     CheckRunsApiFailed,
     RequiredCheckPending,
     RequiredCheckFailed,
+    BaselineStale,
+    BaselineReadFailed,
+    NewCheckFailed,
 }
 
 impl MainlineHealthDiagnostic {
@@ -72,6 +75,9 @@ impl MainlineHealthDiagnostic {
             Self::CheckRunsApiFailed => "check-runs-api-failed",
             Self::RequiredCheckPending => "required-check-pending",
             Self::RequiredCheckFailed => "required-check-failed",
+            Self::BaselineStale => "baseline-stale",
+            Self::BaselineReadFailed => "baseline-read-failed",
+            Self::NewCheckFailed => "new-check-failed",
         }
     }
 }
@@ -154,6 +160,8 @@ pub struct MainlineHealth {
     pub evidence: Vec<CheckEvidence>,
     pub outcome: MainlineHealthOutcome,
     pub diagnostic: MainlineHealthDiagnostic,
+    pub baseline_checks: Vec<String>,
+    pub newly_red_checks: Vec<String>,
 }
 
 impl MainlineHealth {
@@ -167,6 +175,8 @@ impl MainlineHealth {
             evidence: Vec::new(),
             outcome,
             diagnostic,
+            baseline_checks: Vec::new(),
+            newly_red_checks: Vec::new(),
         }
     }
 
@@ -183,12 +193,14 @@ impl MainlineHealth {
             .map(|digest| format!(",\"effective_policy_digest\":\"{}\"", escape_json(digest)))
             .unwrap_or_default();
         format!(
-            "{{\"repo\":\"{}\",\"branch\":\"{}\",\"outcome\":\"{}\",\"diagnostic\":\"{}\"{},\"evidence\":[{}]}}",
+            "{{\"repo\":\"{}\",\"branch\":\"{}\",\"outcome\":\"{}\",\"diagnostic\":\"{}\"{},\"baseline_checks\":[{}],\"newly_red_checks\":[{}],\"evidence\":[{}]}}",
             escape_json(repo),
             escape_json(&self.branch),
             self.outcome.as_str(),
             self.diagnostic.as_str(),
             policy_digest,
+            self.baseline_checks.iter().map(|name| format!("\"{}\"", escape_json(name))).collect::<Vec<_>>().join(","),
+            self.newly_red_checks.iter().map(|name| format!("\"{}\"", escape_json(name))).collect::<Vec<_>>().join(","),
             self.evidence
                 .iter()
                 .map(check_json)
@@ -196,6 +208,51 @@ impl MainlineHealth {
                 .join(",")
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HealthBaseline {
+    Ready(BTreeSet<String>),
+    Stale,
+    Failed,
+}
+
+pub fn evaluate_health_with_baseline(
+    branch: &str,
+    branch_exists: bool,
+    evidence: Vec<CheckEvidence>,
+    baseline: HealthBaseline,
+) -> MainlineHealth {
+    let baseline_checks = match &baseline {
+        HealthBaseline::Ready(names) => names.iter().cloned().collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    if !matches!(baseline, HealthBaseline::Ready(_)) {
+        let diagnostic = if matches!(baseline, HealthBaseline::Stale) {
+            MainlineHealthDiagnostic::BaselineStale
+        } else {
+            MainlineHealthDiagnostic::BaselineReadFailed
+        };
+        let mut health = MainlineHealth::diagnostic(branch, MainlineHealthOutcome::Wait, diagnostic);
+        health.baseline_checks = baseline_checks;
+        return health;
+    }
+    let names = match baseline { HealthBaseline::Ready(names) => names, _ => unreachable!() };
+    let mut health = evaluate_health(branch, branch_exists, evidence.clone());
+    let newly_red_checks = evidence.into_iter()
+        .filter(|check| check.required && check.verdict() == CheckVerdict::Failed && !names.contains(&check.name))
+        .map(|check| check.name)
+        .collect::<Vec<_>>();
+    health.baseline_checks = baseline_checks;
+    health.newly_red_checks = newly_red_checks.clone();
+    if !newly_red_checks.is_empty() {
+        health.outcome = MainlineHealthOutcome::Halt;
+        health.diagnostic = MainlineHealthDiagnostic::NewCheckFailed;
+    } else if health.diagnostic == MainlineHealthDiagnostic::RequiredCheckFailed {
+        health.outcome = MainlineHealthOutcome::Continue;
+        health.diagnostic = MainlineHealthDiagnostic::ChecksPassed;
+    }
+    health
 }
 
 pub fn resolve_health_branch(
@@ -264,6 +321,8 @@ pub fn evaluate_health(
             evidence,
             outcome: MainlineHealthOutcome::Continue,
             diagnostic: MainlineHealthDiagnostic::NoRequiredChecks,
+            baseline_checks: Vec::new(),
+            newly_red_checks: Vec::new(),
         };
     }
 
@@ -276,6 +335,8 @@ pub fn evaluate_health(
             evidence,
             outcome: MainlineHealthOutcome::Wait,
             diagnostic: MainlineHealthDiagnostic::RequiredCheckPending,
+            baseline_checks: Vec::new(),
+            newly_red_checks: Vec::new(),
         };
     }
 
@@ -288,6 +349,8 @@ pub fn evaluate_health(
             evidence,
             outcome: MainlineHealthOutcome::Halt,
             diagnostic: MainlineHealthDiagnostic::RequiredCheckFailed,
+            baseline_checks: Vec::new(),
+            newly_red_checks: Vec::new(),
         };
     }
 
@@ -300,6 +363,8 @@ pub fn evaluate_health(
             evidence,
             outcome: MainlineHealthOutcome::Wait,
             diagnostic: MainlineHealthDiagnostic::RequiredCheckPending,
+            baseline_checks: Vec::new(),
+            newly_red_checks: Vec::new(),
         };
     }
 
@@ -308,6 +373,8 @@ pub fn evaluate_health(
         evidence,
         outcome: MainlineHealthOutcome::Continue,
         diagnostic: MainlineHealthDiagnostic::ChecksPassed,
+        baseline_checks: Vec::new(),
+        newly_red_checks: Vec::new(),
     }
 }
 

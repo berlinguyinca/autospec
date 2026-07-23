@@ -45,6 +45,9 @@ either effective value changes the digest; YAML formatting and unrelated
 configuration do not. Rust reloads the repository policy and appends this
 binding on every evaluated foreground invocation, even when retained conductor
 state ends the cycle. Malformed policy fails before a new record is written.
+When a baseline check-name set is available, known red checks remain advisory;
+only a newly red required check produces the `new-check-failed` admission halt.
+Stale or unreadable baselines remain fail-closed and return a wait outcome.
 If no configured, explicit, or GitHub default branch can be resolved, the
 `default-branch-missing` receipt uses the reserved invalid-ref identity
 `autospec:unresolved-default-branch` for digest input while retaining an empty
