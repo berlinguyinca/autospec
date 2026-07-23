@@ -56,9 +56,11 @@ ARTIFACTS_JSON="$TMP_DIR/artifacts.json"
 STORAGE_KEYS="$TMP_DIR/storage-keys.txt"
 HOTSPOTS_ND="$TMP_DIR/maintainability-hotspots.ndjson"
 HOTSPOT_KEYS="$TMP_DIR/maintainability-hotspot-keys.txt"
+F64_MODULE_KEYS="$TMP_DIR/f64-module-keys.txt"
 FAILED_ISSUE_KEYS="$TMP_DIR/failed-issue-keys.txt"
 touch "$FINDINGS_ND" "$SUPPRESSED_ND" "$ISSUES_ND" "$RISKS_ND" "$VERIFICATION_ND"
 touch "$STORAGE_KEYS" "$HOTSPOTS_ND" "$HOTSPOT_KEYS" "$FAILED_ISSUE_KEYS"
+touch "$F64_MODULE_KEYS"
 
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -132,6 +134,47 @@ probe_mock_policy() {
         "mock-policy:$rel:$line"
     done
   done < <(find "$REPO" \( -path '*/.git' -o -path '*/node_modules' \) -prune -o -type f \( -path '*/tests/*' -o -path '*/test/*' \) -print)
+}
+
+# Rust numeric invariant probe. It is opt-in: a repository must explicitly
+# declare its numeric policy in AGENTS.md before f64 usage becomes actionable.
+probe_rust_f64_invariants() {
+  policy="$REPO/AGENTS.md"
+  [ -f "$policy" ] || return 0
+  grep -Eiq 'numeric invariant|numeric invariants|Decimal|f64[[:space:]].*(money|price|quantity|pnl|mean|std|sharpe|t_stat)|money.*Decimal' "$policy" || return 0
+  while IFS= read -r file; do
+    rel="${file#"$REPO"/}"
+    class="harmless scalar"
+    case "$rel" in
+      tests/*|*/tests/*|test/*|*/test/*) class="test-only" ;;
+    esac
+    while IFS=: read -r line excerpt; do
+      [ -n "$excerpt" ] || continue
+      case "$excerpt" in
+        *quality-audit:\ f64-bridge*) continue ;;
+      esac
+      lower="$(printf '%s' "$excerpt" | tr '[:upper:]' '[:lower:]')"
+      if printf '%s' "$lower" | grep -Eq '(^|[^[:alnum:]_])(price|cost|money|amount|pnl)([^[:alnum:]_]|$)'; then
+        class="money/price"
+      elif printf '%s' "$lower" | grep -Eq '(^|[^[:alnum:]_])(qty|quantity|count|volume)([^[:alnum:]_]|$)'; then
+        class="quantity"
+      elif printf '%s' "$lower" | grep -Eq '(^|[^[:alnum:]_])(percent|percentage|ratio|rate)([^[:alnum:]_]|$)'; then
+        class="percentage"
+      elif printf '%s' "$lower" | grep -Eq '(^|[^[:alnum:]_])(mean|std|sharpe|t_stat|variance|stdev)([^[:alnum:]_]|$)'; then
+        class="statistical metric"
+      fi
+      case "$class" in
+        "money/price"|quantity|"statistical metric")
+          module="${rel%%/src/*}"
+          grep -Fqx "$module" "$F64_MODULE_KEYS" && continue
+          printf '%s\n' "$module" >> "$F64_MODULE_KEYS"
+          add_finding "f64-numeric-invariant" "$class" "medium" "$rel" "${line:-0}" \
+            "f64 numeric invariant in $module" \
+            "${class} value uses f64; prefer Decimal or document a quality-audit: f64-bridge annotation. classification=$class" \
+            "f64-numeric-invariant:$module" ;;
+      esac
+    done < <(grep -Ein '(^|[^[:alnum:]_])f64([^[:alnum:]_]|$)' "$file" 2>/dev/null || true)
+  done < <(find "$REPO" -type f -name '*.rs' -not -path '*/.git/*' -print)
 }
 
 add_guard_finding() {
@@ -1170,6 +1213,7 @@ fi
 
 # Probe: forbidden broker/database mocks under real-service testing policy.
 probe_mock_policy
+probe_rust_f64_invariants
 
 # Probe: package-manager scripts, runtime engine, typecheck/lint/test/audit.
 write_runtime_json
