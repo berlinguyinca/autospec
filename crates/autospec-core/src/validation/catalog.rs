@@ -409,6 +409,7 @@ impl ValidationCheck {
                 CheckOwner::ExternalBatch(ExternalCheck::GapMinerContract)
             }
             "check_startup_preflight" => CheckOwner::RustNative(StructuralCheck::StartupPreflight),
+            "check_rust_output_macros" => CheckOwner::RustNative(StructuralCheck::RustOutputMacros),
             "check_grow_define_contract" => {
                 CheckOwner::ExternalBatch(ExternalCheck::GrowDefineContract)
             }
@@ -527,6 +528,7 @@ pub enum StructuralCheck {
     SharedScriptInstall,
     RootHelperWrapperPolicy,
     StartupPreflight,
+    RustOutputMacros,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -581,6 +583,7 @@ impl ValidationCatalog {
 
 const LEGACY_TOP_LEVEL_CALL_IDS: &[&str] = &[
     "check_startup_preflight",
+    "check_rust_output_macros",
     "check_stop_mode_section",
     "check_keyword_routing_section",
     "check_flag_sentinel_docs",
@@ -740,6 +743,7 @@ const STANDARD_CHECK_IDS: &[&str] = &[
     "check_self_update",
     "check_self_update_duo",
     "check_startup_preflight",
+    "check_rust_output_macros",
     "check_codex_skills_install",
     "check_shared_script_install",
     "check_root_helper_wrapper_policy",
