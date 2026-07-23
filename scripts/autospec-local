@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Run Autospec directly from this checkout without reinstalling installed skills.
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
+export AUTOSPEC_REPO_DIR="${AUTOSPEC_REPO_DIR:-$ROOT}"
+export AUTOSPEC_SCRIPTS_DIR="$ROOT/scripts"
+export PATH="/usr/bin:$HOME/.local/bin:$PATH"
+
+case "${1:-}" in
+  autonomous)
+    shift
+    export AUTOSPEC_EXPLORE_VERIFY_CMD="${AUTOSPEC_EXPLORE_VERIFY_CMD:-bash "$ROOT/scripts/autospec-autonomous-verify-drain.sh"}"
+    if [ "${1:-}" = "preview" ]; then
+      shift
+      out="$(mktemp "${TMPDIR:-/tmp}/autospec-preview.XXXXXX")"
+      trap 'rm -f "$out"' EXIT
+      if timeout "${AUTOSPEC_PREVIEW_TIMEOUT_SEC:-30}" \
+          bash "$ROOT/scripts/autospec-explore.sh" --once --preview --autonomous "$@" >"$out" 2>&1; then
+        json_out="$(tail -n 1 "$out")"
+      else
+        json_out="$(python3 - "$ROOT" <<'PY'
+import json, subprocess, sys
+d=json.loads(subprocess.check_output([sys.argv[1]+"/scripts/autospec-preview-discover.sh", sys.argv[1]]))
+print(json.dumps({"tier":"local","proposals_seen":len(d["candidates"]),"new_candidates":len(d["candidates"]),"filed":0,"dry":False,"reason":"repository-signals-fallback","candidates":d["candidates"]}))
+PY
+)"
+      fi
+      mkdir -p "$ROOT/.autospec/reports"
+      printf '%s\n' "$json_out" > "$ROOT/.autospec/reports/autonomous-preview.json"
+      printf '%s\n' "$json_out"
+      exit 0
+    fi
+    exec bash "$ROOT/scripts/autospec-autonomous.sh" "$@"
+    ;;
+  explore)
+    shift
+    exec bash "$ROOT/scripts/autospec-explore.sh" "$@"
+    ;;
+  validate)
+    shift
+    exec "$ROOT/target/debug/autospec" validate "$@"
+    ;;
+  *)
+    printf 'Usage: %s {autonomous|explore|validate} [options]\n' "$0" >&2
+    exit 2
+    ;;
+esac

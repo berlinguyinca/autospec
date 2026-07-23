@@ -2838,7 +2838,6 @@ EOF_PROV_BATCH
                 if [ "$_dry" = "1" ]; then
                     printf '[conductor] [dry-run] would invoke explore --once for Tier %s\n' \
                         "$_tier" >&2
-                    # Simulate a dry yield in dry-run mode.
                     _explore_out='{"tier":"local","proposals_seen":0,"new_candidates":0,"filed":0,"dry":true,"reason":"dry-run"}'
                     _explore_rc=0
                 elif [ "$_action" = "run-explore-once-internet" ]; then
