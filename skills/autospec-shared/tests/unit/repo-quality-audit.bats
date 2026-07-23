@@ -15,6 +15,29 @@ teardown() {
     teardown_repo_quality_audit_fixture
 }
 
+@test "mock policy classifies forbidden integration broker mock" {
+    printf '%s\n' 'Real-service testing is required; tests must not use broker or DB mocks.' > "$REPO/AGENTS.md"
+    mkdir -p "$REPO/tests/integration"
+    cat > "$REPO/tests/integration/broker_test.js" <<'EOF'
+import { wiremockBroker } from 'wiremock';
+EOF
+    run bash "$AUDIT" --repo "$REPO" --json "$TEST_TMP/audit.json" --markdown "$TEST_TMP/audit.md"
+    [ "$status" -eq 0 ]
+    jq -e '.findings[] | select(.probe=="mock-policy" and .classification=="mock-policy-integration" and (.body|contains("wiremock")) and (.body|contains("broker/DB")))' "$TEST_TMP/audit.json"
+}
+
+@test "mock policy exception annotation suppresses finding" {
+    printf '%s\n' 'Real-service testing is required; tests must not use broker or DB mocks.' > "$REPO/AGENTS.md"
+    mkdir -p "$REPO/tests/integration"
+    cat > "$REPO/tests/integration/broker_test.js" <<'EOF'
+// quality-audit: mock-exception local broker contract fixture
+import { wiremockBroker } from 'wiremock';
+EOF
+    run bash "$AUDIT" --repo "$REPO" --json "$TEST_TMP/audit.json" --markdown "$TEST_TMP/audit.md"
+    [ "$status" -eq 0 ]
+    ! jq -e '.findings[] | select(.probe=="mock-policy")' "$TEST_TMP/audit.json"
+}
+
 @test "repo-quality-audit.sh is executable and prints help" {
     [ -x "$AUDIT" ]
     run bash "$AUDIT" --help
