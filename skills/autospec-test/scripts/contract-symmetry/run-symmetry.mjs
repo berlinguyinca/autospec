@@ -27,10 +27,25 @@
  * Exit codes: 0 = pass, 1 = fail (violations), 2 = fatal error
  */
 
-import { chromium } from '/opt/homebrew/lib/node_modules/playwright/index.mjs';
+import { chromium } from 'playwright';
 import { extract } from './ui-extractor.mjs';
 import { interpolate } from './interpolator.mjs';
 import { assertContains, assertBoolean } from './jsonpath-verifier.mjs';
+
+export function accessScopeViolation(route, guard, declaredScope, documented = '') {
+  const scope = String(declaredScope || '').toLowerCase();
+  const guardText = String(guard || '').toLowerCase();
+  if (!scope || !guardText) return null;
+  const adminOnly = /admin[-_ ]?(only|guard|middleware)|requireadmin|isadmin/.test(guardText);
+  const adminScope = /admin[-_ ]?only|administrators?/.test(scope);
+  if (adminOnly && !adminScope && !/acceptable|documented|intentional/i.test(documented)) {
+    return { type: 'access-scope-mismatch', route, guard, declared_scope: declaredScope };
+  }
+  if (/^\/admin(?:\/|$)/i.test(route) && !adminScope && !/acceptable|documented|intentional/i.test(documented)) {
+    return { type: 'access-scope-mismatch', route, guard, declared_scope: declaredScope };
+  }
+  return null;
+}
 
 async function run() {
   let input;
@@ -84,6 +99,12 @@ async function run() {
         contractResults.push({ id, passed: false, tuples_checked: 0, violations });
         allViolations.push(...violations);
         continue;
+      }
+
+      const declaredScope = cs.access_scope || cs.spec_access_scope || cs.user_access_scope;
+      for (const tuple of tuples) {
+        const mismatch = accessScopeViolation(ui_source.route, tuple.guard, declaredScope, cs.access_scope_note || cs.scope_documentation);
+        if (mismatch) violations.push({ contract_id: id, phase: 'access_scope', ...mismatch });
       }
 
       // Step 2-4: for each tuple, interpolate URL, fetch, assert

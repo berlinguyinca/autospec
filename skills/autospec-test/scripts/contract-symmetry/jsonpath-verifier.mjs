@@ -16,24 +16,12 @@
  *   $.array[?(@.k==true)] — filter with boolean literal
  */
 
-// Try to import jsonpath-plus from common locations
+// Resolve jsonpath-plus from the package environment, independent of host paths.
 let JSONPath = null;
-const candidatePaths = [
-  '/opt/homebrew/lib/node_modules/jsonpath-plus/dist/index-node-cjs.cjs',
-];
-for (const p of candidatePaths) {
-  try {
-    const mod = await import(p);
-    JSONPath = mod.JSONPath;
-    break;
-  } catch { /* try next */ }
-}
-if (!JSONPath) {
-  try {
-    const mod = await import('jsonpath-plus');
-    JSONPath = mod.JSONPath;
-  } catch { /* use built-in fallback */ }
-}
+try {
+  const mod = await import('jsonpath-plus');
+  JSONPath = mod.JSONPath;
+} catch { /* use built-in fallback */ }
 
 // ── Built-in evaluator ────────────────────────────────────────────────────────
 
