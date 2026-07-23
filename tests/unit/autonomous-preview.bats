@@ -6,3 +6,5 @@
   [[ "$output" == *'"filed":0'* ]]
   [[ "$output" == *'"new_candidates":'* ]]
 }
+
+# Keep the preview contract covered when the research-cycle adapter changes.

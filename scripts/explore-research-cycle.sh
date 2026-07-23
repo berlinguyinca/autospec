@@ -44,6 +44,17 @@ REPO_ROOT="${AUTOSPEC_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RESEARCH_DIR="${AUTOSPEC_RESEARCH_DIR:-$SCRIPT_DIR/explore-research}"
 
+classify_repo() {
+    if [ -f "$REPO_ROOT/.git/archived" ]; then printf 'archived'; return; fi
+    if [ -f "$REPO_ROOT/README.md" ] && find "$REPO_ROOT" -maxdepth 2 -type f -name '*.md' | grep -q . && ! find "$REPO_ROOT" -maxdepth 2 -type f \( -name 'package.json' -o -name 'Cargo.toml' -o -name 'pom.xml' \) | grep -q .; then printf 'docs'; return; fi
+    if find "$REPO_ROOT" -maxdepth 3 -type f \( -name '*.ipynb' -o -name '*.rmd' \) | grep -q .; then printf 'data-study'; return; fi
+    if [ -f "$REPO_ROOT/docker-compose.yml" ] || [ -d "$REPO_ROOT/terraform" ] || [ -d "$REPO_ROOT/k8s" ]; then printf 'infra'; return; fi
+    if [ -f "$REPO_ROOT/package.json" ] && find "$REPO_ROOT" -maxdepth 3 -type f \( -name '*.tsx' -o -name '*.jsx' \) | grep -q .; then printf 'frontend'; return; fi
+    if [ -f "$REPO_ROOT/Cargo.toml" ] || [ -f "$REPO_ROOT/pom.xml" ] || [ -f "$REPO_ROOT/go.mod" ]; then printf 'library'; return; fi
+    printf 'unknown'
+}
+REPO_CLASS="${AUTOSPEC_REPO_CLASS:-$(classify_repo)}"
+
 usage() {
     cat <<'EOF'
 Usage: explore-research-cycle.sh [options]
@@ -111,12 +122,21 @@ Env:
                                  object with a "proposals" array). The seam the
                                  orchestrator's LLM dispatch fills; absent → that
                                  specialist contributes zero proposals (graceful).
+  AUTOSPEC_EXPLORE_TRACK_CAPS   JSON object of per-track caps, e.g.
+                                 {"governance":1,"testability":2,"architecture":2,"product":5}.
+                                 Missing tracks use MAX_ISSUES; zero excludes a track.
+  AUTOSPEC_EXPLORE_TRACK_PRIORITY
+                                 Comma-separated track order (default governance,
+                                 testability,architecture,product).
+  AUTOSPEC_EXPLORE_REPO_CLASS     data-study or notebook-research enables safety mode.
 EOF
 }
 
 MAX_ISSUES=5
 SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,dependency-health,internet,quality-resilience,dogfooding,self-leverage,style-normalization"
 OUT=""
+ORG="${AUTOSPEC_EXPLORE_ORG:-}"
+ORG_MAX_AGE="${AUTOSPEC_EXPLORE_ORG_MAX_AGE:-604800}"
 LEDGER="${AUTOSPEC_EXPLORE_LEDGER:-}"
 SPECIALISTS_MODE="discover"
 NUM_SPECIALISTS=3
@@ -132,6 +152,9 @@ while [ "$#" -gt 0 ]; do
         --research-sources)     SOURCES="$2"; shift 2 ;;
         --ledger)               LEDGER="$2"; shift 2 ;;
         --out)                  OUT="$2"; shift 2 ;;
+    --org)                  ORG="$2"; shift 2 ;;
+        --repo-class)           REPO_CLASS="$2"; shift 2 ;;
+        --org-max-age)          ORG_MAX_AGE="$2"; shift 2 ;;
         --specialists-mode)     SPECIALISTS_MODE="$2"; shift 2 ;;
         --num-specialists)      NUM_SPECIALISTS="$2"; shift 2 ;;
         --specialists)          SPECIALISTS_ARG="$2"; shift 2 ;;
@@ -139,6 +162,22 @@ while [ "$#" -gt 0 ]; do
         *) echo "explore-research-cycle: unknown arg: $1" >&2; usage; exit 2 ;;
     esac
 done
+
+ORG_AUDIT_DIR=""
+ORG_PRIOR_LEDGER=""
+ORG_RECHECK=0
+if [ -n "$ORG" ]; then
+    ORG_AUDIT_DIR="$REPO_ROOT/.autospec/org-audits/$ORG"
+    ORG_PRIOR_LEDGER="$ORG_AUDIT_DIR/ledger.jsonl"
+    export AUTOSPEC_EXPLORE_ORG_PRIOR_LEDGER="$ORG_PRIOR_LEDGER"
+    if [ -f "$ORG_AUDIT_DIR/report.json" ]; then
+        report_mtime=$(stat -c %Y "$ORG_AUDIT_DIR/report.json" 2>/dev/null || stat -f %m "$ORG_AUDIT_DIR/report.json" 2>/dev/null || printf '0')
+        now_epoch=$(date +%s)
+        [ $((now_epoch - report_mtime)) -gt "$ORG_MAX_AGE" ] && ORG_RECHECK=1
+    else
+        ORG_RECHECK=1
+    fi
+fi
 
 # Validate the two-pass stage (issue #1095).
 case "$STAGE" in
@@ -379,6 +418,9 @@ STAGE="$STAGE" \
 DEDUPED_IN="$DEDUPED_IN" \
 GAP_REPO_ROOT="$REPO_ROOT" \
 GAP_CLAIMING_SOURCES="${AUTOSPEC_EXPLORE_GAP_CLAIMING_SOURCES:-}" \
+TRACK_CAPS="${AUTOSPEC_EXPLORE_TRACK_CAPS:-}" \
+TRACK_PRIORITY="${AUTOSPEC_EXPLORE_TRACK_PRIORITY:-governance,testability,architecture,product}" \
+REPO_CLASS="${AUTOSPEC_EXPLORE_REPO_CLASS:-${AUTOSPEC_REPO_CLASS:-}}" \
 python3 - <<'PY' > "$work_dir/final.json"
 import json, os, re, glob, datetime
 
@@ -389,6 +431,25 @@ stage    = os.environ.get("STAGE", "full")
 deduped_in = os.environ.get("DEDUPED_IN", "").strip()
 # Repo root for gap-confirmation file resolution — explicit, never cwd-dependent.
 gap_repo_root = os.environ.get("GAP_REPO_ROOT", "") or os.getcwd()
+track_caps_raw = os.environ.get("TRACK_CAPS", "").strip()
+track_priority = [x.strip() for x in os.environ.get("TRACK_PRIORITY", "governance,testability,architecture,product").split(",") if x.strip()]
+TRACKS = ("governance", "testability", "architecture", "product")
+try:
+    track_caps = json.loads(track_caps_raw) if track_caps_raw else {}
+    if not isinstance(track_caps, dict): track_caps = {}
+except Exception:
+    track_caps = {}
+def proposal_track(p, source):
+    value = p.get("track")
+    if value in TRACKS: return value
+    if source in {"quality-resilience", "dependency-health", "style-normalization"}: return "governance"
+    if source in {"dogfooding", "self-leverage"} or source.startswith("specialist:test"):
+        return "testability"
+    if source.startswith("specialist:arch") or source == "architecture": return "architecture"
+    return "product"
+repo_class = os.environ.get("REPO_CLASS", "").strip().lower()
+RESTRICTED_CLASSES = {"data-study", "notebook-research"}
+RESTRICTED_KINDS = {"schema-documentation", "checksum-manifest", "data-dictionary", "notebook-execution-metadata", "environment-capture", "reproducible-pipeline-wrapper"}
 
 # Static source priors per the spec — the defensive fallback used verbatim when
 # no dynamic weights are available (no ledger / weights script absent / broken).
@@ -417,6 +478,21 @@ if _wj:
 else:
     SRC_WEIGHTS = DEFAULT_SRC_WEIGHTS
 COMPLEXITY = {"small": 1.0, "medium": 2.0, "large": 4.0}
+restricted_rejections = []
+def restricted_reason(p):
+    if repo_class not in RESTRICTED_CLASSES:
+        return ""
+    kind = str(p.get("kind", p.get("proposal_kind", ""))).strip().lower()
+    text = " ".join(str(p.get(k, "")) for k in ("title", "evidence", "description")).lower()
+    if kind in RESTRICTED_KINDS:
+        return ""
+    if any(x in text for x in ("rewrite data", "reformat notebook", "generated-data", "generated data")):
+        return "mass rewrite or generated-data modification is forbidden"
+    touches = bool(p.get("touches_data_file")) or any(x in text for x in ("data file", "dataset", ".csv", ".parquet", ".jsonl", ".ipynb"))
+    impl = bool(p.get("implementation_type")) or kind in {"implementation", "code-change", "feature"}
+    if impl and touches and not str(p.get("preservation_rollback_plan", p.get("rollback_plan", ""))).strip():
+        return "data-file implementation requires preservation_rollback_plan"
+    return "proposal kind is required and must be explicitly allowed"
 
 # Severity bands, highest impact -> lowest. Lower numeric value = higher
 # priority (primary sort key). Mirrors schemas/autospec-explore-proposal.schema
@@ -567,6 +643,10 @@ else:
         if not isinstance(p, dict): continue
         title = (p.get("title") or "").strip()
         if not title: continue
+        reason = restricted_reason(p)
+        if reason:
+            restricted_rejections.append({"title": title, "reason": reason})
+            continue
         comp = (p.get("estimated_complexity") or "medium").lower()
         try:
             conf = float(p.get("confidence", 0.5))
@@ -594,6 +674,7 @@ else:
             named_consumer = ""
         # priority (F8): carry through for priority-boost gate.
         priority = bool(p.get("priority"))
+        track = proposal_track(p, src)
         # Carry the optional gap_check through verbatim so the gap-confirmation
         # stage can re-verify it; only a dict is propagated (anything else is
         # ignored and treated as "no gap_check").
@@ -608,6 +689,7 @@ else:
             "named_consumer": named_consumer,
             "score": round(score, 4),
             "priority": priority,
+            "track": track,
         }
         if isinstance(gap_check, dict):
             _entry["gap_check"] = gap_check
@@ -780,7 +862,6 @@ verify_mode = "active" if _verdicts is not None else "no-op-unverified"
 # the historical no-op "all survive" behavior — there the operator IS the
 # skeptic. Gated on AUTOSPEC_EXPLORE_AUTONOMOUS=1 (set by --once / the conductor).
 autonomous = os.environ.get("AUTOSPEC_EXPLORE_AUTONOMOUS", "") == "1"
-preview = os.environ.get("AUTOSPEC_EXPLORE_PREVIEW", "") == "1"
 failclosed = autonomous and verify_mode == "no-op-unverified"
 verified = []
 refuted_count = 0
@@ -816,7 +897,9 @@ roi_kept = []
 for p in verified:
     src = p.get("source", "")
     consumer = str(p.get("named_consumer", "")).strip()
-    if src not in LEGACY_SOURCES and consumer == "":
+    # Governance baselines are reusable operator-facing templates and do not
+    # require a product consumer; domain/product tracks retain the ROI gate.
+    if src not in LEGACY_SOURCES and p.get("track") != "governance" and consumer == "":
         # New source, no named consumer -> dropped by the ROI gate.
         continue
     roi_kept.append(p)
@@ -1008,8 +1091,25 @@ def _rank_key(p):
     sev_rank = SEVERITY_RANK.get(p.get("severity", "feature"), DEFAULT_SEVERITY_RANK)
     return (sev_rank, -p["score"])
 filtered.sort(key=_rank_key)
+# Apply independent track caps, then merge in governance-first order. This
+# prevents a prolific product source from starving governance and testability.
+selected_by_track = {track: [] for track in TRACKS}
+for proposal in filtered:
+    selected_by_track.setdefault(proposal["track"], []).append(proposal)
+track_counts = {track: len(selected_by_track.get(track, [])) for track in TRACKS}
+track_limited = {}
+for track in TRACKS:
+    try:
+        limit = int(track_caps.get(track, cap))
+    except Exception:
+        limit = cap
+    track_limited[track] = selected_by_track.get(track, [])[:max(0, limit)]
+ordered_tracks = [track for track in track_priority if track in TRACKS]
+ordered_tracks.extend(track for track in TRACKS if track not in ordered_tracks)
+track_selected_counts = {track: len(track_limited[track]) for track in TRACKS}
+track_ranked = [proposal for track in ordered_tracks for proposal in track_limited[track]]
 # Fail-closed: an autonomous run with no skeptic verdicts files nothing.
-final = filtered[:cap] if (preview or not failclosed) else []
+final = [] if failclosed else track_ranked[:cap]
 
 out = {
     "round": datetime.date.today().isoformat(),
@@ -1024,9 +1124,14 @@ out = {
     "proposals_after_verify": len(verified),
     "proposals_refuted": refuted_count,
     "proposals_after_roi": len(roi_kept),
+    "restricted_mode": repo_class in RESTRICTED_CLASSES,
+    "restricted_rejections": restricted_rejections,
     "structural_fixes": structural_fixes,
     "proposals_after_constitution": len(constitutional),
     "proposals_after_recent_filter": len(filtered),
+    "track_counts": track_counts,
+    "track_selected_counts": track_selected_counts,
+    "track_priority": ordered_tracks,
     "proposals": final,
 }
 print(json.dumps(out, indent=2))
@@ -1041,5 +1146,21 @@ if [ -n "$OUT" ]; then
     mv "$work_dir/final.json" "$abs.tmp"
     mv "$abs.tmp" "$abs"
 else
-    cat "$work_dir/final.json"
+    :
+fi
+
+# Attach the deterministic classification to each proposal and the aggregate.
+jq --arg repo_class "$REPO_CLASS" '(.repo_class=$repo_class | .proposals |= map(.repo_class=$repo_class))' "${OUT:-$work_dir/final.json}" > "$work_dir/classified.json" 2>/dev/null && mv "$work_dir/classified.json" "${OUT:-$work_dir/final.json}" || true
+if [ -z "$OUT" ]; then cat "$work_dir/final.json"; fi
+
+# Persist an org-scoped learning report after a completed sweep. The directory
+# is deliberately below the repository state root so separate repositories and
+# organizations cannot share mutable learning data.
+if [ -n "$ORG" ] && [ "$STAGE" != "dedup" ]; then
+    audit_dir="$REPO_ROOT/.autospec/org-audits/$ORG"
+    mkdir -p "$audit_dir"
+    cp "${OUT:-$work_dir/final.json}" "$audit_dir/report.json" 2>/dev/null || cp "$work_dir/final.json" "$audit_dir/report.json"
+    jq -r '"# Organization explore report\n\n- Round: " + .round + "\n- Proposals: " + (.proposals|length|tostring) + "\n- Verification: " + .verify_mode + "\n\n## Top risks and exemplars\n\n" + ([.proposals[]? | "- " + (.title // "untitled")]|join("\n"))' "$audit_dir/report.json" > "$audit_dir/report.md"
+    jq -c --arg round "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.proposals[]? | {timestamp:$round,category:(.severity // "feature"),title,evidence}' "$audit_dir/report.json" >> "$audit_dir/ledger.jsonl"
+    jq --argjson recheck "$ORG_RECHECK" --arg ledger "$ORG_PRIOR_LEDGER" '.org_audit={ledger:$ledger,stale_recheck:($recheck == 1)}' "$audit_dir/report.json" > "$audit_dir/report.json.tmp" && mv "$audit_dir/report.json.tmp" "$audit_dir/report.json"
 fi

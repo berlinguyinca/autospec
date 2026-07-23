@@ -312,6 +312,9 @@ pass (default: 120 seconds).
 Implementation-lint results can be cached by content with
 `scripts/lint-implementation-cached.sh --staged`; unchanged staged diffs reuse
 the prior result from `.autospec/cache/lint/`.
+
+The autonomous research-cycle preview wiring is maintained alongside this
+documentation so its environment contract remains discoverable.
 For companion repository boundaries, see
 [`docs/companion-repositories.md`](docs/companion-repositories.md).
 
