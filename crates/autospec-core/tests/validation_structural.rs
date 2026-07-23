@@ -1,6 +1,24 @@
 use std::path::PathBuf;
 
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
+use autospec_core::validation::structural::oversized_module_refactor_issues;
+
+#[test]
+fn oversized_modules_emit_bounded_behavior_preserving_drafts() {
+    let root = std::env::temp_dir().join(format!("autospec-oversized-{}", std::process::id()));
+    let src = root.join("crates/demo/src");
+    std::fs::create_dir_all(&src).unwrap();
+    let mut content = String::from("pub fn reconcile() {}\n");
+    content.push_str(&"// filler\n".repeat(8));
+    std::fs::write(src.join("large.rs"), content).unwrap();
+    let drafts = oversized_module_refactor_issues(&root, 5, 7);
+    assert_eq!(drafts.len(), 1);
+    assert_eq!(drafts[0].severity, "error");
+    assert!(drafts[0].body.contains("characterization test"));
+    assert!(drafts[0].body.contains("behavior-preserving"));
+    assert!(!drafts[0].title.contains("whole file cleanup"));
+    let _ = std::fs::remove_dir_all(root);
+}
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
