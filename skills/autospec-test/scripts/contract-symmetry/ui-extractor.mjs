@@ -42,6 +42,15 @@ export async function extract(page, route, ui_source) {
       tuple[tupleKey] = value;
     }
 
+    // Optional access metadata is extracted separately so existing tuple
+    // contracts remain byte-compatible. A contract may name a custom guard
+    // attribute; otherwise common middleware attributes are consulted.
+    const guardAttr = ui_source.guard_attr || 'data-guard';
+    const guard = await el.getAttribute(guardAttr)
+      ?? await el.getAttribute('data-middleware')
+      ?? await el.getAttribute('data-access-guard');
+    if (guard !== null) tuple.guard = guard;
+
     if (!hasNull) {
       tuples.push(tuple);
     }

@@ -17,12 +17,32 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium } from '/opt/homebrew/lib/node_modules/playwright/index.mjs';
+import { chromium } from 'playwright';
 import { interpolate } from '../../../scripts/contract-symmetry/interpolator.mjs';
 import { assertContains, assertBoolean } from '../../../scripts/contract-symmetry/jsonpath-verifier.mjs';
 import { extract } from '../../../scripts/contract-symmetry/ui-extractor.mjs';
+import { accessScopeViolation } from '../../../scripts/contract-symmetry/run-symmetry.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+describe('access-scope contract symmetry', () => {
+  it('flags an all-users route guarded by admin middleware', () => {
+    const finding = accessScopeViolation('/admin/cluster-state', 'adminOnly', 'all users');
+    assert.equal(finding.type, 'access-scope-mismatch');
+    assert.equal(finding.route, '/admin/cluster-state');
+    assert.equal(finding.guard, 'adminOnly');
+    assert.equal(finding.declared_scope, 'all users');
+  });
+
+  it('accepts an admin-only route with an admin guard', () => {
+    assert.equal(accessScopeViolation('/admin/settings', 'adminOnly', 'admin-only'), null);
+  });
+
+  it('flags undocumented admin paths for non-admin scopes', () => {
+    const finding = accessScopeViolation('/admin/report', 'sessionGuard', 'all users');
+    assert.equal(finding.type, 'access-scope-mismatch');
+  });
+});
 
 // ── Inline fixture server ──────────────────────────────────────────────────────
 
