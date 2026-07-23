@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use autospec_core::autonomous::mainline_health::{
     apply_ignored_checks, check_run_evidence, evaluate_health, resolve_health_branch,
-    CheckEvidence, HealthBranchInput, MainlineHealthDiagnostic, MainlineHealthOutcome,
+    CheckEvidence, HealthBaseline, HealthBranchInput, MainlineHealthDiagnostic, MainlineHealthOutcome,
+    evaluate_health_with_baseline,
 };
 
 #[test]
@@ -16,6 +17,41 @@ fn explicit_health_branch_wins_over_default_branch() {
 
     assert_eq!(resolved.branch, "release-candidate");
     assert_eq!(resolved.source.as_str(), "explicit");
+}
+
+#[test]
+fn baseline_tolerates_known_red_and_halts_new_red() {
+    let mut baseline = BTreeSet::new();
+    baseline.insert("legacy-red".to_string());
+    let known = evaluate_health_with_baseline(
+        "main", true,
+        vec![CheckEvidence::required("legacy-red", "completed", Some("failure"))],
+        HealthBaseline::Ready(baseline.clone()),
+    );
+    assert_eq!(known.outcome, MainlineHealthOutcome::Continue);
+    assert_eq!(known.newly_red_checks, Vec::<String>::new());
+    let new = evaluate_health_with_baseline(
+        "main", true,
+        vec![CheckEvidence::required("new-red", "completed", Some("failure"))],
+        HealthBaseline::Ready(baseline),
+    );
+    assert_eq!(new.outcome, MainlineHealthOutcome::Halt);
+    assert_eq!(new.diagnostic, MainlineHealthDiagnostic::NewCheckFailed);
+    assert_eq!(new.newly_red_checks, vec!["new-red"]);
+}
+
+#[test]
+fn baseline_failures_are_explicit_and_repository_sets_are_isolated() {
+    let stale = evaluate_health_with_baseline("main", true, Vec::new(), HealthBaseline::Stale);
+    assert_eq!(stale.diagnostic, MainlineHealthDiagnostic::BaselineStale);
+    let failed = evaluate_health_with_baseline("main", true, Vec::new(), HealthBaseline::Failed);
+    assert_eq!(failed.diagnostic, MainlineHealthDiagnostic::BaselineReadFailed);
+    let mut a = BTreeSet::new(); a.insert("a".to_string());
+    let mut b = BTreeSet::new(); b.insert("b".to_string());
+    let ha = evaluate_health_with_baseline("main", true, Vec::new(), HealthBaseline::Ready(a));
+    let hb = evaluate_health_with_baseline("main", true, Vec::new(), HealthBaseline::Ready(b));
+    assert_eq!(ha.baseline_checks, vec!["a"]);
+    assert_eq!(hb.baseline_checks, vec!["b"]);
 }
 
 #[test]
