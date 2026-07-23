@@ -1,7 +1,7 @@
 use autospec_core::claim::{
-    evaluate_claim_safety, lint_issue_intent, parse_claim_issue_json, render_safety_review_section,
-    replace_safety_review_section, review_issue_safety, ClaimSafetyInput, SafetyReviewDecision,
-    SafetyReviewSectionError,
+    evaluate_claim_safety, evaluate_claim_safety_with_trusted_actors, lint_issue_intent,
+    parse_claim_issue_json, render_safety_review_section, replace_safety_review_section,
+    review_issue_safety, ClaimSafetyInput, SafetyReviewDecision, SafetyReviewSectionError,
 };
 
 const SAFETY_REVIEW: &str = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n";
@@ -127,6 +127,44 @@ fn fixture_input(title: &str, fixture: &str, author: &str) -> ClaimSafetyInput {
         format!("{SAFETY_REVIEW}{fixture}"),
         author,
     )
+}
+
+#[test]
+fn production_word_rule_does_not_match_a_prefix_inside_produces() {
+    let input = ClaimSafetyInput::new(
+        vec!["safety:reviewed".to_string()],
+        "Add a report",
+        format!("{SAFETY_REVIEW}## Goal\nThe command produces a report."),
+        "agent",
+    );
+    assert!(evaluate_claim_safety(&input).allowed);
+}
+
+#[test]
+fn trusted_semantic_safety_stamp_clears_ambiguous_findings() {
+    let body = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n- **actor:** `berlinguyinca`\n<!-- autospec-safety:end -->\n\n## Goal\nClean old data from the production migration.";
+    let input = ClaimSafetyInput::new(
+        vec!["safety:reviewed".to_string()],
+        "Clean old data",
+        body,
+        "agent",
+    );
+    assert!(evaluate_claim_safety_with_trusted_actors(&input, &["berlinguyinca"]).allowed);
+}
+
+#[test]
+fn untrusted_semantic_safety_stamp_does_not_clear_ambiguous_findings() {
+    let body = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n- **actor:** `agent`\n<!-- autospec-safety:end -->\n\n## Goal\nClean old data from the production migration.";
+    let input = ClaimSafetyInput::new(
+        vec!["safety:reviewed".to_string()],
+        "Clean old data",
+        body,
+        "agent",
+    );
+    assert_eq!(
+        evaluate_claim_safety_with_trusted_actors(&input, &["berlinguyinca"]).reason,
+        "current_body_safety_ambiguous"
+    );
 }
 
 #[test]
