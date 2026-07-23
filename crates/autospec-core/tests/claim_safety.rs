@@ -475,3 +475,13 @@ fn real_ci_or_review_bypass_still_blocks() {
         );
     }
 }
+#[test]
+fn infra_keywords_in_out_of_scope_text_are_ignored() {
+    let body = "## Out of scope\n\nDo not add migrations or touch terraform.\n";
+    let lint = lint_issue_intent("read-only API", body, "agent");
+    assert!(!lint.ambiguous);
+    let paragraph = lint_issue_intent("read-only API", "Out of scope: billing and KMS changes", "agent");
+    assert!(!paragraph.ambiguous);
+    let real = lint_issue_intent("add migration for payments", "Implement the migration", "agent");
+    assert!(real.ambiguous);
+}

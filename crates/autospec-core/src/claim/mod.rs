@@ -571,6 +571,7 @@ pub fn lint_issue_intent_with_trusted_actors(
     trusted_actors: &[&str],
 ) -> IssueIntentLint {
     let lower = format!("{title}\n{}", strip_guardian_skips(body)).to_ascii_lowercase();
+    let infra_lower = strip_out_of_scope_sections(&lower);
     let mut findings = Vec::new();
     let mut add = |severity, rule_id, pattern| {
         findings.push(IssueIntentFinding {
@@ -622,7 +623,7 @@ pub fn lint_issue_intent_with_trusted_actors(
         );
     }
     if contains_any_word(
-        &lower,
+        &infra_lower,
         &[
             "production",
             "prod",
@@ -720,6 +721,21 @@ fn strip_guardian_skips(body: &str) -> String {
         .map(|line| guardian_skip_reason(line).unwrap_or(line))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn strip_out_of_scope_sections(body: &str) -> String {
+    let mut result = Vec::new();
+    let mut excluded = false;
+    for line in body.lines() {
+        let heading = line.trim_start().starts_with("## ");
+        if heading {
+            excluded = line.trim().eq_ignore_ascii_case("## out of scope");
+        }
+        if !excluded && !line.trim_start().starts_with("out of scope:") {
+            result.push(line);
+        }
+    }
+    result.join("\n")
 }
 
 fn guardian_skip_reason(line: &str) -> Option<&str> {
