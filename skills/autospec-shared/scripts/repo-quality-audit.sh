@@ -97,6 +97,43 @@ add_finding() {
     '{probe:$probe,classification:$classification,severity:$severity,file:$file,line:$line,title:$title,body:$body,dedupe_key:$key}'
 }
 
+probe_mock_policy() {
+  policy_file="$REPO/AGENTS.md"
+  [ -f "$policy_file" ] || return 0
+  grep -Eiq 'real[- ]service|no mocks|without mocks|testcontainers|real DB|real database' "$policy_file" || return 0
+  while IFS= read -r file; do
+    [ -f "$file" ] || continue
+    rel="${file#"$REPO"/}"
+    case "$rel" in
+      */unit/*|tests/unit/*) class="unit" ;;
+      */integration/*|tests/integration/*|*/it/*) class="integration" ;;
+      */contract/*|tests/contract/*) class="contract" ;;
+      */e2e/*|tests/e2e/*|*/smoke/*|tests/smoke/*) class="e2e" ;;
+      *) class="integration" ;;
+    esac
+    exception=0
+    grep -Eq 'quality-audit:[[:space:]]*mock-exception[[:space:]]+[^[:space:]]' "$file" && exception=1 || true
+    grep -Ein 'wiremock|mockito|mockall|(^|[^[:alnum:]_])(mock|stub)[[:space:]_]*(broker|db|database|postgres|mysql|redis|kafka|rabbit)' "$file" 2>/dev/null | while IFS=: read -r line excerpt; do
+      [ "$exception" -eq 1 ] && continue
+      framework="mock/stub"
+      printf '%s' "$excerpt" | grep -Eiq 'wiremock' && framework="wiremock"
+      printf '%s' "$excerpt" | grep -Eiq 'mockito' && framework="mockito"
+      printf '%s' "$excerpt" | grep -Eiq 'mockall' && framework="mockall"
+      target="broker/DB"
+      classification="mock-policy-$class"
+      if [ "$class" = "integration" ]; then
+        kind="migrate-to-real-service"
+      else
+        kind="mock-exception-review"
+      fi
+      add_finding "mock-policy" "$classification" "high" "$rel" "${line:-0}" \
+        "forbidden $framework mock targets $target ($class test)" \
+        "Mock framework $framework targets forbidden service $target in a $class test; action: $kind." \
+        "mock-policy:$rel:$line"
+    done
+  done < <(find "$REPO" \( -path '*/.git' -o -path '*/node_modules' \) -prune -o -type f \( -path '*/tests/*' -o -path '*/test/*' \) -print)
+}
+
 add_guard_finding() {
   guard_script="$1"; file="$2"; line="$3"; rule="$4"; class_name="$5"; excerpt="$6"
   key="design-template-guard:$guard_script:$file"
@@ -1130,6 +1167,9 @@ if (cd "$REPO" && git rev-parse --is-inside-work-tree >/dev/null 2>&1); then
       "dirty-git-status"
   fi
 fi
+
+# Probe: forbidden broker/database mocks under real-service testing policy.
+probe_mock_policy
 
 # Probe: package-manager scripts, runtime engine, typecheck/lint/test/audit.
 write_runtime_json
