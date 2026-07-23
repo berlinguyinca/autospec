@@ -1955,7 +1955,20 @@ fn autonomous_stop_graceful_writes_sentinel_and_leaves_conductor_running() {
 
     start_sleeping_autonomous(&operator_dir, &log_dir, &repo_dir, "berlinguyinca/autospec");
     let scope = operator_dir.join("berlinguyinca_autospec");
-    let conductor = read_pid(&scope, "conductor");
+    // The foreground conductor is intentionally one-shot and may finish its
+    // empty fixture scan before the stop command runs. Replace only the
+    // persisted conductor record with a long-lived fixture process so this
+    // test observes the lifecycle contract (graceful stop does not target the
+    // conductor) instead of racing the conductor's normal completion.
+    let conductor = seed_unleased_legacy_conductor(&scope);
+    std::fs::write(
+        scope.join("conductor.pid"),
+        format!(
+            "{{\"pid\":{},\"repo\":\"berlinguyinca/autospec\",\"scope\":\"berlinguyinca_autospec\"}}\n",
+            conductor
+        ),
+    )
+    .expect("running conductor metadata");
 
     let output = autospec()
         .args([
