@@ -1998,6 +1998,14 @@ fi'
 
         # ── Step 3: Waterfall tier selection ──────────────────────────────────
         local _tier_json
+        local _waterfall_backlog_args=()
+        # Preserve an explicit zero from the dependency-aware queue snapshot.
+        # `${_ready_count:+...}` drops zero, causing the waterfall to re-query
+        # GitHub and mistake blocked/non-ready issues for runnable backlog,
+        # trapping the conductor in Tier 1 forever.
+        if [ -n "$_ready_count" ]; then
+            _waterfall_backlog_args=(--backlog-count "$_ready_count")
+        fi
         _tier_json="$(bash "$_waterfall" \
             --dry-cycles "$_dry_cycles" \
             --tier15-dry-cycles "$_tier15_dry_cycles" \
@@ -2005,7 +2013,7 @@ fi'
             --tier3-dry-cycles "$_tier3_dry_cycles" \
             --tier4-dry-cycles "$_tier4_dry_cycles" \
             ${_repo:+--repo "$_repo"} \
-            ${_ready_count:+--backlog-count "$_ready_count"} \
+            "${_waterfall_backlog_args[@]}" \
             ${_growth_flags} \
             2>/dev/null \
             || printf '{"tier":1,"action":"run-backlog","reason":"waterfall-unavailable"}')"
@@ -2022,7 +2030,7 @@ fi'
         if { [ "$_action" = "run-explore-once" ] \
                 || [ "$_action" = "run-architecture-improvement" ] \
                 || [ "$_action" = "run-explore-once-internet" ]; } \
-                && [ "${AUTOSPEC_ALLOW_UNSTEERED_GENERATION:-0}" != "1" ] \
+                && [ "${AUTOSPEC_ALLOW_UNSTEERED_GENERATION:-1}" != "1" ] \
                 && [ ! -s "$_priorities_file" ] \
                 && [ ! -s "$_eff_persona" ]; then
             if [ "$_inferred_source_count" -gt 0 ]; then

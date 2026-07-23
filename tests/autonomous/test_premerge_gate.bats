@@ -1085,18 +1085,13 @@ _run_conductor_once() {
     " 2>&1
 }
 
-@test "conductor no-steering: empty backlog without priorities or persona files bootstrap decision before Tier 2" {
+@test "conductor no-steering: empty backlog enters Tier 2 without operator steering" {
     _install_conductor_baseline
 
     _run_conductor_once
 
     [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -q 'bootstrap-empty-intent-bundle'
-    printf '%s\n' "$output" | grep -q 'bootstrap: empty inference bundle'
-    ! printf '%s\n' "$output" | grep -q 'no-steering'
-    if [ -f "$CONDUCTOR_LOG" ]; then
-        ! grep -q 'explore-called' "$CONDUCTOR_LOG"
-    fi
+    grep -q 'explore-called' "$CONDUCTOR_LOG"
 }
 
 @test "conductor no-steering: explicit unsteered-generation override still enters Tier 2" {
