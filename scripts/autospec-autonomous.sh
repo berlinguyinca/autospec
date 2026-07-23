@@ -1126,7 +1126,7 @@ if repo:
     env["CONDUCTOR_REPO"] = repo
 log = open(log_path, "ab", buffering=0)
 p = subprocess.Popen(
-    [script, "run-foreground"],
+    ["bash", script, "run-foreground"],
     cwd=repo_dir,
     env=env,
     stdout=log,
