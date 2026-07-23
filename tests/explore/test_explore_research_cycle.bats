@@ -31,6 +31,22 @@ EOF
     export AUTOSPEC_EXPLORE_WEIGHTS_BIN="$TMP/missing-explore-source-weights.sh"
 }
 
+@test "tracks are assigned, capped, and merged in configured priority order" {
+    make_fake_researcher quality-resilience '{"source":"quality-resilience","proposals":[{"title":"feat: governance baseline","evidence":"e","estimated_complexity":"small","confidence":0.9}]}'
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: product feature","evidence":"e","estimated_complexity":"small","confidence":0.9}]}'
+    make_fake_researcher open-issues '{"source":"open-issues","proposals":[]}'
+    run env AUTOSPEC_EXPLORE_TRACK_CAPS='{"governance":0,"product":1}' bash "$REPO_ROOT/scripts/explore-research-cycle.sh" --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import json,sys
+d=json.loads(sys.stdin.read())
+assert d['track_counts']['governance'] == 1, d
+assert d['track_selected_counts']['governance'] == 0, d
+assert len(d['proposals']) == 1 and d['proposals'][0]['track'] == 'product', d
+assert d['track_priority'][0] == 'governance', d
+"
+}
+
 teardown() {
     rm -rf "$TMP"
 }

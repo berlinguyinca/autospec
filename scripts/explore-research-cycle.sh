@@ -111,6 +111,12 @@ Env:
                                  object with a "proposals" array). The seam the
                                  orchestrator's LLM dispatch fills; absent → that
                                  specialist contributes zero proposals (graceful).
+  AUTOSPEC_EXPLORE_TRACK_CAPS   JSON object of per-track caps, e.g.
+                                 {"governance":1,"testability":2,"architecture":2,"product":5}.
+                                 Missing tracks use MAX_ISSUES; zero excludes a track.
+  AUTOSPEC_EXPLORE_TRACK_PRIORITY
+                                 Comma-separated track order (default governance,
+                                 testability,architecture,product).
 EOF
 }
 
@@ -399,6 +405,8 @@ STAGE="$STAGE" \
 DEDUPED_IN="$DEDUPED_IN" \
 GAP_REPO_ROOT="$REPO_ROOT" \
 GAP_CLAIMING_SOURCES="${AUTOSPEC_EXPLORE_GAP_CLAIMING_SOURCES:-}" \
+TRACK_CAPS="${AUTOSPEC_EXPLORE_TRACK_CAPS:-}" \
+TRACK_PRIORITY="${AUTOSPEC_EXPLORE_TRACK_PRIORITY:-governance,testability,architecture,product}" \
 python3 - <<'PY' > "$work_dir/final.json"
 import json, os, re, glob, datetime
 
@@ -409,6 +417,22 @@ stage    = os.environ.get("STAGE", "full")
 deduped_in = os.environ.get("DEDUPED_IN", "").strip()
 # Repo root for gap-confirmation file resolution — explicit, never cwd-dependent.
 gap_repo_root = os.environ.get("GAP_REPO_ROOT", "") or os.getcwd()
+track_caps_raw = os.environ.get("TRACK_CAPS", "").strip()
+track_priority = [x.strip() for x in os.environ.get("TRACK_PRIORITY", "governance,testability,architecture,product").split(",") if x.strip()]
+TRACKS = ("governance", "testability", "architecture", "product")
+try:
+    track_caps = json.loads(track_caps_raw) if track_caps_raw else {}
+    if not isinstance(track_caps, dict): track_caps = {}
+except Exception:
+    track_caps = {}
+def proposal_track(p, source):
+    value = p.get("track")
+    if value in TRACKS: return value
+    if source in {"quality-resilience", "dependency-health", "style-normalization"}: return "governance"
+    if source in {"dogfooding", "self-leverage"} or source.startswith("specialist:test"):
+        return "testability"
+    if source.startswith("specialist:arch") or source == "architecture": return "architecture"
+    return "product"
 
 # Static source priors per the spec — the defensive fallback used verbatim when
 # no dynamic weights are available (no ledger / weights script absent / broken).
@@ -614,6 +638,7 @@ else:
             named_consumer = ""
         # priority (F8): carry through for priority-boost gate.
         priority = bool(p.get("priority"))
+        track = proposal_track(p, src)
         # Carry the optional gap_check through verbatim so the gap-confirmation
         # stage can re-verify it; only a dict is propagated (anything else is
         # ignored and treated as "no gap_check").
@@ -628,6 +653,7 @@ else:
             "named_consumer": named_consumer,
             "score": round(score, 4),
             "priority": priority,
+            "track": track,
         }
         if isinstance(gap_check, dict):
             _entry["gap_check"] = gap_check
@@ -835,7 +861,9 @@ roi_kept = []
 for p in verified:
     src = p.get("source", "")
     consumer = str(p.get("named_consumer", "")).strip()
-    if src not in LEGACY_SOURCES and consumer == "":
+    # Governance baselines are reusable operator-facing templates and do not
+    # require a product consumer; domain/product tracks retain the ROI gate.
+    if src not in LEGACY_SOURCES and p.get("track") != "governance" and consumer == "":
         # New source, no named consumer -> dropped by the ROI gate.
         continue
     roi_kept.append(p)
@@ -1027,8 +1055,25 @@ def _rank_key(p):
     sev_rank = SEVERITY_RANK.get(p.get("severity", "feature"), DEFAULT_SEVERITY_RANK)
     return (sev_rank, -p["score"])
 filtered.sort(key=_rank_key)
+# Apply independent track caps, then merge in governance-first order. This
+# prevents a prolific product source from starving governance and testability.
+selected_by_track = {track: [] for track in TRACKS}
+for proposal in filtered:
+    selected_by_track.setdefault(proposal["track"], []).append(proposal)
+track_counts = {track: len(selected_by_track.get(track, [])) for track in TRACKS}
+track_limited = {}
+for track in TRACKS:
+    try:
+        limit = int(track_caps.get(track, cap))
+    except Exception:
+        limit = cap
+    track_limited[track] = selected_by_track.get(track, [])[:max(0, limit)]
+ordered_tracks = [track for track in track_priority if track in TRACKS]
+ordered_tracks.extend(track for track in TRACKS if track not in ordered_tracks)
+track_selected_counts = {track: len(track_limited[track]) for track in TRACKS}
+track_ranked = [proposal for track in ordered_tracks for proposal in track_limited[track]]
 # Fail-closed: an autonomous run with no skeptic verdicts files nothing.
-final = [] if failclosed else filtered[:cap]
+final = [] if failclosed else track_ranked[:cap]
 
 out = {
     "round": datetime.date.today().isoformat(),
@@ -1046,6 +1091,9 @@ out = {
     "structural_fixes": structural_fixes,
     "proposals_after_constitution": len(constitutional),
     "proposals_after_recent_filter": len(filtered),
+    "track_counts": track_counts,
+    "track_selected_counts": track_selected_counts,
+    "track_priority": ordered_tracks,
     "proposals": final,
 }
 print(json.dumps(out, indent=2))
