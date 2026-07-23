@@ -3,6 +3,7 @@ pub mod catalog;
 pub mod command;
 pub mod external;
 pub mod options;
+pub mod output_macros;
 pub mod plan;
 pub mod results;
 pub mod runner;

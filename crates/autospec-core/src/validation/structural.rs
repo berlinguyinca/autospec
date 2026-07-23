@@ -123,6 +123,7 @@ impl StructuralValidator {
                 Self::validate_root_helper_wrapper_policy(root)
             }
             StructuralCheck::StartupPreflight => Self::validate_startup_preflight(root),
+            StructuralCheck::RustOutputMacros => super::output_macros::validate(root),
         }
     }
 
