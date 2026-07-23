@@ -117,6 +117,8 @@ EOF
 MAX_ISSUES=5
 SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,dependency-health,internet,quality-resilience,dogfooding,self-leverage,style-normalization"
 OUT=""
+ORG="${AUTOSPEC_EXPLORE_ORG:-}"
+ORG_MAX_AGE="${AUTOSPEC_EXPLORE_ORG_MAX_AGE:-604800}"
 LEDGER="${AUTOSPEC_EXPLORE_LEDGER:-}"
 SPECIALISTS_MODE="discover"
 NUM_SPECIALISTS=3
@@ -132,6 +134,8 @@ while [ "$#" -gt 0 ]; do
         --research-sources)     SOURCES="$2"; shift 2 ;;
         --ledger)               LEDGER="$2"; shift 2 ;;
         --out)                  OUT="$2"; shift 2 ;;
+        --org)                  ORG="$2"; shift 2 ;;
+        --org-max-age)          ORG_MAX_AGE="$2"; shift 2 ;;
         --specialists-mode)     SPECIALISTS_MODE="$2"; shift 2 ;;
         --num-specialists)      NUM_SPECIALISTS="$2"; shift 2 ;;
         --specialists)          SPECIALISTS_ARG="$2"; shift 2 ;;
@@ -139,6 +143,22 @@ while [ "$#" -gt 0 ]; do
         *) echo "explore-research-cycle: unknown arg: $1" >&2; usage; exit 2 ;;
     esac
 done
+
+ORG_AUDIT_DIR=""
+ORG_PRIOR_LEDGER=""
+ORG_RECHECK=0
+if [ -n "$ORG" ]; then
+    ORG_AUDIT_DIR="$REPO_ROOT/.autospec/org-audits/$ORG"
+    ORG_PRIOR_LEDGER="$ORG_AUDIT_DIR/ledger.jsonl"
+    export AUTOSPEC_EXPLORE_ORG_PRIOR_LEDGER="$ORG_PRIOR_LEDGER"
+    if [ -f "$ORG_AUDIT_DIR/report.json" ]; then
+        report_mtime=$(stat -c %Y "$ORG_AUDIT_DIR/report.json" 2>/dev/null || stat -f %m "$ORG_AUDIT_DIR/report.json" 2>/dev/null || printf '0')
+        now_epoch=$(date +%s)
+        [ $((now_epoch - report_mtime)) -gt "$ORG_MAX_AGE" ] && ORG_RECHECK=1
+    else
+        ORG_RECHECK=1
+    fi
+fi
 
 # Validate the two-pass stage (issue #1095).
 case "$STAGE" in
@@ -1041,4 +1061,16 @@ if [ -n "$OUT" ]; then
     mv "$abs.tmp" "$abs"
 else
     cat "$work_dir/final.json"
+fi
+
+# Persist an org-scoped learning report after a completed sweep. The directory
+# is deliberately below the repository state root so separate repositories and
+# organizations cannot share mutable learning data.
+if [ -n "$ORG" ] && [ "$STAGE" != "dedup" ]; then
+    audit_dir="$REPO_ROOT/.autospec/org-audits/$ORG"
+    mkdir -p "$audit_dir"
+    cp "${OUT:-$work_dir/final.json}" "$audit_dir/report.json" 2>/dev/null || cp "$work_dir/final.json" "$audit_dir/report.json"
+    jq -r '"# Organization explore report\n\n- Round: " + .round + "\n- Proposals: " + (.proposals|length|tostring) + "\n- Verification: " + .verify_mode + "\n\n## Top risks and exemplars\n\n" + ([.proposals[]? | "- " + (.title // "untitled")]|join("\n"))' "$audit_dir/report.json" > "$audit_dir/report.md"
+    jq -c --arg round "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '.proposals[]? | {timestamp:$round,category:(.severity // "feature"),title,evidence}' "$audit_dir/report.json" >> "$audit_dir/ledger.jsonl"
+    jq --argjson recheck "$ORG_RECHECK" --arg ledger "$ORG_PRIOR_LEDGER" '.org_audit={ledger:$ledger,stale_recheck:($recheck == 1)}' "$audit_dir/report.json" > "$audit_dir/report.json.tmp" && mv "$audit_dir/report.json.tmp" "$audit_dir/report.json"
 fi
