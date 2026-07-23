@@ -13,6 +13,11 @@ PROVENANCE_OUT=""
 FENCED_SURFACES=""
 QUARANTINE_OUT=""
 DRY_RUN=0
+_self_issue() {
+    local helper="$(cd "$(dirname "$0")" && pwd)/../skills/autospec-shared/scripts/autospec-self-issue.sh"
+    [ -x "$helper" ] || return 0
+    "$helper" --finding "$1" --dry-run >/dev/null 2>&1 || true
+}
 LANE="implementer"
 MUTATION_BASELINE=""
 MUTATION_CURRENT=""
@@ -151,6 +156,7 @@ _secaudit_skill_present() {
 }
 if ! _qa_skill_present; then
     printf 'halt code_health:qa_skill_missing\n'
+    _self_issue '{"category":"premerge","summary":"qa skill missing","evidence":"autonomous-premerge-gate"}'
     info "HALT: configured scan skill '$QA_CMD' is not installed or not in PATH."
     info "Install autospec-qa before re-running the pre-merge gate."
     exit 2
@@ -158,6 +164,7 @@ fi
 info "Scan skill '$QA_CMD' is present."
 if ! _secaudit_skill_present; then
     printf 'halt code_health:secaudit_skill_missing\n'
+    _self_issue '{"category":"premerge","summary":"security audit skill missing","evidence":"autonomous-premerge-gate"}'
     info "HALT: configured scan skill '$SECAUDIT_CMD' is not installed or not in PATH."
     info "Install autospec-secaudit before re-running the pre-merge gate."
     exit 2

@@ -1320,6 +1320,10 @@ if [ "$QA_GATE" -eq 1 ]; then
     esac
     if [ "$QA_PROMOTE" -eq 0 ]; then
         echo "code_health:explore_qa_gate_failed verdict=$QA_VERDICT sandbox=$SANDBOX_BRANCH" >&2
+        helper="$(cd "$(dirname "$0")" && pwd)/../skills/autospec-shared/scripts/autospec-self-issue.sh"
+        if [ -x "$helper" ]; then
+            "$helper" --finding "$(jq -cn --arg summary "explore QA gate failed: $QA_VERDICT" --arg evidence "$SANDBOX_BRANCH" '{category:"code_health",summary:$summary,evidence:$evidence}')" >/dev/null 2>&1 || true
+        fi
     fi
 fi
 
