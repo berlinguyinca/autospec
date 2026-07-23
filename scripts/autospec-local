@@ -5,7 +5,7 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
 export AUTOSPEC_REPO_DIR="${AUTOSPEC_REPO_DIR:-$ROOT}"
 export AUTOSPEC_SCRIPTS_DIR="$ROOT/scripts"
-export PATH="/usr/bin:$HOME/.local/bin:$PATH"
+export PATH="$HOME/.autospec/bin:/usr/bin:$HOME/.local/bin:$PATH"
 
 case "${1:-}" in
   autonomous)

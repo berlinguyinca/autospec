@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# skills/autospec-shared/scripts/notify.sh — shared desktop notifier
+# skills/autospec-shared/scripts/notify.sh — shared session event notifier
 #
 # Usage: notify.sh "<title>" "<body>"
 #
-# Sends a desktop notification via osascript (macOS) or notify-send (Linux)
-# when a notifier is available, degrades to a stdout log line when none is
-# found (headless/CI), and is a silent no-op when AUTOSPEC_NOTIFY=0.
+# Persists an event for the active session. Desktop notifications are disabled
+# by default; set AUTOSPEC_NOTIFY_DESKTOP=1 only for an explicit opt-in.
 #
 # Reuses the osascript/notify-send routing + escaping pattern from
 # packages/autospec_context_monitor/autospec_context_monitor/adapters/claude_hook.py
@@ -23,6 +22,19 @@ fi
 
 TITLE="${1:-}"
 BODY="${2:-}"
+
+EVENT_LOG="${AUTOSPEC_SESSION_EVENTS:-${HOME}/.autospec/session-events.jsonl}"
+mkdir -p "$(dirname "$EVENT_LOG")" 2>/dev/null || true
+python3 - "$EVENT_LOG" "$TITLE" "$BODY" <<'PY' 2>/dev/null || true
+import json, sys, time
+path, title, body = sys.argv[1:]
+with open(path, "a", encoding="utf-8") as f:
+    f.write(json.dumps({"ts": time.time(), "title": title, "body": body}) + "\n")
+PY
+
+if [ "${AUTOSPEC_NOTIFY_DESKTOP:-0}" != "1" ]; then
+    exit 0
+fi
 
 # ── macOS: osascript ──────────────────────────────────────────────────────────
 if command -v osascript > /dev/null 2>&1; then

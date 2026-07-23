@@ -106,7 +106,7 @@ ensure_autospec_bin_path() {
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] ensure_autospec_bin_path: would create $autospec_bin_dir and $autospec_env_file"
-        info "[dry-run] ensure_autospec_bin_path: would source $autospec_env_file from ~/.zshrc and ~/.bashrc"
+        info "[dry-run] ensure_autospec_bin_path: would source $autospec_env_file from ~/.profile, ~/.zshrc, and ~/.bashrc"
         return 0
     fi
 
@@ -139,7 +139,8 @@ EOF
 
     ensure_line_in_file "$HOME/.zshrc" "$autospec_env_line"
     ensure_line_in_file "$HOME/.bashrc" "$autospec_env_line"
-    info "ensure_autospec_bin_path: $autospec_bin_dir is sourced via ~/.autospec/env"
+    ensure_line_in_file "$HOME/.profile" "$autospec_env_line"
+    info "ensure_autospec_bin_path: $autospec_bin_dir is sourced via ~/.profile, ~/.zshrc, and ~/.bashrc"
 }
 
 write_autonomous_operator_wrapper() {
