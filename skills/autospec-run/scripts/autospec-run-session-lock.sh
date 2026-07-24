@@ -61,12 +61,25 @@ case "$cmd" in
                 pid="$(printf '%s' "$existing" | sed -n 's/.*"pid":\([0-9]*\).*/\1/p')"
                 alive="dead"
                 { [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; } && alive="alive"
+                if [ "$alive" = "dead" ]; then
+                    # A crashed or expired worker must not strand the session
+                    # forever. Remove only metadata whose recorded PID is
+                    # provably dead, then retry the atomic acquire.
+                    rm -f "$LOCK_FILE"
+                    if ( set -o noclobber; : > "$LOCK_FILE" ) 2>/dev/null; then
+                        existing=""
+                    fi
+                fi
+                if [ -z "$existing" ]; then
+                    :
+                else
                 {
                     printf 'autospec-run: a monitor is already active for this session (session=%s).\n' "$TOKEN"
                     printf '  %s\n' "$existing"
                     printf '  holder pid=%s (%s). Run /autospec-stop to halt it, or re-run with --force to override.\n' "${pid:-?}" "$alive"
                 } >&2
                 exit 3
+                fi
             fi
         fi
         # Acquired a fresh noclobber sentinel, or --force override: write the body.
