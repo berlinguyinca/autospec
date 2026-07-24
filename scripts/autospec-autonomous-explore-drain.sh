@@ -135,6 +135,10 @@ fi
 
 HARNESS_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-explore-drain.XXXXXX" 2>/dev/null || printf '/tmp/autospec-explore-drain.%s' "$$")"
 
+# Pass ownership across the harness boundary so a detached explore script can
+# terminate itself when this drain is force-restarted or otherwise disappears.
+export AUTOSPEC_EXPLORE_PARENT_PID="$$"
+
 # Run explore through the harness. STDOUT+STDERR go to the log; the wrapper's own
 # stdout is reserved for the single contract JSON line the conductor parses.
 omx exec \
