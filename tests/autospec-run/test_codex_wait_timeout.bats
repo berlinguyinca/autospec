@@ -12,6 +12,7 @@ setup() {
 @test "autospec-run enforces the native Codex wait timeout floor in every harness" {
   for file in "${FILES[@]}"; do
     grep -Fq 'Codex Wait call-shape contract' "$file"
+    grep -Fq 'native Codex `wait_agent`' "$file"
     grep -Fq 'omit `timeout_ms` or pass an integer greater than or equal to `10000`' "$file"
     grep -Fq 'Never pass `timeout_ms` below `10000`' "$file"
   done
