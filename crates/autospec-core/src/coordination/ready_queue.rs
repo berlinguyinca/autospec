@@ -407,7 +407,7 @@ pub fn plan_ready_queue_with_trusted_actors(
     trusted_actors: &[&str],
 ) -> ReadyQueuePlan {
     let candidates = deduplicate_issues(&input.candidates);
-    let open_count = candidates.len();
+    let open_count = candidates.iter().filter(|issue| !issue.closed).count();
     let mut known = input.dependencies.clone();
     for issue in &candidates {
         known.insert(issue.number, issue.clone());
@@ -432,6 +432,9 @@ pub fn plan_ready_queue_with_trusted_actors(
     let mut candidate_count = 0;
     let mut reviewed_count = 0;
     for issue in candidates {
+        if issue.closed {
+            continue;
+        }
         if !input.policy.only_issues.is_empty() && !input.policy.only_issues.contains(&issue.number)
         {
             continue;
