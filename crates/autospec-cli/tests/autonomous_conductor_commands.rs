@@ -5,8 +5,9 @@ use autospec_core::claim::{parse_remote_comments_json, select_run_state, RunStat
 use autospec_core::coordination::{ConductorOutcome, ConductorPhase, ConductorState};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -482,6 +483,42 @@ fn detached_start_resolves_the_repository_before_launching_foreground() {
     let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
     assert!(calls.contains("repos/test/repo/branches/main"));
     assert!(!calls.contains("repos/unknown"));
+}
+
+#[test]
+fn detached_start_survives_launcher_process_group_shutdown() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let mut command = fixture.detached_command("start");
+    command
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_BLOCK_GH", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command.process_group(0);
+    let launcher = command.spawn().expect("spawn detached launcher");
+    let launcher_process_group = launcher.id();
+    let output = launcher
+        .wait_with_output()
+        .expect("wait for detached launcher");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let conductor_pid = fixture
+        .recorded_conductor_pid()
+        .expect("recorded conductor pid");
+    assert!(process_is_running(conductor_pid));
+
+    terminate_process_group(launcher_process_group);
+    std::thread::sleep(std::time::Duration::from_millis(100));
+
+    assert!(
+        process_is_running(conductor_pid),
+        "detached conductor {conductor_pid} exited with launcher process group {launcher_process_group}"
+    );
 }
 
 #[test]
@@ -1701,6 +1738,9 @@ impl ForegroundFixture {
             r####"#!/bin/sh
 set -eu
 printf '%s\n' "$@" >> "$AUTOSPEC_FOREGROUND_CALLS"
+if [ "${AUTOSPEC_FOREGROUND_BLOCK_GH:-0}" = 1 ]; then
+  while :; do sleep 1; done
+fi
 mode="$(cat "$AUTOSPEC_FOREGROUND_MODE")"
 issue() {
   if [ "$mode" = unreviewed ]; then
@@ -1905,6 +1945,16 @@ exit 1
             "--json",
         ]);
         command
+    }
+
+    fn recorded_conductor_pid(&self) -> Option<u32> {
+        let metadata = fs::read_to_string(self.operator.join("test_repo/conductor.pid")).ok()?;
+        let (_, value) = metadata.split_once("\"pid\":")?;
+        value
+            .split(|character: char| !character.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
     }
 
     fn write_autonomous_config(&self, source: &str) {
@@ -2223,6 +2273,10 @@ fn json_string_field(document: &str, field: &str) -> String {
 
 impl Drop for ForegroundFixture {
     fn drop(&mut self) {
+        if let Some(pid) = self.recorded_conductor_pid() {
+            terminate_process_group(pid);
+            terminate_process(pid);
+        }
         let _ = fs::remove_dir_all(&self.root);
     }
 }
@@ -2294,4 +2348,32 @@ fn wait_for_file_contents(path: &Path, expected: &str) {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     panic!("{} did not contain {expected}", path.display());
+}
+
+fn process_is_running(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .is_ok_and(|output| {
+            output.status.success()
+                && !String::from_utf8_lossy(&output.stdout)
+                    .trim_start()
+                    .starts_with('Z')
+        })
+}
+
+fn terminate_process_group(pid: u32) {
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn terminate_process(pid: u32) {
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &pid.to_string()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }

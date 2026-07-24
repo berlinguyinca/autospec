@@ -2,6 +2,7 @@ use std::io::Write;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -3638,16 +3639,178 @@ fn workspace_root() -> std::path::PathBuf {
         .expect("workspace root")
 }
 
+#[test]
+fn cleanup_pids_terminates_scoped_json_and_legacy_pid_records() {
+    let scope_path = {
+        let scope = TempDirFixture::new("autospec-cleanup-pids");
+        let (mut scoped, descendant_pid) = grouped_fixture_process(scope.path());
+        let legacy = Command::new("sleep")
+            .arg("20")
+            .spawn()
+            .expect("legacy fixture process");
+        let scoped_pid = scoped.pid().to_string();
+        let legacy_pid = legacy.id().to_string();
+        let mut legacy = FixtureChild::new(legacy);
+        std::fs::write(
+            scope.path().join("conductor.pid"),
+            format!("{{\"pid\":{scoped_pid},\"repo\":\"test/repo\",\"scope\":\"test_repo\"}}\n"),
+        )
+        .expect("scoped pid metadata");
+        std::fs::write(scope.path().join("monitor.pid"), format!("{legacy_pid}\n"))
+            .expect("legacy pid metadata");
+
+        cleanup_pids(scope.path());
+        assert!(process_group_stops(&mut scoped));
+        assert!(fixture_child_stops(&mut legacy));
+        assert!(process_stops(&descendant_pid));
+        scope.path().to_path_buf()
+    };
+    assert!(!scope_path.exists(), "cleanup fixture directory leaked");
+}
+
+fn grouped_fixture_process(scope: &std::path::Path) -> (ProcessGroupFixture, String) {
+    let descendant_file = scope.join("descendant.pid");
+    let mut command = Command::new("sh");
+    command
+        .args([
+            "-c",
+            "sleep 20 & printf '%s\\n' \"$!\" > \"$DESCENDANT_PID\"; wait",
+        ])
+        .env("DESCENDANT_PID", &descendant_file);
+    command.process_group(0);
+    let fixture = ProcessGroupFixture::new(command.spawn().expect("scoped fixture process"));
+    for _ in 0..50 {
+        if let Ok(pid) = std::fs::read_to_string(&descendant_file) {
+            return (fixture, pid.trim().to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("scoped fixture descendant PID was not recorded");
+}
+
+fn process_stops(pid: &str) -> bool {
+    for _ in 0..20 {
+        if !process_is_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    false
+}
+
+fn process_group_stops(child: &mut ProcessGroupFixture) -> bool {
+    for _ in 0..20 {
+        if !child.is_running() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    false
+}
+
+fn fixture_child_stops(child: &mut FixtureChild) -> bool {
+    for _ in 0..20 {
+        if !child.is_running() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    false
+}
+
+struct TempDirFixture {
+    path: std::path::PathBuf,
+}
+
+impl TempDirFixture {
+    fn new(prefix: &str) -> Self {
+        Self {
+            path: temp_dir(prefix),
+        }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDirFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+struct ProcessGroupFixture {
+    child: Option<Child>,
+    pid: u32,
+}
+
+impl ProcessGroupFixture {
+    fn new(child: Child) -> Self {
+        let pid = child.id();
+        Self {
+            child: Some(child),
+            pid,
+        }
+    }
+
+    fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    fn is_running(&mut self) -> bool {
+        self.child
+            .as_mut()
+            .expect("process-group fixture child")
+            .try_wait()
+            .expect("process-group fixture child status")
+            .is_none()
+    }
+}
+
+impl Drop for ProcessGroupFixture {
+    fn drop(&mut self) {
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", self.pid)])
+            .stderr(Stdio::null())
+            .status();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
 fn cleanup_pids(scope: &std::path::Path) {
     for name in ["conductor", "monitor", "supervisor"] {
         let pid_file = scope.join(format!("{name}.pid"));
-        if let Ok(pid) = std::fs::read_to_string(pid_file) {
-            let pid = pid.trim();
-            if !pid.is_empty() {
-                let _ = Command::new("kill").arg(pid).stderr(Stdio::null()).status();
-            }
+        if let Ok(metadata) = std::fs::read_to_string(pid_file) {
+            let Some(pid) = cleanup_pid(&metadata) else {
+                continue;
+            };
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &format!("-{pid}")])
+                .stderr(Stdio::null())
+                .status();
+            let _ = Command::new("kill")
+                .args(["-KILL", "--", &pid])
+                .stderr(Stdio::null())
+                .status();
         }
     }
+}
+
+fn cleanup_pid(metadata: &str) -> Option<String> {
+    let metadata = metadata.trim();
+    if metadata.parse::<u32>().is_ok_and(|candidate| candidate > 0) {
+        return Some(metadata.to_string());
+    }
+    serde_json::from_str::<serde_json::Value>(metadata)
+        .ok()?
+        .get("pid")?
+        .as_u64()
+        .filter(|pid| *pid > 0)
+        .map(|pid| pid.to_string())
 }
 
 fn json_path(path: &std::path::Path) -> String {
