@@ -30,12 +30,12 @@ trap 'rm -f "$todo_tmp" "$cov_tmp"' EXIT
 # Precision: require a real annotation shape (MARKER: or MARKER(owner)) — NOT a
 # bare trailing space — so prose like "build me a TODO list CLI" or "FIXME found"
 # does not match. Exclude docs/marketing + non-source assets, and this researcher's
-# own dir plus the lint tooling, which only *document* the markers and would
-# otherwise flag themselves (self-referential false positives).
+# own dir, tests, and lint tooling, which only *document* or exercise the
+# markers and would otherwise flag themselves (self-referential false positives).
 if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git grep -n -I -E '(TODO|FIXME|XXX|HACK)[:(]' \
         -- ':!*.md' ':!*.html' ':!*.cast' ':!*.svg' ':!docs/' \
-           ':!scripts/explore-research/' ':!scripts/lint-*.sh' 2>/dev/null \
+           ':!tests/' ':!scripts/explore-research/' ':!scripts/lint-*.sh' 2>/dev/null \
         | head -n "$MAX_SIGNALS" > "$todo_tmp" || true
 fi
 

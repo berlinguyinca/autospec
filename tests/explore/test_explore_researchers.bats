@@ -84,6 +84,18 @@ EOF
     [[ "$output" == *"TODO"* ]]
 }
 
+@test "codebase-signals ignores TODO annotations inside test fixtures" {
+    mkdir -p src tests/explore
+    printf '# TODO: ship the production parser\n' > src/parser.py
+    printf '# TODO: fixture marker used to test discovery\n' > tests/explore/fixture.py
+    git add -A && git commit -q -m init
+    run bash "$REPO_ROOT/scripts/explore-research/codebase-signals.sh"
+    [ "$status" -eq 0 ]
+    assert_well_formed "$output"
+    [[ "$output" == *"src/parser.py"* ]]
+    [[ "$output" != *"tests/explore/fixture.py"* ]]
+}
+
 @test "codebase-signals ignores prose markers + doc assets, keeps real annotations" {
     mkdir -p src docs/site
     # Real annotation (MARKER: shape) in a source file -> SHOULD be proposed.
