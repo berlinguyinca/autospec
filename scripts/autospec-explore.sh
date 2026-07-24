@@ -58,6 +58,20 @@ HANDOFF_TIMEOUT_SEC="${AUTOSPEC_EXPLORE_HANDOFF_TIMEOUT_SEC:-900}"
 PROMPT=""
 EXPLORE_CHILD_PIDS=""
 
+# A harness may detach this script into a new session. Keep a tiny owner
+# watcher so force-restarting the autonomous drain cannot orphan research work.
+EXPLORE_PARENT_WATCHDOG=""
+if [ -n "${AUTOSPEC_EXPLORE_PARENT_PID:-}" ] && [ "${AUTOSPEC_EXPLORE_PARENT_PID}" != "$$" ]; then
+    (
+        while kill -0 "$AUTOSPEC_EXPLORE_PARENT_PID" 2>/dev/null; do
+            sleep 15
+        done
+        kill -TERM "$$" 2>/dev/null || true
+    ) &
+    EXPLORE_PARENT_WATCHDOG="$!"
+    trap 'if [ -n "${EXPLORE_PARENT_WATCHDOG:-}" ]; then kill "$EXPLORE_PARENT_WATCHDOG" 2>/dev/null || true; fi' EXIT
+fi
+
 usage() {
     cat <<'EOF'
 Usage: scripts/autospec-explore.sh "<initial prompt>" [options]
