@@ -52,4 +52,6 @@ is 300 seconds; both remain configurable through `AUTOSPEC_AUTONOMOUS_EXPLORE_*`
 
 If a harness reports `AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed`, the drain runs
 the local explore entrypoint directly with the verifier command and uses its
-JSON contract, avoiding a model-reported dry result.
+JSON contract, avoiding a model-reported dry result. That fallback runs in its
+own process group and shares `AUTOSPEC_AUTONOMOUS_EXPLORE_MAX_SECS`, so a slow
+researcher cannot hold the conductor indefinitely.
