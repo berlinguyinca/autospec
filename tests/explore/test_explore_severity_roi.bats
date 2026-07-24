@@ -223,6 +223,27 @@ assert not any('alpha module' in t and t != p['title'] for t in titles), titles
 "
 }
 
+@test "pattern synthesis cannot disguise raw marker chores from constitution D3" {
+    make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[]}'
+    make_fake_researcher prior-reports '{"source":"prior-reports","proposals":[]}'
+    make_fake_researcher codebase-signals '{"source":"codebase-signals","proposals":[
+      {"title":"chore: address TODO in src/alpha.py:10","evidence":"TODO at src/alpha.py:10: TODO: implement","estimated_complexity":"small","confidence":0.55},
+      {"title":"chore: address TODO in src/beta.py:20","evidence":"TODO at src/beta.py:20: TODO: implement","estimated_complexity":"small","confidence":0.55},
+      {"title":"chore: address TODO in src/gamma.py:30","evidence":"TODO at src/gamma.py:30: TODO: implement","estimated_complexity":"small","confidence":0.55}
+    ]}'
+    make_fake_researcher open-issues '{"source":"open-issues","proposals":[]}'
+
+    run bash "$REPO_ROOT/scripts/explore-research-cycle.sh" --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | python3 -c "
+import sys, json
+d = json.loads(sys.stdin.read())
+assert d['structural_fixes'] == 0, d
+assert d['proposals_after_constitution'] == 0, d
+assert d['proposals'] == [], d['proposals']
+"
+}
+
 @test "pattern synthesis does NOT over-collapse unrelated proposals" {
     # Two survivors in different severity bands / unrelated subjects must each
     # stay a distinct proposal — no structural-fix, structural_fixes == 0.

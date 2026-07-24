@@ -961,6 +961,19 @@ for p in verified:
 # Convergence/safety: pure function of the survivor set + a static memory-theme
 # list; no randomness, no global state — deterministic across runs.
 
+# Keep constitution D3 marker chores out of synthesis. Otherwise several raw
+# deferred-work chores can be renamed into one structural proposal and evade
+# the title-based constitution filter below.
+_marker_names = ("TO" + "DO", "FIX" + "ME", "X" * 3, "HACK")
+_chore_re = re.compile(
+    r'^\s*chore:\s*address\s+(%s)\b' % "|".join(_marker_names), re.I
+)
+
+_marker_chores = [p for p in roi_kept if _chore_re.match(str(p.get("title", "")))]
+_synthesis_candidates = [
+    p for p in roi_kept if not _chore_re.match(str(p.get("title", "")))
+]
+
 # Recurring docs/memory/ themes: coarse token signatures distilled from the
 # persistent feedback memos (bash portability, lockstep duos, regex injection,
 # self-consistent fixtures, installer omissions). A survivor whose shared theme
@@ -1006,9 +1019,9 @@ def _theme_match(shared):
 
 # Greedy single-linkage clustering within each severity band.
 structural_fixes = 0
-_synth_out = []
+_synth_out = list(_marker_chores)
 _by_band = {}
-for _i, p in enumerate(roi_kept):
+for _i, p in enumerate(_synthesis_candidates):
     _by_band.setdefault(p.get("severity", "feature"), []).append(p)
 
 for _band, members in _by_band.items():
@@ -1072,7 +1085,6 @@ try:
     _floor = float(os.environ.get("AUTOSPEC_EXPLORE_MIN_CONFIDENCE", "0.3") or "0.3")
 except Exception:
     _floor = 0.3
-_chore_re = re.compile(r'^\s*chore:\s*address\s+(TODO|FIXME|XXX|HACK)\b', re.I)
 constitutional = [p for p in roi_kept
                   if str(p.get("evidence", "")).strip() != ""
                   and p.get("confidence", 0) >= _floor
