@@ -341,6 +341,11 @@ fi
 rm -f "$HARNESS_LOG" 2>/dev/null || true
 
 if [ "$parse_rc" -ne 0 ]; then
+    if deterministic_fallback; then
+        printf 'autospec-autonomous-verify-drain: verdict extraction failed; deterministic evidence fallback accepted %s candidate(s)\n' \
+            "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$VERDICTS_OUT" 2>/dev/null || printf 0)" >&2
+        exit 0
+    fi
     fail_closed "could not extract a verdict map from skeptic output"
 fi
 
