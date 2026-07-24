@@ -1394,6 +1394,9 @@ autospec_conductor_run() {
     local _usage_limit="${_sdir}/autospec-usage-limit.sh"
     local _governor="${_sdir}/autonomous-usage-governor.sh"
     local _queue_bin="${AUTOSPEC_QUEUE_BIN:-${AUTOSPEC_BIN:-}}"
+    if [ -z "$_queue_bin" ]; then
+        _queue_bin="$(command -v autospec 2>/dev/null || true)"
+    fi
 
     # ── Ledger wiring (F5) ─────────────────────────────────────────────────────
     # Resolve repo root (parent of scripts/ dir) for ledger data file path.
