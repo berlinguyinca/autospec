@@ -97,3 +97,14 @@ teardown() {
     run jq -e '[.findings[] | select(.probe == "any-usage" and .file == "skills/autospec-test/scripts/playwright-config-resolver.mjs")] | length == 0' "$JSON_OUT"
     [ "$status" -eq 0 ]
 }
+
+@test "quality audit passes issue catalogs through files instead of shell arguments" {
+    run grep -F 'OPEN_ISSUES_JSON="$TMP_DIR/open-issues.json"' "$AUDIT_SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -F 'CLOSED_ISSUES_JSON="$TMP_DIR/closed-issues.json"' "$AUDIT_SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--slurpfile open "$OPEN_ISSUES_JSON" --slurpfile closed "$CLOSED_ISSUES_JSON"' "$AUDIT_SCRIPT"
+    [ "$status" -eq 0 ]
+    run grep -F -- '--argjson open "$open_issues"' "$AUDIT_SCRIPT"
+    [ "$status" -ne 0 ]
+}
