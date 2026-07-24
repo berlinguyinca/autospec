@@ -91,6 +91,13 @@ fi
 
 kill_tree() {
     _pid="$1"
+    _pgid="$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"
+    _own_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+    if [ -n "$_pgid" ] && [ "$_pgid" != "$_own_pgid" ]; then
+        kill -TERM -- "-$_pgid" 2>/dev/null || true
+        kill -KILL -- "-$_pgid" 2>/dev/null || true
+        return 0
+    fi
     for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
         kill_tree "$_child"
     done
@@ -147,7 +154,7 @@ export AUTOSPEC_EXPLORE_PARENT_PID="$$"
 
 # Run explore through the harness. STDOUT+STDERR go to the log; the wrapper's own
 # stdout is reserved for the single contract JSON line the conductor parses.
-omx exec \
+setsid omx exec \
     --cd "$REPO_DIR" \
     --dangerously-bypass-approvals-and-sandbox \
     "$SKILL_INVOCATION" > "$HARNESS_LOG" 2>&1 &
