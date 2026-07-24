@@ -438,3 +438,10 @@ test('resolveResetStrategy: fallback chain order — endpoint > cmd > generate >
     );
     assert.equal(s.kind, 'declared_endpoint');
 });
+
+// linter:allow-TODO_LEFT assertion inspects the intentional generated placeholder
+test('reset route templates share one reset-logic placeholder definition', () => {
+    const source = fs.readFileSync(path.join(SCRIPTS_DIR, 'reset-endpoint-gen.mjs'), 'utf8');
+    const placeholders = source.match(/TO\\x44O: replace with your actual DB reset logic/g) || [];
+    assert.equal(placeholders.length, 1, 'define the generated reset-logic placeholder once');
+});
