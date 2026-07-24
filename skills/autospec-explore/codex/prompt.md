@@ -1,6 +1,12 @@
 
 # autospec-explore workflow (harness-neutral)
 
+Research-cycle output includes a deterministic `repo_class` classification
+(for example `library`, `frontend`, `infra`, `data-study`, `docs`, or
+`archived`) derived from local repository evidence. Pass `--repo-class` to
+override it in controlled tests; governance-only classes are intended for
+read-only proposal tracks.
+
 Start a perpetual autonomous research + ship loop. `/autospec-explore "<initial prompt>"`
 creates an isolated sandbox branch (`autospec/explore/<date>-<slug>`) off `origin/main`,
 runs a roster of parallel researchers each round — **7 universal** (spec-vs-code,
@@ -891,3 +897,19 @@ makes promotion contingent on a sandbox-HEAD QA verdict.
 autospec validate
 bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/explore-sandbox.sh --slug smoke-test
 ```
+# Organization learning reports
+
+Pass `--org <name>` (or set `AUTOSPEC_EXPLORE_ORG`) to persist each completed
+sweep under `.autospec/org-audits/<name>/`. The generated `report.json` and
+human-readable `report.md` are accompanied by append-only `ledger.jsonl`; a
+future sweep can inspect these files to seed source weights and detect stale
+reports before deciding whether a full recheck is needed.
+# Governance and domain proposal tracks
+
+Organization sweeps assign proposals to governance or domain tracks, apply
+independent caps and priorities, and preserve the track metadata in output.
+
+# Data-study safety mode
+
+Repositories classified as `data-study` or `notebook-research` use a restricted
+proposal allowlist and require preservation or rollback plans for data changes.

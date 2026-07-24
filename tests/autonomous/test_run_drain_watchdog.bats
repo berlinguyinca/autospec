@@ -39,7 +39,7 @@ EOF
   bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh" > "$TEST_TMP/drain.out" 2>&1 &
   drain_pid="$!"
 
-  for _ in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     if ! kill -0 "$drain_pid" 2>/dev/null; then
       status=0
       wait "$drain_pid" || status="$?"
@@ -166,7 +166,7 @@ EOF
   bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh" > "$TEST_TMP/drain.out" 2>&1 &
   drain_pid="$!"
 
-  for _ in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     if ! kill -0 "$drain_pid" 2>/dev/null; then
       status=0
       wait "$drain_pid" || status="$?"
@@ -206,7 +206,7 @@ EOF
   bash "$REPO_ROOT/scripts/autospec-autonomous-run-drain.sh" > "$TEST_TMP/drain-wrapper.out" 2>&1 &
   drain_pid="$!"
 
-  for _ in 1 2 3 4 5; do
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
     if ! kill -0 "$drain_pid" 2>/dev/null; then
       status=0
       wait "$drain_pid" || status="$?"

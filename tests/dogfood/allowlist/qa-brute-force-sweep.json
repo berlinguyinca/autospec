@@ -18,6 +18,12 @@
     "justification": "The test helper asserts command output, not a domain representation; this inherited file-scoped heuristic result remains intentionally allowlisted."
   },
   {
+    "file": "crates/autospec-cli/tests/cli_commands.rs",
+    "function": "status_json_reports_persisted_lifecycle_counts",
+    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
+    "justification": "This CLI integration test repeats JSON-field assertions over one response fixture; the assertion rows are test data, not production branching."
+  },
+  {
     "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",

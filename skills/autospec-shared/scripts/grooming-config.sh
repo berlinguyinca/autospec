@@ -88,8 +88,8 @@ case "$KEY" in
     esac
     ;;
   budget.max_issues_per_cycle)
-    v="$(resolve "${AUTOSPEC_GROOMING_MAX_ISSUES:-}" "budget.max_issues_per_cycle" "10")"
-    case "$v" in ''|*[!0-9]*) v=10 ;; esac
+    v="$(resolve "${AUTOSPEC_GROOMING_MAX_ISSUES:-}" "budget.max_issues_per_cycle" "5")"
+    case "$v" in ''|*[!0-9]*) v=5 ;; esac
     printf '%s\n' "$v"
     ;;
   budget.groom_attempts_per_issue)
