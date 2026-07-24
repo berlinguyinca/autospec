@@ -33,3 +33,8 @@ If the skeptic itself times out, the verifier uses a deterministic fallback: it
 survives only candidates whose evidence names an existing repository path and
 line, and refutes all other candidates. Set
 `AUTOSPEC_AUTONOMOUS_DETERMINISTIC_VERIFY=0` to require the skeptic exclusively.
+
+Discovery safety review resolves the Rust CLI in this order: `AUTOSPEC_BIN`,
+the repository's `target/debug/autospec`, `~/.autospec/bin/autospec`, then PATH.
+This keeps filing functional in detached sessions whose PATH does not include
+the installed command shim.

@@ -503,12 +503,33 @@ except Exception:
     _once_filed=0
     if [ "$_once_new" -gt 0 ] && [ "$PREVIEW" -ne 1 ] && [ -f "$_once_candidates" ] && command -v gh >/dev/null 2>&1; then
         _once_filed="$(python3 - "$_once_candidates" <<'PY'
-import json, os, subprocess, sys
+import json, os, shutil, subprocess, sys
 try:
     candidates = json.load(open(sys.argv[1]))
 except Exception:
     candidates = []
 count = 0
+
+def resolve_autospec_bin():
+    configured = str(os.environ.get("AUTOSPEC_BIN", "")).strip()
+    candidates = []
+    if configured:
+        candidates.append(configured)
+    candidates.extend([
+        os.path.join(os.getcwd(), "target", "debug", "autospec"),
+        os.path.expanduser("~/.autospec/bin/autospec"),
+    ])
+    for candidate in candidates:
+        if os.path.isabs(candidate) or os.sep in candidate:
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        else:
+            resolved = shutil.which(candidate)
+            if resolved:
+                return resolved
+    return shutil.which("autospec") or ""
+
+AUTOSPEC_BIN = resolve_autospec_bin()
 
 def rust_safety_pass(issue_url):
     issue_number = str(issue_url or "").strip().rstrip("/").rsplit("/", 1)[-1]
@@ -526,9 +547,11 @@ def rust_safety_pass(issue_url):
         repo = repo_lookup.stdout.strip()
     if not repo:
         return False
+    if not AUTOSPEC_BIN:
+        return False
     review = subprocess.run(
         [
-            os.environ.get("AUTOSPEC_BIN", "autospec"),
+            AUTOSPEC_BIN,
             "queue", "review-safety", "--repo", repo,
             "--limit", "1", "--issue", issue_number,
         ],
