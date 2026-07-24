@@ -55,7 +55,3 @@ the local explore entrypoint directly with the verifier command and uses its
 JSON contract, avoiding a model-reported dry result. That fallback runs in its
 own process group and shares `AUTOSPEC_AUTONOMOUS_EXPLORE_MAX_SECS`, so a slow
 researcher cannot hold the conductor indefinitely.
-
-One-shot explore runs use the same deduplication, verifier, and finalize stages
-as iterative discovery when `AUTOSPEC_EXPLORE_VERIFY_CMD` is configured, so
-candidate evidence is preserved before an issue can be filed.
