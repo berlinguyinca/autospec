@@ -173,6 +173,14 @@ EOF
     grep -q "Z\*|'') break" "$cycle"
 }
 
+@test "once explore path wires the verifier command" {
+    explore="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/autospec-explore.sh"
+    run bash -n "$explore"
+    [ "$status" -eq 0 ]
+    grep -q 'AUTOSPEC_EXPLORE_DEDUPED_IN=' "$explore"
+    grep -q 'data\["verify_mode"\] = "active"' "$explore"
+}
+
 # ── launcher wiring ───────────────────────────────────────────────────────────
 
 @test "launcher exports AUTOSPEC_EXPLORE_CMD to the bridge path by default" {
