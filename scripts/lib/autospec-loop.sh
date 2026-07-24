@@ -1383,7 +1383,9 @@ autospec_conductor_run() {
     local _no_digest="${CONDUCTOR_NO_DIGEST:-0}"
     # Never-idle: idle-rescan heartbeat interval (default 30m per the 2026-07-06
     # platform design). A fully-dry cascade idles here rather than converge-stops.
-    local _rescan_interval="${AUTOSPEC_RESCAN_INTERVAL:-1800}"
+    # Keep an empty backlog responsive: discovery is the autonomous worker's
+    # source of new work, so a dry Tier-1 cycle should not sleep for 30 minutes.
+    local _rescan_interval="${AUTOSPEC_RESCAN_INTERVAL:-300}"
 
     # Resolve helper script paths.
     local _control_ch="${_sdir}/autonomous-control-channel.sh"
