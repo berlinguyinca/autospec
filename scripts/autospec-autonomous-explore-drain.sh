@@ -132,6 +132,12 @@ SKILL_INVOCATION='$autospec-explore --once'
 if [ -n "$RESEARCH_SOURCES" ]; then
     SKILL_INVOCATION="$SKILL_INVOCATION --research-sources $RESEARCH_SOURCES"
 fi
+# `omx exec` may sanitize exported environment variables. Carry the verifier
+# bridge in the command itself so the nested explore process cannot silently
+# enter its fail-closed no-verifier path.
+VERIFY_CMD="${AUTOSPEC_EXPLORE_VERIFY_CMD:-bash $SCRIPT_DIR/autospec-autonomous-verify-drain.sh}"
+printf -v VERIFY_ASSIGNMENT 'AUTOSPEC_EXPLORE_VERIFY_CMD=%q' "$VERIFY_CMD"
+SKILL_INVOCATION="$VERIFY_ASSIGNMENT $SKILL_INVOCATION"
 
 HARNESS_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-explore-drain.XXXXXX" 2>/dev/null || printf '/tmp/autospec-explore-drain.%s' "$$")"
 
