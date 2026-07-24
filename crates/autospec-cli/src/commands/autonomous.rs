@@ -4329,21 +4329,89 @@ fn classify_unit_metadata(
     probe: ProcessProbe,
 ) -> UnitMetadataState {
     let legacy_pid = raw.parse::<i32>().is_ok_and(|pid| pid > 0);
-    if !legacy_pid {
-        let Some(_) = metadata_pid(raw) else {
-            return UnitMetadataState::Ambiguous;
-        };
-        if extract_json_string(raw, "repo").as_deref() != Some(expected_repo)
-            || extract_json_string(raw, "scope").as_deref() != Some(expected_scope)
-        {
-            return UnitMetadataState::Ambiguous;
-        }
+    if !legacy_pid && !structured_unit_metadata_matches(raw, expected_repo, expected_scope) {
+        return UnitMetadataState::Ambiguous;
     }
     match probe {
         ProcessProbe::Alive => UnitMetadataState::Live,
         ProcessProbe::Missing => UnitMetadataState::Stale,
         ProcessProbe::Indeterminate => UnitMetadataState::Ambiguous,
     }
+}
+
+fn structured_unit_metadata_matches(raw: &str, expected_repo: &str, expected_scope: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+        return false;
+    };
+    let Some(metadata) = value.as_object() else {
+        return false;
+    };
+    json_object_keys_are_unique(raw)
+        && metadata
+            .get("pid")
+            .and_then(serde_json::Value::as_i64)
+            .is_some_and(|pid| pid > 0 && pid <= i64::from(i32::MAX))
+        && metadata.get("repo").and_then(serde_json::Value::as_str) == Some(expected_repo)
+        && metadata.get("scope").and_then(serde_json::Value::as_str) == Some(expected_scope)
+}
+
+fn json_object_keys_are_unique(raw: &str) -> bool {
+    let mut object_keys = Vec::<std::collections::HashSet<String>>::new();
+    let bytes = raw.as_bytes();
+    let mut string_start = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in bytes.iter().copied().enumerate() {
+        if !in_string {
+            match byte {
+                b'{' => object_keys.push(std::collections::HashSet::new()),
+                b'}' => {
+                    object_keys.pop();
+                }
+                b'"' => {
+                    in_string = true;
+                    string_start = index;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' => escaped = true,
+            b'"' => {
+                in_string = false;
+                if !record_json_object_key(raw, bytes, string_start, index, &mut object_keys) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    true
+}
+
+fn record_json_object_key(
+    raw: &str,
+    bytes: &[u8],
+    start: usize,
+    end: usize,
+    object_keys: &mut [std::collections::HashSet<String>],
+) -> bool {
+    let next = bytes[end + 1..]
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .map(|offset| end + 1 + offset);
+    if next.is_none_or(|next| bytes[next] != b':') {
+        return true;
+    }
+    let Ok(key) = serde_json::from_str::<String>(&raw[start..=end]) else {
+        return false;
+    };
+    object_keys.last_mut().is_some_and(|keys| keys.insert(key))
 }
 
 #[cfg(unix)]
@@ -5720,6 +5788,49 @@ mod autonomous_metadata_tests {
             assert_eq!(
                 classify_unit_metadata(&raw, REPO, SCOPE, probe),
                 UnitMetadataState::Ambiguous
+            );
+        }
+    }
+
+    #[test]
+    fn autonomous_metadata_rejects_truncated_json() {
+        let raw = r#"{"pid":42,"repo":"test/repo","scope":"test_repo""#;
+        assert_eq!(
+            classify_unit_metadata(raw, REPO, SCOPE, ProcessProbe::Alive),
+            UnitMetadataState::Ambiguous
+        );
+    }
+
+    #[test]
+    fn autonomous_metadata_rejects_duplicate_json_keys() {
+        for raw in [
+            r#"{"pid":42,"pid":43,"repo":"test/repo","scope":"test_repo"}"#,
+            r#"{"pid":42,"\u0070id":43,"repo":"test/repo","scope":"test_repo"}"#,
+            r#"{"pid":42,"repo":"test/repo","repo":"other/repo","scope":"test_repo"}"#,
+            r#"{"pid":42,"repo":"test/repo","scope":"test_repo","scope":"other"}"#,
+            r#"{"pid":42,"repo":"test/repo","scope":"test_repo","extra":{"x":1,"x":2}}"#,
+        ] {
+            assert_eq!(
+                classify_unit_metadata(raw, REPO, SCOPE, ProcessProbe::Alive),
+                UnitMetadataState::Ambiguous,
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn autonomous_metadata_rejects_wrong_types_and_non_positive_pids() {
+        for raw in [
+            r#"{"pid":"42","repo":"test/repo","scope":"test_repo"}"#,
+            r#"{"pid":42,"repo":42,"scope":"test_repo"}"#,
+            r#"{"pid":42,"repo":"test/repo","scope":false}"#,
+            r#"{"pid":0,"repo":"test/repo","scope":"test_repo"}"#,
+            r#"{"pid":-1,"repo":"test/repo","scope":"test_repo"}"#,
+        ] {
+            assert_eq!(
+                classify_unit_metadata(raw, REPO, SCOPE, ProcessProbe::Alive),
+                UnitMetadataState::Ambiguous,
+                "{raw}"
             );
         }
     }
