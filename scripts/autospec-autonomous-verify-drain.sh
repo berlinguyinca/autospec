@@ -45,9 +45,11 @@ fi
 if command -v autospec_runtime_config_int >/dev/null 2>&1; then
     VERIFY_STALL_SECS="$(autospec_runtime_config_int autonomous.verify.stall_secs AUTOSPEC_AUTONOMOUS_VERIFY_STALL_SECS 120)"
     VERIFY_POLL_SECS="$(autospec_runtime_config_int autonomous.verify.poll_secs AUTOSPEC_AUTONOMOUS_VERIFY_POLL_SECS 15)"
+    VERIFY_MAX_SECS="$(autospec_runtime_config_int autonomous.verify.max_secs AUTOSPEC_AUTONOMOUS_VERIFY_MAX_SECS 300)"
 else
     VERIFY_STALL_SECS="${AUTOSPEC_AUTONOMOUS_VERIFY_STALL_SECS:-120}"
     VERIFY_POLL_SECS="${AUTOSPEC_AUTONOMOUS_VERIFY_POLL_SECS:-15}"
+    VERIFY_MAX_SECS="${AUTOSPEC_AUTONOMOUS_VERIFY_MAX_SECS:-300}"
 fi
 
 DEDUPED_IN="${AUTOSPEC_EXPLORE_DEDUPED_IN:-}"
@@ -181,6 +183,7 @@ setsid omx exec \
 child_pid="$!"
 
 omx_rc=0
+verify_started_epoch="$(date +%s)"
 if [ "${VERIFY_STALL_SECS:-0}" -le 0 ] 2>/dev/null; then
     set +e
     wait "$child_pid"
@@ -191,13 +194,22 @@ else
     last_progress_epoch="$(date +%s)"
     while kill -0 "$child_pid" 2>/dev/null; do
         sleep "$VERIFY_POLL_SECS"
+        now_epoch="$(date +%s)"
+        elapsed_secs=$((now_epoch - verify_started_epoch))
+        if [ "${VERIFY_MAX_SECS:-0}" -gt 0 ] 2>/dev/null && [ "$elapsed_secs" -ge "$VERIFY_MAX_SECS" ]; then
+            printf 'autospec-autonomous-verify-drain: absolute timeout after %ss; terminating skeptic child pid %s\n' \
+                "$VERIFY_MAX_SECS" "$child_pid" >&2
+            kill_tree "$child_pid"
+            wait "$child_pid" 2>/dev/null || true
+            omx_rc=124
+            break
+        fi
         current_size="$(stat -c '%s' "$HARNESS_LOG" 2>/dev/null || stat -f '%z' "$HARNESS_LOG" 2>/dev/null || printf '0')"
         if [ "$current_size" != "$last_size" ]; then
             last_size="$current_size"
             last_progress_epoch="$(date +%s)"
             continue
         fi
-        now_epoch="$(date +%s)"
         idle_secs=$((now_epoch - last_progress_epoch))
         if [ "$idle_secs" -ge "$VERIFY_STALL_SECS" ]; then
             printf 'autospec-autonomous-verify-drain: stalled after %ss with no output; terminating skeptic child pid %s\n' \
