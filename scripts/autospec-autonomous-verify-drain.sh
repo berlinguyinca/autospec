@@ -115,6 +115,10 @@ command -v omx >/dev/null 2>&1 || fail_closed "omx not found on PATH"
 
 kill_tree() {
     _pid="$1"
+    _pgid="$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"
+    if [ -n "$_pgid" ] && [ "$_pgid" != "$$" ]; then
+        kill -TERM -- "-$_pgid" 2>/dev/null || true
+    fi
     for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
         kill_tree "$_child"
     done

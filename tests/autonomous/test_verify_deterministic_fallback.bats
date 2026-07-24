@@ -13,3 +13,8 @@
   grep -q 're.search' \
     "$BATS_TEST_DIRNAME/../../scripts/autospec-autonomous-verify-drain.sh"
 }
+
+@test "verifier watchdog kills detached skeptic process groups" {
+  grep -q 'kill -TERM -- "-\$_pgid"' \
+    "$BATS_TEST_DIRNAME/../../scripts/autospec-autonomous-verify-drain.sh"
+}
