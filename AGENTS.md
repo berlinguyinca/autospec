@@ -7,7 +7,7 @@
 - **Never bypass hooks** (`--no-verify`) or signing flags.
 - **Never amend** committed PRs; create a new commit instead.
 - **Lock-step rule** (per `CONTRIBUTING.md`): every multi-harness skill keeps `SKILL.md` / `opencode/agent.md` / `codex/prompt.md` bodies identical; only frontmatters differ.
-- **Validation in lieu of code tests**: this repo has no language-level test runner. Validation is via shell scripts that check lock-step diffs, frontmatter parsing, `bash -n` on install scripts, and file presence. Each PR adds or extends a validation script that passes after the change.
+- **Validation and code tests**: Rust tests run with `cargo test`. Repository-specific validation also uses shell scripts that check lock-step diffs, frontmatter parsing, `bash -n` on install scripts, and file presence. Each PR adds or extends a validation script that passes after the change.
 
 ## Runtime resource isolation
 
