@@ -174,7 +174,7 @@ probe_rust_f64_invariants() {
             "f64-numeric-invariant:$module" ;;
       esac
     done < <(grep -Ein '(^|[^[:alnum:]_])f64([^[:alnum:]_]|$)' "$file" 2>/dev/null || true)
-  done < <(find "$REPO" -type f -name '*.rs' -not -path '*/.git/*' -print)
+  done < <(source_scan_find -type f -name '*.rs' -print)
 }
 
 add_guard_finding() {
@@ -990,7 +990,7 @@ source_scan_find() {
     \( -path "$REPO/.git" -o -path "$REPO/node_modules" -o -path "$REPO/.autospec" \
       -o -path "$REPO/dist" -o -path "$REPO/build" -o -path "$REPO/coverage" \
       -o -path "$REPO/.angular" -o -path "$REPO/.next" -o -path "$REPO/out" \
-      -o -path "$REPO/vendor" -o -path "$REPO/public/build" \) -prune -o "$@"
+      -o -path "$REPO/vendor" -o -path "$REPO/target" -o -path "$REPO/public/build" \) -prune -o "$@"
 }
 
 scan_text_files() {
@@ -1426,7 +1426,7 @@ while IFS= read -r rust_file; do
       "Replace with tokio::sync equivalent; evidence: $context" \
       "sync-lock-async-aware:$rel:$line_no"
   done < "$rust_file"
-done < <(find "$REPO" -type f -name '*.rs' -not -path '*/target/*' -print)
+done < <(source_scan_find -type f -name '*.rs' -print)
 ndjson_to_array "$FINDINGS_ND" > "$FINDINGS_JSON"
 ndjson_to_array "$SUPPRESSED_ND" > "$SUPPRESSED_JSON"
 ndjson_to_array "$VERIFICATION_ND" > "$VERIFICATION_JSON"
