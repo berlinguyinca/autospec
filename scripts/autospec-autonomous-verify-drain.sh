@@ -43,10 +43,10 @@ else
     REPO_DIR="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
 fi
 if command -v autospec_runtime_config_int >/dev/null 2>&1; then
-    VERIFY_STALL_SECS="$(autospec_runtime_config_int autonomous.verify.stall_secs AUTOSPEC_AUTONOMOUS_VERIFY_STALL_SECS 1800)"
+    VERIFY_STALL_SECS="$(autospec_runtime_config_int autonomous.verify.stall_secs AUTOSPEC_AUTONOMOUS_VERIFY_STALL_SECS 120)"
     VERIFY_POLL_SECS="$(autospec_runtime_config_int autonomous.verify.poll_secs AUTOSPEC_AUTONOMOUS_VERIFY_POLL_SECS 15)"
 else
-    VERIFY_STALL_SECS="${AUTOSPEC_AUTONOMOUS_VERIFY_STALL_SECS:-1800}"
+    VERIFY_STALL_SECS="${AUTOSPEC_AUTONOMOUS_VERIFY_STALL_SECS:-120}"
     VERIFY_POLL_SECS="${AUTOSPEC_AUTONOMOUS_VERIFY_POLL_SECS:-15}"
 fi
 
