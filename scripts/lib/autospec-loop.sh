@@ -2441,7 +2441,8 @@ EOF_PROV_BATCH
                                         fi
                                         printf '[conductor] provenance: dispatching operator batch (issues: %s) -> parent\n' \
                                             "$_prov_operator" >&2
-                                        AUTOSPEC_RUN_ONLY_ISSUES="$_prov_operator" \
+                                        AUTOSPEC_NO_SELF_UPDATE=1 \
+                                            AUTOSPEC_RUN_ONLY_ISSUES="$_prov_operator" \
                                             bash -c "$_run_cmd" 2>&1 || true
                                         _tier1_drain_dispatched=1
                                     fi
@@ -2579,7 +2580,8 @@ EOF_PROV_BATCH
                                         else
                                             printf '[conductor] provenance: dispatching self batch (issues: %s) -> integration branch\n' \
                                                 "$_prov_self" >&2
-                                            AUTOSPEC_RUN_ONLY_ISSUES="$_prov_self" \
+                                            AUTOSPEC_NO_SELF_UPDATE=1 \
+                                                AUTOSPEC_RUN_ONLY_ISSUES="$_prov_self" \
                                                 bash -c "$_run_cmd" 2>&1 || true
                                             _tier1_drain_dispatched=1
 
@@ -2667,7 +2669,8 @@ EOF_PROV_BATCH
                                         fi
                                     fi
                                 else
-                                    bash -c "$_run_cmd" 2>&1 || true
+                                    AUTOSPEC_NO_SELF_UPDATE=1 \
+                                        bash -c "$_run_cmd" 2>&1 || true
                                     _tier1_drain_dispatched=1
                                 fi
                             else
