@@ -42,3 +42,5 @@ the installed command shim.
 Each researcher is bounded by `AUTOSPEC_RESEARCHER_TIMEOUT_SECS` (default 120
 seconds). A timed-out source is recorded as `researcher_failed` while other
 sources continue, so one provider cannot stall the autonomous discovery loop.
+Timed-out groups are terminated as a process group to clean up detached
+researcher children as well.
