@@ -23,3 +23,8 @@ They also enforce a 900-second absolute runtime cap via
 
 The drain exports `AUTOSPEC_EXPLORE_PARENT_PID`; detached explore scripts watch
 that owner and terminate when it disappears.
+
+The verifier command is also embedded as a quoted environment assignment in the
+harness command because `omx exec` may not preserve the caller's exported
+environment. This prevents an otherwise healthy discovery pass from being
+mistaken for a no-verifier fail-closed cycle.
