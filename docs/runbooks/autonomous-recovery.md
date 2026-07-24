@@ -59,3 +59,6 @@ researcher cannot hold the conductor indefinitely.
 When `AUTOSPEC_EXPLORE_VERIFY_CMD` is configured, one-shot discovery preserves
 raw proposals through deduplication, verification, and finalization before
 candidate filing.
+
+The one-shot dedup handoff materializes proposals only as input to the external
+verifier; no candidate is filed without an explicit survivor verdict.
