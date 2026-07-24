@@ -110,6 +110,17 @@ EOF
     [[ "$output" != *"parking:"* ]]
 }
 
+@test "idle-rescan resets exhausted dry counters before the next waterfall selection" {
+    # This guards the actual rescan contract: a dry cascade must re-enter the
+    # waterfall, not remain permanently at its exhausted Tier-4 state.
+    run grep -F '_dry_cycles=0' "$LOOP_LIB"
+    [ "$status" -eq 0 ]
+    run grep -F '_tier2_dry_cycles=0' "$LOOP_LIB"
+    [ "$status" -eq 0 ]
+    run grep -F '_tier4_dry_cycles=0' "$LOOP_LIB"
+    [ "$status" -eq 0 ]
+}
+
 # ── resource / control park still EXITS ──────────────────────────────────────
 
 @test "waterfall park (convergence-park verb) still exits the loop after one cycle" {
