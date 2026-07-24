@@ -939,6 +939,7 @@ fn is_builtin_issue_safety_pattern(pattern: &str) -> bool {
             | "(?i)clean (old|bad|stale)? ?data"
             | "(?i)(relax|disable|remove).*security"
             | "(?i)(relax|disable|remove).*(auth|audit|logging)"
+            | "(?i)\\b(production|prod|billing|payments|migration|terraform|iam|kms)\\b"
             | "(?i)(production|prod|billing|payments|migration|terraform|iam|kms)"
     )
 }
