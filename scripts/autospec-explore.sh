@@ -152,6 +152,19 @@ if [ -z "$PROMPT" ]; then
         # 2/4 invocations never supply an initial prompt). Default to a
         # generic repo-discovery seed instead of hard-failing (issue #1625).
         PROMPT="Discover the highest-value defects and improvements in this repository."
+    elif [ -n "${AUTOSPEC_EXPLORE_VERIFY_CMD:-}" ]; then
+        _once_dedup="$_once_dir/dedup.json"
+        _once_verdicts="$_once_dir/verdicts.json"
+        bash "$SCRIPT_DIR/explore-research-cycle.sh" --max-issues-per-round "$MAX_ISSUES_PER_ROUND" \
+            --research-sources "$RESEARCH_SOURCES" --stage dedup --out "$_once_dedup" \
+            > "$_once_dir/research.log" 2>&1 || true
+        if [ -s "$_once_dedup" ] && AUTOSPEC_EXPLORE_DEDUPED_IN="$_once_dedup" \
+           AUTOSPEC_EXPLORE_VERDICTS_OUT="$_once_verdicts" bash -c "$AUTOSPEC_EXPLORE_VERIFY_CMD" \
+           >> "$_once_dir/research.log" 2>&1; then
+            AUTOSPEC_EXPLORE_VERIFY_VERDICTS="$_once_verdicts" bash "$SCRIPT_DIR/explore-research-cycle.sh" \
+                --max-issues-per-round "$MAX_ISSUES_PER_ROUND" --stage finalize \
+                --deduped-in "$_once_dedup" --out "$_once_out" >> "$_once_dir/research.log" 2>&1 || true
+        fi
     else
         echo "autospec-explore: missing initial prompt" >&2
         usage
