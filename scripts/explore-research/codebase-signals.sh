@@ -36,6 +36,7 @@ if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/n
     git grep -n -I -E '(TODO|FIXME|XXX|HACK)[:(]' \
         -- ':!*.md' ':!*.html' ':!*.cast' ':!*.svg' ':!docs/' \
            ':!tests/' ':!scripts/explore-research/' ':!scripts/lint-*.sh' 2>/dev/null \
+        | grep -Ev 'TODO:\*\)' \
         | head -n "$MAX_SIGNALS" > "$todo_tmp" || true
 fi
 
