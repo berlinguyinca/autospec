@@ -115,6 +115,22 @@ EOF
     [[ "$output" != *"index.html"* ]]
 }
 
+@test "codebase-signals ignores shell TODO sentinels but keeps annotations" {
+    mkdir -p scripts
+    cat > scripts/config.sh <<'EOF'
+case "$value" in
+    ""|TODO:*) exit 0 ;;
+esac
+# TODO: replace the temporary configuration
+EOF
+    git add -A && git commit -q -m init
+    run bash "$REPO_ROOT/scripts/explore-research/codebase-signals.sh"
+    [ "$status" -eq 0 ]
+    assert_well_formed "$output"
+    [[ "$output" == *"replace the temporary configuration"* ]]
+    [[ "$output" != *'TODO:*) exit 0'* ]]
+}
+
 @test "open-issues emits well-formed JSON from injected fake gh output" {
     cat > issues.json <<'EOF'
 [
