@@ -207,6 +207,23 @@ else
     fi
 fi
 
+# Some harness turns report a sealed verifier-no-op without actually invoking
+# the supplied command. Bypass that model-reported dry result and execute the
+# repository explore entrypoint directly so the verifier contract is real.
+if grep -q 'AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed' "$HARNESS_LOG" 2>/dev/null; then
+    DIRECT_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-direct-explore.XXXXXX" 2>/dev/null || printf '/tmp/autospec-direct-explore.%s' "$$")"
+    printf 'autospec-autonomous-explore-drain: harness skipped verifier; running direct explore fallback\n' >&2
+    AUTOSPEC_EXPLORE_VERIFY_CMD="$VERIFY_CMD" AUTOSPEC_EXPLORE_AUTONOMOUS=1 \
+        bash "$SCRIPT_DIR/autospec-explore.sh" --once >"$DIRECT_LOG" 2>&1 || true
+    cat "$DIRECT_LOG" >&2 2>/dev/null || true
+    DIRECT_JSON="$(grep -E '^\{"tier"' "$DIRECT_LOG" | tail -1 || true)"
+    rm -f "$DIRECT_LOG" "$HARNESS_LOG" 2>/dev/null || true
+    if [ -n "$DIRECT_JSON" ]; then
+        printf '%s\n' "$DIRECT_JSON"
+        exit 0
+    fi
+fi
+
 # Surface harness output to stderr for observability (never to stdout).
 cat "$HARNESS_LOG" >&2 2>/dev/null || true
 rm -f "$HARNESS_LOG" 2>/dev/null || true
