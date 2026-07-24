@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# linter:allow-COMPLEXITY existing conductor monolith; this fix is a narrow state-boundary repair
 # scripts/lib/autospec-loop.sh — shared continuous-iteration loop driver
 # (issue #708).
 #
@@ -2068,6 +2069,16 @@ fi'
             _conductor_arm_resume \
                 "$_sdir" "$_repo" "$_conductor_session" \
                 "$_notify_sh" "idle-rescan:${_reason}"
+            # A rescan must restart the full waterfall.  Preserve the
+            # never-idle loop, but clear exhausted dry counters so the next
+            # selection re-enters Tier 1 instead of emitting idle-rescan
+            # forever with the same counters.
+            _dry_cycles=0
+            _tier15_dry_cycles=0
+            _tier2_dry_cycles=0
+            _tier3_dry_cycles=0
+            _tier4_dry_cycles=0
+            _tierg_dry_cycles=0
             _work_done=0
             if [ "$_dry" != "1" ] && [ "$_rescan_interval" -gt 0 ] 2>/dev/null; then
                 printf '[conductor] idle-rescan: sleeping %ss before re-scan\n' \
