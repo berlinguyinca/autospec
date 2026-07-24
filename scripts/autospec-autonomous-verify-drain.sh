@@ -116,8 +116,10 @@ command -v omx >/dev/null 2>&1 || fail_closed "omx not found on PATH"
 kill_tree() {
     _pid="$1"
     _pgid="$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"
-    if [ -n "$_pgid" ] && [ "$_pgid" != "$$" ]; then
+    _own_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+    if [ -n "$_pgid" ] && [ "$_pgid" != "$_own_pgid" ]; then
         kill -TERM -- "-$_pgid" 2>/dev/null || true
+        kill -KILL -- "-$_pgid" 2>/dev/null || true
     fi
     for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
         kill_tree "$_child"
@@ -172,7 +174,7 @@ rm -f "$PROMPT_FILE"
 # ── Run the skeptic through omx, with a stall watchdog. ───────────────────────
 HARNESS_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-verify-drain.XXXXXX" 2>/dev/null || printf '/tmp/autospec-verify-drain.%s' "$$")"
 
-omx exec \
+setsid omx exec \
     --cd "$REPO_DIR" \
     --dangerously-bypass-approvals-and-sandbox \
     "$PROMPT" > "$HARNESS_LOG" 2>&1 &
