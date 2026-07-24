@@ -308,6 +308,32 @@ fn blocks_classification_drafts_and_requires_the_implementation_label() {
 }
 
 #[test]
+fn excludes_closed_auto_implement_issues_from_the_ready_queue() {
+    let closed = RemoteIssue::closed(
+        705,
+        "closed candidate",
+        format!("{SAFETY_REVIEW}## Implementation outline\n\n- edit `src/closed.rs`\n"),
+        vec!["auto-implement".to_string(), "safety:reviewed".to_string()],
+        "agent",
+    );
+    let input = ready_input(vec![
+        closed,
+        issue(
+            706,
+            "## Implementation outline\n\n- edit `src/open.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![706]);
+    assert_eq!(plan.batch_numbers(), vec![706]);
+    assert_eq!(plan.gate_counts.open, 1);
+    assert_eq!(plan.gate_counts.candidate, 1);
+}
+
+#[test]
 fn deduplicates_issue_numbers_before_planning_and_reports_gate_counts() {
     let mut input = ready_input(vec![
         issue(
