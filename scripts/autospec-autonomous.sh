@@ -1212,6 +1212,13 @@ supervise_report() {
         _state="stopped"
         if is_pid_alive "$_pid"; then
             _state="running"
+        elif [ ! -f "$STOP_FLAG_FILE" ]; then
+            # A supervisor is a liveness companion, not only a reporter: a
+            # terminated foreground conductor must be relaunched so a stale
+            # worker or transient harness failure cannot leave autonomy off.
+            start_detached
+            _state="restarted"
+            printf 'autospec-supervise: restarted stopped conductor repo=%s\n' "${_repo:-unknown}"
         fi
         printf 'autospec-supervise: ok repo=%s conductor=%s pid=%s action=none\n' "${_repo:-unknown}" "$_state" "${_pid:-}"
         if [ "$MONITOR_ITERATIONS" -gt 0 ] && [ "$_iteration" -ge "$MONITOR_ITERATIONS" ]; then
