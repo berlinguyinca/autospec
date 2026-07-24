@@ -62,3 +62,7 @@ candidate filing.
 
 The one-shot dedup handoff materializes proposals only as input to the external
 verifier; no candidate is filed without an explicit survivor verdict.
+
+If a skeptic returns successfully but emits no recoverable verdict JSON, the
+bridge applies the same deterministic evidence fallback used for timed-out
+skeptics instead of discarding the entire discovery cycle.
