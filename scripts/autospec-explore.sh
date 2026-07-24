@@ -347,6 +347,46 @@ if [ "$ONCE" -eq 1 ]; then
             > "$_once_dir/research.log" 2>&1 || true
     fi
 
+    # The one-shot path has no iterative pass to host the verifier seam. When
+    # autonomous mode supplied a verifier, run it here against the proposals
+    # just produced and retain only explicit survivors.
+    if [ -n "${AUTOSPEC_EXPLORE_VERIFY_CMD:-}" ] && [ -f "$_once_out" ]; then
+        _once_dedup="$_once_dir/dedup.json"
+        _once_verdicts="$_once_dir/verdicts.json"
+        python3 - "$_once_out" "$_once_dedup" <<'PYV'
+import json, re, sys
+src, dst = sys.argv[1:]
+data = json.load(open(src))
+items = []
+for p in data.get("proposals", []) or []:
+    title = str(p.get("title", ""))
+    norm = re.sub(r"[^a-z0-9 ]+", " ", title.lower())
+    norm = re.sub(r"\s+", " ", norm).strip()[:120]
+    if norm:
+        q = dict(p)
+        q["norm_title"] = norm
+        items.append(q)
+json.dump({"deduped": items}, open(dst, "w"))
+PYV
+        if AUTOSPEC_EXPLORE_DEDUPED_IN="$_once_dedup" \
+           AUTOSPEC_EXPLORE_VERDICTS_OUT="$_once_verdicts" \
+           bash -c "$AUTOSPEC_EXPLORE_VERIFY_CMD" >> "$_once_dir/research.log" 2>&1 \
+           && [ -s "$_once_verdicts" ]; then
+            python3 - "$_once_out" "$_once_verdicts" <<'PYV'
+import json, sys
+research, verdicts = sys.argv[1:]
+data = json.load(open(research)); vm = json.load(open(verdicts))
+survivors = {k for k, v in vm.items() if isinstance(v, dict) and v.get("verdict") == "survived"}
+for p in data.get("proposals", []) or []:
+    title = str(p.get("title", "")); key = " ".join("".join(c.lower() if c.isalnum() else " " for c in title).split())[:120]
+    p["_verified_survivor"] = key in survivors
+data["proposals"] = [p for p in data.get("proposals", []) or [] if p.get("_verified_survivor")]
+data["verify_mode"] = "active"; data["failclosed"] = False
+json.dump(data, open(research, "w"))
+PYV
+        fi
+    fi
+
     # Extract the pre-dedup count and render the post-verify survivors into the
     # conductor-facing candidate issue contract. Keep this derivation in one
     # Python pass so body text, labels, evidence, and ROI score stay in sync with
