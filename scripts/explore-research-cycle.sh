@@ -569,7 +569,7 @@ def _gap_search(needle, haystack):
     None=unconfirmable (no target / error). None always fails closed."""
     if haystack == "<repo>":
         try:
-            r = subprocess.run(["git", "grep", "-F", "-q", "--", needle],
+            r = subprocess.run(["git", "grep", "--untracked", "-F", "-q", "--", needle],
                                cwd=gap_repo_root,
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             if r.returncode == 0:
