@@ -244,6 +244,32 @@ trap 'rm -rf "$work_dir"' EXIT
 # sources and would re-derive different deduped titles, breaking the verdict-map
 # keying). Skip the whole researcher + specialist dispatch block.
 if [ "$STAGE" != "finalize" ]; then
+run_researcher_bounded() {
+    _script="$1"
+    _json="$2"
+    _err="$3"
+    setsid bash "$_script" >"$_json" 2>"$_err" &
+    _pid="$!"
+    _started="$(date +%s)"
+    while kill -0 "$_pid" 2>/dev/null; do
+        _now="$(date +%s)"
+        if [ $((_now - _started)) -ge "$RESEARCHER_TIMEOUT_SECS" ]; then
+            _pgid="$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"
+            _own_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+            if [ -n "$_pgid" ] && [ "$_pgid" != "$_own_pgid" ]; then
+                kill -TERM -- "-$_pgid" 2>/dev/null || true
+                sleep 1
+                kill -KILL -- "-$_pgid" 2>/dev/null || true
+            else
+                kill -TERM "$_pid" 2>/dev/null || true
+            fi
+            wait "$_pid" 2>/dev/null || true
+            return 124
+        fi
+        sleep 1
+    done
+    wait "$_pid"
+}
 pids=()
 IFS=','
 for src in $SOURCES; do
@@ -256,12 +282,7 @@ for src in $SOURCES; do
         continue
     fi
     (
-        if command -v timeout >/dev/null 2>&1; then
-            timeout --signal=TERM --kill-after=5 "$RESEARCHER_TIMEOUT_SECS" \
-                bash "$script" > "$work_dir/$src.json" 2>"$work_dir/$src.err"
-        else
-            bash "$script" > "$work_dir/$src.json" 2>"$work_dir/$src.err"
-        fi \
+        run_researcher_bounded "$script" "$work_dir/$src.json" "$work_dir/$src.err" \
             || echo '{"source":"'"$src"'","proposals":[],"error":"researcher_failed"}' \
                  > "$work_dir/$src.json"
     ) &
