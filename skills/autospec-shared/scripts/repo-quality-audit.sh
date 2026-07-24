@@ -832,7 +832,7 @@ probe_npm_audit_script() {
 }
 
 has_non_npm_package_manifest() {
-  for manifest in Cargo.toml pyproject.toml requirements.txt go.mod pom.xml build.gradle build.sbt; do
+  for manifest in Cargo.toml pyproject.toml requirements.txt setup.py setup.cfg Gemfile go.mod pom.xml build.gradle build.gradle.kts build.sbt; do
     [ -f "$REPO/$manifest" ] && return 0
   done
   return 1
@@ -1437,28 +1437,30 @@ if [ "$FILE_ISSUES" -eq 1 ] && [ "${AUTOSPEC_QUALITY_AUDIT_FILE_ISSUES:-0}" = "1
   issue_policy_permits=1
 fi
 
-open_issues='[]'
-closed_issues='[]'
+OPEN_ISSUES_JSON="$TMP_DIR/open-issues.json"
+CLOSED_ISSUES_JSON="$TMP_DIR/closed-issues.json"
+printf '[]\n' > "$OPEN_ISSUES_JSON"
+printf '[]\n' > "$CLOSED_ISSUES_JSON"
 issue_catalog_ok=1
 if [ "$issue_policy_permits" -eq 1 ]; then
-  if ! open_issues="$(cd "$REPO" && gh issue list --state open --limit 500 --json number,state,title,body,labels,url 2>/dev/null)"; then
+  if ! (cd "$REPO" && gh issue list --state open --limit 500 --json number,state,title,body,labels,url 2>/dev/null) > "$OPEN_ISSUES_JSON"; then
     issue_catalog_ok=0
-    open_issues='[]'
-  elif ! printf '%s' "$open_issues" | jq -e 'type=="array"' >/dev/null 2>&1; then
+    printf '[]\n' > "$OPEN_ISSUES_JSON"
+  elif ! jq -e 'type=="array"' "$OPEN_ISSUES_JSON" >/dev/null 2>&1; then
     issue_catalog_ok=0
-    open_issues='[]'
+    printf '[]\n' > "$OPEN_ISSUES_JSON"
   fi
-  if ! closed_issues="$(cd "$REPO" && gh issue list --state closed --limit 500 --json number,state,title,body,labels,url 2>/dev/null)"; then
+  if ! (cd "$REPO" && gh issue list --state closed --limit 500 --json number,state,title,body,labels,url 2>/dev/null) > "$CLOSED_ISSUES_JSON"; then
     issue_catalog_ok=0
-    closed_issues='[]'
-  elif ! printf '%s' "$closed_issues" | jq -e 'type=="array"' >/dev/null 2>&1; then
+    printf '[]\n' > "$CLOSED_ISSUES_JSON"
+  elif ! jq -e 'type=="array"' "$CLOSED_ISSUES_JSON" >/dev/null 2>&1; then
     issue_catalog_ok=0
-    closed_issues='[]'
+    printf '[]\n' > "$CLOSED_ISSUES_JSON"
   fi
 fi
 
-issue_catalog="$(jq -cn --argjson open "$open_issues" --argjson closed "$closed_issues" \
-  '($open | map(.state = "OPEN")) + ($closed | map(.state = "CLOSED"))')"
+issue_catalog="$(jq -cn --slurpfile open "$OPEN_ISSUES_JSON" --slurpfile closed "$CLOSED_ISSUES_JSON" \
+  '($open[0] | map(.state = "OPEN")) + ($closed[0] | map(.state = "CLOSED"))')"
 
 existing_issue_for_finding() {
   key="$1"; title="$2"; semantic_seed="${key%%|path=*}"
