@@ -155,7 +155,7 @@ if [ -z "$PROMPT" ]; then
     elif [ -n "${AUTOSPEC_EXPLORE_VERIFY_CMD:-}" ]; then
         _once_dedup="$_once_dir/dedup.json"
         _once_verdicts="$_once_dir/verdicts.json"
-        bash "$SCRIPT_DIR/explore-research-cycle.sh" --max-issues-per-round "$MAX_ISSUES_PER_ROUND" \
+        AUTOSPEC_HARNESS_DISPATCHER=1 bash "$SCRIPT_DIR/explore-research-cycle.sh" --max-issues-per-round "$MAX_ISSUES_PER_ROUND" \
             --research-sources "$RESEARCH_SOURCES" --stage dedup --out "$_once_dedup" \
             > "$_once_dir/research.log" 2>&1 || true
         if [ -s "$_once_dedup" ] && AUTOSPEC_EXPLORE_DEDUPED_IN="$_once_dedup" \
