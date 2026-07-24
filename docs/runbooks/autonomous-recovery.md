@@ -18,3 +18,5 @@ replacement lifecycle starts.
 
 Explore drains export an inherited recursion marker; a nested drain request
 returns a dry suppression result instead of launching another harness tree.
+They also enforce a 900-second absolute runtime cap via
+`AUTOSPEC_AUTONOMOUS_EXPLORE_MAX_SECS`, independent of incidental harness output.

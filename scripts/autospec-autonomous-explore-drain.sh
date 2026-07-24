@@ -80,10 +80,12 @@ else
     REPO_DIR="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
 fi
 if command -v autospec_runtime_config_int >/dev/null 2>&1; then
-    EXPLORE_STALL_SECS="$(autospec_runtime_config_int autonomous.explore.stall_secs AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS 1800)"
+    EXPLORE_STALL_SECS="$(autospec_runtime_config_int autonomous.explore.stall_secs AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS 600)"
+    EXPLORE_MAX_SECS="$(autospec_runtime_config_int autonomous.explore.max_secs AUTOSPEC_AUTONOMOUS_EXPLORE_MAX_SECS 900)"
     EXPLORE_POLL_SECS="$(autospec_runtime_config_int autonomous.explore.poll_secs AUTOSPEC_AUTONOMOUS_EXPLORE_POLL_SECS 15)"
 else
     EXPLORE_STALL_SECS="${AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS:-600}"
+    EXPLORE_MAX_SECS="${AUTOSPEC_AUTONOMOUS_EXPLORE_MAX_SECS:-900}"
     EXPLORE_POLL_SECS="${AUTOSPEC_AUTONOMOUS_EXPLORE_POLL_SECS:-15}"
 fi
 
@@ -151,6 +153,7 @@ if [ "${EXPLORE_STALL_SECS:-0}" -le 0 ] 2>/dev/null; then
 else
     last_size=0
     last_progress_epoch="$(date +%s)"
+    started_epoch="$last_progress_epoch"
     while kill -0 "$child_pid" 2>/dev/null; do
         sleep "$EXPLORE_POLL_SECS"
         current_size="$(stat -c '%s' "$HARNESS_LOG" 2>/dev/null || stat -f '%z' "$HARNESS_LOG" 2>/dev/null || printf '0')"
@@ -160,6 +163,15 @@ else
             continue
         fi
         now_epoch="$(date +%s)"
+        total_secs=$((now_epoch - started_epoch))
+        if [ "$total_secs" -ge "$EXPLORE_MAX_SECS" ]; then
+            printf 'autospec-autonomous-explore-drain: max runtime %ss reached; terminating explore child pid %s\n' \
+                "$EXPLORE_MAX_SECS" "$child_pid" >&2
+            kill_tree "$child_pid"
+            wait "$child_pid" 2>/dev/null || true
+            explore_rc=124
+            break
+        fi
         idle_secs=$((now_epoch - last_progress_epoch))
         if [ "$idle_secs" -ge "$EXPLORE_STALL_SECS" ]; then
             printf 'autospec-autonomous-explore-drain: stalled after %ss with no output; terminating explore child pid %s\n' \
