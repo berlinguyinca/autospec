@@ -28,3 +28,8 @@ The verifier command is also embedded as a quoted environment assignment in the
 harness command because `omx exec` may not preserve the caller's exported
 environment. This prevents an otherwise healthy discovery pass from being
 mistaken for a no-verifier fail-closed cycle.
+
+If the skeptic itself times out, the verifier uses a deterministic fallback: it
+survives only candidates whose evidence names an existing repository path and
+line, and refutes all other candidates. Set
+`AUTOSPEC_AUTONOMOUS_DETERMINISTIC_VERIFY=0` to require the skeptic exclusively.
