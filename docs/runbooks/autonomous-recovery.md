@@ -38,3 +38,7 @@ Discovery safety review resolves the Rust CLI in this order: `AUTOSPEC_BIN`,
 the repository's `target/debug/autospec`, `~/.autospec/bin/autospec`, then PATH.
 This keeps filing functional in detached sessions whose PATH does not include
 the installed command shim.
+
+Each researcher is bounded by `AUTOSPEC_RESEARCHER_TIMEOUT_SECS` (default 120
+seconds). A timed-out source is recorded as `researcher_failed` while other
+sources continue, so one provider cannot stall the autonomous discovery loop.

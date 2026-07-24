@@ -133,6 +133,7 @@ EOF
 }
 
 MAX_ISSUES=5
+RESEARCHER_TIMEOUT_SECS="${AUTOSPEC_RESEARCHER_TIMEOUT_SECS:-120}"
 SOURCES="spec-vs-code,prior-reports,codebase-signals,open-issues,source-analysis,dependency-health,internet,quality-resilience,dogfooding,self-leverage,style-normalization"
 OUT=""
 ORG="${AUTOSPEC_EXPLORE_ORG:-}"
@@ -255,7 +256,12 @@ for src in $SOURCES; do
         continue
     fi
     (
-        bash "$script" > "$work_dir/$src.json" 2>"$work_dir/$src.err" \
+        if command -v timeout >/dev/null 2>&1; then
+            timeout --signal=TERM --kill-after=5 "$RESEARCHER_TIMEOUT_SECS" \
+                bash "$script" > "$work_dir/$src.json" 2>"$work_dir/$src.err"
+        else
+            bash "$script" > "$work_dir/$src.json" 2>"$work_dir/$src.err"
+        fi \
             || echo '{"source":"'"$src"'","proposals":[],"error":"researcher_failed"}' \
                  > "$work_dir/$src.json"
     ) &
