@@ -53,6 +53,17 @@ count_key() { printf '%s' "$1" | python3 -c "import json,sys;print(json.load(sys
     [ "$(count_key "$output" proposals_after_gap_confirm)" -eq 0 ]
 }
 
+@test "gap-confirm: repo absent claim found in an untracked file is dropped" {
+    printf 'untracked-gap-token lives here\n' > in_flight.txt
+    run grep -q 'untracked-gap-token' in_flight.txt
+    [ "$status" -eq 0 ]
+    mk source-analysis '{"source":"source-analysis","proposals":[{"title":"feat: add untracked-gap-token","evidence":"e","estimated_complexity":"small","confidence":0.9,"gap_check":{"kind":"absent","needle":"untracked-gap-token","haystack":"<repo>"}}]}'
+    run_cycle --research-sources source-analysis --max-issues-per-round 5
+    [ "$status" -eq 0 ]
+    [ -z "$(titles "$output")" ]
+    [ "$(count_key "$output" proposals_after_gap_confirm)" -eq 0 ]
+}
+
 @test "gap-confirm: absent claim that is genuinely MISSING is kept" {
     mk source-analysis '{"source":"source-analysis","proposals":[{"title":"feat: add telemetry-xyz","evidence":"e","estimated_complexity":"small","confidence":0.9,"gap_check":{"kind":"absent","needle":"telemetry-xyz","haystack":"probe.txt"}}]}'
     run_cycle --research-sources source-analysis --max-issues-per-round 5
