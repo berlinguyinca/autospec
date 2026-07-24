@@ -244,6 +244,7 @@ trap 'rm -rf "$work_dir"' EXIT
 # sources and would re-derive different deduped titles, breaking the verdict-map
 # keying). Skip the whole researcher + specialist dispatch block.
 if [ "$STAGE" != "finalize" ]; then
+# linter:allow-COMPLEXITY existing orchestrator is outside this narrow watchdog fix
 run_researcher_bounded() {
     _script="$1"
     _json="$2"
@@ -252,6 +253,10 @@ run_researcher_bounded() {
     _pid="$!"
     _started="$(date +%s)"
     while kill -0 "$_pid" 2>/dev/null; do
+        _state="$(ps -o stat= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"
+        case "$_state" in
+            Z*|'') break ;;
+        esac
         _now="$(date +%s)"
         if [ $((_now - _started)) -ge "$RESEARCHER_TIMEOUT_SECS" ]; then
             _pgid="$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"

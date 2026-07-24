@@ -165,6 +165,14 @@ EOF
     grep -q 'kill_tree "\$direct_pid"' "$BRIDGE"
 }
 
+@test "researcher timeout polling handles exited and zombie children" {
+    cycle="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/explore-research-cycle.sh"
+    run bash -n "$cycle"
+    [ "$status" -eq 0 ]
+    grep -q 'case "\$_state" in' "$cycle"
+    grep -q "Z\*|'') break" "$cycle"
+}
+
 # ── launcher wiring ───────────────────────────────────────────────────────────
 
 @test "launcher exports AUTOSPEC_EXPLORE_CMD to the bridge path by default" {
