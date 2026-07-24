@@ -146,8 +146,14 @@ if [ "$PREVIEW" -eq 1 ]; then
     export AUTOSPEC_EXPLORE_PREVIEW=1
 fi
 
+if [ "$ONCE" -eq 1 ] && [ -n "${AUTOSPEC_EXPLORE_VERIFY_CMD:-}" ]; then
+    _once_dir="${_once_dir:-.autospec/explore-once-$$}"
+    mkdir -p "$_once_dir"
+    _once_out="${_once_out:-$_once_dir/research.json}"
+fi
+
 if [ -z "$PROMPT" ]; then
-    if [ "$ONCE" -eq 1 ]; then
+    if [ "$ONCE" -eq 1 ] && [ -z "${AUTOSPEC_EXPLORE_VERIFY_CMD:-}" ]; then
         # --once discovery sweeps are prompt-less by design (conductor Tier
         # 2/4 invocations never supply an initial prompt). Default to a
         # generic repo-discovery seed instead of hard-failing (issue #1625).
@@ -347,7 +353,9 @@ if [ "$ONCE" -eq 1 ]; then
     _once_out="$_once_dir/research.json"
 
     # Run the single research cycle pass (full stage: dedup + verify + rank).
-    if [ -n "${AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD:-}" ]; then
+    if [ -s "$_once_out" ] && [ -n "${AUTOSPEC_EXPLORE_VERIFY_CMD:-}" ]; then
+        :
+    elif [ -n "${AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD:-}" ]; then
         AUTOSPEC_EXPLORE_ONCE_OUT="$_once_out" \
         AUTOSPEC_EXPLORE_ONCE_SOURCES="$RESEARCH_SOURCES" \
             bash -c "$AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD" \
