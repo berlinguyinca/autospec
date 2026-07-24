@@ -213,8 +213,29 @@ fi
 if grep -q 'AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed' "$HARNESS_LOG" 2>/dev/null; then
     DIRECT_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-direct-explore.XXXXXX" 2>/dev/null || printf '/tmp/autospec-direct-explore.%s' "$$")"
     printf 'autospec-autonomous-explore-drain: harness skipped verifier; running direct explore fallback\n' >&2
-    AUTOSPEC_EXPLORE_VERIFY_CMD="$VERIFY_CMD" AUTOSPEC_EXPLORE_AUTONOMOUS=1 \
-        bash "$SCRIPT_DIR/autospec-explore.sh" --once >"$DIRECT_LOG" 2>&1 || true
+    setsid env AUTOSPEC_EXPLORE_VERIFY_CMD="$VERIFY_CMD" AUTOSPEC_EXPLORE_AUTONOMOUS=1 \
+        bash "$SCRIPT_DIR/autospec-explore.sh" --once >"$DIRECT_LOG" 2>&1 &
+    direct_pid="$!"
+    direct_started="$(date +%s)"
+    direct_rc=0
+    while kill -0 "$direct_pid" 2>/dev/null; do
+        sleep "$EXPLORE_POLL_SECS"
+        direct_elapsed=$(( $(date +%s) - direct_started ))
+        if [ "$direct_elapsed" -ge "$EXPLORE_MAX_SECS" ]; then
+            printf 'autospec-autonomous-explore-drain: direct fallback max runtime %ss reached; terminating pid %s\n' \
+                "$EXPLORE_MAX_SECS" "$direct_pid" >&2
+            kill_tree "$direct_pid"
+            wait "$direct_pid" 2>/dev/null || true
+            direct_rc=124
+            break
+        fi
+    done
+    if [ "$direct_rc" -eq 0 ]; then
+        set +e
+        wait "$direct_pid"
+        direct_rc="$?"
+        set -e
+    fi
     cat "$DIRECT_LOG" >&2 2>/dev/null || true
     DIRECT_JSON="$(grep -E '^\{"tier"' "$DIRECT_LOG" | tail -1 || true)"
     rm -f "$DIRECT_LOG" "$HARNESS_LOG" 2>/dev/null || true

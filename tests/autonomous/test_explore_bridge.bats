@@ -158,6 +158,13 @@ EOF
     printf '%s\n' "$output" | grep -q '"dry":true'
 }
 
+@test "bridge bounds the direct verifier fallback" {
+    run bash -n "$BRIDGE"
+    [ "$status" -eq 0 ]
+    grep -q 'direct fallback max runtime' "$BRIDGE"
+    grep -q 'kill_tree "\$direct_pid"' "$BRIDGE"
+}
+
 # ── launcher wiring ───────────────────────────────────────────────────────────
 
 @test "launcher exports AUTOSPEC_EXPLORE_CMD to the bridge path by default" {
