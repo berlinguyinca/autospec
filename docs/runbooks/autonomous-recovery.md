@@ -15,3 +15,6 @@ repositories or remote research providers.
 `autospec-autonomous restart --force` now signals the detached conductor's
 entire process group, cleaning up active drains and harness children before the
 replacement lifecycle starts.
+
+Explore drains export an inherited recursion marker; a nested drain request
+returns a dry suppression result instead of launching another harness tree.

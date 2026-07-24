@@ -25,6 +25,15 @@
 # itself must not abort the conductor.
 set -eu
 
+# The explore model can rediscover the conductor's helper command while
+# following its own runbook. Inherited marker state makes that recursion
+# explicit and fail-closed instead of spawning an unbounded harness tree.
+if [ "${AUTOSPEC_EXPLORE_DRAIN_ACTIVE:-0}" = "1" ]; then
+    printf '{"tier":"local","proposals_seen":0,"new_candidates":0,"filed":0,"dry":true,"reason":"nested-explore-suppressed"}\n'
+    exit 0
+fi
+export AUTOSPEC_EXPLORE_DRAIN_ACTIVE=1
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ── Parse the flags the conductor appends. ────────────────────────────────────
