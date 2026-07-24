@@ -290,6 +290,8 @@ The helper writes `~/.autospec/usage-limits/<run-id>.json`, starts a background 
 
 Then launch a **background monitor loop** — the orchestrator relaunches the monitor with fresh context after each batch of `AUTOSPEC_BATCH_SIZE` issues (default: 1). The monitor is stateless: all persistent state lives in GitHub labels and heartbeat files, so relaunches are always safe.
 
+**Codex Wait call-shape contract:** When awaiting a native Codex `wait_agent` call, omit `timeout_ms` or pass an integer greater than or equal to `10000`. Never pass `timeout_ms` below `10000`; the native router rejects it before the executor can report progress. Keep waiting through task notifications until the monitor reaches a terminal state.
+
 ```
 batch_num=1
 while true:
