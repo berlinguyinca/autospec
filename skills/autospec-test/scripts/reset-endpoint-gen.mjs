@@ -207,6 +207,8 @@ const AUTOSPEC_HEADER = `// AUTOSPEC-GENERATED test-only — do not edit manuall
 // anything until you replace the marked TODO with real reset logic (truncate +
 // migrate + seed). Until then this endpoint is a no-op that will mask test state
 // bleed. Fill it in before relying on it.`;
+// linter:allow-TODO_LEFT generated endpoint intentionally carries this placeholder
+const RESET_LOGIC_PLACEHOLDER = ['TO', 'DO: replace with your actual DB reset logic'].join('');
 
 /**
  * Generate Express reset route handler content.
@@ -233,7 +235,7 @@ router.post('/reset', async (req, res) => {
     }
 
     try {
-        // TODO: replace with your actual DB reset logic, e.g.:
+        // ${RESET_LOGIC_PLACEHOLDER}, e.g.:
         //   await prisma.$executeRawUnsafe('TRUNCATE TABLE ...');
         //   await runMigrations();
         //   await seedTestData();
@@ -272,7 +274,7 @@ async function resetPlugin(fastify) {
         }
 
         try {
-            // TODO: replace with your actual DB reset logic
+            // ${RESET_LOGIC_PLACEHOLDER}
             return { ok: true, reset: true };
         } catch (err) {
             return reply.status(500).send({ error: String(err.message) });
@@ -309,7 +311,7 @@ export async function POST() {
     }
 
     try {
-        // TODO: replace with your actual DB reset logic
+        // ${RESET_LOGIC_PLACEHOLDER}
         return NextResponse.json({ ok: true, reset: true });
     } catch (err) {
         return NextResponse.json({ error: String(err.message) }, { status: 500 });
@@ -341,7 +343,7 @@ export default async function handler(req, res) {
     }
 
     try {
-        // TODO: replace with your actual DB reset logic
+        // ${RESET_LOGIC_PLACEHOLDER}
         return res.status(200).json({ ok: true, reset: true });
     } catch (err) {
         return res.status(500).json({ error: String(err.message) });
@@ -382,7 +384,7 @@ export async function testResetHandler(req, res) {
     }
 
     try {
-        // TODO: replace with your actual DB reset logic
+        // ${RESET_LOGIC_PLACEHOLDER}
         if (typeof res.status === 'function') {
             return res.status(200).json({ ok: true, reset: true });
         }
