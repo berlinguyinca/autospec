@@ -322,6 +322,13 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+@test "bridge uses a bounded 120 second skeptic stall default" {
+    run bash -n "$BRIDGE"
+    [ "$status" -eq 0 ]
+    grep -q 'AUTOSPEC_AUTONOMOUS_VERIFY_STALL_SECS 120' "$BRIDGE"
+    grep -q 'AUTOSPEC_AUTONOMOUS_VERIFY_STALL_SECS:-120' "$BRIDGE"
+}
+
 # ── launcher wiring ───────────────────────────────────────────────────────────
 
 @test "launcher exports AUTOSPEC_EXPLORE_VERIFY_CMD to the bridge path by default" {
