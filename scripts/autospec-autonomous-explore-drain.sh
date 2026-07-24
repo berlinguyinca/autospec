@@ -173,12 +173,6 @@ else
     started_epoch="$last_progress_epoch"
     while kill -0 "$child_pid" 2>/dev/null; do
         sleep "$EXPLORE_POLL_SECS"
-        current_size="$(stat -c '%s' "$HARNESS_LOG" 2>/dev/null || stat -f '%z' "$HARNESS_LOG" 2>/dev/null || printf '0')"
-        if [ "$current_size" != "$last_size" ]; then
-            last_size="$current_size"
-            last_progress_epoch="$(date +%s)"
-            continue
-        fi
         now_epoch="$(date +%s)"
         total_secs=$((now_epoch - started_epoch))
         if [ "$total_secs" -ge "$EXPLORE_MAX_SECS" ]; then
@@ -188,6 +182,12 @@ else
             wait "$child_pid" 2>/dev/null || true
             explore_rc=124
             break
+        fi
+        current_size="$(stat -c '%s' "$HARNESS_LOG" 2>/dev/null || stat -f '%z' "$HARNESS_LOG" 2>/dev/null || printf '0')"
+        if [ "$current_size" != "$last_size" ]; then
+            last_size="$current_size"
+            last_progress_epoch="$(date +%s)"
+            continue
         fi
         idle_secs=$((now_epoch - last_progress_epoch))
         if [ "$idle_secs" -ge "$EXPLORE_STALL_SECS" ]; then
