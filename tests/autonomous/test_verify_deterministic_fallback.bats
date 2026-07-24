@@ -15,6 +15,6 @@
 }
 
 @test "verifier watchdog kills detached skeptic process groups" {
-  grep -q 'kill -TERM -- "-\$_pgid"' \
-    "$BATS_TEST_DIRNAME/../../scripts/autospec-autonomous-verify-drain.sh"
+  grep -q 'kill -TERM -- "-\$pgid"' \
+    "$BATS_TEST_DIRNAME/../../scripts/lib/process-tree.sh"
 }

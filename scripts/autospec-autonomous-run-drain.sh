@@ -3,6 +3,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/process-tree.sh
+. "$SCRIPT_DIR/lib/process-tree.sh"
 if [ -f "$SCRIPT_DIR/autospec-runtime-config.sh" ]; then
     # shellcheck source=/dev/null
     . "$SCRIPT_DIR/autospec-runtime-config.sh"
@@ -97,14 +99,6 @@ progress_signature() {
         [ -n "$_candidate" ] || continue
         stat_file_signature "$_candidate"
     done
-}
-
-kill_tree() {
-    _pid="$1"
-    for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
-        kill_tree "$_child"
-    done
-    kill "$_pid" 2>/dev/null || true
 }
 
 child_is_running() {
@@ -324,7 +318,7 @@ while child_is_running; do
         record_closeout_hang || true
         printf 'autospec-autonomous-run-drain: stalled after %ss with no output; terminating autospec-run child pid %s\n' \
             "$DRAIN_STALL_SECS" "$child_pid" >&2
-        kill_tree "$child_pid"
+        autospec_kill_process_tree "$child_pid" 0
         wait "$child_pid" 2>/dev/null || true
         if recover_green_in_progress_pr; then
             exit 0

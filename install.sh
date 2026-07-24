@@ -1786,7 +1786,7 @@ copy_runtime_subdirs() {
     autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
 
     # Runtime libs sourced/exec'd by installed scripts at $SCRIPT_DIR/lib/<name>.
-    runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh"
+    runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh process-tree.sh"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] copy_runtime_subdirs: would copy runtime libs + harness table + scripts/explore-research/ to $autospec_scripts_dir/"

@@ -162,7 +162,7 @@ EOF
     run bash -n "$BRIDGE"
     [ "$status" -eq 0 ]
     grep -q 'direct fallback max runtime' "$BRIDGE"
-    grep -q 'kill_tree "\$direct_pid"' "$BRIDGE"
+    grep -q 'autospec_kill_process_tree "\$direct_pid"' "$BRIDGE"
 }
 
 @test "researcher timeout polling handles exited and zombie children" {

@@ -49,6 +49,10 @@ The outer explore harness is isolated with `setsid` and receives the same
 process-group cleanup, preventing a detached `omx exec` from holding a cycle.
 The default no-output stall bound is 120 seconds and the absolute runtime bound
 is 300 seconds; both remain configurable through `AUTOSPEC_AUTONOMOUS_EXPLORE_*`.
+Autonomous drains and explore handoffs source `scripts/lib/process-tree.sh` for
+that cleanup. It signals dedicated `setsid` process groups directly and falls
+back to descendant-first PID termination when a child shares the caller's
+process group.
 
 If a harness reports `AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed`, the drain runs
 the local explore entrypoint directly with the verifier command and uses its
