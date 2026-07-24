@@ -44,3 +44,6 @@ seconds). A timed-out source is recorded as `researcher_failed` while other
 sources continue, so one provider cannot stall the autonomous discovery loop.
 Timed-out groups are terminated as a process group to clean up detached
 researcher children as well.
+
+The outer explore harness is isolated with `setsid` and receives the same
+process-group cleanup, preventing a detached `omx exec` from holding a cycle.
