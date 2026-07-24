@@ -80,12 +80,12 @@ else
     REPO_DIR="${AUTOSPEC_REPO_DIR:-$DEFAULT_REPO_DIR}"
 fi
 if command -v autospec_runtime_config_int >/dev/null 2>&1; then
-    EXPLORE_STALL_SECS="$(autospec_runtime_config_int autonomous.explore.stall_secs AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS 600)"
-    EXPLORE_MAX_SECS="$(autospec_runtime_config_int autonomous.explore.max_secs AUTOSPEC_AUTONOMOUS_EXPLORE_MAX_SECS 900)"
+    EXPLORE_STALL_SECS="$(autospec_runtime_config_int autonomous.explore.stall_secs AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS 120)"
+    EXPLORE_MAX_SECS="$(autospec_runtime_config_int autonomous.explore.max_secs AUTOSPEC_AUTONOMOUS_EXPLORE_MAX_SECS 300)"
     EXPLORE_POLL_SECS="$(autospec_runtime_config_int autonomous.explore.poll_secs AUTOSPEC_AUTONOMOUS_EXPLORE_POLL_SECS 15)"
 else
-    EXPLORE_STALL_SECS="${AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS:-600}"
-    EXPLORE_MAX_SECS="${AUTOSPEC_AUTONOMOUS_EXPLORE_MAX_SECS:-900}"
+    EXPLORE_STALL_SECS="${AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS:-120}"
+    EXPLORE_MAX_SECS="${AUTOSPEC_AUTONOMOUS_EXPLORE_MAX_SECS:-300}"
     EXPLORE_POLL_SECS="${AUTOSPEC_AUTONOMOUS_EXPLORE_POLL_SECS:-15}"
 fi
 

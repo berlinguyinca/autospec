@@ -7,4 +7,6 @@
     "$BATS_TEST_DIRNAME/../../scripts/autospec-autonomous-explore-drain.sh"
   grep -q 'kill -KILL -- "-\$_pgid"' \
     "$BATS_TEST_DIRNAME/../../scripts/autospec-autonomous-explore-drain.sh"
+  grep -q 'AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS 120' \
+    "$BATS_TEST_DIRNAME/../../scripts/autospec-autonomous-explore-drain.sh"
 }
