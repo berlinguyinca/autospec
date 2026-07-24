@@ -25,6 +25,12 @@ else
     DRAIN_POLL_SECS="${AUTOSPEC_AUTONOMOUS_DRAIN_POLL_SECS:-15}"
 fi
 
+# Autonomous workers must recover abandoned edit leases promptly. Interactive
+# editors retain the conservative claim-guard default; the perpetual conductor
+# can safely use a shorter bounded lease because its worker heartbeat refreshes
+# active claims and the watchdog handles genuinely live conflicts.
+export AUTOSPEC_CLAIM_TTL_SECONDS="${AUTOSPEC_CLAIM_TTL_SECONDS:-600}"
+
 if ! command -v omx >/dev/null 2>&1; then
     printf 'autospec-autonomous-run-drain: omx not found on PATH\n' >&2
     exit 127
