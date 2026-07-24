@@ -274,6 +274,10 @@ EOF
     return 0
 }
 
+# Provide a literal, shell-safe resume command so autospec-run preflight does
+# not interpolate `$autospec-run` as an unset shell variable under `set -u`.
+export AUTOSPEC_RESUME_COMMAND="${AUTOSPEC_RESUME_COMMAND:-cd $(printf '%q' "$REPO_DIR") && omx exec '\$autospec-run'}"
+
 omx exec \
     --cd "$REPO_DIR" \
     --dangerously-bypass-approvals-and-sandbox \
