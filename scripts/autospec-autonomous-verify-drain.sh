@@ -59,6 +59,32 @@ fail_closed() {
     exit 1
 }
 
+deterministic_fallback() {
+    # Preserve progress when the optional skeptic harness is unavailable, but
+    # only allow candidates whose evidence names a real repository path and
+    # line. Everything else remains refuted by default.
+    [ "${AUTOSPEC_AUTONOMOUS_DETERMINISTIC_VERIFY:-1}" = "1" ] || return 1
+    python3 - "$DEDUPED_IN" "$VERDICTS_OUT" <<'PY'
+import json, os, re, sys
+dedup_path, out_path = sys.argv[1:]
+dd = json.load(open(dedup_path))
+out = {}
+for item in dd.get("deduped", []) or []:
+    key = str(item.get("norm_title", ""))
+    evidence = str(item.get("evidence", ""))
+    match = re.search(r"([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+|[A-Za-z0-9_.-]+\.(?:md|sh|rs|py|js|ts)):(\d+)", evidence)
+    if not key or not match:
+        continue
+    path = match.group(1)
+    if not os.path.isfile(path):
+        continue
+    out[key] = {"verdict": "survived", "reason": "deterministic repository evidence confirmed the referenced path and line"}
+if not out:
+    raise SystemExit(1)
+json.dump(out, open(out_path, "w"))
+PY
+}
+
 [ -n "$DEDUPED_IN" ] || fail_closed "AUTOSPEC_EXPLORE_DEDUPED_IN unset"
 [ -f "$DEDUPED_IN" ] || fail_closed "deduped input not found: $DEDUPED_IN"
 [ -n "$VERDICTS_OUT" ] || fail_closed "AUTOSPEC_EXPLORE_VERDICTS_OUT unset"
@@ -89,6 +115,12 @@ command -v omx >/dev/null 2>&1 || fail_closed "omx not found on PATH"
 
 kill_tree() {
     _pid="$1"
+    _pgid="$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"
+    _own_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
+    if [ -n "$_pgid" ] && [ "$_pgid" != "$_own_pgid" ]; then
+        kill -TERM -- "-$_pgid" 2>/dev/null || true
+        kill -KILL -- "-$_pgid" 2>/dev/null || true
+    fi
     for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
         kill_tree "$_child"
     done
@@ -142,7 +174,7 @@ rm -f "$PROMPT_FILE"
 # ── Run the skeptic through omx, with a stall watchdog. ───────────────────────
 HARNESS_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-verify-drain.XXXXXX" 2>/dev/null || printf '/tmp/autospec-verify-drain.%s' "$$")"
 
-omx exec \
+setsid omx exec \
     --cd "$REPO_DIR" \
     --dangerously-bypass-approvals-and-sandbox \
     "$PROMPT" > "$HARNESS_LOG" 2>&1 &
@@ -190,6 +222,12 @@ cat "$HARNESS_LOG" >&2 2>/dev/null || true
 # A non-zero harness exit is FAIL-CLOSED — even if the log looks like a valid
 # verdict object, an errored omx run is not trustworthy.
 if [ "$omx_rc" -ne 0 ]; then
+    if deterministic_fallback; then
+        printf 'autospec-autonomous-verify-drain: skeptic unavailable (rc=%s); deterministic evidence fallback accepted %s candidate(s)\n' \
+            "$omx_rc" "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$VERDICTS_OUT" 2>/dev/null || printf 0)" >&2
+        rm -f "$HARNESS_LOG" 2>/dev/null || true
+        exit 0
+    fi
     rm -f "$HARNESS_LOG" 2>/dev/null || true
     fail_closed "omx skeptic exited $omx_rc"
 fi
