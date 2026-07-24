@@ -327,6 +327,7 @@ EOF
 @test "operator cli: supervise prints one-line observer status" {
   mkdir -p "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec"
   printf '999999\n' > "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/conductor.pid"
+  touch "$HOME/.autospec/autonomous-operator/berlinguyinca_autospec/stop.flag"
 
   run bash "$CLI" supervise --interval-sec 0 --iterations 1 --repo berlinguyinca/autospec
 
