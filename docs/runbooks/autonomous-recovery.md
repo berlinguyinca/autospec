@@ -11,3 +11,7 @@ an empty backlog, while an explicit environment value remains authoritative.
 Tier-2 explore drains default `AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS` to `600`
 seconds without observable output; set the variable explicitly for slower
 repositories or remote research providers.
+
+`autospec-autonomous restart --force` now signals the detached conductor's
+entire process group, cleaning up active drains and harness children before the
+replacement lifecycle starts.

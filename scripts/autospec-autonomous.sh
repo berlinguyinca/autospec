@@ -1181,6 +1181,14 @@ stop_conductor() {
     AUTOSPEC_STOP_FLAG_FILE="$STOP_FLAG_FILE" bash "$_stop" "$STOP_MODE"
 }
 
+kill_conductor_process_group() {
+    _group_pid="$1"
+    [ -n "$_group_pid" ] || return 0
+    # Detached conductors are started with start_new_session=True, so the
+    # negative PID targets the entire lifecycle (drains, harnesses, explorers).
+    kill -- "-$_group_pid" >/dev/null 2>&1 || kill "$_group_pid" >/dev/null 2>&1 || true
+}
+
 monitor_report() {
     _iteration=0
     while :; do
@@ -1361,7 +1369,7 @@ case "$ACTION" in
         _pid="$(read_scoped_pid || true)"
         if is_pid_alive "$_pid"; then
             if [ "$FORCE" -eq 1 ]; then
-                kill "$_pid" >/dev/null 2>&1 || true
+                kill_conductor_process_group "$_pid"
                 sleep 1
             else
                 stop_conductor
