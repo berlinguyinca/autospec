@@ -102,6 +102,33 @@ fn assert_no_forbidden_authority(source: &str, patterns: &[SourcePattern], conte
 }
 
 #[test]
+fn autonomous_help_documents_all_start_modes() {
+    let output = ForegroundFixture::new()
+        .configured_command()
+        .args(["autonomous", "--help"])
+        .output()
+        .expect("print autonomous help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--follow"));
+    assert!(stdout.contains("--detach"));
+    assert!(stdout.contains("--foreground"));
+}
+
+#[test]
+fn start_rejects_conflicting_launch_modes_before_mutation() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .configured_command()
+        .args(["autonomous", "start", "--follow", "--foreground"])
+        .output()
+        .expect("reject conflicting modes");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--follow, --detach, and --foreground are mutually exclusive"));
+    assert!(!fixture.operator.exists());
+}
+
+#[test]
 fn foreground_source_has_no_legacy_shell_authority() {
     let source =
         fs::read_to_string(workspace_root().join("crates/autospec-cli/src/commands/autonomous.rs"))

@@ -118,6 +118,8 @@ struct Options {
     dry_run: bool,
     once: bool,
     json: bool,
+    follow: bool,
+    detach: bool,
     foreground: bool,
     force: bool,
     log_path: String,
@@ -147,6 +149,8 @@ impl Default for Options {
             dry_run: false,
             once: false,
             json: false,
+            follow: false,
+            detach: false,
             foreground: false,
             force: false,
             log_path: String::new(),
@@ -165,6 +169,13 @@ impl Default for Options {
 enum StopMode {
     Graceful,
     Immediate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchMode {
+    Detached,
+    Follow,
+    Foreground,
 }
 
 impl StopMode {
@@ -205,9 +216,8 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         return Ok(());
     }
     let options = parse(args).map_err(CommandFailure::diagnostic)?;
-    if options.subcommand == "run-foreground"
-        || (options.subcommand == "start" && options.foreground)
-    {
+    let launch_mode = validate_launch_mode(&options).map_err(CommandFailure::diagnostic)?;
+    if options.subcommand == "run-foreground" || launch_mode == LaunchMode::Foreground {
         return run_foreground(options);
     }
     match options.subcommand.as_str() {
@@ -657,6 +667,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--once" => options.once = true,
             "--json" => options.json = true,
+            "--follow" => options.follow = true,
+            "--detach" => options.detach = true,
             "--foreground" => options.foreground = true,
             "--force" => options.force = true,
             "--graceful" => options.stop_mode = StopMode::Graceful,
@@ -666,6 +678,27 @@ fn parse(args: &[String]) -> Result<Options, String> {
         index += 1;
     }
     Ok(options)
+}
+
+fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
+    let selected =
+        usize::from(options.follow) + usize::from(options.detach) + usize::from(options.foreground);
+    if selected > 1 {
+        return Err("--follow, --detach, and --foreground are mutually exclusive".to_string());
+    }
+    if (options.follow || options.detach || options.foreground) && options.subcommand != "start" {
+        return Err(format!(
+            "launch modes are valid only with autospec autonomous start, not {}",
+            options.subcommand
+        ));
+    }
+    Ok(if options.follow {
+        LaunchMode::Follow
+    } else if options.foreground {
+        LaunchMode::Foreground
+    } else {
+        LaunchMode::Detached
+    })
 }
 
 fn parse_lifetime_budget(value: &str, flag: &str) -> Result<u64, String> {
@@ -5729,7 +5762,7 @@ fn json_string_array(values: &[String]) -> String {
 
 fn print_help() {
     println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --follow | --detach | --foreground\n    --graceful | --immediate"
     );
 }
 
