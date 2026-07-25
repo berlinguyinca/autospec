@@ -83,18 +83,31 @@ autospec-autonomous start "$@"
 Preserve the supplied launch mode and every remaining argument unchanged; do not
 inject `--follow` or any second launch mode.
 
-When the operator supplies a subcommand such as `start`, `status`, `stop`,
+When the operator supplies the `start` subcommand without an explicit launch
+mode, remove the leading `start` token, preserve the remaining tokens as
+`"$@"`, and execute:
+
+```bash
+autospec-autonomous start --follow --repo-dir "$PWD" "$@"
+```
+
+If those remaining tokens include `--repo-dir`, omit the injected
+`--repo-dir "$PWD"` and preserve the operator's option and value unchanged. If
+`start` includes exactly one explicit launch mode, execute
+`autospec-autonomous "$@"` with the original unshifted argument list unchanged.
+
+When the operator supplies any other subcommand such as `status`, `stop`,
 `timeline`, or `watch`, execute:
 
 ```bash
 autospec-autonomous "$@"
 ```
 
-Preserve the subcommand and every argument unchanged. Keep every launch using
+Preserve that subcommand and every argument unchanged. Keep every launch using
 `--follow` attached and forward its complete output to the initiating session.
-Never replace attached session output with a desktop notification. Do not change
-the raw CLI default; `autospec autonomous start` without a launch mode remains
-detached.
+Never replace attached session output with a desktop notification. Do not
+change the raw CLI default; `autospec autonomous start` without a launch mode
+remains detached outside direct interactive skill routing.
 
 ## Operator commands and monitoring
 

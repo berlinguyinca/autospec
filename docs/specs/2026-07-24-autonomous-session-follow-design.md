@@ -80,14 +80,20 @@ intend to halt work.
 
 The canonical `skills/autospec-autonomous/SKILL.md` body instructs an interactive
 harness to execute the installed development-resolved `autospec` command with
-`autonomous start --follow --repo-dir "$PWD"` when invoked without another operator
-subcommand or launch mode. The generated Claude, Codex, and OpenCode adapters retain
-identical bodies under the repository lock-step rule.
+`autonomous start --follow --repo-dir "$PWD"` whenever an interactive start has no
+explicit launch mode. This applies both when the operator omits a subcommand and when
+the operator explicitly supplies `start`. The generated Claude, Codex, and OpenCode
+adapters retain identical bodies under the repository lock-step rule.
 
 The harness must keep the command/tool call active while forwarding progress to the
 initiating session. It must not replace the command with a desktop notifier, a detached
 agent, or a separate terminal. Explicit commands such as `status`, `stop`, `timeline`,
-and `watch` keep their current routing.
+and `watch` keep their current routing. Explicit `start --follow`, `start --detach`,
+and `start --foreground` invocations retain their selected mode unchanged.
+
+`start --follow --force` is rejected before mutation because following means attaching
+to an existing conductor while force expresses replacement lifecycle intent. Operators
+use `restart --force`, then start or attach a follower.
 
 ## Testing
 

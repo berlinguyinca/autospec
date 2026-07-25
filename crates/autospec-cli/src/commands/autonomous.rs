@@ -712,6 +712,12 @@ fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
             options.subcommand
         ));
     }
+    if options.follow && options.force {
+        return Err(
+            "--force cannot be combined with --follow; use autospec autonomous restart --force"
+                .to_string(),
+        );
+    }
     if options.follow && options.json {
         return Err(
             "--json is not supported with --follow; use autospec autonomous status --json"

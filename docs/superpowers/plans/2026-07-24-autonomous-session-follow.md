@@ -329,7 +329,8 @@ Add a direct-session section that instructs Codex, Claude, and OpenCode:
 ````markdown
 ## Direct interactive session launch
 
-When invoked without an operator subcommand, run:
+When invoked without an operator subcommand, or with an explicit `start`
+subcommand and no explicit launch mode, run:
 
 ```bash
 autospec-autonomous start --follow --repo-dir "$PWD"

@@ -133,6 +133,35 @@ fn start_rejects_conflicting_launch_modes_before_mutation() {
 }
 
 #[test]
+fn start_rejects_follow_force_before_mutation() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .configured_command()
+        .args(["autonomous", "start", "--follow", "--force"])
+        .output()
+        .expect("reject follow with force");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains(
+        "--force cannot be combined with --follow; use autospec autonomous restart --force"
+    ));
+    assert!(!fixture.operator.exists());
+}
+
+#[test]
+fn launch_modes_reject_non_start_subcommands_before_mutation() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .configured_command()
+        .args(["autonomous", "status", "--follow"])
+        .output()
+        .expect("reject launch mode on status");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("launch modes are valid only with autospec autonomous start, not status"));
+    assert!(!fixture.operator.exists());
+}
+
+#[test]
 fn foreground_source_has_no_legacy_shell_authority() {
     let source =
         fs::read_to_string(workspace_root().join("crates/autospec-cli/src/commands/autonomous.rs"))
