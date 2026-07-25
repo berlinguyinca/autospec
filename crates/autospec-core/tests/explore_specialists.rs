@@ -134,7 +134,7 @@ fn strict_collector_is_deterministic_and_ranks_domains_and_evidence() {
 
     assert_eq!(first, second);
     assert_eq!(first.schema_version, 1);
-    assert_eq!(first.collector_version, "strict-local-v1");
+    assert_eq!(first.collector_version, "strict-local-v2");
     assert_eq!(
         first.canonical_repo_scope,
         fs::canonicalize(&repo)
@@ -148,7 +148,13 @@ fn strict_collector_is_deterministic_and_ranks_domains_and_evidence() {
             .iter()
             .map(|domain| domain.name.as_str())
             .collect::<Vec<_>>(),
-        vec!["trading", "payments", "infra", "security"]
+        vec![
+            "trading",
+            "payments",
+            "project-manifests",
+            "infra",
+            "security",
+        ]
     );
     assert_eq!(
         first.domains[0]
@@ -193,7 +199,7 @@ fn strict_collector_excludes_generated_and_vendor_trees() {
 }
 
 #[test]
-fn strict_collector_accepts_a_valid_zero_domain_snapshot() {
+fn strict_collector_gives_a_generic_repository_project_evidence() {
     let repo = temp_repo("strict-empty");
     fs::write(
         repo.join("README.md"),
@@ -203,7 +209,67 @@ fn strict_collector_accepts_a_valid_zero_domain_snapshot() {
 
     let evidence = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap();
 
-    assert!(evidence.domains.is_empty(), "{evidence:?}");
+    assert_eq!(evidence.domains.len(), 1, "{evidence:?}");
+    assert_eq!(evidence.domains[0].name, "project-manifests");
+    assert_eq!(evidence.domains[0].evidence[0].file, "README.md");
+}
+
+#[test]
+fn strict_collector_populates_general_project_evidence() {
+    let repo = temp_repo("strict-next-project");
+    for directory in ["app", "scripts", "tests", "docs/specs"] {
+        fs::create_dir_all(repo.join(directory)).unwrap();
+    }
+    fs::write(
+        repo.join("package.json"),
+        "{\"scripts\":{\"test\":\"node scripts/test-page.mjs\"}}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("app/page.tsx"),
+        "export default function Page() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("scripts/test-page.mjs"),
+        "import assert from 'node:assert/strict';\n",
+    )
+    .unwrap();
+    fs::write(repo.join("tests/routes.txt"), "/\n").unwrap();
+    fs::write(repo.join("docs/specs/design.md"), "# Dashboard design\n").unwrap();
+
+    let evidence = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap();
+
+    assert_eq!(evidence.collector_version, "strict-local-v2");
+    let names = evidence
+        .domains
+        .iter()
+        .map(|domain| domain.name.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "project-manifests",
+        "source-surface",
+        "spec-surface",
+        "test-surface",
+    ] {
+        assert!(
+            names.contains(&expected),
+            "missing {expected}: {evidence:?}"
+        );
+    }
+    let rows = evidence
+        .domains
+        .iter()
+        .flat_map(|domain| domain.evidence.iter())
+        .collect::<Vec<_>>();
+    assert!(rows.iter().any(|row| row.file == "package.json"));
+    assert!(rows.iter().any(|row| row.file == "app/page.tsx"));
+    assert!(rows.iter().any(|row| row.file == "scripts/test-page.mjs"));
+    assert!(rows.iter().any(|row| row.file == "docs/specs/design.md"));
+    assert!(
+        rows.len() <= 24,
+        "prompt evidence must stay bounded: {rows:?}"
+    );
 }
 
 #[test]
@@ -341,7 +407,20 @@ fn strict_collector_ignores_legacy_cache_without_writing_or_environment_authorit
         .next()
         .expect("production strict collector source");
 
-    assert!(evidence.domains.is_empty(), "{evidence:?}");
+    assert!(
+        evidence
+            .domains
+            .iter()
+            .any(|domain| domain.name == "project-manifests"),
+        "{evidence:?}"
+    );
+    assert!(
+        evidence
+            .domains
+            .iter()
+            .all(|domain| domain.name != "trading"),
+        "legacy cache must not contribute domains: {evidence:?}"
+    );
     assert_eq!(fs::read_to_string(cache).unwrap(), cached);
     assert!(!strict_production.contains("std::env"));
     assert!(!strict_production.contains("AUTOSPEC_SPECIALIST_LLM_STUB_OUTPUT"));

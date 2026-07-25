@@ -6,6 +6,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 const STRICT_DEPTH: usize = 3;
+const PROJECT_SURFACE_LIMIT: usize = 6;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrictCollectorOptions {
     pub repo_dir: PathBuf,
@@ -72,14 +73,17 @@ pub fn collect_strict_domains(
             )
         })?;
     lexicon::scan_identifiers(&[repo_name.to_string()], ".", "repo-name", &mut hits);
-    lexicon::scan_identifiers(
-        &path_signals.into_iter().collect::<Vec<_>>(),
-        "",
-        "code path",
-        &mut hits,
-    );
+    let path_signals = path_signals.into_iter().collect::<Vec<_>>();
+    lexicon::scan_identifiers(&path_signals, "", "code path", &mut hits);
 
     let mut domains = lexicon::ranked_domains(hits);
+    domains.extend(project_surface_domains(&path_signals));
+    domains.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.name.cmp(&right.name))
+    });
     for domain in &mut domains {
         domain.evidence.sort_by(|left, right| {
             left.file
@@ -91,10 +95,131 @@ pub fn collect_strict_domains(
 
     Ok(StrictCollectorEvidence {
         schema_version: 1,
-        collector_version: "strict-local-v1".to_string(),
+        collector_version: "strict-local-v2".to_string(),
         canonical_repo_scope: root.to_string_lossy().replace('\\', "/"),
         domains,
     })
+}
+
+fn project_surface_domains(paths: &[String]) -> Vec<DetectedDomain> {
+    [
+        (
+            "project-manifests",
+            "project manifest",
+            selected_surface_paths(paths, is_project_manifest),
+        ),
+        (
+            "source-surface",
+            "source file",
+            selected_surface_paths(paths, is_source_file),
+        ),
+        (
+            "spec-surface",
+            "product spec",
+            selected_surface_paths(paths, is_spec_file),
+        ),
+        (
+            "test-surface",
+            "test file",
+            selected_surface_paths(paths, is_test_file),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, label, paths)| project_surface_domain(name, label, &paths))
+    .collect()
+}
+
+fn project_surface_domain(name: &str, label: &str, paths: &[&str]) -> Option<DetectedDomain> {
+    let evidence = paths
+        .iter()
+        .filter(|path| path.chars().count() <= 200)
+        .take(PROJECT_SURFACE_LIMIT)
+        .map(|path| FileLineEvidence {
+            file: (*path).to_string(),
+            line: 1,
+            r#match: format!("{label}: {path}").chars().take(120).collect(),
+        })
+        .collect::<Vec<_>>();
+    (!evidence.is_empty()).then(|| DetectedDomain {
+        name: name.to_string(),
+        score: evidence.len(),
+        evidence,
+    })
+}
+
+fn selected_surface_paths(paths: &[String], predicate: fn(&str) -> bool) -> Vec<&str> {
+    paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| predicate(path))
+        .collect()
+}
+
+fn is_project_manifest(path: &str) -> bool {
+    let path = Path::new(path);
+    lexicon::signal_file_names().any(|candidate| path == Path::new(candidate))
+        || path
+            .extension()
+            .is_some_and(|extension| extension == "csproj")
+}
+
+fn is_source_file(path: &str) -> bool {
+    !is_spec_file(path)
+        && !is_test_file(path)
+        && Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension,
+                    "c" | "cc"
+                        | "cpp"
+                        | "cs"
+                        | "go"
+                        | "java"
+                        | "js"
+                        | "jsx"
+                        | "kt"
+                        | "mjs"
+                        | "php"
+                        | "py"
+                        | "rb"
+                        | "rs"
+                        | "scala"
+                        | "swift"
+                        | "ts"
+                        | "tsx"
+                )
+            })
+}
+
+fn is_spec_file(path: &str) -> bool {
+    Path::new(path).components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("specs"))
+    })
+}
+
+fn is_test_file(path: &str) -> bool {
+    if is_spec_file(path) {
+        return false;
+    }
+    let path = Path::new(path);
+    let directory_marks_test = path.components().any(|component| {
+        component.as_os_str().to_str().is_some_and(|name| {
+            name.eq_ignore_ascii_case("test") || name.eq_ignore_ascii_case("tests")
+        })
+    });
+    let filename_marks_test = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.split(['-', '_', '.'])
+                .any(|part| part.eq_ignore_ascii_case("test") || part.eq_ignore_ascii_case("spec"))
+        });
+    directory_marks_test || filename_marks_test
 }
 
 fn canonical_root(repo_dir: &Path) -> Result<PathBuf, StrictCollectorError> {
