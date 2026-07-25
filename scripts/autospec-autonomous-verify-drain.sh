@@ -187,7 +187,7 @@ else
         if [ "${VERIFY_MAX_SECS:-0}" -gt 0 ] 2>/dev/null && [ "$elapsed_secs" -ge "$VERIFY_MAX_SECS" ]; then
             printf 'autospec-autonomous-verify-drain: absolute timeout after %ss; terminating skeptic child pid %s\n' \
                 "$VERIFY_MAX_SECS" "$child_pid" >&2
-            autospec_kill_tree "$child_pid" separate
+            autospec_kill_tree "$child_pid" separate-recursive
             wait "$child_pid" 2>/dev/null || true
             omx_rc=124
             break
@@ -202,7 +202,7 @@ else
         if [ "$idle_secs" -ge "$VERIFY_STALL_SECS" ]; then
             printf 'autospec-autonomous-verify-drain: stalled after %ss with no output; terminating skeptic child pid %s\n' \
                 "$VERIFY_STALL_SECS" "$child_pid" >&2
-            autospec_kill_tree "$child_pid" separate
+            autospec_kill_tree "$child_pid" separate-recursive
             wait "$child_pid" 2>/dev/null || true
             omx_rc=124
             break

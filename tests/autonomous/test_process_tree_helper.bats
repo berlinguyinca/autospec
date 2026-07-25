@@ -7,12 +7,16 @@ setup() {
 ps() {
   case "$*" in
     *"-p 10") printf '10\n' ;;
+    *"-p 40") printf '40\n' ;;
     *"-p $$") printf '%s\n' "$$" ;;
   esac
 }
 
 pgrep() {
-  [ "$*" = "-P 20" ] && printf '21\n'
+  case "$*" in
+    "-P 20") printf '21\n' ;;
+    "-P 40") printf '41\n' ;;
+  esac
 }
 
 kill() {
@@ -49,6 +53,7 @@ sleep() {
   autospec_kill_tree 10 separate
   autospec_kill_tree 20 none 1
   autospec_kill_tree 30 separate
+  autospec_kill_tree 40 separate-recursive
 
   grep -q '^kill -TERM -- -10$' "$BATS_TEST_TMPDIR/signals"
   grep -q '^kill -KILL -- -10$' "$BATS_TEST_TMPDIR/signals"
@@ -56,5 +61,9 @@ sleep() {
   grep -q '^kill -KILL 20$' "$BATS_TEST_TMPDIR/signals"
   grep -q '^kill -TERM 30$' "$BATS_TEST_TMPDIR/signals"
   [ "$(grep -c '^kill -KILL 30$' "$BATS_TEST_TMPDIR/signals" || true)" -eq 0 ]
+  grep -q '^kill -TERM -- -40$' "$BATS_TEST_TMPDIR/signals"
+  grep -q '^kill -KILL -- -40$' "$BATS_TEST_TMPDIR/signals"
+  grep -q '^kill -TERM 41$' "$BATS_TEST_TMPDIR/signals"
+  [ "$(grep -c '^kill -KILL 41$' "$BATS_TEST_TMPDIR/signals" || true)" -eq 0 ]
   [ "$(grep -c '^sleep 1$' "$BATS_TEST_TMPDIR/signals")" -eq 2 ]
 }

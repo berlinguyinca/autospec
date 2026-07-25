@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Shared process-tree reaper for detached autospec harnesses.
 #
-# autospec_kill_tree <pid> [separate|leader|none] [grace-seconds]
-#   separate: signal a process group that differs from the caller's group.
-#   leader:   signal the group only when pid is its group leader.
-#   none:     recurse through descendants without group signalling.
+# autospec_kill_tree <pid> [separate|separate-recursive|leader|none] [grace-seconds]
+#   separate:           signal a separate group and stop; otherwise recurse.
+#   separate-recursive: signal a separate group and still recurse.
+#   leader:             signal the group only when pid is its group leader.
+#   none:               recurse through descendants without group signalling.
 
 if [ -n "${_AUTOSPEC_PROCESS_TREE_LOADED:-}" ]; then
     return 0 2>/dev/null || true
@@ -18,7 +19,7 @@ autospec_kill_tree() {
     local child pgid="" own_pgid="" group_owned=0
 
     case "$group_policy" in
-        separate)
+        separate|separate-recursive)
             pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
             own_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
             [ -n "$pgid" ] && [ "$pgid" != "$own_pgid" ] && group_owned=1
@@ -33,8 +34,10 @@ autospec_kill_tree() {
 
     if [ "$group_owned" -eq 1 ]; then
         kill -TERM -- "-$pgid" 2>/dev/null || true
-        if [ "$group_policy" = "separate" ]; then
+        if [ "$group_policy" = "separate" ] || [ "$group_policy" = "separate-recursive" ]; then
             kill -KILL -- "-$pgid" 2>/dev/null || true
+        fi
+        if [ "$group_policy" = "separate" ]; then
             return 0
         fi
     fi
@@ -46,7 +49,7 @@ autospec_kill_tree() {
     # The autonomous explore/verify drains historically used TERM-only when a
     # target shared the caller's process group. Preserve that cleanup window;
     # only an owned detached group is safe for their immediate KILL escalation.
-    if [ "$group_policy" = "separate" ]; then
+    if [ "$group_policy" = "separate" ] || [ "$group_policy" = "separate-recursive" ]; then
         return 0
     fi
     if [ "$grace_seconds" -gt 0 ] 2>/dev/null; then

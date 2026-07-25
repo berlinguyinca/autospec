@@ -15,6 +15,6 @@
 }
 
 @test "verifier watchdog kills detached skeptic process groups" {
-  grep -q 'autospec_kill_tree "\$child_pid" separate' \
+  grep -q 'autospec_kill_tree "\$child_pid" separate-recursive' \
     "$BATS_TEST_DIRNAME/../../scripts/autospec-autonomous-verify-drain.sh"
 }
