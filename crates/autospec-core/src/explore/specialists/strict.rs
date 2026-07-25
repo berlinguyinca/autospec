@@ -57,7 +57,15 @@ pub fn collect_strict_domains(
     let mut hits = lexicon::empty_hits();
     let mut selected_files = root_signal_files(&root)?;
     let mut path_signals = BTreeSet::new();
-    walk_paths(&root, &root, 0, &mut selected_files, &mut path_signals)?;
+    let mut project_files = BTreeSet::new();
+    walk_paths(
+        &root,
+        &root,
+        0,
+        &mut selected_files,
+        &mut path_signals,
+        &mut project_files,
+    )?;
     selected_files.sort();
     selected_files.dedup();
     for file in selected_files {
@@ -77,7 +85,9 @@ pub fn collect_strict_domains(
     lexicon::scan_identifiers(&path_signals, "", "code path", &mut hits);
 
     let mut domains = lexicon::ranked_domains(hits);
-    domains.extend(project_surface_domains(&path_signals));
+    domains.extend(project_surface_domains(
+        &project_files.into_iter().collect::<Vec<_>>(),
+    ));
     domains.sort_by(|left, right| {
         right
             .score
@@ -157,7 +167,7 @@ fn selected_surface_paths(paths: &[String], predicate: fn(&str) -> bool) -> Vec<
 
 fn is_project_manifest(path: &str) -> bool {
     let path = Path::new(path);
-    lexicon::signal_file_names().any(|candidate| path == Path::new(candidate))
+    lexicon::manifest_file_names().any(|candidate| path == Path::new(candidate))
         || path
             .extension()
             .is_some_and(|extension| extension == "csproj")
@@ -209,7 +219,9 @@ fn is_test_file(path: &str) -> bool {
     let path = Path::new(path);
     let directory_marks_test = path.components().any(|component| {
         component.as_os_str().to_str().is_some_and(|name| {
-            name.eq_ignore_ascii_case("test") || name.eq_ignore_ascii_case("tests")
+            ["test", "tests", "__tests__", "spec"]
+                .iter()
+                .any(|candidate| name.eq_ignore_ascii_case(candidate))
         })
     });
     let filename_marks_test = path
@@ -280,6 +292,7 @@ fn walk_paths(
     depth: usize,
     selected_files: &mut Vec<PathBuf>,
     signals: &mut BTreeSet<String>,
+    project_files: &mut BTreeSet<String>,
 ) -> Result<(), StrictCollectorError> {
     let entries = fs::read_dir(current).map_err(|source| {
         error(
@@ -295,7 +308,14 @@ fn walk_paths(
     })?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        visit_entry(root, entry.path(), depth, selected_files, signals)?;
+        visit_entry(
+            root,
+            entry.path(),
+            depth,
+            selected_files,
+            signals,
+            project_files,
+        )?;
     }
     Ok(())
 }
@@ -306,6 +326,7 @@ fn visit_entry(
     depth: usize,
     selected_files: &mut Vec<PathBuf>,
     signals: &mut BTreeSet<String>,
+    project_files: &mut BTreeSet<String>,
 ) -> Result<(), StrictCollectorError> {
     let name = path
         .file_name()
@@ -329,9 +350,17 @@ fn visit_entry(
         ));
     }
     if metadata.is_dir() {
-        visit_directory(root, &path, name, depth, selected_files, signals)
+        visit_directory(
+            root,
+            &path,
+            name,
+            depth,
+            selected_files,
+            signals,
+            project_files,
+        )
     } else if metadata.is_file() {
-        visit_file(root, &path, name, selected_files, signals)
+        visit_file(root, &path, name, selected_files, signals, project_files)
     } else {
         Err(error(
             StrictCollectorErrorCode::ReadFile,
@@ -347,6 +376,7 @@ fn visit_directory(
     depth: usize,
     selected_files: &mut Vec<PathBuf>,
     signals: &mut BTreeSet<String>,
+    project_files: &mut BTreeSet<String>,
 ) -> Result<(), StrictCollectorError> {
     if lexicon::should_skip_dir(name) || depth >= STRICT_DEPTH {
         return Ok(());
@@ -356,7 +386,14 @@ fn visit_directory(
         signals.insert(name.to_string());
     }
     signals.insert(format!("{}/", relative_path(root, &directory)?));
-    walk_paths(root, &directory, depth + 1, selected_files, signals)
+    walk_paths(
+        root,
+        &directory,
+        depth + 1,
+        selected_files,
+        signals,
+        project_files,
+    )
 }
 
 fn visit_file(
@@ -365,12 +402,15 @@ fn visit_file(
     name: &str,
     selected_files: &mut Vec<PathBuf>,
     signals: &mut BTreeSet<String>,
+    project_files: &mut BTreeSet<String>,
 ) -> Result<(), StrictCollectorError> {
     let file = canonical_file(root, path)?;
     if name.ends_with(".csproj") {
         selected_files.push(file.clone());
     }
-    signals.insert(relative_path(root, &file)?);
+    let relative = relative_path(root, &file)?;
+    signals.insert(relative.clone());
+    project_files.insert(relative);
     Ok(())
 }
 

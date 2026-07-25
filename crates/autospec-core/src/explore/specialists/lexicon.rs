@@ -119,6 +119,10 @@ pub(super) fn signal_file_names() -> impl Iterator<Item = &'static str> {
     MANIFESTS.iter().chain(DOCS.iter()).copied()
 }
 
+pub(super) fn manifest_file_names() -> impl Iterator<Item = &'static str> {
+    MANIFESTS.iter().copied()
+}
+
 pub(super) fn should_skip_dir(name: &str) -> bool {
     name.starts_with('.') || SKIP_DIRS.contains(&name)
 }

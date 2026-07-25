@@ -151,8 +151,8 @@ fn strict_collector_is_deterministic_and_ranks_domains_and_evidence() {
         vec![
             "trading",
             "payments",
-            "project-manifests",
             "infra",
+            "project-manifests",
             "security",
         ]
     );
@@ -201,6 +201,7 @@ fn strict_collector_excludes_generated_and_vendor_trees() {
 #[test]
 fn strict_collector_gives_a_generic_repository_project_evidence() {
     let repo = temp_repo("strict-empty");
+    fs::write(repo.join("requirements.txt"), "flask==2.0\n").unwrap();
     fs::write(
         repo.join("README.md"),
         "# Generic widget\nPlain application.\n",
@@ -211,13 +212,13 @@ fn strict_collector_gives_a_generic_repository_project_evidence() {
 
     assert_eq!(evidence.domains.len(), 1, "{evidence:?}");
     assert_eq!(evidence.domains[0].name, "project-manifests");
-    assert_eq!(evidence.domains[0].evidence[0].file, "README.md");
+    assert_eq!(evidence.domains[0].evidence[0].file, "requirements.txt");
 }
 
 #[test]
 fn strict_collector_populates_general_project_evidence() {
     let repo = temp_repo("strict-next-project");
-    for directory in ["app", "scripts", "tests", "docs/specs"] {
+    for directory in ["app", "scripts", "tests", "__tests__", "spec", "docs/specs"] {
         fs::create_dir_all(repo.join(directory)).unwrap();
     }
     fs::write(
@@ -236,6 +237,16 @@ fn strict_collector_populates_general_project_evidence() {
     )
     .unwrap();
     fs::write(repo.join("tests/routes.txt"), "/\n").unwrap();
+    fs::write(
+        repo.join("__tests__/layout.tsx"),
+        "export const expectedLayout = 'dashboard';\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("spec/navigation_spec.rb"),
+        "expected_route = '/runs'\n",
+    )
+    .unwrap();
     fs::write(repo.join("docs/specs/design.md"), "# Dashboard design\n").unwrap();
 
     let evidence = collect_strict_domains(&StrictCollectorOptions::new(&repo)).unwrap();
@@ -266,6 +277,27 @@ fn strict_collector_populates_general_project_evidence() {
     assert!(rows.iter().any(|row| row.file == "app/page.tsx"));
     assert!(rows.iter().any(|row| row.file == "scripts/test-page.mjs"));
     assert!(rows.iter().any(|row| row.file == "docs/specs/design.md"));
+    let tests = evidence
+        .domains
+        .iter()
+        .find(|domain| domain.name == "test-surface")
+        .expect("test surface");
+    assert!(tests
+        .evidence
+        .iter()
+        .any(|row| row.file == "__tests__/layout.tsx"));
+    assert!(tests
+        .evidence
+        .iter()
+        .any(|row| row.file == "spec/navigation_spec.rb"));
+    let sources = evidence
+        .domains
+        .iter()
+        .find(|domain| domain.name == "source-surface")
+        .expect("source surface");
+    assert!(sources.evidence.iter().all(|row| {
+        row.file != "__tests__/layout.tsx" && row.file != "spec/navigation_spec.rb"
+    }));
     assert!(
         rows.len() <= 24,
         "prompt evidence must stay bounded: {rows:?}"
@@ -407,13 +439,7 @@ fn strict_collector_ignores_legacy_cache_without_writing_or_environment_authorit
         .next()
         .expect("production strict collector source");
 
-    assert!(
-        evidence
-            .domains
-            .iter()
-            .any(|domain| domain.name == "project-manifests"),
-        "{evidence:?}"
-    );
+    assert!(evidence.domains.is_empty(), "{evidence:?}");
     assert!(
         evidence
             .domains
