@@ -1617,18 +1617,25 @@ jq -n \
   --arg status "$status" \
   --arg repo "$REPO" \
   --arg generated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-  --argjson findings "$(cat "$FINDINGS_JSON")" \
-  --argjson suppressed "$(cat "$SUPPRESSED_JSON")" \
-  --argjson issue_links "$(cat "$ISSUES_JSON")" \
-  --argjson residual_risks "$(cat "$RISKS_JSON")" \
-  --argjson runtime "$(cat "$RUNTIME_JSON")" \
-  --argjson artifacts "$(cat "$ARTIFACTS_JSON")" \
-  --argjson verification_lanes "$(cat "$VERIFICATION_JSON")" \
+  --slurpfile findings_input "$FINDINGS_JSON" \
+  --slurpfile suppressed_input "$SUPPRESSED_JSON" \
+  --slurpfile issue_links_input "$ISSUES_JSON" \
+  --slurpfile residual_risks_input "$RISKS_JSON" \
+  --slurpfile runtime_input "$RUNTIME_JSON" \
+  --slurpfile artifacts_input "$ARTIFACTS_JSON" \
+  --slurpfile verification_lanes_input "$VERIFICATION_JSON" \
   --argjson total_findings "$total_findings" \
   --argjson suppressed_findings "$suppressed_findings" \
   --argjson issue_links_count "$issue_count" \
   --argjson risk_count "$risk_count" \
-  '{
+  '($findings_input[0] // []) as $findings
+  | ($suppressed_input[0] // []) as $suppressed
+  | ($issue_links_input[0] // []) as $issue_links
+  | ($residual_risks_input[0] // []) as $residual_risks
+  | ($runtime_input[0] // {}) as $runtime
+  | ($artifacts_input[0] // {}) as $artifacts
+  | ($verification_lanes_input[0] // []) as $verification_lanes
+  | {
     status:$status,
     repo:$repo,
     generated_at:$generated_at,
