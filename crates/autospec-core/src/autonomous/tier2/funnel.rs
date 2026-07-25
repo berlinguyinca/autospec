@@ -189,6 +189,16 @@ fn deduplicate(
     Ok((Tier2Deduplication { groups }, winners))
 }
 
+pub(super) fn verifier_candidate_keys(
+    proposals: &[Tier2Proposal],
+) -> Result<Vec<String>, Tier2Failure> {
+    let (_, winners) = deduplicate(proposals)?;
+    Ok(winners
+        .into_iter()
+        .map(|winner| winner.proposal.stable_key)
+        .collect())
+}
+
 fn verify_coverage(
     verifier: &Tier2VerifierVerdicts,
     winners: &[Winner],
