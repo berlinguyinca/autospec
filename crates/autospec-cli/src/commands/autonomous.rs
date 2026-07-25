@@ -4843,7 +4843,8 @@ fn legacy_process_group_matches(name: &str, pid: &str) -> bool {
 #[cfg(target_os = "linux")]
 fn read_process_argv(path: &Path) -> Option<Vec<String>> {
     Some(
-        fs::read(path)?
+        fs::read(path)
+            .ok()?
             .split(|byte| *byte == 0)
             .filter(|argument| !argument.is_empty())
             .map(|argument| String::from_utf8_lossy(argument).to_string())
