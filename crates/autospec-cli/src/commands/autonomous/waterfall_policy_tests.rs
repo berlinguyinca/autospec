@@ -238,7 +238,7 @@ fn disabled_tier4_history_replays_without_source_authority() {
     seed_tier_four_cursor(&root);
     assert_eq!(
         record_tier4(root.path(), REPO, Tier4Scan::NotRun).expect("disabled Tier 4"),
-        Tier4Progress::NotRun(autospec_core::autonomous::tier4::DISABLED_REASON.to_string())
+        Tier4Progress::Advanced
     );
     let policy = WaterfallPolicy::from_config(&AutonomousConfig::default()).expect("policy");
 
@@ -257,7 +257,7 @@ fn disabled_tier4_history_replays_without_source_authority() {
         .expect("disabled replay")
         .expect("Tier 4 cursor")
         .current_tier(),
-        NoWorkTier::Tier4
+        NoWorkTier::Tier1
     );
 }
 

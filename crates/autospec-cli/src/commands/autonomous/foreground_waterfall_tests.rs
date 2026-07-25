@@ -89,7 +89,7 @@ fn closed_tier_order_is_exact_and_each_advance_stops_after_one_call() {
 }
 
 #[test]
-fn nonempty_tier4_config_remains_disabled_production_data() {
+fn nonempty_tier4_config_advances_disabled_policy_without_fetching() {
     let root = TempRoot::new();
     seed_tier_four_cursor(&root);
     let lease = acquire_test_lifecycle(root.path(), REPO).expect("lifecycle lease");
@@ -108,13 +108,12 @@ fn nonempty_tier4_config_remains_disabled_production_data() {
     )
     .expect("disabled Tier 4 dispatch");
 
-    assert!(matches!(
+    assert_eq!(
         progress,
-        ForegroundWaterfallProgress::NotRun {
-            tier: NoWorkTier::Tier4,
-            ..
+        ForegroundWaterfallProgress::Pending {
+            tier: NoWorkTier::Tier1
         }
-    ));
+    );
     assert_eq!(source_fetch_count(&root), 0);
 }
 

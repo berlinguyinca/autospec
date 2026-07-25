@@ -69,10 +69,12 @@ fn tier3_disabled_receipt_rejects_changed_policy_identity_funnel_and_artifact_se
     for mutation in ["producer", "funnel", "extra", "policy"] {
         let root = TempRoot::new();
         seed_tier_three_cursor(&root);
-        assert!(matches!(
+        let state_path = root.path().join("waterfall/waterfall-state.json");
+        let tier_three_state = fs::read(&state_path).expect("Tier 3 cursor");
+        assert_eq!(
             record_tier3(root.path(), REPO, Tier3Scan::NotRun),
-            Ok(Tier3Progress::NotRun(_))
-        ));
+            Ok(Tier3Progress::Advanced)
+        );
         let receipt_store = store(&root);
         let prior = receipt_store
             .load_receipt(1, NoWorkTier::Tier3)
@@ -121,6 +123,7 @@ fn tier3_disabled_receipt_rejects_changed_policy_identity_funnel_and_artifact_se
         )
         .expect("replace receipt");
         drop(receipt_store);
+        fs::write(&state_path, &tier_three_state).expect("restore Tier 3 cursor");
         assert!(
             record_tier3(root.path(), REPO, Tier3Scan::NotRun).is_err(),
             "{mutation} disabled receipt must fail"

@@ -1,7 +1,7 @@
 use autospec_core::autonomous::no_work::NoWorkTier;
 use autospec_core::autonomous::tier3::{
     evaluate_tier3, Tier3AdapterEvidence, Tier3Finding, Tier3FindingKind, Tier3Input,
-    Tier3Severity, Tier3StageResult, DISABLED_REASON,
+    Tier3Severity, Tier3StageResult,
 };
 
 use super::tier2::Tier2Scan;
@@ -68,13 +68,13 @@ pub(super) fn finding() -> Tier3Finding {
 }
 
 #[test]
-fn tier3_disabled_policy_seals_only_policy_and_retains_cursor() {
+fn tier3_disabled_policy_receipt_advances_waterfall() {
     let root = TempRoot::new();
     seed_tier_three_cursor(&root);
 
     assert_eq!(
         record_tier3(root.path(), REPO, Tier3Scan::NotRun).expect("disabled receipt"),
-        Tier3Progress::NotRun(DISABLED_REASON.to_string())
+        Tier3Progress::Advanced
     );
     let receipt = store(&root)
         .load_receipt(1, NoWorkTier::Tier3)
@@ -85,13 +85,14 @@ fn tier3_disabled_policy_seals_only_policy_and_retains_cursor() {
         receipt.evidence()[0].reference,
         "waterfall/1/tier3/policy.json"
     );
+    let state = store(&root).load_state().expect("state").expect("cursor");
+    assert_eq!(state.current_tier(), NoWorkTier::Tier4);
     assert_eq!(
-        store(&root)
-            .load_state()
-            .expect("state")
-            .expect("cursor")
-            .current_tier(),
-        NoWorkTier::Tier3
+        state
+            .completed_receipts()
+            .last()
+            .map(|completed| (completed.tier, completed.digest.as_str())),
+        Some((NoWorkTier::Tier3, receipt.digest()))
     );
 }
 

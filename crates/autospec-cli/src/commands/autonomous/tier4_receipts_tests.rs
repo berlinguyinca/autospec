@@ -307,7 +307,7 @@ fn fully_sealed_alternate_policy_dry_evidence_is_rejected_by_trusted_policy() {
 }
 
 #[test]
-fn tier4_disabled_policy_seals_only_checked_in_policy_and_retains_cursor() {
+fn tier4_disabled_policy_receipt_advances_waterfall() {
     let root = TempRoot::new();
     seed_tier_four_cursor(&root);
     let config = AutonomousConfig::parse(
@@ -330,7 +330,7 @@ fn tier4_disabled_policy_seals_only_checked_in_policy_and_retains_cursor() {
             disabled_by_checked_in_policy(&config.tier4),
         )
         .expect("disabled Tier 4 receipt"),
-        Tier4Progress::NotRun(DISABLED_REASON.to_string())
+        Tier4Progress::Advanced
     );
     let mut evidence_files = fs::read_dir(&tier4_dir)
         .expect("read Tier 4 evidence directory")
@@ -375,15 +375,66 @@ fn tier4_disabled_policy_seals_only_checked_in_policy_and_retains_cursor() {
             && !evidence.reference.contains("roi_rank")
             && !evidence.reference.contains("failure")
     }));
+    let state = store.load_state().expect("state").expect("cursor");
     assert_eq!(
-        store
-            .load_state()
-            .expect("state")
-            .expect("cursor")
-            .current_tier(),
-        NoWorkTier::Tier4
+        (state.next_pass_id(), state.current_tier()),
+        (2, NoWorkTier::Tier1)
+    );
+    assert_eq!(
+        state
+            .completed_receipts()
+            .last()
+            .map(|completed| (completed.tier, completed.digest.as_str())),
+        Some((NoWorkTier::Tier4, receipt.digest()))
     );
     assert_ne!(TIER3_DISABLED_REASON, DISABLED_REASON);
+}
+
+#[test]
+fn disabled_tier3_and_tier4_receipts_retain_both_audit_digests() {
+    let root = TempRoot::new();
+    seed_tier_three_cursor(&root);
+    assert_eq!(
+        record_tier3(root.path(), REPO, Tier3Scan::NotRun).expect("disabled Tier 3 receipt"),
+        Tier3Progress::Advanced
+    );
+    let receipt_store = store(&root);
+    let tier3 = receipt_store
+        .load_receipt(1, NoWorkTier::Tier3)
+        .expect("Tier 3 receipt")
+        .expect("sealed Tier 3 receipt");
+    drop(receipt_store);
+
+    assert_eq!(
+        record_tier4(root.path(), REPO, Tier4Scan::NotRun).expect("disabled Tier 4 receipt"),
+        Tier4Progress::Advanced
+    );
+    let receipt_store = store(&root);
+    let tier4 = receipt_store
+        .load_receipt(1, NoWorkTier::Tier4)
+        .expect("Tier 4 receipt")
+        .expect("sealed Tier 4 receipt");
+    let state = receipt_store
+        .load_state()
+        .expect("verified state")
+        .expect("pass 2 cursor");
+
+    assert_eq!(
+        (state.next_pass_id(), state.current_tier()),
+        (2, NoWorkTier::Tier1)
+    );
+    assert_eq!(
+        state
+            .completed_receipts()
+            .iter()
+            .skip(3)
+            .map(|completed| (completed.tier, completed.digest.as_str()))
+            .collect::<Vec<_>>(),
+        vec![
+            (NoWorkTier::Tier3, tier3.digest()),
+            (NoWorkTier::Tier4, tier4.digest()),
+        ]
+    );
 }
 
 #[test]

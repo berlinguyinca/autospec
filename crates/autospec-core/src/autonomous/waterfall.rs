@@ -373,7 +373,11 @@ fn tier4_rollover_receipt(receipt: &TierReceipt) -> bool {
                 | DryReason::VerificationRejected
                 | DryReason::RoiFiltered,
         }
-    )
+    ) || (receipt.producer_version() == "rust-tier4-disabled-policy-v1"
+        && matches!(
+            receipt.status(),
+            TierStatus::NotRun { reason } if reason == super::tier4::DISABLED_REASON
+        ))
 }
 
 pub fn receipt_reference(pass_id: u64, tier: NoWorkTier) -> String {

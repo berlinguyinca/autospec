@@ -1,7 +1,9 @@
 use std::fs;
 
 use autospec_core::autonomous::no_work::NoWorkTier;
-use autospec_core::autonomous::waterfall::{sha256_hex, SealedEvidence, TierReceipt};
+use autospec_core::autonomous::waterfall::{
+    sha256_hex, FunnelCounts, SealedEvidence, TierReceipt, TierStatus,
+};
 
 use super::tier2_receipts_tests::{store, TempRoot, REPO};
 use super::tier4::Tier4Scan;
@@ -10,6 +12,81 @@ use super::tier4_receipts_tests::{
     observation, produced_observation, record_tier4_with_expected_policy, seed_tier_four_cursor,
     source, tier4_store,
 };
+
+#[test]
+fn tier4_disabled_receipt_rejects_changed_identity_reason_funnel_and_artifacts() {
+    for mutation in ["producer", "reason", "funnel", "extra", "policy"] {
+        let root = TempRoot::new();
+        seed_tier_four_cursor(&root);
+        let state_path = root.path().join("waterfall/waterfall-state.json");
+        let tier_four_state = fs::read(&state_path).expect("Tier 4 cursor");
+        assert_eq!(
+            record_tier4(root.path(), REPO, Tier4Scan::NotRun),
+            Ok(Tier4Progress::Advanced)
+        );
+        let receipt_store = store(&root);
+        let prior = receipt_store
+            .load_receipt(1, NoWorkTier::Tier4)
+            .expect("receipt")
+            .expect("sealed receipt");
+        let mut status = prior.status().clone();
+        let mut funnel = prior.funnel().clone();
+        let mut evidence = prior.evidence().to_vec();
+        let producer = if mutation == "producer" {
+            "forged-policy-v1"
+        } else {
+            prior.producer_version()
+        };
+        match mutation {
+            "reason" => {
+                status = TierStatus::NotRun {
+                    reason: "forged-disabled-reason".to_string(),
+                };
+            }
+            "funnel" => {
+                funnel = FunnelCounts::new(1, 1, 1, 1, 1).expect("nonzero funnel");
+            }
+            "extra" => evidence.push(evidence[0].clone()),
+            "policy" => {
+                let contents = "{\"schema\":1,\"kind\":\"tier4_policy\",\"mode\":\"disabled\",\"reason\":\"forged\",\"policy_source\":\"checked_in\"}\n";
+                evidence[0] =
+                    SealedEvidence::new(&evidence[0].reference, sha256_hex(contents.as_bytes()))
+                        .expect("policy digest");
+                fs::write(
+                    root.path().join("waterfall").join(&evidence[0].reference),
+                    contents,
+                )
+                .expect("replace policy");
+            }
+            "producer" => {}
+            _ => unreachable!("fixed mutation list"),
+        }
+        let forged = TierReceipt::new(
+            REPO,
+            1,
+            NoWorkTier::Tier4,
+            producer,
+            1,
+            1,
+            status,
+            funnel,
+            evidence,
+        )
+        .expect("syntactic receipt");
+        fs::write(
+            receipt_store.receipt_path(&prior).expect("receipt path"),
+            format!("{}\n", forged.to_json()),
+        )
+        .expect("replace receipt");
+        drop(receipt_store);
+        fs::write(&state_path, &tier_four_state).expect("restore Tier 4 cursor");
+
+        assert!(
+            record_tier4(root.path(), REPO, Tier4Scan::NotRun).is_err(),
+            "{mutation} disabled receipt must fail"
+        );
+    }
+}
 
 #[test]
 fn changed_retry_clears_only_unreferenced_tier4_artifacts_before_writing() {
