@@ -58,19 +58,43 @@ If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$` (cas
 
 ## Direct interactive session launch
 
-When Codex, Claude, or OpenCode invokes this skill without an operator subcommand
-or an explicit launch mode, run:
+For direct invocations from Codex, Claude, or OpenCode, treat `"$@"` in the
+commands below as every operator-supplied argument, preserving each token and its
+original order unchanged.
+
+When invoked without an operator subcommand or explicit launch mode, execute:
 
 ```bash
-autospec-autonomous start --follow --repo-dir "$PWD"
+autospec-autonomous start --follow --repo-dir "$PWD" "$@"
 ```
 
-Keep that tool call attached and forward its output to the initiating session.
-Existing operator subcommands such as `status`, `stop`, `timeline`, and `watch`
-keep their normal routing. If the operator supplies `--detach` or `--foreground`,
-preserve that explicit mode and do not inject `--follow`. This interactive skill
-default does not change the raw CLI default, which remains detached. Never replace
-session output with a desktop notification.
+Forward every supplied non-launch argument through `"$@"`. If the operator
+supplied `--repo-dir`, omit the injected `--repo-dir "$PWD"` and preserve the
+operator's option and value unchanged; never drop, duplicate, or reorder an
+operator argument.
+
+When no subcommand is supplied and the operator supplies exactly one of
+`--follow`, `--detach`, or `--foreground`, execute:
+
+```bash
+autospec-autonomous start "$@"
+```
+
+Preserve the supplied launch mode and every remaining argument unchanged; do not
+inject `--follow` or any second launch mode.
+
+When the operator supplies a subcommand such as `start`, `status`, `stop`,
+`timeline`, or `watch`, execute:
+
+```bash
+autospec-autonomous "$@"
+```
+
+Preserve the subcommand and every argument unchanged. Keep every launch using
+`--follow` attached and forward its complete output to the initiating session.
+Never replace attached session output with a desktop notification. Do not change
+the raw CLI default; `autospec autonomous start` without a launch mode remains
+detached.
 
 ## Operator commands and monitoring
 
