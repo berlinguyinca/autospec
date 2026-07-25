@@ -7,7 +7,7 @@ use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -555,17 +555,110 @@ fn session_follow_attaches_without_restarting_and_detaches_safely() {
     fixture.start_blocked_detached();
     let conductor_pid = fixture.recorded_conductor_pid().expect("conductor pid");
 
-    let mut follower = fixture.spawn_following_start(1);
+    let mut follower = fixture.spawn_following_start(0);
     wait_for_file_contents(
         &fixture.root.join("follower.log"),
         "autospec autonomous attached",
     );
+    assert!(process_is_running(follower.id()));
     assert_eq!(fixture.recorded_conductor_pid(), Some(conductor_pid));
+    assert!(!fixture.scoped_stop_sentinel().exists());
 
-    terminate_process_group(follower.id());
-    let _ = follower.wait();
+    follower.terminate_and_wait();
     assert!(process_is_running(conductor_pid));
+    assert_eq!(fixture.recorded_conductor_pid(), Some(conductor_pid));
+    assert!(!fixture.scoped_stop_sentinel().exists());
     fixture.terminate_recorded_conductor();
+}
+
+#[test]
+fn session_follow_fresh_start_uses_a_generation_log_and_enters_follow_mode() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+
+    let mut follower = fixture.spawn_following_start(1);
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "autospec autonomous started",
+    );
+    let status = follower.wait();
+
+    assert!(status.success());
+    assert!(process_is_running(
+        fixture.recorded_conductor_pid().expect("conductor pid")
+    ));
+    let logpath = fixture.recorded_conductor_logpath();
+    assert_ne!(
+        logpath.file_name().and_then(|name| name.to_str()),
+        Some("autospec-autonomous-conductor.log")
+    );
+    assert!(logpath.exists());
+}
+
+#[test]
+fn session_follow_switches_to_repaired_conductor_log_from_offset_zero() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.start_blocked_detached();
+    let initial_log = fixture.recorded_conductor_logpath();
+    fs::write(&initial_log, "initial-generation\n").expect("write initial conductor log");
+
+    let mut follower = fixture.spawn_following_start(0);
+    wait_for_file_contents(&fixture.root.join("follower.log"), "initial-generation");
+
+    let repaired_log = fixture.root.join("repaired-conductor.log");
+    fs::write(&repaired_log, "repair-generation-from-zero\n").expect("write repaired log");
+    fs::write(
+        fixture.scoped_dir().join("conductor.logpath"),
+        format!("{}\n", repaired_log.display()),
+    )
+    .expect("switch scoped log metadata");
+
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "repair-generation-from-zero",
+    );
+    follower.terminate_and_wait();
+    assert!(process_is_running(
+        fixture.recorded_conductor_pid().expect("conductor pid")
+    ));
+}
+
+#[test]
+fn session_follow_resets_explicit_log_cursor_after_observed_truncation() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let explicit_log = fixture.root.join("explicit-conductor.log");
+    fixture.start_blocked_detached_with_log(Some(&explicit_log));
+    fs::write(&explicit_log, "before-observed-truncation\n").expect("write initial explicit log");
+
+    let mut follower = fixture.spawn_following_start(0);
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "before-observed-truncation",
+    );
+    fs::write(&explicit_log, "after\n").expect("truncate explicit log");
+    wait_for_file_contents(&fixture.root.join("follower.log"), "after");
+
+    follower.terminate_and_wait();
+    assert_eq!(fixture.recorded_conductor_logpath(), explicit_log);
+    assert!(!fixture.scoped_stop_sentinel().exists());
+}
+
+#[test]
+fn session_follow_reads_log_growth_with_a_seek_cursor() {
+    let source =
+        fs::read_to_string(workspace_root().join("crates/autospec-cli/src/commands/autonomous.rs"))
+            .expect("read autonomous command source");
+    let growth = source
+        .split_once("fn print_log_growth")
+        .and_then(|(_, remainder)| remainder.split_once("\nfn "))
+        .map(|(body, _)| body)
+        .expect("print_log_growth function");
+
+    assert!(growth.contains("SeekFrom::Start"));
+    assert!(growth.contains("read_to_end"));
+    assert!(!growth.contains("fs::read(logpath)"));
 }
 
 #[test]
@@ -1798,6 +1891,49 @@ fn foreground_fixture_directories_are_unique_within_one_process() {
     assert_ne!(first.root, second.root);
 }
 
+struct GuardedProcessGroup {
+    child: Option<Child>,
+}
+
+impl GuardedProcessGroup {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.as_ref().expect("live guarded child").id()
+    }
+
+    fn wait(&mut self) -> ExitStatus {
+        let mut child = self.child.take().expect("live guarded child");
+        child.wait().expect("wait for guarded child")
+    }
+
+    fn terminate_and_wait(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        terminate_process_group(child.id());
+        let _ = child.wait();
+    }
+}
+
+impl Drop for GuardedProcessGroup {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                terminate_process_group(child.id());
+                let _ = child.kill();
+            }
+        }
+        let _ = child.wait();
+    }
+}
+
 struct ForegroundFixture {
     root: PathBuf,
     repo_dir: PathBuf,
@@ -2044,10 +2180,16 @@ exit 1
     }
 
     fn start_blocked_detached(&self) {
-        let output = self
-            .detached_command("start")
-            .arg("--detach")
-            .args(["--branch", "main"])
+        self.start_blocked_detached_with_log(None);
+    }
+
+    fn start_blocked_detached_with_log(&self, logpath: Option<&Path>) {
+        let mut command = self.detached_command("start");
+        command.arg("--detach").args(["--branch", "main"]);
+        if let Some(logpath) = logpath {
+            command.args(["--log", logpath.to_str().expect("log path")]);
+        }
+        let output = command
             .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
             .env("AUTOSPEC_FOREGROUND_BLOCK_GH", "1")
             .output()
@@ -2062,7 +2204,7 @@ exit 1
         assert!(process_is_running(conductor_pid));
     }
 
-    fn spawn_following_start(&self, iterations: u64) -> std::process::Child {
+    fn spawn_following_start(&self, iterations: u64) -> GuardedProcessGroup {
         let mut command = self.detached_command("start");
         let output = File::create(self.root.join("follower.log")).expect("create follower log");
         let errors = output.try_clone().expect("clone follower log");
@@ -2081,7 +2223,7 @@ exit 1
             .stdout(Stdio::from(output))
             .stderr(Stdio::from(errors))
             .process_group(0);
-        command.spawn().expect("spawn following start")
+        GuardedProcessGroup::new(command.spawn().expect("spawn following start"))
     }
 
     fn recorded_conductor_pid(&self) -> Option<u32> {
@@ -2099,6 +2241,22 @@ exit 1
             terminate_process_group(pid);
             terminate_process(pid);
         }
+    }
+
+    fn recorded_conductor_logpath(&self) -> PathBuf {
+        PathBuf::from(
+            fs::read_to_string(self.scoped_dir().join("conductor.logpath"))
+                .expect("read conductor logpath")
+                .trim(),
+        )
+    }
+
+    fn scoped_dir(&self) -> PathBuf {
+        self.operator.join("test_repo")
+    }
+
+    fn scoped_stop_sentinel(&self) -> PathBuf {
+        self.scoped_dir().join("stop.flag")
     }
 
     fn write_autonomous_config(&self, source: &str) {

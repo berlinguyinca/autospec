@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -4070,7 +4070,7 @@ fn spawn_unit(
 ) -> Result<UnitRecord, String> {
     let logpath = log_override
         .map(PathBuf::from)
-        .unwrap_or_else(|| log_dir.join(format!("autospec-autonomous-{name}.log")));
+        .unwrap_or_else(|| default_unit_logpath(name, log_dir));
     if let Some(parent) = logpath.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
@@ -4119,6 +4119,21 @@ fn spawn_unit(
         logpath,
         logpath_file,
     })
+}
+
+fn default_unit_logpath(name: &str, log_dir: &Path) -> PathBuf {
+    if name != "conductor" {
+        return log_dir.join(format!("autospec-autonomous-{name}.log"));
+    }
+    let generation = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    log_dir.join(format!(
+        "autospec-autonomous-conductor-{generation}-{}-{sequence}.log",
+        std::process::id()
+    ))
 }
 
 fn launch_units(
@@ -5623,19 +5638,32 @@ fn print_log_growth(logpath: &str, mut offset: usize) -> Result<usize, String> {
     if logpath.is_empty() {
         return Ok(0);
     }
-    let raw = fs::read(logpath).map_err(|error| format!("cannot read {logpath}: {error}"))?;
-    if raw.len() < offset {
+    let mut log = File::open(logpath).map_err(|error| format!("cannot open {logpath}: {error}"))?;
+    let length = usize::try_from(
+        log.metadata()
+            .map_err(|error| format!("cannot inspect {logpath}: {error}"))?
+            .len(),
+    )
+    .map_err(|_| format!("cannot follow {logpath}: file is too large"))?;
+    if length < offset {
         offset = 0;
     }
-    if raw.len() > offset {
+    log.seek(SeekFrom::Start(offset as u64))
+        .map_err(|error| format!("cannot seek {logpath}: {error}"))?;
+    let mut growth = Vec::new();
+    log.read_to_end(&mut growth)
+        .map_err(|error| format!("cannot read {logpath}: {error}"))?;
+    if !growth.is_empty() {
         io::stdout()
-            .write_all(&raw[offset..])
+            .write_all(&growth)
             .map_err(|error| format!("cannot write log output: {error}"))?;
         io::stdout()
             .flush()
             .map_err(|error| format!("cannot flush stdout: {error}"))?;
     }
-    Ok(raw.len())
+    offset
+        .checked_add(growth.len())
+        .ok_or_else(|| format!("cannot follow {logpath}: byte cursor overflow"))
 }
 
 fn summarize_timeline_line(line: &str) -> String {
