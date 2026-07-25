@@ -130,6 +130,14 @@ fn settle_receipt(
         }
         TierStatus::Produced { count } => Ok(Tier3Progress::Produced(*count)),
         TierStatus::Failed { reason } => Ok(Tier3Progress::Failed(reason.clone())),
+        TierStatus::NotRun { reason }
+            if receipt.producer_version() == DISABLED_PRODUCER_VERSION
+                && reason == DISABLED_REASON =>
+        {
+            let advanced = state.clone().record_receipt(&receipt)?;
+            store.persist_state(&advanced).map_err(store_error)?;
+            Ok(Tier3Progress::Advanced)
+        }
         TierStatus::NotRun { reason } => Ok(Tier3Progress::NotRun(reason.clone())),
         status => Err(format!(
             "Tier 3 receipt has unexpected {} status",

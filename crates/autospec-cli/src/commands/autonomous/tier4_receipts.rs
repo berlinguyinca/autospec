@@ -141,6 +141,14 @@ fn settle_receipt(
     match receipt.status() {
         TierStatus::Produced { count } => Ok(Tier4Progress::Produced(*count)),
         TierStatus::Failed { reason } => Ok(Tier4Progress::Failed(reason.clone())),
+        TierStatus::NotRun { reason }
+            if receipt.producer_version() == DISABLED_PRODUCER_VERSION
+                && reason == DISABLED_REASON =>
+        {
+            let advanced = state.clone().record_receipt(&receipt)?;
+            store.persist_state(&advanced).map_err(store_error)?;
+            Ok(Tier4Progress::Advanced)
+        }
         TierStatus::NotRun { reason } => Ok(Tier4Progress::NotRun(reason.clone())),
         TierStatus::Exhausted {
             reason:
