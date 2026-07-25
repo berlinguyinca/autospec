@@ -177,6 +177,21 @@ EOF
     grep -q 'lint: not run' "$OUT_MD"
 }
 
+@test "audit assembles reports when findings exceed the per-argument size limit" {
+    OUT_JSON="$TEST_TMP/audit.json"
+    OUT_MD="$TEST_TMP/audit.md"
+    : > "$REPO/src/app.js"
+    for index in $(seq 1 500); do
+        printf "localStorage.setItem('token_%04d', token);\\n" "$index"
+    done > "$REPO/src/storage.js"
+
+    run bash "$AUDIT" --repo "$REPO" --json "$OUT_JSON" --markdown "$OUT_MD"
+
+    [ "$status" -eq 0 ]
+    jq -e '[.findings[] | select(.probe == "security-sensitive-storage")] | length == 500' "$OUT_JSON"
+    jq -e '.summary.total_findings == (.findings | length)' "$OUT_JSON"
+}
+
 @test "audit files deduplicated follow-up issues only when policy permits" {
     OUT_JSON="$TEST_TMP/audit.json"
     OUT_MD="$TEST_TMP/audit.md"
