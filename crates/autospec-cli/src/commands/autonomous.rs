@@ -221,7 +221,7 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         return run_foreground(options);
     }
     match options.subcommand.as_str() {
-        "start" => start(options),
+        "start" => start(options, launch_mode),
         "restart" => restart(options),
         "status" => status(options),
         "monitor" => monitor(options).map_err(CommandFailure::diagnostic),
@@ -965,12 +965,12 @@ fn option_value(args: &[String], index: &mut usize, option: &str) -> Result<Stri
         .ok_or_else(|| format!("{option} requires a value"))
 }
 
-fn start(options: Options) -> Result<(), CommandFailure> {
+fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure> {
     if options.dry_run {
         let commands = launch_commands(&options).map_err(CommandFailure::diagnostic)?;
         let foreground = foreground_command(&options).map_err(CommandFailure::diagnostic)?;
         if options.json {
-            println!(
+            let mut body = format!(
                 "{{\"command\":\"autonomous\",\"subcommand\":\"start\",\"status\":\"dry-run\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"conductor\":\"{}\",\"companions\":{{\"monitor\":\"{}\",\"supervisor\":\"{}\"}}}}",
                 json_escape(&options.repo),
                 json_escape(&options.repo_dir),
@@ -978,11 +978,19 @@ fn start(options: Options) -> Result<(), CommandFailure> {
                 json_escape(&commands.monitor.display()),
                 json_escape(&commands.supervisor.display())
             );
+            if launch_mode == LaunchMode::Follow {
+                body.pop();
+                body.push_str(",\"follow\":\"scoped conductor log\"}");
+            }
+            println!("{body}");
         } else {
             println!("autospec autonomous start: dry-run");
             println!("conductor: {}", foreground.display());
             println!("monitor: {}", commands.monitor.display());
             println!("supervisor: {}", commands.supervisor.display());
+            if launch_mode == LaunchMode::Follow {
+                println!("follow: scoped conductor log");
+            }
         }
         return Ok(());
     }
@@ -991,6 +999,12 @@ fn start(options: Options) -> Result<(), CommandFailure> {
     let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
+    if launch_mode == LaunchMode::Follow {
+        if let Some(conductor) = live_follow_target(&layout).map_err(CommandFailure::diagnostic)? {
+            print_follow_attach_summary(&options, &layout, &conductor);
+            return follow_scoped_conductor(&layout, &options).map_err(CommandFailure::diagnostic);
+        }
+    }
     let (lifecycle, lease) =
         acquire_lifecycle_start(&layout, &options, LifecycleTransition::Start)?;
     let launched = start_after_lease(&layout, &options, &lifecycle, &lease);
@@ -1017,7 +1031,36 @@ fn start(options: Options) -> Result<(), CommandFailure> {
         println!("monitor pid: {}", monitor.pid);
         println!("supervisor pid: {}", supervisor.pid);
     }
+    if launch_mode == LaunchMode::Follow {
+        return follow_scoped_conductor(&layout, &options).map_err(CommandFailure::diagnostic);
+    }
     Ok(())
+}
+
+fn live_follow_target(layout: &RunLayout) -> Result<Option<UnitStatus>, String> {
+    let unit = read_unit("conductor", layout);
+    match unit.metadata_state {
+        UnitMetadataState::Live => Ok(Some(unit)),
+        UnitMetadataState::Absent | UnitMetadataState::Stale => Ok(None),
+        UnitMetadataState::Ambiguous => Err(format!(
+            "cannot follow ambiguous conductor metadata for {}",
+            layout.repo
+        )),
+    }
+}
+
+fn print_follow_attach_summary(options: &Options, layout: &RunLayout, conductor: &UnitStatus) {
+    if options.json {
+        println!(
+            "{{\"command\":\"autonomous\",\"subcommand\":\"start\",\"status\":\"attached\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"conductor\":{}}}",
+            json_escape(&layout.repo),
+            json_escape(&options.repo_dir),
+            unit_status_json(conductor)
+        );
+    } else {
+        println!("autospec autonomous attached");
+        println!("conductor pid: {}", conductor.pid);
+    }
 }
 
 fn start_after_lease(
@@ -5532,6 +5575,67 @@ fn follow_log(logpath: &str, interval_sec: u64) -> Result<(), String> {
         }
         thread::sleep(Duration::from_secs(interval_sec.max(1)));
     }
+}
+
+fn follow_scoped_conductor(layout: &RunLayout, options: &Options) -> Result<(), String> {
+    let mut logpath = String::new();
+    let mut offset = 0usize;
+    let mut iteration = 0u64;
+    loop {
+        iteration += 1;
+        let unit = read_unit("conductor", layout);
+        match unit.metadata_state {
+            UnitMetadataState::Ambiguous => {
+                return Err(format!(
+                    "cannot follow ambiguous conductor metadata for {}",
+                    layout.repo
+                ));
+            }
+            UnitMetadataState::Live => {
+                if unit.logpath != logpath {
+                    println!("autospec autonomous follow: log={}", unit.logpath);
+                    logpath = unit.logpath;
+                    offset = 0;
+                }
+                offset = print_log_growth(&logpath, offset)?;
+            }
+            UnitMetadataState::Absent | UnitMetadataState::Stale => {
+                if persisted_stop_mode(layout)?.is_some() {
+                    println!("autospec autonomous follow: conductor stopped");
+                    return Ok(());
+                }
+                let supervisor = read_unit("supervisor", layout);
+                if !supervisor.running {
+                    println!("autospec autonomous follow: conductor exited");
+                    return Ok(());
+                }
+                println!("autospec autonomous follow: waiting for supervisor repair");
+            }
+        }
+        if options.iterations > 0 && iteration >= options.iterations {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_secs(options.interval_sec.max(1)));
+    }
+}
+
+fn print_log_growth(logpath: &str, mut offset: usize) -> Result<usize, String> {
+    if logpath.is_empty() {
+        return Ok(0);
+    }
+    let raw = fs::read(logpath).map_err(|error| format!("cannot read {logpath}: {error}"))?;
+    if raw.len() < offset {
+        offset = 0;
+    }
+    if raw.len() > offset {
+        io::stdout()
+            .write_all(&raw[offset..])
+            .map_err(|error| format!("cannot write log output: {error}"))?;
+        io::stdout()
+            .flush()
+            .map_err(|error| format!("cannot flush stdout: {error}"))?;
+    }
+    Ok(raw.len())
 }
 
 fn summarize_timeline_line(line: &str) -> String {
