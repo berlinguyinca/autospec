@@ -6,6 +6,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 const STRICT_DEPTH: usize = 3;
+const PROJECT_SURFACE_LIMIT: usize = 6;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StrictCollectorOptions {
     pub repo_dir: PathBuf,
@@ -56,7 +57,15 @@ pub fn collect_strict_domains(
     let mut hits = lexicon::empty_hits();
     let mut selected_files = root_signal_files(&root)?;
     let mut path_signals = BTreeSet::new();
-    walk_paths(&root, &root, 0, &mut selected_files, &mut path_signals)?;
+    let mut project_files = BTreeSet::new();
+    walk_paths(
+        &root,
+        &root,
+        0,
+        &mut selected_files,
+        &mut path_signals,
+        &mut project_files,
+    )?;
     selected_files.sort();
     selected_files.dedup();
     for file in selected_files {
@@ -72,14 +81,19 @@ pub fn collect_strict_domains(
             )
         })?;
     lexicon::scan_identifiers(&[repo_name.to_string()], ".", "repo-name", &mut hits);
-    lexicon::scan_identifiers(
-        &path_signals.into_iter().collect::<Vec<_>>(),
-        "",
-        "code path",
-        &mut hits,
-    );
+    let path_signals = path_signals.into_iter().collect::<Vec<_>>();
+    lexicon::scan_identifiers(&path_signals, "", "code path", &mut hits);
 
     let mut domains = lexicon::ranked_domains(hits);
+    domains.extend(project_surface_domains(
+        &project_files.into_iter().collect::<Vec<_>>(),
+    ));
+    domains.sort_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.name.cmp(&right.name))
+    });
     for domain in &mut domains {
         domain.evidence.sort_by(|left, right| {
             left.file
@@ -91,10 +105,133 @@ pub fn collect_strict_domains(
 
     Ok(StrictCollectorEvidence {
         schema_version: 1,
-        collector_version: "strict-local-v1".to_string(),
+        collector_version: "strict-local-v2".to_string(),
         canonical_repo_scope: root.to_string_lossy().replace('\\', "/"),
         domains,
     })
+}
+
+fn project_surface_domains(paths: &[String]) -> Vec<DetectedDomain> {
+    [
+        (
+            "project-manifests",
+            "project manifest",
+            selected_surface_paths(paths, is_project_manifest),
+        ),
+        (
+            "source-surface",
+            "source file",
+            selected_surface_paths(paths, is_source_file),
+        ),
+        (
+            "spec-surface",
+            "product spec",
+            selected_surface_paths(paths, is_spec_file),
+        ),
+        (
+            "test-surface",
+            "test file",
+            selected_surface_paths(paths, is_test_file),
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(name, label, paths)| project_surface_domain(name, label, &paths))
+    .collect()
+}
+
+fn project_surface_domain(name: &str, label: &str, paths: &[&str]) -> Option<DetectedDomain> {
+    let evidence = paths
+        .iter()
+        .filter(|path| path.chars().count() <= 200)
+        .take(PROJECT_SURFACE_LIMIT)
+        .map(|path| FileLineEvidence {
+            file: (*path).to_string(),
+            line: 1,
+            r#match: format!("{label}: {path}").chars().take(120).collect(),
+        })
+        .collect::<Vec<_>>();
+    (!evidence.is_empty()).then(|| DetectedDomain {
+        name: name.to_string(),
+        score: evidence.len(),
+        evidence,
+    })
+}
+
+fn selected_surface_paths(paths: &[String], predicate: fn(&str) -> bool) -> Vec<&str> {
+    paths
+        .iter()
+        .map(String::as_str)
+        .filter(|path| predicate(path))
+        .collect()
+}
+
+fn is_project_manifest(path: &str) -> bool {
+    let path = Path::new(path);
+    lexicon::manifest_file_names().any(|candidate| path == Path::new(candidate))
+        || path
+            .extension()
+            .is_some_and(|extension| extension == "csproj")
+}
+
+fn is_source_file(path: &str) -> bool {
+    !is_spec_file(path)
+        && !is_test_file(path)
+        && Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension,
+                    "c" | "cc"
+                        | "cpp"
+                        | "cs"
+                        | "go"
+                        | "java"
+                        | "js"
+                        | "jsx"
+                        | "kt"
+                        | "mjs"
+                        | "php"
+                        | "py"
+                        | "rb"
+                        | "rs"
+                        | "scala"
+                        | "swift"
+                        | "ts"
+                        | "tsx"
+                )
+            })
+}
+
+fn is_spec_file(path: &str) -> bool {
+    Path::new(path).components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("specs"))
+    })
+}
+
+fn is_test_file(path: &str) -> bool {
+    if is_spec_file(path) {
+        return false;
+    }
+    let path = Path::new(path);
+    let directory_marks_test = path.components().any(|component| {
+        component.as_os_str().to_str().is_some_and(|name| {
+            ["test", "tests", "__tests__", "spec"]
+                .iter()
+                .any(|candidate| name.eq_ignore_ascii_case(candidate))
+        })
+    });
+    let filename_marks_test = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.split(['-', '_', '.'])
+                .any(|part| part.eq_ignore_ascii_case("test") || part.eq_ignore_ascii_case("spec"))
+        });
+    directory_marks_test || filename_marks_test
 }
 
 fn canonical_root(repo_dir: &Path) -> Result<PathBuf, StrictCollectorError> {
@@ -155,6 +292,7 @@ fn walk_paths(
     depth: usize,
     selected_files: &mut Vec<PathBuf>,
     signals: &mut BTreeSet<String>,
+    project_files: &mut BTreeSet<String>,
 ) -> Result<(), StrictCollectorError> {
     let entries = fs::read_dir(current).map_err(|source| {
         error(
@@ -170,7 +308,14 @@ fn walk_paths(
     })?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
-        visit_entry(root, entry.path(), depth, selected_files, signals)?;
+        visit_entry(
+            root,
+            entry.path(),
+            depth,
+            selected_files,
+            signals,
+            project_files,
+        )?;
     }
     Ok(())
 }
@@ -181,6 +326,7 @@ fn visit_entry(
     depth: usize,
     selected_files: &mut Vec<PathBuf>,
     signals: &mut BTreeSet<String>,
+    project_files: &mut BTreeSet<String>,
 ) -> Result<(), StrictCollectorError> {
     let name = path
         .file_name()
@@ -204,9 +350,17 @@ fn visit_entry(
         ));
     }
     if metadata.is_dir() {
-        visit_directory(root, &path, name, depth, selected_files, signals)
+        visit_directory(
+            root,
+            &path,
+            name,
+            depth,
+            selected_files,
+            signals,
+            project_files,
+        )
     } else if metadata.is_file() {
-        visit_file(root, &path, name, selected_files, signals)
+        visit_file(root, &path, name, selected_files, signals, project_files)
     } else {
         Err(error(
             StrictCollectorErrorCode::ReadFile,
@@ -222,6 +376,7 @@ fn visit_directory(
     depth: usize,
     selected_files: &mut Vec<PathBuf>,
     signals: &mut BTreeSet<String>,
+    project_files: &mut BTreeSet<String>,
 ) -> Result<(), StrictCollectorError> {
     if lexicon::should_skip_dir(name) || depth >= STRICT_DEPTH {
         return Ok(());
@@ -231,7 +386,14 @@ fn visit_directory(
         signals.insert(name.to_string());
     }
     signals.insert(format!("{}/", relative_path(root, &directory)?));
-    walk_paths(root, &directory, depth + 1, selected_files, signals)
+    walk_paths(
+        root,
+        &directory,
+        depth + 1,
+        selected_files,
+        signals,
+        project_files,
+    )
 }
 
 fn visit_file(
@@ -240,12 +402,15 @@ fn visit_file(
     name: &str,
     selected_files: &mut Vec<PathBuf>,
     signals: &mut BTreeSet<String>,
+    project_files: &mut BTreeSet<String>,
 ) -> Result<(), StrictCollectorError> {
     let file = canonical_file(root, path)?;
     if name.ends_with(".csproj") {
         selected_files.push(file.clone());
     }
-    signals.insert(relative_path(root, &file)?);
+    let relative = relative_path(root, &file)?;
+    signals.insert(relative.clone());
+    project_files.insert(relative);
     Ok(())
 }
 

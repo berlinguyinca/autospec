@@ -13,7 +13,10 @@ pub(super) fn validate_collector(
     collector: &StrictCollectorEvidence,
 ) -> Result<BTreeSet<EvidenceKey>, Tier2Failure> {
     if collector.schema_version != TIER2_SCHEMA
-        || collector.collector_version != "strict-local-v1"
+        || !matches!(
+            collector.collector_version.as_str(),
+            "strict-local-v1" | "strict-local-v2"
+        )
         || !bounded_text(&collector.collector_version, FIELD_SCALAR_LIMIT)
         || !bounded_text(&collector.canonical_repo_scope, FIELD_SCALAR_LIMIT)
     {
@@ -184,4 +187,33 @@ fn domain_before(left: &DetectedDomain, right: &DetectedDomain) -> bool {
 
 fn failure(stage: Tier2Stage, code: Tier2FailureCode, detail: impl Into<String>) -> Tier2Failure {
     Tier2Failure::initial(stage, code, detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::explore::specialists::{DetectedDomain, FileLineEvidence, StrictCollectorEvidence};
+
+    use super::validate_collector;
+
+    #[test]
+    fn collector_validation_accepts_legacy_and_general_evidence_versions() {
+        for version in ["strict-local-v1", "strict-local-v2"] {
+            let collector = StrictCollectorEvidence {
+                schema_version: 1,
+                collector_version: version.to_string(),
+                canonical_repo_scope: "/tmp/repository".to_string(),
+                domains: vec![DetectedDomain {
+                    name: "project-manifests".to_string(),
+                    score: 1,
+                    evidence: vec![FileLineEvidence {
+                        file: "package.json".to_string(),
+                        line: 1,
+                        r#match: "project manifest: package.json".to_string(),
+                    }],
+                }],
+            };
+
+            assert!(validate_collector(&collector).is_ok(), "{version}");
+        }
+    }
 }
