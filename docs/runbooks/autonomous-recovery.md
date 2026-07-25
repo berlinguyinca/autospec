@@ -94,4 +94,10 @@ successful empty verifier result before Tier 2 advances.
 
 Ranked Tier 2 survivors are local receipt evidence only. A separate publisher
 owns idempotent `auto-implement` issue creation, so generator or verifier
-children can never mutate GitHub or the worktree.
+children can never mutate GitHub or the worktree. The conductor publishes each
+survivor with `auto-implement` and `origin:self`, plus a repository-scoped
+publication marker derived from the proposal stable key. Recovery scans both
+open and closed issues: one matching marker with both publication labels is
+complete, no marker is retried, and a missing label or multiple matches fails
+closed. The Tier 2 cursor advances only after every marker from the sealed
+receipt is confirmed remotely.

@@ -17,7 +17,7 @@ use super::waterfall::{
 };
 
 const DISABLED_PRODUCER_VERSION: &str = "rust-tier2-disabled-policy-v1";
-const PRODUCER_VERSION: &str = "rust-tier2-local-receipts-v1";
+pub(super) const PRODUCER_VERSION: &str = "rust-tier2-local-receipts-v1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Tier2Progress {
@@ -43,6 +43,49 @@ pub(super) fn record_tier2_with_lease(
     scan: Tier2Scan,
 ) -> Result<Tier2Progress, String> {
     with_current_lifecycle_lease(lease, || record_tier2_fenced(state_root, repo, scan))
+}
+
+pub(super) fn acknowledge_tier2_publication_with_lease(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+) -> Result<Tier2Progress, String> {
+    with_current_lifecycle_lease(lease, || {
+        acknowledge_tier2_publication_fenced(state_root, repo)
+    })
+}
+
+fn acknowledge_tier2_publication_fenced(
+    state_root: &Path,
+    repo: &str,
+) -> Result<Tier2Progress, String> {
+    let store =
+        match WaterfallStore::acquire(state_root.join("waterfall"), repo).map_err(store_error)? {
+            StoreAcquisition::Acquired(store) => store,
+            StoreAcquisition::Held => return Ok(Tier2Progress::Pending),
+        };
+    let state = store
+        .load_state()
+        .map_err(store_error)?
+        .ok_or_else(|| "Tier 2 publication state is missing".to_string())?;
+    if state.current_tier() != NoWorkTier::Tier2 {
+        return Ok(Tier2Progress::Pending);
+    }
+    let receipt = store
+        .load_receipt(state.next_pass_id(), NoWorkTier::Tier2)
+        .map_err(store_error)?
+        .ok_or_else(|| "Tier 2 publication receipt is missing".to_string())?;
+    store
+        .verify_tier2_evidence(state.next_pass_id(), &receipt)
+        .map_err(store_error)?;
+    if receipt.producer_version() != PRODUCER_VERSION
+        || !matches!(receipt.status(), TierStatus::Produced { count } if *count > 0)
+    {
+        return Err("Tier 2 publisher cannot advance a non-produced receipt".to_string());
+    }
+    let advanced = state.record_receipt(&receipt)?;
+    store.persist_state(&advanced).map_err(store_error)?;
+    Ok(Tier2Progress::Advanced)
 }
 
 fn record_tier2_fenced(
@@ -420,6 +463,14 @@ pub(super) fn record_tier2(
     scan: Tier2Scan,
 ) -> Result<Tier2Progress, String> {
     record_tier2_fenced(state_root, repo, scan)
+}
+
+#[cfg(test)]
+pub(super) fn acknowledge_tier2_publication(
+    state_root: &Path,
+    repo: &str,
+) -> Result<Tier2Progress, String> {
+    acknowledge_tier2_publication_fenced(state_root, repo)
 }
 
 #[cfg(test)]

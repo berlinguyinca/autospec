@@ -162,7 +162,7 @@ fn foreground_dispatcher_inventory_is_recursive_and_closed() {
         ("record_tier2_with_lease", 1),
         ("record_tier3_with_lease", 1),
         ("record_tier4_with_lease", 1),
-        ("disabled_by_checked_in_policy", 3),
+        ("disabled_by_checked_in_policy", 2),
         ("with_current_lifecycle_lease", 2),
         ("acquire_with_policy", 1),
     ] {
@@ -175,6 +175,36 @@ fn foreground_dispatcher_inventory_is_recursive_and_closed() {
 }
 
 #[test]
+fn tier2_publisher_is_the_only_tier2_github_writer() {
+    let root = workspace_root().join("crates/autospec-cli/src/commands/autonomous");
+    let mut writers = Vec::new();
+    for entry in fs::read_dir(&root).expect("read autonomous source directory") {
+        let path = entry.expect("read autonomous source").path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("tier2")
+            || name.ends_with("_tests.rs")
+            || path.extension().and_then(|value| value.to_str()) != Some("rs")
+        {
+            continue;
+        }
+        let source = fs::read_to_string(&path).expect("read Tier 2 source");
+        let production = production_code(&source, &path.display().to_string());
+        if has_write_capable_github_argv(&production) {
+            writers.push(path);
+        }
+    }
+    writers.sort();
+    assert_eq!(writers, [root.join("tier2_publisher.rs")]);
+
+    let publisher = fs::read_to_string(&writers[0]).expect("read publisher");
+    assert!(!publisher.contains("\"PATCH\""));
+    assert!(!publisher.contains("\"DELETE\""));
+    assert!(!publisher.contains("\"PUT\""));
+}
+
+#[test]
 fn foreground_wiring_only_delegates_empty_repository_traversal() {
     let source = workspace_root().join("crates/autospec-cli/src/commands/autonomous.rs");
     let tokens = function_tokens(&source, "scan_foreground");
@@ -182,6 +212,13 @@ fn foreground_wiring_only_delegates_empty_repository_traversal() {
 
     assert_eq!(
         count_path(&tokens, &["foreground_waterfall", "::", "run_one_tier"]),
+        1
+    );
+    assert_eq!(
+        count_path(
+            &tokens,
+            &["tier2_publisher", "::", "publish_tier2_with_lease"]
+        ),
         1
     );
     assert_eq!(

@@ -58,6 +58,9 @@ mod tier15_receipts;
 // Tier 2 runs bounded evidence-only model children and persists sealed local receipts.
 #[allow(dead_code)]
 mod tier2;
+mod tier2_publisher;
+#[cfg(test)]
+mod tier2_publisher_tests;
 #[allow(dead_code)]
 mod tier2_receipts;
 mod tier2_runner;
@@ -2569,6 +2572,17 @@ fn scan_foreground(
                 policy,
                 waterfall_coordinator::Tier1QueueEvidence::EmptyPage(&initial_plan),
             )? {
+                foreground_waterfall::ForegroundWaterfallProgress::Produced {
+                    tier: NoWorkTier::Tier2,
+                    ..
+                } => {
+                    tier2_publisher::publish_tier2_with_lease(
+                        &layout.state_dir,
+                        &layout.repo,
+                        lease,
+                    )?;
+                    return Ok((state, false));
+                }
                 foreground_waterfall::ForegroundWaterfallProgress::Pending { .. }
                 | foreground_waterfall::ForegroundWaterfallProgress::Produced { .. }
                 | foreground_waterfall::ForegroundWaterfallProgress::Failed { .. }
