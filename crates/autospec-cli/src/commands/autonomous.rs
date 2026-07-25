@@ -617,10 +617,15 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--max-cycles" => {
                 index += 1;
-                options.max_cycles = args
+                let raw = args
                     .get(index)
                     .cloned()
                     .ok_or_else(|| "--max-cycles requires a value".to_string())?;
+                raw.parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| "--max-cycles must be a positive integer".to_string())?;
+                options.max_cycles = raw;
             }
             "--budget-tokens" => {
                 index += 1;
@@ -2129,6 +2134,8 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
     let inherited_lease = inherited_foreground_lease(&layout.repo)?;
+    let continuous =
+        inherited_lease.is_some() || (options.subcommand == "start" && options.foreground);
     let config = match load_autonomous_config(&options.repo_dir) {
         Ok(config) => config,
         Err(error) => {
@@ -2173,8 +2180,99 @@ fn run_foreground(options: Options) -> Result<(), CommandFailure> {
 
     let (lease, admission) =
         acquire_foreground_lease(&layout, &options, scope.clone(), inherited_lease)?;
-    let result = run_foreground_with_lease(&layout, &options, &config, scope, &lease, admission);
+    let result = run_foreground_cycles(
+        &layout, &options, &config, scope, &lease, admission, continuous,
+    );
     finish_foreground_with_lease(&layout.repo, &lease, result)
+}
+
+fn run_foreground_cycles(
+    layout: &RunLayout,
+    options: &Options,
+    config: &AutonomousConfig,
+    scope: RepositoryScope,
+    lease: &resilience::ConductorLease,
+    mut admission: resilience::ResilienceAdmission,
+    continuous: bool,
+) -> Result<ForegroundCompletion, ForegroundFailure> {
+    let cycle_limit = if options.max_cycles.is_empty() {
+        None
+    } else {
+        Some(
+            options
+                .max_cycles
+                .parse::<u64>()
+                .map_err(|_| CommandFailure::diagnostic("invalid --max-cycles value"))?,
+        )
+    };
+    let mut completed_cycles = 0u64;
+    loop {
+        let heartbeat = resilience::start_lifecycle_heartbeat(&layout.repo, lease)
+            .map_err(resilience_lease_error)?;
+        let cycle =
+            run_foreground_with_lease(layout, options, config, scope.clone(), lease, admission);
+        let heartbeat_result = heartbeat.finish().map_err(resilience_lease_error);
+        let completion = cycle?;
+        heartbeat_result?;
+        completed_cycles = completed_cycles.saturating_add(1);
+        let keep_running = continuous
+            && cycle_limit.is_none_or(|limit| completed_cycles < limit)
+            && matches!(
+                &completion,
+                ForegroundCompletion::State(state) if state.phase() == ConductorPhase::Scan
+            );
+        if !keep_running {
+            return Ok(completion);
+        }
+
+        if let ForegroundCompletion::State(state) = &completion {
+            println!("{}", state.to_json());
+            io::stdout().flush().map_err(|error| {
+                CommandFailure::diagnostic(format!("cannot flush foreground cycle output: {error}"))
+            })?;
+        }
+        resilience::renew_lifecycle(&layout.repo, lease).map_err(resilience_lease_error)?;
+        if let Some(lifecycle) = wait_for_next_foreground_cycle(layout, options, &scope, lease)? {
+            return Ok(ForegroundCompletion::Lifecycle(lifecycle));
+        }
+        admission = resilience_admission_for_issue(layout, options, options.issue, Some(lease))?;
+    }
+}
+
+fn wait_for_next_foreground_cycle(
+    layout: &RunLayout,
+    options: &Options,
+    scope: &RepositoryScope,
+    lease: &resilience::ConductorLease,
+) -> Result<Option<LifecycleDecision>, ForegroundFailure> {
+    const LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_secs(options.interval_sec);
+    let mut next_heartbeat = Instant::now() + LEASE_HEARTBEAT_INTERVAL;
+    loop {
+        if let Some(mode) = persisted_stop_mode(layout).map_err(CommandFailure::diagnostic)? {
+            let lifecycle = decide_lifecycle(
+                &LifecycleInput::from_scope(scope.clone())
+                    .with_transition(LifecycleTransition::Foreground)
+                    .with_stop(mode),
+            );
+            persist_foreground_lifecycle(layout, &lifecycle)?;
+            return Ok(Some(lifecycle));
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(None);
+        }
+        if now >= next_heartbeat {
+            resilience::renew_lifecycle(&layout.repo, lease).map_err(resilience_lease_error)?;
+            next_heartbeat = now + LEASE_HEARTBEAT_INTERVAL;
+        }
+        thread::sleep(
+            deadline
+                .saturating_duration_since(now)
+                .min(next_heartbeat.saturating_duration_since(now))
+                .min(Duration::from_secs(1)),
+        );
+    }
 }
 
 fn acquire_foreground_lease(
@@ -2620,6 +2718,9 @@ fn dispatch_foreground(
             &receipt.claim_step,
         )?;
         claim::reconcile_active_issue(&lease.repo, lease.issue)?;
+        state =
+            reconcile_successful_foreground_dispatch(state).map_err(CommandFailure::diagnostic)?;
+        persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
         let (next, scheduled) =
             schedule_foreground_retry(state).map_err(CommandFailure::diagnostic)?;
         state = next;
@@ -2629,6 +2730,15 @@ fn dispatch_foreground(
         }
         return Ok(ForegroundDispatchResult::State(Box::new(state)));
     }
+}
+
+fn reconcile_successful_foreground_dispatch(
+    state: ConductorState,
+) -> Result<ConductorState, String> {
+    if state.phase() != ConductorPhase::DispatchRecorded {
+        return Ok(state);
+    }
+    state.transition(ConductorEvent::Reconciled)
 }
 
 fn schedule_foreground_retry(state: ConductorState) -> Result<(ConductorState, bool), String> {
@@ -6233,6 +6343,32 @@ mod foreground_tests {
         assert!(!scheduled);
         assert_eq!(state.phase(), ConductorPhase::Paused);
         assert_eq!(state.pause_reason(), Some("retry_limit_exhausted"));
+    }
+
+    #[test]
+    fn successful_foreground_dispatch_reconciles_back_to_scan() {
+        let state = ConductorState::new("test/repo", ConductorScope::Repository, 3)
+            .expect("state")
+            .transition(ConductorEvent::ScanFoundWork)
+            .expect("scan")
+            .transition(ConductorEvent::SafetyReviewed)
+            .expect("review")
+            .transition(ConductorEvent::Selected {
+                issue: 42,
+                serialization_reasons: Vec::new(),
+            })
+            .expect("selected")
+            .transition(ConductorEvent::Claimed)
+            .expect("claimed")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Succeeded,
+            })
+            .expect("dispatch recorded");
+
+        let state = reconcile_successful_foreground_dispatch(state).expect("reconcile success");
+
+        assert_eq!(state.phase(), ConductorPhase::Scan);
+        assert_eq!(state.selected_issue(), None);
     }
 
     #[test]

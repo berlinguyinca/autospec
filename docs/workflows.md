@@ -77,6 +77,13 @@ authorizes autonomous discovery to stop permanently.
 The foreground CLI adapter persists this state under its repository-scoped
 autonomous directory in separate repository and exact-slice files, and does not
 delegate selection or dispatch to a script.
+Direct `autospec autonomous run-foreground` executes one bounded native cycle.
+`autospec autonomous start` and `restart` pass a fenced lifecycle lease to that
+Rust child, which retains the lease and repeats native cycles until a stop, park,
+failure, or optional `--max-cycles` boundary. It emits each completed cycle before
+waiting `--poll-interval-sec`, re-checks the scoped stop record during that wait,
+and re-runs spend/failure admission before dispatching the next cycle. Monitor and
+supervisor remain observers; neither owns conductor restart or waterfall work.
 Its bare Rust `executor-result --repo OWNER/REPO --issue N` child remains the
 exact successful deferred receipt: it makes no claim mutation and leaves the
 selected issue paused and claimed. It must not requeue or mark the issue complete

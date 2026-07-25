@@ -582,6 +582,125 @@ fn detached_start_survives_launcher_process_group_shutdown() {
 }
 
 #[test]
+fn detached_start_runs_multiple_native_cycles_then_exits_at_max_cycles() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "start",
+            "--repo-dir",
+            fixture.repo_dir.to_str().expect("repo directory"),
+            "--branch",
+            "main",
+            "--max-cycles",
+            "2",
+            "--poll-interval-sec",
+            "1",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("start bounded detached foreground");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let conductor_pid = fixture
+        .recorded_conductor_pid()
+        .expect("recorded conductor pid");
+    for _ in 0..400 {
+        if !process_is_running(conductor_pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(
+        !process_is_running(conductor_pid),
+        "bounded conductor {conductor_pid} did not exit after two cycles"
+    );
+    assert_eq!(
+        fixture.read_state().no_progress_cycles(),
+        2,
+        "a detached start must keep the Rust conductor alive across completed cycles"
+    );
+    assert!(
+        fs::read_to_string(fixture.resilience_state_path())
+            .expect("read released lifecycle state")
+            .contains("\"status\":\"released\""),
+        "a max-cycle exit must release lifecycle ownership"
+    );
+}
+
+#[test]
+fn detached_start_observes_stop_before_the_next_native_cycle() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let output = fixture
+        .configured_command()
+        .args([
+            "autonomous",
+            "start",
+            "--repo-dir",
+            fixture.repo_dir.to_str().expect("repo directory"),
+            "--branch",
+            "main",
+            "--max-cycles",
+            "3",
+            "--poll-interval-sec",
+            "5",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("start stoppable detached foreground");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let conductor_pid = fixture
+        .recorded_conductor_pid()
+        .expect("recorded conductor pid");
+    wait_for_file_contents(&fixture.state_path(), "\"no_progress_cycles\":1");
+    fs::write(
+        fixture.scoped_stop_sentinel(),
+        "graceful\n2026-07-25T00:00:00Z test@localhost\n",
+    )
+    .expect("write scoped stop sentinel");
+
+    for _ in 0..250 {
+        if !process_is_running(conductor_pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(
+        !process_is_running(conductor_pid),
+        "conductor {conductor_pid} did not stop at the next cycle boundary"
+    );
+    assert_eq!(
+        fixture.read_state().no_progress_cycles(),
+        1,
+        "the stop boundary must prevent a second cycle"
+    );
+    assert!(
+        fs::read_to_string(fixture.resilience_state_path())
+            .expect("read released lifecycle state")
+            .contains("\"status\":\"released\""),
+        "a stop exit must release lifecycle ownership"
+    );
+}
+
+#[test]
 fn session_follow_attaches_without_restarting_and_detaches_safely() {
     let fixture = ForegroundFixture::new();
     fixture.initialize_git_remote();
@@ -2647,6 +2766,13 @@ exit 1
         self.operator
             .join("test_repo")
             .join("foreground-conductor-repository.json")
+    }
+
+    fn resilience_state_path(&self) -> PathBuf {
+        self.state
+            .join("autonomous")
+            .join("test__repo")
+            .join("state.json")
     }
 
     fn slice_state_path(&self, issue_scope: &str) -> PathBuf {
