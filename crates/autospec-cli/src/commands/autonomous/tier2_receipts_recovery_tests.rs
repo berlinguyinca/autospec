@@ -6,12 +6,114 @@ use autospec_core::autonomous::waterfall::{
 };
 use autospec_core::explore::specialists::{StrictCollectorError, StrictCollectorErrorCode};
 
+use super::tier15_receipts::ReceiptPreflight;
 use super::tier2::{strict_collector_failure, Tier2Scan};
-use super::tier2_receipts::{record_tier2, Tier2Progress};
+use super::tier2_receipts::{record_tier2, replay_tier2, Tier2Progress};
 use super::tier2_receipts_tests::{
     observation, proposal, seed_tier_two_cursor, store, survives, TempRoot, REPO,
 };
 use super::waterfall::Tier2EvidenceArtifact;
+
+#[test]
+fn tier2_obsolete_policy_receipt_rotates_to_collection() {
+    let root = TempRoot::new();
+    seed_tier_two_cursor(&root);
+    assert_eq!(
+        record_tier2(root.path(), REPO, Tier2Scan::NotRun).expect("legacy disabled receipt"),
+        Tier2Progress::NotRun("tier2_local_discovery_disabled_by_policy".to_string())
+    );
+    let receipt_path = root.path().join("waterfall/waterfall/1/tier2.json");
+    let policy_path = root.path().join("waterfall/waterfall/1/tier2/policy.json");
+    assert!(receipt_path.exists());
+    assert!(policy_path.exists());
+
+    assert!(matches!(
+        replay_tier2(root.path(), REPO).expect("obsolete receipt rotation"),
+        ReceiptPreflight::NeedsCollection
+    ));
+    assert!(!receipt_path.exists());
+    assert!(!policy_path.exists());
+    assert_eq!(
+        store(&root)
+            .load_state()
+            .expect("state")
+            .expect("cursor")
+            .current_tier(),
+        NoWorkTier::Tier2
+    );
+}
+
+#[test]
+fn tier2_obsolete_policy_orphan_recovers_after_receipt_removal() {
+    let root = TempRoot::new();
+    seed_tier_two_cursor(&root);
+    record_tier2(root.path(), REPO, Tier2Scan::NotRun).expect("legacy disabled receipt");
+    fs::remove_file(root.path().join("waterfall/waterfall/1/tier2.json"))
+        .expect("simulate crash after receipt removal");
+
+    assert_eq!(
+        record_tier2(
+            root.path(),
+            REPO,
+            Tier2Scan::Complete(observation(Vec::new(), Vec::new()))
+        )
+        .expect("native collection replaces orphaned policy"),
+        Tier2Progress::Advanced
+    );
+    assert!(!root
+        .path()
+        .join("waterfall/waterfall/1/tier2/policy.json")
+        .exists());
+    assert!(root
+        .path()
+        .join("waterfall/waterfall/1/tier2/collector.json")
+        .exists());
+}
+
+#[test]
+fn tier2_unknown_disabled_producer_receipt_is_preserved() {
+    let root = TempRoot::new();
+    seed_tier_two_cursor(&root);
+    assert_eq!(
+        record_tier2(root.path(), REPO, Tier2Scan::NotRun).expect("disabled receipt"),
+        Tier2Progress::NotRun("tier2_local_discovery_disabled_by_policy".to_string())
+    );
+    let receipt_store = store(&root);
+    let prior = receipt_store
+        .load_receipt(1, NoWorkTier::Tier2)
+        .expect("receipt")
+        .expect("sealed receipt");
+    let unknown = TierReceipt::new(
+        REPO,
+        1,
+        NoWorkTier::Tier2,
+        "future-tier2-receipts-v2",
+        1,
+        1,
+        prior.status().clone(),
+        prior.funnel().clone(),
+        prior.evidence().to_vec(),
+    )
+    .expect("syntactically sealed receipt");
+    let receipt_path = receipt_store.receipt_path(&prior).expect("receipt path");
+    fs::write(&receipt_path, format!("{}\n", unknown.to_json())).expect("replace receipt");
+    drop(receipt_store);
+
+    assert!(replay_tier2(root.path(), REPO).is_err());
+    assert!(receipt_path.exists());
+    assert!(root
+        .path()
+        .join("waterfall/waterfall/1/tier2/policy.json")
+        .exists());
+    assert_eq!(
+        store(&root)
+            .load_state()
+            .expect("state")
+            .expect("cursor")
+            .current_tier(),
+        NoWorkTier::Tier2
+    );
+}
 
 #[test]
 fn tier2_replay_accepts_typed_exclusion_policy_receipts() {
