@@ -353,6 +353,13 @@ fn is_advancing_completed_receipt(receipt: &TierReceipt) -> bool {
     ) || matches!(
         (receipt.tier(), receipt.producer_version(), receipt.status()),
         (
+            NoWorkTier::Tier2,
+            "rust-tier2-local-receipts-v1",
+            TierStatus::Produced { count },
+        ) if *count > 0
+    ) || matches!(
+        (receipt.tier(), receipt.producer_version(), receipt.status()),
+        (
             NoWorkTier::Tier3,
             "rust-tier3-disabled-policy-v1",
             TierStatus::NotRun { reason },

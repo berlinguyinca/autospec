@@ -1,0 +1,472 @@
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use autospec_core::autonomous::no_work::NoWorkTier;
+use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus};
+use autospec_core::coordination::RemoteIssue;
+use autospec_core::lint::lint_issue_body;
+use serde_json::Value;
+
+use super::resilience::{with_current_lifecycle_lease, ConductorLease};
+use super::tier15;
+use super::tier2_receipts::{
+    acknowledge_tier2_publication_with_lease, Tier2Progress, PRODUCER_VERSION,
+};
+use super::waterfall::{StoreAcquisition, WaterfallStore, WaterfallStoreError};
+
+const MARKER_PREFIX: &str = "<!-- autospec:tier2-publication:v1:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct PublicationDraft {
+    pub stable_key: String,
+    pub title: String,
+    pub body: String,
+    pub labels: Vec<&'static str>,
+}
+
+#[derive(Debug)]
+struct ProposalDraft {
+    stable_key: String,
+    title: String,
+    target_path: String,
+}
+
+pub(super) fn publish_tier2_with_lease(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+) -> Result<Tier2Progress, String> {
+    let existing = with_current_lifecycle_lease(lease, || tier15::repository_issues(repo))?;
+    let drafts =
+        with_current_lifecycle_lease(lease, || publication_plan(state_root, repo, &existing))?;
+    if !drafts.is_empty() {
+        for label in required_labels(&drafts) {
+            with_current_lifecycle_lease(lease, || ensure_label(repo, label))?;
+        }
+        for draft in drafts {
+            with_current_lifecycle_lease(lease, || create_issue(repo, &draft))?;
+        }
+    }
+    let confirmed = with_current_lifecycle_lease(lease, || tier15::repository_issues(repo))?;
+    confirm_and_acknowledge(state_root, repo, lease, &confirmed)
+}
+
+pub(super) fn confirm_and_acknowledge(
+    state_root: &Path,
+    repo: &str,
+    lease: &ConductorLease,
+    confirmed: &[RemoteIssue],
+) -> Result<Tier2Progress, String> {
+    let remaining =
+        with_current_lifecycle_lease(lease, || publication_plan(state_root, repo, confirmed))?;
+    if !remaining.is_empty() {
+        return Err(format!(
+            "Tier 2 publication could not confirm {} stable-key markers",
+            remaining.len()
+        ));
+    }
+    acknowledge_tier2_publication_with_lease(state_root, repo, lease)
+}
+
+pub(super) fn publication_plan(
+    state_root: &Path,
+    repo: &str,
+    existing: &[RemoteIssue],
+) -> Result<Vec<PublicationDraft>, String> {
+    let (receipt, collector, ranked) = load_verified_documents(state_root, repo)?;
+    if !matches!(receipt.status(), TierStatus::Produced { count } if *count > 0) {
+        return Err("Tier 2 publisher requires a produced receipt".to_string());
+    }
+    let test_path = test_path_template(&collector)?;
+    let test_command = test_command(&collector);
+    let proposals = parse_ranked(&ranked)?;
+    if proposals.len() as u64 != receipt.funnel().ranked {
+        return Err("Tier 2 publication proposal count does not match receipt".to_string());
+    }
+    let mut drafts = Vec::new();
+    for proposal in proposals {
+        let marker = marker(repo, &proposal.stable_key);
+        let marked = existing
+            .iter()
+            .filter(|issue| issue.body.lines().any(|line| line == marker))
+            .collect::<Vec<_>>();
+        match marked.as_slice() {
+            [] => drafts.push(render_draft(
+                proposal,
+                marker,
+                &receipt,
+                &test_path,
+                &test_command,
+            )?),
+            [issue] => {
+                for required in ["origin:self", "auto-implement"] {
+                    if !issue.labels.iter().any(|label| label == required) {
+                        return Err(format!(
+                            "Tier 2 publication marker on issue {} is missing {required}",
+                            issue.number
+                        ));
+                    }
+                }
+            }
+            marked => {
+                return Err(format!(
+                    "Tier 2 publication marker occurs on {} issues; refusing ambiguous replay",
+                    marked.len()
+                ));
+            }
+        }
+    }
+    Ok(drafts)
+}
+
+fn load_verified_documents(
+    state_root: &Path,
+    repo: &str,
+) -> Result<(TierReceipt, String, String), String> {
+    let store =
+        match WaterfallStore::acquire(state_root.join("waterfall"), repo).map_err(store_error)? {
+            StoreAcquisition::Acquired(store) => store,
+            StoreAcquisition::Held => return Err("Tier 2 publication store is busy".to_string()),
+        };
+    let state = store
+        .load_state()
+        .map_err(store_error)?
+        .ok_or_else(|| "Tier 2 publication state is missing".to_string())?;
+    if state.current_tier() != NoWorkTier::Tier2 {
+        return Err("Tier 2 publication cursor is not at Tier 2".to_string());
+    }
+    let receipt = store
+        .load_receipt(state.next_pass_id(), NoWorkTier::Tier2)
+        .map_err(store_error)?
+        .ok_or_else(|| "Tier 2 publication receipt is missing".to_string())?;
+    store
+        .verify_tier2_evidence(state.next_pass_id(), &receipt)
+        .map_err(store_error)?;
+    if receipt.producer_version() != PRODUCER_VERSION {
+        return Err("Tier 2 publisher rejected an unknown producer".to_string());
+    }
+    let evidence_root = state_root.join("waterfall");
+    let collector = read_evidence(&evidence_root, &receipt, "collector.json")?;
+    let ranked = read_evidence(&evidence_root, &receipt, "roi-rank.json")?;
+    Ok((receipt, collector, ranked))
+}
+
+fn read_evidence(root: &Path, receipt: &TierReceipt, suffix: &str) -> Result<String, String> {
+    let evidence = receipt
+        .evidence()
+        .iter()
+        .find(|evidence| evidence.reference.ends_with(suffix))
+        .ok_or_else(|| format!("Tier 2 receipt is missing {suffix}"))?;
+    fs::read_to_string(root.join(&evidence.reference))
+        .map_err(|error| format!("cannot read Tier 2 {suffix}: {error}"))
+}
+
+fn parse_ranked(document: &str) -> Result<Vec<ProposalDraft>, String> {
+    let root: Value = serde_json::from_str(document)
+        .map_err(|error| format!("invalid Tier 2 rank JSON: {error}"))?;
+    let ranked = root
+        .get("ranked")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "Tier 2 rank document is missing ranked proposals".to_string())?;
+    let mut proposals = Vec::with_capacity(ranked.len());
+    for value in ranked {
+        let proposal = value
+            .get("proposal")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "Tier 2 ranked proposal is missing its proposal".to_string())?;
+        let stable_key = required_line(proposal.get("stable_key"), "stable_key")?;
+        if !valid_stable_key(&stable_key) {
+            return Err("Tier 2 proposal stable key is not kebab-case".to_string());
+        }
+        let title = required_line(proposal.get("title"), "title")?;
+        let target_path = proposal
+            .get("evidence")
+            .and_then(Value::as_array)
+            .and_then(|evidence| evidence.first())
+            .and_then(|evidence| evidence.get("file"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| "Tier 2 proposal is missing target evidence".to_string())?
+            .to_string();
+        if !safe_issue_path(&target_path) {
+            return Err("Tier 2 proposal target path is not safe to publish".to_string());
+        }
+        proposals.push(ProposalDraft {
+            stable_key,
+            title,
+            target_path,
+        });
+    }
+    Ok(proposals)
+}
+
+fn required_line(value: Option<&Value>, field: &str) -> Result<String, String> {
+    let value = value
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("Tier 2 proposal is missing {field}"))?;
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err(format!("Tier 2 proposal {field} is not one line"));
+    }
+    Ok(value.to_string())
+}
+
+fn valid_stable_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 60
+        && value.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
+fn safe_issue_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 240
+        && !value.starts_with('/')
+        && !value.contains(['`', '\\'])
+        && value
+            .split('/')
+            .all(|component| !component.is_empty() && !matches!(component, "." | ".."))
+}
+
+fn test_path_template(collector: &str) -> Result<(PathBuf, String), String> {
+    let root: Value = serde_json::from_str(collector)
+        .map_err(|error| format!("invalid Tier 2 collector JSON: {error}"))?;
+    if let Some(path) = domain_file(&root, "test-surface") {
+        let path = Path::new(path);
+        let parent = path.parent().unwrap_or_else(|| Path::new("tests"));
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("test");
+        return Ok((parent.to_path_buf(), extension.to_string()));
+    }
+    if domain_file(&root, "project-manifests") == Some("Cargo.toml")
+        || any_domain_file(&root, "Cargo.toml")
+    {
+        return Ok((PathBuf::from("tests"), "rs".to_string()));
+    }
+    Ok((PathBuf::from("tests"), "test".to_string()))
+}
+
+fn test_command(collector: &str) -> String {
+    let Ok(root) = serde_json::from_str::<Value>(collector) else {
+        return "git diff --check".to_string();
+    };
+    for (manifest, command) in [
+        ("package.json", "npm test"),
+        ("Cargo.toml", "cargo test"),
+        ("pom.xml", "mvn test"),
+        ("build.gradle", "./gradlew test"),
+        ("build.gradle.kts", "./gradlew test"),
+    ] {
+        if any_domain_file(&root, manifest) {
+            return command.to_string();
+        }
+    }
+    "git diff --check".to_string()
+}
+
+fn domain_file<'a>(root: &'a Value, domain_name: &str) -> Option<&'a str> {
+    root.get("domains")?
+        .as_array()?
+        .iter()
+        .find(|domain| domain.get("name").and_then(Value::as_str) == Some(domain_name))?
+        .get("evidence")?
+        .as_array()?
+        .first()?
+        .get("file")?
+        .as_str()
+}
+
+fn any_domain_file(root: &Value, expected: &str) -> bool {
+    root.get("domains")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .flat_map(|domain| {
+            domain
+                .get("evidence")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .any(|evidence| evidence.get("file").and_then(Value::as_str) == Some(expected))
+}
+
+fn marker(repo: &str, stable_key: &str) -> String {
+    let identity = format!("autospec-tier2-publication-v1\0{repo}\0{stable_key}");
+    format!("{MARKER_PREFIX}{} -->", sha256_hex(identity.as_bytes()))
+}
+
+fn render_draft(
+    proposal: ProposalDraft,
+    marker: String,
+    receipt: &TierReceipt,
+    test_template: &(PathBuf, String),
+    test_command: &str,
+) -> Result<PublicationDraft, String> {
+    let mut test_path = test_template
+        .0
+        .join(format!("{}.{}", proposal.stable_key, test_template.1))
+        .to_string_lossy()
+        .into_owned();
+    if test_path.len() > 80 || !safe_issue_path(&test_path) {
+        test_path = format!("tests/{}.test", proposal.stable_key);
+    }
+    let receipt_marker = format!(
+        "<!-- autospec:tier2-receipt:v1:{}:{} -->",
+        receipt.reference(),
+        receipt.digest()
+    );
+    let body = format!(
+        "{marker}\n{receipt_marker}\n\n## Goal\n\nImplement `{key}` for `{target}`.\n\n## Acceptance criteria\n\n- [ ] `{key}` has `1` passing behavior scenario.\n- [ ] `{test_path}` covers the verified proposal.\n- [ ] `{test_command}` exits with status `0`.\n\n## Files to read first\n\n- `{target}`\n\n## Implementation outline\n\n- Read `{target}` to preserve its current behavior contract.\n- Add `{test_path}` using the project test conventions.\n\n## Tests required\n\n- project-native behavior\n\n### Primary smoke test (inner loop)\n\n```bash\n{test_command}\n```\n\n## Files touched\n\n- `{target}`\n- `{test_path}`\n\n## Dependencies\n\nnone\n\n## Discovery evidence\n\n- Stable key: `{key}`\n- Source proposal: {title}\n",
+        key = proposal.stable_key,
+        target = proposal.target_path,
+        title = proposal.title,
+    );
+    let findings = lint_issue_body(&body);
+    if !findings.is_empty() {
+        let summary = findings
+            .iter()
+            .map(|finding| format!("{}: {}", finding.rule_id(), finding.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "Tier 2 proposal failed the issue-quality contract: {summary}"
+        ));
+    }
+    Ok(PublicationDraft {
+        stable_key: proposal.stable_key,
+        title: proposal.title,
+        body,
+        labels: vec![
+            "auto-implement",
+            "origin:self",
+            "ctx:32k",
+            "reasoning:medium",
+        ],
+    })
+}
+
+fn required_labels(drafts: &[PublicationDraft]) -> BTreeSet<&'static str> {
+    let mut labels = BTreeSet::new();
+    for draft in drafts {
+        labels.extend(draft.labels.iter().copied());
+    }
+    labels
+}
+
+fn ensure_label(repo: &str, label: &str) -> Result<(), String> {
+    let endpoint = format!("repos/{repo}/labels/{label}");
+    let read = run_gh(&["api", "--method", "GET", &endpoint])?;
+    if read.status.success() {
+        return Ok(());
+    }
+    let (color, description) = label_metadata(label);
+    let endpoint = format!("repos/{repo}/labels");
+    let name = format!("name={label}");
+    let color = format!("color={color}");
+    let description = format!("description={description}");
+    let create = run_gh(&[
+        "api",
+        "--method",
+        "POST",
+        &endpoint,
+        "-f",
+        &name,
+        "-f",
+        &color,
+        "-f",
+        &description,
+    ])?;
+    if create.status.success() {
+        return Ok(());
+    }
+    let confirm = run_gh(&[
+        "api",
+        "--method",
+        "GET",
+        &format!("repos/{repo}/labels/{label}"),
+    ])?;
+    if confirm.status.success() {
+        return Ok(());
+    }
+    require_success(&create, &format!("create label {label}"))
+}
+
+fn label_metadata(label: &str) -> (&'static str, &'static str) {
+    match label {
+        "auto-implement" => ("8250df", "Autospec autonomous implementation issue"),
+        "origin:self" => ("8250df", "Discovered from local autonomous analysis"),
+        "ctx:32k" => ("8250df", "Small-context implementation fit"),
+        "reasoning:medium" => ("8250df", "Medium reasoning implementation fit"),
+        _ => ("8250df", "Managed by Autospec"),
+    }
+}
+
+fn create_issue(repo: &str, draft: &PublicationDraft) -> Result<u64, String> {
+    let arguments = create_issue_arguments(repo, draft);
+    let output = Command::new("gh")
+        .args(&arguments)
+        .output()
+        .map_err(|error| format!("could not execute gh: {error}"))?;
+    require_success(&output, "create Tier 2 issue")?;
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|number| *number > 0)
+        .ok_or_else(|| "Tier 2 issue creation returned an invalid number".to_string())
+}
+
+pub(super) fn create_issue_arguments(repo: &str, draft: &PublicationDraft) -> Vec<String> {
+    let endpoint = format!("repos/{repo}/issues");
+    let title = format!("title={}", draft.title);
+    let body = format!("body={}", draft.body);
+    let mut arguments = vec![
+        "api".to_string(),
+        "--method".to_string(),
+        "POST".to_string(),
+        endpoint,
+        "-f".to_string(),
+        title,
+        "-f".to_string(),
+        body,
+    ];
+    for label in &draft.labels {
+        arguments.push("-f".to_string());
+        arguments.push(format!("labels[]={label}"));
+    }
+    arguments.push("--jq".to_string());
+    arguments.push(".number".to_string());
+    arguments
+}
+
+fn run_gh(args: &[&str]) -> Result<Output, String> {
+    Command::new("gh")
+        .args(args)
+        .output()
+        .map_err(|error| format!("could not execute gh: {error}"))
+}
+
+fn require_success(output: &Output, operation: &str) -> Result<(), String> {
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "{operation} failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim_end()
+    ))
+}
+
+fn store_error(error: WaterfallStoreError) -> String {
+    match error {
+        WaterfallStoreError::Diagnostic(reason)
+        | WaterfallStoreError::InvalidReceipt(reason)
+        | WaterfallStoreError::InvalidState(reason) => reason,
+    }
+}

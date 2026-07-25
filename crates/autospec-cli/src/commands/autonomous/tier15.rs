@@ -35,10 +35,10 @@ pub(super) enum Tier15Scan {
 }
 
 pub(super) fn scan(repo: &str, budget: usize) -> Tier15Scan {
-    if let Err(error) = validate_repo(repo) {
-        return Tier15Scan::Failed(error);
+    match repository_snapshot(repo) {
+        Ok((open, closed)) => observe_snapshot(open, closed, budget),
+        Err(error) => Tier15Scan::Failed(error),
     }
-    scan_with(budget, |state, page| fetch_page(repo, state, page))
 }
 
 pub(super) fn scan_with<F>(budget: usize, mut fetch_page: F) -> Tier15Scan
@@ -53,6 +53,35 @@ where
         Ok(issues) => issues,
         Err(error) => return Tier15Scan::Failed(error),
     };
+    observe_snapshot(open, closed, budget)
+}
+
+pub(super) fn repository_issues(repo: &str) -> Result<Vec<RemoteIssue>, String> {
+    let (mut open, closed) = repository_snapshot(repo)?;
+    open.extend(closed);
+    Ok(open)
+}
+
+fn repository_snapshot(repo: &str) -> Result<(Vec<RemoteIssue>, Vec<RemoteIssue>), String> {
+    validate_repo(repo)?;
+    let mut fetch = |state, page| fetch_page(repo, state, page);
+    let open = collect_snapshot(&mut fetch, IssueState::Open)?;
+    let closed = collect_snapshot(&mut fetch, IssueState::Closed)?;
+    validate_disjoint(&open, &closed)?;
+    Ok((open, closed))
+}
+
+fn observe_snapshot(open: Vec<RemoteIssue>, closed: Vec<RemoteIssue>, budget: usize) -> Tier15Scan {
+    if let Err(error) = validate_disjoint(&open, &closed) {
+        return Tier15Scan::Failed(error);
+    }
+    match observe_tier15(Tier15Input::new(open, closed, budget)) {
+        Ok(observation) => Tier15Scan::Complete(observation),
+        Err(error) => Tier15Scan::Failed(format!("tier1_5 observer failed: {error}")),
+    }
+}
+
+fn validate_disjoint(open: &[RemoteIssue], closed: &[RemoteIssue]) -> Result<(), String> {
     let open_numbers = open
         .iter()
         .map(|issue| issue.number)
@@ -61,15 +90,12 @@ where
         .iter()
         .find(|issue| open_numbers.contains(&issue.number))
     {
-        return Tier15Scan::Failed(format!(
+        return Err(format!(
             "tier1_5 open and closed snapshots overlap issue {}",
             issue.number
         ));
     }
-    match observe_tier15(Tier15Input::new(open, closed, budget)) {
-        Ok(observation) => Tier15Scan::Complete(observation),
-        Err(error) => Tier15Scan::Failed(format!("tier1_5 observer failed: {error}")),
-    }
+    Ok(())
 }
 
 fn collect_snapshot<F>(fetch_page: &mut F, state: IssueState) -> Result<Vec<RemoteIssue>, String>
