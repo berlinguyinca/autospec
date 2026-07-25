@@ -15,7 +15,7 @@ use autospec_core::autonomous::mainline_health::{
 };
 use autospec_core::autonomous::no_work::{NoWorkObservation, NoWorkState, NoWorkTier, TierOutcome};
 use autospec_core::autonomous::premerge::{PremergeDecisionKind, PremergeDecisionReceipt};
-use autospec_core::autonomous::waterfall::{TierReceipt, TierStatus, WaterfallState};
+use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus, WaterfallState};
 use autospec_core::autonomous_lifecycle::{
     decide as decide_lifecycle, Budget as LifecycleBudget, CapacityDecision, ClaimBranch,
     ClaimContext, ConductorLeaseDecision, Health as LifecycleHealth, IssueNumber, LeaseFreshness,
@@ -1151,19 +1151,12 @@ fn restart_after_lease(
     options: &Options,
     lifecycle: &LifecycleDecision,
     lease: &resilience::ConductorLease,
+    stopped: usize,
 ) -> Result<(usize, UnitRecord, UnitRecord, UnitRecord), CommandFailure> {
     let commands = launch_commands(options).map_err(CommandFailure::diagnostic)?;
     let foreground = foreground_command(options).map_err(CommandFailure::diagnostic)?;
     create_launch_directories(layout)?;
     persist_lifecycle_decision(layout, lifecycle).map_err(CommandFailure::diagnostic)?;
-    let mut stopped = 0;
-    for name in ["supervisor", "monitor", "conductor"] {
-        let unit = read_unit(name, layout);
-        if unit.running && terminate_pid(&unit.pid) {
-            stopped += 1;
-        }
-    }
-    wait_for_scope_stopped(layout);
     clear_stop_flag(layout).map_err(CommandFailure::diagnostic)?;
     write_launch_json(layout, options, &foreground, &commands)
         .map_err(CommandFailure::diagnostic)?;
@@ -1660,8 +1653,12 @@ fn stop(options: Options) -> Result<(), String> {
     };
     for name in units {
         let unit = read_unit(name, &layout);
-        if unit.running && terminate_pid(&unit.pid) {
+        let terminated = terminate_unit(name, &unit)?;
+        if terminated {
             stopped += 1;
+        }
+        if *name == "conductor" && (terminated || unit.metadata_state == UnitMetadataState::Stale) {
+            release_terminated_owner(&layout, &unit.pid)?;
         }
     }
     if options.json {
@@ -1688,10 +1685,26 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
     let stop_options = options.clone();
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
+    let mut stopped = 0;
+    let mut conductor_pid = None;
+    for name in ["supervisor", "monitor", "conductor"] {
+        let unit = read_unit(name, &layout);
+        let terminated = terminate_unit(name, &unit).map_err(CommandFailure::diagnostic)?;
+        if terminated {
+            stopped += 1;
+        }
+        if name == "conductor" && (terminated || unit.metadata_state == UnitMetadataState::Stale) {
+            conductor_pid = Some(unit.pid);
+        }
+    }
+    wait_for_scope_stopped(&layout);
+    if let Some(pid) = conductor_pid {
+        release_terminated_owner(&layout, &pid).map_err(CommandFailure::diagnostic)?;
+    }
     let (lifecycle, lease) =
         acquire_lifecycle_start(&layout, &options, LifecycleTransition::Restart)
             .map_err(LifecycleStartError::into_command_failure)?;
-    let launched = restart_after_lease(&layout, &options, &lifecycle, &lease);
+    let launched = restart_after_lease(&layout, &options, &lifecycle, &lease, stopped);
     let (stopped, conductor, monitor, supervisor) = match launched {
         Ok(units) => units,
         Err(error) => {
@@ -4024,9 +4037,17 @@ struct UnitStatus {
     stale_pid: bool,
     metadata_only: bool,
     metadata_state: UnitMetadataState,
+    recorded_identity: Option<ProcessIdentity>,
+    identity_mismatch: bool,
     pid_file: PathBuf,
     logpath: String,
     logpath_file: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessIdentity {
+    pgid: i32,
+    start_time_ticks: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4269,13 +4290,20 @@ fn spawn_unit(
         .spawn()
         .map_err(|error| format!("cannot spawn {name} command: {error}"))?;
     let pid = child.id().to_string();
+    let identity = process_identity(&pid).ok_or_else(|| {
+        let _ = child.kill();
+        let _ = child.wait();
+        format!("cannot verify {name} process identity for pid {pid}")
+    })?;
     let pid_file = layout.state_dir.join(format!("{name}.pid"));
     let logpath_file = layout.state_dir.join(format!("{name}.logpath"));
     let pid_metadata = format!(
-        "{{\"pid\":{},\"repo\":\"{}\",\"scope\":\"{}\"}}\n",
+        "{{\"pid\":{},\"repo\":\"{}\",\"scope\":\"{}\",\"pgid\":{},\"start_time_ticks\":{}}}\n",
         pid,
         json_escape(&layout.repo),
-        json_escape(&layout.scope)
+        json_escape(&layout.scope),
+        identity.pgid,
+        identity.start_time_ticks
     );
     if let Err(error) = fs::write(&pid_file, pid_metadata) {
         let _ = child.kill();
@@ -4346,7 +4374,7 @@ fn launch_units(
     ) {
         Ok(unit) => unit,
         Err(error) => {
-            let _ = terminate_pid(&conductor.pid);
+            let _ = terminate_process_group(&conductor.pid);
             return Err(CommandFailure::diagnostic(error));
         }
     };
@@ -4361,8 +4389,8 @@ fn launch_units(
     ) {
         Ok(unit) => unit,
         Err(error) => {
-            let _ = terminate_pid(&monitor.pid);
-            let _ = terminate_pid(&conductor.pid);
+            let _ = terminate_process_group(&monitor.pid);
+            let _ = terminate_process_group(&conductor.pid);
             return Err(CommandFailure::diagnostic(error));
         }
     };
@@ -4389,8 +4417,8 @@ fn prepare_start_scope(layout: &RunLayout, options: &Options) -> Result<(), Stri
             layout.repo
         ));
     }
-    for (_, unit) in live_units {
-        let _ = terminate_pid(&unit.pid);
+    for (name, unit) in live_units {
+        terminate_unit(name, &unit)?;
     }
     wait_for_scope_stopped(layout);
     Ok(())
@@ -4502,11 +4530,18 @@ fn read_unit(name: &str, layout: &RunLayout) -> UnitStatus {
     let raw_pid = fs::read_to_string(&pid_file).unwrap_or_default();
     let raw_pid = raw_pid.trim();
     let pid = metadata_pid(raw_pid).unwrap_or_else(|| raw_pid.to_string());
+    let recorded_identity = metadata_process_identity(raw_pid);
+    let current_identity = process_identity(&pid);
+    let identity_mismatch = recorded_identity
+        .zip(current_identity)
+        .is_some_and(|(recorded, current)| recorded != current);
     let logpath = fs::read_to_string(&logpath_file)
         .unwrap_or_default()
         .trim()
         .to_string();
-    let metadata_state = if raw_pid.is_empty() {
+    let metadata_state = if identity_mismatch {
+        UnitMetadataState::Ambiguous
+    } else if raw_pid.is_empty() {
         if logpath.is_empty() {
             UnitMetadataState::Absent
         } else {
@@ -4523,6 +4558,8 @@ fn read_unit(name: &str, layout: &RunLayout) -> UnitStatus {
         stale_pid,
         metadata_only,
         metadata_state,
+        recorded_identity,
+        identity_mismatch,
         pid,
         pid_file,
         logpath,
@@ -4587,6 +4624,18 @@ fn metadata_pid(raw: &str) -> Option<String> {
     extract_json_number(raw, "pid").filter(|pid| pid.parse::<i32>().is_ok_and(|pid| pid > 0))
 }
 
+fn metadata_process_identity(raw: &str) -> Option<ProcessIdentity> {
+    let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    let metadata = value.as_object()?;
+    let pgid = metadata.get("pgid")?.as_i64()?;
+    let start_time_ticks = metadata.get("start_time_ticks")?.as_u64()?;
+    let pgid = i32::try_from(pgid).ok().filter(|pgid| *pgid > 0)?;
+    (start_time_ticks > 0).then_some(ProcessIdentity {
+        pgid,
+        start_time_ticks,
+    })
+}
+
 fn classify_unit_metadata(
     raw: &str,
     expected_repo: &str,
@@ -4611,11 +4660,21 @@ fn structured_unit_metadata_matches(raw: &str, expected_repo: &str, expected_sco
     let Some(metadata) = value.as_object() else {
         return false;
     };
+    let pid = metadata
+        .get("pid")
+        .and_then(serde_json::Value::as_i64)
+        .filter(|pid| *pid > 0 && *pid <= i64::from(i32::MAX));
+    let identity_valid = match (metadata.get("pgid"), metadata.get("start_time_ticks"), pid) {
+        (None, None, Some(_)) => true,
+        (Some(pgid), Some(start_time), Some(pid)) => {
+            pgid.as_i64() == Some(pid)
+                && start_time.as_u64().is_some_and(|start_time| start_time > 0)
+        }
+        _ => false,
+    };
     json_object_keys_are_unique(raw)
-        && metadata
-            .get("pid")
-            .and_then(serde_json::Value::as_i64)
-            .is_some_and(|pid| pid > 0 && pid <= i64::from(i32::MAX))
+        && pid.is_some()
+        && identity_valid
         && metadata.get("repo").and_then(serde_json::Value::as_str) == Some(expected_repo)
         && metadata.get("scope").and_then(serde_json::Value::as_str) == Some(expected_scope)
 }
@@ -4700,6 +4759,179 @@ fn process_alive(pid: &str) -> bool {
     probe_process(pid) == ProcessProbe::Alive
 }
 
+fn terminate_unit(name: &str, unit: &UnitStatus) -> Result<bool, String> {
+    if unit.identity_mismatch {
+        return Err(format!(
+            "refusing to terminate {name} pid {}: process identity mismatch",
+            unit.pid
+        ));
+    }
+    let group_alive = unit
+        .pid
+        .parse::<i32>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .is_some_and(process_group_alive);
+    match unit.metadata_state {
+        UnitMetadataState::Absent => Ok(false),
+        UnitMetadataState::Stale if !group_alive => Ok(false),
+        UnitMetadataState::Ambiguous => Err(format!(
+            "refusing to terminate {name}: ambiguous scoped process metadata"
+        )),
+        UnitMetadataState::Live | UnitMetadataState::Stale => {
+            let owned = unit
+                .recorded_identity
+                .is_some_and(|identity| identity.pgid.to_string() == unit.pid && group_alive)
+                || (unit.recorded_identity.is_none()
+                    && legacy_process_group_matches(name, &unit.pid));
+            if !owned {
+                return Err(format!(
+                    "refusing to terminate {name} pid {}: process group ownership is unverified",
+                    unit.pid
+                ));
+            }
+            Ok(terminate_process_group(&unit.pid))
+        }
+    }
+}
+
+fn process_identity(pid: &str) -> Option<ProcessIdentity> {
+    #[cfg(target_os = "linux")]
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        let (_, fields) = stat.rsplit_once(") ")?;
+        let fields = fields.split_whitespace().collect::<Vec<_>>();
+        return Some(ProcessIdentity {
+            pgid: fields.get(2)?.parse().ok()?,
+            start_time_ticks: fields.get(19)?.parse().ok()?,
+        });
+    }
+
+    let output = Command::new("ps")
+        .args(["-o", "pgid=,lstart=", "-p", pid])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let line = String::from_utf8(output.stdout).ok()?;
+    let mut fields = line.split_whitespace();
+    let pgid = fields.next()?.parse().ok()?;
+    let started = fields.collect::<Vec<_>>().join(" ");
+    let digest = sha256_hex(started.as_bytes());
+    Some(ProcessIdentity {
+        pgid,
+        start_time_ticks: u64::from_str_radix(digest.get(..16)?, 16).ok()?,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn legacy_process_group_matches(name: &str, pid: &str) -> bool {
+    let Ok(expected_pgid) = pid.parse::<i32>() else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let member_pid = entry.file_name().to_string_lossy().to_string();
+        process_identity(&member_pid).is_some_and(|identity| identity.pgid == expected_pgid)
+            && read_process_argv(&entry.path().join("cmdline"))
+                .is_some_and(|argv| legacy_unit_argv_matches(name, &argv))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn read_process_argv(path: &Path) -> Option<Vec<String>> {
+    Some(
+        fs::read(path)?
+            .split(|byte| *byte == 0)
+            .filter(|argument| !argument.is_empty())
+            .map(|argument| String::from_utf8_lossy(argument).to_string())
+            .collect(),
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn legacy_process_group_matches(name: &str, pid: &str) -> bool {
+    let Ok(expected_pgid) = pid.parse::<i32>() else {
+        return false;
+    };
+    let Ok(output) = Command::new("ps").args(["-eo", "pgid=,args="]).output() else {
+        return false;
+    };
+    output.status.success()
+        && String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+            let mut fields = line.split_whitespace();
+            fields.next().and_then(|value| value.parse::<i32>().ok()) == Some(expected_pgid)
+                && legacy_unit_argv_matches(name, &fields.map(str::to_string).collect::<Vec<_>>())
+        })
+}
+
+fn legacy_unit_argv_matches(name: &str, argv: &[String]) -> bool {
+    let autospec_program = argv.iter().any(|argument| {
+        Path::new(argument)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| matches!(value, "autospec" | "autospec-autonomous.sh"))
+    });
+    if !autospec_program {
+        return false;
+    }
+    let has_argument = |expected: &str| argv.iter().any(|argument| argument == expected);
+    match name {
+        "conductor" => has_argument("run-foreground"),
+        "monitor" => has_argument("monitor"),
+        "supervisor" => has_argument("supervise") || has_argument("supervisor"),
+        _ => false,
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process_group(pid: &str) -> bool {
+    let Some(pid) = pid.parse::<i32>().ok().filter(|pid| *pid > 0) else {
+        return false;
+    };
+    let process_group = Pid::from_raw(pid);
+    match killpg(process_group, Signal::SIGTERM) {
+        Ok(()) => {}
+        Err(Errno::ESRCH) => return terminate_pid(&pid.to_string()),
+        Err(_) => return false,
+    }
+    for _ in 0..20 {
+        if !process_group_alive(pid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let _ = killpg(process_group, Signal::SIGKILL);
+    for _ in 0..20 {
+        if !process_group_alive(pid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    !process_alive(&pid.to_string())
+}
+
+#[cfg(unix)]
+fn process_group_alive(pid: i32) -> bool {
+    match kill(Pid::from_raw(-pid), None) {
+        Ok(()) => true,
+        Err(Errno::ESRCH) => false,
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(unix))]
+fn process_group_alive(pid: i32) -> bool {
+    process_alive(&pid.to_string())
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(pid: &str) -> bool {
+    terminate_pid(pid)
+}
+
 fn terminate_pid(pid: &str) -> bool {
     if pid.is_empty() {
         return false;
@@ -4712,6 +4944,35 @@ fn terminate_pid(pid: &str) -> bool {
         thread::sleep(Duration::from_millis(25));
     }
     false
+}
+
+fn release_terminated_owner(layout: &RunLayout, pid: &str) -> Result<(), String> {
+    let pid = pid
+        .parse::<u32>()
+        .map_err(|_| format!("cannot release invalid conductor pid {pid}"))?;
+    resilience::release_terminated_lifecycle_owner(&layout.repo, pid)
+        .and_then(|outcome| match outcome {
+            resilience::TerminatedOwnerRelease::Released
+            | resilience::TerminatedOwnerRelease::Absent => Ok(()),
+            resilience::TerminatedOwnerRelease::OwnerMismatch => {
+                Err(resilience::LifecycleLeaseError::TokenMismatch)
+            }
+        })
+        .map_err(|error| match error {
+            resilience::LifecycleLeaseError::Reject(reason) => {
+                format!("cannot release terminated conductor lease: {reason}")
+            }
+            resilience::LifecycleLeaseError::Diagnostic(message) => message,
+            resilience::LifecycleLeaseError::Held => {
+                format!("cannot release conductor lease while pid {pid} is alive")
+            }
+            resilience::LifecycleLeaseError::TokenMismatch => {
+                "cannot release terminated conductor lease: token mismatch".to_string()
+            }
+            resilience::LifecycleLeaseError::Policy(_) => {
+                "cannot release terminated conductor lease: policy rejected".to_string()
+            }
+        })
 }
 
 fn wait_for_scope_stopped(layout: &RunLayout) {
@@ -6202,6 +6463,8 @@ mod autonomous_metadata_tests {
                 stale_pid: state == UnitMetadataState::Stale,
                 metadata_only: state != UnitMetadataState::Live,
                 metadata_state: state,
+                recorded_identity: None,
+                identity_mismatch: false,
                 pid_file: pid_file.clone(),
                 logpath: "log".to_string(),
                 logpath_file: logpath_file.clone(),
