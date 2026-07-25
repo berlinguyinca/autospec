@@ -100,6 +100,7 @@ fn nonempty_tier4_config_remains_disabled_production_data() {
     let progress = run_one_tier(
         root.path(),
         REPO,
+        root.path(),
         &lease,
         &config,
         &policy,
@@ -134,6 +135,7 @@ fn waterfall_lock_contention_is_pending_and_never_blocked() {
     let progress = run_one_tier(
         root.path(),
         REPO,
+        root.path(),
         &lease,
         &config,
         &policy,
@@ -163,6 +165,7 @@ fn stale_lease_cannot_probe_or_create_waterfall_state() {
     let error = run_one_tier(
         operator_root.path(),
         REPO,
+        operator_root.path(),
         &lease,
         &config,
         &policy,

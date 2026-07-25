@@ -74,3 +74,24 @@ verifier; no candidate is filed without an explicit survivor verdict.
 If a skeptic returns successfully but emits no recoverable verdict JSON, the
 bridge applies the same deterministic evidence fallback used for timed-out
 skeptics instead of discarding the entire discovery cycle.
+
+## Native Tier 2 discovery
+
+The Rust foreground conductor runs Tier 2 after a completed empty Tier 1.5
+scan. It collects bounded repository-local evidence before launching separate
+generator and verifier model children. Each child receives only serialized
+evidence in one argument, runs in an isolated scratch directory, has no GitHub
+mutation authority, and is killed with its process group after 120 seconds.
+
+Codex runs with a read-only ephemeral sandbox and Claude runs in plan mode with
+no tools. OpenCode fails closed because its pure mode still permits built-in
+mutation tools; native Tier 2 must not run there until a no-tools mode is
+proven. Child output is written to a private file, capped while the child is
+live, and removed on every exit path. Invalid JSON, non-zero exits, missing
+binaries, oversized output, and timeouts produce sealed failure receipts; they
+are not clean dry outcomes. Successful empty generation still requires a
+successful empty verifier result before Tier 2 advances.
+
+Ranked Tier 2 survivors are local receipt evidence only. A separate publisher
+owns idempotent `auto-implement` issue creation, so generator or verifier
+children can never mutate GitHub or the worktree.

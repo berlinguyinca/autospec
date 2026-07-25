@@ -38,6 +38,14 @@ pub fn evaluate_tier2_with_policy(
         .map_err(|failure| failure.with_exclusion_report(report))
 }
 
+/// Returns the stable keys that require verifier coverage after deterministic
+/// Tier 2 deduplication.
+pub fn tier2_verifier_candidate_keys(
+    proposals: &[Tier2Proposal],
+) -> Result<Vec<String>, Tier2Failure> {
+    funnel::verifier_candidate_keys(proposals)
+}
+
 fn apply_exclusions(
     input: Tier2Input,
     policy: &Tier2ExclusionPolicy,

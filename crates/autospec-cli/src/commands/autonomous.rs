@@ -55,11 +55,14 @@ mod tier15;
 // Tier 1.5 is read-only foreground discovery; retained receipts replay before collection.
 #[allow(dead_code)]
 mod tier15_receipts;
-// Tier 2 participates in foreground traversal but remains disabled by checked-in policy.
+// Tier 2 runs bounded evidence-only model children and persists sealed local receipts.
 #[allow(dead_code)]
 mod tier2;
 #[allow(dead_code)]
 mod tier2_receipts;
+mod tier2_runner;
+#[cfg(test)]
+mod tier2_runner_tests;
 // Tier 3 remains disabled in production until a typed metadata package exists.
 #[cfg(test)]
 mod tier2_receipts_failure_prefix_tests;
@@ -2426,6 +2429,7 @@ fn run_foreground_with_lease(
         .map_err(CommandFailure::diagnostic)?;
     let (state, found_work) = scan_foreground(
         layout,
+        Path::new(&options.repo_dir),
         lease,
         config,
         &waterfall_policy,
@@ -2525,6 +2529,7 @@ enum ForegroundDispatchResult {
 
 fn scan_foreground(
     layout: &RunLayout,
+    repo_dir: &Path,
     lease: &resilience::ConductorLease,
     config: &AutonomousConfig,
     policy: &waterfall_policy::WaterfallPolicy,
@@ -2558,6 +2563,7 @@ fn scan_foreground(
             match foreground_waterfall::run_one_tier(
                 &layout.state_dir,
                 &layout.repo,
+                repo_dir,
                 lease,
                 config,
                 policy,
