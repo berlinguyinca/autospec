@@ -287,9 +287,23 @@ for src in $SOURCES; do
         continue
     fi
     (
-        run_researcher_bounded "$script" "$work_dir/$src.json" "$work_dir/$src.err" \
-            || echo '{"source":"'"$src"'","proposals":[],"error":"researcher_failed"}' \
-                 > "$work_dir/$src.json"
+        if run_researcher_bounded "$script" "$work_dir/$src.json" "$work_dir/$src.err"; then
+            :
+        else
+            _rc=$?
+            _reason="researcher_failed"
+            [ "$_rc" -eq 124 ] && _reason="timeout"
+            SRC="$src" RC="$_rc" REASON="$_reason" python3 - \
+                > "$work_dir/$src.json" <<'PY'
+import json, os
+print(json.dumps({
+    "source": os.environ["SRC"],
+    "proposals": [],
+    "error": os.environ["REASON"],
+    "exit_code": int(os.environ["RC"]),
+}))
+PY
+        fi
     ) &
     pids+=("$!")
 done
@@ -402,6 +416,93 @@ PY
 fi
 fi  # end: STAGE != finalize (researcher + specialist dispatch)
 
+# Preserve discovery-health evidence independently of proposal ranking. A
+# completed empty researcher is healthy; a missing, timed-out, non-zero, or
+# malformed researcher is not. Finalize carries the health from its dedup input
+# rather than pretending it reran the sources.
+if [ "$STAGE" = "finalize" ]; then
+    RESEARCH_HEALTH_JSON="$(python3 - "$DEDUPED_IN" <<'PY'
+import json, sys
+invalid = {
+    "selected": 0,
+    "succeeded": 0,
+    "failures": [{"source": "research-cycle", "reason": "invalid_output", "exit_code": 1}],
+}
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    health = data.get("researcher_health")
+except Exception:
+    health = None
+if not isinstance(health, dict):
+    health = invalid
+else:
+    selected = health.get("selected")
+    succeeded = health.get("succeeded")
+    failures = health.get("failures")
+    if (
+        not isinstance(selected, int)
+        or isinstance(selected, bool)
+        or not isinstance(succeeded, int)
+        or isinstance(succeeded, bool)
+        or not isinstance(failures, list)
+    ):
+        health = invalid
+print(json.dumps(health, separators=(",", ":")))
+PY
+)"
+else
+    RESEARCH_HEALTH_JSON="$(WORK_DIR="$work_dir" python3 - <<'PY'
+import glob, json, os
+
+selected = 0
+succeeded = 0
+failures = []
+for path in sorted(glob.glob(os.path.join(os.environ["WORK_DIR"], "*.json"))):
+    selected += 1
+    fallback = os.path.basename(path).removesuffix(".json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            result = json.load(handle)
+        if not isinstance(result, dict):
+            raise ValueError("result is not an object")
+        source_value = result.get("source")
+        if not isinstance(source_value, str) or not source_value.strip():
+            raise ValueError("source is missing")
+        if not isinstance(result.get("proposals"), list):
+            raise ValueError("proposals is not an array")
+    except Exception:
+        failures.append({"source": fallback, "reason": "invalid_output", "exit_code": 1})
+        continue
+    source = source_value.strip()
+    reason = str(result.get("error") or "").strip()
+    if reason:
+        raw_exit_code = result.get("exit_code", 0)
+        try:
+            exit_code = int(raw_exit_code)
+        except (TypeError, ValueError):
+            failures.append({
+                "source": source,
+                "reason": "invalid_output",
+                "exit_code": 1,
+            })
+            continue
+        failures.append({
+            "source": source,
+            "reason": reason,
+            "exit_code": exit_code,
+        })
+    else:
+        succeeded += 1
+print(json.dumps({
+    "selected": selected,
+    "succeeded": succeeded,
+    "failures": failures,
+}, separators=(",", ":")))
+PY
+)"
+fi
+export RESEARCH_HEALTH_JSON
+
 # Gather recent titles (last 7 days) to filter against. Allow injection.
 recent_titles_file="$work_dir/recent.txt"
 if [ -n "${AUTOSPEC_TEST_RECENT_TITLES:-}" ]; then
@@ -461,6 +562,10 @@ cap      = int(os.environ["MAX_ISSUES"])
 recent_f = os.environ["RECENT_FILE"]
 stage    = os.environ.get("STAGE", "full")
 deduped_in = os.environ.get("DEDUPED_IN", "").strip()
+try:
+    researcher_health = json.loads(os.environ.get("RESEARCH_HEALTH_JSON", "{}"))
+except Exception:
+    researcher_health = {}
 # Repo root for gap-confirmation file resolution — explicit, never cwd-dependent.
 gap_repo_root = os.environ.get("GAP_REPO_ROOT", "") or os.getcwd()
 track_caps_raw = os.environ.get("TRACK_CAPS", "").strip()
@@ -840,6 +945,7 @@ if stage == "dedup":
         "gap_unconfirmed_dropped": gap_dropped,
         "gap_check_malformed": gap_malformed,
         "saturated_sources": saturated_sources,
+        "researcher_health": researcher_health,
         "deduped": deduped,
     }
     print(json.dumps(out, indent=2))
@@ -1176,6 +1282,7 @@ out = {
     "track_counts": track_counts,
     "track_selected_counts": track_selected_counts,
     "track_priority": ordered_tracks,
+    "researcher_health": researcher_health,
     "proposals": final,
 }
 print(json.dumps(out, indent=2))
@@ -1196,6 +1303,15 @@ fi
 # Attach the deterministic classification to each proposal and the aggregate.
 jq --arg repo_class "$REPO_CLASS" '(.repo_class=$repo_class | .proposals |= map(.repo_class=$repo_class))' "${OUT:-$work_dir/final.json}" > "$work_dir/classified.json" 2>/dev/null && mv "$work_dir/classified.json" "${OUT:-$work_dir/final.json}" || true
 if [ -z "$OUT" ]; then cat "$work_dir/final.json"; fi
+
+researcher_failures="$(jq -r '.researcher_health.failures | length' \
+    "${OUT:-$work_dir/final.json}" 2>/dev/null || printf '1')"
+case "$researcher_failures" in ''|*[!0-9]*) researcher_failures=1 ;; esac
+if [ "$researcher_failures" -gt 0 ]; then
+    printf 'explore-research-cycle: %s configured researcher(s) did not complete\n' \
+        "$researcher_failures" >&2
+    exit 4
+fi
 
 # Persist an org-scoped learning report after a completed sweep. The directory
 # is deliberately below the repository state root so separate repositories and

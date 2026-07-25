@@ -86,3 +86,61 @@ for p in d["proposals"]:
     [[ "$output" == *"dependency-health"* ]]
     [[ "$output" == *"\"proposals\": []"* || "$output" == *'"proposals":[]'* ]]
 }
+
+@test "dependency-health resolves npm 10 current version from package-lock" {
+    cat > package.json <<'EOF'
+{"dependencies":{"next":"^16.2.0"}}
+EOF
+    cat > package-lock.json <<'EOF'
+{"lockfileVersion":3,"packages":{"node_modules/next":{"version":"16.2.10"}}}
+EOF
+    cat > "$TMP/npm-outdated.json" <<'EOF'
+{"next":{"wanted":"16.2.11","latest":"16.2.11","dependent":"repo"}}
+EOF
+
+    run env AUTOSPEC_REPO_ROOT="$PWD" \
+      AUTOSPEC_TEST_NPM_OUTDATED="$TMP/npm-outdated.json" \
+      bash "$REPO_ROOT/scripts/explore-research/dependency-health.sh"
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.proposals[0].title')" = \
+      "chore(deps): bump next 16.2.10 → 16.2.11" ]
+    [ "$(printf '%s' "$output" | jq -r '.proposals[0].evidence')" = \
+      "npm outdated reports next current=16.2.10 latest=16.2.11" ]
+}
+
+@test "dependency-health resolves an exact installed npm version from node_modules" {
+    cat > package.json <<'EOF'
+{"dependencies":{"next":"^16.2.0"}}
+EOF
+    mkdir -p node_modules/next
+    printf '%s\n' '{"name":"next","version":"16.2.10"}' > node_modules/next/package.json
+    cat > "$TMP/npm-outdated.json" <<'EOF'
+{"next":{"wanted":"16.2.11","latest":"16.2.11","dependent":"repo"}}
+EOF
+
+    run env AUTOSPEC_REPO_ROOT="$PWD" \
+      AUTOSPEC_TEST_NPM_OUTDATED="$TMP/npm-outdated.json" \
+      bash "$REPO_ROOT/scripts/explore-research/dependency-health.sh"
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.proposals[0].title')" = \
+      "chore(deps): bump next 16.2.10 → 16.2.11" ]
+}
+
+@test "dependency-health never reports an npm declaration range as installed" {
+    cat > package.json <<'EOF'
+{"dependencies":{"next":"^16.2.0"}}
+EOF
+    cat > "$TMP/npm-outdated.json" <<'EOF'
+{"next":{"wanted":"16.2.11","latest":"16.2.11","dependent":"repo"}}
+EOF
+
+    run env AUTOSPEC_REPO_ROOT="$PWD" \
+      AUTOSPEC_TEST_NPM_OUTDATED="$TMP/npm-outdated.json" \
+      bash "$REPO_ROOT/scripts/explore-research/dependency-health.sh"
+
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq '.proposals | length')" -eq 0 ]
+    [[ "$output" != *'^16.2.0'* ]]
+}

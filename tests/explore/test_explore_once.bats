@@ -112,10 +112,27 @@ MEOF
     echo "bash $mock"
 }
 
+@test "--once reports verifier failure as incomplete discovery" {
+    cat > "$AUTOSPEC_RESEARCH_DIR/spec-vs-code.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"source":"spec-vs-code","proposals":[]}'
+EOF
+    chmod +x "$AUTOSPEC_RESEARCH_DIR/spec-vs-code.sh"
+    export AUTOSPEC_EXPLORE_VERIFY_CMD=false
+
+    run bash "$REPO_ROOT/scripts/autospec-explore.sh" \
+        --once --research-sources spec-vs-code
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *'"dry":false'* ]]
+    [[ "$output" == *'"reason":"research-incomplete"'* ]]
+}
+
 @test "--once emits valid JSON with all 6 required keys" {
     local proposals='[{"title":"feat: widget","evidence":"e","estimated_complexity":"small","confidence":0.9,"source":"spec-vs-code","severity":"feature","named_consumer":"test"}]'
     local cycle_cmd
     cycle_cmd="$(make_cycle_cmd 1 "$proposals")"
+    export AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD="$cycle_cmd"
 
     run bash "$REPO_ROOT/scripts/autospec-explore.sh" "test prompt" \
         --once \

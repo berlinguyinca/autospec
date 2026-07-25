@@ -159,17 +159,23 @@ if [ -z "$PROMPT" ]; then
         # generic repo-discovery seed instead of hard-failing (issue #1625).
         PROMPT="Discover the highest-value defects and improvements in this repository."
     elif [ -n "${AUTOSPEC_EXPLORE_VERIFY_CMD:-}" ]; then
+        _once_preflight_rc=0
         _once_dedup="$_once_dir/dedup.json"
         _once_verdicts="$_once_dir/verdicts.json"
         AUTOSPEC_HARNESS_DISPATCHER=1 bash "$SCRIPT_DIR/explore-research-cycle.sh" --max-issues-per-round "$MAX_ISSUES_PER_ROUND" \
             --research-sources "$RESEARCH_SOURCES" --stage dedup --out "$_once_dedup" \
-            > "$_once_dir/research.log" 2>&1 || true
-        if [ -s "$_once_dedup" ] && AUTOSPEC_EXPLORE_DEDUPED_IN="$_once_dedup" \
-           AUTOSPEC_EXPLORE_VERDICTS_OUT="$_once_verdicts" bash -c "$AUTOSPEC_EXPLORE_VERIFY_CMD" \
-           >> "$_once_dir/research.log" 2>&1; then
-            AUTOSPEC_EXPLORE_VERIFY_VERDICTS="$_once_verdicts" bash "$SCRIPT_DIR/explore-research-cycle.sh" \
-                --max-issues-per-round "$MAX_ISSUES_PER_ROUND" --stage finalize \
-                --deduped-in "$_once_dedup" --out "$_once_out" >> "$_once_dir/research.log" 2>&1 || true
+            > "$_once_dir/research.log" 2>&1 || _once_preflight_rc=$?
+        if [ "$_once_preflight_rc" -eq 0 ] && [ -s "$_once_dedup" ]; then
+            if AUTOSPEC_EXPLORE_DEDUPED_IN="$_once_dedup" \
+               AUTOSPEC_EXPLORE_VERDICTS_OUT="$_once_verdicts" bash -c "$AUTOSPEC_EXPLORE_VERIFY_CMD" \
+               >> "$_once_dir/research.log" 2>&1; then
+                AUTOSPEC_EXPLORE_VERIFY_VERDICTS="$_once_verdicts" bash "$SCRIPT_DIR/explore-research-cycle.sh" \
+                    --max-issues-per-round "$MAX_ISSUES_PER_ROUND" --stage finalize \
+                    --deduped-in "$_once_dedup" --out "$_once_out" >> "$_once_dir/research.log" 2>&1 \
+                    || _once_preflight_rc=$?
+            else
+                _once_preflight_rc=$?
+            fi
         fi
     else
         echo "autospec-explore: missing initial prompt" >&2
@@ -351,6 +357,7 @@ if [ "$ONCE" -eq 1 ]; then
     _once_dir=".autospec/explore-once-$$"
     mkdir -p "$_once_dir"
     _once_out="$_once_dir/research.json"
+    _once_research_rc="${_once_preflight_rc:-0}"
 
     # Run the single research cycle pass (full stage: dedup + verify + rank).
     if [ -s "$_once_out" ] && [ -n "${AUTOSPEC_EXPLORE_VERIFY_CMD:-}" ]; then
@@ -359,13 +366,20 @@ if [ "$ONCE" -eq 1 ]; then
         AUTOSPEC_EXPLORE_ONCE_OUT="$_once_out" \
         AUTOSPEC_EXPLORE_ONCE_SOURCES="$RESEARCH_SOURCES" \
             bash -c "$AUTOSPEC_EXPLORE_ONCE_CYCLE_CMD" \
-            > "$_once_dir/research.log" 2>&1 || true
+            > "$_once_dir/research.log" 2>&1 || _once_research_rc=$?
     else
         bash "$SCRIPT_DIR/explore-research-cycle.sh" \
             --max-issues-per-round "$MAX_ISSUES_PER_ROUND" \
             --research-sources "$RESEARCH_SOURCES" \
             --out "$_once_out" \
-            > "$_once_dir/research.log" 2>&1 || true
+            > "$_once_dir/research.log" 2>&1 || _once_research_rc=$?
+    fi
+
+    if [ "$_once_research_rc" -ne 0 ]; then
+        cat "$_once_dir/research.log" >&2 2>/dev/null || true
+        printf '{"tier":"%s","proposals_seen":0,"new_candidates":0,"filed":0,"dry":false,"reason":"research-incomplete","candidates":[]}\n' \
+            "$_once_tier"
+        exit "$_once_research_rc"
     fi
 
     # The one-shot path has no iterative pass to host the verifier seam. When
@@ -1287,9 +1301,9 @@ PYR
         done < "$refuted_tsv"
     fi
 
-    if [ "$proposals_count" -eq 0 ] && [ "$research_rc" -ne 0 ]; then
-        echo "code_health:explore_all_researchers_failed iter=$iter" >&2
-        status="explore_all_researchers_failed"
+    if [ "$research_rc" -ne 0 ]; then
+        echo "code_health:explore_research_incomplete iter=$iter rc=$research_rc" >&2
+        status="explore_research_incomplete"
         break
     fi
     if [ "$proposals_count" -eq 0 ] && [ "$research_rc" -eq 0 ]; then
