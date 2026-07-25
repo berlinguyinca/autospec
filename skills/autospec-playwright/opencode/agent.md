@@ -75,6 +75,23 @@ silently retry with `TIER_A`. Never ask the user.
 /autospec-playwright [--dry-run]
 ```
 
+## Screenshot-audit guardrails
+
+Projects may turn the JSON produced by the screenshot audit into documentation
+and stable, pixel-independent Playwright checks:
+
+```bash
+node skills/autospec-doc/scripts/gen-ui-audit-doc.mjs --input .autospec/screenshot-audit.json --output docs/ui-audit.md
+node skills/autospec-qa/scripts/gen-layout-guardrails.mjs --input .autospec/screenshot-audit.json --output e2e/generated/layout-guardrails.spec.mjs
+```
+
+The generated suite checks visible content, auth-shell absence, and **document**
+horizontal overflow at desktop/tablet/mobile widths. Intentional component
+scroll containers (tables and charts) are not treated as document overflow.
+Primitive-count checks remain disabled by default; add `--strict-counts` only
+when the fixture's live data is deterministic, then include the generated file
+in the project's existing Playwright command. No pixel snapshots are required.
+
 - `--dry-run` — print what would be done; do not invoke Stage 2A.
 
 ## Dispatcher flow

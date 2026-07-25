@@ -9,3 +9,6 @@ bash scripts/autospec-generate-screenshot-contact-sheet.sh --confirm --feature i
 ```
 
 If Playwright is missing, Autospec creates an adoption issue/spec and does not install anything.
+
+For screenshot-audit output, generate pixel-independent layout guardrails and
+enable `--strict-counts` only when the loaded fixture data is deterministic.

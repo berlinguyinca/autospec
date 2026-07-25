@@ -45,7 +45,7 @@ fn scan_sources(path: &Path, target_kind: &str, findings: &mut Vec<String>) -> R
         } else if file.extension().and_then(|x| x.to_str()) == Some("rs") {
             let text = fs::read_to_string(&file).map_err(|e| e.to_string())?;
             for (line_no, line) in text.lines().enumerate() {
-                if !(line.contains("println!(") || line.contains("eprintln!("))
+                if !(line.contains("println!(") || line.contains("eprintln!(")) // autospec:allow-output
                     || line.contains("autospec:allow-output") { continue; }
                 if target_kind == "binary" { continue; }
                 let remediation = if target_kind == "library" {

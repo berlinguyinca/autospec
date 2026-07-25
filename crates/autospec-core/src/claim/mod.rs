@@ -442,7 +442,7 @@ pub fn evaluate_claim_safety_with_trusted_actors(
     if intent.ambiguous
         && !safety_actor
             .as_deref()
-            .is_some_and(|actor| trusted_actors.iter().any(|trusted| *trusted == actor))
+            .is_some_and(|actor| trusted_actors.contains(&actor))
     {
         return ClaimSafetyDecision::reject("current_body_safety_ambiguous");
     }

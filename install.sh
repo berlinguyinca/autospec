@@ -1615,6 +1615,7 @@ skills/autospec-harmonize/scripts/extract-runtime.mjs::extract-runtime.mjs \
 skills/autospec-harmonize/scripts/fetch-vendor.sh::fetch-vendor.sh \
 skills/autospec-harmonize/scripts/lib/color.mjs::lib/color.mjs \
 skills/autospec-qa/scripts/qa-visual-findings.sh::qa-visual-findings.sh \
+skills/autospec-ui-audit/scripts/route-inventory.mjs::autospec-ui-route-inventory.mjs \
 skills/autospec-sweep/scripts/run.sh::autospec-sweep-run.sh \
 skills/autospec-sweep/scripts/wizard.sh::autospec-sweep-wizard.sh"
 

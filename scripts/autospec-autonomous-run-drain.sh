@@ -105,6 +105,10 @@ kill_tree() {
         kill_tree "$_child"
     done
     kill "$_pid" 2>/dev/null || true
+    # A shell blocked in `wait` may defer TERM until its child exits. Escalate
+    # immediately after recursively signalling descendants so stall recovery
+    # never inherits the child's full sleep/runtime.
+    kill -KILL "$_pid" 2>/dev/null || true
 }
 
 child_is_running() {
