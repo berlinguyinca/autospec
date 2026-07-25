@@ -8,10 +8,10 @@
 #    "filed":N,"dry":<bool>,"reason":"..."}
 #
 # scripts/autospec-autonomous-explore-drain.sh bridges the explore skill through
-# the LLM harness (omx), mirroring autospec-autonomous-run-drain.sh. It derives
+# the active LLM harness. It derives
 # filed/dry from the count of `auto-implement` issues created during the run, and
-# degrades to a clean dry (exit 0) on harness absence/failure — a failed explore
-# is a clean dry, never a conductor crash.
+# returns non-zero on harness absence/failure so a failed explore cannot be
+# confused with a completed empty repository scan.
 #
 # Mocking: PATH-shim omx + gh; no network. The gh mock reports an issue count
 # read from a state file; the omx mock mutates that file to simulate filing.
@@ -48,13 +48,19 @@ exit 0
 EOF
     chmod +x "$TMP/bin/gh"
 
-    # Default omx mock: succeeds, files 1 issue (bumps the count).
-    OMX_LOG="$TMP/omx-args.log"
-    cat > "$TMP/bin/omx" <<EOF
+    # Default codex mock: succeeds, files 2 issues (bumps the count).
+    HARNESS_LOG="$TMP/harness-args.log"
+    cat > "$TMP/bin/codex" <<EOF
 #!/usr/bin/env bash
-printf '%s\n' "\$*" >> "$OMX_LOG"
+printf '%s\n' "\$*" >> "$HARNESS_LOG"
 printf '2\n' > "$COUNT_FILE"
 exit 0
+EOF
+    chmod +x "$TMP/bin/codex"
+    cat > "$TMP/bin/omx" <<'EOF'
+#!/usr/bin/env bash
+echo "unexpected omx invocation" >&2
+exit 99
 EOF
     chmod +x "$TMP/bin/omx"
 
@@ -62,16 +68,34 @@ EOF
     export AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS=0
     export CONDUCTOR_REPO="owner/repo"
     export AUTOSPEC_REPO_DIR="$TMP"
+    export AUTOSPEC_HANDOFF_DISPATCHER_KIND=codex
+    export AUTOSPEC_HANDOFF_DISPATCHER=1
+    export AUTOSPEC_HARNESS_PROBE_ROOT="$TMP/probes"
+    export AUTOSPEC_HARNESS_RUNTIME_ALIASES="$TMP/aliases.tsv"
+    printf 'claude\tclaude\t--dangerously-skip-permissions\tClaude Code\ncodex\tcodex\t--yolo\tCodex CLI\nopencode\topencode\t\tOpenCode\n' \
+        > "$AUTOSPEC_HARNESS_RUNTIME_ALIASES"
 }
 
 teardown() {
     rm -rf "$TMP"
 }
 
+write_codex_failure() {
+    local code="$1"
+    printf '%s\n' '#!/usr/bin/env bash' 'echo "codex: boom" >&2' "exit $code" \
+        > "$TMP/bin/codex"
+    chmod +x "$TMP/bin/codex"
+}
+
+write_codex_success_noop() {
+    printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$TMP/bin/codex"
+    chmod +x "$TMP/bin/codex"
+}
+
 # ── contract shape ────────────────────────────────────────────────────────────
 
 @test "bridge emits valid contract JSON on a successful explore (filed>0 -> dry=false)" {
-    run bash "$BRIDGE" --once
+    run /bin/bash "$BRIDGE" --once
     [ "$status" -eq 0 ]
     # Last stdout line must be the parseable contract with filed>0, dry=false.
     line="$(printf '%s\n' "$output" | grep '"filed"' | tail -1)"
@@ -88,74 +112,86 @@ teardown() {
     echo "$line" | jq -e '.tier == "competitor"' >/dev/null
 }
 
-@test "bridge forwards the skill invocation to omx" {
+@test "bridge forwards the skill invocation to the active harness" {
     run bash "$BRIDGE" --once
     [ "$status" -eq 0 ]
-    grep -q 'autospec-explore --once' "$OMX_LOG"
+    grep -q 'autospec-explore --once' "$HARNESS_LOG"
 }
 
-@test "bridge forwards --research-sources to the omx skill invocation" {
+@test "bridge forwards --research-sources to the active harness" {
     run bash "$BRIDGE" --once --research-sources internet
     [ "$status" -eq 0 ]
-    grep -q 'research-sources internet' "$OMX_LOG"
+    grep -q 'research-sources internet' "$HARNESS_LOG"
+}
+
+@test "bridge uses Claude slash-skill syntax when Claude owns the session" {
+    cat > "$TMP/bin/claude" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$HARNESS_LOG"
+printf '1\n' > "$COUNT_FILE"
+EOF
+    chmod +x "$TMP/bin/claude"
+    export AUTOSPEC_HANDOFF_DISPATCHER_KIND=claude
+
+    run bash "$BRIDGE" --once
+    [ "$status" -eq 0 ]
+    grep -q '/autospec-explore --once' "$HARNESS_LOG"
+    ! grep -q '\$autospec-explore' "$HARNESS_LOG"
+}
+
+@test "bridge uses OpenCode slash-skill syntax when OpenCode owns the session" {
+    cat > "$TMP/bin/opencode" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$HARNESS_LOG"
+printf '1\n' > "$COUNT_FILE"
+EOF
+    chmod +x "$TMP/bin/opencode"
+    export AUTOSPEC_HANDOFF_DISPATCHER_KIND=opencode
+
+    run bash "$BRIDGE" --once
+    [ "$status" -eq 0 ]
+    grep -q '/autospec-explore --once' "$HARNESS_LOG"
+    ! grep -q '\$autospec-explore' "$HARNESS_LOG"
 }
 
 # ── dry explore ───────────────────────────────────────────────────────────────
 
 @test "bridge reports a clean dry (filed=0 -> dry=true) when explore files nothing" {
-    # omx mock leaves the issue count unchanged -> filed=0.
-    cat > "$TMP/bin/omx" <<'EOF'
-#!/usr/bin/env bash
-exit 0
-EOF
-    chmod +x "$TMP/bin/omx"
+    # Harness mock leaves the issue count unchanged -> filed=0.
+    write_codex_success_noop
 
-    run bash "$BRIDGE" --once
+    run /bin/bash "$BRIDGE" --once
     [ "$status" -eq 0 ]
     line="$(printf '%s\n' "$output" | grep '"filed"' | tail -1)"
     echo "$line" | jq -e '.dry == true' >/dev/null
     echo "$line" | jq -e '.filed == 0' >/dev/null
 }
 
-# ── failure / harness absence -> clean dry, exit 0, never crash ───────────────
+# ── failure / harness absence -> non-zero, never clean dry ────────────────────
 
-@test "bridge degrades to a clean dry (exit 0) when omx exits non-zero" {
-    cat > "$TMP/bin/omx" <<'EOF'
-#!/usr/bin/env bash
-echo "omx: boom" >&2
-exit 3
-EOF
-    chmod +x "$TMP/bin/omx"
+@test "bridge fails visibly when the active harness exits non-zero" {
+    write_codex_failure 3
 
     run bash "$BRIDGE" --once
-    [ "$status" -eq 0 ]
-    line="$(printf '%s\n' "$output" | grep '"filed"' | tail -1)"
-    echo "$line" | jq -e '.dry == true' >/dev/null
-    echo "$line" | jq -e '.filed == 0' >/dev/null
-    echo "$line" | jq -e '.reason == "explore-error"' >/dev/null
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"explore-error"* ]]
+    [[ "$output" != *'"dry":true'* ]]
 }
 
-@test "bridge degrades to a clean dry (exit 0) when omx is absent from PATH" {
-    rm -f "$TMP/bin/omx"
+@test "bridge fails visibly when the selected harness is absent from PATH" {
+    rm -f "$TMP/bin/codex"
     ln -sf /usr/bin/dirname "$TMP/bin/dirname"
-    # Ensure omx is genuinely unavailable even on developer hosts with /usr/bin/omx or /bin/omx.
-    run env PATH="$TMP/bin" /bin/bash "$BRIDGE" --once
-    [ "$status" -eq 0 ]
-    line="$(printf '%s\n' "$output" | grep '"filed"' | tail -1)"
-    echo "$line" | jq -e '.dry == true' >/dev/null
-    echo "$line" | jq -e '.filed == 0' >/dev/null
+    run /usr/bin/env PATH="$TMP/bin" /bin/bash "$BRIDGE" --once
+    [ "$status" -ne 0 ]
+    [[ "$output" != *'"dry":true'* ]]
 }
 
-@test "bridge runs safely under set -eu (no errexit abort on a failing explore)" {
-    cat > "$TMP/bin/omx" <<'EOF'
-#!/usr/bin/env bash
-exit 5
-EOF
-    chmod +x "$TMP/bin/omx"
+@test "bridge preserves a non-zero harness result under set -eu" {
+    write_codex_failure 5
 
-    run bash -c "set -eu; bash '$BRIDGE' --once"
-    [ "$status" -eq 0 ]
-    printf '%s\n' "$output" | grep -q '"dry":true'
+    run /bin/bash -c "set -eu; bash '$BRIDGE' --once"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *'"dry":true'* ]]
 }
 
 @test "bridge bounds the direct verifier fallback" {
@@ -163,6 +199,30 @@ EOF
     [ "$status" -eq 0 ]
     grep -q 'direct fallback max runtime' "$BRIDGE"
     grep -q 'kill_tree "\$direct_pid"' "$BRIDGE"
+}
+
+@test "bridge preserves a non-zero direct verifier fallback result" {
+    local direct_root="$TMP/direct"
+    mkdir -p "$direct_root/scripts/lib"
+    cp "$BRIDGE" "$direct_root/scripts/autospec-autonomous-explore-drain.sh"
+    cp "$(dirname "$BRIDGE")/lib/autospec-harness-detect.sh" "$direct_root/scripts/lib/"
+    cat > "$direct_root/scripts/autospec-explore.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"tier":"local","proposals_seen":0,"new_candidates":0,"filed":0,"dry":false,"reason":"research-incomplete"}'
+exit 4
+EOF
+    chmod +x "$direct_root/scripts/"*.sh
+    cat > "$TMP/bin/codex" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' 'AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed'
+exit 0
+EOF
+    chmod +x "$TMP/bin/codex"
+
+    run bash "$direct_root/scripts/autospec-autonomous-explore-drain.sh" --once
+    [ "$status" -eq 4 ]
+    [[ "$output" == *'"reason":"research-incomplete"'* ]]
+    [[ "$output" != *'"dry":true'* ]]
 }
 
 @test "researcher timeout polling handles exited and zombie children" {

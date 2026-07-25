@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # autospec-autonomous-explore-drain.sh — one discovery (explore --once) pass for
-# the conductor, bridged through the LLM harness (omx).
+# the conductor, bridged through the active LLM harness.
 #
 # The conductor loop (scripts/lib/autospec-loop.sh) resolves Tier-2/3/4 discovery
 # from AUTOSPEC_EXPLORE_CMD and appends the flags `--once` and, for Tier 4,
@@ -13,16 +13,16 @@
 # Bare `bash autospec-explore.sh --once` has no LLM orchestrator to dispatch the
 # researcher subagents and the fail-closed adversarial verify, so every proposal
 # is refused and every cycle reports dry. This wrapper runs the explore SKILL via
-# `omx exec` (mirroring autospec-autonomous-run-drain.sh's `$autospec-run` call),
-# giving discovery a real orchestrator.
+# detected Codex, Claude, or OpenCode runtime, giving discovery a real
+# orchestrator without crossing into an unrelated installed harness.
 #
 # filed/dry are derived from the count of `auto-implement` issues created during
 # the run (the explore skill files via `gh issue create --label auto-implement`).
 # All harness chatter goes to stderr; STDOUT carries exactly one JSON line.
 #
-# A failed/absent harness is a CLEAN DRY (exit 0), never a conductor crash: the
-# loop treats a non-zero wrapper exit as a visible explore_error, but the wrapper
-# itself must not abort the conductor.
+# A failed/absent harness exits non-zero and emits `dry:false`; the conductor
+# already maps that to a visible explore_error. Only a completed healthy scan
+# may emit `dry:true`.
 set -eu
 
 # The explore model can rediscover the conductor's helper command while
@@ -35,6 +35,7 @@ fi
 export AUTOSPEC_EXPLORE_DRAIN_ACTIVE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HARNESS_HELPER="$SCRIPT_DIR/lib/autospec-harness-detect.sh"
 
 # ── Parse the flags the conductor appends. ────────────────────────────────────
 RESEARCH_SOURCES=""
@@ -58,12 +59,33 @@ emit_dry() {
         "$TIER" "${1:-explore-dry}"
 }
 
-# ── Harness absence is a clean dry (never hard-fail the conductor). ───────────
-if ! command -v omx >/dev/null 2>&1; then
-    printf 'autospec-autonomous-explore-drain: omx not found on PATH; reporting clean dry\n' >&2
-    emit_dry "explore-error"
-    exit 0
+emit_error() {
+    printf '{"tier":"%s","proposals_seen":0,"new_candidates":0,"filed":0,"dry":false,"reason":"%s"}\n' \
+        "$TIER" "${1:-explore-error}"
+}
+
+# Resolve the harness that owns this session. An explicit kind wins, followed
+# by active runtime markers, then installed-home probes.
+if [ ! -f "$HARNESS_HELPER" ]; then
+    printf 'autospec-autonomous-explore-drain: harness detector missing: %s\n' "$HARNESS_HELPER" >&2
+    emit_error "explore-error"
+    exit 3
 fi
+# shellcheck source=/dev/null
+. "$HARNESS_HELPER"
+HARNESS_KIND="$(autospec_harness_detect)"
+HARNESS_BINARY="$(autospec_harness_binary_for "$HARNESS_KIND" 2>/dev/null || true)"
+HARNESS_DISPATCHER=""
+if [ -n "$HARNESS_BINARY" ] && command -v "$HARNESS_BINARY" >/dev/null 2>&1; then
+    HARNESS_DISPATCHER="$(command -v "$HARNESS_BINARY")"
+fi
+if [ -z "$HARNESS_DISPATCHER" ] || ! autospec_harness_dispatcher_safe "$HARNESS_DISPATCHER"; then
+    printf 'autospec-autonomous-explore-drain: active harness unavailable or unsafe: %s\n' \
+        "$HARNESS_KIND" >&2
+    emit_error "explore-error"
+    exit 3
+fi
+export AUTOSPEC_HANDOFF_DISPATCHER_KIND="$HARNESS_KIND"
 
 if [ -f "$SCRIPT_DIR/autospec-runtime-config.sh" ]; then
     # shellcheck source=/dev/null
@@ -134,17 +156,17 @@ count_auto_issues() {
 REPO="$(detect_repo)"
 BEFORE="$(count_auto_issues "$REPO")"
 
-# ── Build the explore skill invocation (mirrors the drain wrapper's $autospec-run).
-SKILL_INVOCATION='$autospec-explore --once'
+# ── Build the harness-native explore skill invocation.
+case "$HARNESS_KIND" in
+    codex) SKILL_INVOCATION='$autospec-explore --once' ;;
+    claude|opencode) SKILL_INVOCATION='/autospec-explore --once' ;;
+    *) SKILL_INVOCATION='' ;;
+esac
 if [ -n "$RESEARCH_SOURCES" ]; then
     SKILL_INVOCATION="$SKILL_INVOCATION --research-sources $RESEARCH_SOURCES"
 fi
-# `omx exec` may sanitize exported environment variables. Carry the verifier
-# bridge in the command itself so the nested explore process cannot silently
-# enter its fail-closed no-verifier path.
 VERIFY_CMD="${AUTOSPEC_EXPLORE_VERIFY_CMD:-bash $SCRIPT_DIR/autospec-autonomous-verify-drain.sh}"
-printf -v VERIFY_ASSIGNMENT 'AUTOSPEC_EXPLORE_VERIFY_CMD=%q' "$VERIFY_CMD"
-SKILL_INVOCATION="$VERIFY_ASSIGNMENT $SKILL_INVOCATION"
+export AUTOSPEC_EXPLORE_VERIFY_CMD="$VERIFY_CMD"
 
 HARNESS_LOG="$(mktemp "${TMPDIR:-/tmp}/autospec-explore-drain.XXXXXX" 2>/dev/null || printf '/tmp/autospec-explore-drain.%s' "$$")"
 
@@ -154,10 +176,32 @@ export AUTOSPEC_EXPLORE_PARENT_PID="$$"
 
 # Run explore through the harness. STDOUT+STDERR go to the log; the wrapper's own
 # stdout is reserved for the single contract JSON line the conductor parses.
-setsid omx exec \
-    --cd "$REPO_DIR" \
-    --dangerously-bypass-approvals-and-sandbox \
-    "$SKILL_INVOCATION" > "$HARNESS_LOG" 2>&1 &
+case "$HARNESS_KIND" in
+    codex)
+        setsid "$HARNESS_DISPATCHER" exec \
+            --cd "$REPO_DIR" \
+            --dangerously-bypass-approvals-and-sandbox \
+            "$SKILL_INVOCATION" > "$HARNESS_LOG" 2>&1 &
+        ;;
+    claude)
+        (
+            cd "$REPO_DIR"
+            exec setsid "$HARNESS_DISPATCHER" -p --dangerously-skip-permissions \
+                "$SKILL_INVOCATION"
+        ) > "$HARNESS_LOG" 2>&1 &
+        ;;
+    opencode)
+        setsid "$HARNESS_DISPATCHER" run \
+            --dir "$REPO_DIR" \
+            --dangerously-skip-permissions \
+            "$SKILL_INVOCATION" > "$HARNESS_LOG" 2>&1 &
+        ;;
+    *)
+        printf 'autospec-autonomous-explore-drain: unsupported harness: %s\n' "$HARNESS_KIND" >&2
+        emit_error "explore-error"
+        exit 3
+        ;;
+esac
 child_pid="$!"
 
 explore_rc=0
@@ -239,6 +283,14 @@ if grep -q 'AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed' "$HARNESS_LOG" 2>/dev/null
     cat "$DIRECT_LOG" >&2 2>/dev/null || true
     DIRECT_JSON="$(grep -E '^\{"tier"' "$DIRECT_LOG" | tail -1 || true)"
     rm -f "$DIRECT_LOG" "$HARNESS_LOG" 2>/dev/null || true
+    if [ "$direct_rc" -ne 0 ]; then
+        if [ -n "$DIRECT_JSON" ]; then
+            printf '%s\n' "$DIRECT_JSON"
+        else
+            emit_error "explore-error"
+        fi
+        exit "$direct_rc"
+    fi
     if [ -n "$DIRECT_JSON" ]; then
         printf '%s\n' "$DIRECT_JSON"
         exit 0
@@ -249,14 +301,12 @@ fi
 cat "$HARNESS_LOG" >&2 2>/dev/null || true
 rm -f "$HARNESS_LOG" 2>/dev/null || true
 
-# A non-zero harness exit (crash, stall, misconfig) is a clean dry to the
-# conductor's stdout parser, tagged explore-error — the loop surfaces the
-# distinct code_health signal from the wrapper's non-zero-less contract.
+# A non-zero harness exit is incomplete discovery, never a clean dry.
 if [ "$explore_rc" -ne 0 ]; then
-    printf 'autospec-autonomous-explore-drain: explore harness exited %s; reporting clean dry\n' \
+    printf 'autospec-autonomous-explore-drain: explore harness exited %s\n' \
         "$explore_rc" >&2
-    emit_dry "explore-error"
-    exit 0
+    emit_error "explore-error"
+    exit "$explore_rc"
 fi
 
 AFTER="$(count_auto_issues "$REPO")"

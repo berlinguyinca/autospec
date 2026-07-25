@@ -27,10 +27,11 @@ They also enforce a 900-second absolute runtime cap via
 The drain exports `AUTOSPEC_EXPLORE_PARENT_PID`; detached explore scripts watch
 that owner and terminate when it disappears.
 
-The verifier command is also embedded as a quoted environment assignment in the
-harness command because `omx exec` may not preserve the caller's exported
-environment. This prevents an otherwise healthy discovery pass from being
-mistaken for a no-verifier fail-closed cycle.
+The explore drain dispatches directly through the active Codex, Claude, or
+OpenCode harness. `AUTOSPEC_HANDOFF_DISPATCHER_KIND` is authoritative; when it
+is unset, active runtime markers are preferred over installed skill homes. The
+verifier command is exported to that child so a mixed-harness installation
+cannot silently select an unrelated provider.
 
 If the skeptic itself times out, the verifier uses a deterministic fallback: it
 survives only candidates whose evidence names an existing repository path and
@@ -43,15 +44,19 @@ This keeps filing functional in detached sessions whose PATH does not include
 the installed command shim.
 
 Each researcher is bounded by `AUTOSPEC_RESEARCHER_TIMEOUT_SECS` (default 120
-seconds). A timed-out source is recorded as `researcher_failed` while other
-sources continue, so one provider cannot stall the autonomous discovery loop.
-Timed-out groups are terminated as a process group to clean up detached
-researcher children as well.
+seconds). The cycle records selected, successful, and failed sources in
+`researcher_health`; timeout, missing-script, non-zero, and malformed-output
+failures make the cycle non-zero even when another source produced candidates.
+Only a completed zero-candidate scan is clean dry. Timed-out groups are
+terminated as a process group to clean up detached researcher children as well.
 
 The outer explore harness is isolated with `setsid` and receives the same
-process-group cleanup, preventing a detached `omx exec` from holding a cycle.
+process-group cleanup, preventing a detached model process from holding a cycle.
 The default no-output stall bound is 120 seconds and the absolute runtime bound
 is 300 seconds; both remain configurable through `AUTOSPEC_AUTONOMOUS_EXPLORE_*`.
+Missing dispatchers, authentication failures, non-zero exits, and watchdog
+timeouts return non-zero with `dry:false`; they are never counted as repository
+exhaustion.
 
 If a harness reports `AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed`, the drain runs
 the local explore entrypoint directly with the verifier command and uses its

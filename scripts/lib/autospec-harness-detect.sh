@@ -12,7 +12,8 @@
 #
 # Detection order:
 #   1. AUTOSPEC_HANDOFF_DISPATCHER_KIND env override (claude|codex|opencode).
-#   2. Skill-mount probe:
+#   2. Active harness runtime marker.
+#   3. Skill-mount probe:
 #        ~/.claude/skills/...               → Claude Code
 #        ~/.codex/prompts/... | ~/.codex/   → Codex CLI
 #        ~/.config/opencode/agent/...       → OpenCode
@@ -139,6 +140,19 @@ autospec_harness_detect() {
             printf '%s' "$AUTOSPEC_HANDOFF_DISPATCHER_KIND"
             return 0
         fi
+    fi
+    # Installed skill homes describe what can run, not which harness owns this
+    # process. Prefer runtime markers before probing homes so a Codex session on
+    # a machine that also has Claude installed does not silently dispatch to
+    # Claude. Explicit override above remains authoritative.
+    if [ -n "${CODEX_THREAD_ID:-}" ] || [ -n "${CODEX_CI:-}" ]; then
+        printf 'codex'; return 0
+    fi
+    if [ -n "${CLAUDECODE:-}" ] || [ -n "${CLAUDE_CODE_ENTRYPOINT:-}" ]; then
+        printf 'claude'; return 0
+    fi
+    if [ -n "${OPENCODE:-}" ] || [ -n "${OPENCODE_SESSION_ID:-}" ]; then
+        printf 'opencode'; return 0
     fi
     local probe_root="${AUTOSPEC_HARNESS_PROBE_ROOT:-$HOME}"
     if [ -d "$probe_root/.claude/skills" ]; then

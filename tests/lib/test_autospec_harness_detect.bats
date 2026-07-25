@@ -12,6 +12,8 @@ setup() {
     # Reset env each test.
     unset AUTOSPEC_HANDOFF_DISPATCHER_KIND AUTOSPEC_HANDOFF_DISPATCHER
     unset AUTOSPEC_HARNESS_KIND AUTOSPEC_HARNESS_DISPATCHER
+    unset CODEX_THREAD_ID CODEX_CI CLAUDECODE CLAUDE_CODE_ENTRYPOINT
+    unset OPENCODE OPENCODE_SESSION_ID
     export AUTOSPEC_HARNESS_PROBE_ROOT="$PROBE_ROOT"
 }
 
@@ -51,12 +53,24 @@ _source() {
 }
 
 @test "env override AUTOSPEC_HANDOFF_DISPATCHER_KIND wins over probe" {
-    mkdir -p "$PROBE_ROOT/.claude/skills"
+    mkdir -p "$PROBE_ROOT/.claude/skills" "$PROBE_ROOT/.codex/prompts" \
+        "$PROBE_ROOT/.config/opencode/agent"
     export AUTOSPEC_HANDOFF_DISPATCHER_KIND=codex
     _source
     run autospec_harness_detect
     [ "$status" -eq 0 ]
     [ "$output" = "codex" ]
+}
+
+@test "Codex runtime marker wins over mixed installed harness homes" {
+    mkdir -p "$PROBE_ROOT/.claude/skills" "$PROBE_ROOT/.codex/prompts" \
+        "$PROBE_ROOT/.config/opencode/agent"
+    export CODEX_THREAD_ID="test-thread"
+    _source
+    run autospec_harness_detect
+    [ "$status" -eq 0 ]
+    [ "$output" = "codex" ]
+    unset CODEX_THREAD_ID
 }
 
 @test "missing binary for detected harness exits 3 with named category" {

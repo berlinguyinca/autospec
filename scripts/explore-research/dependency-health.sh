@@ -64,6 +64,39 @@ cap = int(os.environ.get("AUTOSPEC_MAX_PROPOSALS", "20"))
 
 proposals = []
 
+def load_json(path):
+    try:
+        with open(path, encoding="utf-8") as handle:
+            value = json.load(handle)
+        return value if isinstance(value, dict) else {}
+    except Exception:
+        return {}
+
+package_json = load_json("package.json")
+package_lock = load_json("package-lock.json")
+
+def npm_current_version(name, info):
+    current = str((info or {}).get("current", "")).strip()
+    if current:
+        return current
+    packages = package_lock.get("packages", {})
+    if isinstance(packages, dict):
+        installed = packages.get(f"node_modules/{name}", {})
+        if isinstance(installed, dict):
+            current = str(installed.get("version", "")).strip()
+            if current:
+                return current
+    locked = package_lock.get("dependencies", {}).get(name, {})
+    if isinstance(locked, dict):
+        current = str(locked.get("version", "")).strip()
+        if current:
+            return current
+    installed = load_json(os.path.join("node_modules", name, "package.json"))
+    current = str(installed.get("version", "")).strip()
+    if current:
+        return current
+    return ""
+
 def add(title, evidence, complexity="small", confidence=0.7):
     if len(proposals) >= cap:
         return
@@ -80,9 +113,9 @@ if npm_raw:
         data = json.loads(npm_raw)
         if isinstance(data, dict):
             for pkg, info in data.items():
-                cur = (info or {}).get("current", "?")
-                latest = (info or {}).get("latest", "?")
-                if cur == latest:
+                cur = npm_current_version(pkg, info)
+                latest = str((info or {}).get("latest", "")).strip()
+                if not cur or not latest or cur == latest:
                     continue
                 add(
                     f"chore(deps): bump {pkg} {cur} → {latest}",
@@ -112,7 +145,7 @@ if pip_raw:
 # Fallback: if manifests exist but no outdated tooling produced output, emit a
 # single low-confidence proposal noting toolchain coverage gap so the sweep
 # does not silently report a clean dependency-health area.
-if manifests and not proposals:
+if manifests and not proposals and not npm_raw and not pip_raw:
     add(
         "chore(deps): verify dependency freshness (no outdated tooling available)",
         f"Detected manifests: {', '.join(manifests)}. No outdated-check tooling produced output.",
