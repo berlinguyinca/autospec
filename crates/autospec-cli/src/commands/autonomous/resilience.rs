@@ -3,6 +3,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::CommandFailure;
@@ -50,12 +53,41 @@ pub(super) enum LifecycleAdmissionError {
     Diagnostic(String),
 }
 
+#[derive(Clone)]
 pub(super) struct ConductorLease {
     token: String,
     generation: u64,
     repo: String,
     state_path: PathBuf,
     lock_path: PathBuf,
+}
+
+pub(super) struct LifecycleHeartbeat {
+    stop: Sender<()>,
+    handle: Option<JoinHandle<Result<(), LifecycleLeaseError>>>,
+}
+
+impl LifecycleHeartbeat {
+    pub(super) fn finish(mut self) -> Result<(), LifecycleLeaseError> {
+        let _ = self.stop.send(());
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        handle.join().unwrap_or_else(|_| {
+            Err(LifecycleLeaseError::Diagnostic(
+                "resilience lease heartbeat thread panicked".to_string(),
+            ))
+        })
+    }
+}
+
+impl Drop for LifecycleHeartbeat {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl ConductorLease {
@@ -326,6 +358,22 @@ impl ResilienceStore {
         ))
     }
 
+    fn renew(&self, lease: &ConductorLease) -> Result<(), StoreError> {
+        let _transaction = LeaseTransaction::try_open(&self.lock_path())?;
+        let Some((mut state, _)) = self.read_state()? else {
+            return Err(StoreError::TokenMismatch);
+        };
+        if !state_matches_lease(&state, lease) {
+            return Err(StoreError::TokenMismatch);
+        }
+
+        state.status = "running".to_string();
+        state.heartbeat_at = Some(now_secs());
+        state.lock_pid = Some(std::process::id());
+        state.lock_host = Some(self.host.clone());
+        self.write_state(&state)
+    }
+
     fn release(&self, lease: &ConductorLease) -> Result<(), StoreError> {
         let _transaction = LeaseTransaction::try_open(&self.lock_path())?;
         let Some((mut state, _)) = self.read_state()? else {
@@ -569,6 +617,66 @@ pub(super) fn admit_owned_lifecycle(
     store
         .admit_owned(lease, issue, usage_cap, issue_cap)
         .map_err(store_error_to_lease_error)
+}
+
+pub(super) fn renew_lifecycle(
+    repo: &str,
+    lease: &ConductorLease,
+) -> Result<(), LifecycleLeaseError> {
+    let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
+    renew_lifecycle_store(&store, lease)
+}
+
+pub(super) fn start_lifecycle_heartbeat(
+    repo: &str,
+    lease: &ConductorLease,
+) -> Result<LifecycleHeartbeat, LifecycleLeaseError> {
+    const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+    let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
+    start_lifecycle_heartbeat_with_store(store, lease.clone(), HEARTBEAT_INTERVAL)
+}
+
+fn start_lifecycle_heartbeat_with_store(
+    store: ResilienceStore,
+    lease: ConductorLease,
+    interval: Duration,
+) -> Result<LifecycleHeartbeat, LifecycleLeaseError> {
+    renew_lifecycle_store(&store, &lease)?;
+    let lease = lease.clone();
+    let (stop, stopped) = mpsc::channel();
+    let handle = thread::spawn(move || loop {
+        match stopped.recv_timeout(interval) {
+            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                renew_lifecycle_store(&store, &lease)?;
+            }
+        }
+    });
+    Ok(LifecycleHeartbeat {
+        stop,
+        handle: Some(handle),
+    })
+}
+
+fn renew_lifecycle_store(
+    store: &ResilienceStore,
+    lease: &ConductorLease,
+) -> Result<(), LifecycleLeaseError> {
+    const RETRY_DELAYS: [Duration; 3] = [
+        Duration::from_millis(10),
+        Duration::from_millis(20),
+        Duration::from_millis(40),
+    ];
+    for delay in RETRY_DELAYS {
+        match store.renew(lease) {
+            Ok(()) => return Ok(()),
+            Err(StoreError::Held) => thread::sleep(delay),
+            Err(error) => return Err(store_error_to_lease_error(error)),
+        }
+    }
+    // A held transaction fences the lease while another owned mutation completes.
+    // Defer this tick; the next heartbeat retries without treating contention as loss.
+    Ok(())
 }
 
 pub(super) fn release_lifecycle(
@@ -1108,6 +1216,111 @@ mod tests {
             replacement_state
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn owned_lease_renewal_prevents_abandonment_reclaim() {
+        let root = test_root("renewal");
+        let owner = test_store(&root);
+        let contender = test_store(&root);
+        let (_, claimed) = owner
+            .acquire(None, 1, 1)
+            .unwrap_or_else(|_| panic!("claim lease"));
+        let lease = owner
+            .adopt(&claimed.token)
+            .unwrap_or_else(|_| panic!("adopt lease"));
+        let mut stale_state = owner
+            .read_state()
+            .unwrap_or_else(|_| panic!("read state"))
+            .expect("running state")
+            .0;
+        stale_state.heartbeat_at = Some(now_secs().saturating_sub(10_801));
+        owner
+            .write_state(&stale_state)
+            .unwrap_or_else(|_| panic!("age running lease"));
+
+        owner
+            .renew(&lease)
+            .unwrap_or_else(|_| panic!("renew owned lease"));
+
+        assert!(matches!(
+            contender.acquire(None, 1, 1),
+            Err(StoreError::Held)
+        ));
+        let renewed = owner
+            .read_state()
+            .unwrap_or_else(|_| panic!("read renewed state"))
+            .expect("renewed state")
+            .0;
+        assert!(renewed.heartbeat_at > stale_state.heartbeat_at);
+        owner
+            .release(&lease)
+            .unwrap_or_else(|_| panic!("release renewed lease"));
+        assert_eq!(
+            owner
+                .read_state()
+                .unwrap_or_else(|_| panic!("read released state"))
+                .expect("released state")
+                .0
+                .status,
+            "released"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn heartbeat_survives_owned_transaction_contention_and_renews_later() {
+        let root = test_root("heartbeat-contention");
+        let owner = test_store(&root);
+        let (_, claimed) = owner
+            .acquire(None, 1, 1)
+            .unwrap_or_else(|_| panic!("claim lease"));
+        let lease = owner
+            .adopt(&claimed.token)
+            .unwrap_or_else(|_| panic!("adopt lease"));
+        let mut stale_state = owner
+            .read_state()
+            .unwrap_or_else(|_| panic!("read state"))
+            .expect("running state")
+            .0;
+        stale_state.heartbeat_at = Some(now_secs().saturating_sub(10_801));
+        owner
+            .write_state(&stale_state)
+            .unwrap_or_else(|_| panic!("age running lease"));
+
+        let transaction = LeaseTransaction::try_open(&owner.lock_path())
+            .unwrap_or_else(|_| panic!("hold owned lease transaction"));
+        let heartbeat = start_lifecycle_heartbeat_with_store(
+            test_store(&root),
+            lease.clone(),
+            Duration::from_millis(10),
+        )
+        .unwrap_or_else(|_| panic!("start heartbeat despite contention"));
+        thread::sleep(Duration::from_millis(90));
+        assert!(
+            !heartbeat
+                .handle
+                .as_ref()
+                .expect("heartbeat handle")
+                .is_finished(),
+            "transient contention must not terminate the heartbeat"
+        );
+
+        drop(transaction);
+        thread::sleep(Duration::from_millis(100));
+        heartbeat
+            .finish()
+            .unwrap_or_else(|_| panic!("finish surviving heartbeat"));
+        let renewed = owner
+            .read_state()
+            .unwrap_or_else(|_| panic!("read renewed state"))
+            .expect("renewed state")
+            .0;
+        assert!(renewed.heartbeat_at > stale_state.heartbeat_at);
+        owner
+            .release(&lease)
+            .unwrap_or_else(|_| panic!("release lease"));
         let _ = fs::remove_dir_all(root);
     }
 

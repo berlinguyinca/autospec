@@ -86,3 +86,15 @@ EOF
     "$REPO_ROOT/skills/autospec-autonomous" --check
   [ "$status" -eq 0 ]
 }
+
+@test "autonomous skill assigns perpetual cycle ownership to Rust" {
+  run grep -F \
+    'The child retains that lease across native waterfall cycles' \
+    "$REPO_ROOT/skills/autospec-autonomous/SKILL.md"
+  [ "$status" -eq 0 ]
+
+  run grep -F \
+    'that Rust shim delegates to the existing' \
+    "$REPO_ROOT/skills/autospec-autonomous/SKILL.md"
+  [ "$status" -ne 0 ]
+}

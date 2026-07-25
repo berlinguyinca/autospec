@@ -448,12 +448,15 @@ Rust migration ownership:
 - **Rust-owned lifecycle/reporting:** `start`, `status`, `list`, `logs`, `watch`,
   `timeline`, `monitor`, `supervise`, `cleanup`, `stop`, and `restart` wrappers
   route Rust-first with shell fallback.
-- **Rust-owned foreground shim:** `start` now launches the conductor through
-  `autospec autonomous run-foreground`; that Rust shim delegates to the existing
-  shell conductor backend.
-- **Shell-owned conductor body:** the waterfall implementation still lives behind
-  `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh run-foreground`. Migrate that backend last,
-  after Rust can call the same gates/drain scripts with parity tests.
+- **Rust-owned foreground loop:** `start` and `restart` launch
+  `autospec autonomous run-foreground` with a fenced inherited lifecycle lease.
+  The child retains that lease across native waterfall cycles, emits each cycle
+  before waiting `--poll-interval-sec`, and exits only for stop, park, failure,
+  or `--max-cycles`. A direct `run-foreground` invocation remains one bounded
+  cycle for diagnostics and internal tests.
+- **Legacy shell backend:** `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomous.sh run-foreground`
+  remains a recovery surface only; the default Rust launcher does not delegate
+  conductor authority to it.
 - **Timeline parity:** Rust `timeline` now owns chronological summaries,
   coordinator forecast rows, heartbeat-active issue reconciliation, and item
   timing rows. Keep shell fallback until the remaining edge cases are fixture
