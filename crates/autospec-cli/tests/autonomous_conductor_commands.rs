@@ -979,6 +979,247 @@ fn detached_restart_resolves_the_repository_before_launching_foreground() {
 }
 
 #[test]
+fn immediate_stop_terminates_recorded_wrapper_descendants() {
+    let fixture = ForegroundFixture::new();
+    let child_pid_path = fixture.root.join("wrapper-child.pid");
+    let mut wrapper = Command::new("sh");
+    wrapper
+        .arg("-c")
+        .arg("sleep 300 & child=$!; printf '%s\n' \"$child\" > \"$CHILD_PID_FILE\"; wait")
+        .env("CHILD_PID_FILE", &child_pid_path)
+        .process_group(0);
+    let mut wrapper = GuardedProcessGroup::new(wrapper.spawn().expect("spawn wrapper process"));
+    wait_for_file_contents(&child_pid_path, "");
+    let child_pid = fs::read_to_string(&child_pid_path)
+        .expect("read wrapper child pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse wrapper child pid");
+    let scope = fixture.scoped_dir();
+    fs::create_dir_all(&scope).expect("create scoped metadata");
+    fs::write(
+        scope.join("supervisor.pid"),
+        format!(
+            "{{\"pid\":{},\"repo\":\"test/repo\",\"scope\":\"test_repo\",\"pgid\":{},\"start_time_ticks\":{}}}\n",
+            wrapper.id(),
+            wrapper.id(),
+            process_identity(wrapper.id()).expect("wrapper identity").1
+        ),
+    )
+    .expect("record wrapper metadata");
+
+    let output = fixture
+        .detached_command("stop")
+        .args(["--immediate", "--json"])
+        .output()
+        .expect("stop wrapper process group");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for _ in 0..100 {
+        if !process_is_running(child_pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let child_survived = process_is_running(child_pid);
+    wrapper.terminate_and_wait();
+
+    assert!(
+        !child_survived,
+        "wrapper descendant {child_pid} survived immediate stop"
+    );
+}
+
+#[test]
+fn immediate_stop_terminates_descendants_after_the_recorded_leader_exits() {
+    let fixture = ForegroundFixture::new();
+    let child_pid_path = fixture.root.join("orphan-child.pid");
+    let mut leader = Command::new("bash");
+    leader
+        .arg("-c")
+        .arg(
+            "trap '' HUP; bash -c 'trap \"\" HUP; exec -a autospec-autonomous-supervisor sleep 300' & child=$!; printf '%s\n' \"$child\" > \"$CHILD_PID_FILE\"",
+        )
+        .env("CHILD_PID_FILE", &child_pid_path)
+        .process_group(0);
+    let mut leader = leader.spawn().expect("spawn short-lived group leader");
+    let leader_pid = leader.id();
+    let (_, start_time_ticks) = process_identity(leader_pid).expect("leader identity");
+    wait_for_file_contents(&child_pid_path, "");
+    let child_pid = fs::read_to_string(&child_pid_path)
+        .expect("read orphan child pid")
+        .trim()
+        .parse::<u32>()
+        .expect("parse orphan child pid");
+    assert!(leader.wait().expect("reap group leader").success());
+    assert!(!process_is_running(leader_pid));
+    assert!(process_is_running(child_pid));
+    let scope = fixture.scoped_dir();
+    fs::create_dir_all(&scope).expect("create scoped metadata");
+    fs::write(
+        scope.join("supervisor.pid"),
+        format!(
+            "{{\"pid\":{leader_pid},\"repo\":\"test/repo\",\"scope\":\"test_repo\",\"pgid\":{leader_pid},\"start_time_ticks\":{start_time_ticks}}}\n"
+        ),
+    )
+    .expect("record exited leader metadata");
+
+    let output = fixture
+        .detached_command("stop")
+        .args(["--immediate", "--json"])
+        .output()
+        .expect("stop orphaned process group");
+    for _ in 0..100 {
+        if !process_is_running(child_pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let child_survived = process_is_running(child_pid);
+    terminate_process_group(leader_pid);
+    terminate_process(child_pid);
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !child_survived,
+        "orphaned descendant {child_pid} survived immediate stop"
+    );
+}
+
+#[test]
+fn immediate_stop_rejects_mismatched_process_start_identity() {
+    let fixture = ForegroundFixture::new();
+    let mut process = Command::new("sleep");
+    process.arg("300").process_group(0);
+    let process = process.spawn().expect("spawn unrelated process group");
+    let process_pid = process.id();
+    let mut process = GuardedProcessGroup::new(process);
+    let (_, start_time_ticks) = process_identity(process_pid).expect("process identity");
+    let scope = fixture.scoped_dir();
+    fs::create_dir_all(&scope).expect("create scoped metadata");
+    fs::write(
+        scope.join("supervisor.pid"),
+        format!(
+            "{{\"pid\":{process_pid},\"repo\":\"test/repo\",\"scope\":\"test_repo\",\"pgid\":{process_pid},\"start_time_ticks\":{}}}\n",
+            start_time_ticks + 1
+        ),
+    )
+    .expect("record mismatched process metadata");
+
+    let output = fixture
+        .detached_command("stop")
+        .args(["--immediate", "--json"])
+        .output()
+        .expect("reject mismatched process identity");
+    let process_survived = process_is_running(process_pid);
+    process.terminate_and_wait();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("process identity mismatch"));
+    assert!(process_survived, "mismatched process group was terminated");
+}
+
+#[test]
+fn forced_restart_replaces_a_live_conductor_and_its_lease() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let output = fixture
+        .detached_command("start")
+        .args(["--detach", "--branch", "main"])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_BLOCK_GH", "1")
+        .env("AUTOSPEC_HOST", "unknown")
+        .output()
+        .expect("start live conductor with an unknown host");
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_for_file_contents(&fixture.calls, "repos/test/repo/branches/main");
+    let original_pid = fixture
+        .recorded_conductor_pid()
+        .expect("original conductor");
+
+    let output = fixture
+        .detached_command("restart")
+        .args(["--force", "--branch", "main", "--json"])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_BLOCK_GH", "1")
+        .env("AUTOSPEC_HOST", "unknown")
+        .output()
+        .expect("restart live conductor");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let replacement_pid = fixture
+        .recorded_conductor_pid()
+        .expect("replacement conductor");
+    assert_ne!(replacement_pid, original_pid);
+    assert!(!process_is_running(original_pid));
+    assert!(process_is_running(replacement_pid));
+}
+
+#[test]
+fn forced_restart_releases_an_unknown_host_lease_after_the_conductor_is_gone() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let output = fixture
+        .detached_command("start")
+        .args(["--detach", "--branch", "main"])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_BLOCK_GH", "1")
+        .env("AUTOSPEC_HOST", "unknown")
+        .output()
+        .expect("start conductor with an unknown host");
+    assert!(output.status.success());
+    wait_for_file_contents(&fixture.calls, "repos/test/repo/branches/main");
+    let original_pid = fixture
+        .recorded_conductor_pid()
+        .expect("original conductor");
+    fixture.terminate_recorded_conductor();
+    for _ in 0..100 {
+        if !process_is_running(original_pid) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!process_is_running(original_pid));
+
+    let output = fixture
+        .detached_command("restart")
+        .args(["--force", "--branch", "main", "--json"])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_BLOCK_GH", "1")
+        .env("AUTOSPEC_HOST", "unknown")
+        .output()
+        .expect("restart after conductor loss");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let replacement_pid = fixture
+        .recorded_conductor_pid()
+        .expect("replacement conductor");
+    assert_ne!(replacement_pid, original_pid);
+    assert!(process_is_running(replacement_pid));
+}
+
+#[test]
 fn foreground_stops_before_executor_when_main_health_blocks() {
     let fixture = ForegroundFixture::new();
     let output = fixture
@@ -2916,6 +3157,13 @@ fn process_is_running(pid: u32) -> bool {
                     .trim_start()
                     .starts_with('Z')
         })
+}
+
+fn process_identity(pid: u32) -> Option<(u32, u64)> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let (_, fields) = stat.rsplit_once(") ")?;
+    let fields = fields.split_whitespace().collect::<Vec<_>>();
+    Some((fields.get(2)?.parse().ok()?, fields.get(19)?.parse().ok()?))
 }
 
 fn terminate_process_group(pid: u32) {

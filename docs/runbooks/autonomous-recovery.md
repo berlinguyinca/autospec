@@ -12,9 +12,12 @@ Tier-2 explore drains default `AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS` to `600`
 seconds without observable output; set the variable explicitly for slower
 repositories or remote research providers.
 
-`autospec-autonomous restart --force` now signals the detached conductor's
-entire process group, cleaning up active drains and harness children before the
-replacement lifecycle starts.
+`autospec autonomous stop --immediate` and `autospec autonomous restart --force`
+signal each verified conductor, monitor, and supervisor process group. Restart
+releases the terminated conductor's matching lease before acquiring replacement
+ownership, so legacy wrapper children cannot revive a stale conductor during
+the handoff. New unit metadata binds the PID to its process-group ID and start
+time; mismatched live identities fail closed instead of signaling a reused PID.
 
 Explore drains export an inherited recursion marker; a nested drain request
 returns a dry suppression result instead of launching another harness tree.

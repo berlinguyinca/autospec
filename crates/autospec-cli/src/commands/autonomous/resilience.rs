@@ -48,6 +48,13 @@ pub(super) struct ResilienceSpend {
     pub budget_issues: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TerminatedOwnerRelease {
+    Released,
+    Absent,
+    OwnerMismatch,
+}
+
 pub(super) enum LifecycleAdmissionError {
     Reject(&'static str),
     Diagnostic(String),
@@ -394,6 +401,39 @@ impl ResilienceStore {
         self.write_state(&state)
     }
 
+    fn release_terminated_owner(
+        &self,
+        expected_pid: u32,
+    ) -> Result<TerminatedOwnerRelease, StoreError> {
+        let _transaction = LeaseTransaction::try_open(&self.lock_path())?;
+        let Some((mut state, _)) = self.read_state()? else {
+            return Ok(TerminatedOwnerRelease::Absent);
+        };
+        if state.status == "released" {
+            return Ok(TerminatedOwnerRelease::Absent);
+        }
+        if !pid_is_dead(expected_pid) {
+            return Err(StoreError::Held);
+        }
+        let exact_owner = state.lock_pid == Some(expected_pid);
+        let abandoned_claim = state.status == "claimed"
+            && state.lock_pid.is_some_and(pid_is_dead)
+            && state.lease_token.is_some();
+        if !exact_owner && !abandoned_claim {
+            return Ok(TerminatedOwnerRelease::OwnerMismatch);
+        }
+
+        state.status = "released".to_string();
+        state.heartbeat_at = Some(now_secs());
+        state.lock_pid = None;
+        state.lock_host = None;
+        state.lock_session = None;
+        state.lock_acquired_at = None;
+        state.lease_token = None;
+        self.write_state(&state)?;
+        Ok(TerminatedOwnerRelease::Released)
+    }
+
     fn read_admission(
         &self,
         issue: Option<u64>,
@@ -685,6 +725,16 @@ pub(super) fn release_lifecycle(
 ) -> Result<(), LifecycleLeaseError> {
     let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
     store.release(lease).map_err(store_error_to_lease_error)
+}
+
+pub(super) fn release_terminated_lifecycle_owner(
+    repo: &str,
+    expected_pid: u32,
+) -> Result<TerminatedOwnerRelease, LifecycleLeaseError> {
+    let store = ResilienceStore::from_env(repo).map_err(LifecycleLeaseError::Diagnostic)?;
+    store
+        .release_terminated_owner(expected_pid)
+        .map_err(store_error_to_lease_error)
 }
 
 pub(super) fn with_current_lifecycle_lease<T>(
@@ -1216,6 +1266,71 @@ mod tests {
             replacement_state
         );
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terminated_owner_release_requires_the_exact_dead_pid() {
+        let root = test_root("terminated-owner");
+        let store = test_store(&root);
+        let (_, _) = store
+            .acquire(None, 1, 1)
+            .unwrap_or_else(|_| panic!("acquire owner lease"));
+        let before =
+            fs::read_to_string(store.canonical_state_path()).expect("read owner lease state");
+
+        assert_eq!(
+            store
+                .release_terminated_owner(u32::MAX)
+                .unwrap_or_else(|_| panic!("reject a mismatched dead pid")),
+            TerminatedOwnerRelease::OwnerMismatch
+        );
+        assert_eq!(
+            fs::read_to_string(store.canonical_state_path())
+                .expect("read state after mismatched release"),
+            before
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn terminated_owner_release_handles_a_dead_claim_owner_before_adoption() {
+        let root = test_root("terminated-claimed-owner");
+        let store = test_store(&root);
+        let (_, _) = store
+            .acquire(None, 1, 1)
+            .unwrap_or_else(|_| panic!("acquire claimed lease"));
+        let mut child = ChildGuard(
+            Command::new("sleep")
+                .arg("60")
+                .spawn()
+                .expect("start claimed owner"),
+        );
+        let claimed_pid = child.0.id();
+        let mut state = store
+            .read_state()
+            .unwrap_or_else(|_| panic!("read claimed state"))
+            .expect("claimed state")
+            .0;
+        state.lock_pid = Some(claimed_pid);
+        store
+            .write_state(&state)
+            .unwrap_or_else(|_| panic!("record claimed owner"));
+        child.stop_and_reap();
+
+        assert_eq!(
+            store
+                .release_terminated_owner(u32::MAX)
+                .unwrap_or_else(|_| panic!("release abandoned claim")),
+            TerminatedOwnerRelease::Released
+        );
+        let released = store
+            .read_state()
+            .unwrap_or_else(|_| panic!("read released state"))
+            .expect("released state")
+            .0;
+        assert_eq!(released.status, "released");
+        assert!(released.lock_pid.is_none());
         let _ = fs::remove_dir_all(root);
     }
 
