@@ -112,6 +112,10 @@ fn autonomous_help_documents_all_start_modes() {
     assert!(stdout.contains("--follow"));
     assert!(stdout.contains("--detach"));
     assert!(stdout.contains("--foreground"));
+    assert!(stdout.contains("default"));
+    assert!(stdout.contains("detached and supervised"));
+    assert!(stdout.contains("Ctrl-C detaches only the follower"));
+    assert!(stdout.contains("caller-owned"));
 }
 
 #[test]
@@ -596,6 +600,24 @@ fn session_follow_fresh_start_uses_a_generation_log_and_enters_follow_mode() {
 }
 
 #[test]
+fn session_follow_uses_a_one_second_cadence_without_a_poll_interval_override() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.start_blocked_detached();
+    let logpath = fixture.recorded_conductor_logpath();
+
+    let mut follower = fixture.spawn_following_start_without_interval(2);
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "autospec autonomous attached",
+    );
+    fs::write(&logpath, "default-cadence-update\n").expect("write conductor update");
+    wait_for_file_contents(&fixture.root.join("follower.log"), "default-cadence-update");
+
+    assert!(follower.wait().success());
+}
+
+#[test]
 fn session_follow_switches_to_repaired_conductor_log_from_offset_zero() {
     let fixture = ForegroundFixture::new();
     fixture.initialize_git_remote();
@@ -625,24 +647,50 @@ fn session_follow_switches_to_repaired_conductor_log_from_offset_zero() {
 }
 
 #[test]
-fn session_follow_resets_explicit_log_cursor_after_observed_truncation() {
+fn session_follow_resets_explicit_log_cursor_after_live_pid_replacement() {
     let fixture = ForegroundFixture::new();
     fixture.initialize_git_remote();
     let explicit_log = fixture.root.join("explicit-conductor.log");
     fixture.start_blocked_detached_with_log(Some(&explicit_log));
-    fs::write(&explicit_log, "before-observed-truncation\n").expect("write initial explicit log");
+    fs::write(&explicit_log, "old-generation-complete\n").expect("write initial explicit log");
 
     let mut follower = fixture.spawn_following_start(0);
     wait_for_file_contents(
         &fixture.root.join("follower.log"),
-        "before-observed-truncation",
+        "old-generation-complete",
     );
-    fs::write(&explicit_log, "after\n").expect("truncate explicit log");
-    wait_for_file_contents(&fixture.root.join("follower.log"), "after");
+
+    fixture.terminate_recorded_conductor();
+    let mut replacement_command = Command::new("sh");
+    replacement_command
+        .args(["-c", "while :; do sleep 1; done"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let replacement = GuardedProcessGroup::new(
+        replacement_command
+            .spawn()
+            .expect("spawn replacement conductor"),
+    );
+    fs::write(
+        fixture.scoped_dir().join("conductor.pid"),
+        format!(
+            "{{\"pid\":{},\"repo\":\"test/repo\",\"scope\":\"test_repo\"}}\n",
+            replacement.id()
+        ),
+    )
+    .expect("record replacement conductor pid");
+    fs::write(
+        &explicit_log,
+        "new-generation-prefix-must-be-visible-even-when-this-generation-is-longer-than-the-old-one\n",
+    )
+    .expect("rewrite explicit log for replacement generation");
+    wait_for_file_contents(&fixture.root.join("follower.log"), "new-generation-prefix");
 
     follower.terminate_and_wait();
     assert_eq!(fixture.recorded_conductor_logpath(), explicit_log);
     assert!(!fixture.scoped_stop_sentinel().exists());
+    drop(replacement);
 }
 
 #[test]
@@ -673,6 +721,47 @@ fn session_follow_dry_run_reports_scoped_log_without_creating_state() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("follow: scoped conductor log"));
     assert!(!fixture.operator.exists());
+}
+
+#[test]
+fn session_follow_rejects_json_before_creating_state() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .detached_command("start")
+        .args(["--follow", "--json"])
+        .output()
+        .expect("reject mixed JSON and log stream");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--json is not supported with --follow; use autospec autonomous status --json"));
+    assert!(!fixture.operator.exists());
+}
+
+#[test]
+fn session_follow_waits_for_metadata_published_after_a_held_lease() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.start_blocked_detached();
+    let original_pid = fixture.recorded_conductor_pid().expect("conductor pid");
+    let pid_path = fixture.scoped_dir().join("conductor.pid");
+    let logpath_path = fixture.scoped_dir().join("conductor.logpath");
+    let pid_metadata = fs::read_to_string(&pid_path).expect("read conductor metadata");
+    let logpath_metadata = fs::read_to_string(&logpath_path).expect("read log metadata");
+    fs::remove_file(&pid_path).expect("hide conductor pid before follower start");
+    fs::remove_file(&logpath_path).expect("hide conductor log before follower start");
+
+    let mut follower = fixture.spawn_following_start(1);
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "waiting for scoped conductor metadata after held lifecycle lease",
+    );
+    fs::write(&pid_path, pid_metadata).expect("publish conductor pid metadata");
+    fs::write(&logpath_path, logpath_metadata).expect("publish conductor log metadata");
+
+    assert!(follower.wait().success());
+    assert_eq!(fixture.recorded_conductor_pid(), Some(original_pid));
+    assert!(process_is_running(original_pid));
 }
 
 #[test]
@@ -2205,19 +2294,32 @@ exit 1
     }
 
     fn spawn_following_start(&self, iterations: u64) -> GuardedProcessGroup {
+        self.spawn_following_start_command(iterations, true)
+    }
+
+    fn spawn_following_start_without_interval(&self, iterations: u64) -> GuardedProcessGroup {
+        self.spawn_following_start_command(iterations, false)
+    }
+
+    fn spawn_following_start_command(
+        &self,
+        iterations: u64,
+        set_interval: bool,
+    ) -> GuardedProcessGroup {
         let mut command = self.detached_command("start");
         let output = File::create(self.root.join("follower.log")).expect("create follower log");
         let errors = output.try_clone().expect("clone follower log");
+        command.args([
+            "--follow",
+            "--iterations",
+            &iterations.to_string(),
+            "--branch",
+            "main",
+        ]);
+        if set_interval {
+            command.args(["--interval-sec", "1"]);
+        }
         command
-            .args([
-                "--follow",
-                "--iterations",
-                &iterations.to_string(),
-                "--interval-sec",
-                "1",
-                "--branch",
-                "main",
-            ])
             .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
             .env("AUTOSPEC_FOREGROUND_BLOCK_GH", "1")
             .stdout(Stdio::from(output))

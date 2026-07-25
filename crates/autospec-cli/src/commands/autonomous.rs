@@ -178,6 +178,26 @@ enum LaunchMode {
     Foreground,
 }
 
+enum LifecycleStartError {
+    Held,
+    Failure(CommandFailure),
+}
+
+impl From<CommandFailure> for LifecycleStartError {
+    fn from(error: CommandFailure) -> Self {
+        Self::Failure(error)
+    }
+}
+
+impl LifecycleStartError {
+    fn into_command_failure(self) -> CommandFailure {
+        match self {
+            Self::Held => resilience_lease_held(),
+            Self::Failure(error) => error,
+        }
+    }
+}
+
 impl StopMode {
     fn as_str(self) -> &'static str {
         match self {
@@ -692,6 +712,12 @@ fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
             options.subcommand
         ));
     }
+    if options.follow && options.json {
+        return Err(
+            "--json is not supported with --follow; use autospec autonomous status --json"
+                .to_string(),
+        );
+    }
     Ok(if options.follow {
         LaunchMode::Follow
     } else if options.foreground {
@@ -1006,7 +1032,20 @@ fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure
         }
     }
     let (lifecycle, lease) =
-        acquire_lifecycle_start(&layout, &options, LifecycleTransition::Start)?;
+        match acquire_lifecycle_start(&layout, &options, LifecycleTransition::Start) {
+            Ok(acquired) => acquired,
+            Err(LifecycleStartError::Held) if launch_mode == LaunchMode::Follow => {
+                if let Some(conductor) = wait_for_follow_target_after_held(&layout)
+                    .map_err(CommandFailure::diagnostic)?
+                {
+                    print_follow_attach_summary(&options, &layout, &conductor);
+                    return follow_scoped_conductor(&layout, &options)
+                        .map_err(CommandFailure::diagnostic);
+                }
+                return Err(resilience_lease_held());
+            }
+            Err(error) => return Err(error.into_command_failure()),
+        };
     let launched = start_after_lease(&layout, &options, &lifecycle, &lease);
     let (conductor, monitor, supervisor) = match launched {
         Ok(units) => units,
@@ -1047,6 +1086,23 @@ fn live_follow_target(layout: &RunLayout) -> Result<Option<UnitStatus>, String> 
             layout.repo
         )),
     }
+}
+
+fn wait_for_follow_target_after_held(layout: &RunLayout) -> Result<Option<UnitStatus>, String> {
+    const ATTEMPTS: usize = 50;
+    const RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+    println!("autospec autonomous follow: waiting for scoped conductor metadata after held lifecycle lease");
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("cannot flush stdout: {error}"))?;
+    for _ in 0..ATTEMPTS {
+        if let Some(conductor) = live_follow_target(layout)? {
+            return Ok(Some(conductor));
+        }
+        thread::sleep(RETRY_INTERVAL);
+    }
+    Ok(None)
 }
 
 fn print_follow_attach_summary(options: &Options, layout: &RunLayout, conductor: &UnitStatus) {
@@ -1622,7 +1678,8 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
     let (lifecycle, lease) =
-        acquire_lifecycle_start(&layout, &options, LifecycleTransition::Restart)?;
+        acquire_lifecycle_start(&layout, &options, LifecycleTransition::Restart)
+            .map_err(LifecycleStartError::into_command_failure)?;
     let launched = restart_after_lease(&layout, &options, &lifecycle, &lease);
     let (stopped, conductor, monitor, supervisor) = match launched {
         Ok(units) => units,
@@ -3387,7 +3444,7 @@ fn acquire_lifecycle_start(
     layout: &RunLayout,
     options: &Options,
     transition: LifecycleTransition,
-) -> Result<(LifecycleDecision, resilience::ConductorLease), CommandFailure> {
+) -> Result<(LifecycleDecision, resilience::ConductorLease), LifecycleStartError> {
     let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
@@ -3399,7 +3456,7 @@ fn acquire_lifecycle_start(
                     .with_transition(transition)
                     .with_stop(mode),
             );
-            return Err(lifecycle_non_run(&decision));
+            return Err(lifecycle_non_run(&decision).into());
         }
     }
     let (admission, lease) = match resilience::acquire_lifecycle(
@@ -3412,14 +3469,15 @@ fn acquire_lifecycle_start(
         Err(resilience::LifecycleLeaseError::Policy(admission)) => {
             let decision =
                 lifecycle_decision_with_admission(scope, transition, stored_stop, &admission)?;
-            return Err(lifecycle_non_run(&decision));
+            return Err(lifecycle_non_run(&decision).into());
         }
-        Err(error) => return Err(resilience_lease_error(error)),
+        Err(resilience::LifecycleLeaseError::Held) => return Err(LifecycleStartError::Held),
+        Err(error) => return Err(resilience_lease_error(error).into()),
     };
     let decision = lifecycle_decision_with_admission(scope, transition, stored_stop, &admission)?;
     if !matches!(decision, LifecycleDecision::Run { .. }) {
         release_launch_lease(&layout.repo, &lease)?;
-        return Err(lifecycle_non_run(&decision));
+        return Err(lifecycle_non_run(&decision).into());
     }
     Ok((decision, lease))
 }
@@ -5593,7 +5651,10 @@ fn follow_log(logpath: &str, interval_sec: u64) -> Result<(), String> {
 }
 
 fn follow_scoped_conductor(layout: &RunLayout, options: &Options) -> Result<(), String> {
+    const FOLLOW_INTERVAL: Duration = Duration::from_secs(1);
+
     let mut logpath = String::new();
+    let mut conductor_pid = String::new();
     let mut offset = 0usize;
     let mut iteration = 0u64;
     loop {
@@ -5607,8 +5668,9 @@ fn follow_scoped_conductor(layout: &RunLayout, options: &Options) -> Result<(), 
                 ));
             }
             UnitMetadataState::Live => {
-                if unit.logpath != logpath {
+                if unit.pid != conductor_pid || unit.logpath != logpath {
                     println!("autospec autonomous follow: log={}", unit.logpath);
+                    conductor_pid = unit.pid.clone();
                     logpath = unit.logpath;
                     offset = 0;
                 }
@@ -5630,7 +5692,7 @@ fn follow_scoped_conductor(layout: &RunLayout, options: &Options) -> Result<(), 
         if options.iterations > 0 && iteration >= options.iterations {
             return Ok(());
         }
-        thread::sleep(Duration::from_secs(options.interval_sec.max(1)));
+        thread::sleep(FOLLOW_INTERVAL);
     }
 }
 
@@ -5894,7 +5956,7 @@ fn json_string_array(values: &[String]) -> String {
 
 fn print_help() {
     println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --follow | --detach | --foreground\n    --graceful | --immediate"
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate\n\nStart launch modes:\n    default / --detach  detached and supervised; print the start summary and return\n    --follow            detached and supervised; stream the scoped conductor; Ctrl-C detaches only the follower\n    --foreground        caller-owned; run the conductor directly in the caller"
     );
 }
 
