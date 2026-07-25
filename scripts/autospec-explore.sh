@@ -35,6 +35,8 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${AUTOSPEC_REPO_ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+# shellcheck source=lib/autospec-process-tree.sh
+. "$SCRIPT_DIR/lib/autospec-process-tree.sh"
 
 # Defaults.
 MAX_ITERATIONS=3
@@ -215,35 +217,11 @@ _explore_remove_child_pid() {
     EXPLORE_CHILD_PIDS="$out"
 }
 
-_explore_kill_tree() {
-    local pid="$1" child
-    local pgid
-    pgid="$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
-    # Group-kill ONLY when this pid is its own process-group leader (pgid == pid),
-    # i.e. setsid gave the handoff a dedicated group we own. When setsid is absent
-    # (e.g. macOS) the handoff shares the CALLER's group; a `kill -TERM -$pgid`
-    # there would take down autospec-explore itself, the test runner, or the
-    # operator's shell. In that case fall back to killing the pid + its
-    # descendants individually (pgrep -P recursion below).
-    if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
-        kill -TERM "-$pgid" 2>/dev/null || true
-    fi
-    for child in $(pgrep -P "$pid" 2>/dev/null || true); do
-        _explore_kill_tree "$child"
-    done
-    kill -TERM "$pid" 2>/dev/null || true
-    sleep 1
-    if [ -n "$pgid" ] && [ "$pgid" = "$pid" ]; then
-        kill -KILL "-$pgid" 2>/dev/null || true
-    fi
-    kill -KILL "$pid" 2>/dev/null || true
-}
-
 _explore_cleanup_children() {
     local pid
     for pid in $EXPLORE_CHILD_PIDS; do
         if kill -0 "$pid" 2>/dev/null; then
-            _explore_kill_tree "$pid"
+            autospec_kill_tree "$pid" leader 1
         fi
     done
 }
@@ -290,7 +268,7 @@ _explore_run_handoff() {
         sleep "$HANDOFF_TIMEOUT_SEC"
         if kill -0 "$pid" 2>/dev/null; then
             printf 'timeout after %ss\n' "$HANDOFF_TIMEOUT_SEC" > "$timeout_file"
-            _explore_kill_tree "$pid"
+            autospec_kill_tree "$pid" leader 1
         fi
     ) >/dev/null 2>&1 &
     watchdog=$!

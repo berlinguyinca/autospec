@@ -35,6 +35,8 @@ fi
 export AUTOSPEC_EXPLORE_DRAIN_ACTIVE=1
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/autospec-process-tree.sh
+. "$SCRIPT_DIR/lib/autospec-process-tree.sh"
 
 # ── Parse the flags the conductor appends. ────────────────────────────────────
 RESEARCH_SOURCES=""
@@ -88,21 +90,6 @@ else
     EXPLORE_MAX_SECS="${AUTOSPEC_AUTONOMOUS_EXPLORE_MAX_SECS:-300}"
     EXPLORE_POLL_SECS="${AUTOSPEC_AUTONOMOUS_EXPLORE_POLL_SECS:-15}"
 fi
-
-kill_tree() {
-    _pid="$1"
-    _pgid="$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"
-    _own_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
-    if [ -n "$_pgid" ] && [ "$_pgid" != "$_own_pgid" ]; then
-        kill -TERM -- "-$_pgid" 2>/dev/null || true
-        kill -KILL -- "-$_pgid" 2>/dev/null || true
-        return 0
-    fi
-    for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
-        kill_tree "$_child"
-    done
-    kill "$_pid" 2>/dev/null || true
-}
 
 detect_repo() {
     if [ -n "${CONDUCTOR_REPO:-}" ]; then
@@ -178,7 +165,7 @@ else
         if [ "$total_secs" -ge "$EXPLORE_MAX_SECS" ]; then
             printf 'autospec-autonomous-explore-drain: max runtime %ss reached; terminating explore child pid %s\n' \
                 "$EXPLORE_MAX_SECS" "$child_pid" >&2
-            kill_tree "$child_pid"
+            autospec_kill_tree "$child_pid" separate
             wait "$child_pid" 2>/dev/null || true
             explore_rc=124
             break
@@ -193,7 +180,7 @@ else
         if [ "$idle_secs" -ge "$EXPLORE_STALL_SECS" ]; then
             printf 'autospec-autonomous-explore-drain: stalled after %ss with no output; terminating explore child pid %s\n' \
                 "$EXPLORE_STALL_SECS" "$child_pid" >&2
-            kill_tree "$child_pid"
+            autospec_kill_tree "$child_pid" separate
             wait "$child_pid" 2>/dev/null || true
             explore_rc=124
             break
@@ -224,7 +211,7 @@ if grep -q 'AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed' "$HARNESS_LOG" 2>/dev/null
         if [ "$direct_elapsed" -ge "$EXPLORE_MAX_SECS" ]; then
             printf 'autospec-autonomous-explore-drain: direct fallback max runtime %ss reached; terminating pid %s\n' \
                 "$EXPLORE_MAX_SECS" "$direct_pid" >&2
-            kill_tree "$direct_pid"
+            autospec_kill_tree "$direct_pid" separate
             wait "$direct_pid" 2>/dev/null || true
             direct_rc=124
             break

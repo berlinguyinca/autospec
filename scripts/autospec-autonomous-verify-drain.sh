@@ -28,6 +28,8 @@
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/autospec-process-tree.sh
+. "$SCRIPT_DIR/lib/autospec-process-tree.sh"
 if [ -f "$SCRIPT_DIR/autospec-runtime-config.sh" ]; then
     # shellcheck source=/dev/null
     . "$SCRIPT_DIR/autospec-runtime-config.sh"
@@ -115,20 +117,6 @@ fi
 # ── Harness absence is FAIL-CLOSED here (unlike the run/explore drains). ──────
 command -v omx >/dev/null 2>&1 || fail_closed "omx not found on PATH"
 
-kill_tree() {
-    _pid="$1"
-    _pgid="$(ps -o pgid= -p "$_pid" 2>/dev/null | tr -d ' ' || true)"
-    _own_pgid="$(ps -o pgid= -p "$$" 2>/dev/null | tr -d ' ' || true)"
-    if [ -n "$_pgid" ] && [ "$_pgid" != "$_own_pgid" ]; then
-        kill -TERM -- "-$_pgid" 2>/dev/null || true
-        kill -KILL -- "-$_pgid" 2>/dev/null || true
-    fi
-    for _child in $(pgrep -P "$_pid" 2>/dev/null || true); do
-        kill_tree "$_child"
-    done
-    kill "$_pid" 2>/dev/null || true
-}
-
 # ── Build the adversarial-skeptic prompt (embeds the exact norm_title keys). ──
 PROMPT_FILE="$(mktemp "${TMPDIR:-/tmp}/autospec-verify-prompt.XXXXXX" 2>/dev/null || printf '/tmp/autospec-verify-prompt.%s' "$$")"
 if ! python3 - "$DEDUPED_IN" > "$PROMPT_FILE" <<'PY'; then
@@ -199,7 +187,7 @@ else
         if [ "${VERIFY_MAX_SECS:-0}" -gt 0 ] 2>/dev/null && [ "$elapsed_secs" -ge "$VERIFY_MAX_SECS" ]; then
             printf 'autospec-autonomous-verify-drain: absolute timeout after %ss; terminating skeptic child pid %s\n' \
                 "$VERIFY_MAX_SECS" "$child_pid" >&2
-            kill_tree "$child_pid"
+            autospec_kill_tree "$child_pid" separate
             wait "$child_pid" 2>/dev/null || true
             omx_rc=124
             break
@@ -214,7 +202,7 @@ else
         if [ "$idle_secs" -ge "$VERIFY_STALL_SECS" ]; then
             printf 'autospec-autonomous-verify-drain: stalled after %ss with no output; terminating skeptic child pid %s\n' \
                 "$VERIFY_STALL_SECS" "$child_pid" >&2
-            kill_tree "$child_pid"
+            autospec_kill_tree "$child_pid" separate
             wait "$child_pid" 2>/dev/null || true
             omx_rc=124
             break
