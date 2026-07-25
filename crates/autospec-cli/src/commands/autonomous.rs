@@ -1,5 +1,5 @@
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -118,6 +118,8 @@ struct Options {
     dry_run: bool,
     once: bool,
     json: bool,
+    follow: bool,
+    detach: bool,
     foreground: bool,
     force: bool,
     log_path: String,
@@ -147,6 +149,8 @@ impl Default for Options {
             dry_run: false,
             once: false,
             json: false,
+            follow: false,
+            detach: false,
             foreground: false,
             force: false,
             log_path: String::new(),
@@ -165,6 +169,33 @@ impl Default for Options {
 enum StopMode {
     Graceful,
     Immediate,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchMode {
+    Detached,
+    Follow,
+    Foreground,
+}
+
+enum LifecycleStartError {
+    Held,
+    Failure(CommandFailure),
+}
+
+impl From<CommandFailure> for LifecycleStartError {
+    fn from(error: CommandFailure) -> Self {
+        Self::Failure(error)
+    }
+}
+
+impl LifecycleStartError {
+    fn into_command_failure(self) -> CommandFailure {
+        match self {
+            Self::Held => resilience_lease_held(),
+            Self::Failure(error) => error,
+        }
+    }
 }
 
 impl StopMode {
@@ -205,13 +236,12 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         return Ok(());
     }
     let options = parse(args).map_err(CommandFailure::diagnostic)?;
-    if options.subcommand == "run-foreground"
-        || (options.subcommand == "start" && options.foreground)
-    {
+    let launch_mode = validate_launch_mode(&options).map_err(CommandFailure::diagnostic)?;
+    if options.subcommand == "run-foreground" || launch_mode == LaunchMode::Foreground {
         return run_foreground(options);
     }
     match options.subcommand.as_str() {
-        "start" => start(options),
+        "start" => start(options, launch_mode),
         "restart" => restart(options),
         "status" => status(options),
         "monitor" => monitor(options).map_err(CommandFailure::diagnostic),
@@ -657,6 +687,8 @@ fn parse(args: &[String]) -> Result<Options, String> {
             }
             "--once" => options.once = true,
             "--json" => options.json = true,
+            "--follow" => options.follow = true,
+            "--detach" => options.detach = true,
             "--foreground" => options.foreground = true,
             "--force" => options.force = true,
             "--graceful" => options.stop_mode = StopMode::Graceful,
@@ -666,6 +698,39 @@ fn parse(args: &[String]) -> Result<Options, String> {
         index += 1;
     }
     Ok(options)
+}
+
+fn validate_launch_mode(options: &Options) -> Result<LaunchMode, String> {
+    let selected =
+        usize::from(options.follow) + usize::from(options.detach) + usize::from(options.foreground);
+    if selected > 1 {
+        return Err("--follow, --detach, and --foreground are mutually exclusive".to_string());
+    }
+    if (options.follow || options.detach || options.foreground) && options.subcommand != "start" {
+        return Err(format!(
+            "launch modes are valid only with autospec autonomous start, not {}",
+            options.subcommand
+        ));
+    }
+    if options.follow && options.force {
+        return Err(
+            "--force cannot be combined with --follow; use autospec autonomous restart --force"
+                .to_string(),
+        );
+    }
+    if options.follow && options.json {
+        return Err(
+            "--json is not supported with --follow; use autospec autonomous status --json"
+                .to_string(),
+        );
+    }
+    Ok(if options.follow {
+        LaunchMode::Follow
+    } else if options.foreground {
+        LaunchMode::Foreground
+    } else {
+        LaunchMode::Detached
+    })
 }
 
 fn parse_lifetime_budget(value: &str, flag: &str) -> Result<u64, String> {
@@ -932,12 +997,12 @@ fn option_value(args: &[String], index: &mut usize, option: &str) -> Result<Stri
         .ok_or_else(|| format!("{option} requires a value"))
 }
 
-fn start(options: Options) -> Result<(), CommandFailure> {
+fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure> {
     if options.dry_run {
         let commands = launch_commands(&options).map_err(CommandFailure::diagnostic)?;
         let foreground = foreground_command(&options).map_err(CommandFailure::diagnostic)?;
         if options.json {
-            println!(
+            let mut body = format!(
                 "{{\"command\":\"autonomous\",\"subcommand\":\"start\",\"status\":\"dry-run\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"conductor\":\"{}\",\"companions\":{{\"monitor\":\"{}\",\"supervisor\":\"{}\"}}}}",
                 json_escape(&options.repo),
                 json_escape(&options.repo_dir),
@@ -945,11 +1010,19 @@ fn start(options: Options) -> Result<(), CommandFailure> {
                 json_escape(&commands.monitor.display()),
                 json_escape(&commands.supervisor.display())
             );
+            if launch_mode == LaunchMode::Follow {
+                body.pop();
+                body.push_str(",\"follow\":\"scoped conductor log\"}");
+            }
+            println!("{body}");
         } else {
             println!("autospec autonomous start: dry-run");
             println!("conductor: {}", foreground.display());
             println!("monitor: {}", commands.monitor.display());
             println!("supervisor: {}", commands.supervisor.display());
+            if launch_mode == LaunchMode::Follow {
+                println!("follow: scoped conductor log");
+            }
         }
         return Ok(());
     }
@@ -958,8 +1031,27 @@ fn start(options: Options) -> Result<(), CommandFailure> {
     let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
+    if launch_mode == LaunchMode::Follow {
+        if let Some(conductor) = live_follow_target(&layout).map_err(CommandFailure::diagnostic)? {
+            print_follow_attach_summary(&options, &layout, &conductor);
+            return follow_scoped_conductor(&layout, &options).map_err(CommandFailure::diagnostic);
+        }
+    }
     let (lifecycle, lease) =
-        acquire_lifecycle_start(&layout, &options, LifecycleTransition::Start)?;
+        match acquire_lifecycle_start(&layout, &options, LifecycleTransition::Start) {
+            Ok(acquired) => acquired,
+            Err(LifecycleStartError::Held) if launch_mode == LaunchMode::Follow => {
+                if let Some(conductor) = wait_for_follow_target_after_held(&layout)
+                    .map_err(CommandFailure::diagnostic)?
+                {
+                    print_follow_attach_summary(&options, &layout, &conductor);
+                    return follow_scoped_conductor(&layout, &options)
+                        .map_err(CommandFailure::diagnostic);
+                }
+                return Err(resilience_lease_held());
+            }
+            Err(error) => return Err(error.into_command_failure()),
+        };
     let launched = start_after_lease(&layout, &options, &lifecycle, &lease);
     let (conductor, monitor, supervisor) = match launched {
         Ok(units) => units,
@@ -984,7 +1076,53 @@ fn start(options: Options) -> Result<(), CommandFailure> {
         println!("monitor pid: {}", monitor.pid);
         println!("supervisor pid: {}", supervisor.pid);
     }
+    if launch_mode == LaunchMode::Follow {
+        return follow_scoped_conductor(&layout, &options).map_err(CommandFailure::diagnostic);
+    }
     Ok(())
+}
+
+fn live_follow_target(layout: &RunLayout) -> Result<Option<UnitStatus>, String> {
+    let unit = read_unit("conductor", layout);
+    match unit.metadata_state {
+        UnitMetadataState::Live => Ok(Some(unit)),
+        UnitMetadataState::Absent | UnitMetadataState::Stale => Ok(None),
+        UnitMetadataState::Ambiguous => Err(format!(
+            "cannot follow ambiguous conductor metadata for {}",
+            layout.repo
+        )),
+    }
+}
+
+fn wait_for_follow_target_after_held(layout: &RunLayout) -> Result<Option<UnitStatus>, String> {
+    const ATTEMPTS: usize = 50;
+    const RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+    println!("autospec autonomous follow: waiting for scoped conductor metadata after held lifecycle lease");
+    io::stdout()
+        .flush()
+        .map_err(|error| format!("cannot flush stdout: {error}"))?;
+    for _ in 0..ATTEMPTS {
+        if let Some(conductor) = live_follow_target(layout)? {
+            return Ok(Some(conductor));
+        }
+        thread::sleep(RETRY_INTERVAL);
+    }
+    Ok(None)
+}
+
+fn print_follow_attach_summary(options: &Options, layout: &RunLayout, conductor: &UnitStatus) {
+    if options.json {
+        println!(
+            "{{\"command\":\"autonomous\",\"subcommand\":\"start\",\"status\":\"attached\",\"repo\":\"{}\",\"repo_dir\":\"{}\",\"conductor\":{}}}",
+            json_escape(&layout.repo),
+            json_escape(&options.repo_dir),
+            unit_status_json(conductor)
+        );
+    } else {
+        println!("autospec autonomous attached");
+        println!("conductor pid: {}", conductor.pid);
+    }
 }
 
 fn start_after_lease(
@@ -1546,7 +1684,8 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
     let (lifecycle, lease) =
-        acquire_lifecycle_start(&layout, &options, LifecycleTransition::Restart)?;
+        acquire_lifecycle_start(&layout, &options, LifecycleTransition::Restart)
+            .map_err(LifecycleStartError::into_command_failure)?;
     let launched = restart_after_lease(&layout, &options, &lifecycle, &lease);
     let (stopped, conductor, monitor, supervisor) = match launched {
         Ok(units) => units,
@@ -3311,7 +3450,7 @@ fn acquire_lifecycle_start(
     layout: &RunLayout,
     options: &Options,
     transition: LifecycleTransition,
-) -> Result<(LifecycleDecision, resilience::ConductorLease), CommandFailure> {
+) -> Result<(LifecycleDecision, resilience::ConductorLease), LifecycleStartError> {
     let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
     })?;
@@ -3323,7 +3462,7 @@ fn acquire_lifecycle_start(
                     .with_transition(transition)
                     .with_stop(mode),
             );
-            return Err(lifecycle_non_run(&decision));
+            return Err(lifecycle_non_run(&decision).into());
         }
     }
     let (admission, lease) = match resilience::acquire_lifecycle(
@@ -3336,14 +3475,15 @@ fn acquire_lifecycle_start(
         Err(resilience::LifecycleLeaseError::Policy(admission)) => {
             let decision =
                 lifecycle_decision_with_admission(scope, transition, stored_stop, &admission)?;
-            return Err(lifecycle_non_run(&decision));
+            return Err(lifecycle_non_run(&decision).into());
         }
-        Err(error) => return Err(resilience_lease_error(error)),
+        Err(resilience::LifecycleLeaseError::Held) => return Err(LifecycleStartError::Held),
+        Err(error) => return Err(resilience_lease_error(error).into()),
     };
     let decision = lifecycle_decision_with_admission(scope, transition, stored_stop, &admission)?;
     if !matches!(decision, LifecycleDecision::Run { .. }) {
         release_launch_lease(&layout.repo, &lease)?;
-        return Err(lifecycle_non_run(&decision));
+        return Err(lifecycle_non_run(&decision).into());
     }
     Ok((decision, lease))
 }
@@ -3994,7 +4134,7 @@ fn spawn_unit(
 ) -> Result<UnitRecord, String> {
     let logpath = log_override
         .map(PathBuf::from)
-        .unwrap_or_else(|| log_dir.join(format!("autospec-autonomous-{name}.log")));
+        .unwrap_or_else(|| default_unit_logpath(name, log_dir));
     if let Some(parent) = logpath.parent() {
         fs::create_dir_all(parent)
             .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
@@ -4043,6 +4183,21 @@ fn spawn_unit(
         logpath,
         logpath_file,
     })
+}
+
+fn default_unit_logpath(name: &str, log_dir: &Path) -> PathBuf {
+    if name != "conductor" {
+        return log_dir.join(format!("autospec-autonomous-{name}.log"));
+    }
+    let generation = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let sequence = ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    log_dir.join(format!(
+        "autospec-autonomous-conductor-{generation}-{}-{sequence}.log",
+        std::process::id()
+    ))
 }
 
 fn launch_units(
@@ -5501,6 +5656,84 @@ fn follow_log(logpath: &str, interval_sec: u64) -> Result<(), String> {
     }
 }
 
+fn follow_scoped_conductor(layout: &RunLayout, options: &Options) -> Result<(), String> {
+    const FOLLOW_INTERVAL: Duration = Duration::from_secs(1);
+
+    let mut logpath = String::new();
+    let mut conductor_pid = String::new();
+    let mut offset = 0usize;
+    let mut iteration = 0u64;
+    loop {
+        iteration += 1;
+        let unit = read_unit("conductor", layout);
+        match unit.metadata_state {
+            UnitMetadataState::Ambiguous => {
+                return Err(format!(
+                    "cannot follow ambiguous conductor metadata for {}",
+                    layout.repo
+                ));
+            }
+            UnitMetadataState::Live => {
+                if unit.pid != conductor_pid || unit.logpath != logpath {
+                    println!("autospec autonomous follow: log={}", unit.logpath);
+                    conductor_pid = unit.pid.clone();
+                    logpath = unit.logpath;
+                    offset = 0;
+                }
+                offset = print_log_growth(&logpath, offset)?;
+            }
+            UnitMetadataState::Absent | UnitMetadataState::Stale => {
+                if persisted_stop_mode(layout)?.is_some() {
+                    println!("autospec autonomous follow: conductor stopped");
+                    return Ok(());
+                }
+                let supervisor = read_unit("supervisor", layout);
+                if !supervisor.running {
+                    println!("autospec autonomous follow: conductor exited");
+                    return Ok(());
+                }
+                println!("autospec autonomous follow: waiting for supervisor repair");
+            }
+        }
+        if options.iterations > 0 && iteration >= options.iterations {
+            return Ok(());
+        }
+        thread::sleep(FOLLOW_INTERVAL);
+    }
+}
+
+fn print_log_growth(logpath: &str, mut offset: usize) -> Result<usize, String> {
+    if logpath.is_empty() {
+        return Ok(0);
+    }
+    let mut log = File::open(logpath).map_err(|error| format!("cannot open {logpath}: {error}"))?;
+    let length = usize::try_from(
+        log.metadata()
+            .map_err(|error| format!("cannot inspect {logpath}: {error}"))?
+            .len(),
+    )
+    .map_err(|_| format!("cannot follow {logpath}: file is too large"))?;
+    if length < offset {
+        offset = 0;
+    }
+    log.seek(SeekFrom::Start(offset as u64))
+        .map_err(|error| format!("cannot seek {logpath}: {error}"))?;
+    let mut growth = Vec::new();
+    log.read_to_end(&mut growth)
+        .map_err(|error| format!("cannot read {logpath}: {error}"))?;
+    if !growth.is_empty() {
+        io::stdout()
+            .write_all(&growth)
+            .map_err(|error| format!("cannot write log output: {error}"))?;
+        io::stdout()
+            .flush()
+            .map_err(|error| format!("cannot flush stdout: {error}"))?;
+    }
+    offset
+        .checked_add(growth.len())
+        .ok_or_else(|| format!("cannot follow {logpath}: byte cursor overflow"))
+}
+
 fn summarize_timeline_line(line: &str) -> String {
     if line.len() > 21 && line.as_bytes().get(10) == Some(&b'T') {
         line[21..].trim_start().to_string()
@@ -5729,7 +5962,7 @@ fn json_string_array(values: &[String]) -> String {
 
 fn print_help() {
     println!(
-        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate"
+        "autospec autonomous\n\nUSAGE:\n    autospec autonomous [start|status|list|logs|watch|timeline|monitor|supervise|cleanup|stop|restart|run-foreground|main-health] [OPTIONS]\n    autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]\n    autospec autonomous lifecycle decide --repo OWNER/REPO [LIFECYCLE OPTIONS]\n\nCommon options:\n    --repo OWNER/REPO\n    --repo-dir DIR\n    --json\n    --dry-run\n    --max-cycles N\n    --budget-tokens N\n    --budget-issues N\n    --poll-interval-sec N\n    --graceful | --immediate\n\nStart launch modes:\n    default / --detach  detached and supervised; print the start summary and return\n    --follow            detached and supervised; stream the scoped conductor; Ctrl-C detaches only the follower\n    --foreground        caller-owned; run the conductor directly in the caller"
     );
 }
 

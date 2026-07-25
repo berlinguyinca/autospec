@@ -3,11 +3,11 @@ use autospec_core::autonomous::premerge::PremergeLaneIdentity;
 use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus, WaterfallState};
 use autospec_core::claim::{parse_remote_comments_json, select_run_state, RunStateRecord};
 use autospec_core::coordination::{ConductorOutcome, ConductorPhase, ConductorState};
-use std::fs;
+use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -99,6 +99,66 @@ fn assert_no_forbidden_authority(source: &str, patterns: &[SourcePattern], conte
             pattern.needle()
         );
     }
+}
+
+#[test]
+fn autonomous_help_documents_all_start_modes() {
+    let output = ForegroundFixture::new()
+        .configured_command()
+        .args(["autonomous", "--help"])
+        .output()
+        .expect("print autonomous help");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--follow"));
+    assert!(stdout.contains("--detach"));
+    assert!(stdout.contains("--foreground"));
+    assert!(stdout.contains("default"));
+    assert!(stdout.contains("detached and supervised"));
+    assert!(stdout.contains("Ctrl-C detaches only the follower"));
+    assert!(stdout.contains("caller-owned"));
+}
+
+#[test]
+fn start_rejects_conflicting_launch_modes_before_mutation() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .configured_command()
+        .args(["autonomous", "start", "--follow", "--foreground"])
+        .output()
+        .expect("reject conflicting modes");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--follow, --detach, and --foreground are mutually exclusive"));
+    assert!(!fixture.operator.exists());
+}
+
+#[test]
+fn start_rejects_follow_force_before_mutation() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .configured_command()
+        .args(["autonomous", "start", "--follow", "--force"])
+        .output()
+        .expect("reject follow with force");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains(
+        "--force cannot be combined with --follow; use autospec autonomous restart --force"
+    ));
+    assert!(!fixture.operator.exists());
+}
+
+#[test]
+fn launch_modes_reject_non_start_subcommands_before_mutation() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .configured_command()
+        .args(["autonomous", "status", "--follow"])
+        .output()
+        .expect("reject launch mode on status");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("launch modes are valid only with autospec autonomous start, not status"));
+    assert!(!fixture.operator.exists());
 }
 
 #[test]
@@ -519,6 +579,254 @@ fn detached_start_survives_launcher_process_group_shutdown() {
         process_is_running(conductor_pid),
         "detached conductor {conductor_pid} exited with launcher process group {launcher_process_group}"
     );
+}
+
+#[test]
+fn session_follow_attaches_without_restarting_and_detaches_safely() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.start_blocked_detached();
+    let conductor_pid = fixture.recorded_conductor_pid().expect("conductor pid");
+
+    let mut follower = fixture.spawn_following_start(0);
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "autospec autonomous attached",
+    );
+    assert!(process_is_running(follower.id()));
+    assert_eq!(fixture.recorded_conductor_pid(), Some(conductor_pid));
+    assert!(!fixture.scoped_stop_sentinel().exists());
+
+    follower.terminate_and_wait();
+    assert!(process_is_running(conductor_pid));
+    assert_eq!(fixture.recorded_conductor_pid(), Some(conductor_pid));
+    assert!(!fixture.scoped_stop_sentinel().exists());
+    fixture.terminate_recorded_conductor();
+}
+
+#[test]
+fn session_follow_fresh_start_uses_a_generation_log_and_enters_follow_mode() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+
+    let mut follower = fixture.spawn_following_start(1);
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "autospec autonomous started",
+    );
+    let status = follower.wait();
+
+    assert!(status.success());
+    assert!(process_is_running(
+        fixture.recorded_conductor_pid().expect("conductor pid")
+    ));
+    let logpath = fixture.recorded_conductor_logpath();
+    assert_ne!(
+        logpath.file_name().and_then(|name| name.to_str()),
+        Some("autospec-autonomous-conductor.log")
+    );
+    assert!(logpath.exists());
+}
+
+#[test]
+fn session_follow_uses_a_one_second_cadence_without_a_poll_interval_override() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.start_blocked_detached();
+    let logpath = fixture.recorded_conductor_logpath();
+
+    let mut follower = fixture.spawn_following_start_without_interval(2);
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "autospec autonomous attached",
+    );
+    fs::write(&logpath, "default-cadence-update\n").expect("write conductor update");
+    wait_for_file_contents(&fixture.root.join("follower.log"), "default-cadence-update");
+
+    assert!(follower.wait().success());
+}
+
+#[test]
+fn session_follow_switches_to_repaired_conductor_log_from_offset_zero() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.start_blocked_detached();
+    let initial_log = fixture.recorded_conductor_logpath();
+    fs::write(&initial_log, "initial-generation\n").expect("write initial conductor log");
+
+    let mut follower = fixture.spawn_following_start(0);
+    wait_for_file_contents(&fixture.root.join("follower.log"), "initial-generation");
+
+    let repaired_log = fixture.root.join("repaired-conductor.log");
+    fs::write(&repaired_log, "repair-generation-from-zero\n").expect("write repaired log");
+    fs::write(
+        fixture.scoped_dir().join("conductor.logpath"),
+        format!("{}\n", repaired_log.display()),
+    )
+    .expect("switch scoped log metadata");
+
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "repair-generation-from-zero",
+    );
+    follower.terminate_and_wait();
+    assert!(process_is_running(
+        fixture.recorded_conductor_pid().expect("conductor pid")
+    ));
+}
+
+#[test]
+fn session_follow_resets_explicit_log_cursor_after_live_pid_replacement() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let explicit_log = fixture.root.join("explicit-conductor.log");
+    fixture.start_blocked_detached_with_log(Some(&explicit_log));
+    fs::write(&explicit_log, "old-generation-complete\n").expect("write initial explicit log");
+
+    let mut follower = fixture.spawn_following_start(0);
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "old-generation-complete",
+    );
+
+    fixture.terminate_recorded_conductor();
+    let mut replacement_command = Command::new("sh");
+    replacement_command
+        .args(["-c", "while :; do sleep 1; done"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let replacement = GuardedProcessGroup::new(
+        replacement_command
+            .spawn()
+            .expect("spawn replacement conductor"),
+    );
+    fs::write(
+        fixture.scoped_dir().join("conductor.pid"),
+        format!(
+            "{{\"pid\":{},\"repo\":\"test/repo\",\"scope\":\"test_repo\"}}\n",
+            replacement.id()
+        ),
+    )
+    .expect("record replacement conductor pid");
+    fs::write(
+        &explicit_log,
+        "new-generation-prefix-must-be-visible-even-when-this-generation-is-longer-than-the-old-one\n",
+    )
+    .expect("rewrite explicit log for replacement generation");
+    wait_for_file_contents(&fixture.root.join("follower.log"), "new-generation-prefix");
+
+    follower.terminate_and_wait();
+    assert_eq!(fixture.recorded_conductor_logpath(), explicit_log);
+    assert!(!fixture.scoped_stop_sentinel().exists());
+    drop(replacement);
+}
+
+#[test]
+fn session_follow_reads_log_growth_with_a_seek_cursor() {
+    let source =
+        fs::read_to_string(workspace_root().join("crates/autospec-cli/src/commands/autonomous.rs"))
+            .expect("read autonomous command source");
+    let growth = source
+        .split_once("fn print_log_growth")
+        .and_then(|(_, remainder)| remainder.split_once("\nfn "))
+        .map(|(body, _)| body)
+        .expect("print_log_growth function");
+
+    assert!(growth.contains("SeekFrom::Start"));
+    assert!(growth.contains("read_to_end"));
+    assert!(!growth.contains("fs::read(logpath)"));
+}
+
+#[test]
+fn session_follow_dry_run_reports_scoped_log_without_creating_state() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .detached_command("start")
+        .args(["--follow", "--dry-run"])
+        .output()
+        .expect("dry-run following start");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("follow: scoped conductor log"));
+    assert!(!fixture.operator.exists());
+}
+
+#[test]
+fn session_follow_rejects_json_before_creating_state() {
+    let fixture = ForegroundFixture::new();
+    let output = fixture
+        .detached_command("start")
+        .args(["--follow", "--json"])
+        .output()
+        .expect("reject mixed JSON and log stream");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("--json is not supported with --follow; use autospec autonomous status --json"));
+    assert!(!fixture.operator.exists());
+}
+
+#[test]
+fn session_follow_waits_for_metadata_published_after_a_held_lease() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.start_blocked_detached();
+    let original_pid = fixture.recorded_conductor_pid().expect("conductor pid");
+    let pid_path = fixture.scoped_dir().join("conductor.pid");
+    let logpath_path = fixture.scoped_dir().join("conductor.logpath");
+    let pid_metadata = fs::read_to_string(&pid_path).expect("read conductor metadata");
+    let logpath_metadata = fs::read_to_string(&logpath_path).expect("read log metadata");
+    fs::remove_file(&pid_path).expect("hide conductor pid before follower start");
+    fs::remove_file(&logpath_path).expect("hide conductor log before follower start");
+
+    let mut follower = fixture.spawn_following_start(1);
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "waiting for scoped conductor metadata after held lifecycle lease",
+    );
+    fs::write(&pid_path, pid_metadata).expect("publish conductor pid metadata");
+    fs::write(&logpath_path, logpath_metadata).expect("publish conductor log metadata");
+
+    assert!(follower.wait().success());
+    assert_eq!(fixture.recorded_conductor_pid(), Some(original_pid));
+    assert!(process_is_running(original_pid));
+}
+
+#[test]
+fn session_follow_rejects_ambiguous_conductor_metadata_before_starting() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let scope = fixture.operator.join("test_repo");
+    fs::create_dir_all(&scope).expect("create scoped metadata");
+    fs::write(scope.join("conductor.logpath"), "/tmp/ambiguous.log\n")
+        .expect("write ambiguous log metadata");
+
+    let output = fixture
+        .detached_command("start")
+        .args(["--follow", "--iterations", "1", "--branch", "main"])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .output()
+        .expect("follow ambiguous conductor");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("cannot follow ambiguous conductor metadata for test/repo"));
+    assert!(!scope.join("conductor.pid").exists());
+}
+
+#[test]
+fn detached_flag_returns_after_start_without_following() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let output = fixture
+        .detached_command("start")
+        .arg("--detach")
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .output()
+        .expect("explicit detached start");
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("autospec autonomous started"));
 }
 
 #[test]
@@ -1701,6 +2009,49 @@ fn foreground_fixture_directories_are_unique_within_one_process() {
     assert_ne!(first.root, second.root);
 }
 
+struct GuardedProcessGroup {
+    child: Option<Child>,
+}
+
+impl GuardedProcessGroup {
+    fn new(child: Child) -> Self {
+        Self { child: Some(child) }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.as_ref().expect("live guarded child").id()
+    }
+
+    fn wait(&mut self) -> ExitStatus {
+        let mut child = self.child.take().expect("live guarded child");
+        child.wait().expect("wait for guarded child")
+    }
+
+    fn terminate_and_wait(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        terminate_process_group(child.id());
+        let _ = child.wait();
+    }
+}
+
+impl Drop for GuardedProcessGroup {
+    fn drop(&mut self) {
+        let Some(mut child) = self.child.take() else {
+            return;
+        };
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => {
+                terminate_process_group(child.id());
+                let _ = child.kill();
+            }
+        }
+        let _ = child.wait();
+    }
+}
+
 struct ForegroundFixture {
     root: PathBuf,
     repo_dir: PathBuf,
@@ -1942,9 +2293,68 @@ exit 1
             "test/repo",
             "--repo-dir",
             self.repo_dir.to_str().expect("repo path"),
-            "--json",
         ]);
         command
+    }
+
+    fn start_blocked_detached(&self) {
+        self.start_blocked_detached_with_log(None);
+    }
+
+    fn start_blocked_detached_with_log(&self, logpath: Option<&Path>) {
+        let mut command = self.detached_command("start");
+        command.arg("--detach").args(["--branch", "main"]);
+        if let Some(logpath) = logpath {
+            command.args(["--log", logpath.to_str().expect("log path")]);
+        }
+        let output = command
+            .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+            .env("AUTOSPEC_FOREGROUND_BLOCK_GH", "1")
+            .output()
+            .expect("start blocked detached conductor");
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        wait_for_file_contents(&self.calls, "repos/test/repo/branches/main");
+        let conductor_pid = self.recorded_conductor_pid().expect("conductor pid");
+        assert!(process_is_running(conductor_pid));
+    }
+
+    fn spawn_following_start(&self, iterations: u64) -> GuardedProcessGroup {
+        self.spawn_following_start_command(iterations, true)
+    }
+
+    fn spawn_following_start_without_interval(&self, iterations: u64) -> GuardedProcessGroup {
+        self.spawn_following_start_command(iterations, false)
+    }
+
+    fn spawn_following_start_command(
+        &self,
+        iterations: u64,
+        set_interval: bool,
+    ) -> GuardedProcessGroup {
+        let mut command = self.detached_command("start");
+        let output = File::create(self.root.join("follower.log")).expect("create follower log");
+        let errors = output.try_clone().expect("clone follower log");
+        command.args([
+            "--follow",
+            "--iterations",
+            &iterations.to_string(),
+            "--branch",
+            "main",
+        ]);
+        if set_interval {
+            command.args(["--interval-sec", "1"]);
+        }
+        command
+            .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+            .env("AUTOSPEC_FOREGROUND_BLOCK_GH", "1")
+            .stdout(Stdio::from(output))
+            .stderr(Stdio::from(errors))
+            .process_group(0);
+        GuardedProcessGroup::new(command.spawn().expect("spawn following start"))
     }
 
     fn recorded_conductor_pid(&self) -> Option<u32> {
@@ -1955,6 +2365,29 @@ exit 1
             .next()?
             .parse()
             .ok()
+    }
+
+    fn terminate_recorded_conductor(&self) {
+        if let Some(pid) = self.recorded_conductor_pid() {
+            terminate_process_group(pid);
+            terminate_process(pid);
+        }
+    }
+
+    fn recorded_conductor_logpath(&self) -> PathBuf {
+        PathBuf::from(
+            fs::read_to_string(self.scoped_dir().join("conductor.logpath"))
+                .expect("read conductor logpath")
+                .trim(),
+        )
+    }
+
+    fn scoped_dir(&self) -> PathBuf {
+        self.operator.join("test_repo")
+    }
+
+    fn scoped_stop_sentinel(&self) -> PathBuf {
+        self.scoped_dir().join("stop.flag")
     }
 
     fn write_autonomous_config(&self, source: &str) {
@@ -2273,10 +2706,7 @@ fn json_string_field(document: &str, field: &str) -> String {
 
 impl Drop for ForegroundFixture {
     fn drop(&mut self) {
-        if let Some(pid) = self.recorded_conductor_pid() {
-            terminate_process_group(pid);
-            terminate_process(pid);
-        }
+        self.terminate_recorded_conductor();
         let _ = fs::remove_dir_all(&self.root);
     }
 }

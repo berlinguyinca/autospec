@@ -60,6 +60,59 @@ If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$` (cas
 2. Honor `--graceful` and `--immediate` by writing the shell-compatible stop sentinel at `${AUTOSPEC_STOP_FLAG_FILE:-~/.autospec/autonomous-operator/<repo-scope>/stop.flag}`. Graceful stop leaves the conductor to finish the current issue/cycle boundary while stopping the companion monitor/supervisor; immediate stop also terminates the recorded conductor PID.
 3. Print the stop summary and exit. Do not enter the autonomous pipeline.
 
+## Direct interactive session launch
+
+For direct invocations from Codex, Claude, or OpenCode, treat `"$@"` in the
+commands below as every operator-supplied argument, preserving each token and its
+original order unchanged.
+
+When invoked without an operator subcommand or explicit launch mode, execute:
+
+```bash
+autospec-autonomous start --follow --repo-dir "$PWD" "$@"
+```
+
+Forward every supplied non-launch argument through `"$@"`. If the operator
+supplied `--repo-dir`, omit the injected `--repo-dir "$PWD"` and preserve the
+operator's option and value unchanged; never drop, duplicate, or reorder an
+operator argument.
+
+When no subcommand is supplied and the operator supplies exactly one of
+`--follow`, `--detach`, or `--foreground`, execute:
+
+```bash
+autospec-autonomous start "$@"
+```
+
+Preserve the supplied launch mode and every remaining argument unchanged; do not
+inject `--follow` or any second launch mode.
+
+When the operator supplies the `start` subcommand without an explicit launch
+mode, remove the leading `start` token, preserve the remaining tokens as
+`"$@"`, and execute:
+
+```bash
+autospec-autonomous start --follow --repo-dir "$PWD" "$@"
+```
+
+If those remaining tokens include `--repo-dir`, omit the injected
+`--repo-dir "$PWD"` and preserve the operator's option and value unchanged. If
+`start` includes exactly one explicit launch mode, execute
+`autospec-autonomous "$@"` with the original unshifted argument list unchanged.
+
+When the operator supplies any other subcommand such as `status`, `stop`,
+`timeline`, or `watch`, execute:
+
+```bash
+autospec-autonomous "$@"
+```
+
+Preserve that subcommand and every argument unchanged. Keep every launch using
+`--follow` attached and forward its complete output to the initiating session.
+Never replace attached session output with a desktop notification. Do not
+change the raw CLI default; `autospec autonomous start` without a launch mode
+remains detached outside direct interactive skill routing.
+
 ## Operator commands and monitoring
 
 The installer creates command wrappers in `~/.autospec/bin` and configures shells
@@ -69,6 +122,9 @@ or after `. "$HOME/.autospec/env"`:
 | Command | Purpose |
 |---------|---------|
 | `autospec-autonomous [start]` | Start the detached conductor plus its default monitor/supervisor companions. |
+| `autospec-autonomous start --follow` | Start a detached conductor, follow its scoped log, and remain attached until the conductor exits. |
+| `autospec-autonomous start --detach` | Explicitly start detached and return after launch. |
+| `autospec-autonomous start --foreground` | Run the conductor in the current process instead of detaching. |
 | `autospec-autonomous-start` | Start the Rust lifecycle launcher directly. |
 | `autospec-autonomous-list` | Enumerate repo-scoped conductors with PID, liveness, log path, and companion metadata. |
 | `autospec-autonomous-status` | Print PID, log path, conductor state, spend ledger, and recent log tail; pass `--all --json` to enumerate all conductors. |
@@ -363,6 +419,7 @@ bats suite mocks as a subprocess.
 /autospec-autonomous [--max-cycles N] \
     [--budget-tokens N] \
     [--budget-issues N] \
+    [--follow | --detach | --foreground] \
     [--dry-run] \
     [--no-digest] \
     [--poll-interval-sec N]
@@ -371,9 +428,12 @@ bats suite mocks as a subprocess.
 Equivalent installed shell command:
 
 ```bash
-autospec-autonomous start [--max-cycles N] [--dry-run] [--no-digest] [--poll-interval-sec N]
+autospec-autonomous start [--follow | --detach | --foreground] [--max-cycles N] [--dry-run] [--no-digest] [--poll-interval-sec N]
 ```
 
+- `--follow` — start detached, stream the scoped conductor log, and remain attached until the conductor exits; the interactive skill default.
+- `--detach` — explicitly preserve raw CLI detached behavior and return after launch.
+- `--foreground` — run the conductor in the current process instead of detaching.
 - `--max-cycles N` — outer loop cycle cap. Default unlimited; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
 - `--budget-tokens N` — lifetime token ceiling (sets `AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS`). Default 50M; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
 - `--budget-issues N` — lifetime budget-counted issue-unit ceiling. Default unlimited; forwarded through the Rust `run-foreground` shim and recorded in Rust `launch.json`.
