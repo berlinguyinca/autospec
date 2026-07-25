@@ -65,6 +65,9 @@ fn record_tier2_fenced(
     if let Some(receipt) = existing_receipt(&store, &state)? {
         return settle_receipt(&store, &state, receipt);
     }
+    store
+        .clear_obsolete_tier2_policy_evidence(state.next_pass_id(), &disabled_policy_document())
+        .map_err(store_error)?;
 
     let receipt = match scan {
         Tier2Scan::NotRun => disabled_receipt(&store, &state)?,
@@ -95,9 +98,29 @@ fn replay_tier2_fenced(
         return Ok(ReceiptPreflight::Replayed(Tier2Progress::Pending));
     }
     match existing_receipt(&store, &state)? {
+        Some(receipt) if is_obsolete_disabled_receipt(&receipt) => {
+            store
+                .remove_unreferenced_tier2_receipt(&state, &receipt)
+                .map_err(store_error)?;
+            store
+                .clear_obsolete_tier2_policy_evidence(
+                    state.next_pass_id(),
+                    &disabled_policy_document(),
+                )
+                .map_err(store_error)?;
+            Ok(ReceiptPreflight::NeedsCollection)
+        }
         Some(receipt) => settle_receipt(&store, &state, receipt).map(ReceiptPreflight::Replayed),
         None => Ok(ReceiptPreflight::NeedsCollection),
     }
+}
+
+fn is_obsolete_disabled_receipt(receipt: &TierReceipt) -> bool {
+    receipt.producer_version() == DISABLED_PRODUCER_VERSION
+        && matches!(
+            receipt.status(),
+            TierStatus::NotRun { reason } if reason == DISABLED_REASON
+        )
 }
 
 fn existing_receipt(
@@ -397,6 +420,14 @@ pub(super) fn record_tier2(
     scan: Tier2Scan,
 ) -> Result<Tier2Progress, String> {
     record_tier2_fenced(state_root, repo, scan)
+}
+
+#[cfg(test)]
+pub(super) fn replay_tier2(
+    state_root: &Path,
+    repo: &str,
+) -> Result<ReceiptPreflight<Tier2Progress>, String> {
+    replay_tier2_fenced(state_root, repo)
 }
 
 #[cfg(test)]
