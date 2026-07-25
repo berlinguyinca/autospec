@@ -48,10 +48,13 @@ sleep() {
 
   autospec_kill_tree 10 separate
   autospec_kill_tree 20 none 1
+  autospec_kill_tree 30 separate
 
   grep -q '^kill -TERM -- -10$' "$BATS_TEST_TMPDIR/signals"
   grep -q '^kill -KILL -- -10$' "$BATS_TEST_TMPDIR/signals"
   grep -q '^kill -TERM 21$' "$BATS_TEST_TMPDIR/signals"
   grep -q '^kill -KILL 20$' "$BATS_TEST_TMPDIR/signals"
+  grep -q '^kill -TERM 30$' "$BATS_TEST_TMPDIR/signals"
+  [ "$(grep -c '^kill -KILL 30$' "$BATS_TEST_TMPDIR/signals" || true)" -eq 0 ]
   [ "$(grep -c '^sleep 1$' "$BATS_TEST_TMPDIR/signals")" -eq 2 ]
 }

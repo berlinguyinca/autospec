@@ -43,6 +43,12 @@ autospec_kill_tree() {
         autospec_kill_tree "$child" "$group_policy" "$grace_seconds"
     done
     kill -TERM "$pid" 2>/dev/null || true
+    # The autonomous explore/verify drains historically used TERM-only when a
+    # target shared the caller's process group. Preserve that cleanup window;
+    # only an owned detached group is safe for their immediate KILL escalation.
+    if [ "$group_policy" = "separate" ]; then
+        return 0
+    fi
     if [ "$grace_seconds" -gt 0 ] 2>/dev/null; then
         sleep "$grace_seconds"
     fi
