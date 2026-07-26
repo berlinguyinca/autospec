@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU32, AtomicU8};
@@ -572,6 +572,10 @@ pub(crate) struct PersistedInvocation {
     pub(crate) progress_at: u64,
     pub(crate) pr: Option<u64>,
     pub(crate) head_oid: Option<String>,
+    pub(crate) closeout_path: Option<PathBuf>,
+    pub(crate) closeout_digest: Option<String>,
+    pub(crate) remote_snapshot_digest: Option<String>,
+    pub(crate) draft_process: Option<ProcessIdentity>,
     pub(crate) terminal_result: Option<String>,
 }
 
@@ -628,6 +632,10 @@ fn invocation_to_value(invocation: &PersistedInvocation) -> serde_json::Value {
     let identity = &invocation.identity;
     let supervisor = invocation.supervisor.as_ref().map(process_identity_value);
     let process = invocation.process.as_ref().map(process_identity_value);
+    let draft_process = invocation
+        .draft_process
+        .as_ref()
+        .map(process_identity_value);
     serde_json::json!({
         "schema": invocation.schema,
         "identity": {
@@ -650,6 +658,10 @@ fn invocation_to_value(invocation: &PersistedInvocation) -> serde_json::Value {
         "progress_at": invocation.progress_at,
         "pr": invocation.pr,
         "head_oid": invocation.head_oid,
+        "closeout_path": invocation.closeout_path,
+        "closeout_digest": invocation.closeout_digest,
+        "remote_snapshot_digest": invocation.remote_snapshot_digest,
+        "draft_process": draft_process,
         "terminal_result": invocation.terminal_result,
     })
 }
@@ -667,6 +679,10 @@ fn invocation_from_value(value: serde_json::Value) -> Result<PersistedInvocation
             "progress_at",
             "pr",
             "head_oid",
+            "closeout_path",
+            "closeout_digest",
+            "remote_snapshot_digest",
+            "draft_process",
             "terminal_result",
         ],
         "invocation",
@@ -696,6 +712,7 @@ fn invocation_from_value(value: serde_json::Value) -> Result<PersistedInvocation
     };
     let supervisor = parse_process("supervisor")?;
     let process = parse_process("process")?;
+    let draft_process = parse_process("draft_process")?;
     let phase = BridgePhase::parse(&text(&object, "phase")?)?;
     let schema = checked_u32(&object, "schema")?;
     if schema != INVOCATION_SCHEMA {
@@ -723,6 +740,10 @@ fn invocation_from_value(value: serde_json::Value) -> Result<PersistedInvocation
         progress_at: number(&object, "progress_at")?,
         pr: optional_number(&object, "pr")?,
         head_oid: optional_text(&object, "head_oid")?,
+        closeout_path: optional_text(&object, "closeout_path")?.map(PathBuf::from),
+        closeout_digest: optional_text(&object, "closeout_digest")?,
+        remote_snapshot_digest: optional_text(&object, "remote_snapshot_digest")?,
+        draft_process,
         terminal_result: optional_text(&object, "terminal_result")?,
     })
 }
@@ -953,6 +974,19 @@ pub(crate) fn prove_implementation(
     snapshot: &MutationSnapshot,
     closeout_path: &Path,
 ) -> Result<ImplementationProof, String> {
+    let initial_proof = state.phase == BridgePhase::ImplementationComplete;
+    if !initial_proof
+        && !matches!(
+            state.phase,
+            BridgePhase::ImplementationProven
+                | BridgePhase::BranchPushing
+                | BridgePhase::BranchPushed
+                | BridgePhase::DraftCreating
+                | BridgePhase::DraftCreated
+        )
+    {
+        return Err("executor implementation proof is illegal from the current phase".to_string());
+    }
     let branch = git_stdout(
         &state.identity.worktree,
         &["symbolic-ref", "--quiet", "--short", "HEAD"],
@@ -1020,11 +1054,25 @@ pub(crate) fn prove_implementation(
         );
     }
     snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
-    let closeout_body = validate_closeout_report(&state.identity.worktree, closeout_path)?;
-    state.phase = BridgePhase::ImplementationProven;
-    state.head_oid = Some(head.clone());
-    state.progress_at = unix_now()?;
-    write_invocation_atomic(state_path, state)?;
+    let canonical_closeout = fs::canonicalize(closeout_path)
+        .map_err(|error| format!("canonicalize executor Closeout report: {error}"))?;
+    let closeout_body = validate_closeout_report(&state.identity.worktree, &canonical_closeout)?;
+    let closeout_digest = sha256_hex(closeout_body.as_bytes());
+    if initial_proof {
+        state.phase = BridgePhase::ImplementationProven;
+        state.head_oid = Some(head.clone());
+        state.closeout_path = Some(canonical_closeout);
+        state.closeout_digest = Some(closeout_digest);
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+    } else if state.head_oid.as_deref() != Some(head.as_str())
+        || state.closeout_path.as_deref() != Some(canonical_closeout.as_path())
+        || state.closeout_digest.as_deref() != Some(closeout_digest.as_str())
+    {
+        return Err(
+            "executor durable implementation proof does not match recovered evidence".into(),
+        );
+    }
     Ok(ImplementationProof {
         head_oid: head,
         closeout_body,
@@ -1032,21 +1080,64 @@ pub(crate) fn prove_implementation(
 }
 
 fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, String> {
-    if !path.is_absolute() || !path.starts_with(worktree) {
-        return Err("executor Closeout report must be inside the exact worktree".to_string());
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(
+            "executor Closeout report path must be absolute without parent traversal".to_string(),
+        );
     }
     reject_symlink_path(path)?;
-    let body = fs::read_to_string(path)
-        .map_err(|error| format!("read executor Closeout report {}: {error}", path.display()))?;
+    let canonical_worktree = fs::canonicalize(worktree)
+        .map_err(|error| format!("canonicalize executor worktree: {error}"))?;
+    let canonical_path = fs::canonicalize(path)
+        .map_err(|error| format!("canonicalize executor Closeout report: {error}"))?;
+    if !canonical_path.starts_with(&canonical_worktree) || canonical_path == canonical_worktree {
+        return Err("executor Closeout report must be inside the exact worktree".to_string());
+    }
+    validate_private_state_file(&canonical_path)
+        .map_err(|error| format!("executor Closeout report must be private: {error}"))?;
+    let body = fs::read_to_string(&canonical_path).map_err(|error| {
+        format!(
+            "read executor Closeout report {}: {error}",
+            canonical_path.display()
+        )
+    })?;
     if body.len() > 64 * 1024 {
         return Err("executor Closeout report exceeds 64 KiB".to_string());
     }
-    let heading_count = body
-        .lines()
-        .filter(|line| line.trim() == "## Closeout report")
-        .count();
-    if heading_count != 1 {
+    let lines = body.lines().collect::<Vec<_>>();
+    let headings = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| line.trim().starts_with("## "))
+        .collect::<Vec<_>>();
+    if headings.len() != 1 || headings[0].1.trim() != "## Closeout report" {
         return Err("executor Closeout report must contain exactly one report heading".to_string());
+    }
+    if lines[..headings[0].0]
+        .iter()
+        .any(|line| !line.trim().is_empty())
+    {
+        return Err("executor Closeout report contains content outside its section".to_string());
+    }
+    if lines.iter().any(|line| {
+        let lower = line.trim().to_ascii_lowercase();
+        let Some((keyword, remainder)) = lower.split_once(|character: char| {
+            character.is_whitespace() || matches!(character, ':' | '-')
+        }) else {
+            return false;
+        };
+        matches!(keyword, "closes" | "fixes" | "resolves")
+            && remainder
+                .split_whitespace()
+                .any(|token| token.trim_matches([':', '-', ',']).starts_with('#'))
+    }) {
+        return Err(
+            "executor Closeout report must not contain an issue-closing directive".to_string(),
+        );
     }
     let required = [
         "Result:",
@@ -1058,36 +1149,52 @@ fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, Stri
         "One likely hidden failure:",
     ];
     for field in required {
-        let value = body
-            .lines()
-            .find_map(|line| line.trim().strip_prefix(field))
-            .map(str::trim)
+        let values = lines
+            .iter()
+            .filter_map(|line| line.trim().strip_prefix(field).map(str::trim))
             .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
+            .collect::<Vec<_>>();
+        if values.is_empty() || (field != "Claims:" && values.len() != 1) {
+            return Err({
                 format!(
-                    "executor Closeout report requires nonempty {}",
+                    "executor Closeout report requires exactly one nonempty {}",
                     field.trim_end_matches(':')
                 )
-            })?;
-        if field == "Claims:"
-            && ![
-                "[verified]",
-                "[assumed]",
-                "[couldnt-verify]",
-                "[likely-wrong]",
-            ]
-            .iter()
-            .any(|label| value.contains(label))
-        {
-            return Err(
-                "executor Closeout report Claims require an explicit evidence label".to_string(),
-            );
+            });
+        }
+        if field == "Claims:" {
+            for claim in values {
+                let label = [
+                    "[verified]",
+                    "[assumed]",
+                    "[couldnt-verify]",
+                    "[likely-wrong]",
+                ]
+                .iter()
+                .find(|label| claim.starts_with(**label));
+                let Some(label) = label else {
+                    return Err(
+                        "executor Closeout report every Claims line requires an evidence label"
+                            .to_string(),
+                    );
+                };
+                let proof = claim[label.len()..]
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default();
+                if !matches!(proof, "runtime" | "static") {
+                    return Err(
+                        "executor Closeout report every Claims line requires a valid proof type"
+                            .to_string(),
+                    );
+                }
+            }
         }
     }
-    let claims = body
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("Claims:"))
-        .unwrap_or_default();
+    let claims = lines
+        .iter()
+        .filter_map(|line| line.trim().strip_prefix("Claims:"))
+        .collect::<Vec<_>>();
     let proof_type = body
         .lines()
         .find_map(|line| line.trim().strip_prefix("Proof type:"))
@@ -1096,8 +1203,9 @@ fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, Stri
     if !matches!(proof_type, "runtime" | "static") {
         return Err("executor Closeout report Proof type must be runtime or static".to_string());
     }
-    if claims.contains("[verified]")
-        && claims.to_ascii_lowercase().contains("runtime")
+    if claims
+        .iter()
+        .any(|claim| claim.contains("[verified]") && claim.to_ascii_lowercase().contains("runtime"))
         && proof_type != "runtime"
     {
         return Err(
@@ -1131,9 +1239,12 @@ pub(crate) struct RemoteMutationSnapshot {
 impl RemoteMutationSnapshot {
     pub(crate) fn capture_and_persist(
         state_path: &Path,
-        state: &PersistedInvocation,
+        state: &mut PersistedInvocation,
         adapter: &DraftPrAdapter,
     ) -> Result<Self, String> {
+        if state.phase != BridgePhase::Pending || state.remote_snapshot_digest.is_some() {
+            return Err("executor remote snapshot is create-once in Pending phase".to_string());
+        }
         let snapshot = Self::capture(state, adapter)?;
         let path = remote_snapshot_path(state_path);
         reject_symlink_path(&path)?;
@@ -1155,20 +1266,39 @@ impl RemoteMutationSnapshot {
                 })
             })
             .collect::<Vec<_>>();
+        let local_head = git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+        )?;
+        if local_head != state.identity.base_oid {
+            return Err("executor prelaunch local HEAD must equal the validated base".to_string());
+        }
         let body = serde_json::json!({
             "schema": 1,
             "identity": {
                 "repository": state.identity.repository,
+                "repository_path": fs::canonicalize(&state.identity.repository_path)
+                    .map_err(|error| format!("canonicalize repository path: {error}"))?,
                 "issue": state.identity.issue,
+                "worker_id": state.identity.worker_id,
+                "branch": state.identity.branch,
+                "claim_id": state.identity.claim_id,
                 "invocation_id": state.identity.invocation_id,
                 "base_ref": state.identity.base_ref,
                 "base_oid": state.identity.base_oid,
+                "worktree": fs::canonicalize(&state.identity.worktree)
+                    .map_err(|error| format!("canonicalize worktree: {error}"))?,
+                "local_head": local_head,
             },
             "refs": &snapshot.refs,
             "pull_requests": pull_requests,
         })
         .to_string();
-        write_private_atomic(&path, body.as_bytes(), "executor remote snapshot")?;
+        let bytes = format!("{body}\n").into_bytes();
+        let digest = sha256_hex(&bytes);
+        write_private_create_once(&path, &bytes, "executor remote snapshot")?;
+        state.remote_snapshot_digest = Some(digest);
+        write_invocation_atomic(state_path, state)?;
         Ok(snapshot)
     }
 
@@ -1183,11 +1313,21 @@ impl RemoteMutationSnapshot {
         let path = remote_snapshot_path(state_path);
         reject_symlink_path(&path)?;
         validate_private_state_file(&path)?;
-        let value: serde_json::Value = serde_json::from_str(
-            &fs::read_to_string(&path)
-                .map_err(|error| format!("read executor prelaunch remote snapshot: {error}"))?,
-        )
-        .map_err(|error| format!("parse executor prelaunch remote snapshot: {error}"))?;
+        let bytes = fs::read(&path)
+            .map_err(|error| format!("read executor prelaunch remote snapshot: {error}"))?;
+        let persisted =
+            PersistedInvocation::from_json(&fs::read_to_string(state_path).map_err(|error| {
+                format!("read executor invocation for snapshot digest: {error}")
+            })?)?;
+        if persisted.identity != state.identity
+            || persisted.remote_snapshot_digest.as_deref() != Some(sha256_hex(&bytes).as_str())
+        {
+            return Err(
+                "executor prelaunch remote snapshot digest or identity mismatch".to_string(),
+            );
+        }
+        let value: serde_json::Value = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("parse executor prelaunch remote snapshot: {error}"))?;
         let object = value
             .as_object()
             .ok_or_else(|| "executor prelaunch remote snapshot must be an object".to_string())?;
@@ -1197,10 +1337,18 @@ impl RemoteMutationSnapshot {
         }
         let expected_identity = serde_json::json!({
             "repository": state.identity.repository,
+            "repository_path": fs::canonicalize(&state.identity.repository_path)
+                .map_err(|error| format!("canonicalize repository path: {error}"))?,
             "issue": state.identity.issue,
+            "worker_id": state.identity.worker_id,
+            "branch": state.identity.branch,
+            "claim_id": state.identity.claim_id,
             "invocation_id": state.identity.invocation_id,
             "base_ref": state.identity.base_ref,
             "base_oid": state.identity.base_oid,
+            "worktree": fs::canonicalize(&state.identity.worktree)
+                .map_err(|error| format!("canonicalize worktree: {error}"))?,
+            "local_head": state.identity.base_oid,
         });
         if object.get("identity") != Some(&expected_identity) {
             return Err(
@@ -1281,6 +1429,48 @@ fn write_private_atomic(path: &Path, body: &[u8], label: &str) -> Result<(), Str
     result
 }
 
+fn write_private_create_once(path: &Path, body: &[u8], label: &str) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{label} requires a parent"))?;
+    ensure_private_directory(parent)?;
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("state"),
+        std::process::id(),
+        INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("create {label} temporary file: {error}"))?;
+    let result = (|| {
+        file.write_all(body)
+            .map_err(|error| format!("write {label}: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync {label}: {error}"))?;
+        fs::hard_link(&temporary, path)
+            .map_err(|error| format!("publish create-once {label}: {error}"))?;
+        fs::remove_file(&temporary)
+            .map_err(|error| format!("remove {label} temporary file: {error}"))?;
+        #[cfg(unix)]
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync {label} parent: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 fn validate_private_state_file(path: &Path) -> Result<(), String> {
     let metadata =
         fs::metadata(path).map_err(|error| format!("read executor state metadata: {error}"))?;
@@ -1302,7 +1492,8 @@ fn validate_private_state_file(path: &Path) -> Result<(), String> {
 }
 
 struct BridgeRepositoryIndex {
-    root: PathBuf,
+    repo: PathBuf,
+    tree_oid: String,
 }
 
 impl RepositoryIndex for BridgeRepositoryIndex {
@@ -1315,7 +1506,17 @@ impl RepositoryIndex for BridgeRepositoryIndex {
         {
             return None;
         }
-        fs::read_to_string(self.root.join(path)).ok()
+        let object = format!("{}:{}", self.tree_oid, path.display());
+        let output = Command::new("git")
+            .args(["show", &object])
+            .current_dir(&self.repo)
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| String::from_utf8(output.stdout).ok())
+            .flatten()
     }
 }
 
@@ -1334,10 +1535,12 @@ pub(crate) fn push_and_create_draft(
                 | BridgePhase::BranchPushing
                 | BridgePhase::BranchPushed
                 | BridgePhase::DraftCreating
+                | BridgePhase::DraftCreated
         )
     {
         return Err("executor draft transaction requires exact proven implementation state".into());
     }
+    verify_proven_local_state(state, proof)?;
     let prelaunch = RemoteMutationSnapshot::load(state_path, state)?;
     let observed = RemoteMutationSnapshot::capture(state, adapter)?;
     let issue_ref = format!("refs/heads/{}", state.identity.branch);
@@ -1351,7 +1554,9 @@ pub(crate) fn push_and_create_draft(
         BridgePhase::BranchPushing => {
             observed.refs == prelaunch.refs || observed.refs == pushed_refs
         }
-        BridgePhase::BranchPushed | BridgePhase::DraftCreating => observed.refs == pushed_refs,
+        BridgePhase::BranchPushed | BridgePhase::DraftCreating | BridgePhase::DraftCreated => {
+            observed.refs == pushed_refs
+        }
         _ => false,
     };
     let body = expected_draft_body(state.identity.issue, proof);
@@ -1359,17 +1564,20 @@ pub(crate) fn push_and_create_draft(
         .identity
         .base_ref
         .strip_prefix("origin/")
-        .ok_or_else(|| "executor draft base must name origin".to_string())?;
+        .ok_or_else(|| "executor draft base must name origin".to_string())?
+        .to_string();
     let observed_exact = exact_draft_candidates(
         &observed.pull_requests,
         &body,
         &state.identity.branch,
         &proof.head_oid,
-        base,
+        &base,
     );
     let prs_valid = observed.pull_requests == prelaunch.pull_requests
-        || (state.phase == BridgePhase::DraftCreating
-            && observed_exact.len() == 1
+        || (matches!(
+            state.phase,
+            BridgePhase::DraftCreating | BridgePhase::DraftCreated
+        ) && observed_exact.len() == 1
             && observed.pull_requests.len() == prelaunch.pull_requests.len() + 1
             && prelaunch
                 .pull_requests
@@ -1419,7 +1627,7 @@ pub(crate) fn push_and_create_draft(
         &body,
         &state.identity.branch,
         &proof.head_oid,
-        base,
+        &base,
     );
     let baseline_preserved = prelaunch
         .pull_requests
@@ -1431,13 +1639,33 @@ pub(crate) fn push_and_create_draft(
         return Err("executor open pull requests changed before draft creation".into());
     }
     let pull_requests = if existing.is_empty() {
-        if state.phase != BridgePhase::DraftCreating {
-            state.phase = BridgePhase::DraftCreating;
-            state.progress_at = unix_now()?;
-            write_invocation_atomic(state_path, state)?;
+        if state.phase == BridgePhase::DraftCreating {
+            if let Some(expected) = &state.draft_process {
+                if let Some(observed) =
+                    observe_process_identity(expected.pid, &expected.argv_digest)?
+                {
+                    if expected.matches(&observed) {
+                        return Err(
+                            "executor draft creation remains in-flight; refusing a second request"
+                                .to_string(),
+                        );
+                    }
+                    return Err(
+                        "executor draft creation process identity changed; refusing retry"
+                            .to_string(),
+                    );
+                }
+            }
+            return Err(
+                "executor draft creation outcome is ambiguous; refusing a second request"
+                    .to_string(),
+            );
         }
+        state.phase = BridgePhase::DraftCreating;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
         let creation =
-            create_draft_pull_request(state_path, state, proof, issue_title, base, adapter);
+            create_draft_pull_request(state_path, state, proof, issue_title, &base, adapter);
         let authoritative = list_bridge_pull_requests(&state.identity.repository, adapter)?;
         if creation.is_err()
             && exact_draft_candidates(
@@ -1445,7 +1673,7 @@ pub(crate) fn push_and_create_draft(
                 &body,
                 &state.identity.branch,
                 &proof.head_oid,
-                base,
+                &base,
             )
             .is_empty()
         {
@@ -1460,7 +1688,7 @@ pub(crate) fn push_and_create_draft(
         &body,
         &state.identity.branch,
         &proof.head_oid,
-        base,
+        &base,
     );
     if candidates.len() != 1 {
         return Err(format!(
@@ -1476,6 +1704,9 @@ pub(crate) fn push_and_create_draft(
             .all(|pull_request| pull_requests.contains(pull_request))
     {
         return Err("executor draft authoritative reread found extra open pull requests".into());
+    }
+    if remote_head_refs(&state.identity.repository_path)? != pushed_refs {
+        return Err("executor remote refs changed during authoritative draft creation".into());
     }
     let number = candidates[0].number;
     state.phase = BridgePhase::DraftCreated;
@@ -1504,14 +1735,22 @@ fn run_implementation_lint(
     let diff = parse_unified_diff(&diff)
         .map_err(|error| format!("parse executor implementation diff for lint: {error}"))?;
     let repository = BridgeRepositoryIndex {
-        root: state.identity.worktree.clone(),
+        repo: state.identity.worktree.clone(),
+        tree_oid: proof.head_oid.clone(),
+    };
+    let options = ImplementationLintOptions {
+        pre_commit_mode: true,
+        enable_vacuous_assertions: true,
+        enable_assertion_density: true,
+        enable_reuse_lens: true,
+        ..ImplementationLintOptions::default()
     };
     let result = lint_implementation(
         &diff,
         ImplementationLintContext {
             issue_body: (!issue_body.is_empty()).then_some(issue_body),
             repository: &repository,
-            options: ImplementationLintOptions::default(),
+            options,
         },
     );
     if result.blocking_count == 0 && !result.scope_exploded {
@@ -1524,9 +1763,38 @@ fn run_implementation_lint(
     }
 }
 
+fn verify_proven_local_state(
+    state: &PersistedInvocation,
+    proof: &ImplementationProof,
+) -> Result<(), String> {
+    let branch = git_stdout(
+        &state.identity.worktree,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )?;
+    if branch != state.identity.branch {
+        return Err("executor proven implementation branch changed before mutation".to_string());
+    }
+    if !git_bytes(
+        &state.identity.worktree,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?
+    .is_empty()
+    {
+        return Err("executor proven implementation worktree must be clean before mutation".into());
+    }
+    let head = git_stdout(
+        &state.identity.worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    if head != proof.head_oid {
+        return Err("executor proven implementation HEAD changed before mutation".to_string());
+    }
+    Ok(())
+}
+
 fn create_draft_pull_request(
     state_path: &Path,
-    state: &PersistedInvocation,
+    state: &mut PersistedInvocation,
     proof: &ImplementationProof,
     issue_title: &str,
     base: &str,
@@ -1555,27 +1823,41 @@ fn create_draft_pull_request(
         .map_err(|error| format!("write executor draft body: {error}"))?;
     file.sync_all()
         .map_err(|error| format!("sync executor draft body: {error}"))?;
-    let output = Command::new(&adapter.gh)
-        .args([
-            "pr",
-            "create",
-            "--repo",
-            &state.identity.repository,
-            "--draft",
-            "--head",
-            &state.identity.branch,
-            "--base",
-            base,
-            "--title",
-            issue_title,
-            "--body-file",
-            body_path
-                .to_str()
-                .ok_or_else(|| "executor draft body path is not UTF-8".to_string())?,
-        ])
+    let args = [
+        "pr",
+        "create",
+        "--repo",
+        &state.identity.repository,
+        "--draft",
+        "--head",
+        &state.identity.branch,
+        "--base",
+        base,
+        "--title",
+        issue_title,
+        "--body-file",
+        body_path
+            .to_str()
+            .ok_or_else(|| "executor draft body path is not UTF-8".to_string())?,
+    ];
+    let child = Command::new(&adapter.gh)
+        .args(args)
         .envs(&adapter.environment)
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("create executor draft pull request: {error}"))?;
+    for _ in 0..20 {
+        if let Some(identity) = observe_process_identity(child.id(), "")? {
+            state.draft_process = Some(identity);
+            write_invocation_atomic(state_path, state)?;
+            break;
+        }
+        thread::yield_now();
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("wait for executor draft pull request: {error}"))?;
     let _ = fs::remove_file(&body_path);
     if output.status.success() {
         Ok(())
@@ -1624,13 +1906,21 @@ fn list_bridge_pull_requests(
 }
 
 fn remote_head_refs(repo: &Path) -> Result<BTreeMap<String, String>, String> {
-    let output = git_stdout(repo, &["ls-remote", "--heads", "origin"])?;
+    let output = git_stdout(repo, &["ls-remote", "--refs", "origin"])?;
     output
         .lines()
         .map(|line| {
             let (oid, reference) = line
                 .split_once('\t')
                 .ok_or_else(|| "executor remote ref evidence is malformed".to_string())?;
+            if !["refs/heads/", "refs/tags/", "refs/notes/"]
+                .iter()
+                .any(|prefix| reference.starts_with(prefix))
+            {
+                return Err(format!(
+                    "executor remote advertised unsupported ref namespace: {reference}"
+                ));
+            }
             Ok((reference.to_string(), oid.to_string()))
         })
         .collect()
@@ -6865,6 +7155,10 @@ mod tests {
             progress_at: 1,
             pr: None,
             head_oid: None,
+            closeout_path: None,
+            closeout_digest: None,
+            remote_snapshot_digest: None,
+            draft_process: None,
             terminal_result: None,
         };
         write_invocation_atomic(&state_path, &invocation).expect("persist invocation");
@@ -6982,6 +7276,10 @@ mod tests {
             progress_at: 1,
             pr: None,
             head_oid: None,
+            closeout_path: None,
+            closeout_digest: None,
+            remote_snapshot_digest: None,
+            draft_process: None,
             terminal_result: None,
         };
         write_invocation_atomic(&state_path, &invocation).expect("persist invocation");
@@ -7758,6 +8056,10 @@ mod tests {
             progress_at: 1_722_000_000,
             pr: None,
             head_oid: None,
+            closeout_path: None,
+            closeout_digest: None,
+            remote_snapshot_digest: None,
+            draft_process: None,
             terminal_result: None,
         }
     }
@@ -9228,7 +9530,7 @@ mod tests {
             &closeout,
             "## Closeout report\n\n\
              Result: shipped\n\
-             Claims: [verified] behavior is covered\n\
+             Claims: [verified] static behavior is covered\n\
              Proof type: static\n\
              Before/after: 0 to 1\n\
              Artifacts: README.md; `git diff origin/main...HEAD`\n\
@@ -9305,7 +9607,7 @@ mod tests {
             &closeout,
             "## Closeout report\n\n\
              Result: shipped\n\
-             Claims: [verified] behavior is covered\n\
+             Claims: [verified] static behavior is covered\n\
              Proof type: static\n\
              Before/after: 0 to 1\n\
              Artifacts: README.md; `git diff origin/main...HEAD`\n\
@@ -9313,6 +9615,8 @@ mod tests {
              One likely hidden failure: none observed\n",
         )
         .expect("write closeout");
+        fs::set_permissions(&closeout, fs::Permissions::from_mode(0o600))
+            .expect("private closeout");
         (fixture, state, snapshot, closeout)
     }
 
@@ -9660,12 +9964,12 @@ mod tests {
             let mut body = fs::read_to_string(&closeout).expect("valid closeout");
             if label == "unlabeled-claim" {
                 body = body.replace(
-                    "Claims: [verified] behavior is covered\n",
+                    "Claims: [verified] static behavior is covered\n",
                     transform.trim_start(),
                 );
             } else if label == "runtime-static" {
                 body = body.replace(
-                    "Claims: [verified] behavior is covered\n",
+                    "Claims: [verified] static behavior is covered\n",
                     "Claims: [verified] runtime behavior is covered\n",
                 );
             } else {
@@ -9717,6 +10021,69 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_structurally_seals_private_closeout_authority() {
+        // Break caught: report prose smuggling another issue close or unlabeled claim evidence.
+        for (label, addition, expected) in [
+            (
+                "foreign-close",
+                "\nCloses #999\n",
+                "issue-closing directive",
+            ),
+            (
+                "unlabeled-second-claim",
+                "\nClaims: second claim lacks a label\n",
+                "evidence label",
+            ),
+            (
+                "invalid-claim-proof",
+                "\nClaims: [assumed] unknown evidence\n",
+                "proof type",
+            ),
+            (
+                "punctuated-foreign-close",
+                "\nResolves: #999\n",
+                "issue-closing directive",
+            ),
+        ] {
+            let (fixture, _, _, closeout) =
+                implementation_proof_fixture(&format!("closeout-structure-{label}"));
+            let mut body = fs::read_to_string(&closeout).expect("valid closeout");
+            body.push_str(addition);
+            fs::write(&closeout, body).expect("malformed closeout");
+            fs::set_permissions(&closeout, fs::Permissions::from_mode(0o600))
+                .expect("private closeout");
+
+            let error =
+                super::validate_closeout_report(&fixture.root.join("issue-worktree"), &closeout)
+                    .expect_err("structurally invalid report must fail closed");
+
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+
+        let (fixture, _, _, closeout) = implementation_proof_fixture("closeout-parent-dir");
+        let outside = fixture.root.join("outside.md");
+        fs::copy(&closeout, &outside).expect("outside closeout");
+        fs::set_permissions(&outside, fs::Permissions::from_mode(0o600))
+            .expect("private outside closeout");
+        let traversal = fixture.root.join("issue-worktree/../outside.md");
+        let error =
+            super::validate_closeout_report(&fixture.root.join("issue-worktree"), &traversal)
+                .expect_err("parent traversal must fail closed");
+        assert!(
+            error.contains("parent") || error.contains("inside"),
+            "{error}"
+        );
+
+        let (fixture, _, _, closeout) = implementation_proof_fixture("closeout-public-mode");
+        fs::set_permissions(&closeout, fs::Permissions::from_mode(0o644)).expect("public closeout");
+        let error =
+            super::validate_closeout_report(&fixture.root.join("issue-worktree"), &closeout)
+                .expect_err("public closeout must fail closed");
+        assert!(error.contains("private"), "{error}");
+    }
+
+    #[cfg(unix)]
     fn draft_pr_adapter_fixture(
         fixture: &GitFixture,
         state_path: &Path,
@@ -9736,6 +10103,13 @@ mod tests {
              if [ \"$1 $2\" = \"pr list\" ]; then cat \"$GH_PR_STATE\"; exit 0; fi\n\
              if [ \"$1 $2\" = \"pr create\" ]; then\n\
                grep -q '\"phase\":\"draft_creating\"' \"$BRIDGE_STATE\"\n\
+               if [ -n \"${GH_CREATE_DELAY:-}\" ]; then\n\
+                 if ! mkdir \"$GH_INFLIGHT\" 2>/dev/null; then exit 65; fi\n\
+                 touch \"$GH_CREATE_STARTED\"\n\
+                 while [ -e \"$GH_CREATE_DELAY\" ]; do sleep 0.02; done\n\
+                 rmdir \"$GH_INFLIGHT\"\n\
+               fi\n\
+               if [ -n \"${GH_MUTATE_REF:-}\" ]; then git --git-dir \"$GH_REMOTE\" update-ref refs/tags/during-create \"$GH_MUTATE_REF\"; fi\n\
                cp \"$GH_CREATED_PR\" \"$GH_PR_STATE\"\n\
                printf 'https://example.invalid/pull/17\\n'\n\
                exit 0\n\
@@ -9751,6 +10125,10 @@ mod tests {
                 ("GH_PR_STATE".into(), pull_requests.into_os_string()),
                 ("GH_CREATED_PR".into(), created.into_os_string()),
                 ("BRIDGE_STATE".into(), state_path.as_os_str().to_os_string()),
+                (
+                    "GH_REMOTE".into(),
+                    fixture.root.join("remote.git").into_os_string(),
+                ),
             ]),
         }
     }
@@ -9803,8 +10181,11 @@ mod tests {
         let (fixture, mut state, snapshot, closeout) = implementation_proof_fixture(label);
         let state_path = fixture.root.join("state/invocation.json");
         let empty_adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
-        super::RemoteMutationSnapshot::capture_and_persist(&state_path, &state, &empty_adapter)
+        state.phase = BridgePhase::Pending;
+        super::write_invocation_atomic(&state_path, &state).expect("pending invocation");
+        super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &empty_adapter)
             .expect("prelaunch remote");
+        state.phase = BridgePhase::ImplementationComplete;
         let snapshot_path = state_path.with_extension("prelaunch-remote.json");
         assert_eq!(
             fs::metadata(&snapshot_path)
@@ -9884,6 +10265,11 @@ mod tests {
         );
         let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
         assert_eq!(calls.matches("pr create").count(), 1);
+
+        let recovered = prepared.publish().expect("revalidate durable draft");
+        assert_eq!(recovered, pull_request);
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 1);
     }
 
     #[cfg(unix)]
@@ -9920,14 +10306,60 @@ mod tests {
             .expect("create intent");
         fs::write(before_create.fixture.root.join("gh-calls"), "").expect("clear calls");
 
-        let pr = before_create
+        let error = before_create
             .publish()
-            .expect("retry create after crash before gh");
-
-        assert_eq!(pr, 17);
+            .expect_err("ambiguous create intent must not retry");
+        assert!(
+            error.contains("ambiguous") || error.contains("in-flight"),
+            "{error}"
+        );
         let calls =
             fs::read_to_string(before_create.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_restart_never_duplicates_inflight_draft_create() {
+        // Break caught: spawn returning before exact gh child identity is durable.
+        let mut prepared = prepared_draft_transaction("draft-create-inflight");
+        let delay = prepared.fixture.root.join("create.delay");
+        let started = prepared.fixture.root.join("create.started");
+        let inflight = prepared.fixture.root.join("create.inflight");
+        let state_path = prepared.state_path.clone();
+        let calls_path = prepared.fixture.root.join("gh-calls");
+        fs::write(&delay, "").expect("delay sentinel");
+        prepared
+            .adapter
+            .environment
+            .insert("GH_CREATE_DELAY".into(), delay.clone().into_os_string());
+        prepared
+            .adapter
+            .environment
+            .insert("GH_CREATE_STARTED".into(), started.clone().into_os_string());
+        prepared
+            .adapter
+            .environment
+            .insert("GH_INFLIGHT".into(), inflight.into_os_string());
+        let publisher = std::thread::spawn(move || {
+            let result = prepared.publish();
+            (prepared, result)
+        });
+        for _ in 0..100 {
+            if started.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started.exists(), "delayed gh never entered create");
+        let durable = fs::read_to_string(&state_path).expect("durable create identity");
+        assert!(durable.contains("\"draft_process\":{"), "{durable}");
+        let calls = fs::read_to_string(&calls_path).expect("gh calls");
         assert_eq!(calls.matches("pr create").count(), 1);
+        fs::remove_file(delay).expect("release delayed gh");
+        let (prepared, result) = publisher.join().expect("join publisher");
+        assert_eq!(result.expect("finish single create"), 17);
+        assert!(prepared.state.draft_process.is_some());
     }
 
     #[cfg(unix)]
@@ -9938,8 +10370,11 @@ mod tests {
             implementation_proof_fixture("draft-lint-block");
         let state_path = fixture.root.join("state/invocation.json");
         let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
-        super::RemoteMutationSnapshot::capture_and_persist(&state_path, &state, &adapter)
+        state.phase = BridgePhase::Pending;
+        super::write_invocation_atomic(&state_path, &state).expect("pending invocation");
+        super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
             .expect("prelaunch remote");
+        state.phase = BridgePhase::ImplementationComplete;
         fs::write(
             state.identity.worktree.join("unsafe.rs"),
             format!("fn unsafe_change() {{ /* {} */ }}\n", ["TO", "DO"].concat()),
@@ -9972,6 +10407,59 @@ mod tests {
         .all(|line| !line.ends_with(&format!("refs/heads/{}", state.identity.branch))));
         let calls = fs::read_to_string(fixture.root.join("gh-calls")).expect("gh calls");
         assert_eq!(calls.matches("pr create").count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_lints_the_proven_tree_not_mutable_worktree() {
+        // Break caught: an uncommitted allow marker suppressing an unsafe committed diff.
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("draft-lint-exact-tree");
+        let state_path = fixture.root.join("state/invocation.json");
+        let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
+        state.phase = BridgePhase::Pending;
+        super::write_invocation_atomic(&state_path, &state).expect("pending invocation");
+        super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+            .expect("prelaunch remote");
+        state.phase = BridgePhase::ImplementationComplete;
+        let unsafe_path = state.identity.worktree.join("unsafe.rs");
+        let unsafe_source = ["fn unsafe_change() { ev", "al(input); }\n"].concat();
+        fs::write(&unsafe_path, unsafe_source).expect("unsafe change");
+        git(&state.identity.worktree, &["add", "."]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "feat: unsafe fixture"],
+        );
+        let proof = super::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
+            .expect("prove unsafe committed implementation");
+        let mutable_allow_marker = [
+            "// linter:allow-SECURITY fixture marker is not committed\nev",
+            "al(input);\n",
+        ]
+        .concat();
+        fs::write(&unsafe_path, mutable_allow_marker).expect("mutable allow marker");
+
+        let error = super::push_and_create_draft(
+            &state_path,
+            &mut state,
+            &proof,
+            "Implement issue",
+            "## Implementation outline\n\n- unsafe.rs\n- .autospec/closeout.md\n",
+            &adapter,
+        )
+        .expect_err("mutable worktree cannot suppress exact-tree lint");
+
+        assert!(error.contains("worktree must be clean"), "{error}");
+        assert!(git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        )
+        .lines()
+        .all(|line| !line.ends_with(&format!("refs/heads/{}", state.identity.branch))));
     }
 
     #[cfg(unix)]
@@ -10062,6 +10550,17 @@ mod tests {
         .expect_err("extra branch must fail closed");
         assert!(error.contains("mutated remote"), "{error}");
 
+        let mut tag = prepared_draft_transaction("draft-extra-tag");
+        git(&tag.fixture.root.join("seed"), &["tag", "foreign-tag"]);
+        git(
+            &tag.fixture.root.join("seed"),
+            &["push", "origin", "refs/tags/foreign-tag"],
+        );
+        let error = tag
+            .publish()
+            .expect_err("extra safe-namespace tag must fail closed");
+        assert!(error.contains("mutated remote"), "{error}");
+
         let mut pull_request = prepared_draft_transaction("draft-extra-pr");
         fs::write(
             adapter_path(&pull_request.adapter, "GH_PR_STATE"),
@@ -10095,14 +10594,84 @@ mod tests {
         )
         .expect_err("stale remote snapshot must fail closed");
         assert!(error.contains("identity"), "{error}");
+
+        let mut during_create = prepared_draft_transaction("draft-ref-during-create");
+        during_create.adapter.environment.insert(
+            "GH_MUTATE_REF".into(),
+            during_create.proof.head_oid.clone().into(),
+        );
+        let error = during_create
+            .publish()
+            .expect_err("remote ref mutation during create must fail closed");
+        assert!(error.contains("remote refs"), "{error}");
+        assert_ne!(during_create.state.phase, BridgePhase::DraftCreated);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_snapshot_is_create_once_and_full_identity_bound() {
+        // Break caught: a same-invocation recapture blessing a new remote baseline.
+        let (fixture, mut state, _, _) = implementation_proof_fixture("snapshot-create-once");
+        let state_path = fixture.root.join("state/invocation.json");
+        state.phase = BridgePhase::Pending;
+        super::write_invocation_atomic(&state_path, &state).expect("pending invocation");
+        let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
+
+        super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+            .expect("first prelaunch snapshot");
+        let persisted = fs::read_to_string(&state_path).expect("persisted invocation");
+        assert!(
+            persisted.contains("\"remote_snapshot_digest\":\""),
+            "invocation must bind the snapshot digest"
+        );
+        let error =
+            super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+                .expect_err("snapshot recapture must fail closed");
+        assert!(
+            error.contains("exists") || error.contains("once"),
+            "{error}"
+        );
+
+        state.identity.worker_id = "foreign-worker".to_string();
+        let error = super::RemoteMutationSnapshot::load(&state_path, &state)
+            .expect_err("full invocation identity mismatch must fail closed");
+        assert!(
+            error.contains("identity") || error.contains("digest"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_proof_recovery_preserves_phase_and_artifact_digest() {
+        // Break caught: recovery reconstructing an in-memory body or regressing a mutation phase.
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("proof-durable-recovery");
+        let state_path = fixture.root.join("state/invocation.json");
+        commit_implementation(&state);
+        super::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
+            .expect("initial proof");
+        let persisted = fs::read_to_string(&state_path).expect("persisted proof");
+        assert!(persisted.contains("\"closeout_path\":\""), "{persisted}");
+        assert!(persisted.contains("\"closeout_digest\":\""), "{persisted}");
+
+        state.phase = BridgePhase::BranchPushed;
+        super::write_invocation_atomic(&state_path, &state).expect("mutation phase");
+        let recovered = super::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
+            .expect("phase-preserving proof recovery");
+
+        assert_eq!(state.phase, BridgePhase::BranchPushed);
+        assert_eq!(recovered.head_oid, state.head_oid.unwrap());
     }
 
     #[cfg(unix)]
     #[test]
     fn autonomous_executor_bridge_rejects_saturated_pull_request_inventory() {
         // Break caught: a 100-row gh result silently hiding additional open pull requests.
-        let (fixture, state, _, _) = implementation_proof_fixture("draft-pr-saturation");
+        let (fixture, mut state, _, _) = implementation_proof_fixture("draft-pr-saturation");
         let state_path = fixture.root.join("state/invocation.json");
+        state.phase = BridgePhase::Pending;
+        super::write_invocation_atomic(&state_path, &state).expect("pending invocation");
         let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
         let pull_requests = (1..=100)
             .map(|number| {
@@ -10123,7 +10692,7 @@ mod tests {
         .expect("saturated PR fixture");
 
         let error =
-            super::RemoteMutationSnapshot::capture_and_persist(&state_path, &state, &adapter)
+            super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
                 .expect_err("saturated PR inventory must fail closed");
 
         assert!(
