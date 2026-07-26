@@ -35,7 +35,7 @@ use maven::MavenAdapter;
 use options::{parse_normalize_options, NormalizeMode, NormalizeOptions};
 use session::{live_sessions, run_session_command, SessionLease};
 use state::{
-    claim_ports, layout_for_context, read_authoritative_state, read_runtime_state,
+    claim_ports, layout_for_context, read_authoritative_state, read_runtime_state, write_lifecycle,
     write_runtime_state, EnvironmentLease, PortReservations, StateLayout,
 };
 
@@ -121,6 +121,14 @@ impl PreparedRuntimeSession {
             inner.bypassed,
         )
     }
+
+    pub(crate) fn abort(mut self) -> Result<(), CommandFailure> {
+        let inner = self
+            .inner
+            .take()
+            .expect("prepared runtime session can only be closed once");
+        cleanup_prepared_session(inner)
+    }
 }
 
 impl Drop for PreparedRuntimeSession {
@@ -128,14 +136,49 @@ impl Drop for PreparedRuntimeSession {
         let Some(inner) = self.inner.take() else {
             return;
         };
-        let _ = session::cleanup_session(
-            &inner.context,
-            &inner.state,
-            &inner.plan,
-            inner.session_lease,
-            true,
-        );
+        let session_id = inner.session_lease.session_id().to_string();
+        if let Err(error) = cleanup_prepared_session(inner) {
+            eprintln!(
+                "RUNTIME_PREPARED_SESSION_CLEANUP_FAILED session_id={session_id} exit_code={} message={}",
+                error.exit_code, error.message
+            );
+        }
     }
+}
+
+fn cleanup_prepared_session(inner: PreparedRuntimeSessionInner) -> Result<(), CommandFailure> {
+    let cleanup = session::cleanup_session(
+        &inner.context,
+        &inner.state,
+        &inner.plan,
+        inner.session_lease,
+        true,
+    );
+    let Err(mut error) = cleanup else {
+        return Ok(());
+    };
+    if let Err(evidence_error) = record_prepared_cleanup_failure(&inner.context) {
+        let separator = if error.message.is_empty() { "" } else { "; " };
+        error.message.push_str(&format!(
+            "{separator}persist cleanup-failure evidence also failed: {}",
+            evidence_error.message
+        ));
+    }
+    Err(error)
+}
+
+fn record_prepared_cleanup_failure(context: &RuntimeContext) -> Result<(), CommandFailure> {
+    let layout = layout_for_context(context);
+    let Some(mut authoritative) = read_authoritative_state(&layout)? else {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_PARTIAL_STATE: cleanup failure has no authoritative owner",
+        ));
+    };
+    write_lifecycle(
+        &layout,
+        &mut authoritative.owner,
+        EnvironmentLifecycle::CleanupFailed,
+    )
 }
 
 pub(crate) fn prepare_runtime_session(

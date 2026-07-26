@@ -675,6 +675,10 @@ impl RuntimeSessionAdapter {
     pub(crate) fn run(self, command: &[String]) -> Result<(), crate::commands::CommandFailure> {
         self.session.run(command)
     }
+
+    pub(crate) fn abort(self) -> Result<(), crate::commands::CommandFailure> {
+        self.session.abort()
+    }
 }
 
 pub(crate) fn resolve_base(
@@ -682,10 +686,23 @@ pub(crate) fn resolve_base(
     env: &BTreeMap<String, OsString>,
 ) -> Result<ResolvedBase, String> {
     let explore_path = repo.join(".autospec/explore-mode.json");
-    if explore_path.exists() {
-        if !explore_path.is_file() {
-            return Err("executor explore-mode path is not a regular file".to_string());
+    reject_symlink_path(&explore_path)?;
+    let explore_present = match fs::symlink_metadata(&explore_path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() {
+                return Err("executor explore-mode path is not a regular file".to_string());
+            }
+            true
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(format!(
+                "inspect executor explore mode {}: {error}",
+                explore_path.display()
+            ))
+        }
+    };
+    if explore_present {
         let value: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(&explore_path)
                 .map_err(|error| format!("read explore mode: {error}"))?,
@@ -1109,6 +1126,7 @@ pub(crate) fn write_invocation_atomic(
     path: &Path,
     invocation: &PersistedInvocation,
 ) -> Result<(), String> {
+    reject_symlink_path(path)?;
     let parent = path
         .parent()
         .ok_or_else(|| "invocation path requires a parent".to_string())?;
@@ -1280,6 +1298,8 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use autospec_core::runtime_env::{EnvironmentLifecycle, EnvironmentOwner};
 
     use super::{
         provision_issue_worktree, recover_invocation, resolve_base, runtime_session_adapter,
@@ -1477,6 +1497,47 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_explore_links_fail_closed_before_base_fallback() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = GitFixture::new("explore-links");
+        let environment_oid = fixture.branch("environment");
+        fs::create_dir_all(fixture.repo.join(".autospec")).expect("create config directory");
+        let explore_path = fixture.repo.join(".autospec/explore-mode.json");
+        let env = BTreeMap::from([(
+            "AUTOSPEC_BASE_BRANCH".to_string(),
+            OsString::from("environment"),
+        )]);
+
+        symlink(fixture.root.join("missing-explore.json"), &explore_path)
+            .expect("dangling explore symlink");
+        let dangling = resolve_base(&fixture.repo, &env)
+            .expect_err("dangling explore link must not fall through to the environment base");
+        assert!(dangling.contains("symlink"), "{dangling}");
+        assert!(fs::symlink_metadata(&explore_path)
+            .expect("dangling link remains")
+            .file_type()
+            .is_symlink());
+
+        fs::remove_file(&explore_path).expect("remove dangling explore link");
+        let foreign = fixture.root.join("foreign-explore.json");
+        fs::write(
+            &foreign,
+            format!("{{\"branch\":\"environment\",\"head_sha\":\"{environment_oid}\"}}\n"),
+        )
+        .expect("write foreign explore mode");
+        symlink(&foreign, &explore_path).expect("live explore symlink");
+        let live = resolve_base(&fixture.repo, &env)
+            .expect_err("live explore link must not be followed or fall through");
+        assert!(live.contains("symlink"), "{live}");
+        assert!(fs::symlink_metadata(&explore_path)
+            .expect("live link remains")
+            .file_type()
+            .is_symlink());
+    }
+
     #[test]
     fn autonomous_executor_bridge_provisions_and_recovers_owned_worktree() {
         let fixture = GitFixture::new("worktree");
@@ -1668,6 +1729,78 @@ mod tests {
         let _ = fs::remove_dir_all(two.path.parent().expect("second scope root"));
     }
 
+    #[test]
+    fn autonomous_executor_bridge_explicit_runtime_abort_surfaces_cleanup_failure() {
+        let fixture = GitFixture::new("runtime-abort-failure");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "runtime_abort_{}",
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree =
+            provision_issue_worktree(&fixture.repo, &scope, 31, &base).expect("provision worktree");
+        fs::create_dir_all(worktree.path.join(".autospec")).expect("create runtime config");
+        fs::write(
+            worktree.path.join("runtime-up-abort.sh"),
+            "python3 -m http.server \"$AGENT_FRONTEND_PORT\" > runtime-abort.log 2>&1 &\nprintf '%s\\n' \"$!\" > runtime-abort.pid\n",
+        )
+        .expect("write runtime up");
+        fs::write(
+            worktree.path.join("runtime-down-abort.sh"),
+            "pid=$(cat runtime-abort.pid)\nkill \"$pid\"\nrm -f runtime-abort.pid\nexit 42\n",
+        )
+        .expect("write failing runtime down");
+        fs::write(
+            worktree.path.join(".autospec/runtime.yml"),
+            "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: sh runtime-up-abort.sh\n    down: sh runtime-down-abort.sh\n",
+        )
+        .expect("write runtime manifest");
+        let state_root = fixture.root.join("runtime-abort-state");
+        let previous_state_root = std::env::var_os("AGENT_ENV_STATE_ROOT");
+        std::env::set_var("AGENT_ENV_STATE_ROOT", &state_root);
+
+        let adapter = runtime_session_adapter(&worktree.path)
+            .expect("prepare runtime adapter")
+            .expect("manifest-backed runtime");
+        let environment = fs::read_dir(&state_root)
+            .expect("runtime state root")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .find(|path| path.join("owner.json").is_file())
+            .expect("authoritative runtime environment");
+        let failure = adapter
+            .abort()
+            .expect_err("explicit abort must report failing cleanup");
+
+        assert_eq!(failure.exit_code, 42);
+        let owner: EnvironmentOwner =
+            autospec_core::runtime_env::read_json(&environment.join("owner.json"))
+                .expect("recoverable authoritative owner");
+        assert_eq!(owner.lifecycle, EnvironmentLifecycle::CleanupFailed);
+        assert!(environment.join("plan.json").is_file());
+        assert!(environment.join("inventory.json").is_file());
+        assert!(session_record_ids(&state_root).is_empty());
+
+        match previous_state_root {
+            Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),
+            None => std::env::remove_var("AGENT_ENV_STATE_ROOT"),
+        }
+        let _ = fs::remove_file(worktree.path.join("runtime-abort.log"));
+        for path in [
+            ".autospec/runtime.yml",
+            "runtime-up-abort.sh",
+            "runtime-down-abort.sh",
+        ] {
+            fs::remove_file(worktree.path.join(path)).expect("remove runtime fixture");
+        }
+        fs::remove_dir(worktree.path.join(".autospec")).expect("remove runtime config");
+        git(
+            &fixture.repo,
+            &["worktree", "remove", worktree.path.to_str().unwrap()],
+        );
+        let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
+    }
+
     fn remove_runtime_fixture(repo: &Path, manifest: &str, label: &str) {
         for path in [
             repo.join(manifest),
@@ -1822,6 +1955,37 @@ mod tests {
                 .and_then(Path::parent)
                 .expect("scope root"),
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_atomic_write_preserves_destination_links() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("invocation-write-links");
+        let state = root.join("state/invocation.json");
+        fs::create_dir_all(state.parent().expect("state parent")).expect("state directory");
+        let invocation = persisted_invocation();
+
+        for target in [
+            root.join("missing-invocation.json"),
+            root.join("foreign-invocation.json"),
+        ] {
+            if target.file_name().and_then(|name| name.to_str()) == Some("foreign-invocation.json")
+            {
+                fs::write(&target, "foreign\n").expect("write foreign invocation");
+            }
+            symlink(&target, &state).expect("invocation destination symlink");
+            let error = write_invocation_atomic(&state, &invocation)
+                .expect_err("destination symlink must fail closed");
+            assert!(error.contains("symlink"), "{error}");
+            assert!(fs::symlink_metadata(&state)
+                .expect("destination symlink remains")
+                .file_type()
+                .is_symlink());
+            fs::remove_file(&state).expect("remove destination symlink");
+        }
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
