@@ -33,7 +33,7 @@ The bridge is a recoverable state machine:
    `.autospec/autospec.yml` `git.base_branch`, then the remote default branch.
    Persist its ref and OID, fetch it, and create or adopt the exact clean
    private `/tmp/autospec-executor/<repository-scope>/issue-<N>` worktree and
-   `autonomous/issue-<N>` branch.
+   `feat/autonomous-issue-<N>` branch.
 3. Persist the invocation identity and `implementing` phase before launch.
 4. Start or adopt the target repository's isolated runtime through
    `autospec runtime env session --repo <worktree> --mode auto -- ...` when a
@@ -75,8 +75,9 @@ canonical binary names and approval aliases:
   --output-last-message <artifact> <prompt>`.
 - Claude: `claude -p --permission-mode acceptEdits --allowedTools <local-only>
   --no-session-persistence --output-format text <prompt>`.
-- OpenCode: `opencode run --dir <worktree> --pure <prompt>`, with permissions
-  restricted by the installed OpenCode policy.
+- OpenCode: fail closed unless an installed, explicitly configured containment
+  adapter proves that built-in mutation tools cannot escape the worktree;
+  `--pure` alone is not containment.
 
 An explicit `AUTOSPEC_HANDOFF_DISPATCHER_KIND` wins. Runtime markers select the
 initiating harness next. PATH probing uses the alias-table order after that.
@@ -87,6 +88,11 @@ launch and quarantines the invocation on any extra mutation. GitHub credentials
 are removed from the child environment where the harness authentication model
 allows it. Only Rust receives authority to push or create, ready, or merge the
 pull request.
+
+The alias table and argument builder still recognize OpenCode so installation,
+selection, and diagnostics stay synchronized across all three harnesses.
+Execution returns `executor_harness_uncontained` before launch until an exact
+containment adapter is configured and its path passes the same safety checks.
 
 ## Persistence and recovery
 
@@ -114,6 +120,13 @@ generation makes subsequent work inert and aborts every remote mutation.
 The current fixed `.autospec/executor-result.json` adapter remains available as
 a compatibility ingestion path, but it is no longer the default producer.
 
+On retryable failure the bridge stops only its runtime session, preserves the
+private worktree, records exact failure evidence, and releases the exact claim
+back to `auto-implement`. On exhausted or non-retryable failure it adds
+`autospec:needs-human`, removes both claim and queue ownership, preserves the
+worktree evidence, and continues scanning other work. No terminal invocation
+may retain `in-progress-by-bot`.
+
 ## Progress and stop behavior
 
 Every phase transition and bounded child-output line is written as a structured
@@ -134,8 +147,9 @@ and prevents another issue dispatch.
   checkout mutation by the implementation harness.
 - No success from stdout substring matching or exit status alone.
 - No success without a changed commit, clean worktree, exact PR head, Closeout
-  report, passing runtime smoke, deterministic security/implementation lint,
-  Pass receipt, required CI, independent LGTM, and observed merged PR.
+  report, passing runtime smoke, the complete resolved target-repository suite,
+  deterministic implementation lint, passing gitleaks/semgrep/trivy/license
+  scans, Pass receipt, required CI, independent LGTM, and observed merged PR.
 - No terminal persistence for `implementation_executor_pending`.
 - No new dependency and no shell or legacy conductor fallback.
 - The strict pull-request representation includes `isDraft`; draft is required
@@ -153,9 +167,10 @@ because perpetual autonomy then depends on an unrelated live operator session.
 ## Verification
 
 Unit tests cover harness resolution, alias parsing, explicit argument vectors,
-base resolution, strict state decoding, process identity, non-terminal
-recovery, claim refresh, draft state, direct smoke argv parsing, structured
-result parsing, and identity rejection.
+OpenCode containment refusal, base resolution, strict state decoding, process
+identity, non-terminal recovery, claim refresh, draft state, direct command-plan
+parsing, full-suite resolution, scanner evidence, structured result parsing,
+terminal release, and identity rejection.
 
 Integration tests use a real local Git repository and bare remote plus
 hermetic executable fixtures. They prove repository-scoped worktrees for equal
@@ -163,5 +178,6 @@ issue numbers, runtime-manifest isolation, one direct harness launch, streamed
 progress, restart adoption, PID-reuse-safe stop, claim refresh beyond TTL,
 takeover abort, draft-PR proof, direct QA/security evidence, ready transition,
 required-CI wait, LGTM, admin merge, terminal claim release, and fail-closed
-foreign/stale/malformed/extra-mutation cases. The installed binary is then
+foreign/stale/malformed/extra-mutation cases. Retry exhaustion is also proven to
+release the claim and let another issue run. The installed binary is then
 dogfooded against autospec-gui issues #36, #34, and #35.
