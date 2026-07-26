@@ -255,7 +255,8 @@ they have a skill/shared canonical source.
 | Var | Default | Effect |
 |---|---|---|
 | `AUTOSPEC_SEC_MAX_ROUNDS` | `3` | Phase 4 security gate fix/re-scan loop cap. |
-| `AUTOSPEC_SKIP_ENSURE_TOOL` / `_<TOOL>` | (unset) | Disable scanner auto-install (all, or one tool). |
+| `AUTOSPEC_REQUIRED_SYSTEM_TOOLS` | core tools + `npm gitleaks semgrep trivy license-checker` | Override required installer commands; any missing command fails installation after auto-install attempts. |
+| `AUTOSPEC_SKIP_ENSURE_TOOL` / `_<TOOL>` | (unset) | Disable scanner auto-install (all, or one tool); required scanners remain verified and fail closed by exact name. |
 
 ## Explore (autospec-explore RSI)
 | Var | Default | Effect |

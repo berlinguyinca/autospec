@@ -49,7 +49,9 @@ SUPERPOWERS_REMOTE="${SUPERPOWERS_REMOTE:-https://github.com/obra/superpowers.gi
 SUPERPOWERS_CODEX_SKILLS_DIR="${SUPERPOWERS_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
 SUPERPOWERS_OPENCODE_PLUGIN="${SUPERPOWERS_OPENCODE_PLUGIN:-superpowers@git+https://github.com/obra/superpowers.git}"
 OPENCODE_CONFIG_ROOT="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
-AUTOSPEC_REQUIRED_SYSTEM_TOOLS="${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-git bash curl cargo python3 gh jq}"
+if [ -z "${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-}" ]; then
+    AUTOSPEC_REQUIRED_SYSTEM_TOOLS="git bash curl cargo python3 gh jq npm gitleaks semgrep trivy license-checker"
+fi
 AUTOSPEC_HARNESS_TOOLS="${AUTOSPEC_HARNESS_TOOLS:-codex claude opencode}"
 AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-yq node npm bun bats omx omc oh-my-opencode mempalace ajv}"
 OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"

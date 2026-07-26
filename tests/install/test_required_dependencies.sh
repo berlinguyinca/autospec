@@ -30,7 +30,7 @@ for command_dir in $ORIGINAL_PATH; do
         [ -e "$command_path" ] || continue
         command_name="$(basename "$command_path")"
         case "$command_name" in
-            git|curl|cargo|python3|gh|jq|codex|claude|opencode|brew|apt-get|dnf|yum|pacman|apk|winget|choco|scoop|sudo) continue ;;
+            git|curl|cargo|python3|gh|jq|codex|claude|opencode|gitleaks|semgrep|trivy|license-checker|brew|apt-get|dnf|yum|pacman|apk|winget|choco|scoop|sudo|npm|pip|pip3|pipx|uv) continue ;;
         esac
         [ -e "$ISOLATED_BIN/$command_name" ] && continue
         ln -s "$command_path" "$ISOLATED_BIN/$command_name" 2>/dev/null || true
@@ -144,6 +144,117 @@ cat > "$ISOLATED_BIN/codex" <<'SHIM'
 exit 0
 SHIM
 chmod +x "$ISOLATED_BIN/codex"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/python3"
+chmod +x "$ISOLATED_BIN/python3"
+
+# Autonomous execution fails closed unless all executor scanners are installed
+# and discoverable. Exercise the real installer with package-manager shims that
+# materialize commands only when the expected fallback is attempted.
+SCANNER_LOG="$TMP_DIR/scanner-install.log"
+rm -f "$ISOLATED_BIN/id"
+cat > "$ISOLATED_BIN/id" <<'SHIM'
+#!/usr/bin/env bash
+[ "${1:-}" = "-u" ] && printf '1000\n'
+SHIM
+cat > "$ISOLATED_BIN/sudo" <<SHIM
+#!/usr/bin/env bash
+printf 'sudo %s\n' "\$*" >> "$SCANNER_LOG"
+exec "\$@"
+SHIM
+cat > "$ISOLATED_BIN/apt-get" <<SHIM
+#!/usr/bin/env bash
+printf 'apt-get %s\n' "\$*" >> "$SCANNER_LOG"
+for package in "\$@"; do
+    case "\$package" in
+        gitleaks|semgrep|trivy)
+            printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/\$package"
+            chmod +x "$ISOLATED_BIN/\$package"
+            ;;
+    esac
+done
+exit 0
+SHIM
+cat > "$ISOLATED_BIN/npm" <<SHIM
+#!/usr/bin/env bash
+printf 'npm %s\n' "\$*" >> "$SCANNER_LOG"
+case "\$*" in
+    *license-checker*)
+        printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/license-checker"
+        chmod +x "$ISOLATED_BIN/license-checker"
+        ;;
+esac
+exit 0
+SHIM
+cat > "$ISOLATED_BIN/pipx" <<SHIM
+#!/usr/bin/env bash
+printf 'pipx %s\n' "\$*" >> "$SCANNER_LOG"
+case "\$*" in
+    *semgrep*)
+        printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/semgrep"
+        chmod +x "$ISOLATED_BIN/semgrep"
+        ;;
+esac
+exit 0
+SHIM
+chmod +x "$ISOLATED_BIN/id" "$ISOLATED_BIN/sudo" "$ISOLATED_BIN/apt-get" "$ISOLATED_BIN/npm" "$ISOLATED_BIN/pipx"
+
+set +e
+scanner_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
+    CARGO_TARGET_DIR="$TEST_CARGO_TARGET_DIR" \
+    AUTOSPEC_SYSTEM_TOOLS=true \
+    AUTOSPEC_HARNESS_TOOLS=codex \
+    AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
+    AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1 \
+    AUTOSPEC_NO_DB_PROMPT=1 \
+    AUTOSPEC_NO_STAR_PROMPT=1 \
+    TURBO_REPO_DIR="$TMP_DIR/scanner-turbo" \
+    bash "$ROOT/install.sh" --disable-auto-rollover --skill autospec --harness codex 2>&1)
+scanner_status=$?
+set -e
+if [ "$scanner_status" -ne 0 ]; then
+    fail "autonomous scanner installation did not provision and verify every required scanner: $scanner_output"
+fi
+for scanner in gitleaks semgrep trivy license-checker; do
+    if [ ! -x "$ISOLATED_BIN/$scanner" ]; then
+        fail "autonomous scanner installation did not expose $scanner on PATH"
+    fi
+done
+for scanner in gitleaks trivy; do
+    if ! grep -q "^sudo apt-get install -y $scanner$" "$SCANNER_LOG"; then
+        fail "autonomous scanner installation did not attempt $scanner through the approved sudo APT fallback"
+    fi
+done
+if ! grep -q '^pipx install semgrep$' "$SCANNER_LOG"; then
+    fail "autonomous scanner installation did not attempt semgrep through pipx"
+fi
+if ! grep -q '^npm install -g license-checker$' "$SCANNER_LOG"; then
+    fail "autonomous scanner installation did not attempt license-checker through npm"
+fi
+
+rm -f "$ISOLATED_BIN/semgrep"
+set +e
+skipped_scanner_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
+    CARGO_TARGET_DIR="$TEST_CARGO_TARGET_DIR" \
+    AUTOSPEC_SKIP_ENSURE_TOOL_SEMGREP=1 \
+    AUTOSPEC_SYSTEM_TOOLS=true \
+    AUTOSPEC_HARNESS_TOOLS=codex \
+    AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
+    AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1 \
+    AUTOSPEC_NO_DB_PROMPT=1 \
+    AUTOSPEC_NO_STAR_PROMPT=1 \
+    TURBO_REPO_DIR="$TMP_DIR/skipped-scanner-turbo" \
+    bash "$ROOT/install.sh" --disable-auto-rollover --skill autospec --harness codex 2>&1)
+skipped_scanner_status=$?
+set -e
+if [ "$skipped_scanner_status" -eq 0 ]; then
+    fail "per-tool scanner skip bypassed required scanner verification"
+fi
+if ! printf '%s\n' "$skipped_scanner_output" | grep -qx 'error: required missing: semgrep'; then
+    fail "per-tool scanner skip did not report the exact missing scanner: $skipped_scanner_output"
+fi
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ISOLATED_BIN/semgrep"
+chmod +x "$ISOLATED_BIN/semgrep"
+rm -f "$ISOLATED_BIN/python3" "$ISOLATED_BIN/id" "$ISOLATED_BIN/sudo" "$ISOLATED_BIN/apt-get" "$ISOLATED_BIN/pipx"
 
 # WinGet updates the persistent Windows PATH, not the already-running Git Bash
 # process. Simulate Python landing outside the original PATH and require the

@@ -212,7 +212,9 @@ case "$TOOL" in
       || _try_winget Git.Git || _try_choco git || _try_scoop git || true
     ;;
   gitleaks)
-    _try_brew gitleaks || _try_winget gitleaks.gitleaks || _try_choco gitleaks || _try_scoop gitleaks || true
+    _try_brew gitleaks || _try_apt gitleaks || _try_dnf gitleaks || _try_yum gitleaks \
+      || _try_pacman gitleaks || _try_apk gitleaks || _try_winget gitleaks.gitleaks \
+      || _try_choco gitleaks || _try_scoop gitleaks || true
     ;;
   license-checker)
     _try_npm license-checker || true
@@ -251,7 +253,9 @@ case "$TOOL" in
     _try_pipx semgrep || _try_uv semgrep || _try_pip semgrep || _try_brew semgrep || true
     ;;
   trivy)
-    _try_brew trivy || _try_winget AquaSecurity.Trivy || _try_choco trivy || _try_scoop trivy || true
+    _try_brew trivy || _try_apt trivy || _try_dnf trivy || _try_yum trivy \
+      || _try_pacman trivy || _try_apk trivy || _try_winget AquaSecurity.Trivy \
+      || _try_choco trivy || _try_scoop trivy || true
     ;;
   uv)
     _try_brew uv || _try_pipx uv || _try_pip uv || _try_choco uv || _try_scoop uv || true
