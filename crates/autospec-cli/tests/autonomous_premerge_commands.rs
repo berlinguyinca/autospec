@@ -314,7 +314,7 @@ fn json_output(output: &Output) -> Value {
     serde_json::from_slice(&output.stdout).expect("command emits JSON")
 }
 #[test]
-fn pass_uses_git_identity_fixed_evidence_and_closed_authority() {
+fn bare_typed_pass_evidence_is_not_admissible_without_observed_bundle_marker() {
     let fixture = Fixture::new("feat/lane-a", 42, "worker-42", "claim-42");
     let qa = qa(&fixture.lane, EvidenceVerdict::Pass);
     let security = security(&fixture.lane, EvidenceVerdict::Pass);
@@ -329,40 +329,181 @@ fn pass_uses_git_identity_fixed_evidence_and_closed_authority() {
     )
     .expect("unrelated poisoned evidence");
     let first = fixture.run();
-    assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
+    assert_eq!(first.status.code(), Some(2));
     let body = json_output(&first);
     assert_eq!(body["schema"], 1);
-    assert_eq!(body["decision"], "pass");
+    assert_eq!(body["decision"], "failed");
     assert_eq!(body["repo"], "test/repo");
     assert_eq!(body["branch"], fixture.lane.branch);
     assert_eq!(body["commit"], fixture.lane.commit);
     assert_eq!(body["lane_digest"], fixture.lane.lane_digest());
     assert_eq!(body["finding_codes"], json!([]));
-    let digest = decision_digest(
-        &fixture.lane,
-        EvidenceAvailability::Present(qa),
-        EvidenceAvailability::Present(security),
-    );
     let lane_state = fixture.lane_state_dir();
-    let decision = lane_state.join("decisions").join(format!("{digest}.json"));
-    assert!(decision.is_file());
-    assert!(lane_state.join("latest.json").is_file());
-    assert!(!lane_state.join("quarantine.json").exists());
-    let original = fs::read(&decision).expect("immutable decision");
-    let second = fixture.run();
-    assert!(second.status.success());
-    assert_eq!(fs::read(&decision).expect("immutable decision"), original);
+    let decisions = lane_state.join("decisions");
     assert_eq!(
-        fs::read_dir(lane_state.join("decisions"))
-            .expect("decision directory")
+        fs::read_dir(&decisions)
+            .expect("failed decision directory")
             .count(),
         1
     );
+    assert!(lane_state.join("latest.json").is_file());
+    assert!(!lane_state.join("quarantine.json").exists());
+    let original = fs::read(lane_state.join("latest.json")).expect("latest failed decision");
+    let second = fixture.run();
+    assert_eq!(second.status.code(), Some(2));
+    assert_eq!(
+        fs::read(lane_state.join("latest.json")).expect("stable failed decision"),
+        original
+    );
+    assert_eq!(
+        fs::read_dir(decisions).expect("decision directory").count(),
+        1
+    );
     assert!(!fixture.poison_log.exists());
+}
+
+#[test]
+fn crash_boundaries_before_complete_marker_never_admit_pass() {
+    for stage in ["intent-only", "qa-staged", "security-staged", "pre-marker"] {
+        let fixture = Fixture::new(
+            "feat/crash-boundary",
+            70 + FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            "worker-crash",
+            "claim-crash",
+        );
+        let directory = fixture.evidence_dir();
+        fs::create_dir_all(&directory).expect("evidence directory");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("private evidence directory");
+        let write_private = |name: &str, body: String| {
+            let path = directory.join(name);
+            fs::write(&path, body).expect("crash-stage artifact");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .expect("private crash-stage artifact");
+        };
+        write_private(
+            "intent.json",
+            json!({
+                "schema":1,
+                "lane_digest":fixture.lane.lane_digest(),
+                "input_digest":"input",
+                "run_id":"run",
+                "completed_at":1_800_000_000_u64
+            })
+            .to_string(),
+        );
+        if matches!(stage, "qa-staged" | "pre-marker") {
+            write_private(
+                "qa.json",
+                format!("{}\n", qa(&fixture.lane, EvidenceVerdict::Pass).to_json()),
+            );
+        }
+        if matches!(stage, "security-staged" | "pre-marker") {
+            write_private(
+                "security.json",
+                format!(
+                    "{}\n",
+                    security(&fixture.lane, EvidenceVerdict::Pass).to_json()
+                ),
+            );
+        }
+        if stage == "pre-marker" {
+            write_private(
+                "observed.json",
+                json!({
+                    "schema":1,
+                    "lane_digest":fixture.lane.lane_digest(),
+                    "intent_digest":"fake",
+                    "qa_run_id":"qa-run",
+                    "security_run_id":"security-run",
+                    "qa_records":[],
+                    "scanners":[],
+                    "artifacts":[]
+                })
+                .to_string(),
+            );
+            write_private(
+                "cleanup.json",
+                json!({
+                    "schema":1,
+                    "intent_digest":"fake",
+                    "manifest_digest":"fake",
+                    "runtime_session_id":null,
+                    "cleanup":"verified"
+                })
+                .to_string(),
+            );
+        }
+        let output = fixture.run();
+        assert_eq!(output.status.code(), Some(2), "{stage}");
+        assert_eq!(json_output(&output)["decision"], "failed", "{stage}");
+    }
+}
+
+#[test]
+fn fabricated_complete_marker_and_arbitrary_manifest_never_admit_pass() {
+    use autospec_core::autonomous::waterfall::sha256_hex;
+
+    let fixture = Fixture::new("feat/fake-bundle", 79, "worker-fake", "claim-fake");
+    let qa = qa(&fixture.lane, EvidenceVerdict::Pass);
+    let security = security(&fixture.lane, EvidenceVerdict::Pass);
+    fixture.write_evidence(&qa, &security);
+    let directory = fixture.evidence_dir();
+    let private_write = |name: &str, body: &str| {
+        let path = directory.join(name);
+        fs::write(&path, body).expect("fake bundle artifact");
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .expect("private fake bundle artifact");
+    };
+    let intent = json!({
+        "schema":1,
+        "lane_digest":fixture.lane.lane_digest(),
+        "input_digest":"fake",
+        "run_id":"fake",
+        "completed_at":qa.completed_at
+    })
+    .to_string();
+    private_write("intent.json", &intent);
+    private_write("arbitrary.json", "{}");
+    let arbitrary_digest = sha256_hex(b"{}");
+    let observed = json!({
+        "schema":1,
+        "lane_digest":fixture.lane.lane_digest(),
+        "intent_digest":sha256_hex(intent.as_bytes()),
+        "qa_run_id":qa.run_id,
+        "security_run_id":security.run_id,
+        "qa_records":[],
+        "scanners":[],
+        "artifacts":[{"kind":"command","path":"arbitrary.json","digest":arbitrary_digest}]
+    })
+    .to_string();
+    private_write("observed.json", &observed);
+    let cleanup = json!({
+        "schema":1,
+        "intent_digest":sha256_hex(intent.as_bytes()),
+        "manifest_digest":sha256_hex(observed.as_bytes()),
+        "runtime_session_id":null,
+        "cleanup":"verified"
+    })
+    .to_string();
+    private_write("cleanup.json", &cleanup);
+    let qa_body = format!("{}\n", qa.to_json());
+    let security_body = format!("{}\n", security.to_json());
+    let complete = json!({
+        "schema":1,
+        "lane_digest":fixture.lane.lane_digest(),
+        "intent_digest":sha256_hex(intent.as_bytes()),
+        "manifest_digest":sha256_hex(observed.as_bytes()),
+        "cleanup_digest":sha256_hex(cleanup.as_bytes()),
+        "qa_digest":sha256_hex(qa_body.as_bytes()),
+        "security_digest":sha256_hex(security_body.as_bytes())
+    })
+    .to_string();
+    private_write("complete.json", &complete);
+
+    let output = fixture.run();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(!fixture.lane_state_dir().join("quarantine.json").exists());
 }
 #[test]
 fn tracked_dirt_and_detached_head_fail_before_receipt_creation() {
@@ -498,7 +639,7 @@ fn fixed_evidence_symlinks_never_escape_the_canonical_repository() {
     }
 }
 #[test]
-fn blocking_quarantine_is_lane_scoped_and_passing_lane_is_unaffected() {
+fn blocking_quarantine_is_lane_scoped_and_bare_pass_is_rejected() {
     let blocked = Fixture::new("feat/lane-blocked", 48, "worker-48", "claim-48");
     blocked.write_evidence(
         &qa(
@@ -520,8 +661,8 @@ fn blocking_quarantine_is_lane_scoped_and_passing_lane_is_unaffected() {
         &security(&passing.lane, EvidenceVerdict::Pass),
     );
     let output = passing.run();
-    assert!(output.status.success());
-    assert_eq!(json_output(&output)["decision"], "pass");
+    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(json_output(&output)["decision"], "failed");
     assert!(!passing.lane_state_dir().join("quarantine.json").exists());
     assert_eq!(
         json_output(&blocked.run())["finding_codes"],
@@ -532,7 +673,12 @@ fn blocking_quarantine_is_lane_scoped_and_passing_lane_is_unaffected() {
 #[test]
 fn an_existing_decision_with_different_contents_is_never_replaced() {
     let fixture = Fixture::new("feat/immutable", 50, "worker-50", "claim-50");
-    let qa = qa(&fixture.lane, EvidenceVerdict::Pass);
+    let qa = qa(
+        &fixture.lane,
+        EvidenceVerdict::Blocked {
+            finding_codes: vec!["QA-RED".into()],
+        },
+    );
     let security = security(&fixture.lane, EvidenceVerdict::Pass);
     fixture.write_evidence(&qa, &security);
     let digest = decision_digest(

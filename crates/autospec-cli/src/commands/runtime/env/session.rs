@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
@@ -70,11 +71,117 @@ impl SessionLease {
         &self.record.session_id
     }
 
+    pub(super) fn verify_active(&self, expected_session_id: &str) -> Result<(), CommandFailure> {
+        if self.record.session_id != expected_session_id {
+            return Err(diagnostic(
+                "runtime prepared session identity changed while active",
+            ));
+        }
+        let observed: SessionRecord = read_json(&self.record_path).map_err(|error| {
+            diagnostic(format!(
+                "runtime prepared session record is unreadable: {error}"
+            ))
+        })?;
+        if observed != self.record {
+            return Err(diagnostic(
+                "runtime prepared session durable record changed while active",
+            ));
+        }
+        for path in [&self.record_path, &self.lock_path] {
+            let metadata = std::fs::symlink_metadata(path).map_err(|error| {
+                diagnostic(format!(
+                    "runtime prepared session artifact {} is missing: {error}",
+                    path.display()
+                ))
+            })?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(diagnostic(
+                    "runtime prepared session artifact is not a regular file",
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                // SAFETY: geteuid has no arguments or memory-safety preconditions.
+                let owner = unsafe { nix::libc::geteuid() };
+                if metadata.uid() != owner || metadata.permissions().mode() & 0o077 != 0 {
+                    return Err(diagnostic(
+                        "runtime prepared session artifact ownership or mode is unsafe",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn release(self) -> Result<(), CommandFailure> {
         remove_if_present(&self.record_path)?;
         drop(self._lock);
         remove_if_present(&self.lock_path)
     }
+}
+
+pub(super) fn reconcile_for_exclusive_session(
+    environment_dir: &Path,
+) -> Result<(), CommandFailure> {
+    let sessions = environment_dir.join("sessions");
+    std::fs::create_dir_all(&sessions)
+        .map_err(|error| diagnostic(format!("create runtime sessions directory: {error}")))?;
+    let mut ids = BTreeSet::new();
+    for entry in std::fs::read_dir(&sessions)
+        .map_err(|error| diagnostic(format!("inventory runtime sessions: {error}")))?
+    {
+        let path = entry.map_err(|error| diagnostic(error.to_string()))?.path();
+        if matches!(
+            path.extension().and_then(|extension| extension.to_str()),
+            Some("json" | "lock")
+        ) {
+            let id = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| diagnostic("runtime session artifact name is not UTF-8"))?;
+            ids.insert(id.to_string());
+        }
+    }
+    for id in ids {
+        let record_path = sessions.join(format!("{id}.json"));
+        let lock_path = sessions.join(format!("{id}.lock"));
+        if !record_path.is_file() || !lock_path.is_file() {
+            return Err(diagnostic(format!(
+                "RUNTIME_PARTIAL_SESSION: {id} requires both record and lock"
+            )));
+        }
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| diagnostic(format!("open runtime session lock: {error}")))?;
+        match lock.try_lock() {
+            Ok(()) => {
+                let record: SessionRecord = read_json(&record_path)
+                    .map_err(|error| diagnostic(format!("read stale session record: {error}")))?;
+                if record.session_id != id {
+                    return Err(diagnostic(
+                        "RUNTIME_SESSION_ID_MISMATCH: stale record does not match filename",
+                    ));
+                }
+                remove_if_present(&record_path)?;
+                drop(lock);
+                remove_if_present(&lock_path)?;
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(diagnostic(format!(
+                    "RUNTIME_SESSION_LIVE: exclusive evidence session blocked by {id}"
+                )))
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(diagnostic(format!(
+                    "could not reconcile runtime session {id}: {error}"
+                )))
+            }
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn run_session_command(
@@ -273,6 +380,62 @@ pub(super) fn live_sessions(environment_dir: &Path) -> Result<Vec<SessionRecord>
     Ok(live)
 }
 
+pub(super) fn verify_session_released(
+    environment_dir: &Path,
+    session_id: &str,
+) -> Result<(), CommandFailure> {
+    let sessions = environment_dir.join("sessions");
+    for path in [
+        sessions.join(format!("{session_id}.json")),
+        sessions.join(format!("{session_id}.lock")),
+    ] {
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(diagnostic(format!(
+                    "RUNTIME_SESSION_RELEASE_UNVERIFIED: {} still exists",
+                    path.display()
+                )))
+            }
+            Err(error) => {
+                return Err(diagnostic(format!(
+                    "RUNTIME_SESSION_RELEASE_UNVERIFIED: cannot inspect {}: {error}",
+                    path.display()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn verify_environment_released(environment_dir: &Path) -> Result<(), CommandFailure> {
+    for name in [
+        "owner.json",
+        "plan.json",
+        "env",
+        "inventory.json",
+        "sessions",
+    ] {
+        let path = environment_dir.join(name);
+        match std::fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(diagnostic(format!(
+                    "RUNTIME_RESOURCE_RELEASE_UNVERIFIED: {} still exists",
+                    path.display()
+                )))
+            }
+            Err(error) => {
+                return Err(diagnostic(format!(
+                    "RUNTIME_RESOURCE_RELEASE_UNVERIFIED: cannot inspect {}: {error}",
+                    path.display()
+                )))
+            }
+        }
+    }
+    Ok(())
+}
+
 fn inspect_record(path: &Path, live: &mut Vec<SessionRecord>) -> Result<(), CommandFailure> {
     let lock_path = path.with_extension("lock");
     let lock = open_lock(&lock_path)?;
@@ -348,4 +511,82 @@ fn host() -> String {
 
 fn diagnostic(message: impl Into<String>) -> CommandFailure {
     CommandFailure::diagnostic(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "autospec-session-reconcile-{name}-{}-{}",
+            std::process::id(),
+            unix_time_ms().expect("timestamp")
+        ));
+        std::fs::create_dir_all(root.join("sessions")).expect("sessions fixture");
+        root
+    }
+
+    fn record(id: &str) -> SessionRecord {
+        SessionRecord {
+            schema_version: 1,
+            session_id: id.to_string(),
+            pid: 1,
+            process_start: "start".into(),
+            harness: "test".into(),
+            host: "host".into(),
+            started_at_unix_ms: 1,
+            heartbeat_at_unix_ms: 1,
+        }
+    }
+
+    #[test]
+    fn exclusive_reconciliation_removes_exact_unlocked_stale_pair() {
+        let root = fixture("stale");
+        let sessions = root.join("sessions");
+        write_record(&sessions.join("stale.json"), &record("stale")).expect("record");
+        File::create(sessions.join("stale.lock")).expect("lock");
+
+        reconcile_for_exclusive_session(&root).expect("stale reconciliation");
+
+        assert!(!sessions.join("stale.json").exists());
+        assert!(!sessions.join("stale.lock").exists());
+        reconcile_for_exclusive_session(&root).expect("absent pair is idempotent");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn exclusive_reconciliation_rejects_partial_record_or_lock() {
+        for extension in ["json", "lock"] {
+            let root = fixture(extension);
+            let path = root.join("sessions").join(format!("partial.{extension}"));
+            if extension == "json" {
+                write_record(&path, &record("partial")).expect("partial record");
+            } else {
+                File::create(&path).expect("partial lock");
+            }
+
+            let error = reconcile_for_exclusive_session(&root)
+                .expect_err("partial session evidence must fail");
+
+            assert!(error.message.contains("RUNTIME_PARTIAL_SESSION"));
+            std::fs::remove_dir_all(root).expect("cleanup");
+        }
+    }
+
+    #[test]
+    fn exclusive_reconciliation_rejects_live_held_lock() {
+        let root = fixture("live");
+        let sessions = root.join("sessions");
+        write_record(&sessions.join("live.json"), &record("live")).expect("record");
+        let lock = File::create(sessions.join("live.lock")).expect("lock");
+        lock.lock().expect("hold live lock");
+
+        let error =
+            reconcile_for_exclusive_session(&root).expect_err("live session must block rotation");
+
+        assert!(error.message.contains("RUNTIME_SESSION_LIVE"));
+        drop(lock);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
 }

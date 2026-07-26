@@ -1,7 +1,9 @@
 use std::fs;
+use std::fs::File;
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -89,6 +91,19 @@ pub(crate) struct PreparedRuntimeSession {
     inner: Option<PreparedRuntimeSessionInner>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ObservedChildTerminal {
+    Exited(i32),
+    Signaled(i32),
+}
+
+pub(crate) struct RuntimeOwnedObservedChild<'session> {
+    guard: worker::ChildGuard,
+    process_group: u32,
+    terminal: Option<ObservedChildTerminal>,
+    _session: PhantomData<&'session mut PreparedRuntimeSession>,
+}
+
 struct PreparedRuntimeSessionInner {
     context: RuntimeContext,
     state: RuntimeState,
@@ -104,6 +119,28 @@ impl PreparedRuntimeSession {
             .expect("prepared runtime session is available before consumption")
             .session_lease
             .session_id()
+    }
+
+    pub(crate) fn environment_dir(&self) -> &Path {
+        &self
+            .inner
+            .as_ref()
+            .expect("prepared runtime session is available before consumption")
+            .context
+            .environment_dir
+    }
+
+    pub(crate) fn verify_active_session(
+        &self,
+        expected_session_id: &str,
+    ) -> Result<(), CommandFailure> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| {
+                CommandFailure::diagnostic("prepared runtime session is already closed")
+            })?
+            .session_lease
+            .verify_active(expected_session_id)
     }
 
     pub(crate) fn run(mut self, command: &[String]) -> Result<(), CommandFailure> {
@@ -127,7 +164,57 @@ impl PreparedRuntimeSession {
             .inner
             .take()
             .expect("prepared runtime session can only be closed once");
-        cleanup_prepared_session(inner)
+        cleanup_prepared_session_verified(inner)
+    }
+
+    pub(crate) fn close_verified(self) -> Result<(), CommandFailure> {
+        self.abort()
+    }
+
+    pub(crate) fn spawn_observed_child<'session>(
+        &'session mut self,
+        command: &[String],
+        stdout: File,
+        stderr: File,
+    ) -> Result<RuntimeOwnedObservedChild<'session>, CommandFailure> {
+        let inner = self
+            .inner
+            .as_ref()
+            .expect("prepared runtime session is available before consumption");
+        let (program, arguments) = command
+            .split_first()
+            .ok_or_else(|| CommandFailure::diagnostic("observed runtime child command is empty"))?;
+        let mut process = Command::new(program);
+        process
+            .args(arguments)
+            .current_dir(&inner.context.repo)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        worker::scrub_external_environment(&mut process);
+        worker::configure_runtime_environment(
+            &mut process,
+            &inner.context,
+            &inner.state,
+            inner.bypassed,
+        )?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            process.process_group(0);
+        }
+        let child = process.spawn().map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not start observed runtime child {program}: {error}"
+            ))
+        })?;
+        let process_group = child.id();
+        Ok(RuntimeOwnedObservedChild {
+            guard: worker::ChildGuard::new(child, cfg!(unix)),
+            process_group,
+            terminal: None,
+            _session: PhantomData,
+        })
     }
 }
 
@@ -137,11 +224,43 @@ impl Drop for PreparedRuntimeSession {
             return;
         };
         let session_id = inner.session_lease.session_id().to_string();
-        if let Err(error) = cleanup_prepared_session(inner) {
+        if let Err(error) = cleanup_prepared_session_verified(inner) {
             eprintln!(
                 "RUNTIME_PREPARED_SESSION_CLEANUP_FAILED session_id={session_id} exit_code={} message={}",
                 error.exit_code, error.message
             );
+        }
+    }
+}
+
+fn cleanup_prepared_session_verified(
+    inner: PreparedRuntimeSessionInner,
+) -> Result<(), CommandFailure> {
+    let environment_dir = inner.context.environment_dir.clone();
+    let session_id = inner.session_lease.session_id().to_string();
+    let cleanup = cleanup_prepared_session(inner);
+    let release = session::verify_session_released(&environment_dir, &session_id);
+    let resources = session::verify_environment_released(&environment_dir);
+    match (cleanup, release, resources) {
+        (Ok(()), Ok(()), resources) => resources,
+        (Err(primary), Ok(()), Ok(())) => Err(primary),
+        (primary, release, resources) => {
+            let mut error = primary.err();
+            if let Err(release) = release {
+                error = Some(session::add_secondary_failure(
+                    error,
+                    "runtime session release verification also failed",
+                    release,
+                ));
+            }
+            if let Err(resources) = resources {
+                error = Some(session::add_secondary_failure(
+                    error,
+                    "runtime resource release verification also failed",
+                    resources,
+                ));
+            }
+            Err(error.expect("at least one runtime cleanup verification failed"))
         }
     }
 }
@@ -154,6 +273,105 @@ fn cleanup_prepared_session(inner: PreparedRuntimeSessionInner) -> Result<(), Co
         inner.session_lease,
         true,
     )
+}
+
+impl RuntimeOwnedObservedChild<'_> {
+    pub(crate) fn poll(&mut self) -> Result<Option<ObservedChildTerminal>, CommandFailure> {
+        if let Some(terminal) = self.terminal {
+            return Ok(Some(terminal));
+        }
+        let Some(status) = self.guard.child().try_wait().map_err(|error| {
+            CommandFailure::diagnostic(format!("could not poll observed runtime child: {error}"))
+        })?
+        else {
+            return Ok(None);
+        };
+        let terminal = observed_terminal(status)?;
+        self.terminal = Some(terminal);
+        Ok(Some(terminal))
+    }
+
+    pub(crate) fn terminate(&mut self) -> Result<ObservedChildTerminal, CommandFailure> {
+        self.guard.terminate()?;
+        wait_for_observed_group_absence(self.process_group)?;
+        let terminal = ObservedChildTerminal::Signaled(9);
+        self.terminal = Some(terminal);
+        Ok(terminal)
+    }
+
+    pub(crate) fn finish(mut self) -> Result<ObservedChildTerminal, CommandFailure> {
+        let terminal = self
+            .terminal
+            .ok_or_else(|| CommandFailure::diagnostic("observed runtime child is not terminal"))?;
+        if observed_group_alive(self.process_group)? {
+            self.guard.terminate()?;
+            wait_for_observed_group_absence(self.process_group)?;
+            return Err(CommandFailure::diagnostic(
+                "RUNTIME_OBSERVED_DESCENDANT: observed child exited with a surviving descendant",
+            ));
+        }
+        self.guard.disarm();
+        Ok(terminal)
+    }
+}
+
+fn observed_terminal(
+    status: std::process::ExitStatus,
+) -> Result<ObservedChildTerminal, CommandFailure> {
+    if let Some(code) = status.code() {
+        return Ok(ObservedChildTerminal::Exited(code));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        status
+            .signal()
+            .map(ObservedChildTerminal::Signaled)
+            .ok_or_else(|| {
+                CommandFailure::diagnostic(
+                    "observed runtime child has no exit code or termination signal",
+                )
+            })
+    }
+    #[cfg(not(unix))]
+    Err(CommandFailure::diagnostic(
+        "observed runtime child has no exit code",
+    ))
+}
+
+#[cfg(unix)]
+fn observed_group_alive(process_group: u32) -> Result<bool, CommandFailure> {
+    let process_group = i32::try_from(process_group)
+        .map_err(|_| CommandFailure::diagnostic("observed process group exceeds i32"))?;
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(-process_group), None) {
+        Ok(()) => Ok(true),
+        Err(nix::errno::Errno::ESRCH) => Ok(false),
+        Err(error) => Err(CommandFailure::diagnostic(format!(
+            "could not inspect observed runtime process group: {error}"
+        ))),
+    }
+}
+
+#[cfg(not(unix))]
+fn observed_group_alive(_process_group: u32) -> Result<bool, CommandFailure> {
+    Ok(false)
+}
+
+fn wait_for_observed_group_absence(process_group: u32) -> Result<(), CommandFailure> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if !observed_group_alive(process_group)? {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if observed_group_alive(process_group)? {
+        Err(CommandFailure::diagnostic(
+            "RUNTIME_OBSERVED_DESCENDANT: process group survived termination",
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -260,6 +478,7 @@ pub(crate) fn prepare_runtime_session(
     let context = context_from_plan(&repo, mode, &plan)?;
     let environment_lease = EnvironmentLease::acquire(&context.environment_dir)?;
     let state = provision_locked(&context, &plan, invocation.bypassed)?;
+    session::reconcile_for_exclusive_session(&context.environment_dir)?;
     reset_session_signal_handlers();
     let session_lease = SessionLease::register(&context.environment_dir, harness)?;
     drop(environment_lease);
@@ -1132,4 +1351,223 @@ fn print_help() {
     println!(
         "autospec runtime env\n\nUSAGE:\n    autospec runtime env init [--repo PATH] [--manifest agent|autospec] [--force]\n    autospec runtime env up [--repo PATH] [--mode MODE]\n    autospec runtime env status [--repo PATH] [--mode MODE]\n    autospec runtime env down [--repo PATH] [--mode MODE] [--purge-maven]\n    autospec runtime env gc [--repo PATH]\n    autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]\n    autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]\n    autospec runtime env normalize-compose --repo PATH --check|--apply --fingerprint SHA256"
     );
+}
+
+#[cfg(test)]
+mod observed_child_tests {
+    use super::{prepare_runtime_session, ObservedChildTerminal};
+    use std::fs::{self, File};
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    static ENVIRONMENT: Mutex<()> = Mutex::new(());
+
+    struct RuntimeFixture {
+        root: PathBuf,
+        repo: PathBuf,
+        state_root: PathBuf,
+        previous_state_root: Option<std::ffi::OsString>,
+    }
+
+    impl RuntimeFixture {
+        fn new(name: &str, failing_down: bool) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "autospec-observed-runtime-{name}-{}-{nanos}",
+                std::process::id()
+            ));
+            let repo = root.join("repo");
+            let state_root = root.join("state");
+            fs::create_dir_all(repo.join(".autospec")).expect("runtime fixture directory");
+            git(&repo, &["init", "-b", "main"]);
+            git(&repo, &["config", "user.name", "Autospec Test"]);
+            git(&repo, &["config", "user.email", "autospec@example.invalid"]);
+            fs::write(
+                repo.join("runtime-up.py"),
+                "import http.server, os\npid=os.fork()\nif pid == 0:\n http.server.HTTPServer(('127.0.0.1', int(os.environ['AGENT_FRONTEND_PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()\nelse:\n open('runtime.pid','w').write(str(pid))\n",
+            )
+            .expect("runtime up fixture");
+            let down = if failing_down {
+                "import os, signal, sys\npid=int(open('runtime.pid').read())\nos.kill(pid, signal.SIGTERM)\nos.remove('runtime.pid')\nsys.exit (42)\n"
+            } else {
+                "import os, signal\npid=int(open('runtime.pid').read())\nos.kill(pid, signal.SIGTERM)\nos.remove('runtime.pid')\n"
+            };
+            fs::write(repo.join("runtime-down.py"), down).expect("runtime down fixture");
+            fs::write(
+                repo.join(".autospec/runtime.yml"),
+                "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: python3 runtime-up.py\n    down: python3 runtime-down.py\n",
+            )
+            .expect("runtime manifest");
+            fs::write(repo.join("tracked.txt"), "fixture\n").expect("tracked fixture");
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-m", "runtime fixture"]);
+            let previous_state_root = std::env::var_os("AGENT_ENV_STATE_ROOT");
+            unsafe {
+                std::env::set_var("AGENT_ENV_STATE_ROOT", &state_root);
+            }
+            Self {
+                root,
+                repo,
+                state_root,
+                previous_state_root,
+            }
+        }
+
+        fn private_output(&self, name: &str) -> File {
+            let path = self.root.join(name);
+            let file = File::create(&path).expect("output artifact");
+            let mut permissions = fs::metadata(path).expect("output metadata").permissions();
+            permissions.set_mode(0o600);
+            file
+        }
+
+        fn session_record_exists(&self, session_id: &str) -> bool {
+            contains_named_file(&self.state_root, &format!("{session_id}.json"))
+        }
+    }
+
+    impl Drop for RuntimeFixture {
+        fn drop(&mut self) {
+            unsafe {
+                match self.previous_state_root.take() {
+                    Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),
+                    None => std::env::remove_var("AGENT_ENV_STATE_ROOT"),
+                }
+            }
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git starts");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn contains_named_file(root: &Path, name: &str) -> bool {
+        let Ok(entries) = fs::read_dir(root) else {
+            return false;
+        };
+        entries.filter_map(Result::ok).any(|entry| {
+            let path = entry.path();
+            path.file_name().and_then(|value| value.to_str()) == Some(name)
+                || (path.is_dir() && contains_named_file(&path, name))
+        })
+    }
+
+    fn wait_terminal(child: &mut super::RuntimeOwnedObservedChild) -> ObservedChildTerminal {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(terminal) = child.poll().expect("poll observed child") {
+                return terminal;
+            }
+            assert!(Instant::now() < deadline, "observed child did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn prepared_runtime_owns_successful_observed_child_and_verified_close() {
+        let _environment = ENVIRONMENT.lock().expect("runtime test environment");
+        let fixture = RuntimeFixture::new("success", false);
+        let mut session =
+            prepare_runtime_session(&fixture.repo, "auto", "observed-test").expect("session");
+        let session_id = session.session_id().to_string();
+        let mut child = session
+            .spawn_observed_child(
+                &["/usr/bin/printf".to_string(), "observed".to_string()],
+                fixture.private_output("stdout"),
+                fixture.private_output("stderr"),
+            )
+            .expect("observed child");
+
+        assert_eq!(wait_terminal(&mut child), ObservedChildTerminal::Exited(0));
+        child.finish().expect("successful child has no descendants");
+        session.close_verified().expect("verified broker cleanup");
+        assert!(!fixture.session_record_exists(&session_id));
+    }
+
+    #[test]
+    fn prepared_runtime_terminates_timed_out_observed_child_before_verified_close() {
+        let _environment = ENVIRONMENT.lock().expect("runtime test environment");
+        let fixture = RuntimeFixture::new("timeout", false);
+        let mut session =
+            prepare_runtime_session(&fixture.repo, "auto", "observed-test").expect("session");
+        let session_id = session.session_id().to_string();
+        let mut child = session
+            .spawn_observed_child(
+                &["/usr/bin/sleep".to_string(), "30".to_string()],
+                fixture.private_output("stdout"),
+                fixture.private_output("stderr"),
+            )
+            .expect("observed child");
+
+        assert_eq!(
+            child.terminate().expect("terminate observed child"),
+            ObservedChildTerminal::Signaled(9)
+        );
+        child.finish().expect("terminated group is absent");
+        session.close_verified().expect("verified broker cleanup");
+        assert!(!fixture.session_record_exists(&session_id));
+    }
+
+    #[test]
+    fn prepared_runtime_detects_and_reaps_descendant_after_leader_termination() {
+        let _environment = ENVIRONMENT.lock().expect("runtime test environment");
+        let fixture = RuntimeFixture::new("descendant", false);
+        let descendant_pid = fixture.root.join("descendant.pid");
+        fs::write(
+            fixture.repo.join("fork.py"),
+            format!(
+                "import os, time\npid=os.fork()\nif pid == 0:\n time.sleep(30)\nelse:\n open({:?}, 'w').write(str(pid))\n",
+                descendant_pid
+            ),
+        )
+        .expect("descendant fixture");
+        let mut session =
+            prepare_runtime_session(&fixture.repo, "auto", "observed-test").expect("session");
+        let mut child = session
+            .spawn_observed_child(
+                &["/usr/bin/python3".to_string(), "fork.py".to_string()],
+                fixture.private_output("stdout"),
+                fixture.private_output("stderr"),
+            )
+            .expect("observed child");
+
+        assert_eq!(wait_terminal(&mut child), ObservedChildTerminal::Exited(0));
+        let error = child
+            .finish()
+            .expect_err("surviving descendant must fail observed command");
+        assert!(error.message.contains("descendant"), "{}", error.message);
+        session.close_verified().expect("verified broker cleanup");
+    }
+
+    #[test]
+    fn prepared_runtime_cleanup_failure_is_reported_after_session_release() {
+        let _environment = ENVIRONMENT.lock().expect("runtime test environment");
+        let fixture = RuntimeFixture::new("cleanup-failure", true);
+        let session =
+            prepare_runtime_session(&fixture.repo, "auto", "observed-test").expect("session");
+        let session_id = session.session_id().to_string();
+
+        let error = session
+            .close_verified()
+            .expect_err("failing broker down must fail close");
+        assert_eq!(error.exit_code, 42);
+        assert!(!fixture.session_record_exists(&session_id));
+    }
 }
