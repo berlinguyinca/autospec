@@ -19,6 +19,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::commands::claim::{refresh_claim_generation, ClaimRefreshResult};
 use autospec_core::autonomous::waterfall::sha256_hex;
+use autospec_core::claim::{parse_open_pull_requests_json, OpenPullRequest};
+use autospec_core::lint::{
+    lint_implementation, parse_unified_diff, ImplementationLintContext, ImplementationLintOptions,
+    RepositoryIndex,
+};
 #[cfg(unix)]
 use nix::fcntl::OFlag;
 #[cfg(unix)]
@@ -421,6 +426,7 @@ pub(crate) enum BridgePhase {
     Implementing,
     ImplementationComplete,
     ImplementationProven,
+    BranchPushing,
     BranchPushed,
     DraftCreating,
     DraftCreated,
@@ -482,6 +488,7 @@ impl BridgePhase {
             Self::Implementing => "implementing",
             Self::ImplementationComplete => "implementation_complete",
             Self::ImplementationProven => "implementation_proven",
+            Self::BranchPushing => "branch_pushing",
             Self::BranchPushed => "branch_pushed",
             Self::DraftCreating => "draft_creating",
             Self::DraftCreated => "draft_created",
@@ -495,6 +502,7 @@ impl BridgePhase {
             "implementing" => Ok(Self::Implementing),
             "implementation_complete" => Ok(Self::ImplementationComplete),
             "implementation_proven" => Ok(Self::ImplementationProven),
+            "branch_pushing" => Ok(Self::BranchPushing),
             "branch_pushed" => Ok(Self::BranchPushed),
             "draft_creating" => Ok(Self::DraftCreating),
             "draft_created" => Ok(Self::DraftCreated),
@@ -934,12 +942,12 @@ fn worktree_registry_snapshot(porcelain: &str, issue_branch: &str) -> String {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct ImplementationProof {
-    head_oid: String,
-    closeout_body: String,
+pub(crate) struct ImplementationProof {
+    pub(crate) head_oid: String,
+    pub(crate) closeout_body: String,
 }
 
-fn prove_implementation(
+pub(crate) fn prove_implementation(
     state_path: &Path,
     state: &mut PersistedInvocation,
     snapshot: &MutationSnapshot,
@@ -1097,6 +1105,558 @@ fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, Stri
         );
     }
     Ok(body)
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DraftPrAdapter {
+    gh: PathBuf,
+    environment: BTreeMap<OsString, OsString>,
+}
+
+impl DraftPrAdapter {
+    pub(crate) fn github_cli() -> Self {
+        Self {
+            gh: PathBuf::from("gh"),
+            environment: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteMutationSnapshot {
+    refs: BTreeMap<String, String>,
+    pull_requests: Vec<OpenPullRequest>,
+}
+
+impl RemoteMutationSnapshot {
+    pub(crate) fn capture_and_persist(
+        state_path: &Path,
+        state: &PersistedInvocation,
+        adapter: &DraftPrAdapter,
+    ) -> Result<Self, String> {
+        let snapshot = Self::capture(state, adapter)?;
+        let path = remote_snapshot_path(state_path);
+        reject_symlink_path(&path)?;
+        ensure_private_directory(
+            path.parent()
+                .ok_or_else(|| "executor remote snapshot requires a parent".to_string())?,
+        )?;
+        let pull_requests = snapshot
+            .pull_requests
+            .iter()
+            .map(|pull_request| {
+                serde_json::json!({
+                    "number": pull_request.number,
+                    "body": pull_request.body,
+                    "headRefName": pull_request.head_ref_name,
+                    "headRefOid": pull_request.head_ref_oid,
+                    "isDraft": pull_request.is_draft,
+                    "baseRefName": pull_request.base_ref_name,
+                })
+            })
+            .collect::<Vec<_>>();
+        let body = serde_json::json!({
+            "schema": 1,
+            "identity": {
+                "repository": state.identity.repository,
+                "issue": state.identity.issue,
+                "invocation_id": state.identity.invocation_id,
+                "base_ref": state.identity.base_ref,
+                "base_oid": state.identity.base_oid,
+            },
+            "refs": &snapshot.refs,
+            "pull_requests": pull_requests,
+        })
+        .to_string();
+        write_private_atomic(&path, body.as_bytes(), "executor remote snapshot")?;
+        Ok(snapshot)
+    }
+
+    fn capture(state: &PersistedInvocation, adapter: &DraftPrAdapter) -> Result<Self, String> {
+        Ok(Self {
+            refs: remote_head_refs(&state.identity.repository_path)?,
+            pull_requests: list_bridge_pull_requests(&state.identity.repository, adapter)?,
+        })
+    }
+
+    fn load(state_path: &Path, state: &PersistedInvocation) -> Result<Self, String> {
+        let path = remote_snapshot_path(state_path);
+        reject_symlink_path(&path)?;
+        validate_private_state_file(&path)?;
+        let value: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&path)
+                .map_err(|error| format!("read executor prelaunch remote snapshot: {error}"))?,
+        )
+        .map_err(|error| format!("parse executor prelaunch remote snapshot: {error}"))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "executor prelaunch remote snapshot must be an object".to_string())?;
+        if object.get("schema").and_then(serde_json::Value::as_u64) != Some(1) || object.len() != 4
+        {
+            return Err("executor prelaunch remote snapshot schema is invalid".to_string());
+        }
+        let expected_identity = serde_json::json!({
+            "repository": state.identity.repository,
+            "issue": state.identity.issue,
+            "invocation_id": state.identity.invocation_id,
+            "base_ref": state.identity.base_ref,
+            "base_oid": state.identity.base_oid,
+        });
+        if object.get("identity") != Some(&expected_identity) {
+            return Err(
+                "executor prelaunch remote snapshot identity does not match invocation".to_string(),
+            );
+        }
+        let refs = object
+            .get("refs")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| "executor prelaunch remote refs must be an object".to_string())?
+            .iter()
+            .map(|(reference, oid)| {
+                let oid = oid
+                    .as_str()
+                    .filter(|oid| {
+                        oid.len() == 40 && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+                    .ok_or_else(|| "executor prelaunch remote ref OID is invalid".to_string())?;
+                Ok((reference.clone(), oid.to_string()))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
+        let pull_requests = parse_open_pull_requests_json(
+            &object
+                .get("pull_requests")
+                .ok_or_else(|| "executor prelaunch pull request snapshot is missing".to_string())?
+                .to_string(),
+        )?;
+        Ok(Self {
+            refs,
+            pull_requests,
+        })
+    }
+}
+
+fn remote_snapshot_path(state_path: &Path) -> PathBuf {
+    state_path.with_extension("prelaunch-remote.json")
+}
+
+fn write_private_atomic(path: &Path, body: &[u8], label: &str) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("{label} requires a parent"))?;
+    ensure_private_directory(parent)?;
+    let sequence = INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("state"),
+        std::process::id(),
+        sequence
+    ));
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("create {label} temporary file: {error}"))?;
+    let result = (|| {
+        file.write_all(body)
+            .map_err(|error| format!("write {label}: {error}"))?;
+        file.write_all(b"\n")
+            .map_err(|error| format!("write {label} newline: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync {label}: {error}"))?;
+        fs::rename(&temporary, path).map_err(|error| format!("publish {label}: {error}"))?;
+        #[cfg(unix)]
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync {label} parent: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn validate_private_state_file(path: &Path) -> Result<(), String> {
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("read executor state metadata: {error}"))?;
+    if !metadata.is_file() {
+        return Err("executor state path is not a regular file".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        // SAFETY: geteuid has no arguments or memory-safety preconditions.
+        if metadata.uid() != unsafe { geteuid() } || metadata.mode() & 0o077 != 0 {
+            return Err("executor state file ownership or mode is not private".to_string());
+        }
+    }
+    Ok(())
+}
+
+struct BridgeRepositoryIndex {
+    root: PathBuf,
+}
+
+impl RepositoryIndex for BridgeRepositoryIndex {
+    fn post_change_file(&self, path: &str) -> Option<String> {
+        let path = Path::new(path);
+        if path.is_absolute()
+            || path
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return None;
+        }
+        fs::read_to_string(self.root.join(path)).ok()
+    }
+}
+
+pub(crate) fn push_and_create_draft(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    proof: &ImplementationProof,
+    issue_title: &str,
+    issue_body: &str,
+    adapter: &DraftPrAdapter,
+) -> Result<u64, String> {
+    if state.head_oid.as_deref() != Some(proof.head_oid.as_str())
+        || !matches!(
+            state.phase,
+            BridgePhase::ImplementationProven
+                | BridgePhase::BranchPushing
+                | BridgePhase::BranchPushed
+                | BridgePhase::DraftCreating
+        )
+    {
+        return Err("executor draft transaction requires exact proven implementation state".into());
+    }
+    let prelaunch = RemoteMutationSnapshot::load(state_path, state)?;
+    let observed = RemoteMutationSnapshot::capture(state, adapter)?;
+    let issue_ref = format!("refs/heads/{}", state.identity.branch);
+    if prelaunch.refs.contains_key(&issue_ref) {
+        return Err("executor issue remote ref existed before Rust push authority".into());
+    }
+    let mut pushed_refs = prelaunch.refs.clone();
+    pushed_refs.insert(issue_ref.clone(), proof.head_oid.clone());
+    let refs_valid = match state.phase {
+        BridgePhase::ImplementationProven => observed.refs == prelaunch.refs,
+        BridgePhase::BranchPushing => {
+            observed.refs == prelaunch.refs || observed.refs == pushed_refs
+        }
+        BridgePhase::BranchPushed | BridgePhase::DraftCreating => observed.refs == pushed_refs,
+        _ => false,
+    };
+    let body = expected_draft_body(state.identity.issue, proof);
+    let base = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor draft base must name origin".to_string())?;
+    let observed_exact = exact_draft_candidates(
+        &observed.pull_requests,
+        &body,
+        &state.identity.branch,
+        &proof.head_oid,
+        base,
+    );
+    let prs_valid = observed.pull_requests == prelaunch.pull_requests
+        || (state.phase == BridgePhase::DraftCreating
+            && observed_exact.len() == 1
+            && observed.pull_requests.len() == prelaunch.pull_requests.len() + 1
+            && prelaunch
+                .pull_requests
+                .iter()
+                .all(|pull_request| observed.pull_requests.contains(pull_request)));
+    if !refs_valid || !prs_valid {
+        return Err(
+            "executor harness mutated remote refs or open pull requests before Rust mutation"
+                .into(),
+        );
+    }
+    run_implementation_lint(state, proof, issue_body)?;
+
+    if state.phase == BridgePhase::ImplementationProven {
+        state.phase = BridgePhase::BranchPushing;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+    }
+    if state.phase == BridgePhase::BranchPushing && observed.refs == prelaunch.refs {
+        let refspec = format!("{}:{issue_ref}", proof.head_oid);
+        let output = Command::new("git")
+            .args(["push", "--porcelain", "origin", &refspec])
+            .current_dir(&state.identity.worktree)
+            .output()
+            .map_err(|error| format!("push exact executor issue branch: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "push exact executor issue branch failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    if state.phase == BridgePhase::BranchPushing {
+        if remote_head_refs(&state.identity.repository_path)? != pushed_refs {
+            return Err("executor exact issue branch push could not be proven".into());
+        }
+        state.phase = BridgePhase::BranchPushed;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+    }
+    if remote_head_refs(&state.identity.repository_path)? != pushed_refs {
+        return Err("executor remote refs changed outside the exact issue branch push".into());
+    }
+    let before_create = list_bridge_pull_requests(&state.identity.repository, adapter)?;
+    let existing = exact_draft_candidates(
+        &before_create,
+        &body,
+        &state.identity.branch,
+        &proof.head_oid,
+        base,
+    );
+    let baseline_preserved = prelaunch
+        .pull_requests
+        .iter()
+        .all(|pull_request| before_create.contains(pull_request));
+    if !baseline_preserved
+        || before_create.len() != prelaunch.pull_requests.len() + usize::from(!existing.is_empty())
+    {
+        return Err("executor open pull requests changed before draft creation".into());
+    }
+    let pull_requests = if existing.is_empty() {
+        if state.phase != BridgePhase::DraftCreating {
+            state.phase = BridgePhase::DraftCreating;
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+        }
+        let creation =
+            create_draft_pull_request(state_path, state, proof, issue_title, base, adapter);
+        let authoritative = list_bridge_pull_requests(&state.identity.repository, adapter)?;
+        if creation.is_err()
+            && exact_draft_candidates(
+                &authoritative,
+                &body,
+                &state.identity.branch,
+                &proof.head_oid,
+                base,
+            )
+            .is_empty()
+        {
+            return Err(creation.expect_err("creation failed"));
+        }
+        authoritative
+    } else {
+        before_create.clone()
+    };
+    let candidates = exact_draft_candidates(
+        &pull_requests,
+        &body,
+        &state.identity.branch,
+        &proof.head_oid,
+        base,
+    );
+    if candidates.len() != 1 {
+        return Err(format!(
+            "executor draft authoritative reread requires exactly one exact PR, observed {}",
+            candidates.len()
+        ));
+    }
+    let expected_count = prelaunch.pull_requests.len() + 1;
+    if pull_requests.len() != expected_count
+        || !prelaunch
+            .pull_requests
+            .iter()
+            .all(|pull_request| pull_requests.contains(pull_request))
+    {
+        return Err("executor draft authoritative reread found extra open pull requests".into());
+    }
+    let number = candidates[0].number;
+    state.phase = BridgePhase::DraftCreated;
+    state.pr = Some(number);
+    state.head_oid = Some(proof.head_oid.clone());
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    Ok(number)
+}
+
+fn run_implementation_lint(
+    state: &PersistedInvocation,
+    proof: &ImplementationProof,
+    issue_body: &str,
+) -> Result<(), String> {
+    let diff = git_stdout(
+        &state.identity.worktree,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--unified=3",
+            &state.identity.base_oid,
+            &proof.head_oid,
+        ],
+    )?;
+    let diff = parse_unified_diff(&diff)
+        .map_err(|error| format!("parse executor implementation diff for lint: {error}"))?;
+    let repository = BridgeRepositoryIndex {
+        root: state.identity.worktree.clone(),
+    };
+    let result = lint_implementation(
+        &diff,
+        ImplementationLintContext {
+            issue_body: (!issue_body.is_empty()).then_some(issue_body),
+            repository: &repository,
+            options: ImplementationLintOptions::default(),
+        },
+    );
+    if result.blocking_count == 0 && !result.scope_exploded {
+        Ok(())
+    } else {
+        Err(format!(
+            "executor implementation lint blocked remote mutation with {} finding(s)",
+            result.blocking_count
+        ))
+    }
+}
+
+fn create_draft_pull_request(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    proof: &ImplementationProof,
+    issue_title: &str,
+    base: &str,
+    adapter: &DraftPrAdapter,
+) -> Result<(), String> {
+    let body_path = state_path.with_file_name(format!(
+        "draft-body-{}-{}.md",
+        state.identity.invocation_id,
+        INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    reject_symlink_path(&body_path)?;
+    if let Some(parent) = body_path.parent() {
+        ensure_private_directory(parent)?;
+    }
+    let body = format!(
+        "Closes #{}\n\n{}",
+        state.identity.issue, proof.closeout_body
+    );
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&body_path)
+        .map_err(|error| format!("create executor draft body: {error}"))?;
+    file.write_all(body.as_bytes())
+        .map_err(|error| format!("write executor draft body: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("sync executor draft body: {error}"))?;
+    let output = Command::new(&adapter.gh)
+        .args([
+            "pr",
+            "create",
+            "--repo",
+            &state.identity.repository,
+            "--draft",
+            "--head",
+            &state.identity.branch,
+            "--base",
+            base,
+            "--title",
+            issue_title,
+            "--body-file",
+            body_path
+                .to_str()
+                .ok_or_else(|| "executor draft body path is not UTF-8".to_string())?,
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| format!("create executor draft pull request: {error}"))?;
+    let _ = fs::remove_file(&body_path);
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "create executor draft pull request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn list_bridge_pull_requests(
+    repository: &str,
+    adapter: &DraftPrAdapter,
+) -> Result<Vec<OpenPullRequest>, String> {
+    const OPEN_PULL_REQUEST_LIMIT: usize = 100;
+    let output = Command::new(&adapter.gh)
+        .args([
+            "pr",
+            "list",
+            "--repo",
+            repository,
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,body,headRefName,headRefOid,isDraft,baseRefName",
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| format!("list executor open pull requests: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "list executor open pull requests failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let pull_requests = parse_open_pull_requests_json(&String::from_utf8_lossy(&output.stdout))?;
+    if pull_requests.len() >= OPEN_PULL_REQUEST_LIMIT {
+        return Err(format!(
+            "executor open pull request inventory saturated the {OPEN_PULL_REQUEST_LIMIT}-row limit"
+        ));
+    }
+    Ok(pull_requests)
+}
+
+fn remote_head_refs(repo: &Path) -> Result<BTreeMap<String, String>, String> {
+    let output = git_stdout(repo, &["ls-remote", "--heads", "origin"])?;
+    output
+        .lines()
+        .map(|line| {
+            let (oid, reference) = line
+                .split_once('\t')
+                .ok_or_else(|| "executor remote ref evidence is malformed".to_string())?;
+            Ok((reference.to_string(), oid.to_string()))
+        })
+        .collect()
+}
+
+fn exact_draft_candidates<'a>(
+    pull_requests: &'a [OpenPullRequest],
+    expected_body: &str,
+    branch: &str,
+    head_oid: &str,
+    base: &str,
+) -> Vec<&'a OpenPullRequest> {
+    pull_requests
+        .iter()
+        .filter(|pull_request| {
+            pull_request.is_draft
+                && pull_request.head_ref_name == branch
+                && pull_request.head_ref_oid == head_oid
+                && pull_request.base_ref_name == base
+                && pull_request.body == expected_body
+        })
+        .collect()
+}
+
+fn expected_draft_body(issue: u64, proof: &ImplementationProof) -> String {
+    format!("Closes #{issue}\n\n{}", proof.closeout_body)
 }
 
 fn dirty_path_identities(
@@ -9104,12 +9664,10 @@ mod tests {
                     transform.trim_start(),
                 );
             } else if label == "runtime-static" {
-                body = body
-                    .replace(
-                        "Claims: [verified] behavior is covered\n",
-                        "Claims: [verified] runtime behavior is covered\n",
-                    )
-                    .replace("Proof type: static\n", "Proof type: static\n");
+                body = body.replace(
+                    "Claims: [verified] behavior is covered\n",
+                    "Claims: [verified] runtime behavior is covered\n",
+                );
             } else {
                 body.push_str(transform);
             }
@@ -9155,6 +9713,422 @@ mod tests {
                 ]
             ),
             remote_before
+        );
+    }
+
+    #[cfg(unix)]
+    fn draft_pr_adapter_fixture(
+        fixture: &GitFixture,
+        state_path: &Path,
+        created_pull_request: &str,
+    ) -> super::DraftPrAdapter {
+        let gh = fixture.root.join("gh");
+        let pull_requests = fixture.root.join("pull-requests.json");
+        let created = fixture.root.join("created-pull-request.json");
+        let calls = fixture.root.join("gh-calls");
+        fs::write(&pull_requests, "[]").expect("empty PR snapshot");
+        fs::write(&created, created_pull_request).expect("created PR fixture");
+        fs::write(
+            &gh,
+            "#!/bin/sh\n\
+             set -eu\n\
+             printf '%s\\n' \"$*\" >> \"$GH_CALLS\"\n\
+             if [ \"$1 $2\" = \"pr list\" ]; then cat \"$GH_PR_STATE\"; exit 0; fi\n\
+             if [ \"$1 $2\" = \"pr create\" ]; then\n\
+               grep -q '\"phase\":\"draft_creating\"' \"$BRIDGE_STATE\"\n\
+               cp \"$GH_CREATED_PR\" \"$GH_PR_STATE\"\n\
+               printf 'https://example.invalid/pull/17\\n'\n\
+               exit 0\n\
+             fi\n\
+             exit 64\n",
+        )
+        .expect("gh fixture");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("executable gh");
+        super::DraftPrAdapter {
+            gh,
+            environment: BTreeMap::from([
+                ("GH_CALLS".into(), calls.into_os_string()),
+                ("GH_PR_STATE".into(), pull_requests.into_os_string()),
+                ("GH_CREATED_PR".into(), created.into_os_string()),
+                ("BRIDGE_STATE".into(), state_path.as_os_str().to_os_string()),
+            ]),
+        }
+    }
+
+    #[cfg(unix)]
+    struct PreparedDraftTransaction {
+        fixture: GitFixture,
+        state: PersistedInvocation,
+        proof: super::ImplementationProof,
+        adapter: super::DraftPrAdapter,
+        state_path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    const DRAFT_ISSUE_BODY: &str =
+        "## Implementation outline\n\n- implementation.txt\n- .autospec/closeout.md\n";
+
+    #[cfg(unix)]
+    impl PreparedDraftTransaction {
+        fn push_exact_at_intent(&mut self) {
+            self.state.phase = BridgePhase::BranchPushing;
+            super::write_invocation_atomic(&self.state_path, &self.state).expect("push intent");
+            git(
+                &self.state.identity.worktree,
+                &[
+                    "push",
+                    "origin",
+                    &format!(
+                        "{}:refs/heads/{}",
+                        self.proof.head_oid, self.state.identity.branch
+                    ),
+                ],
+            );
+        }
+
+        fn publish(&mut self) -> Result<u64, String> {
+            super::push_and_create_draft(
+                &self.state_path,
+                &mut self.state,
+                &self.proof,
+                "Implement issue",
+                DRAFT_ISSUE_BODY,
+                &self.adapter,
+            )
+        }
+    }
+
+    #[cfg(unix)]
+    fn prepared_draft_transaction(label: &str) -> PreparedDraftTransaction {
+        let (fixture, mut state, snapshot, closeout) = implementation_proof_fixture(label);
+        let state_path = fixture.root.join("state/invocation.json");
+        let empty_adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
+        super::RemoteMutationSnapshot::capture_and_persist(&state_path, &state, &empty_adapter)
+            .expect("prelaunch remote");
+        let snapshot_path = state_path.with_extension("prelaunch-remote.json");
+        assert_eq!(
+            fs::metadata(&snapshot_path)
+                .expect("remote snapshot metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "remote snapshot must publish privately"
+        );
+        assert!(
+            fs::read_dir(snapshot_path.parent().expect("snapshot parent"))
+                .expect("snapshot directory")
+                .all(|entry| !entry
+                    .expect("snapshot directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")),
+            "atomic snapshot publication must not strand a temporary file"
+        );
+        commit_implementation(&state);
+        let proof = super::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
+            .expect("prove implementation");
+        let body = format!("Closes #42\n\n{}", proof.closeout_body);
+        let created = format!(
+            "[{{\"number\":17,\"body\":{},\"headRefName\":\"{}\",\"headRefOid\":\"{}\",\"isDraft\":true,\"baseRefName\":\"main\"}}]",
+            serde_json::to_string(&body).unwrap(),
+            state.identity.branch,
+            proof.head_oid,
+        );
+        let adapter = draft_pr_adapter_fixture(&fixture, &state_path, &created);
+        PreparedDraftTransaction {
+            fixture,
+            state,
+            proof,
+            adapter,
+            state_path,
+        }
+    }
+
+    #[cfg(unix)]
+    fn adapter_path(adapter: &super::DraftPrAdapter, key: &str) -> PathBuf {
+        PathBuf::from(
+            adapter
+                .environment
+                .get(std::ffi::OsStr::new(key))
+                .expect("adapter path"),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_pushes_exact_oid_and_creates_one_draft_pr() {
+        // Break caught: Rust pushing before lint/proof or creating a PR before DraftCreating is durable.
+        let mut prepared = prepared_draft_transaction("draft-create");
+
+        let pull_request = prepared.publish().expect("create exact draft");
+
+        assert_eq!(pull_request, 17);
+        assert_eq!(prepared.state.phase, BridgePhase::DraftCreated);
+        assert_eq!(prepared.state.pr, Some(17));
+        assert_eq!(
+            prepared.state.head_oid.as_deref(),
+            Some(prepared.proof.head_oid.as_str())
+        );
+        assert_eq!(
+            git_stdout(
+                &prepared.fixture.root,
+                &[
+                    "--git-dir",
+                    prepared.fixture.root.join("remote.git").to_str().unwrap(),
+                    "rev-parse",
+                    &format!("refs/heads/{}", prepared.state.identity.branch),
+                ],
+            ),
+            prepared.proof.head_oid
+        );
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_recovers_push_and_draft_creation_boundaries() {
+        // Break caught: restart duplicating a push or draft after Rust mutated remote state.
+        let mut pushed = prepared_draft_transaction("draft-recover-push");
+        pushed.push_exact_at_intent();
+        pushed.publish().expect("recover exact pushed OID");
+        assert_eq!(pushed.state.phase, BridgePhase::DraftCreated);
+
+        let mut created = prepared_draft_transaction("draft-recover-create");
+        created.push_exact_at_intent();
+        created.state.phase = BridgePhase::DraftCreating;
+        super::write_invocation_atomic(&created.state_path, &created.state).expect("create intent");
+        fs::copy(
+            adapter_path(&created.adapter, "GH_CREATED_PR"),
+            adapter_path(&created.adapter, "GH_PR_STATE"),
+        )
+        .expect("simulate completed create");
+        fs::write(created.fixture.root.join("gh-calls"), "").expect("clear calls");
+
+        let pr = created.publish().expect("adopt exact authoritative draft");
+
+        assert_eq!(pr, 17);
+        assert_eq!(created.state.phase, BridgePhase::DraftCreated);
+        let calls = fs::read_to_string(created.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+
+        let mut before_create = prepared_draft_transaction("draft-recover-before-create");
+        before_create.push_exact_at_intent();
+        before_create.state.phase = BridgePhase::DraftCreating;
+        super::write_invocation_atomic(&before_create.state_path, &before_create.state)
+            .expect("create intent");
+        fs::write(before_create.fixture.root.join("gh-calls"), "").expect("clear calls");
+
+        let pr = before_create
+            .publish()
+            .expect("retry create after crash before gh");
+
+        assert_eq!(pr, 17);
+        let calls =
+            fs::read_to_string(before_create.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_lint_blocks_before_git_or_gh_mutation() {
+        // Break caught: a deterministic unfinished-work finding reaching a remote boundary.
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("draft-lint-block");
+        let state_path = fixture.root.join("state/invocation.json");
+        let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
+        super::RemoteMutationSnapshot::capture_and_persist(&state_path, &state, &adapter)
+            .expect("prelaunch remote");
+        fs::write(
+            state.identity.worktree.join("unsafe.rs"),
+            format!("fn unsafe_change() {{ /* {} */ }}\n", ["TO", "DO"].concat()),
+        )
+        .expect("lint finding");
+        commit_implementation(&state);
+        let proof = super::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
+            .expect("prove implementation");
+
+        let error = super::push_and_create_draft(
+            &state_path,
+            &mut state,
+            &proof,
+            "Implement issue",
+            "## Implementation outline\n\n- implementation.txt\n- unsafe.rs\n- .autospec/closeout.md\n",
+            &adapter,
+        )
+        .expect_err("lint must block");
+
+        assert!(error.contains("lint"), "{error}");
+        assert!(git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        )
+        .lines()
+        .all(|line| !line.ends_with(&format!("refs/heads/{}", state.identity.branch))));
+        let calls = fs::read_to_string(fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_nonexact_authoritative_drafts() {
+        // Break caught: treating partial PR identity or additional PRs as the one owned draft.
+        for variant in [
+            "missing",
+            "multiple",
+            "wrong-head",
+            "wrong-base",
+            "ready",
+            "wrong-body",
+            "extra",
+        ] {
+            let mut prepared = prepared_draft_transaction(&format!("draft-invalid-{variant}"));
+            let created_path = adapter_path(&prepared.adapter, "GH_CREATED_PR");
+            let exact: serde_json::Value =
+                serde_json::from_str(&fs::read_to_string(&created_path).unwrap()).unwrap();
+            let mut pull_requests = exact.as_array().unwrap().clone();
+            match variant {
+                "missing" => pull_requests.clear(),
+                "multiple" => {
+                    let mut duplicate = pull_requests[0].clone();
+                    duplicate["number"] = 18.into();
+                    pull_requests.push(duplicate);
+                }
+                "wrong-head" => {
+                    pull_requests[0]["headRefOid"] =
+                        "ffffffffffffffffffffffffffffffffffffffff".into()
+                }
+                "wrong-base" => pull_requests[0]["baseRefName"] = "other".into(),
+                "ready" => pull_requests[0]["isDraft"] = false.into(),
+                "wrong-body" => pull_requests[0]["body"] = "## Closeout report\n".into(),
+                "extra" => {
+                    pull_requests.push(serde_json::json!({
+                        "number": 18,
+                        "body": "Closes #99",
+                        "headRefName": "foreign",
+                        "headRefOid": "ffffffffffffffffffffffffffffffffffffffff",
+                        "isDraft": true,
+                        "baseRefName": "main"
+                    }));
+                }
+                _ => unreachable!(),
+            }
+            fs::write(
+                &created_path,
+                serde_json::Value::Array(pull_requests).to_string(),
+            )
+            .expect("invalid authoritative PR fixture");
+
+            let error = super::push_and_create_draft(
+                &prepared.state_path,
+                &mut prepared.state,
+                &prepared.proof,
+                "Implement issue",
+                "## Implementation outline\n\n- implementation.txt\n- .autospec/closeout.md\n",
+                &prepared.adapter,
+            )
+            .expect_err("nonexact draft must fail closed");
+
+            assert!(
+                error.contains("exact") || error.contains("extra"),
+                "{variant}: {error}"
+            );
+            assert_eq!(prepared.state.phase, BridgePhase::DraftCreating);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_prelaunch_remote_snapshot_drift() {
+        // Break caught: harness-created extra refs or PRs being mistaken for Rust-owned mutations.
+        let mut branch = prepared_draft_transaction("draft-extra-branch");
+        git(
+            &branch.fixture.root.join("seed"),
+            &["push", "origin", "HEAD:refs/heads/foreign"],
+        );
+        let error = super::push_and_create_draft(
+            &branch.state_path,
+            &mut branch.state,
+            &branch.proof,
+            "Implement issue",
+            "## Implementation outline\n\n- implementation.txt\n- .autospec/closeout.md\n",
+            &branch.adapter,
+        )
+        .expect_err("extra branch must fail closed");
+        assert!(error.contains("mutated remote"), "{error}");
+
+        let mut pull_request = prepared_draft_transaction("draft-extra-pr");
+        fs::write(
+            adapter_path(&pull_request.adapter, "GH_PR_STATE"),
+            r#"[{"number":99,"body":"Closes #99","headRefName":"foreign","headRefOid":"ffffffffffffffffffffffffffffffffffffffff","isDraft":true,"baseRefName":"main"}]"#,
+        )
+        .expect("extra PR");
+        let error = super::push_and_create_draft(
+            &pull_request.state_path,
+            &mut pull_request.state,
+            &pull_request.proof,
+            "Implement issue",
+            "## Implementation outline\n\n- implementation.txt\n- .autospec/closeout.md\n",
+            &pull_request.adapter,
+        )
+        .expect_err("extra PR must fail closed");
+        assert!(error.contains("mutated remote"), "{error}");
+
+        let mut stale = prepared_draft_transaction("draft-stale-snapshot");
+        let snapshot_path = stale.state_path.with_extension("prelaunch-remote.json");
+        let mut snapshot: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&snapshot_path).unwrap()).unwrap();
+        snapshot["identity"]["invocation_id"] = "stale-invocation".into();
+        fs::write(&snapshot_path, snapshot.to_string()).expect("tamper snapshot identity");
+        let error = super::push_and_create_draft(
+            &stale.state_path,
+            &mut stale.state,
+            &stale.proof,
+            "Implement issue",
+            "## Implementation outline\n\n- implementation.txt\n- .autospec/closeout.md\n",
+            &stale.adapter,
+        )
+        .expect_err("stale remote snapshot must fail closed");
+        assert!(error.contains("identity"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_saturated_pull_request_inventory() {
+        // Break caught: a 100-row gh result silently hiding additional open pull requests.
+        let (fixture, state, _, _) = implementation_proof_fixture("draft-pr-saturation");
+        let state_path = fixture.root.join("state/invocation.json");
+        let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
+        let pull_requests = (1..=100)
+            .map(|number| {
+                serde_json::json!({
+                    "number": number,
+                    "body": format!("Closes #{number}"),
+                    "headRefName": format!("foreign-{number}"),
+                    "headRefOid": "ffffffffffffffffffffffffffffffffffffffff",
+                    "isDraft": true,
+                    "baseRefName": "main"
+                })
+            })
+            .collect::<Vec<_>>();
+        fs::write(
+            adapter_path(&adapter, "GH_PR_STATE"),
+            serde_json::to_string(&pull_requests).unwrap(),
+        )
+        .expect("saturated PR fixture");
+
+        let error =
+            super::RemoteMutationSnapshot::capture_and_persist(&state_path, &state, &adapter)
+                .expect_err("saturated PR inventory must fail closed");
+
+        assert!(
+            error.contains("100") || error.contains("saturat"),
+            "{error}"
         );
     }
 

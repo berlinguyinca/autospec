@@ -1507,8 +1507,8 @@ fn claim_state_reconcile_records_a_linked_pr_before_posting_one_handoff_blocker(
     )
     .expect("comments fixture");
     let pull_requests = r#"[
-      {"number":77,"body":"Fixes #42\n\n## Closeout report\n\n## Closeout report","headRefName":"feat/other","headRefOid":"7777777777777777777777777777777777777777"},
-      {"number":75,"body":"Closes #42\n\n## Closeout report\n\n**Result** shipped.","headRefName":"feat/test","headRefOid":"7575757575757575757575757575757575757575"}
+      {"number":77,"body":"Fixes #42\n\n## Closeout report\n\n## Closeout report","headRefName":"feat/other","headRefOid":"7777777777777777777777777777777777777777","isDraft":false,"baseRefName":"main"},
+      {"number":75,"body":"Closes #42\n\n## Closeout report\n\n**Result** shipped.","headRefName":"feat/test","headRefOid":"7575757575757575757575757575757575757575","isDraft":false,"baseRefName":"main"}
     ]"#;
 
     let output = autospec()
