@@ -44,6 +44,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
+#[allow(dead_code)]
+mod executor_bridge;
 mod premerge;
 // Task 3 wires the closed dispatcher into the foreground cycle.
 #[allow(dead_code)]

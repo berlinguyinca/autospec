@@ -1,0 +1,839 @@
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+pub(crate) const CLAUDE_LOCAL_TOOLS: &str =
+    "Read,Edit,Write,Glob,Grep,Bash(git:*),Bash(cargo:*),Bash(npm:*),Bash(pnpm:*),Bash(yarn:*)";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HarnessKind {
+    Claude,
+    Codex,
+    OpenCode,
+}
+
+impl HarnessKind {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "claude" => Ok(Self::Claude),
+            "codex" => Ok(Self::Codex),
+            "opencode" => Ok(Self::OpenCode),
+            other => Err(format!("unsupported executor harness: {other}")),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HarnessAlias {
+    pub(crate) kind: HarnessKind,
+    pub(crate) binary: String,
+    pub(crate) approval_alias: String,
+    pub(crate) display_name: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HarnessConfig {
+    aliases: Vec<HarnessAlias>,
+    opencode_adapter: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedHarness {
+    pub(crate) kind: HarnessKind,
+    pub(crate) executable: PathBuf,
+    opencode_adapter: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct HarnessInvocation {
+    pub(crate) program: PathBuf,
+    pub(crate) args: Vec<String>,
+    pub(crate) current_dir: PathBuf,
+    pub(crate) requires_mutation_snapshots: bool,
+}
+
+impl HarnessConfig {
+    pub(crate) fn load(_repo: &Path, env: &BTreeMap<String, OsString>) -> Result<Self, String> {
+        let table = env
+            .get("AUTOSPEC_HARNESS_RUNTIME_ALIASES")
+            .ok_or_else(|| "AUTOSPEC_HARNESS_RUNTIME_ALIASES is required".to_string())?;
+        let body = fs::read_to_string(table)
+            .map_err(|error| format!("read harness alias table: {error}"))?;
+        let aliases = Self::parse_alias_table(&body)?;
+        let opencode_adapter = env
+            .get("AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER")
+            .map(PathBuf::from)
+            .map(|path| safe_executable(&path, env))
+            .transpose()?;
+        Ok(Self {
+            aliases,
+            opencode_adapter,
+        })
+    }
+
+    pub(crate) fn parse_alias_table(body: &str) -> Result<Vec<HarnessAlias>, String> {
+        body.lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            .map(|line| {
+                let columns: Vec<_> = line.split('\t').collect();
+                if columns.len() != 4 {
+                    return Err(format!(
+                        "harness alias row must contain exactly four TSV columns: {line}"
+                    ));
+                }
+                Ok(HarnessAlias {
+                    kind: HarnessKind::parse(columns[0])?,
+                    binary: columns[1].trim().to_string(),
+                    approval_alias: columns[2].trim().to_string(),
+                    display_name: columns[3].trim().to_string(),
+                })
+            })
+            .collect()
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        env: &BTreeMap<String, OsString>,
+    ) -> Result<ResolvedHarness, String> {
+        let requested = env
+            .get("AUTOSPEC_HANDOFF_DISPATCHER_KIND")
+            .and_then(|value| value.to_str())
+            .map(HarnessKind::parse)
+            .transpose()?
+            .or_else(|| {
+                if env.contains_key("CODEX_THREAD_ID") {
+                    Some(HarnessKind::Codex)
+                } else if env.contains_key("CLAUDECODE")
+                    || env.contains_key("CLAUDE_CODE_ENTRYPOINT")
+                {
+                    Some(HarnessKind::Claude)
+                } else if env.contains_key("OPENCODE") {
+                    Some(HarnessKind::OpenCode)
+                } else {
+                    None
+                }
+            })
+            .ok_or_else(|| "executor_harness_unknown: no active harness marker".to_string())?;
+        let alias = self
+            .aliases
+            .iter()
+            .find(|alias| alias.kind == requested)
+            .ok_or_else(|| format!("executor harness alias missing: {}", requested.as_str()))?;
+        Ok(ResolvedHarness {
+            kind: requested,
+            executable: safe_executable(Path::new(&alias.binary), env)?,
+            opencode_adapter: self.opencode_adapter.clone(),
+        })
+    }
+}
+
+impl ResolvedHarness {
+    pub(crate) fn invocation(
+        &self,
+        worktree: &Path,
+        artifact: &Path,
+        prompt: &str,
+    ) -> Result<HarnessInvocation, String> {
+        let (program, args, requires_mutation_snapshots) = match self.kind {
+            HarnessKind::Codex => (
+                self.executable.clone(),
+                vec![
+                    "exec".into(),
+                    "-C".into(),
+                    worktree.display().to_string(),
+                    "--sandbox".into(),
+                    "workspace-write".into(),
+                    "--ephemeral".into(),
+                    "--output-last-message".into(),
+                    artifact.display().to_string(),
+                    prompt.into(),
+                ],
+                false,
+            ),
+            HarnessKind::Claude => (
+                self.executable.clone(),
+                vec![
+                    "-p".into(),
+                    "--permission-mode".into(),
+                    "acceptEdits".into(),
+                    "--allowedTools".into(),
+                    CLAUDE_LOCAL_TOOLS.into(),
+                    "--no-session-persistence".into(),
+                    "--output-format".into(),
+                    "text".into(),
+                    prompt.into(),
+                ],
+                true,
+            ),
+            HarnessKind::OpenCode => {
+                let adapter = self
+                    .opencode_adapter
+                    .clone()
+                    .ok_or_else(|| "executor_harness_uncontained: OpenCode requires AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER".to_string())?;
+                (
+                    adapter,
+                    vec![
+                        self.executable.display().to_string(),
+                        "--pure".into(),
+                        "run".into(),
+                        prompt.into(),
+                    ],
+                    false,
+                )
+            }
+        };
+        Ok(HarnessInvocation {
+            program,
+            args,
+            current_dir: worktree.to_path_buf(),
+            requires_mutation_snapshots,
+        })
+    }
+}
+
+fn safe_executable(path: &Path, env: &BTreeMap<String, OsString>) -> Result<PathBuf, String> {
+    let candidate = if path.components().count() > 1 {
+        path.to_path_buf()
+    } else {
+        env.get("PATH")
+            .and_then(|value| value.to_str())
+            .into_iter()
+            .flat_map(std::env::split_paths)
+            .map(|directory| directory.join(path))
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| format!("executor harness not found on PATH: {}", path.display()))?
+    };
+    let canonical = fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "canonicalize executor harness {}: {error}",
+            candidate.display()
+        )
+    })?;
+    if canonical.starts_with(std::env::temp_dir()) {
+        return Err(format!(
+            "executor harness resolves through temporary storage: {}",
+            canonical.display()
+        ));
+    }
+    if !canonical.is_absolute() || !canonical.is_file() {
+        return Err(format!(
+            "executor harness is not an absolute regular file: {}",
+            canonical.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BridgeIdentity {
+    pub(crate) repository: String,
+    pub(crate) issue: u64,
+    pub(crate) worker_id: String,
+    pub(crate) branch: String,
+    pub(crate) claim_id: String,
+    pub(crate) invocation_id: String,
+    pub(crate) base_ref: String,
+    pub(crate) base_oid: String,
+    pub(crate) worktree: PathBuf,
+    pub(crate) runtime_session_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BridgePhase {
+    Implementing,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ProcessIdentity {
+    pub(crate) pid: u32,
+    pub(crate) process_group: u32,
+    pub(crate) executable: PathBuf,
+    pub(crate) argv_digest: String,
+    pub(crate) boot_id: String,
+    pub(crate) start_identity: String,
+}
+
+impl ProcessIdentity {
+    pub(crate) fn matches(&self, observed: &Self) -> bool {
+        self == observed
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PersistedInvocation {
+    pub(crate) schema: u32,
+    pub(crate) identity: BridgeIdentity,
+    pub(crate) harness: HarnessKind,
+    pub(crate) phase: BridgePhase,
+    pub(crate) process: Option<ProcessIdentity>,
+    pub(crate) progress_at: u64,
+    pub(crate) pr: Option<u64>,
+    pub(crate) head_oid: Option<String>,
+    pub(crate) terminal_result: Option<String>,
+}
+
+impl PersistedInvocation {
+    pub(crate) fn to_json(&self) -> Result<String, String> {
+        Ok(invocation_to_value(self).to_string())
+    }
+
+    pub(crate) fn from_json(body: &str) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_str(body)
+            .map_err(|error| format!("invalid invocation JSON: {error}"))?;
+        invocation_from_value(value)
+    }
+}
+
+fn invocation_to_value(invocation: &PersistedInvocation) -> serde_json::Value {
+    let identity = &invocation.identity;
+    let process = invocation.process.as_ref().map(|process| {
+        serde_json::json!({
+            "pid": process.pid,
+            "process_group": process.process_group,
+            "executable": process.executable,
+            "argv_digest": process.argv_digest,
+            "boot_id": process.boot_id,
+            "start_identity": process.start_identity,
+        })
+    });
+    serde_json::json!({
+        "schema": invocation.schema,
+        "identity": {
+            "repository": identity.repository,
+            "issue": identity.issue,
+            "worker_id": identity.worker_id,
+            "branch": identity.branch,
+            "claim_id": identity.claim_id,
+            "invocation_id": identity.invocation_id,
+            "base_ref": identity.base_ref,
+            "base_oid": identity.base_oid,
+            "worktree": identity.worktree,
+            "runtime_session_id": identity.runtime_session_id,
+        },
+        "harness": invocation.harness.as_str(),
+        "phase": "implementing",
+        "process": process,
+        "progress_at": invocation.progress_at,
+        "pr": invocation.pr,
+        "head_oid": invocation.head_oid,
+        "terminal_result": invocation.terminal_result,
+    })
+}
+
+fn invocation_from_value(value: serde_json::Value) -> Result<PersistedInvocation, String> {
+    let object = strict_object(
+        value,
+        &[
+            "schema",
+            "identity",
+            "harness",
+            "phase",
+            "process",
+            "progress_at",
+            "pr",
+            "head_oid",
+            "terminal_result",
+        ],
+        "invocation",
+    )?;
+    let identity = strict_object(
+        required(&object, "identity")?.clone(),
+        &[
+            "repository",
+            "issue",
+            "worker_id",
+            "branch",
+            "claim_id",
+            "invocation_id",
+            "base_ref",
+            "base_oid",
+            "worktree",
+            "runtime_session_id",
+        ],
+        "identity",
+    )?;
+    let process = match required(&object, "process")? {
+        serde_json::Value::Null => None,
+        value => {
+            let process = strict_object(
+                value.clone(),
+                &[
+                    "pid",
+                    "process_group",
+                    "executable",
+                    "argv_digest",
+                    "boot_id",
+                    "start_identity",
+                ],
+                "process",
+            )?;
+            Some(ProcessIdentity {
+                pid: number(&process, "pid")? as u32,
+                process_group: number(&process, "process_group")? as u32,
+                executable: PathBuf::from(text(&process, "executable")?),
+                argv_digest: text(&process, "argv_digest")?,
+                boot_id: text(&process, "boot_id")?,
+                start_identity: text(&process, "start_identity")?,
+            })
+        }
+    };
+    let phase = text(&object, "phase")?;
+    if phase != "implementing" {
+        return Err(format!("unsupported bridge phase: {phase}"));
+    }
+    Ok(PersistedInvocation {
+        schema: number(&object, "schema")? as u32,
+        identity: BridgeIdentity {
+            repository: text(&identity, "repository")?,
+            issue: number(&identity, "issue")?,
+            worker_id: text(&identity, "worker_id")?,
+            branch: text(&identity, "branch")?,
+            claim_id: text(&identity, "claim_id")?,
+            invocation_id: text(&identity, "invocation_id")?,
+            base_ref: text(&identity, "base_ref")?,
+            base_oid: text(&identity, "base_oid")?,
+            worktree: PathBuf::from(text(&identity, "worktree")?),
+            runtime_session_id: optional_text(&identity, "runtime_session_id")?,
+        },
+        harness: HarnessKind::parse(&text(&object, "harness")?)?,
+        phase: BridgePhase::Implementing,
+        process,
+        progress_at: number(&object, "progress_at")?,
+        pr: optional_number(&object, "pr")?,
+        head_oid: optional_text(&object, "head_oid")?,
+        terminal_result: optional_text(&object, "terminal_result")?,
+    })
+}
+
+type JsonObject = serde_json::Map<String, serde_json::Value>;
+
+fn strict_object(
+    value: serde_json::Value,
+    allowed: &[&str],
+    label: &str,
+) -> Result<JsonObject, String> {
+    let object = value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| format!("{label} must be an object"))?;
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err(format!("unexpected field in {label}: {field}"));
+    }
+    for field in allowed {
+        if !object.contains_key(*field) {
+            return Err(format!("missing field in {label}: {field}"));
+        }
+    }
+    Ok(object)
+}
+
+fn required<'a>(object: &'a JsonObject, field: &str) -> Result<&'a serde_json::Value, String> {
+    object
+        .get(field)
+        .ok_or_else(|| format!("missing field: {field}"))
+}
+
+fn text(object: &JsonObject, field: &str) -> Result<String, String> {
+    required(object, field)?
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("{field} must be a string"))
+}
+
+fn number(object: &JsonObject, field: &str) -> Result<u64, String> {
+    required(object, field)?
+        .as_u64()
+        .ok_or_else(|| format!("{field} must be an unsigned integer"))
+}
+
+fn optional_text(object: &JsonObject, field: &str) -> Result<Option<String>, String> {
+    match required(object, field)? {
+        serde_json::Value::Null => Ok(None),
+        value => value
+            .as_str()
+            .map(|value| Some(value.to_string()))
+            .ok_or_else(|| format!("{field} must be a string or null")),
+    }
+}
+
+fn optional_number(object: &JsonObject, field: &str) -> Result<Option<u64>, String> {
+    match required(object, field)? {
+        serde_json::Value::Null => Ok(None),
+        value => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| format!("{field} must be an unsigned integer or null")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use super::{
+        BridgeIdentity, BridgePhase, HarnessConfig, HarnessKind, PersistedInvocation,
+        ProcessIdentity, CLAUDE_LOCAL_TOOLS,
+    };
+
+    static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    fn test_root(label: &str) -> PathBuf {
+        let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "autospec-autonomous-executor-bridge-{label}-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create executor bridge test root");
+        root
+    }
+
+    fn write_alias_table(root: &Path, body: &str) -> PathBuf {
+        let path = root.join("harness-runtime-aliases.tsv");
+        fs::write(&path, body).expect("write harness alias table");
+        path
+    }
+
+    fn environment(table: &Path) -> BTreeMap<String, OsString> {
+        BTreeMap::from([
+            (
+                "AUTOSPEC_HARNESS_RUNTIME_ALIASES".to_string(),
+                table.as_os_str().to_os_string(),
+            ),
+            ("PATH".to_string(), OsString::from("/bin:/usr/bin")),
+        ])
+    }
+
+    fn installed_aliases() -> &'static str {
+        "claude\ttrue\t--dangerously-skip-permissions\tClaude Code\n\
+         codex\tsh\t--yolo\tCodex CLI\n\
+         opencode\tfalse\t\tOpenCode\n"
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_runtime_marker_precedes_alias_path_order() {
+        // Break caught: probing the first installed binary before the active runtime marker.
+        let root = test_root("marker");
+        let table = write_alias_table(&root, installed_aliases());
+        let mut env = environment(&table);
+        env.insert("CODEX_THREAD_ID".to_string(), OsString::from("thread-1"));
+
+        let config = HarnessConfig::load(&root, &env).expect("load harness config");
+        let resolved = config.resolve(&env).expect("resolve active harness");
+
+        assert_eq!(resolved.kind, HarnessKind::Codex);
+        assert_eq!(
+            resolved.executable,
+            fs::canonicalize("/bin/sh").expect("canonical /bin/sh")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_explicit_override_precedes_runtime_marker() {
+        // Break caught: a Codex marker overriding an operator's explicit Claude selection.
+        let root = test_root("override");
+        let table = write_alias_table(&root, installed_aliases());
+        let mut env = environment(&table);
+        env.insert("CODEX_THREAD_ID".to_string(), OsString::from("thread-1"));
+        env.insert(
+            "AUTOSPEC_HANDOFF_DISPATCHER_KIND".to_string(),
+            OsString::from("claude"),
+        );
+
+        let resolved = HarnessConfig::load(&root, &env)
+            .expect("load harness config")
+            .resolve(&env)
+            .expect("resolve explicit harness");
+
+        assert_eq!(resolved.kind, HarnessKind::Claude);
+        assert_eq!(
+            resolved.executable,
+            fs::canonicalize("/bin/true").expect("canonical /bin/true")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_alias_table_parses_all_four_columns() {
+        // Break caught: hard-coded harness binaries or discarded approval/display metadata.
+        let aliases = HarnessConfig::parse_alias_table(installed_aliases())
+            .expect("parse installed alias table");
+
+        assert_eq!(aliases.len(), 3);
+        assert_eq!(aliases[0].kind, HarnessKind::Claude);
+        assert_eq!(aliases[0].binary, "true");
+        assert_eq!(aliases[0].approval_alias, "--dangerously-skip-permissions");
+        assert_eq!(aliases[0].display_name, "Claude Code");
+        assert_eq!(aliases[2].kind, HarnessKind::OpenCode);
+        assert_eq!(aliases[2].approval_alias, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_temporary_dispatcher_paths() {
+        // Break caught: launching a PATH-shadowed dispatcher from an attacker-writable temp root.
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = test_root("unsafe-dispatcher");
+        let dispatcher = root.join("codex");
+        fs::write(&dispatcher, "#!/bin/sh\nexit 0\n").expect("write dispatcher");
+        fs::set_permissions(&dispatcher, fs::Permissions::from_mode(0o755))
+            .expect("make dispatcher executable");
+        let table = write_alias_table(
+            &root,
+            "codex\tcodex\t--yolo\tCodex CLI\n\
+             claude\ttrue\t--dangerously-skip-permissions\tClaude Code\n\
+             opencode\tfalse\t\tOpenCode\n",
+        );
+        let mut env = environment(&table);
+        env.insert("PATH".to_string(), root.as_os_str().to_os_string());
+        env.insert("CODEX_THREAD_ID".to_string(), OsString::from("thread-1"));
+
+        let error = HarnessConfig::load(&root, &env)
+            .expect("load harness config")
+            .resolve(&env)
+            .expect_err("temporary dispatcher must fail closed");
+
+        assert!(error.contains("temporary"), "unexpected error: {error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_builds_exact_codex_arguments() {
+        // Break caught: Codex launching without workspace-write containment or a result artifact.
+        let root = test_root("codex-argv");
+        let table = write_alias_table(&root, installed_aliases());
+        let mut env = environment(&table);
+        env.insert("CODEX_THREAD_ID".to_string(), OsString::from("thread-1"));
+        let resolved = HarnessConfig::load(&root, &env)
+            .expect("load harness config")
+            .resolve(&env)
+            .expect("resolve Codex");
+        let worktree = Path::new("/safe/worktree");
+        let artifact = Path::new("/safe/state/last-message.txt");
+
+        let invocation = resolved
+            .invocation(worktree, artifact, "implement issue 42")
+            .expect("build Codex invocation");
+
+        assert_eq!(invocation.program, resolved.executable);
+        assert_eq!(invocation.current_dir, worktree);
+        assert_eq!(
+            invocation.args,
+            vec![
+                "exec",
+                "-C",
+                "/safe/worktree",
+                "--sandbox",
+                "workspace-write",
+                "--ephemeral",
+                "--output-last-message",
+                "/safe/state/last-message.txt",
+                "implement issue 42",
+            ]
+        );
+        assert!(!invocation.requires_mutation_snapshots);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_builds_exact_claude_arguments() {
+        // Break caught: Claude receiving remote-capable tools or bypass-permission aliases.
+        let root = test_root("claude-argv");
+        let table = write_alias_table(&root, installed_aliases());
+        let mut env = environment(&table);
+        env.insert(
+            "AUTOSPEC_HANDOFF_DISPATCHER_KIND".to_string(),
+            OsString::from("claude"),
+        );
+        let resolved = HarnessConfig::load(&root, &env)
+            .expect("load harness config")
+            .resolve(&env)
+            .expect("resolve Claude");
+
+        let invocation = resolved
+            .invocation(
+                Path::new("/safe/worktree"),
+                Path::new("/safe/state/unused.txt"),
+                "implement issue 42",
+            )
+            .expect("build Claude invocation");
+
+        assert_eq!(
+            invocation.args,
+            vec![
+                "-p",
+                "--permission-mode",
+                "acceptEdits",
+                "--allowedTools",
+                CLAUDE_LOCAL_TOOLS,
+                "--no-session-persistence",
+                "--output-format",
+                "text",
+                "implement issue 42",
+            ]
+        );
+        assert!(invocation.requires_mutation_snapshots);
+        assert!(!invocation
+            .args
+            .iter()
+            .any(|arg| arg == "--dangerously-skip-permissions"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_opencode_requires_and_uses_safe_adapter() {
+        // Break caught: treating OpenCode --pure as built-in tool containment.
+        let root = test_root("opencode-argv");
+        let table = write_alias_table(&root, installed_aliases());
+        let mut env = environment(&table);
+        env.insert(
+            "AUTOSPEC_HANDOFF_DISPATCHER_KIND".to_string(),
+            OsString::from("opencode"),
+        );
+        let uncontained = HarnessConfig::load(&root, &env)
+            .expect("load harness config")
+            .resolve(&env)
+            .expect("recognize OpenCode");
+
+        let error = uncontained
+            .invocation(
+                Path::new("/safe/worktree"),
+                Path::new("/safe/state/unused.txt"),
+                "implement issue 42",
+            )
+            .expect_err("OpenCode without an adapter must fail closed");
+        assert!(
+            error.contains("executor_harness_uncontained"),
+            "unexpected error: {error}"
+        );
+
+        env.insert(
+            "AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER".to_string(),
+            OsString::from("/bin/true"),
+        );
+        let contained = HarnessConfig::load(&root, &env)
+            .expect("load contained harness config")
+            .resolve(&env)
+            .expect("resolve contained OpenCode");
+        let invocation = contained
+            .invocation(
+                Path::new("/safe/worktree"),
+                Path::new("/safe/state/unused.txt"),
+                "implement issue 42",
+            )
+            .expect("build contained OpenCode invocation");
+
+        assert_eq!(
+            invocation.program,
+            fs::canonicalize("/bin/true").expect("canonical adapter")
+        );
+        assert_eq!(
+            invocation.args,
+            vec![
+                contained.executable.display().to_string(),
+                "--pure".to_string(),
+                "run".to_string(),
+                "implement issue 42".to_string(),
+            ]
+        );
+        assert!(!invocation.requires_mutation_snapshots);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn persisted_invocation() -> PersistedInvocation {
+        PersistedInvocation {
+            schema: 1,
+            identity: BridgeIdentity {
+                repository: "owner/repo".to_string(),
+                issue: 42,
+                worker_id: "worker-1".to_string(),
+                branch: "feat/autonomous-issue-42".to_string(),
+                claim_id: "claim-42".to_string(),
+                invocation_id: "invocation-42".to_string(),
+                base_ref: "refs/remotes/origin/main".to_string(),
+                base_oid: "a".repeat(40),
+                worktree: PathBuf::from("/safe/worktree"),
+                runtime_session_id: Some("runtime-42".to_string()),
+            },
+            harness: HarnessKind::Codex,
+            phase: BridgePhase::Implementing,
+            process: Some(ProcessIdentity {
+                pid: 123,
+                process_group: 123,
+                executable: PathBuf::from("/usr/bin/codex"),
+                argv_digest: "b".repeat(64),
+                boot_id: "boot-1".to_string(),
+                start_identity: "456".to_string(),
+            }),
+            progress_at: 1_722_000_000,
+            pr: None,
+            head_oid: None,
+            terminal_result: None,
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_persisted_json_round_trips_strictly() {
+        // Break caught: recovery accepting missing, mistyped, or silently defaulted identity data.
+        let expected = persisted_invocation();
+        let json = expected.to_json().expect("serialize invocation");
+        let actual = PersistedInvocation::from_json(&json).expect("parse invocation");
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_persisted_json_rejects_unknown_fields() {
+        // Break caught: a newer or foreign state document being partially adopted.
+        let expected = persisted_invocation();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&expected.to_json().expect("serialize invocation"))
+                .expect("parse test JSON");
+        value
+            .as_object_mut()
+            .expect("invocation object")
+            .insert("foreign".to_string(), serde_json::json!(true));
+
+        let error = PersistedInvocation::from_json(&value.to_string())
+            .expect_err("unknown fields must fail closed");
+
+        assert!(
+            error.contains("unexpected field"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_process_identity_requires_every_component() {
+        // Break caught: signaling a reused PID whose executable or boot/start identity differs.
+        let expected = persisted_invocation().process.expect("process identity");
+        let mut observed = expected.clone();
+        assert!(expected.matches(&observed));
+
+        observed.boot_id = "other-boot".to_string();
+        assert!(!expected.matches(&observed));
+        observed = expected.clone();
+        observed.argv_digest = "c".repeat(64);
+        assert!(!expected.matches(&observed));
+        observed = expected.clone();
+        observed.start_identity = "457".to_string();
+        assert!(!expected.matches(&observed));
+    }
+}
