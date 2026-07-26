@@ -429,6 +429,7 @@ pub(crate) enum BridgePhase {
     BranchPushing,
     BranchPushed,
     DraftCreating,
+    DraftCleanupPending,
     DraftCreated,
     Interrupted,
 }
@@ -491,6 +492,7 @@ impl BridgePhase {
             Self::BranchPushing => "branch_pushing",
             Self::BranchPushed => "branch_pushed",
             Self::DraftCreating => "draft_creating",
+            Self::DraftCleanupPending => "draft_cleanup_pending",
             Self::DraftCreated => "draft_created",
             Self::Interrupted => "interrupted",
         }
@@ -505,6 +507,7 @@ impl BridgePhase {
             "branch_pushing" => Ok(Self::BranchPushing),
             "branch_pushed" => Ok(Self::BranchPushed),
             "draft_creating" => Ok(Self::DraftCreating),
+            "draft_cleanup_pending" => Ok(Self::DraftCleanupPending),
             "draft_created" => Ok(Self::DraftCreated),
             "interrupted" => Ok(Self::Interrupted),
             other => Err(format!("unsupported bridge phase: {other}")),
@@ -982,6 +985,7 @@ pub(crate) fn prove_implementation(
                 | BridgePhase::BranchPushing
                 | BridgePhase::BranchPushed
                 | BridgePhase::DraftCreating
+                | BridgePhase::DraftCleanupPending
                 | BridgePhase::DraftCreated
         )
     {
@@ -1448,6 +1452,10 @@ fn draft_release_receipt_path(state_path: &Path) -> PathBuf {
     state_path.with_extension("draft-release")
 }
 
+fn draft_release_intent_path(state_path: &Path) -> PathBuf {
+    state_path.with_extension("draft-release-intent")
+}
+
 fn draft_release_digest(state: &PersistedInvocation, process: &ProcessIdentity) -> String {
     sha256_hex(
         serde_json::json!({
@@ -1466,25 +1474,81 @@ fn draft_release_was_recorded(
     state_path: &Path,
     state: &PersistedInvocation,
 ) -> Result<bool, String> {
-    let path = draft_release_receipt_path(state_path);
-    reject_symlink_path(&path)?;
+    draft_release_record_was_recorded(&draft_release_receipt_path(state_path), state, "receipt")
+}
+
+fn draft_release_intent_was_recorded(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    draft_release_record_was_recorded(&draft_release_intent_path(state_path), state, "intent")
+}
+
+fn draft_release_record_was_recorded(
+    path: &Path,
+    state: &PersistedInvocation,
+    label: &str,
+) -> Result<bool, String> {
+    reject_symlink_path(path)?;
     if !path
         .try_exists()
-        .map_err(|error| format!("inspect executor draft release receipt: {error}"))?
+        .map_err(|error| format!("inspect executor draft release {label}: {error}"))?
     {
         return Ok(false);
     }
-    validate_private_state_file(&path)
-        .map_err(|error| format!("executor draft release receipt must be private: {error}"))?;
-    let process = state.draft_process.as_ref().ok_or_else(|| {
-        "executor draft release receipt has no durable process identity".to_string()
-    })?;
-    let observed = fs::read_to_string(&path)
-        .map_err(|error| format!("read executor draft release receipt: {error}"))?;
+    validate_private_state_file(path)
+        .map_err(|error| format!("executor draft release {label} must be private: {error}"))?;
+    let process = state
+        .draft_process
+        .as_ref()
+        .ok_or_else(|| format!("executor draft release {label} has no durable process identity"))?;
+    let observed = fs::read_to_string(path)
+        .map_err(|error| format!("read executor draft release {label}: {error}"))?;
     if observed.trim() != draft_release_digest(state, process) {
-        return Err("executor draft release receipt identity digest mismatch".to_string());
+        return Err(format!(
+            "executor draft release {label} identity digest mismatch"
+        ));
     }
     Ok(true)
+}
+
+fn write_draft_release_intent(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    process: &ProcessIdentity,
+) -> Result<(), String> {
+    let path = draft_release_intent_path(state_path);
+    reject_symlink_path(&path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "executor draft release intent requires a parent".to_string())?;
+    ensure_private_directory(parent)?;
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&path)
+        .map_err(|error| format!("create executor draft release intent: {error}"))?;
+    file.write_all(draft_release_digest(state, process).as_bytes())
+        .map_err(|error| format!("write executor draft release intent: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("sync executor draft release intent: {error}"))?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync executor draft release intent parent: {error}"))
+}
+
+fn clear_draft_release_intent(state_path: &Path) -> Result<(), String> {
+    let path = draft_release_intent_path(state_path);
+    reject_symlink_path(&path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "executor draft release intent requires a parent".to_string())?;
+    fs::remove_file(&path)
+        .map_err(|error| format!("clear executor draft release intent: {error}"))?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync cleared executor draft release intent parent: {error}"))
 }
 
 fn write_private_atomic(path: &Path, body: &[u8], label: &str) -> Result<(), String> {
@@ -1641,6 +1705,7 @@ pub(crate) fn push_and_create_draft(
                 | BridgePhase::BranchPushing
                 | BridgePhase::BranchPushed
                 | BridgePhase::DraftCreating
+                | BridgePhase::DraftCleanupPending
                 | BridgePhase::DraftCreated
         )
     {
@@ -1660,9 +1725,10 @@ pub(crate) fn push_and_create_draft(
         BridgePhase::BranchPushing => {
             observed.refs == prelaunch.refs || observed.refs == pushed_refs
         }
-        BridgePhase::BranchPushed | BridgePhase::DraftCreating | BridgePhase::DraftCreated => {
-            observed.refs == pushed_refs
-        }
+        BridgePhase::BranchPushed
+        | BridgePhase::DraftCreating
+        | BridgePhase::DraftCleanupPending
+        | BridgePhase::DraftCreated => observed.refs == pushed_refs,
         _ => false,
     };
     let body = expected_draft_body(state.identity.issue, proof);
@@ -1745,8 +1811,12 @@ pub(crate) fn push_and_create_draft(
         return Err("executor open pull requests changed before draft creation".into());
     }
     let pull_requests = if existing.is_empty() {
+        if state.phase == BridgePhase::DraftCleanupPending {
+            return Err("executor draft release intent cleanup failed; refusing retry".to_string());
+        }
         if state.phase == BridgePhase::DraftCreating {
             let released = draft_release_was_recorded(state_path, state)?;
+            let release_intended = draft_release_intent_was_recorded(state_path, state)?;
             if let Some(expected) = &state.draft_process {
                 if let Some(observed) = observe_process_birth(expected.pid)? {
                     if expected.owns_birth(&observed) {
@@ -1771,6 +1841,12 @@ pub(crate) fn push_and_create_draft(
                         .to_string(),
                 );
             }
+            if release_intended {
+                return Err(
+                    "executor draft release intent remains after unproven cleanup; refusing retry"
+                        .to_string(),
+                );
+            }
             state.phase = BridgePhase::BranchPushed;
             state.draft_process = None;
             state.progress_at = unix_now()?;
@@ -1781,7 +1857,14 @@ pub(crate) fn push_and_create_draft(
         write_invocation_atomic(state_path, state)?;
         let creation =
             create_draft_pull_request(state_path, state, proof, issue_title, &base, adapter);
-        let authoritative = list_bridge_pull_requests(&state.identity.repository, adapter)?;
+        let authoritative = list_bridge_pull_requests(&state.identity.repository, adapter)
+            .map_err(|error| {
+                if let Err(creation_error) = &creation {
+                    format!("{creation_error}; executor draft authoritative reread failed: {error}")
+                } else {
+                    error
+                }
+            })?;
         if creation.is_err()
             && exact_draft_candidates(
                 &authoritative,
@@ -2013,6 +2096,8 @@ fn create_draft_pull_request(
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft release pipe: {error}"))?;
     let (digest_read, digest_write) =
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft digest pipe: {error}"))?;
+    let (cleanup_status_read, cleanup_status_write) = pipe2(OFlag::O_CLOEXEC)
+        .map_err(|error| format!("create draft cleanup status pipe: {error}"))?;
     let (stderr_read, stderr_write) =
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft stderr pipe: {error}"))?;
     let null = OpenOptions::new()
@@ -2055,11 +2140,25 @@ fn create_draft_pull_request(
     let release_write_fd = release_write.as_raw_fd();
     let digest_read_fd = digest_read.as_raw_fd();
     let digest_write_fd = digest_write.as_raw_fd();
+    let cleanup_status_read_fd = cleanup_status_read.as_raw_fd();
+    let cleanup_status_write_fd = cleanup_status_write.as_raw_fd();
     let stderr_read_fd = stderr_read.as_raw_fd();
     let stderr_write_fd = stderr_write.as_raw_fd();
     let null_fd = null.as_raw_fd();
     let receipt_fd = receipt_file.as_raw_fd();
     let receipt_directory_fd = receipt_directory.as_raw_fd();
+    #[cfg(test)]
+    let inject_receipt_unlink_failure = adapter.environment.contains_key(std::ffi::OsStr::new(
+        "AUTOSPEC_TEST_DRAFT_FAIL_RECEIPT_UNLINK",
+    ));
+    #[cfg(not(test))]
+    let inject_receipt_unlink_failure = false;
+    #[cfg(test)]
+    let inject_receipt_directory_fsync_failure = adapter.environment.contains_key(
+        std::ffi::OsStr::new("AUTOSPEC_TEST_DRAFT_FAIL_RECEIPT_DIRECTORY_FSYNC"),
+    );
+    #[cfg(not(test))]
+    let inject_receipt_directory_fsync_failure = false;
     // SAFETY: every allocation and pointer array is complete before fork. The child branch
     // performs only async-signal-safe syscalls before execve and never returns to Rust.
     let child = match unsafe { fork() }
@@ -2068,6 +2167,7 @@ fn create_draft_pull_request(
         ForkResult::Child => unsafe {
             nix::libc::close(release_write_fd);
             nix::libc::close(digest_write_fd);
+            nix::libc::close(cleanup_status_read_fd);
             nix::libc::close(stderr_read_fd);
             if nix::libc::dup2(null_fd, nix::libc::STDOUT_FILENO) < 0
                 || nix::libc::dup2(stderr_write_fd, nix::libc::STDERR_FILENO) < 0
@@ -2137,16 +2237,42 @@ fn create_draft_pull_request(
                 argv_pointers.as_ptr(),
                 environment_pointers.as_ptr(),
             );
-            let removed = loop {
-                let result = nix::libc::unlink(receipt_path_c.as_ptr());
-                if result < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+            let cleanup_status = if inject_receipt_unlink_failure {
+                b'U'
+            } else {
+                let removed = loop {
+                    let result = nix::libc::unlink(receipt_path_c.as_ptr());
+                    if result < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                        continue;
+                    }
+                    break result;
+                };
+                if removed != 0 {
+                    b'U'
+                } else if inject_receipt_directory_fsync_failure
+                    || nix::libc::fsync(receipt_directory_fd) != 0
+                {
+                    b'F'
+                } else {
+                    b'S'
+                }
+            };
+            let mut status_written = 0_usize;
+            while status_written < 1 {
+                let count = nix::libc::write(
+                    cleanup_status_write_fd,
+                    std::ptr::addr_of!(cleanup_status).cast(),
+                    1,
+                );
+                if count < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
                     continue;
                 }
-                break result;
-            };
-            if removed == 0 {
-                nix::libc::fsync(receipt_directory_fd);
+                if count <= 0 {
+                    break;
+                }
+                status_written += count as usize;
             }
+            nix::libc::close(cleanup_status_write_fd);
             nix::libc::close(receipt_directory_fd);
             let marker = b"executor draft launch failed\n";
             nix::libc::write(
@@ -2160,6 +2286,7 @@ fn create_draft_pull_request(
     };
     drop(release_read);
     drop(digest_read);
+    drop(cleanup_status_write);
     drop(receipt_file);
     drop(receipt_directory);
     drop(stderr_write);
@@ -2220,6 +2347,15 @@ fn create_draft_pull_request(
             ));
         }
     }
+    if let Err(error) = write_draft_release_intent(state_path, state, &process) {
+        drop(release_write);
+        drop(digest_write);
+        let _ = waitpid(child, None);
+        let _ = stderr_reader.join();
+        let _ = fs::remove_file(&receipt_temporary);
+        let _ = fs::remove_file(&body_path);
+        return Err(error);
+    }
     let digest = draft_release_digest(state, &process);
     let release_result = (|| {
         let digest_count = fd_write(&digest_write, digest.as_bytes())
@@ -2241,10 +2377,65 @@ fn create_draft_pull_request(
     let stderr = stderr_reader
         .join()
         .map_err(|_| "join executor draft stderr reader".to_string())?;
+    let mut cleanup_status = Vec::new();
+    File::from(cleanup_status_read)
+        .read_to_end(&mut cleanup_status)
+        .map_err(|error| format!("read executor draft cleanup status: {error}"))?;
     let _ = fs::remove_file(&body_path);
     release_result?;
     if matches!(status, WaitStatus::Exited(_, 0)) {
         Ok(())
+    } else if matches!(status, WaitStatus::Exited(_, 127)) {
+        match cleanup_status.as_slice() {
+            b"S" => {
+                reject_symlink_path(&receipt_path).map_err(|error| {
+                    format!("executor draft launch cleanup receipt inspection failed: {error}")
+                })?;
+                if receipt_path.try_exists().map_err(|error| {
+                    format!("executor draft launch cleanup receipt inspection failed: {error}")
+                })? {
+                    return Err(
+                        "executor draft launch cleanup failed: release receipt remains".to_string(),
+                    );
+                }
+                File::open(receipt_parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|error| {
+                        format!(
+                            "executor draft launch cleanup parent directory sync failed: {error}"
+                        )
+                    })?;
+                state.phase = BridgePhase::DraftCleanupPending;
+                state.progress_at = unix_now()?;
+                write_invocation_atomic(state_path, state)?;
+                clear_draft_release_intent(state_path).map_err(|error| {
+                    format!("executor draft launch cleanup intent failed: {error}")
+                })?;
+                state.phase = BridgePhase::BranchPushed;
+                state.draft_process = None;
+                state.progress_at = unix_now()?;
+                write_invocation_atomic(state_path, state)?;
+                Err(
+                    "executor draft launch failed before request; release cleanup was proven"
+                        .to_string(),
+                )
+            }
+            b"U" => Err(
+                "executor draft launch cleanup failed: child could not unlink release receipt"
+                    .to_string(),
+            ),
+            b"F" => Err(
+                "executor draft launch cleanup failed: child could not sync release receipt parent"
+                    .to_string(),
+            ),
+            [] => Err(
+                "executor draft launch cleanup failed: child cleanup status is missing".to_string(),
+            ),
+            _ => Err(
+                "executor draft launch cleanup failed: child cleanup status is malformed"
+                    .to_string(),
+            ),
+        }
     } else {
         Err(format!(
             "create executor draft pull request failed: {}",
@@ -10968,6 +11159,120 @@ mod tests {
         assert_eq!(pull_request, 17);
         let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
         assert_eq!(calls.matches("pr create").count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_unlink_failure_never_authorizes_draft_retry() {
+        // Break caught: ignored receipt unlink failure being mistaken for proven safe cleanup.
+        let mut prepared = prepared_draft_transaction("draft-create-unlink-failure");
+        let executable = prepared.adapter.gh.clone();
+        let executable_body = fs::read(&executable).expect("fixture executable body");
+        let executable_mode = fs::metadata(&executable)
+            .expect("fixture executable metadata")
+            .permissions()
+            .mode();
+        prepared.adapter.environment.insert(
+            "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE".into(),
+            "1".into(),
+        );
+        prepared
+            .adapter
+            .environment
+            .insert("AUTOSPEC_TEST_DRAFT_FAIL_RECEIPT_UNLINK".into(), "1".into());
+
+        let error = prepared
+            .publish()
+            .expect_err("receipt unlink failure must remain fail-closed");
+
+        assert!(
+            error.contains("cleanup") && error.contains("unlink"),
+            "{error}"
+        );
+        assert!(super::draft_release_receipt_path(&prepared.state_path).exists());
+        assert!(prepared
+            .state_path
+            .with_extension("draft-release-intent")
+            .exists());
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+
+        fs::write(&executable, executable_body).expect("restore fixture executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(executable_mode))
+            .expect("restore fixture executable mode");
+        prepared.adapter.environment.remove(std::ffi::OsStr::new(
+            "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE",
+        ));
+        prepared.adapter.environment.remove(std::ffi::OsStr::new(
+            "AUTOSPEC_TEST_DRAFT_FAIL_RECEIPT_UNLINK",
+        ));
+
+        let error = prepared
+            .publish()
+            .expect_err("failed unlink must prohibit a later request");
+        assert!(
+            error.contains("released") && error.contains("ambiguous"),
+            "{error}"
+        );
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_cleanup_fsync_failure_never_authorizes_draft_retry() {
+        // Break caught: ignored receipt-directory fsync failure allowing an unproven retry.
+        let mut prepared = prepared_draft_transaction("draft-create-cleanup-fsync-failure");
+        let executable = prepared.adapter.gh.clone();
+        let executable_body = fs::read(&executable).expect("fixture executable body");
+        let executable_mode = fs::metadata(&executable)
+            .expect("fixture executable metadata")
+            .permissions()
+            .mode();
+        prepared.adapter.environment.insert(
+            "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE".into(),
+            "1".into(),
+        );
+        prepared.adapter.environment.insert(
+            "AUTOSPEC_TEST_DRAFT_FAIL_RECEIPT_DIRECTORY_FSYNC".into(),
+            "1".into(),
+        );
+
+        let error = prepared
+            .publish()
+            .expect_err("receipt directory fsync failure must remain fail-closed");
+
+        assert!(
+            error.contains("cleanup") && error.contains("sync"),
+            "{error}"
+        );
+        assert!(!super::draft_release_receipt_path(&prepared.state_path).exists());
+        assert!(prepared
+            .state_path
+            .with_extension("draft-release-intent")
+            .exists());
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+
+        fs::write(&executable, executable_body).expect("restore fixture executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(executable_mode))
+            .expect("restore fixture executable mode");
+        prepared.adapter.environment.remove(std::ffi::OsStr::new(
+            "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE",
+        ));
+        prepared.adapter.environment.remove(std::ffi::OsStr::new(
+            "AUTOSPEC_TEST_DRAFT_FAIL_RECEIPT_DIRECTORY_FSYNC",
+        ));
+
+        let error = prepared
+            .publish()
+            .expect_err("failed cleanup sync must prohibit a later request");
+        assert!(
+            error.contains("release intent") && error.contains("refusing retry"),
+            "{error}"
+        );
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
     }
 
     #[cfg(target_os = "linux")]
