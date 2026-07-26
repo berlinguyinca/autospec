@@ -3,6 +3,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub(crate) const CLAUDE_BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,Bash";
 pub(crate) const CLAUDE_LOCAL_TOOLS: &str = concat!(
     "Read,Edit,Write,Glob,Grep,",
     "Bash(git status),Bash(git status *),Bash(git diff),Bash(git diff *),",
@@ -204,6 +205,16 @@ impl ResolvedHarness {
                 self.executable.clone(),
                 vec![
                     "-p".into(),
+                    "--tools".into(),
+                    CLAUDE_BUILTIN_TOOLS.into(),
+                    "--safe-mode".into(),
+                    "--bare".into(),
+                    "--disable-slash-commands".into(),
+                    "--setting-sources".into(),
+                    String::new(),
+                    "--strict-mcp-config".into(),
+                    "--mcp-config".into(),
+                    r#"{"mcpServers":{}}"#.into(),
                     "--permission-mode".into(),
                     "acceptEdits".into(),
                     "--allowedTools".into(),
@@ -257,6 +268,7 @@ fn safe_executable(path: &Path, env: &BTreeMap<String, OsString>) -> Result<Path
             .and_then(|value| value.to_str())
             .into_iter()
             .flat_map(std::env::split_paths)
+            .filter(|directory| directory.is_absolute())
             .map(|directory| directory.join(path))
             .find(|candidate| candidate.is_file())
             .ok_or_else(|| format!("executor harness not found on PATH: {}", path.display()))?
@@ -359,6 +371,7 @@ fn bare_path_exists(path: &Path, env: &BTreeMap<String, OsString>) -> bool {
         .and_then(|value| value.to_str())
         .into_iter()
         .flat_map(std::env::split_paths)
+        .filter(|directory| directory.is_absolute())
         .any(|directory| directory.join(path).is_file())
 }
 
@@ -625,7 +638,7 @@ mod tests {
 
     use super::{
         BridgeIdentity, BridgePhase, HarnessConfig, HarnessKind, PersistedInvocation,
-        ProcessIdentity, CLAUDE_FORBIDDEN_TOOLS, CLAUDE_LOCAL_TOOLS,
+        ProcessIdentity, CLAUDE_BUILTIN_TOOLS, CLAUDE_FORBIDDEN_TOOLS, CLAUDE_LOCAL_TOOLS,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -817,6 +830,16 @@ mod tests {
             invocation.args,
             vec![
                 "-p",
+                "--tools",
+                CLAUDE_BUILTIN_TOOLS,
+                "--safe-mode",
+                "--bare",
+                "--disable-slash-commands",
+                "--setting-sources",
+                "",
+                "--strict-mcp-config",
+                "--mcp-config",
+                r#"{"mcpServers":{}}"#,
                 "--permission-mode",
                 "acceptEdits",
                 "--allowedTools",
@@ -834,6 +857,33 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "--dangerously-skip-permissions"));
+        assert_eq!(
+            CLAUDE_BUILTIN_TOOLS, "Read,Edit,Write,Glob,Grep,Bash",
+            "Claude must expose only the six local built-ins needed for implementation"
+        );
+        for isolation_flag in [
+            "--safe-mode",
+            "--bare",
+            "--disable-slash-commands",
+            "--strict-mcp-config",
+        ] {
+            assert!(
+                invocation.args.iter().any(|arg| arg == isolation_flag),
+                "Claude invocation must include {isolation_flag}"
+            );
+        }
+        let strict_mcp = invocation
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--mcp-config")
+            .expect("explicit MCP configuration");
+        assert_eq!(strict_mcp[1], r#"{"mcpServers":{}}"#);
+        let setting_sources = invocation
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--setting-sources")
+            .expect("explicit setting source isolation");
+        assert_eq!(setting_sources[1], "");
         for required in [
             "Read",
             "Edit",
@@ -904,6 +954,62 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_dot_path_dispatcher_directory() {
+        // Break caught: PATH=. selecting an executable from the conductor's mutable cwd.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dispatcher_name = format!(
+            "autospec-relative-path-dispatcher-{}",
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let dispatcher = std::env::current_dir()
+            .expect("current directory")
+            .join(&dispatcher_name);
+        fs::write(&dispatcher, "#!/bin/sh\nexit 0\n").expect("write relative dispatcher");
+        fs::set_permissions(&dispatcher, fs::Permissions::from_mode(0o755))
+            .expect("make relative dispatcher executable");
+        let env = BTreeMap::from([("PATH".to_string(), OsString::from("."))]);
+
+        let error = super::safe_executable(Path::new(&dispatcher_name), &env)
+            .expect_err("relative PATH directories must be ignored");
+
+        assert!(
+            error.contains("not found on PATH"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_file(dispatcher);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_empty_path_dispatcher_directory() {
+        // Break caught: an empty PATH component selecting from the conductor's mutable cwd.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dispatcher_name = format!(
+            "autospec-empty-path-dispatcher-{}",
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let dispatcher = std::env::current_dir()
+            .expect("current directory")
+            .join(&dispatcher_name);
+        fs::write(&dispatcher, "#!/bin/sh\nexit 0\n").expect("write empty-path dispatcher");
+        fs::set_permissions(&dispatcher, fs::Permissions::from_mode(0o755))
+            .expect("make empty-path dispatcher executable");
+        let env = BTreeMap::from([("PATH".to_string(), OsString::from(":"))]);
+
+        let error = super::safe_executable(Path::new(&dispatcher_name), &env)
+            .expect_err("empty PATH directories must be ignored");
+
+        assert!(
+            error.contains("not found on PATH"),
+            "unexpected error: {error}"
+        );
+        let _ = fs::remove_file(dispatcher);
     }
 
     #[cfg(unix)]
