@@ -79,7 +79,7 @@ fn produce(args: &[String]) -> Result<(), CommandFailure> {
             unknown => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown produce option: {unknown}"
-                )))
+                )));
             }
         }
     }
@@ -95,6 +95,11 @@ fn produce(args: &[String]) -> Result<(), CommandFailure> {
     let run_id = run_id.ok_or_else(|| CommandFailure::diagnostic("--run-id is required"))?;
     let verdict_name =
         verdict.ok_or_else(|| CommandFailure::diagnostic("--verdict is required"))?;
+    if verdict_name == "pass" {
+        return Err(CommandFailure::diagnostic(
+            "premerge Pass requires observed bridge evidence; the external producer may only record blocked or failed evidence",
+        ));
+    }
     let branch = git_stdout(&repo_dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])
         .map_err(|_| CommandFailure::diagnostic("premerge producer worktree is detached"))?;
     let commit = git_stdout(&repo_dir, &["rev-parse", "HEAD"])?;
@@ -109,7 +114,7 @@ fn produce(args: &[String]) -> Result<(), CommandFailure> {
         _ => {
             return Err(CommandFailure::diagnostic(
                 "--verdict must be pass, blocked, or failed",
-            ))
+            ));
         }
     };
     let json = match kind.as_str() {
@@ -151,6 +156,153 @@ fn produce(args: &[String]) -> Result<(), CommandFailure> {
         directory.join(filename).display()
     );
     Ok(())
+}
+
+pub(crate) fn persist_observed_bridge_evidence(
+    repo_dir: &Path,
+    qa: &QaEvidence,
+    security: &SecurityAuditEvidence,
+) -> Result<PremergeDecision, String> {
+    if qa.lane != security.lane {
+        return Err("observed QA and security evidence lanes differ".to_string());
+    }
+    let repo_dir = fs::canonicalize(repo_dir)
+        .map_err(|error| format!("canonicalize observed evidence repository: {error}"))?;
+    let branch = git_stdout(&repo_dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .map_err(|error| error.message)?;
+    let commit = git_stdout(&repo_dir, &["rev-parse", "HEAD"]).map_err(|error| error.message)?;
+    if qa.lane.branch != branch || qa.lane.commit != commit {
+        return Err("observed evidence lane drifted from the exact worktree commit".to_string());
+    }
+    let directory = repo_dir
+        .join(".autospec/evidence/premerge")
+        .join(qa.lane.lane_digest());
+    ensure_private_evidence_directory(&directory)?;
+    let qa_path = directory.join("qa.json");
+    let security_path = directory.join("security.json");
+    atomic_private_write(&qa_path, &format!("{}\n", qa.to_json()))?;
+    atomic_private_write(&security_path, &format!("{}\n", security.to_json()))?;
+    let reread_qa = read_evidence(
+        &repo_dir,
+        &qa.lane.lane_digest(),
+        "qa.json",
+        QaEvidence::parse,
+    )
+    .map_err(|error| error.message)?;
+    let reread_security = read_evidence(
+        &repo_dir,
+        &qa.lane.lane_digest(),
+        "security.json",
+        SecurityAuditEvidence::parse,
+    )
+    .map_err(|error| error.message)?;
+    if reread_qa != EvidenceAvailability::Present(qa.clone())
+        || reread_security != EvidenceAvailability::Present(security.clone())
+    {
+        return Err("observed evidence changed after atomic persistence".to_string());
+    }
+    let decision = evaluate_premerge(&qa.lane, reread_qa, reread_security);
+    let document = decision_document(&decision);
+    persist_decision(&qa.lane.repo, &repo_dir, &decision, &document)
+        .map_err(|error| error.message)?;
+    Ok(decision)
+}
+
+fn ensure_private_evidence_directory(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|error| {
+        format!(
+            "create observed evidence directory {}: {error}",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut current = path.to_path_buf();
+        for _ in 0..3 {
+            fs::set_permissions(&current, fs::Permissions::from_mode(0o700)).map_err(|error| {
+                format!(
+                    "secure observed evidence directory {}: {error}",
+                    current.display()
+                )
+            })?;
+            let Some(parent) = current.parent() else {
+                break;
+            };
+            current = parent.to_path_buf();
+        }
+    }
+    Ok(())
+}
+
+fn atomic_private_write(path: &Path, contents: &str) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(format!(
+                    "observed evidence path is not a regular file: {}",
+                    path.display()
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o077 != 0 {
+                    return Err(format!(
+                        "observed evidence path is not private: {}",
+                        path.display()
+                    ));
+                }
+            }
+            let existing = fs::read_to_string(path)
+                .map_err(|error| format!("read observed evidence for recovery: {error}"))?;
+            if existing == contents {
+                return Ok(());
+            }
+            return Err(format!(
+                "observed evidence path already exists with different contents: {}",
+                path.display()
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "inspect observed evidence path {}: {error}",
+                path.display()
+            ));
+        }
+    }
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.pending",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("evidence"),
+        std::process::id()
+    ));
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("create observed evidence temporary file: {error}"))?;
+    let result = (|| {
+        file.write_all(contents.as_bytes())
+            .map_err(|error| format!("write observed evidence: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync observed evidence: {error}"))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| format!("publish observed evidence: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn unix_now() -> u64 {
@@ -236,7 +388,7 @@ fn parse_evaluate_options(args: &[String]) -> Result<EvaluateOptions, CommandFai
             option => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown autospec autonomous premerge evaluate option: {option}"
-                )))
+                )));
             }
         }
     }
@@ -330,13 +482,13 @@ fn read_evidence<T>(
     let bytes = match fs::read(&path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Ok(EvidenceAvailability::Missing)
+            return Ok(EvidenceAvailability::Missing);
         }
         Err(error) => {
             return Err(CommandFailure::diagnostic(format!(
                 "cannot read fixed premerge evidence {}: {error}",
                 path.display()
-            )))
+            )));
         }
     };
     let document = match String::from_utf8(bytes) {

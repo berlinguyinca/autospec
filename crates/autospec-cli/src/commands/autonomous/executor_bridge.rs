@@ -8,8 +8,10 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU32, AtomicU8};
@@ -18,6 +20,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::commands::claim::{refresh_claim_generation, ClaimRefreshResult};
+use autospec_core::autonomous::premerge::{
+    EvidenceVerdict, PremergeDecision, PremergeLaneIdentity, QaEvidence, SecurityAuditEvidence,
+};
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::claim::{parse_open_pull_requests_json, OpenPullRequest};
 use autospec_core::lint::{
@@ -61,7 +66,1388 @@ pub(crate) const CLAUDE_FORBIDDEN_TOOLS: &str = concat!(
     "Bash(git commit *--amend*)"
 );
 const INVOCATION_SCHEMA: u32 = 1;
+const MAX_DIRECT_COMMAND_LINE: usize = 4_096;
+const MAX_DIRECT_COMMAND_SEGMENTS: usize = 16;
+const MAX_DIRECT_COMMAND_ARGS: usize = 128;
+const MAX_DIRECT_ARGUMENT_LENGTH: usize = 1_024;
+const MAX_DIRECT_OUTPUT_BYTES: u64 = 1024 * 1024;
 static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DirectCommand {
+    pub(crate) argv: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DirectCommandPlan {
+    pub(crate) commands: Vec<DirectCommand>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FullSuiteSource {
+    Environment,
+    Declared,
+    Ecosystem,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedFullSuite {
+    pub(crate) source: FullSuiteSource,
+    pub(crate) plan: DirectCommandPlan,
+}
+
+const REQUIRED_SCANNERS: [&str; 4] = ["gitleaks", "semgrep", "trivy", "license-checker"];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ScannerExecutables {
+    paths: BTreeMap<String, PathBuf>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObservedScanner {
+    pub(crate) name: String,
+    pub(crate) command: ObservedDirectCommand,
+    pub(crate) result_path: PathBuf,
+    pub(crate) result_digest: String,
+}
+
+impl ScannerExecutables {
+    pub(crate) fn from_paths(paths: BTreeMap<String, PathBuf>) -> Result<Self, String> {
+        let mut canonical = BTreeMap::new();
+        for scanner in REQUIRED_SCANNERS {
+            let path = paths
+                .get(scanner)
+                .ok_or_else(|| format!("executor required scanner is missing: {scanner}"))?;
+            let path = fs::canonicalize(path)
+                .map_err(|error| format!("canonicalize required scanner {scanner}: {error}"))?;
+            if !path.is_file() {
+                return Err(format!(
+                    "executor required scanner is not a regular file: {scanner}"
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if fs::metadata(&path)
+                    .map_err(|error| format!("inspect required scanner {scanner}: {error}"))?
+                    .permissions()
+                    .mode()
+                    & 0o111
+                    == 0
+                {
+                    return Err(format!(
+                        "executor required scanner is not executable: {scanner}"
+                    ));
+                }
+            }
+            canonical.insert(scanner.to_string(), path);
+        }
+        Ok(Self { paths: canonical })
+    }
+
+    pub(crate) fn resolve(env: &BTreeMap<String, OsString>) -> Result<Self, String> {
+        let path = env
+            .get("PATH")
+            .ok_or_else(|| "executor scanner PATH is missing".to_string())?;
+        let directories = std::env::split_paths(path)
+            .filter(|directory| directory.is_absolute())
+            .collect::<Vec<_>>();
+        let paths = REQUIRED_SCANNERS
+            .into_iter()
+            .map(|scanner| {
+                directories
+                    .iter()
+                    .map(|directory| directory.join(scanner))
+                    .find(|candidate| candidate.is_file())
+                    .map(|path| (scanner.to_string(), path))
+                    .ok_or_else(|| format!("executor required scanner is missing: {scanner}"))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
+        Self::from_paths(paths)
+    }
+
+    fn path(&self, scanner: &str) -> Result<&Path, String> {
+        self.paths
+            .get(scanner)
+            .map(PathBuf::as_path)
+            .ok_or_else(|| format!("executor required scanner is missing: {scanner}"))
+    }
+}
+
+fn validate_scanner_result(
+    scanner: &str,
+    exit_status: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> Result<(), String> {
+    if !REQUIRED_SCANNERS.contains(&scanner) {
+        return Err(format!("executor scanner identity is unknown: {scanner}"));
+    }
+    if exit_status != 0 {
+        return Err(format!(
+            "executor required scanner {scanner} failed with exit status {exit_status}"
+        ));
+    }
+    let diagnostics = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    if ["degraded", "fallback", "scanner missing", "skipped"]
+        .iter()
+        .any(|marker| diagnostics.contains(marker))
+    {
+        return Err(format!(
+            "executor required scanner {scanner} reported degraded execution"
+        ));
+    }
+    let output = std::str::from_utf8(stdout)
+        .map_err(|_| format!("executor required scanner {scanner} output is not UTF-8"))?;
+    serde_json::from_str::<serde_json::Value>(output).map_err(|error| {
+        format!("executor required scanner {scanner} output is malformed: {error}")
+    })?;
+    Ok(())
+}
+
+fn scanner_command(
+    scanner: &str,
+    executable: &Path,
+    worktree: &Path,
+    gitleaks_report: &Path,
+) -> Result<DirectCommand, String> {
+    let executable = executable
+        .to_str()
+        .ok_or_else(|| format!("executor required scanner path is not UTF-8: {scanner}"))?;
+    let worktree = worktree
+        .to_str()
+        .ok_or_else(|| "executor scanner worktree is not UTF-8".to_string())?;
+    let mut argv = vec![executable.to_string()];
+    match scanner {
+        "gitleaks" => argv.extend(
+            [
+                "detect",
+                "--no-git",
+                "--no-banner",
+                "--redact",
+                "--source",
+                worktree,
+                "--report-format",
+                "json",
+                "--report-path",
+                gitleaks_report
+                    .to_str()
+                    .ok_or_else(|| "gitleaks report path is not UTF-8".to_string())?,
+            ]
+            .into_iter()
+            .map(str::to_string),
+        ),
+        "semgrep" => argv.extend(
+            [
+                "scan",
+                "--config",
+                "auto",
+                "--metrics",
+                "off",
+                "--error",
+                "--json",
+                worktree,
+            ]
+            .into_iter()
+            .map(str::to_string),
+        ),
+        "trivy" => argv.extend(
+            [
+                "fs",
+                "--quiet",
+                "--format",
+                "json",
+                "--exit-code",
+                "1",
+                worktree,
+            ]
+            .into_iter()
+            .map(str::to_string),
+        ),
+        "license-checker" => argv.extend(
+            [
+                "--json",
+                "--production",
+                "--start",
+                worktree,
+                "--failOn",
+                "GPL;AGPL;LGPL",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        ),
+        _ => return Err(format!("executor scanner identity is unknown: {scanner}")),
+    }
+    Ok(DirectCommand { argv })
+}
+
+pub(crate) fn run_required_scanners(
+    worktree: &Path,
+    artifact_root: &Path,
+    executables: &ScannerExecutables,
+    stall_timeout: Duration,
+) -> Result<Vec<ObservedScanner>, String> {
+    ensure_private_directory(artifact_root)?;
+    let mut observations = Vec::new();
+    for scanner in REQUIRED_SCANNERS {
+        let scanner_root = artifact_root.join(scanner);
+        ensure_private_directory(&scanner_root)?;
+        let report = scanner_root.join("result.json");
+        if scanner == "gitleaks" {
+            drop(create_private_artifact(&report)?);
+        }
+        let command = scanner_command(scanner, executables.path(scanner)?, worktree, &report)?;
+        let plan = DirectCommandPlan {
+            commands: vec![command],
+        };
+        let command = execute_direct_plan(
+            worktree,
+            &plan,
+            &scanner_root.join("process"),
+            None,
+            stall_timeout,
+        )
+        .map_err(|error| format!("executor required scanner {scanner}: {error}"))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| format!("executor required scanner {scanner} produced no observation"))?;
+        let result_path = if scanner == "gitleaks" {
+            report
+        } else {
+            command.stdout_path.clone()
+        };
+        reject_symlink_path(&result_path)?;
+        validate_private_state_file(&result_path)
+            .map_err(|error| format!("executor required scanner {scanner} result: {error}"))?;
+        let result = fs::read(&result_path)
+            .map_err(|error| format!("read required scanner {scanner} result: {error}"))?;
+        if result.len() as u64 > MAX_DIRECT_OUTPUT_BYTES {
+            return Err(format!(
+                "executor required scanner {scanner} result exceeded 1 MiB"
+            ));
+        }
+        let stderr = fs::read(&command.stderr_path)
+            .map_err(|error| format!("read required scanner {scanner} stderr: {error}"))?;
+        validate_scanner_result(scanner, command.exit_status, &result, &stderr)?;
+        observations.push(ObservedScanner {
+            name: scanner.to_string(),
+            command,
+            result_path,
+            result_digest: sha256_hex(&result),
+        });
+    }
+    validate_observed_scanners(worktree, &observations)?;
+    Ok(observations)
+}
+
+fn typed_evidence_from_observed(
+    worktree: &Path,
+    lane: &PremergeLaneIdentity,
+    qa_commands: Result<&[ObservedDirectCommand], &str>,
+    scanners: Result<&[ObservedScanner], &str>,
+    model_output: Option<&str>,
+    completed_at: u64,
+) -> (QaEvidence, SecurityAuditEvidence) {
+    let qa_verdict = match qa_commands {
+        Err(reason) => EvidenceVerdict::Failed {
+            reason: reason.to_string(),
+        },
+        Ok([]) => EvidenceVerdict::Failed {
+            reason: "observed QA command set is empty".to_string(),
+        },
+        Ok(commands) => match commands
+            .iter()
+            .try_for_each(|command| validate_observed_command(worktree, command))
+        {
+            Ok(()) => EvidenceVerdict::Pass,
+            Err(reason) => EvidenceVerdict::Failed { reason },
+        },
+    };
+    let mut security_verdict = match scanners {
+        Err(reason) => EvidenceVerdict::Failed {
+            reason: reason.to_string(),
+        },
+        Ok(observed) => validate_observed_scanners(worktree, observed).map_or_else(
+            |reason| EvidenceVerdict::Failed { reason },
+            |()| EvidenceVerdict::Pass,
+        ),
+    };
+    if matches!(security_verdict, EvidenceVerdict::Pass) {
+        if let Some(output) = model_output
+            .map(str::trim)
+            .filter(|output| !output.is_empty())
+        {
+            if !matches!(output.to_ascii_uppercase().as_str(), "PASS" | "LGTM") {
+                security_verdict = EvidenceVerdict::Blocked {
+                    finding_codes: vec!["MODEL_REVIEW_FINDING".to_string()],
+                };
+            }
+        }
+    }
+    let qa_run_id = evidence_run_id("qa", lane, qa_commands.ok().unwrap_or_default());
+    let security_run_id = scanner_evidence_run_id(lane, scanners.ok().unwrap_or_default());
+    (
+        QaEvidence {
+            lane: lane.clone(),
+            run_id: qa_run_id,
+            completed_at,
+            verdict: qa_verdict,
+        },
+        SecurityAuditEvidence {
+            lane: lane.clone(),
+            run_id: security_run_id,
+            completed_at,
+            verdict: security_verdict,
+        },
+    )
+}
+
+fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> Result<(), String> {
+    let names = scanners
+        .iter()
+        .map(|scanner| scanner.name.as_str())
+        .collect::<BTreeSet<_>>();
+    let required = REQUIRED_SCANNERS.into_iter().collect::<BTreeSet<_>>();
+    if names != required || scanners.len() != REQUIRED_SCANNERS.len() {
+        return Err(
+            "observed security evidence is missing or duplicates a required scanner".to_string(),
+        );
+    }
+    for scanner in scanners {
+        validate_observed_command(worktree, &scanner.command)?;
+        reject_symlink_path(&scanner.result_path)?;
+        validate_private_state_file(&scanner.result_path).map_err(|error| {
+            format!(
+                "executor required scanner {} result artifact is unsafe: {error}",
+                scanner.name
+            )
+        })?;
+        let result = fs::read(&scanner.result_path).map_err(|error| {
+            format!(
+                "read required scanner {} result artifact: {error}",
+                scanner.name
+            )
+        })?;
+        if sha256_hex(&result) != scanner.result_digest {
+            return Err(format!(
+                "executor required scanner {} result digest changed",
+                scanner.name
+            ));
+        }
+        let stderr = fs::read(&scanner.command.stderr_path).map_err(|error| {
+            format!(
+                "read required scanner {} stderr artifact: {error}",
+                scanner.name
+            )
+        })?;
+        validate_scanner_result(&scanner.name, scanner.command.exit_status, &result, &stderr)?;
+    }
+    Ok(())
+}
+
+fn evidence_run_id(
+    kind: &str,
+    lane: &PremergeLaneIdentity,
+    commands: &[ObservedDirectCommand],
+) -> String {
+    let mut body = format!(
+        "{kind}\0{}\0{}\0{}\0",
+        lane.lane_digest(),
+        lane.commit,
+        commands.len()
+    );
+    for command in commands {
+        body.push_str(&command.executable.to_string_lossy());
+        body.push('\0');
+        for argument in &command.argv {
+            body.push_str(argument);
+            body.push('\0');
+        }
+        body.push_str(&command.process_executable.to_string_lossy());
+        body.push('\0');
+        for argument in &command.process_argv {
+            body.push_str(argument);
+            body.push('\0');
+        }
+        body.push_str(&command.stdout_digest);
+        body.push('\0');
+        body.push_str(&command.stderr_digest);
+        body.push('\0');
+        body.push_str(&command.record_digest);
+        body.push('\0');
+    }
+    format!("{kind}-{}", sha256_hex(body.as_bytes()))
+}
+
+fn scanner_evidence_run_id(lane: &PremergeLaneIdentity, scanners: &[ObservedScanner]) -> String {
+    let commands = scanners
+        .iter()
+        .map(|scanner| scanner.command.clone())
+        .collect::<Vec<_>>();
+    let mut body = evidence_run_id("security", lane, &commands);
+    for scanner in scanners {
+        body.push('\0');
+        body.push_str(&scanner.name);
+        body.push('\0');
+        body.push_str(&scanner.result_digest);
+    }
+    format!("security-{}", sha256_hex(body.as_bytes()))
+}
+
+pub(crate) struct DeterministicEvidenceRequest<'a> {
+    pub(crate) state: &'a PersistedInvocation,
+    pub(crate) proof: &'a ImplementationProof,
+    pub(crate) issue_body: &'a str,
+    pub(crate) spec_documents: &'a [&'a str],
+    pub(crate) env: &'a BTreeMap<String, OsString>,
+    pub(crate) scanners: &'a ScannerExecutables,
+    pub(crate) artifact_root: &'a Path,
+    pub(crate) runtime: Option<&'a DirectRuntimeAdapter>,
+    pub(crate) model_output: Option<&'a str>,
+    pub(crate) stall_timeout: Duration,
+}
+
+pub(crate) struct FullSuiteRevalidationRequest<'a> {
+    pub(crate) worktree: &'a Path,
+    pub(crate) issue_body: &'a str,
+    pub(crate) spec_documents: &'a [&'a str],
+    pub(crate) env: &'a BTreeMap<String, OsString>,
+    pub(crate) artifact_root: &'a Path,
+    pub(crate) runtime: Option<&'a DirectRuntimeAdapter>,
+    pub(crate) stall_timeout: Duration,
+    pub(crate) expected_base_ref: &'a str,
+    pub(crate) expected_base_oid: &'a str,
+    pub(crate) expected_commit: &'a str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DeterministicEvidenceOutcome {
+    pub(crate) qa: QaEvidence,
+    pub(crate) security: SecurityAuditEvidence,
+    pub(crate) decision: PremergeDecision,
+}
+
+pub(crate) fn produce_deterministic_premerge_evidence(
+    request: DeterministicEvidenceRequest<'_>,
+) -> Result<DeterministicEvidenceOutcome, String> {
+    if request.state.phase != BridgePhase::DraftCreated
+        || request.state.head_oid.as_deref() != Some(request.proof.head_oid.as_str())
+    {
+        return Err(
+            "executor deterministic evidence requires the exact created draft HEAD".to_string(),
+        );
+    }
+    verify_proven_local_state(request.state, request.proof)?;
+    let lane = PremergeLaneIdentity::new(
+        request.state.identity.repository.clone(),
+        request.state.identity.issue,
+        request.state.identity.worker_id.clone(),
+        request.state.identity.claim_id.clone(),
+        request.state.identity.branch.clone(),
+        request.proof.head_oid.clone(),
+    )?;
+    ensure_private_directory(request.artifact_root)?;
+
+    let qa_result = (|| {
+        let smoke = parse_primary_smoke(request.issue_body)?;
+        let mut observations = execute_direct_plan(
+            &request.state.identity.worktree,
+            &smoke,
+            &request.artifact_root.join("qa/smoke"),
+            request.runtime,
+            request.stall_timeout,
+        )?;
+        let full_artifact_root = request.artifact_root.join("qa/full");
+        let mut full = revalidate_full_suite(FullSuiteRevalidationRequest {
+            worktree: &request.state.identity.worktree,
+            issue_body: request.issue_body,
+            spec_documents: request.spec_documents,
+            env: request.env,
+            artifact_root: &full_artifact_root,
+            runtime: request.runtime,
+            stall_timeout: request.stall_timeout,
+            expected_base_ref: &request.state.identity.base_ref,
+            expected_base_oid: &request.state.identity.base_oid,
+            expected_commit: &request.proof.head_oid,
+        })?;
+        observations.append(&mut full);
+        Ok::<_, String>(observations)
+    })();
+    let security_result = (|| {
+        run_implementation_lint(request.state, request.proof, request.issue_body)?;
+        run_required_scanners(
+            &request.state.identity.worktree,
+            &request.artifact_root.join("security"),
+            request.scanners,
+            request.stall_timeout,
+        )
+    })();
+    let completed_at = unix_now()?;
+    let (qa, security) = typed_evidence_from_observed(
+        &request.state.identity.worktree,
+        &lane,
+        qa_result.as_deref().map_err(String::as_str),
+        security_result.as_deref().map_err(String::as_str),
+        request.model_output,
+        completed_at,
+    );
+    let decision = super::premerge::persist_observed_bridge_evidence(
+        &request.state.identity.worktree,
+        &qa,
+        &security,
+    )?;
+    if !matches!(decision, PremergeDecision::Pass { .. }) {
+        return Err("executor deterministic premerge evidence did not produce Pass".to_string());
+    }
+    Ok(DeterministicEvidenceOutcome {
+        qa,
+        security,
+        decision,
+    })
+}
+
+pub(crate) fn revalidate_full_suite(
+    request: FullSuiteRevalidationRequest<'_>,
+) -> Result<Vec<ObservedDirectCommand>, String> {
+    verify_full_suite_base(
+        request.worktree,
+        request.expected_base_ref,
+        request.expected_base_oid,
+    )?;
+    let before = git_stdout(
+        request.worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    if before != request.expected_commit {
+        return Err(format!(
+            "executor full-suite revalidation commit mismatch: expected {}, observed {before}",
+            request.expected_commit
+        ));
+    }
+    let resolved = resolve_full_suite(
+        request.worktree,
+        request.issue_body,
+        request.spec_documents,
+        request.env,
+    )?;
+    let observations = execute_direct_plan(
+        request.worktree,
+        &resolved.plan,
+        request.artifact_root,
+        request.runtime,
+        request.stall_timeout,
+    )?;
+    for observation in &observations {
+        validate_observed_command(request.worktree, observation)?;
+    }
+    let after = git_stdout(
+        request.worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    if after != request.expected_commit {
+        return Err("executor full-suite revalidation commit drifted during execution".to_string());
+    }
+    verify_full_suite_base(
+        request.worktree,
+        request.expected_base_ref,
+        request.expected_base_oid,
+    )?;
+    Ok(observations)
+}
+
+fn verify_full_suite_base(
+    worktree: &Path,
+    expected_base_ref: &str,
+    expected_base_oid: &str,
+) -> Result<(), String> {
+    let base_branch = expected_base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor full-suite base ref must name origin".to_string())?;
+    let remote = git_stdout(
+        worktree,
+        &[
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            &format!("refs/heads/{base_branch}"),
+        ],
+    )?;
+    let observed = remote
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "executor full-suite base ref returned no OID".to_string())?;
+    if observed != expected_base_oid {
+        return Err(format!(
+            "executor full-suite base drift: expected {expected_base_oid}, observed {observed}"
+        ));
+    }
+    let ancestry = Command::new("git")
+        .args(["merge-base", "--is-ancestor", expected_base_oid, "HEAD"])
+        .current_dir(worktree)
+        .status()
+        .map_err(|error| format!("verify full-suite base ancestry: {error}"))?;
+    if !ancestry.success() {
+        return Err("executor full-suite base is not an ancestor of HEAD".to_string());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ObservedDirectCommand {
+    pub(crate) commit_oid: String,
+    pub(crate) executable: PathBuf,
+    pub(crate) argv: Vec<String>,
+    pub(crate) process_executable: PathBuf,
+    pub(crate) process_argv: Vec<String>,
+    pub(crate) exit_status: i32,
+    pub(crate) stdout_path: PathBuf,
+    pub(crate) stdout_digest: String,
+    pub(crate) stderr_path: PathBuf,
+    pub(crate) stderr_digest: String,
+    pub(crate) record_path: PathBuf,
+    pub(crate) record_digest: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DirectInvocation {
+    program: PathBuf,
+    args: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DirectRuntimeAdapter {
+    autospec: PathBuf,
+    repo: PathBuf,
+}
+
+impl DirectRuntimeAdapter {
+    pub(crate) fn new(autospec: PathBuf, repo: &Path) -> Result<Self, String> {
+        let autospec = fs::canonicalize(&autospec)
+            .map_err(|error| format!("canonicalize runtime adapter executable: {error}"))?;
+        if !autospec.is_file() {
+            return Err("runtime adapter executable is not a regular file".to_string());
+        }
+        let repo = fs::canonicalize(repo)
+            .map_err(|error| format!("canonicalize runtime adapter repository: {error}"))?;
+        Ok(Self { autospec, repo })
+    }
+
+    fn invocation(&self, command: &DirectCommand) -> Result<DirectInvocation, String> {
+        if command.argv.is_empty() {
+            return Err("runtime adapter direct command is empty".to_string());
+        }
+        let mut args = vec![
+            "runtime".to_string(),
+            "env".to_string(),
+            "session".to_string(),
+            "--repo".to_string(),
+            self.repo
+                .to_str()
+                .ok_or_else(|| "runtime adapter repository is not UTF-8".to_string())?
+                .to_string(),
+            "--mode".to_string(),
+            "auto".to_string(),
+            "--".to_string(),
+        ];
+        args.extend(command.argv.iter().cloned());
+        Ok(DirectInvocation {
+            program: self.autospec.clone(),
+            args,
+        })
+    }
+}
+
+pub(crate) fn parse_primary_smoke(issue_body: &str) -> Result<DirectCommandPlan, String> {
+    let line = first_fenced_command_under(issue_body, "primary smoke test")?;
+    parse_direct_command_plan(line)
+}
+
+fn first_fenced_command_under<'a>(body: &'a str, heading: &str) -> Result<&'a str, String> {
+    let lines = body.lines().collect::<Vec<_>>();
+    let heading_index = lines
+        .iter()
+        .position(|line| {
+            line.trim_start_matches('#')
+                .trim()
+                .to_ascii_lowercase()
+                .starts_with(heading)
+                && line.trim_start().starts_with("###")
+        })
+        .ok_or_else(|| format!("executor issue is missing the {heading} heading"))?;
+    let section_end = lines[heading_index + 1..]
+        .iter()
+        .position(|line| line.trim_start().starts_with("###"))
+        .map_or(lines.len(), |offset| heading_index + 1 + offset);
+    let section = &lines[heading_index + 1..section_end];
+    let fence = section
+        .iter()
+        .position(|line| line.trim_start().starts_with("```"))
+        .ok_or_else(|| format!("executor {heading} requires a fenced command"))?;
+    let fence_end = section[fence + 1..]
+        .iter()
+        .position(|line| line.trim() == "```")
+        .map(|offset| fence + 1 + offset)
+        .ok_or_else(|| format!("executor {heading} fence is unterminated"))?;
+    let commands = section[fence + 1..fence_end]
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect::<Vec<_>>();
+    if commands.len() != 1 {
+        return Err(format!(
+            "executor {heading} requires exactly one non-comment command line"
+        ));
+    }
+    Ok(commands[0])
+}
+
+fn parse_direct_command_plan(line: &str) -> Result<DirectCommandPlan, String> {
+    if line.is_empty()
+        || line.len() > MAX_DIRECT_COMMAND_LINE
+        || line.contains('\n')
+        || line.contains('\r')
+        || line.contains('\0')
+    {
+        return Err("executor direct command line is empty, multiline, or oversized".to_string());
+    }
+    if line.contains("$(") || line.contains('`') {
+        return Err("executor direct command rejects command substitution".to_string());
+    }
+
+    let mut segments = Vec::<Vec<String>>::new();
+    let mut argv = Vec::<String>::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let characters = line.chars().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < characters.len() {
+        let character = characters[index];
+        if escaped {
+            token.push(character);
+            escaped = false;
+            index += 1;
+            continue;
+        }
+        if character == '\\' && quote != Some('\'') {
+            escaped = true;
+            index += 1;
+            continue;
+        }
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            } else {
+                token.push(character);
+            }
+            index += 1;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            quote = Some(character);
+            index += 1;
+            continue;
+        }
+        if character == '&' && characters.get(index + 1) == Some(&'&') {
+            finish_direct_token(&mut argv, &mut token)?;
+            if argv.is_empty() {
+                return Err("executor direct command contains an empty segment".to_string());
+            }
+            segments.push(std::mem::take(&mut argv));
+            index += 2;
+            continue;
+        }
+        if matches!(character, '|' | '<' | '>' | ';' | '&') {
+            return Err(format!(
+                "executor direct command rejects shell operator {character}"
+            ));
+        }
+        if character.is_whitespace() {
+            finish_direct_token(&mut argv, &mut token)?;
+        } else {
+            token.push(character);
+        }
+        index += 1;
+    }
+    if escaped || quote.is_some() {
+        return Err("executor direct command has unterminated quoting or escaping".to_string());
+    }
+    finish_direct_token(&mut argv, &mut token)?;
+    if argv.is_empty() {
+        return Err("executor direct command contains an empty segment".to_string());
+    }
+    segments.push(argv);
+    if segments.len() > MAX_DIRECT_COMMAND_SEGMENTS {
+        return Err("executor direct command has too many sequential segments".to_string());
+    }
+    const CONTROL_BUILTINS: [&str; 18] = [
+        ".", "break", "cd", "continue", "eval", "exec", "exit", "export", "readonly", "return",
+        "set", "shift", "source", "times", "trap", "umask", "unset", "wait",
+    ];
+    let commands = segments
+        .into_iter()
+        .map(|argv| {
+            if argv.len() > MAX_DIRECT_COMMAND_ARGS {
+                return Err("executor direct command has too many arguments".to_string());
+            }
+            if CONTROL_BUILTINS.contains(&argv[0].as_str()) {
+                return Err(format!(
+                    "executor direct command rejects shell control builtin {}",
+                    argv[0]
+                ));
+            }
+            Ok(DirectCommand { argv })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(DirectCommandPlan { commands })
+}
+
+fn finish_direct_token(argv: &mut Vec<String>, token: &mut String) -> Result<(), String> {
+    if token.is_empty() {
+        return Ok(());
+    }
+    if token.len() > MAX_DIRECT_ARGUMENT_LENGTH {
+        return Err("executor direct command argument is oversized".to_string());
+    }
+    argv.push(std::mem::take(token));
+    Ok(())
+}
+
+pub(crate) fn resolve_full_suite(
+    worktree: &Path,
+    issue_body: &str,
+    spec_documents: &[&str],
+    env: &BTreeMap<String, OsString>,
+) -> Result<ResolvedFullSuite, String> {
+    if let Some(command) = env.get("AUTOSPEC_FULL_TEST_COMMAND") {
+        let command = command
+            .to_str()
+            .ok_or_else(|| "AUTOSPEC_FULL_TEST_COMMAND is not valid UTF-8".to_string())?;
+        return Ok(ResolvedFullSuite {
+            source: FullSuiteSource::Environment,
+            plan: parse_direct_command_plan(command)?,
+        });
+    }
+
+    let mut declared = Vec::new();
+    let mut declared_section = false;
+    for document in std::iter::once(issue_body).chain(spec_documents.iter().copied()) {
+        if let Some(commands) = declared_full_commands(document)? {
+            declared_section = true;
+            declared.extend(commands);
+        }
+    }
+    if declared_section {
+        if declared.is_empty() {
+            return Err(
+                "executor Operator/full verification declares no complete commands".to_string(),
+            );
+        }
+        return Ok(ResolvedFullSuite {
+            source: FullSuiteSource::Declared,
+            plan: DirectCommandPlan { commands: declared },
+        });
+    }
+
+    let worktree = fs::canonicalize(worktree)
+        .map_err(|error| format!("canonicalize full-suite worktree: {error}"))?;
+    let commands = detected_full_suite(&worktree)?;
+    if commands.is_empty() {
+        return Err(
+            "executor could not resolve a complete full suite for the target repository"
+                .to_string(),
+        );
+    }
+    Ok(ResolvedFullSuite {
+        source: FullSuiteSource::Ecosystem,
+        plan: DirectCommandPlan { commands },
+    })
+}
+
+fn declared_full_commands(body: &str) -> Result<Option<Vec<DirectCommand>>, String> {
+    let lines = body.lines().collect::<Vec<_>>();
+    let mut commands = Vec::new();
+    let mut found = false;
+    let mut index = 0;
+    while index < lines.len() {
+        let trimmed = lines[index].trim();
+        let heading = trimmed.trim_start_matches('#').trim().to_ascii_lowercase();
+        let is_heading =
+            trimmed.starts_with("###") && heading.contains("operator") && heading.contains("full");
+        if !is_heading {
+            index += 1;
+            continue;
+        }
+        found = true;
+        index += 1;
+        while index < lines.len() && !lines[index].trim_start().starts_with("###") {
+            if !lines[index].trim_start().starts_with("```") {
+                index += 1;
+                continue;
+            }
+            index += 1;
+            let mut closed = false;
+            while index < lines.len() {
+                let line = lines[index].trim();
+                if line == "```" {
+                    closed = true;
+                    index += 1;
+                    break;
+                }
+                if !line.is_empty() && !line.starts_with('#') {
+                    commands.extend(parse_direct_command_plan(line)?.commands);
+                }
+                index += 1;
+            }
+            if !closed {
+                return Err("executor Operator/full verification fence is unterminated".to_string());
+            }
+        }
+    }
+    Ok(found.then_some(commands))
+}
+
+fn detected_full_suite(worktree: &Path) -> Result<Vec<DirectCommand>, String> {
+    let mut commands = Vec::new();
+    if worktree.join("Cargo.toml").is_file() {
+        commands.extend(
+            [
+                "cargo fmt --check",
+                "cargo clippy --all-targets -- -D warnings",
+                "cargo test --all-targets",
+                "cargo build --all-targets",
+            ]
+            .into_iter()
+            .map(parse_direct_command_plan)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flat_map(|plan| plan.commands),
+        );
+    }
+    let package_path = worktree.join("package.json");
+    if package_path.is_file() {
+        let package: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&package_path)
+                .map_err(|error| format!("read package.json for full suite: {error}"))?,
+        )
+        .map_err(|error| format!("parse package.json for full suite: {error}"))?;
+        let scripts = package
+            .get("scripts")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| {
+                "executor package full suite is incomplete: scripts missing".to_string()
+            })?;
+        for required in ["lint", "typecheck", "test", "build"] {
+            if !scripts
+                .get(required)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|script| !script.trim().is_empty())
+            {
+                return Err(format!(
+                    "executor package full suite is incomplete: script {required} missing"
+                ));
+            }
+        }
+        let runner = if worktree.join("pnpm-lock.yaml").is_file() {
+            "pnpm"
+        } else if worktree.join("yarn.lock").is_file() {
+            "yarn"
+        } else {
+            "npm"
+        };
+        for script in ["lint", "typecheck", "test", "build"] {
+            commands.push(DirectCommand {
+                argv: vec![runner.to_string(), "run".to_string(), script.to_string()],
+            });
+        }
+    }
+    if worktree.join("pom.xml").is_file() {
+        let runner = if worktree.join("mvnw").is_file() {
+            "./mvnw"
+        } else {
+            "mvn"
+        };
+        commands.push(DirectCommand {
+            argv: vec![
+                runner.to_string(),
+                "--batch-mode".to_string(),
+                "verify".to_string(),
+            ],
+        });
+    }
+    if worktree.join("build.gradle").is_file() || worktree.join("build.gradle.kts").is_file() {
+        let runner = if worktree.join("gradlew").is_file() {
+            "./gradlew"
+        } else {
+            "gradle"
+        };
+        commands.push(DirectCommand {
+            argv: vec![runner.to_string(), "check".to_string(), "build".to_string()],
+        });
+    }
+    if worktree.join("go.mod").is_file() {
+        for argv in [
+            vec!["go", "vet", "./..."],
+            vec!["go", "test", "./..."],
+            vec!["go", "build", "./..."],
+        ] {
+            commands.push(DirectCommand {
+                argv: argv.into_iter().map(str::to_string).collect(),
+            });
+        }
+    }
+    if (worktree.join("pyproject.toml").is_file() || worktree.join("setup.py").is_file())
+        && commands.is_empty()
+    {
+        return Err(
+            "executor Python full suite is incomplete without Operator/full verification"
+                .to_string(),
+        );
+    }
+    Ok(commands)
+}
+
+pub(crate) fn execute_direct_plan(
+    worktree: &Path,
+    plan: &DirectCommandPlan,
+    artifact_root: &Path,
+    runtime: Option<&DirectRuntimeAdapter>,
+    stall_timeout: Duration,
+) -> Result<Vec<ObservedDirectCommand>, String> {
+    if plan.commands.is_empty() || stall_timeout.is_zero() {
+        return Err("executor direct plan and stall timeout must be nonempty".to_string());
+    }
+    let worktree = fs::canonicalize(worktree)
+        .map_err(|error| format!("canonicalize direct command worktree: {error}"))?;
+    let commit_oid = git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    ensure_private_directory(artifact_root)?;
+    let artifact_root = fs::canonicalize(artifact_root)
+        .map_err(|error| format!("canonicalize direct command artifact root: {error}"))?;
+    let mut observed = Vec::new();
+    for (index, command) in plan.commands.iter().enumerate() {
+        let executable = resolve_direct_executable(&worktree, &command.argv[0])?;
+        let mut effective = command.clone();
+        effective.argv[0] = executable.display().to_string();
+        let invocation = match runtime {
+            Some(runtime) => runtime.invocation(&effective)?,
+            None => DirectInvocation {
+                program: executable.clone(),
+                args: effective.argv[1..].to_vec(),
+            },
+        };
+        let process_executable = fs::canonicalize(&invocation.program)
+            .map_err(|error| format!("canonicalize direct process executable: {error}"))?;
+        let mut process_argv = vec![process_executable.display().to_string()];
+        process_argv.extend(invocation.args.iter().cloned());
+        let stdout_path = artifact_root.join(format!("command-{index:03}.stdout"));
+        let stderr_path = artifact_root.join(format!("command-{index:03}.stderr"));
+        let stdout = create_private_artifact(&stdout_path)?;
+        let stderr = create_private_artifact(&stderr_path)?;
+        let mut process = Command::new(&invocation.program);
+        process
+            .args(&invocation.args)
+            .current_dir(&worktree)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(
+                stdout
+                    .try_clone()
+                    .map_err(|error| format!("clone stdout artifact: {error}"))?,
+            ))
+            .stderr(Stdio::from(
+                stderr
+                    .try_clone()
+                    .map_err(|error| format!("clone stderr artifact: {error}"))?,
+            ));
+        #[cfg(unix)]
+        process.process_group(0);
+        let mut child = process
+            .spawn()
+            .map_err(|error| format!("execute direct command {}: {error}", executable.display()))?;
+        let mut last_progress = Instant::now();
+        let mut observed_size = (0, 0);
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| format!("poll direct command: {error}"))?
+            {
+                break status;
+            }
+            let sizes = (
+                stdout
+                    .metadata()
+                    .map_err(|error| format!("inspect stdout artifact: {error}"))?
+                    .len(),
+                stderr
+                    .metadata()
+                    .map_err(|error| format!("inspect stderr artifact: {error}"))?
+                    .len(),
+            );
+            if sizes.0 > MAX_DIRECT_OUTPUT_BYTES || sizes.1 > MAX_DIRECT_OUTPUT_BYTES {
+                terminate_direct_process(&mut child)?;
+                return Err("executor direct command output exceeded 1 MiB".to_string());
+            }
+            if sizes != observed_size {
+                observed_size = sizes;
+                last_progress = Instant::now();
+            } else if last_progress.elapsed() >= stall_timeout {
+                terminate_direct_process(&mut child)?;
+                return Err("executor direct command stalled".to_string());
+            }
+            thread::sleep(Duration::from_millis(25));
+        };
+        stdout
+            .sync_all()
+            .map_err(|error| format!("sync stdout artifact: {error}"))?;
+        stderr
+            .sync_all()
+            .map_err(|error| format!("sync stderr artifact: {error}"))?;
+        let stdout_bytes =
+            fs::read(&stdout_path).map_err(|error| format!("read stdout artifact: {error}"))?;
+        let stderr_bytes =
+            fs::read(&stderr_path).map_err(|error| format!("read stderr artifact: {error}"))?;
+        if stdout_bytes.len() as u64 > MAX_DIRECT_OUTPUT_BYTES
+            || stderr_bytes.len() as u64 > MAX_DIRECT_OUTPUT_BYTES
+        {
+            return Err("executor direct command output exceeded 1 MiB".to_string());
+        }
+        let exit_status = status.code().unwrap_or(128);
+        let record_path = artifact_root.join(format!("command-{index:03}.json"));
+        let record_body = observed_command_document(
+            &commit_oid,
+            &executable,
+            &effective.argv,
+            &process_executable,
+            &process_argv,
+            exit_status,
+            &stdout_path,
+            &sha256_hex(&stdout_bytes),
+            &stderr_path,
+            &sha256_hex(&stderr_bytes),
+        );
+        write_private_create_once(
+            &record_path,
+            record_body.as_bytes(),
+            "direct command evidence",
+        )?;
+        let observation = ObservedDirectCommand {
+            commit_oid: commit_oid.clone(),
+            executable,
+            argv: effective.argv,
+            process_executable,
+            process_argv,
+            exit_status,
+            stdout_path,
+            stdout_digest: sha256_hex(&stdout_bytes),
+            stderr_path,
+            stderr_digest: sha256_hex(&stderr_bytes),
+            record_path,
+            record_digest: sha256_hex(record_body.as_bytes()),
+        };
+        validate_observed_command(&worktree, &observation)?;
+        observed.push(observation);
+        if !status.success() {
+            return Err(format!(
+                "executor direct command segment {index} failed with exit status {exit_status}"
+            ));
+        }
+    }
+    if git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])? != commit_oid {
+        return Err("executor direct command commit identity drifted during execution".to_string());
+    }
+    Ok(observed)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn observed_command_document(
+    commit_oid: &str,
+    executable: &Path,
+    argv: &[String],
+    process_executable: &Path,
+    process_argv: &[String],
+    exit_status: i32,
+    stdout_path: &Path,
+    stdout_digest: &str,
+    stderr_path: &Path,
+    stderr_digest: &str,
+) -> String {
+    serde_json::json!({
+        "schema": 1,
+        "commit_oid": commit_oid,
+        "executable": executable,
+        "argv": argv,
+        "process_executable": process_executable,
+        "process_argv": process_argv,
+        "exit_status": exit_status,
+        "stdout_path": stdout_path,
+        "stdout_digest": stdout_digest,
+        "stderr_path": stderr_path,
+        "stderr_digest": stderr_digest,
+    })
+    .to_string()
+}
+
+fn resolve_direct_executable(worktree: &Path, executable: &str) -> Result<PathBuf, String> {
+    if executable.is_empty() || executable.starts_with('-') {
+        return Err("executor direct command executable is invalid".to_string());
+    }
+    let path = Path::new(executable);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else if path.components().count() > 1 {
+        let candidate = worktree.join(path);
+        if !candidate.starts_with(worktree) {
+            return Err("executor direct command executable escapes the worktree".to_string());
+        }
+        candidate
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .filter(|directory| directory.is_absolute())
+            .map(|directory| directory.join(path))
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| format!("executor direct command executable is missing: {executable}"))?
+    };
+    let canonical = fs::canonicalize(&candidate).map_err(|error| {
+        format!(
+            "canonicalize direct command executable {}: {error}",
+            candidate.display()
+        )
+    })?;
+    if !canonical.is_file() {
+        return Err(format!(
+            "executor direct command executable is not a regular file: {}",
+            canonical.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::metadata(&canonical)
+            .map_err(|error| format!("inspect direct command executable: {error}"))?
+            .permissions()
+            .mode()
+            & 0o111
+            == 0
+        {
+            return Err(format!(
+                "executor direct command executable is not executable: {}",
+                canonical.display()
+            ));
+        }
+    }
+    Ok(canonical)
+}
+
+fn create_private_artifact(path: &Path) -> Result<File, String> {
+    reject_symlink_path(path)?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+        .open(path)
+        .map_err(|error| format!("create direct command artifact {}: {error}", path.display()))
+}
+
+fn terminate_direct_process(child: &mut Child) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        let group = Pid::from_raw(child.id() as i32);
+        nix::sys::signal::killpg(group, Signal::SIGKILL)
+            .or_else(|error| {
+                if error == nix::errno::Errno::ESRCH {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
+            .map_err(|error| format!("terminate stalled direct command group: {error}"))?;
+    }
+    #[cfg(not(unix))]
+    child
+        .kill()
+        .map_err(|error| format!("terminate stalled direct command: {error}"))?;
+    child
+        .wait()
+        .map_err(|error| format!("reap stalled direct command: {error}"))?;
+    Ok(())
+}
+
+fn validate_observed_command(
+    worktree: &Path,
+    observed: &ObservedDirectCommand,
+) -> Result<(), String> {
+    let commit = git_stdout(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    if commit != observed.commit_oid {
+        return Err(format!(
+            "executor observed command commit drift: expected {}, observed {commit}",
+            observed.commit_oid
+        ));
+    }
+    let executable = fs::canonicalize(&observed.executable)
+        .map_err(|error| format!("canonicalize observed command executable: {error}"))?;
+    if executable != observed.executable
+        || observed.argv.first().map(String::as_str)
+            != Some(observed.executable.to_string_lossy().as_ref())
+    {
+        return Err("executor observed command executable or argv identity changed".to_string());
+    }
+    let process_executable = fs::canonicalize(&observed.process_executable)
+        .map_err(|error| format!("canonicalize observed process executable: {error}"))?;
+    if process_executable != observed.process_executable
+        || observed.process_argv.first().map(String::as_str)
+            != Some(observed.process_executable.to_string_lossy().as_ref())
+    {
+        return Err("executor observed process executable or argv identity changed".to_string());
+    }
+    if observed.exit_status != 0 {
+        return Err(format!(
+            "executor observed command failed with exit status {}",
+            observed.exit_status
+        ));
+    }
+    for (label, path, expected_digest) in [
+        (
+            "stdout",
+            &observed.stdout_path,
+            observed.stdout_digest.as_str(),
+        ),
+        (
+            "stderr",
+            &observed.stderr_path,
+            observed.stderr_digest.as_str(),
+        ),
+    ] {
+        reject_symlink_path(path)?;
+        validate_private_state_file(path)
+            .map_err(|error| format!("executor observed {label} artifact is unsafe: {error}"))?;
+        let bytes =
+            fs::read(path).map_err(|error| format!("read observed {label} artifact: {error}"))?;
+        if sha256_hex(&bytes) != expected_digest {
+            return Err(format!("executor observed {label} artifact digest changed"));
+        }
+    }
+    reject_symlink_path(&observed.record_path)?;
+    validate_private_state_file(&observed.record_path)
+        .map_err(|error| format!("executor observed command record is unsafe: {error}"))?;
+    let record = fs::read_to_string(&observed.record_path)
+        .map_err(|error| format!("read observed command record: {error}"))?;
+    let expected = observed_command_document(
+        &observed.commit_oid,
+        &observed.executable,
+        &observed.argv,
+        &observed.process_executable,
+        &observed.process_argv,
+        observed.exit_status,
+        &observed.stdout_path,
+        &observed.stdout_digest,
+        &observed.stderr_path,
+        &observed.stderr_digest,
+    );
+    if sha256_hex(record.as_bytes()) != observed.record_digest || record != expected {
+        return Err("executor observed command record digest or identity changed".to_string());
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HarnessKind {
@@ -3816,7 +5202,7 @@ fn supervise_validated_harness_with_claim_renewal(
                 if observe_process_identity(expected.pid, &expected.argv_digest)?.is_some() =>
             {
                 Err(format!(
-                "legacy executor ownership is quarantined; exact parent supervisor could not be proven: {error}"
+                    "legacy executor ownership is quarantined; exact parent supervisor could not be proven: {error}"
                 ))
             }
             Err(_) => {
@@ -5390,8 +6776,8 @@ fn launch_and_supervise(
                     state.progress_at = unix_now()?;
                     write_invocation_atomic(state_path, state)?;
                     return Err(format!(
-                    "executor child identity changed; refusing to observe or signal reused PID: expected={process:?} observed={observed:?}"
-                ));
+                        "executor child identity changed; refusing to observe or signal reused PID: expected={process:?} observed={observed:?}"
+                    ));
                 }
                 None => {
                     let status = guard
@@ -6521,7 +7907,7 @@ pub(crate) fn resolve_base(
             return Err(format!(
                 "inspect executor explore mode {}: {error}",
                 explore_path.display()
-            ))
+            ));
         }
     };
     if explore_present {
@@ -7157,7 +8543,7 @@ mod tests {
                 Some(nix::sys::wait::WaitPidFlag::WNOHANG),
             ) {
                 Ok(nix::sys::wait::WaitStatus::StillAlive) | Err(nix::errno::Errno::ECHILD) => {
-                    break
+                    break;
                 }
                 Ok(_) => {}
                 Err(error) => panic!("reap exited executor fixture child: {error}"),
@@ -13664,5 +15050,630 @@ exit 19
         .expect_err("symlinked artifact must be rejected before argv construction");
 
         assert!(error.contains("symlink"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_parses_primary_smoke_as_direct_segments() {
+        let body = "## Verification\n\n### Primary smoke test (inner loop)\n\n```bash\n/usr/bin/printf 'first value' && /usr/bin/printf second\n```\n";
+
+        let plan = super::parse_primary_smoke(body).expect("bounded direct smoke plan");
+
+        assert_eq!(plan.commands.len(), 2);
+        assert_eq!(
+            plan.commands[0].argv,
+            vec!["/usr/bin/printf", "first value"]
+        );
+        assert_eq!(plan.commands[1].argv, vec!["/usr/bin/printf", "second"]);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_shell_operator_families_and_unbounded_smoke() {
+        for line in [
+            "printf ok | cat",
+            "printf ok > out",
+            "printf $(id)",
+            "printf `id`",
+            "printf ok &",
+            "printf ok ; printf bad",
+            "if true; then printf ok; fi",
+            "cd /tmp",
+            "printf ok\nprintf bad",
+            "printf ok && && printf bad",
+        ] {
+            let body = format!("### Primary smoke test (inner loop)\n\n```bash\n{line}\n```\n");
+            assert!(
+                super::parse_primary_smoke(&body).is_err(),
+                "unsafe smoke was accepted: {line:?}"
+            );
+        }
+        let oversized = format!(
+            "### Primary smoke test (inner loop)\n\n```bash\n/usr/bin/printf {}\n```\n",
+            "x".repeat(super::MAX_DIRECT_COMMAND_LINE + 1)
+        );
+        assert!(super::parse_primary_smoke(&oversized).is_err());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_executes_direct_segments_and_stops_on_first_failure() {
+        let fixture = GitFixture::new("direct-qa");
+        let artifact_root = fixture.root.join("evidence");
+        let stopped_marker = fixture.root.join("must-not-run");
+        let plan = super::parse_direct_command_plan(&format!(
+            "/usr/bin/printf first && /usr/bin/false && /usr/bin/touch {}",
+            stopped_marker.display()
+        ))
+        .expect("direct plan");
+
+        let error = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("second direct command must fail");
+
+        assert!(error.contains("exit status 1"), "{error}");
+        assert!(!stopped_marker.exists(), "later segment must not execute");
+        let stdout =
+            fs::read(artifact_root.join("command-000.stdout")).expect("first stdout artifact");
+        assert_eq!(stdout, b"first");
+        assert!(artifact_root.join("command-001.stderr").is_file());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_runtime_adapter_uses_typed_session_prefix() {
+        let fixture = GitFixture::new("runtime-qa-prefix");
+        let autospec = PathBuf::from("/usr/bin/true")
+            .canonicalize()
+            .expect("canonical executable");
+        let runtime = super::DirectRuntimeAdapter::new(autospec.clone(), &fixture.repo)
+            .expect("runtime adapter");
+        let direct = super::DirectCommand {
+            argv: vec!["/usr/bin/printf".to_string(), "ok".to_string()],
+        };
+
+        let invocation = runtime.invocation(&direct).expect("runtime invocation");
+
+        assert_eq!(invocation.program, autospec);
+        assert_eq!(
+            invocation.args,
+            vec![
+                "runtime",
+                "env",
+                "session",
+                "--repo",
+                fixture.repo.to_str().expect("repo UTF-8"),
+                "--mode",
+                "auto",
+                "--",
+                "/usr/bin/printf",
+                "ok",
+            ]
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_resolves_full_suite_in_authoritative_order() {
+        let fixture = GitFixture::new("full-suite-order");
+        fs::write(
+            fixture.repo.join("Cargo.toml"),
+            "[package]\nname='fixture'\nversion='0.1.0'\n",
+        )
+        .expect("write cargo manifest");
+        let issue = "### Operator/full verification\n\n```bash\n/usr/bin/printf issue\n```\n";
+        let spec = "### Operator full\n\n```\n/usr/bin/printf spec\n```\n";
+        let override_env = BTreeMap::from([(
+            "AUTOSPEC_FULL_TEST_COMMAND".to_string(),
+            OsString::from("/usr/bin/printf override"),
+        )]);
+
+        let overridden = super::resolve_full_suite(&fixture.repo, issue, &[spec], &override_env)
+            .expect("environment override");
+        assert_eq!(overridden.source, super::FullSuiteSource::Environment);
+        assert_eq!(
+            overridden.plan.commands[0].argv,
+            vec!["/usr/bin/printf", "override"]
+        );
+
+        let declared = super::resolve_full_suite(&fixture.repo, issue, &[spec], &BTreeMap::new())
+            .expect("declared full verification");
+        assert_eq!(declared.source, super::FullSuiteSource::Declared);
+        assert_eq!(declared.plan.commands.len(), 2);
+
+        let fallback = super::resolve_full_suite(&fixture.repo, "", &[], &BTreeMap::new())
+            .expect("ecosystem fallback");
+        assert_eq!(fallback.source, super::FullSuiteSource::Ecosystem);
+        assert_eq!(
+            fallback
+                .plan
+                .commands
+                .iter()
+                .map(|command| command.argv.join(" "))
+                .collect::<Vec<_>>(),
+            vec![
+                "cargo fmt --check",
+                "cargo clippy --all-targets -- -D warnings",
+                "cargo test --all-targets",
+                "cargo build --all-targets",
+            ]
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_full_suite_rejects_unknown_or_incomplete_repositories() {
+        let fixture = GitFixture::new("full-suite-unknown");
+        let error = super::resolve_full_suite(&fixture.repo, "", &[], &BTreeMap::new())
+            .expect_err("unknown repository must not have a fabricated suite");
+        assert!(error.contains("complete full suite"), "{error}");
+
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"scripts":{"test":"vitest"}}"#,
+        )
+        .expect("write incomplete package manifest");
+        let error = super::resolve_full_suite(&fixture.repo, "", &[], &BTreeMap::new())
+            .expect_err("package suite missing lint/typecheck/build must fail closed");
+        assert!(error.contains("incomplete"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_every_required_scanner_fails_closed_when_missing() {
+        for missing in ["gitleaks", "semgrep", "trivy", "license-checker"] {
+            let mut paths = BTreeMap::new();
+            for scanner in ["gitleaks", "semgrep", "trivy", "license-checker"] {
+                if scanner != missing {
+                    paths.insert(scanner.to_string(), PathBuf::from("/usr/bin/true"));
+                }
+            }
+            let error = super::ScannerExecutables::from_paths(paths)
+                .expect_err("missing required scanner must fail closed");
+            assert!(error.contains(missing), "{missing}: {error}");
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_every_degraded_or_failing_scanner_blocks() {
+        let fixture = GitFixture::new("scanner-status");
+        for scanner in ["gitleaks", "semgrep", "trivy", "license-checker"] {
+            let degraded =
+                super::validate_scanner_result(scanner, 0, b"", b"scanner degraded fallback")
+                    .expect_err("degraded scanner output must fail closed");
+            assert!(degraded.contains(scanner), "{degraded}");
+
+            let failed = super::validate_scanner_result(scanner, 1, b"{}", b"")
+                .expect_err("failing scanner must fail closed");
+            assert!(failed.contains(scanner), "{failed}");
+        }
+        drop(fixture);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_scanner_argv_is_direct_and_fail_closed() {
+        let worktree = Path::new("/safe/worktree");
+        let report = Path::new("/safe/evidence/gitleaks.json");
+        let expected = [
+            (
+                "gitleaks",
+                vec![
+                    "/scanner/gitleaks",
+                    "detect",
+                    "--no-git",
+                    "--no-banner",
+                    "--redact",
+                    "--source",
+                    "/safe/worktree",
+                    "--report-format",
+                    "json",
+                    "--report-path",
+                    "/safe/evidence/gitleaks.json",
+                ],
+            ),
+            (
+                "semgrep",
+                vec![
+                    "/scanner/semgrep",
+                    "scan",
+                    "--config",
+                    "auto",
+                    "--metrics",
+                    "off",
+                    "--error",
+                    "--json",
+                    "/safe/worktree",
+                ],
+            ),
+            (
+                "trivy",
+                vec![
+                    "/scanner/trivy",
+                    "fs",
+                    "--quiet",
+                    "--format",
+                    "json",
+                    "--exit-code",
+                    "1",
+                    "/safe/worktree",
+                ],
+            ),
+            (
+                "license-checker",
+                vec![
+                    "/scanner/license-checker",
+                    "--json",
+                    "--production",
+                    "--start",
+                    "/safe/worktree",
+                    "--failOn",
+                    "GPL;AGPL;LGPL",
+                ],
+            ),
+        ];
+        for (scanner, argv) in expected {
+            assert_eq!(
+                super::scanner_command(scanner, Path::new(argv[0]), worktree, report)
+                    .expect("scanner command")
+                    .argv,
+                argv
+            );
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_command_artifact_digest_and_commit_tamper_block() {
+        let fixture = GitFixture::new("command-evidence-tamper");
+        let artifacts = fixture.root.join("evidence");
+        let plan =
+            super::parse_direct_command_plan("/usr/bin/printf exact").expect("direct command plan");
+        let records = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifacts,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("observed command");
+        super::validate_observed_command(&fixture.repo, &records[0])
+            .expect("untampered observation");
+
+        fs::write(&records[0].stdout_path, "tampered").expect("tamper command output");
+        let error = super::validate_observed_command(&fixture.repo, &records[0])
+            .expect_err("artifact digest tamper must fail");
+        assert!(error.contains("digest"), "{error}");
+
+        git(&fixture.repo, &["commit", "--allow-empty", "-m", "drift"]);
+        let error = super::validate_observed_command(&fixture.repo, &records[0])
+            .expect_err("commit drift must fail");
+        assert!(error.contains("commit"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_observed_results_are_the_only_typed_pass_authority() {
+        let fixture = GitFixture::new("typed-evidence");
+        let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        let lane = super::PremergeLaneIdentity::new(
+            "test/repo",
+            42,
+            "worker-42",
+            "claim-42",
+            "main",
+            commit,
+        )
+        .expect("typed lane");
+        let mut qa = Vec::new();
+        let mut scanners = Vec::new();
+        for (index, scanner) in ["gitleaks", "semgrep", "trivy", "license-checker"]
+            .into_iter()
+            .enumerate()
+        {
+            let plan = super::parse_direct_command_plan("/usr/bin/printf '{}'")
+                .expect("JSON observation command");
+            let records = super::execute_direct_plan(
+                &fixture.repo,
+                &plan,
+                &fixture.root.join(format!("observed-{index}")),
+                None,
+                Duration::from_secs(5),
+            )
+            .expect("real observed process");
+            if index == 0 {
+                qa.push(records[0].clone());
+            }
+            scanners.push(super::ObservedScanner {
+                name: scanner.to_string(),
+                command: records[0].clone(),
+                result_path: records[0].stdout_path.clone(),
+                result_digest: records[0].stdout_digest.clone(),
+            });
+        }
+
+        let complete = super::typed_evidence_from_observed(
+            &fixture.repo,
+            &lane,
+            Ok(&qa),
+            Ok(&scanners),
+            Some("PASS"),
+            1_800_000_000,
+        );
+        assert!(matches!(complete.0.verdict, super::EvidenceVerdict::Pass));
+        assert!(matches!(complete.1.verdict, super::EvidenceVerdict::Pass));
+
+        let missing = super::typed_evidence_from_observed(
+            &fixture.repo,
+            &lane,
+            Ok(&qa),
+            Ok(&scanners[..3]),
+            Some("PASS"),
+            1_800_000_001,
+        );
+        assert!(
+            !matches!(missing.1.verdict, super::EvidenceVerdict::Pass),
+            "fabricated model Pass must not upgrade missing scanner evidence"
+        );
+
+        let failed = super::typed_evidence_from_observed(
+            &fixture.repo,
+            &lane,
+            Err("full suite failed"),
+            Ok(&scanners),
+            Some("PASS"),
+            1_800_000_002,
+        );
+        assert!(
+            !matches!(failed.0.verdict, super::EvidenceVerdict::Pass),
+            "fabricated model Pass must not upgrade failed QA evidence"
+        );
+        let lint_failed = super::typed_evidence_from_observed(
+            &fixture.repo,
+            &lane,
+            Ok(&qa),
+            Err("implementation lint failed"),
+            Some("PASS"),
+            1_800_000_003,
+        );
+        assert!(
+            !matches!(lint_failed.1.verdict, super::EvidenceVerdict::Pass),
+            "implementation-lint failure must block security Pass"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_direct_runner_kills_stalls_and_bounded_output() {
+        let fixture = GitFixture::new("direct-bounds");
+        let stalled = super::parse_direct_command_plan("/usr/bin/sleep 5").expect("sleep plan");
+        let started = Instant::now();
+        let error = super::execute_direct_plan(
+            &fixture.repo,
+            &stalled,
+            &fixture.root.join("stalled"),
+            None,
+            Duration::from_millis(75),
+        )
+        .expect_err("quiet command must hit bounded stall policy");
+        assert!(error.contains("stalled"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+
+        let noisy = super::parse_direct_command_plan("/usr/bin/yes").expect("noisy plan");
+        let error = super::execute_direct_plan(
+            &fixture.repo,
+            &noisy,
+            &fixture.root.join("noisy"),
+            None,
+            Duration::from_secs(2),
+        )
+        .expect_err("unbounded output must be terminated");
+        assert!(error.contains("exceeded 1 MiB"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_full_suite_revalidation_is_commit_bound_and_repeatable() {
+        let fixture = GitFixture::new("full-suite-revalidation");
+        let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        let env = BTreeMap::from([(
+            "AUTOSPEC_FULL_TEST_COMMAND".to_string(),
+            OsString::from("/usr/bin/true"),
+        )]);
+        for pass in 0..2 {
+            let artifact_root = fixture.root.join(format!("full-{pass}"));
+            let observed = super::revalidate_full_suite(super::FullSuiteRevalidationRequest {
+                worktree: &fixture.repo,
+                issue_body: "",
+                spec_documents: &[],
+                env: &env,
+                artifact_root: &artifact_root,
+                runtime: None,
+                stall_timeout: Duration::from_secs(5),
+                expected_base_ref: "origin/main",
+                expected_base_oid: &commit,
+                expected_commit: &commit,
+            })
+            .expect("repeat exact full suite");
+            assert_eq!(observed.len(), 1);
+            assert_eq!(observed[0].commit_oid, commit);
+        }
+
+        git(
+            &fixture.repo,
+            &["commit", "--allow-empty", "-m", "base update"],
+        );
+        let artifact_root = fixture.root.join("full-drift");
+        let error = super::revalidate_full_suite(super::FullSuiteRevalidationRequest {
+            worktree: &fixture.repo,
+            issue_body: "",
+            spec_documents: &[],
+            env: &env,
+            artifact_root: &artifact_root,
+            runtime: None,
+            stall_timeout: Duration::from_secs(5),
+            expected_base_ref: "origin/main",
+            expected_base_oid: &commit,
+            expected_commit: &commit,
+        })
+        .expect_err("stale revalidation commit must fail closed");
+        assert!(error.contains("commit mismatch"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_executes_smoke_through_real_runtime_session() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("runtime-qa-execution");
+        fs::create_dir_all(fixture.repo.join(".autospec")).expect("runtime manifest directory");
+        fs::write(
+            fixture.repo.join("runtime-up.py"),
+            "import http.server, os\npid=os.fork()\nif pid == 0:\n http.server.HTTPServer(('127.0.0.1', int(os.environ['AGENT_FRONTEND_PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()\nelse:\n open('runtime.pid','w').write(str(pid))\n",
+        )
+        .expect("runtime up executable");
+        fs::write(
+            fixture.repo.join("runtime-down.py"),
+            "import os, signal\npid=int(open('runtime.pid').read())\nos.kill(pid, signal.SIGTERM)\nos.remove('runtime.pid')\n",
+        )
+        .expect("runtime down executable");
+        fs::write(
+            fixture.repo.join(".autospec/runtime.yml"),
+            "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: python3 runtime-up.py\n    down: python3 runtime-down.py\n",
+        )
+        .expect("runtime manifest");
+        let autospec = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/debug/autospec")
+            .canonicalize()
+            .expect("compiled autospec binary");
+        let adapter =
+            super::DirectRuntimeAdapter::new(autospec, &fixture.repo).expect("runtime adapter");
+        let state_root = fixture.root.join("runtime-state");
+        let previous = std::env::var_os("AGENT_ENV_STATE_ROOT");
+        std::env::set_var("AGENT_ENV_STATE_ROOT", &state_root);
+        let plan = super::parse_direct_command_plan("/usr/bin/printf runtime-session")
+            .expect("runtime smoke plan");
+
+        let observed = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &fixture.root.join("runtime-evidence"),
+            Some(&adapter),
+            Duration::from_secs(5),
+        )
+        .expect("execute through real runtime session");
+
+        assert_eq!(
+            fs::read(&observed[0].stdout_path).expect("runtime stdout"),
+            b"runtime-session"
+        );
+        assert!(session_record_ids(&state_root).is_empty());
+        match previous {
+            Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),
+            None => std::env::remove_var("AGENT_ENV_STATE_ROOT"),
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_detects_each_supported_ecosystem_full_suite() {
+        let node = GitFixture::new("ecosystem-node");
+        fs::write(
+            node.repo.join("package.json"),
+            r#"{"scripts":{"lint":"eslint .","typecheck":"tsc --noEmit","test":"vitest","build":"vite build"}}"#,
+        )
+        .expect("node manifest");
+        let suite =
+            super::resolve_full_suite(&node.repo, "", &[], &BTreeMap::new()).expect("node suite");
+        assert_eq!(suite.plan.commands.len(), 4);
+
+        let maven = GitFixture::new("ecosystem-maven");
+        fs::write(maven.repo.join("pom.xml"), "<project/>").expect("maven manifest");
+        let suite =
+            super::resolve_full_suite(&maven.repo, "", &[], &BTreeMap::new()).expect("maven suite");
+        assert_eq!(
+            suite.plan.commands[0].argv,
+            vec!["mvn", "--batch-mode", "verify"]
+        );
+
+        let gradle = GitFixture::new("ecosystem-gradle");
+        fs::write(gradle.repo.join("build.gradle.kts"), "plugins {}").expect("gradle manifest");
+        let suite = super::resolve_full_suite(&gradle.repo, "", &[], &BTreeMap::new())
+            .expect("gradle suite");
+        assert_eq!(
+            suite.plan.commands[0].argv,
+            vec!["gradle", "check", "build"]
+        );
+
+        let go = GitFixture::new("ecosystem-go");
+        fs::write(
+            go.repo.join("go.mod"),
+            "module example.invalid/test\n\ngo 1.22\n",
+        )
+        .expect("go manifest");
+        let suite =
+            super::resolve_full_suite(&go.repo, "", &[], &BTreeMap::new()).expect("go suite");
+        assert_eq!(suite.plan.commands.len(), 3);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_primary_smoke_is_additional_to_full_suite() {
+        let fixture = GitFixture::new("smoke-additional");
+        let issue = "### Primary smoke test (inner loop)\n\n```bash\n/usr/bin/false\n```\n\n### Operator/full verification\n\n```bash\n/usr/bin/true\n```\n";
+        let smoke = super::parse_primary_smoke(issue).expect("primary smoke");
+        let full = super::resolve_full_suite(&fixture.repo, issue, &[], &BTreeMap::new())
+            .expect("full suite");
+        assert_eq!(smoke.commands[0].argv, vec!["/usr/bin/false"]);
+        assert_eq!(full.plan.commands[0].argv, vec!["/usr/bin/true"]);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_persists_observed_typed_pass_privately_and_idempotently() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("persist-observed-pass");
+        let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        let lane = super::PremergeLaneIdentity::new(
+            "test/repo",
+            42,
+            "worker-42",
+            "claim-42",
+            "main",
+            commit,
+        )
+        .expect("observed lane");
+        let qa = super::QaEvidence {
+            lane: lane.clone(),
+            run_id: "observed-qa".to_string(),
+            completed_at: 1_800_000_000,
+            verdict: super::EvidenceVerdict::Pass,
+        };
+        let security = super::SecurityAuditEvidence {
+            lane: lane.clone(),
+            run_id: "observed-security".to_string(),
+            completed_at: 1_800_000_001,
+            verdict: super::EvidenceVerdict::Pass,
+        };
+        let previous = std::env::var_os("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR");
+        std::env::set_var(
+            "AUTOSPEC_AUTONOMOUS_OPERATOR_DIR",
+            fixture.root.join("operator"),
+        );
+        for _ in 0..2 {
+            let decision = super::super::premerge::persist_observed_bridge_evidence(
+                &fixture.repo,
+                &qa,
+                &security,
+            )
+            .expect("persist exact observed evidence idempotently");
+            assert!(matches!(decision, super::PremergeDecision::Pass { .. }));
+        }
+        #[cfg(unix)]
+        for filename in ["qa.json", "security.json"] {
+            let mode = fs::metadata(
+                fixture
+                    .repo
+                    .join(".autospec/evidence/premerge")
+                    .join(lane.lane_digest())
+                    .join(filename),
+            )
+            .expect("evidence metadata")
+            .permissions()
+            .mode();
+            assert_eq!(mode & 0o077, 0, "{filename} must be private");
+        }
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR"),
+        }
     }
 }

@@ -253,6 +253,56 @@ fn native_executor_bridge_source_owns_child_supervision_contract() {
 }
 
 #[test]
+fn fabricated_premerge_producer_pass_is_not_admissible_evidence() {
+    let root = temp_dir("fabricated-premerge-pass");
+    let repo = root.join("repo");
+    fs::create_dir_all(&repo).expect("create producer repo");
+    git_fixture(&repo, &["init", "-b", "feat/evidence"]);
+    git_fixture(&repo, &["config", "user.name", "Autospec Test"]);
+    git_fixture(&repo, &["config", "user.email", "autospec@example.invalid"]);
+    fs::write(repo.join("tracked.txt"), "baseline\n").expect("write producer fixture");
+    git_fixture(&repo, &["add", "tracked.txt"]);
+    git_fixture(&repo, &["commit", "-m", "fixture"]);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_autospec"))
+        .args([
+            "autonomous",
+            "premerge",
+            "produce",
+            "--kind",
+            "qa",
+            "--repo",
+            "test/repo",
+            "--repo-dir",
+            repo.to_str().expect("repo UTF-8"),
+            "--issue",
+            "42",
+            "--worker-id",
+            "worker-42",
+            "--claim-id",
+            "claim-42",
+            "--run-id",
+            "fabricated-model-pass",
+            "--verdict",
+            "pass",
+        ])
+        .output()
+        .expect("reject fabricated producer Pass");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("observed bridge evidence"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !repo.join(".autospec/evidence/premerge").exists(),
+        "external Pass producer must not write admissible evidence"
+    );
+    fs::remove_dir_all(root).expect("remove producer fixture");
+}
+
+#[test]
 fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() {
     let fixture = ForegroundFixture::new();
     let first = fixture
@@ -1501,8 +1551,7 @@ fn main_health_reads_the_same_repository_config_as_foreground_admission() {
 
 #[test]
 fn missing_default_branch_keeps_its_typed_policy_bound_health_receipt() {
-    const UNRESOLVED_POLICY_DIGEST: &str =
-        "autospec-main-health-policy-v1:66e6f0c0605153f689ec9b01bbbd3ada254ed0031573a196fed67c7aab401671";
+    const UNRESOLVED_POLICY_DIGEST: &str = "autospec-main-health-policy-v1:66e6f0c0605153f689ec9b01bbbd3ada254ed0031573a196fed67c7aab401671";
     let fixture = ForegroundFixture::new();
 
     let output = fixture
@@ -1526,8 +1575,7 @@ fn missing_default_branch_keeps_its_typed_policy_bound_health_receipt() {
 
 #[test]
 fn foreground_missing_default_branch_applies_typed_halt_after_recording_policy() {
-    const UNRESOLVED_POLICY_DIGEST: &str =
-        "autospec-main-health-policy-v1:66e6f0c0605153f689ec9b01bbbd3ada254ed0031573a196fed67c7aab401671";
+    const UNRESOLVED_POLICY_DIGEST: &str = "autospec-main-health-policy-v1:66e6f0c0605153f689ec9b01bbbd3ada254ed0031573a196fed67c7aab401671";
     let fixture = ForegroundFixture::new();
 
     let output = fixture
