@@ -1,28 +1,32 @@
 # Rust Autonomous Executor Bridge Implementation Plan
 
 **Goal:** Replace the foreground conductor's external result-file dependency
-with a recoverable Rust-owned bridge that launches a configured implementation
-harness and advances only independently verified PR evidence.
+with a recoverable Rust-owned bridge that implements, verifies, reviews, merges,
+and cleans up one exact claimed issue without operator intervention.
 
 **Architecture:** A dedicated `executor_bridge` module owns harness resolution,
-isolated worktree identity, direct child supervision, persisted phases, strict
-artifact parsing, and PR proof. `autonomous.rs` remains the conductor and claim
-authority. Existing `premerge` and `executor-result` commands remain the only
-QA/security decision and result-ingestion boundaries.
+repository-scoped worktree/runtime identity, direct child supervision,
+persisted phases, deterministic validation, and the PR-through-merge
+transaction. `autonomous.rs` remains the conductor and `claim.rs` remains the
+lease authority. Existing typed premerge decisions and executor-result evidence
+remain the result-ingestion boundaries.
 
 **Tech stack:** Existing Rust workspace, Git and GitHub CLI adapters, existing
-runtime alias table, existing claim/premerge types, and serial Rust integration
-tests. No new dependencies.
+runtime alias table, runtime broker, claim/premerge types, and serial Rust
+integration tests. No new dependencies.
 
 ## Constraints
 
-- Work only in the issue worktree created from current `origin/main`.
+- Work only in the issue worktree created from fetched `origin/main`.
 - Write a failing regression before each behavior change.
 - Never invoke `autospec-run`, `omx`, a shell conductor, or the primary checkout.
 - Never treat process exit, free-form stdout, or a harness claim as proof.
 - Keep the fixed executor-result artifact as compatibility input.
-- Keep every invocation bound to one repository, issue, worker, branch, claim,
-  base commit, worktree, and PR head.
+- Bind every invocation to one repository, issue, worker, branch, claim,
+  configured base ref/OID, private worktree, runtime session, and PR head.
+- A model may block verification but cannot create QA/security Pass evidence.
+- Rust owns push, draft creation, ready transition, CI admission, merge,
+  terminal claim release, and cleanup.
 
 ### Task 1: Add typed harness and invocation contracts
 
@@ -34,28 +38,36 @@ tests. No new dependencies.
 1. Add failing unit tests for runtime-marker precedence, explicit override,
    alias-table parsing, unsafe dispatcher rejection, and exact Codex, Claude,
    and OpenCode argument vectors.
-2. Implement `HarnessKind`, `HarnessConfig`, `BridgeIdentity`,
-   `BridgePhase`, and strict persisted invocation JSON.
+2. Implement `HarnessKind`, `HarnessConfig`, `BridgeIdentity`, `BridgePhase`,
+   process identity, and strict persisted invocation JSON.
 3. Resolve the installed alias table from the existing environment/config
    locations and resolve an absolute non-temporary executable.
-4. Commit the typed contract and tests.
+4. Use Codex workspace-write containment; use local-only Claude/OpenCode policy
+   plus before/after mutation snapshots where OS containment is unavailable.
+5. Commit the typed contract and tests.
 
-### Task 2: Provision and recover the isolated issue worktree
+### Task 2: Provision and recover isolated worktree and runtime state
 
 **Files:**
 
 - Modify `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
+- Modify `crates/autospec-cli/src/commands/runtime/env.rs`
 - Modify `crates/autospec-cli/tests/autonomous_conductor_commands.rs`
 
 1. Add a failing integration fixture backed by a real local Git repository and
    bare remote.
-2. Resolve the remote default branch, fetch it, and create the exact
-   `autonomous/issue-<N>` branch in `/tmp/wt-autonomous-issue-<N>`.
-3. Adopt only a matching clean branch/worktree; fail closed on dirty, detached,
-   foreign, symlinked, or mismatched reuse.
-4. Persist non-terminal state atomically before launch and recover the last
+2. Resolve `AUTOSPEC_BASE_BRANCH`, then `.autospec/autospec.yml`
+   `git.base_branch`, then remote default; persist the exact base ref and OID.
+3. Fetch and create the exact `autonomous/issue-<N>` branch under the private
+   `/tmp/autospec-executor/<repository-scope>/issue-<N>` root.
+4. Adopt only a matching clean branch/worktree; fail closed on dirty, detached,
+   foreign, symlinked, wrong-owner, or mismatched reuse.
+5. Provision manifest-backed runtime isolation through the typed
+   `runtime env session` adapter; use no runtime session without a manifest.
+6. Persist non-terminal state atomically before launch and recover the last
    independently verified phase after restart.
-5. Commit worktree and recovery behavior.
+7. Test two repositories with the same issue number and two isolated runtime
+   manifests, then commit worktree/runtime recovery behavior.
 
 ### Task 3: Launch and supervise the implementation harness
 
@@ -64,17 +76,58 @@ tests. No new dependencies.
 - Modify `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
 - Modify `crates/autospec-cli/tests/autonomous_conductor_commands.rs`
 
-1. Add failing tests proving one direct launch, explicit argv, output progress,
-   stall termination, process-group cleanup, and no duplicate live child.
-2. Build the dedicated implementer prompt from the exact issue, claim, branch,
-   worktree, and base identity.
+1. Add failing tests proving one direct launch, exact argv, output progress,
+   stall termination, verified process-group cleanup, and no duplicate child.
+2. Build the dedicated implementer prompt from exact issue, claim, branch,
+   worktree, base, local-only, Closeout, and no-remote-mutation requirements.
 3. Stream bounded child output into structured executor events while refreshing
-   progress state.
-4. Replace the 30-second absolute timeout with progress-aware stall detection.
-5. Make pending and interrupted phases non-terminal.
-6. Commit supervision behavior.
+   local progress state.
+4. Persist canonical executable, argv digest, PID/PGID, and boot/start identity;
+   observe or signal a child only on an exact live identity match.
+5. Replace the 30-second absolute timeout with progress-aware stall detection.
+6. Make pending and interrupted phases non-terminal.
+7. Add PID-reuse and malicious primary/protected-ref mutation fixtures.
+8. Commit supervision behavior.
 
-### Task 4: Prove the draft PR and verifier evidence
+### Task 4: Add compare-and-set claim renewal
+
+**Files:**
+
+- Modify `crates/autospec-cli/src/commands/claim.rs`
+- Modify `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
+- Modify `crates/autospec-cli/tests/claim_commands.rs`
+- Modify `crates/autospec-cli/tests/autonomous_conductor_commands.rs`
+
+1. Add failing tests for exact-generation refresh, stale generation, changed
+   worker/branch/claim ID, simulated elapsed time beyond TTL, and takeover.
+2. Add a claim API that re-reads the authoritative run-state comment, verifies
+   exact identity, updates only heartbeat/step/PR fields, and confirms the
+   written generation.
+3. Refresh during implementation, verification, CI wait, and review; abort
+   inertly before further remote mutation when ownership is lost.
+4. Commit claim renewal and takeover safety.
+
+### Task 5: Prove and create the draft PR
+
+**Files:**
+
+- Modify `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
+- Modify `crates/autospec-core/src/claim/mod.rs`
+- Modify `crates/autospec-cli/src/commands/claim.rs`
+- Modify `crates/autospec-cli/tests/autonomous_conductor_commands.rs`
+- Modify `crates/autospec-core/tests/claim_tiebreak.rs`
+
+1. Add failing tests for unchanged HEAD, dirty state, foreign branch, missing or
+   multiple PRs, extra branches/PRs, base OID drift, wrong head OID, primary
+   mutation, missing issue close, and malformed Closeout report.
+2. Extend strict pull-request evidence with `isDraft` and update every fixture.
+3. Re-read Git and pre-launch mutation snapshots after the implementer exits.
+4. Run deterministic implementation lint before Rust pushes only the exact
+   issue branch and creates one draft PR with the validated Closeout report.
+5. Require exact draft/head/base/issue-close identity after creation.
+6. Commit draft-PR proof and Rust-owned mutation.
+
+### Task 6: Produce real QA and security evidence
 
 **Files:**
 
@@ -82,18 +135,38 @@ tests. No new dependencies.
 - Modify `crates/autospec-cli/src/commands/autonomous/premerge.rs`
 - Modify `crates/autospec-cli/tests/autonomous_conductor_commands.rs`
 
-1. Add failing tests for unchanged HEAD, dirty state, foreign branch, missing or
-   multiple PRs, wrong head OID, ready-before-verification, missing issue close,
-   and malformed Closeout report.
-2. Re-read Git and GitHub state after the implementer exits and accept exactly
-   one matching draft PR.
-3. Launch QA and security verifier prompts with strict JSON final artifacts.
-4. Convert parsed verifier artifacts into the existing typed evidence, evaluate
-   the immutable premerge decision, and require Pass.
-5. Mark the draft ready and submit the existing strict executor result.
-6. Commit the verified success path.
+1. Add failing tests for direct Primary smoke execution, sequential `&&`,
+   rejected shell operators, runtime failure, deterministic lint/security
+   failure, and fabricated model Pass output.
+2. Parse the one Primary smoke line into a bounded direct-command plan, execute
+   each `&&` segment without a shell inside the isolated runtime session, and
+   stop on the first failure.
+3. Run the Rust implementation linter against the exact PR and use its SECURITY
+   and full-contract result as static security proof.
+4. Produce typed QA/security evidence only from observed command results,
+   evaluate premerge, and require Pass.
+5. Commit deterministic premerge evidence.
 
-### Task 5: Wire the conductor and remove terminal pending replay
+### Task 7: Review, wait for CI, merge, and release
+
+**Files:**
+
+- Modify `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
+- Modify `crates/autospec-cli/src/commands/claim.rs`
+- Modify `crates/autospec-cli/tests/autonomous_conductor_commands.rs`
+
+1. Add failing tests for draft-to-ready, pending/failing/advisory CI, non-LGTM
+   review, merge failure, observed merged state, terminal claim release, and
+   invocation-owned cleanup.
+2. Mark the exact draft ready only after premerge Pass, poll all non-advisory
+   required checks, and refresh the claim throughout the wait.
+3. Launch a bounded independent reviewer; strict LGTM can admit only after all
+   deterministic/runtime gates pass and any finding blocks.
+4. Admin-squash-merge the exact PR, confirm merged state, write terminal merged
+   claim state, tear down the owned runtime session, and remove the worktree.
+5. Commit end-to-end completion.
+
+### Task 8: Wire the conductor and remove terminal pending replay
 
 **Files:**
 
@@ -103,13 +176,13 @@ tests. No new dependencies.
 1. Add a failing foreground regression proving a selected issue reaches the
    bridge rather than the fixed pending child.
 2. Call the bridge from `ExecutorRequest`, preserve compatibility artifact
-   ingestion, parse exact JSON, and persist terminal receipts only for terminal
-   outcomes.
-3. Avoid the duplicate blocked `record_executor_outcome` call after accepted
-   success and keep claim reconciliation authoritative.
-4. Commit conductor integration.
+   ingestion, parse exact JSON, and persist receipts only for terminal outcomes.
+3. Avoid duplicate blocked `record_executor_outcome` after accepted success and
+   keep claim reconciliation authoritative.
+4. Record conductor success only after the bridge observes merged PR state.
+5. Commit conductor integration.
 
-### Task 6: Document, review, merge, reinstall, and dogfood
+### Task 9: Document, review, merge, reinstall, and dogfood
 
 **Files:**
 
@@ -118,8 +191,9 @@ tests. No new dependencies.
 - Modify `docs/superpowers/specs/2026-07-25-rust-autonomous-executor-bridge-design.md`
 - Modify `docs/superpowers/plans/2026-07-25-rust-autonomous-executor-bridge.md`
 
-1. Document harness selection, worktree isolation, recovery, progress, stop,
-   evidence, and compatibility behavior.
+1. Document harness selection, base resolution, repository-scoped worktree and
+   runtime isolation, recovery, claim renewal, progress, stop, deterministic
+   evidence, CI/review, merge, cleanup, and compatibility behavior.
 2. Run targeted formatting, focused serial tests, full serial workspace tests,
    Clippy with warnings denied, fast validation, implementation lint, and diff
    checks.
@@ -127,7 +201,7 @@ tests. No new dependencies.
 4. Open the issue-linked PR, wait for required CI, admin-squash-merge, fetch
    exact merged main, build from a clean detached worktree, and install it.
 5. Restart autospec-gui autonomy with follow enabled and prove issue #36 creates
-   and advances a PR, then observe #34 and #35 without touching its existing
+   and merges a PR, then observe #34 and #35 without touching its existing
    `.gitignore` change.
 
 ## Verification commands
@@ -137,6 +211,8 @@ Run:
 ```bash
 cargo test -p autospec-cli autonomous_executor_bridge -- --test-threads=1
 cargo test -p autospec-cli --test autonomous_conductor_commands -- --test-threads=1
+cargo test -p autospec-cli --test claim_commands -- --test-threads=1
+cargo test -p autospec-core --test claim_tiebreak -- --test-threads=1
 cargo test --workspace -- --test-threads=1
 cargo clippy --workspace --all-targets -- -D warnings
 cargo run -q -p autospec-cli -- validate --fast
