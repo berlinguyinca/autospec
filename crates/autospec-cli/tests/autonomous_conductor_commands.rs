@@ -1,9 +1,10 @@
 use autospec_core::autonomous::no_work::NoWorkTier;
 use autospec_core::autonomous::premerge::PremergeLaneIdentity;
 use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus, WaterfallState};
-use autospec_core::claim::{parse_remote_comments_json, select_run_state, RunStateRecord};
+use autospec_core::claim::{parse_remote_comments_json, parse_run_state_comment, RunStateRecord};
 use autospec_core::coordination::{ConductorOutcome, ConductorPhase, ConductorState};
 use std::fs::{self, File};
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -519,9 +520,9 @@ fn foreground_fails_closed_when_executor_outcome_loses_its_claim() {
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(fs::read_to_string(&fixture.comments)
-        .expect("read comments")
-        .contains("foreign-worker"));
+    let record = fixture.claim_record();
+    assert_eq!(record.worker_id, "foreign-worker");
+    assert_eq!(record.branch, "foreign/issue-42");
 }
 
 #[test]
@@ -549,21 +550,20 @@ fn foreground_rejects_a_terminal_run_state_before_claim_mutation() {
 }
 
 #[test]
-fn foreground_rejects_malformed_run_state_before_claim_mutation() {
+fn foreground_ignores_a_malformed_audit_projection_without_a_claim_ref() {
     let fixture = ForegroundFixture::new();
     fixture.seed_malformed_claim();
 
     let output = fixture.run_foreground();
 
-    assert_eq!(output.status.code(), Some(3));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "{\"decision\":\"reject\",\"reason\":\"malformed_claim\"}\n"
-    );
+    assert!(output.status.success());
+    let record = fixture.claim_record();
+    assert!(record.worker_id.starts_with("rust-foreground-conductor-"));
+    assert_eq!(record.state, "claimed");
     let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
     assert!(
-        !calls.contains("issue\nedit\n42"),
-        "malformed state must be rejected before claim label mutation"
+        calls.contains("issue\nedit\n42"),
+        "an audit-only malformed comment must not block a new authoritative claim"
     );
 }
 
@@ -2298,7 +2298,7 @@ fn executor_result_rejects_an_expired_matching_lease_without_mutating_claim() {
 }
 
 #[test]
-fn executor_result_rejects_a_terminal_claim_without_mutating_claim() {
+fn executor_result_ignores_a_terminal_audit_comment_without_a_terminal_claim_ref() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     fixture.append_terminal_merged_marker();
@@ -2312,11 +2312,13 @@ fn executor_result_rejects_a_terminal_claim_without_mutating_claim() {
         .output()
         .expect("submit terminal result");
 
-    assert_eq!(output.status.code(), Some(3));
-    assert!(String::from_utf8_lossy(&output.stdout).starts_with("{\"status\":\"ownership_lost\""));
-    assert_eq!(
-        fs::read_to_string(&fixture.comments).expect("read terminal claim after result"),
-        before
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).starts_with("{\"status\":\"accepted\""));
+    assert_eq!(fixture.claim_record().state, "claimed");
+    assert_ne!(
+        fs::read_to_string(&fixture.comments).expect("read terminal audit after result"),
+        before,
+        "accepted result evidence is appended to the audit projection"
     );
 }
 
@@ -2476,6 +2478,9 @@ struct ForegroundFixture {
     state: PathBuf,
     health: PathBuf,
     heartbeats: PathBuf,
+    claim_repo: PathBuf,
+    claim_remote: PathBuf,
+    claim_state: PathBuf,
 }
 
 impl ForegroundFixture {
@@ -2491,8 +2496,17 @@ impl ForegroundFixture {
         let state = root.join("state");
         let health = root.join("health");
         let heartbeats = root.join("heartbeats");
+        let claim_repo = root.join("claim-repo");
+        let claim_remote = root.join("claim-remote.git");
+        let claim_state = root.join("claim-state");
         fs::create_dir_all(&repo_dir).expect("create repo directory");
         fs::create_dir_all(&bin).expect("create fake bin");
+        git_fixture(&root, &["init", "--bare", claim_remote.to_str().unwrap()]);
+        git_fixture(&root, &["init", claim_repo.to_str().unwrap()]);
+        git_fixture(
+            &claim_repo,
+            &["remote", "add", "origin", claim_remote.to_str().unwrap()],
+        );
         fs::write(&mode, "unreviewed\n").expect("write mode");
         fs::write(&comments, "[]\n").expect("write comments");
         fs::write(&pull_requests, "[]\n").expect("write pull requests");
@@ -2515,6 +2529,27 @@ issue() {
 claim_issue() {
   if [ "$mode" = claimed ]; then labels='["in-progress-by-bot","safety:reviewed"]'; else labels='["auto-implement","safety:reviewed"]'; fi
   printf '%s\n' "{\"labels\":$labels,\"title\":\"Add Rust foreground\",\"body\":\"## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\",\"author\":\"agent\"}"
+}
+steal_claim() {
+  reference=refs/autospec/claims/issue-42
+  current=$(git --git-dir "$AUTOSPEC_CLAIM_GIT_REMOTE" rev-parse "$reference")
+  tree=$(git --git-dir "$AUTOSPEC_CLAIM_GIT_REMOTE" mktree </dev/null)
+  message="$AUTOSPEC_FOREGROUND_COMMENTS.claim-message"
+  cat > "$message" <<'EOF'
+autospec-claim-ledger-v1
+generation=foreign-generation
+
+<!-- autospec-run-state:begin -->
+{"schema":1,"repo":"test/repo","issue":42,"worker_id":"foreign-worker","state":"claimed","branch":"foreign/issue-42","pr":"","step":"claimed","paths":[],"claimed_at":"2030-07-15T00:00:00Z","updated_at":"2030-07-15T00:00:00Z","ttl_seconds":10800,"claim_id":"foreign-claim"}
+<!-- autospec-run-state:end -->
+EOF
+  oid=$(GIT_AUTHOR_NAME='Autospec Claim Test' \
+    GIT_AUTHOR_EMAIL='autospec-claim-test@localhost' \
+    GIT_COMMITTER_NAME='Autospec Claim Test' \
+    GIT_COMMITTER_EMAIL='autospec-claim-test@localhost' \
+    git --git-dir "$AUTOSPEC_CLAIM_GIT_REMOTE" commit-tree "$tree" -p "$current" -F "$message")
+  git --git-dir "$AUTOSPEC_CLAIM_GIT_REMOTE" update-ref "$reference" "$oid" "$current"
+  rm -f "$message"
 }
 if [ "$1" = api ] && [ "$2" = graphql ]; then
   printf '%s\n' '{"items":[],"page_info":{"has_next_page":false,"end_cursor":null}}'
@@ -2582,9 +2617,7 @@ if [ "$1" = api ]; then
       body=""
       for value in "$@"; do case "$value" in body=*) body="${value#body=}" ;; esac; done
       if [ "${AUTOSPEC_FOREGROUND_STEAL_ON_OUTCOME:-0}" = 1 ] && printf '%s' "$body" | grep -q executor_pending; then
-        body='<!-- autospec-run-state:begin -->
-{"schema":1,"repo":"test/repo","issue":42,"worker_id":"foreign-worker","state":"claimed","branch":"foreign/issue-42","pr":"","step":"claimed","paths":[],"claimed_at":"2026-07-15T00:00:00Z","updated_at":"2026-07-15T00:00:00Z","ttl_seconds":10800}
-<!-- autospec-run-state:end -->'
+        steal_claim
       fi
       jq --arg body "$body" '.[0].body = $body | .[0].updated_at = "2026-07-15T00:00:00Z"' "$AUTOSPEC_FOREGROUND_COMMENTS" > "$AUTOSPEC_FOREGROUND_COMMENTS.tmp"
       mv "$AUTOSPEC_FOREGROUND_COMMENTS.tmp" "$AUTOSPEC_FOREGROUND_COMMENTS"
@@ -2601,22 +2634,15 @@ if [ "$1" = issue ] && [ "$2" = comment ]; then
     exit 1
   fi
   if [ "${AUTOSPEC_FOREGROUND_STEAL_ON_OUTCOME:-0}" = 1 ] && printf '%s' "$body" | grep -q executor_pending; then
-    parent=$(printf '%s\n' "$body" | sed -n 's/^<!-- autospec-run-state-link parent=\([^ ]*\) .*generation=.*$/\1/p')
-    foreign=$(printf '<!-- autospec-run-state-link parent=%s generation=foreign-generation -->\n<!-- autospec-run-state:begin -->\n{"schema":1,"repo":"test/repo","issue":42,"worker_id":"foreign-worker","state":"claimed","branch":"foreign/issue-42","pr":"","step":"claimed","paths":[],"claimed_at":"2026-07-15T00:00:00Z","updated_at":"2026-07-15T00:00:00Z","ttl_seconds":10800}\n<!-- autospec-run-state:end -->' "$parent")
-    jq --arg foreign "$foreign" --arg body "$body" '. as $comments | ((map(.id) | max // 99) + 1) as $next | $comments + [{"id":$next,"updated_at":"2026-07-15T00:00:00Z","body":$foreign},{"id":($next + 1),"updated_at":"2026-07-15T00:00:01Z","body":$body}]' "$AUTOSPEC_FOREGROUND_COMMENTS" > "$AUTOSPEC_FOREGROUND_COMMENTS.tmp"
-  else
-    jq --arg body "$body" '. + [{"id":((map(.id) | max // 99) + 1),"updated_at":"2026-07-15T00:00:00Z","body":$body}]' "$AUTOSPEC_FOREGROUND_COMMENTS" > "$AUTOSPEC_FOREGROUND_COMMENTS.tmp"
+    steal_claim
   fi
+  jq --arg body "$body" '. + [{"id":((map(.id) | max // 99) + 1),"updated_at":"2026-07-15T00:00:00Z","body":$body}]' "$AUTOSPEC_FOREGROUND_COMMENTS" > "$AUTOSPEC_FOREGROUND_COMMENTS.tmp"
   mv "$AUTOSPEC_FOREGROUND_COMMENTS.tmp" "$AUTOSPEC_FOREGROUND_COMMENTS"
   exit 0
 fi
 if [ "$1" = pr ] && [ "$2" = list ]; then
   if [ "${AUTOSPEC_FOREGROUND_STEAL_ON_RESULT_VALIDATION:-0}" = 1 ]; then
-    body='<!-- autospec-run-state:begin -->
-{"schema":1,"repo":"test/repo","issue":42,"worker_id":"foreign-worker","state":"claimed","branch":"foreign/issue-42","pr":"","step":"claimed","paths":[],"claimed_at":"2026-07-15T00:00:00Z","updated_at":"2026-07-15T00:00:00Z","ttl_seconds":10800}
-<!-- autospec-run-state:end -->'
-    jq --arg body "$body" '.[0].body = $body | .[0].updated_at = "2026-07-15T00:00:00Z"' "$AUTOSPEC_FOREGROUND_COMMENTS" > "$AUTOSPEC_FOREGROUND_COMMENTS.tmp"
-    mv "$AUTOSPEC_FOREGROUND_COMMENTS.tmp" "$AUTOSPEC_FOREGROUND_COMMENTS"
+    steal_claim
   fi
   cat "$AUTOSPEC_FOREGROUND_PULL_REQUESTS"
   exit 0
@@ -2637,6 +2663,9 @@ exit 1
             state,
             health,
             heartbeats,
+            claim_repo,
+            claim_remote,
+            claim_state,
         }
     }
 
@@ -2669,6 +2698,8 @@ exit 1
             .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", self.root.join("spend"))
             .env("AUTOSPEC_AUTONOMOUS_STATE_DIR", &self.health)
             .env("AUTOSPEC_HEARTBEAT_DIR", &self.heartbeats)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &self.claim_remote)
+            .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", &self.claim_state)
             .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
             .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
             .env_remove("AUTOSPEC_CONFIG_FILE");
@@ -2892,6 +2923,7 @@ exit 1
             10_800,
         )
         .with_claim_id(claim_id);
+        self.transition_claim_ref(&record);
         fs::write(
             &self.comments,
             format!(
@@ -2901,6 +2933,56 @@ exit 1
             ),
         )
         .expect("seed claimed run-state comment");
+    }
+
+    fn transition_claim_ref(&self, record: &RunStateRecord) {
+        let reference = format!("refs/autospec/claims/issue-{}", record.issue);
+        let remote = self.claim_remote.to_str().expect("claim remote path");
+        let current = git_fixture(
+            &self.claim_repo,
+            &["ls-remote", "--refs", remote, &reference],
+        );
+        let parent = current.split_whitespace().next().map(str::to_string);
+        if parent.is_some() {
+            git_fixture(
+                &self.claim_repo,
+                &["fetch", "--no-tags", remote, &reference],
+            );
+        }
+        let tree = git_fixture(&self.claim_repo, &["mktree"]);
+        let mut command = Command::new("git");
+        command
+            .arg("commit-tree")
+            .arg(tree)
+            .current_dir(&self.claim_repo)
+            .env("GIT_AUTHOR_NAME", "Autospec Claim Test")
+            .env("GIT_AUTHOR_EMAIL", "autospec-claim-test@localhost")
+            .env("GIT_COMMITTER_NAME", "Autospec Claim Test")
+            .env("GIT_COMMITTER_EMAIL", "autospec-claim-test@localhost")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped());
+        if let Some(parent) = parent.as_deref() {
+            command.args(["-p", parent]);
+        }
+        let mut child = command.spawn().expect("create claim ledger commit");
+        write!(
+            child.stdin.take().expect("claim commit stdin"),
+            "autospec-claim-ledger-v1\ngeneration=fixture-{}\n\n{}\n",
+            TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+            record.to_marked_comment()
+        )
+        .expect("write claim ledger commit");
+        let output = child.wait_with_output().expect("claim commit output");
+        assert!(
+            output.status.success(),
+            "create claim commit: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        git_fixture(
+            &self.claim_repo,
+            &["push", remote, &format!("{oid}:{reference}")],
+        );
     }
 
     fn seed_malformed_claim(&self) {
@@ -3052,13 +3134,18 @@ exit 1
     }
 
     fn claim_record(&self) -> RunStateRecord {
-        let comments = parse_remote_comments_json(
-            &fs::read_to_string(&self.comments).expect("read claimed run-state comments"),
-        )
-        .expect("parse claimed run-state comments");
-        select_run_state(&comments, "test/repo", 42)
-            .expect("select claimed run-state")
-            .record
+        let message = git_fixture(
+            &self.root,
+            &[
+                "--git-dir",
+                self.claim_remote.to_str().expect("claim remote path"),
+                "show",
+                "-s",
+                "--format=%B",
+                "refs/autospec/claims/issue-42",
+            ],
+        );
+        parse_run_state_comment(&message).expect("parse authoritative claim ledger record")
     }
 
     fn state_path(&self) -> PathBuf {
@@ -3180,6 +3267,20 @@ fn temp_dir(prefix: &str) -> PathBuf {
     ));
     fs::create_dir_all(&path).expect("create fixture directory");
     path
+}
+
+fn git_fixture(directory: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(directory)
+        .output()
+        .expect("run Git fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn write_executable(path: &Path, contents: &str) {

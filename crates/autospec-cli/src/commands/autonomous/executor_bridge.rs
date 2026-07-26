@@ -1122,6 +1122,12 @@ struct DurableOutputReaders {
     coalesced_reported: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CompletionDrainOutcome {
+    Drained,
+    OwnershipLost,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct OutputCursor {
     generation: u64,
@@ -2765,7 +2771,12 @@ fn launch_and_supervise(
                     .map_err(|error| format!("observe executor child exit: {error}"))?;
                 if let Some(status) = status {
                     guard.child_mut().processes.terminate()?;
-                    readers.drain_after_completion(state_path, event_log, state)?;
+                    if readers.drain_after_completion(state_path, event_log, state, &mut renewal)?
+                        == CompletionDrainOutcome::OwnershipLost
+                    {
+                        record_claim_ownership_loss(state_path, event_log, state)?;
+                        return Ok(SupervisionOutcome::OwnershipLost);
+                    }
                     fail_launch_at("pre-verify")?;
                     if let Err(error) =
                         snapshot.verify(&state.identity.repository_path, &state.identity.branch)
@@ -2913,7 +2924,12 @@ fn supervise_adopted_process(
 
             if let Some(exit_code) = read_executor_exit_status(&sinks.exit_status)? {
                 guard.terminate()?;
-                readers.drain_after_completion(state_path, event_log, state)?;
+                if readers.drain_after_completion(state_path, event_log, state, &mut renewal)?
+                    == CompletionDrainOutcome::OwnershipLost
+                {
+                    record_claim_ownership_loss(state_path, event_log, state)?;
+                    return Ok(SupervisionOutcome::OwnershipLost);
+                }
                 snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
                 state.phase = if exit_code == 0 {
                     BridgePhase::ImplementationComplete
@@ -3213,7 +3229,30 @@ impl DurableOutputReaders {
         state_path: &Path,
         event_log: &Path,
         state: &mut PersistedInvocation,
-    ) -> Result<(), String> {
+        renewal: &mut ClaimRenewalSchedule,
+    ) -> Result<CompletionDrainOutcome, String> {
+        if renewal.is_enabled() {
+            match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)? {
+                BridgeClaimOwnership::Refreshed { ttl_seconds } => {
+                    renewal.mark_refreshed(ttl_seconds);
+                }
+                BridgeClaimOwnership::Lost => {
+                    return Ok(CompletionDrainOutcome::OwnershipLost);
+                }
+            }
+        }
+        #[cfg(test)]
+        if let Ok(marker) = std::env::var("AUTOSPEC_TEST_COMPLETION_DRAIN_MARKER") {
+            fs::write(marker, b"entered\n")
+                .map_err(|error| format!("write test completion drain marker: {error}"))?;
+        }
+        #[cfg(test)]
+        if let Ok(delay) = std::env::var("AUTOSPEC_TEST_COMPLETION_DRAIN_DELAY_MS") {
+            let delay = delay
+                .parse::<u64>()
+                .map_err(|_| "invalid test completion drain delay".to_string())?;
+            thread::sleep(Duration::from_millis(delay));
+        }
         let unread_bytes = self.streams.iter().try_fold(0_u64, |total, stream| {
             let writer = read_output_cursor(&stream.writer_cursor).map_err(|error| {
                 format!(
@@ -3238,12 +3277,22 @@ impl DurableOutputReaders {
             .saturating_add(self.streams.len() as u64 * 4)
             .saturating_add(4) as usize;
         for _ in 0..max_polls {
+            if renewal.is_due() {
+                match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)? {
+                    BridgeClaimOwnership::Refreshed { ttl_seconds } => {
+                        renewal.mark_refreshed(ttl_seconds);
+                    }
+                    BridgeClaimOwnership::Lost => {
+                        return Ok(CompletionDrainOutcome::OwnershipLost);
+                    }
+                }
+            }
             let progressed = self.poll()?;
             self.last_flush = Instant::now() - OUTPUT_HEARTBEAT_INTERVAL;
             self.flush_if_due(state_path, event_log, state, false)?;
             if !progressed {
                 self.flush_if_due(state_path, event_log, state, true)?;
-                return Ok(());
+                return Ok(CompletionDrainOutcome::Drained);
             }
         }
         Err("executor output drain exceeded the fixed ring bound".to_string())
@@ -6467,9 +6516,9 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_executor_bridge_stops_before_more_remote_work_after_claim_takeover() {
+    fn autonomous_executor_bridge_stops_completion_drain_after_ttl_one_claim_takeover() {
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
-        // Break caught: a long-running implementation continuing after its exact claim was replaced.
+        // Break caught: dense completion output crossing TTL after the exact claim was replaced.
         let fixture = GitFixture::new("supervise-claim-takeover");
         let mut state = supervision_state(&fixture);
         let snapshot =
@@ -6496,6 +6545,10 @@ mod tests {
             1,
         )
         .with_claim_id("claim-42");
+        assert!(
+            crate::commands::claim::advance_claim_ref_for_test(&fixture.repo, &claimed)
+                .expect("seed authoritative claim ref")
+        );
         fs::write(
             &comments,
             serde_json::json!([{
@@ -6565,6 +6618,8 @@ exit 19
         let takeover = format!("{takeover_link}\n{}", takeover_record.to_marked_comment());
         let original_path = std::env::var_os("PATH");
         let original_lease = std::env::var_os("AUTOSPEC_CLAIM_LEASE_SECONDS");
+        let original_claim_remote = std::env::var_os("AUTOSPEC_CLAIM_GIT_REMOTE");
+        let original_claim_state = std::env::var_os("AUTOSPEC_CLAIM_GIT_STATE_DIR");
         std::env::set_var(
             "PATH",
             format!(
@@ -6582,16 +6637,41 @@ exit 19
         std::env::set_var("AUTOSPEC_BRIDGE_TAKEOVER", &takeover);
         std::env::set_var("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0");
         std::env::set_var("AUTOSPEC_CLAIM_LEASE_SECONDS", "999999");
+        std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.root.join("remote.git"));
+        std::env::set_var(
+            "AUTOSPEC_CLAIM_GIT_STATE_DIR",
+            fixture.root.join("claim-state"),
+        );
+        std::env::set_var("AUTOSPEC_TEST_COMPLETION_DRAIN_DELAY_MS", "1100");
+        let drain_marker = fixture.root.join("completion-drain.entered");
+        std::env::set_var("AUTOSPEC_TEST_COMPLETION_DRAIN_MARKER", &drain_marker);
 
+        let takeover_repo = fixture.repo.clone();
+        let takeover_for_thread = takeover_record.clone();
+        let takeover_thread = std::thread::spawn(move || {
+            for _ in 0..500 {
+                if drain_marker.exists() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(drain_marker.exists(), "completion drain did not start");
+            crate::commands::claim::advance_claim_ref_for_test(&takeover_repo, &takeover_for_thread)
+                .expect("publish claim takeover")
+        });
         let outcome = super::supervise_harness_with_claim_renewal(
             &state_path,
             &event_log,
             &mut state,
-            &shell_invocation(&fixture.repo, "printf 'started\\n'; sleep 30"),
+            &shell_invocation(
+                &fixture.repo,
+                "yes x | head -c 32768; printf 'completion-marker\\n'",
+            ),
             &snapshot,
             supervision_config(2_000),
             Duration::from_millis(20),
         );
+        assert!(takeover_thread.join().expect("takeover publisher"));
 
         match original_path {
             Some(path) => std::env::set_var("PATH", path),
@@ -6601,12 +6681,22 @@ exit 19
             Some(value) => std::env::set_var("AUTOSPEC_CLAIM_LEASE_SECONDS", value),
             None => std::env::remove_var("AUTOSPEC_CLAIM_LEASE_SECONDS"),
         }
+        match original_claim_remote {
+            Some(value) => std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", value),
+            None => std::env::remove_var("AUTOSPEC_CLAIM_GIT_REMOTE"),
+        }
+        match original_claim_state {
+            Some(value) => std::env::set_var("AUTOSPEC_CLAIM_GIT_STATE_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_CLAIM_GIT_STATE_DIR"),
+        }
         for name in [
             "AUTOSPEC_BRIDGE_GH_LOG",
             "AUTOSPEC_BRIDGE_COMMENTS",
             "AUTOSPEC_BRIDGE_POSTS",
             "AUTOSPEC_BRIDGE_TAKEOVER",
             "AUTOSPEC_CLAIM_RETRY_SLEEP_MS",
+            "AUTOSPEC_TEST_COMPLETION_DRAIN_DELAY_MS",
+            "AUTOSPEC_TEST_COMPLETION_DRAIN_MARKER",
         ] {
             std::env::remove_var(name);
         }
@@ -6621,9 +6711,8 @@ exit 19
         let events = fs::read_to_string(event_log).expect("claim loss event");
         assert!(events.contains("\"event\":\"claim_ownership_lost\""));
         let calls = fs::read_to_string(gh_log).expect("claim gh calls");
-        assert_eq!(
-            calls.matches("issue\ncomment\n42").count(),
-            2,
+        assert!(
+            calls.matches("issue\ncomment\n42").count() >= 1,
             "authoritative ttl=1 must renew before env ttl=999999 expires: {calls}"
         );
         assert!(
