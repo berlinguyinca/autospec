@@ -85,6 +85,96 @@ struct SessionOptions {
     keep_alive: bool,
 }
 
+pub(crate) struct PreparedRuntimeSession {
+    inner: Option<PreparedRuntimeSessionInner>,
+}
+
+struct PreparedRuntimeSessionInner {
+    context: RuntimeContext,
+    state: RuntimeState,
+    plan: ResourcePlan,
+    session_lease: SessionLease,
+    bypassed: bool,
+}
+
+impl PreparedRuntimeSession {
+    pub(crate) fn session_id(&self) -> &str {
+        self.inner
+            .as_ref()
+            .expect("prepared runtime session is available before consumption")
+            .session_lease
+            .session_id()
+    }
+
+    pub(crate) fn run(mut self, command: &[String]) -> Result<(), CommandFailure> {
+        let inner = self
+            .inner
+            .take()
+            .expect("prepared runtime session can only run once");
+        run_session_command(
+            command,
+            &inner.context,
+            &inner.state,
+            &inner.plan,
+            inner.session_lease,
+            false,
+            inner.bypassed,
+        )
+    }
+}
+
+impl Drop for PreparedRuntimeSession {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.take() else {
+            return;
+        };
+        let _ = session::cleanup_session(
+            &inner.context,
+            &inner.state,
+            &inner.plan,
+            inner.session_lease,
+            true,
+        );
+    }
+}
+
+pub(crate) fn prepare_runtime_session(
+    repo: &Path,
+    mode: &str,
+    harness: &str,
+) -> Result<PreparedRuntimeSession, CommandFailure> {
+    let repo = canonical_repo(repo)?;
+    if selected_manifest(&repo).is_none() {
+        return Err(CommandFailure::diagnostic(
+            "runtime session preparation requires a runtime manifest",
+        ));
+    }
+    if whole_environment_disabled()? {
+        return Err(CommandFailure::diagnostic(
+            "runtime session preparation refuses disabled isolation",
+        ));
+    }
+    let invocation = invocation_isolation(&repo, mode)?;
+    let plan = invocation
+        .plan
+        .expect("enabled runtime invocation has a plan");
+    let context = context_from_plan(&repo, mode, &plan)?;
+    let environment_lease = EnvironmentLease::acquire(&context.environment_dir)?;
+    let state = provision_locked(&context, &plan, invocation.bypassed)?;
+    reset_session_signal_handlers();
+    let session_lease = SessionLease::register(&context.environment_dir, harness)?;
+    drop(environment_lease);
+    Ok(PreparedRuntimeSession {
+        inner: Some(PreparedRuntimeSessionInner {
+            context,
+            state,
+            plan,
+            session_lease,
+            bypassed: invocation.bypassed,
+        }),
+    })
+}
+
 #[derive(Debug, Clone)]
 struct DownOptions {
     options: Options,

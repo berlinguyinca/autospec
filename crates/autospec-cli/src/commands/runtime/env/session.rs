@@ -157,7 +157,7 @@ fn add_secondary_failure(
     )
 }
 
-fn cleanup_session(
+pub(super) fn cleanup_session(
     context: &RuntimeContext,
     state: &RuntimeState,
     plan: &ResourcePlan,
