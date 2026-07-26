@@ -3,7 +3,32 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub(crate) const CLAUDE_LOCAL_TOOLS: &str = "Read,Edit,Write,Glob,Grep";
+pub(crate) const CLAUDE_LOCAL_TOOLS: &str = concat!(
+    "Read,Edit,Write,Glob,Grep,",
+    "Bash(git status),Bash(git status *),Bash(git diff),Bash(git diff *),",
+    "Bash(git add *),Bash(git commit *),",
+    "Bash(cargo test),Bash(cargo test *),Bash(cargo check),Bash(cargo check *),",
+    "Bash(cargo clippy),Bash(cargo clippy *),",
+    "Bash(npm test),Bash(npm test *),Bash(npm run test),Bash(npm run test *),",
+    "Bash(pnpm test),Bash(pnpm test *),Bash(pnpm run test),Bash(pnpm run test *),",
+    "Bash(yarn test),Bash(yarn test *),Bash(yarn run test),Bash(yarn run test *),",
+    "Bash(go test),Bash(go test *),Bash(pytest),Bash(pytest *),",
+    "Bash(python -m pytest),Bash(python -m pytest *),",
+    "Bash(mvn test),Bash(mvn test *),Bash(./mvnw test),Bash(./mvnw test *),",
+    "Bash(gradle test),Bash(gradle test *),Bash(./gradlew test),",
+    "Bash(./gradlew test *),Bash(sbt test),Bash(sbt test *),",
+    "Bash(make test),Bash(make test *)"
+);
+pub(crate) const CLAUDE_FORBIDDEN_TOOLS: &str = concat!(
+    "Bash(git push),Bash(git push *),Bash(git fetch),Bash(git fetch *),",
+    "Bash(git pull),Bash(git pull *),Bash(git remote),Bash(git remote *),",
+    "Bash(git worktree),Bash(git worktree *),Bash(git branch),Bash(git branch *),",
+    "Bash(git checkout),Bash(git checkout *),Bash(git switch),Bash(git switch *),",
+    "Bash(git merge),Bash(git merge *),Bash(git rebase),Bash(git rebase *),",
+    "Bash(git reset),Bash(git reset *),Bash(git clean),Bash(git clean *),",
+    "Bash(git clone),Bash(git clone *),Bash(git init),Bash(git init *),",
+    "Bash(git commit *--amend*)"
+);
 const INVOCATION_SCHEMA: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -183,6 +208,8 @@ impl ResolvedHarness {
                     "acceptEdits".into(),
                     "--allowedTools".into(),
                     CLAUDE_LOCAL_TOOLS.into(),
+                    "--disallowedTools".into(),
+                    CLAUDE_FORBIDDEN_TOOLS.into(),
                     "--no-session-persistence".into(),
                     "--output-format".into(),
                     "text".into(),
@@ -234,13 +261,19 @@ fn safe_executable(path: &Path, env: &BTreeMap<String, OsString>) -> Result<Path
             .find(|candidate| candidate.is_file())
             .ok_or_else(|| format!("executor harness not found on PATH: {}", path.display()))?
     };
+    if temporary_path(&candidate, env) {
+        return Err(format!(
+            "executor harness is configured through temporary storage: {}",
+            candidate.display()
+        ));
+    }
     let canonical = fs::canonicalize(&candidate).map_err(|error| {
         format!(
             "canonicalize executor harness {}: {error}",
             candidate.display()
         )
     })?;
-    if canonical.starts_with(std::env::temp_dir()) {
+    if temporary_path(&canonical, env) {
         return Err(format!(
             "executor harness resolves through temporary storage: {}",
             canonical.display()
@@ -273,6 +306,16 @@ fn safe_executable(path: &Path, env: &BTreeMap<String, OsString>) -> Result<Path
         }
     }
     Ok(canonical)
+}
+
+fn temporary_path(path: &Path, env: &BTreeMap<String, OsString>) -> bool {
+    const TEMPORARY_ROOTS: [&str; 4] = ["/tmp", "/private/tmp", "/var/tmp", "/var/folders"];
+
+    TEMPORARY_ROOTS.iter().any(|root| path.starts_with(root))
+        || env
+            .get("TMPDIR")
+            .filter(|root| !root.is_empty())
+            .is_some_and(|root| path.starts_with(Path::new(root)))
 }
 
 fn alias_table_path(repo: &Path, env: &BTreeMap<String, OsString>) -> Result<PathBuf, String> {
@@ -582,7 +625,7 @@ mod tests {
 
     use super::{
         BridgeIdentity, BridgePhase, HarnessConfig, HarnessKind, PersistedInvocation,
-        ProcessIdentity, CLAUDE_LOCAL_TOOLS,
+        ProcessIdentity, CLAUDE_FORBIDDEN_TOOLS, CLAUDE_LOCAL_TOOLS,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -748,7 +791,8 @@ mod tests {
 
     #[test]
     fn autonomous_executor_bridge_builds_exact_claude_arguments() {
-        // Break caught: Claude receiving remote-capable tools or bypass-permission aliases.
+        // Break caught: Claude being unable to test/commit locally, or inheriting remote Git
+        // permissions from user/project settings.
         let root = test_root("claude-argv");
         let table = write_alias_table(&root, installed_aliases());
         let mut env = environment(&table);
@@ -777,6 +821,8 @@ mod tests {
                 "acceptEdits",
                 "--allowedTools",
                 CLAUDE_LOCAL_TOOLS,
+                "--disallowedTools",
+                CLAUDE_FORBIDDEN_TOOLS,
                 "--no-session-persistence",
                 "--output-format",
                 "text",
@@ -788,25 +834,218 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "--dangerously-skip-permissions"));
-        assert_eq!(CLAUDE_LOCAL_TOOLS, "Read,Edit,Write,Glob,Grep");
-        for forbidden in [
-            "Bash(git:*)",
-            "git push",
-            "git fetch",
-            "git remote",
-            "git worktree",
-            "git branch",
-            "Bash(cargo:*)",
-            "Bash(npm:*)",
-            "Bash(pnpm:*)",
-            "Bash(yarn:*)",
+        for required in [
+            "Read",
+            "Edit",
+            "Write",
+            "Glob",
+            "Grep",
+            "Bash(git status)",
+            "Bash(git status *)",
+            "Bash(git diff)",
+            "Bash(git diff *)",
+            "Bash(git add *)",
+            "Bash(git commit *)",
+            "Bash(cargo test)",
+            "Bash(cargo test *)",
+            "Bash(npm test)",
+            "Bash(npm test *)",
+            "Bash(pnpm test *)",
+            "Bash(yarn test *)",
+            "Bash(go test *)",
+            "Bash(pytest *)",
+            "Bash(python -m pytest *)",
         ] {
             assert!(
-                !CLAUDE_LOCAL_TOOLS.contains(forbidden),
-                "Claude local-only policy must reject {forbidden}"
+                CLAUDE_LOCAL_TOOLS.split(',').any(|tool| tool == required),
+                "Claude local-only policy must allow {required}"
+            );
+        }
+        for overly_broad in [
+            "Bash",
+            "Bash(git *)",
+            "Bash(cargo *)",
+            "Bash(npm *)",
+            "Bash(pnpm *)",
+            "Bash(yarn *)",
+        ] {
+            assert!(
+                !CLAUDE_LOCAL_TOOLS
+                    .split(',')
+                    .any(|tool| tool == overly_broad),
+                "Claude local-only policy must not broadly allow {overly_broad}"
+            );
+        }
+        for forbidden in [
+            "Bash(git push)",
+            "Bash(git push *)",
+            "Bash(git fetch)",
+            "Bash(git fetch *)",
+            "Bash(git pull)",
+            "Bash(git pull *)",
+            "Bash(git remote)",
+            "Bash(git remote *)",
+            "Bash(git worktree)",
+            "Bash(git worktree *)",
+            "Bash(git branch)",
+            "Bash(git branch *)",
+            "Bash(git checkout)",
+            "Bash(git checkout *)",
+            "Bash(git switch)",
+            "Bash(git switch *)",
+            "Bash(git merge *)",
+            "Bash(git rebase *)",
+        ] {
+            assert!(
+                CLAUDE_FORBIDDEN_TOOLS
+                    .split(',')
+                    .any(|tool| tool == forbidden),
+                "Claude local-only policy must explicitly deny {forbidden}"
             );
         }
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_every_temporary_dispatcher_root() {
+        // Break caught: the Rust bridge accepting a dispatcher that the shared shell resolver
+        // rejects, especially /var/tmp and an operator-supplied TMPDIR.
+        use super::temporary_path;
+
+        let mut env = BTreeMap::new();
+        env.insert(
+            "TMPDIR".to_string(),
+            OsString::from("/safe/operator-temporary"),
+        );
+
+        for denied in [
+            "/tmp/codex",
+            "/private/tmp/codex",
+            "/var/tmp/codex",
+            "/var/folders/session/codex",
+            "/safe/operator-temporary/codex",
+        ] {
+            assert!(
+                temporary_path(Path::new(denied), &env),
+                "{denied} must be treated as temporary"
+            );
+        }
+        for allowed in [
+            "/tmp-safe/codex",
+            "/private/tmp-safe/codex",
+            "/var/tmp-safe/codex",
+            "/var/folders-safe/codex",
+            "/safe/operator-temporary-safe/codex",
+        ] {
+            assert!(
+                !temporary_path(Path::new(allowed), &env),
+                "{allowed} must not match a temporary prefix accidentally"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_checks_temporary_candidate_before_canonicalization() {
+        // Break caught: a symlink placed in temporary storage being accepted because its target
+        // is an otherwise safe executable.
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let safe_root = PathBuf::from(std::env::var_os("HOME").expect("HOME for test fixture"))
+            .join(".autospec/test-fixtures")
+            .join(format!(
+                "executor-safe-target-{}-{sequence}",
+                std::process::id()
+            ));
+        fs::create_dir_all(&safe_root).expect("create safe target root");
+        let safe_target = safe_root.join("codex");
+        fs::write(&safe_target, "#!/bin/sh\nexit 0\n").expect("write safe target");
+        fs::set_permissions(&safe_target, fs::Permissions::from_mode(0o755))
+            .expect("make safe target executable");
+
+        let var_tmp_root = PathBuf::from("/var/tmp").join(format!(
+            "autospec-executor-candidate-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&var_tmp_root).expect("create /var/tmp candidate root");
+        let var_tmp_link = var_tmp_root.join("codex");
+        symlink(&safe_target, &var_tmp_link).expect("link temporary candidate to safe target");
+
+        let custom_tmp = safe_root.join("operator-tmp");
+        fs::create_dir_all(&custom_tmp).expect("create supplied TMPDIR");
+        let custom_tmp_link = custom_tmp.join("claude");
+        symlink(&safe_target, &custom_tmp_link).expect("link TMPDIR candidate to safe target");
+        let env = BTreeMap::from([("TMPDIR".to_string(), custom_tmp.as_os_str().to_os_string())]);
+
+        for candidate in [&var_tmp_link, &custom_tmp_link] {
+            let error = super::safe_executable(candidate, &env)
+                .expect_err("temporary candidate must fail before canonicalization");
+            assert!(error.contains("temporary"), "unexpected error: {error}");
+        }
+
+        let _ = fs::remove_dir_all(var_tmp_root);
+        let _ = fs::remove_dir_all(safe_root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_checks_temporary_target_after_canonicalization() {
+        // Break caught: a safe-looking configured path resolving to an executable in /var/tmp.
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let safe_root = PathBuf::from(std::env::var_os("HOME").expect("HOME for test fixture"))
+            .join(".autospec/test-fixtures")
+            .join(format!(
+                "executor-safe-candidate-{}-{sequence}",
+                std::process::id()
+            ));
+        fs::create_dir_all(&safe_root).expect("create safe candidate root");
+
+        let var_tmp_root = PathBuf::from("/var/tmp").join(format!(
+            "autospec-executor-target-{}-{sequence}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&var_tmp_root).expect("create /var/tmp target root");
+        let temporary_target = var_tmp_root.join("codex");
+        fs::write(&temporary_target, "#!/bin/sh\nexit 0\n").expect("write temporary target");
+        fs::set_permissions(&temporary_target, fs::Permissions::from_mode(0o755))
+            .expect("make temporary target executable");
+        let var_tmp_link = safe_root.join("codex");
+        symlink(&temporary_target, &var_tmp_link).expect("link safe candidate to /var/tmp target");
+
+        let custom_tmp_root =
+            PathBuf::from(std::env::var_os("HOME").expect("HOME for supplied TMPDIR fixture"))
+                .join(".autospec/test-fixtures")
+                .join(format!(
+                    "executor-custom-tmp-target-{}-{sequence}",
+                    std::process::id()
+                ));
+        fs::create_dir_all(&custom_tmp_root).expect("create supplied TMPDIR target root");
+        let custom_tmp_target = custom_tmp_root.join("claude");
+        fs::write(&custom_tmp_target, "#!/bin/sh\nexit 0\n").expect("write supplied TMPDIR target");
+        fs::set_permissions(&custom_tmp_target, fs::Permissions::from_mode(0o755))
+            .expect("make supplied TMPDIR target executable");
+        let custom_tmp_link = safe_root.join("claude");
+        symlink(&custom_tmp_target, &custom_tmp_link)
+            .expect("link safe candidate to supplied TMPDIR target");
+
+        let custom_env = BTreeMap::from([(
+            "TMPDIR".to_string(),
+            custom_tmp_root.as_os_str().to_os_string(),
+        )]);
+        let empty_env = BTreeMap::new();
+        for (candidate, env) in [(&var_tmp_link, &empty_env), (&custom_tmp_link, &custom_env)] {
+            let error = super::safe_executable(candidate, env)
+                .expect_err("temporary canonical target must fail closed");
+            assert!(error.contains("temporary"), "unexpected error: {error}");
+        }
+
+        let _ = fs::remove_dir_all(safe_root);
+        let _ = fs::remove_dir_all(var_tmp_root);
+        let _ = fs::remove_dir_all(custom_tmp_root);
     }
 
     #[test]
