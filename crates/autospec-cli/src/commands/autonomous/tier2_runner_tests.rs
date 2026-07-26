@@ -1,12 +1,6 @@
 use std::time::Duration;
 
 use autospec_core::autonomous::tier2::{Tier2FailureCode, Tier2Stage};
-#[cfg(unix)]
-use nix::errno::Errno;
-#[cfg(unix)]
-use nix::sys::signal::kill;
-#[cfg(unix)]
-use nix::unistd::Pid;
 
 use super::tier2_receipts_tests::collector;
 use super::tier2_runner::{
@@ -194,7 +188,43 @@ fn bounded_child_kills_a_timed_out_process_group() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn process_is_running(pid: i32) -> bool {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) => panic!("read process state for PID {pid}: {error}"),
+    };
+    let close = stat.rfind(')').expect("process stat command terminator");
+    !matches!(
+        stat[close + 1..]
+            .split_whitespace()
+            .next()
+            .expect("process stat state"),
+        "Z" | "X" | "x"
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_running_probe_rejects_zombies_without_hiding_live_children() {
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("30")
+        .spawn()
+        .expect("spawn live probe fixture");
+    assert!(
+        process_is_running(child.id() as i32),
+        "live sleep was classified as terminated"
+    );
+    child.kill().expect("terminate live probe fixture");
+    child.wait().expect("reap live probe fixture");
+    assert!(
+        !process_is_running(child.id() as i32),
+        "reaped sleep was classified as running"
+    );
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn bounded_child_kills_descendants_in_its_process_group() {
     let child_pid_path = std::env::temp_dir().join(format!(
@@ -217,20 +247,19 @@ fn bounded_child_kills_descendants_in_its_process_group() {
         .expect("child records descendant pid")
         .parse::<i32>()
         .expect("descendant pid is numeric");
-    let mut probe = kill(Pid::from_raw(descendant), None);
+    let mut running = process_is_running(descendant);
     for _ in 0..100 {
-        if probe == Err(Errno::ESRCH) {
+        if !running {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
-        probe = kill(Pid::from_raw(descendant), None);
+        running = process_is_running(descendant);
     }
     let _ = std::fs::remove_file(child_pid_path);
 
-    assert_eq!(
-        probe,
-        Err(Errno::ESRCH),
-        "descendant survived process-group cleanup"
+    assert!(
+        !running,
+        "descendant remained in a running process state after process-group cleanup"
     );
 }
 
