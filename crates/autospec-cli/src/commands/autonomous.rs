@@ -1547,30 +1547,50 @@ fn supervise(options: Options) -> Result<(), String> {
         iteration += 1;
         let layout = RunLayout::new(&options)?;
         let recorded = read_unit("conductor", &layout);
-        let watched_pid = if options.pid.is_empty() {
-            recorded.pid.as_str()
+        let mut watched_pid = if options.pid.is_empty() {
+            recorded.pid.clone()
         } else {
-            options.pid.as_str()
+            options.pid.clone()
         };
-        let conductor_running = process_alive(watched_pid);
+        let mut conductor_running = process_alive(&watched_pid);
+        let mut action = if options.pid.is_empty() && recorded.stale_pid {
+            "stale-metadata".to_string()
+        } else if !watched_pid.is_empty() && !conductor_running {
+            "conductor-not-running".to_string()
+        } else {
+            "none".to_string()
+        };
+        let repairable = options.pid.is_empty()
+            && !conductor_running
+            && layout.state_dir.join("launch.json").is_file();
+        if repairable {
+            if persisted_stop_mode(&layout)?.is_some() {
+                action = "stop-requested".to_string();
+            } else {
+                match repair_stopped_conductor(&layout, &options, &recorded) {
+                    Ok(replacement) => {
+                        watched_pid = replacement.pid;
+                        conductor_running = true;
+                        action = "restarted-conductor".to_string();
+                    }
+                    Err(error) => {
+                        eprintln!("autospec-supervise: repair deferred: {error}");
+                        action = "repair-deferred".to_string();
+                    }
+                }
+            }
+        }
         let conductor = if conductor_running {
             "running"
         } else {
             "stopped"
-        };
-        let action = if options.pid.is_empty() && recorded.stale_pid {
-            "stale-metadata"
-        } else if !watched_pid.is_empty() && !conductor_running {
-            "conductor-not-running"
-        } else {
-            "none"
         };
         if options.json {
             println!(
                 "{{\"command\":\"autonomous\",\"subcommand\":\"supervise\",\"repo\":\"{}\",\"conductor\":\"{}\",\"pid\":\"{}\",\"action\":\"{}\"}}",
                 json_escape(&options.repo),
                 conductor,
-                json_escape(watched_pid),
+                json_escape(&watched_pid),
                 action
             );
         } else {
@@ -1585,6 +1605,42 @@ fn supervise(options: Options) -> Result<(), String> {
         thread::sleep(Duration::from_secs(options.interval_sec));
     }
     Ok(())
+}
+
+fn repair_stopped_conductor(
+    layout: &RunLayout,
+    options: &Options,
+    recorded: &UnitStatus,
+) -> Result<UnitRecord, String> {
+    if recorded.metadata_state == UnitMetadataState::Ambiguous {
+        return Err("conductor metadata is ambiguous".to_string());
+    }
+    // Clear stale records while the terminated owner's lease still fences new launches. If the
+    // lease were released first, another supervisor could publish replacement metadata here.
+    remove_stale_unit_metadata(recorded)?;
+    if !recorded.pid.is_empty() {
+        release_terminated_owner(layout, &recorded.pid)?;
+    }
+    let (lifecycle, lease) = acquire_lifecycle_start(layout, options, LifecycleTransition::Start)
+        .map_err(|error| error.into_command_failure().message)?;
+    let repaired = (|| {
+        create_launch_directories(layout).map_err(|error| error.message)?;
+        persist_lifecycle_decision(layout, &lifecycle)?;
+        let command = foreground_command(options)?;
+        spawn_unit(
+            "conductor",
+            &command,
+            &options.repo_dir,
+            layout,
+            &layout.log_dir,
+            log_override_for("conductor", options),
+            Some(lease.token()),
+        )
+    })();
+    if repaired.is_err() {
+        release_launch_lease(&layout.repo, &lease).map_err(|error| error.message)?;
+    }
+    repaired
 }
 
 fn status(options: Options) -> Result<(), CommandFailure> {
@@ -1906,7 +1962,9 @@ fn remove_stale_unit_metadata(unit: &UnitStatus) -> Result<usize, String> {
         return Ok(0);
     }
     let mut removed = 0;
-    for path in [&unit.pid_file, &unit.logpath_file] {
+    // Preserve the PID until secondary metadata is gone so a partial cleanup remains safely
+    // classifiable as stale and can be retried.
+    for path in [&unit.logpath_file, &unit.pid_file] {
         if path.exists() {
             fs::remove_file(path)
                 .map_err(|error| format!("cannot remove {}: {error}", path.display()))?;
@@ -4241,19 +4299,27 @@ fn launch_commands(options: &Options) -> Result<LaunchCommands, String> {
 }
 
 fn companion_command(options: &Options, subcommand: &str) -> Result<ForegroundCommand, String> {
+    let mut args = vec![
+        "autonomous".to_string(),
+        subcommand.to_string(),
+        "--repo".to_string(),
+        options.repo.clone(),
+        "--repo-dir".to_string(),
+        options.repo_dir.clone(),
+        "--interval-sec".to_string(),
+        options.interval_sec.to_string(),
+    ];
+    if subcommand == "supervise" {
+        args.extend(conductor_passthrough_args(options));
+        if !options.log_path.is_empty() {
+            args.push("--log".to_string());
+            args.push(options.log_path.clone());
+        }
+    }
     Ok(ForegroundCommand {
         program: std::env::current_exe()
             .map_err(|error| format!("cannot resolve autonomous executable: {error}"))?,
-        args: vec![
-            "autonomous".to_string(),
-            subcommand.to_string(),
-            "--repo".to_string(),
-            options.repo.clone(),
-            "--repo-dir".to_string(),
-            options.repo_dir.clone(),
-            "--interval-sec".to_string(),
-            options.interval_sec.to_string(),
-        ],
+        args,
     })
 }
 
