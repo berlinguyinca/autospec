@@ -183,6 +183,21 @@ fn foreground_source_has_no_legacy_shell_authority() {
     assert!(source.contains("executor-result"));
     assert!(source.contains("ExecutorRequest"));
 
+    let bridge = fs::read_to_string(
+        workspace_root().join("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs"),
+    )
+    .expect("read executor bridge source");
+    for native_contract in [
+        "provision_issue_worktree",
+        "recover_invocation",
+        "runtime_session_adapter",
+    ] {
+        assert!(
+            bridge.contains(native_contract),
+            "executor bridge must own {native_contract}"
+        );
+    }
+
     let coordinator = fs::read_to_string(
         workspace_root()
             .join("crates/autospec-cli/src/commands/autonomous/waterfall_coordinator.rs"),

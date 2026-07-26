@@ -1,8 +1,14 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use autospec_core::autonomous::waterfall::sha256_hex;
+use yaml_edit::Document;
 pub(crate) const CLAUDE_BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,Bash";
 pub(crate) const CLAUDE_LOCAL_TOOLS: &str = concat!(
     "Read,Edit,Write,Glob,Grep,",
@@ -31,6 +37,7 @@ pub(crate) const CLAUDE_FORBIDDEN_TOOLS: &str = concat!(
     "Bash(git commit *--amend*)"
 );
 const INVOCATION_SCHEMA: u32 = 1;
+static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum HarnessKind {
@@ -627,6 +634,509 @@ fn optional_number(object: &JsonObject, field: &str) -> Result<Option<u64>, Stri
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedBase {
+    pub(crate) base_ref: String,
+    pub(crate) base_oid: String,
+    pub(crate) explore_mode: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct IssueWorktree {
+    pub(crate) path: PathBuf,
+    pub(crate) branch: String,
+    pub(crate) base_ref: String,
+    pub(crate) base_oid: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeSessionAdapter {
+    pub(crate) repo: PathBuf,
+    pub(crate) mode: String,
+    pub(crate) session_id: String,
+}
+
+impl RuntimeSessionAdapter {
+    pub(crate) fn command_args(&self, command: &[String]) -> Vec<String> {
+        let mut args = vec![
+            "env".to_string(),
+            "session".to_string(),
+            "--repo".to_string(),
+            self.repo.display().to_string(),
+            "--mode".to_string(),
+            self.mode.clone(),
+            "--".to_string(),
+        ];
+        args.extend(command.iter().cloned());
+        args
+    }
+
+    pub(crate) fn run(
+        &self,
+        command: &[String],
+    ) -> Result<(), crate::commands::CommandFailure> {
+        crate::commands::runtime::run(&self.command_args(command))
+    }
+}
+
+pub(crate) fn resolve_base(
+    repo: &Path,
+    env: &BTreeMap<String, OsString>,
+) -> Result<ResolvedBase, String> {
+    let explore_path = repo.join(".autospec/explore-mode.json");
+    if explore_path.exists() {
+        if !explore_path.is_file() {
+            return Err("executor explore-mode path is not a regular file".to_string());
+        }
+        let value: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&explore_path)
+                .map_err(|error| format!("read explore mode: {error}"))?,
+        )
+        .map_err(|error| format!("invalid explore mode JSON: {error}"))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "explore mode must be an object".to_string())?;
+        let branch = object
+            .get("branch")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "explore mode branch is required".to_string())?;
+        let recorded_oid = object
+            .get("head_sha")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "explore mode head_sha is required".to_string())?;
+        validate_branch(branch)?;
+        if protected_main_branch(branch) {
+            return Err("executor explore mode may not target main".to_string());
+        }
+        let selected = fetch_and_resolve_base(repo, branch, true)?;
+        if selected.base_oid != recorded_oid {
+            return Err(format!(
+                "executor explore head mismatch: recorded {recorded_oid}, observed {}",
+                selected.base_oid
+            ));
+        }
+        return Ok(selected);
+    }
+
+    if let Some(branch) = env
+        .get("AUTOSPEC_BASE_BRANCH")
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+    {
+        return fetch_and_resolve_base(repo, branch.trim(), false);
+    }
+    if let Some(branch) = configured_base_branch(repo)? {
+        return fetch_and_resolve_base(repo, &branch, false);
+    }
+    let reference = git_stdout(
+        repo,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    )?;
+    let branch = reference
+        .strip_prefix("refs/remotes/origin/")
+        .ok_or_else(|| format!("unexpected remote default reference: {reference}"))?;
+    fetch_and_resolve_base(repo, branch, false)
+}
+
+fn configured_base_branch(repo: &Path) -> Result<Option<String>, String> {
+    let path = repo.join(".autospec/autospec.yml");
+    if !path.exists() {
+        return Ok(None);
+    }
+    let body =
+        fs::read_to_string(&path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let document = Document::from_str(&body)
+        .map_err(|error| format!("invalid {}: {error}", path.display()))?;
+    let root = document
+        .as_mapping()
+        .ok_or_else(|| format!("{} must contain a YAML mapping", path.display()))?;
+    let Some(git) = root.get("git") else {
+        return Ok(None);
+    };
+    let git = git
+        .as_mapping()
+        .ok_or_else(|| "autospec git configuration must be a mapping".to_string())?;
+    let Some(branch) = git.get("base_branch") else {
+        return Ok(None);
+    };
+    let branch = branch
+        .as_scalar()
+        .ok_or_else(|| "git.base_branch must be a scalar".to_string())?
+        .as_string();
+    if branch.trim().is_empty() {
+        return Err("git.base_branch must not be empty".to_string());
+    }
+    Ok(Some(branch))
+}
+
+fn fetch_and_resolve_base(
+    repo: &Path,
+    branch: &str,
+    explore_mode: bool,
+) -> Result<ResolvedBase, String> {
+    validate_branch(branch)?;
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    let fetch_refspec = format!("refs/heads/{branch}:{remote_ref}");
+    git(repo, &["fetch", "--quiet", "origin", &fetch_refspec])?;
+    let base_oid = git_stdout(repo, &["rev-parse", "--verify", &format!("{remote_ref}^{{commit}}")])?;
+    Ok(ResolvedBase {
+        base_ref: format!("origin/{branch}"),
+        base_oid,
+        explore_mode,
+    })
+}
+
+fn validate_branch(branch: &str) -> Result<(), String> {
+    if branch.trim() != branch || branch.is_empty() || branch.starts_with('-') {
+        return Err(format!("invalid executor base branch: {branch}"));
+    }
+    git(
+        Path::new("."),
+        &["check-ref-format", "--branch", branch],
+    )
+    .map_err(|_| format!("invalid executor base branch: {branch}"))
+}
+
+fn protected_main_branch(branch: &str) -> bool {
+    matches!(branch, "main" | "master" | "origin/main" | "origin/master")
+}
+
+pub(crate) fn provision_issue_worktree(
+    repo: &Path,
+    repository_scope: &str,
+    issue: u64,
+    base: &ResolvedBase,
+) -> Result<IssueWorktree, String> {
+    let canonical_repo =
+        fs::canonicalize(repo).map_err(|error| format!("canonicalize repository: {error}"))?;
+    let scope = safe_scope(repository_scope)?;
+    let branch = format!("feat/autonomous-issue-{issue}");
+    let scope_root = PathBuf::from("/tmp/autospec-executor").join(scope);
+    ensure_private_directory(&scope_root)?;
+    let path = scope_root.join(format!("issue-{issue}"));
+    reject_symlink_path(&path)?;
+
+    if path.exists() {
+        validate_existing_worktree(&canonical_repo, &path, &branch, &scope_root)?;
+    } else {
+        if git_ref_exists(&canonical_repo, &format!("refs/heads/{branch}"))? {
+            return Err(format!(
+                "executor branch already exists outside the expected worktree: {branch}"
+            ));
+        }
+        git(
+            &canonical_repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                &branch,
+                path.to_str()
+                    .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
+                &base.base_oid,
+            ],
+        )?;
+        validate_existing_worktree(&canonical_repo, &path, &branch, &scope_root)?;
+    }
+    Ok(IssueWorktree {
+        path,
+        branch,
+        base_ref: base.base_ref.clone(),
+        base_oid: base.base_oid.clone(),
+    })
+}
+
+fn safe_scope(scope: &str) -> Result<String, String> {
+    let sanitized: String = scope
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        return Err("executor repository scope is invalid".to_string());
+    }
+    let digest = sha256_hex(scope.as_bytes());
+    Ok(format!("{sanitized}-{}", &digest[..12]))
+}
+
+fn ensure_private_directory(path: &Path) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    fs::create_dir_all(path)
+        .map_err(|error| format!("create executor directory {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("secure executor directory {}: {error}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn reject_symlink_path(path: &Path) -> Result<(), String> {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "executor path contains a symlink: {}",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect executor path {}: {error}",
+                    current.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_existing_worktree(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    scope_root: &Path,
+) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    let canonical = fs::canonicalize(path)
+        .map_err(|error| format!("canonicalize executor worktree: {error}"))?;
+    if canonical != path {
+        return Err(format!(
+            "executor worktree path is not canonical: {}",
+            path.display()
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let owner = fs::metadata(scope_root)
+            .map_err(|error| format!("read executor root owner: {error}"))?
+            .uid();
+        let worktree_owner = fs::metadata(path)
+            .map_err(|error| format!("read executor worktree owner: {error}"))?
+            .uid();
+        if owner != worktree_owner {
+            return Err("executor worktree owner does not match its private root".to_string());
+        }
+    }
+    let registered = registered_worktree_paths(repo)?;
+    if !registered.iter().any(|registered| registered == &canonical) {
+        return Err(format!(
+            "executor path is not an attached repository worktree: {}",
+            path.display()
+        ));
+    }
+    let observed_branch = git_stdout(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    if observed_branch != branch {
+        return Err(format!(
+            "executor worktree branch mismatch: expected {branch}, observed {observed_branch}"
+        ));
+    }
+    if !git_stdout(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
+        return Err("executor worktree is dirty and cannot be adopted".to_string());
+    }
+    Ok(())
+}
+
+fn registered_worktree_paths(repo: &Path) -> Result<Vec<PathBuf>, String> {
+    let body = git_stdout(repo, &["worktree", "list", "--porcelain"])?;
+    body.lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .map(|path| {
+            fs::canonicalize(path)
+                .map_err(|error| format!("canonicalize registered worktree {path}: {error}"))
+        })
+        .collect()
+}
+
+fn git_ref_exists(repo: &Path, reference: &str) -> Result<bool, String> {
+    let status = Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", reference])
+        .current_dir(repo)
+        .status()
+        .map_err(|error| format!("run git show-ref: {error}"))?;
+    Ok(status.success())
+}
+
+pub(crate) fn runtime_session_adapter(
+    worktree: &Path,
+) -> Result<Option<RuntimeSessionAdapter>, String> {
+    let autospec_manifest = worktree.join(".autospec/runtime.yml");
+    let agent_manifest = worktree.join(".agent-runtime.yml");
+    let manifest = if autospec_manifest.exists() {
+        autospec_manifest
+    } else if agent_manifest.exists() {
+        agent_manifest
+    } else {
+        return Ok(None);
+    };
+    reject_symlink_path(&manifest)?;
+    if !manifest.is_file() {
+        return Err(format!(
+            "runtime manifest is not a regular file: {}",
+            manifest.display()
+        ));
+    }
+    let canonical = fs::canonicalize(worktree)
+        .map_err(|error| format!("canonicalize runtime worktree: {error}"))?;
+    let session_id = sha256_hex(canonical.to_string_lossy().as_bytes());
+    Ok(Some(RuntimeSessionAdapter {
+        repo: canonical,
+        mode: "auto".to_string(),
+        session_id,
+    }))
+}
+
+pub(crate) fn write_invocation_atomic(
+    path: &Path,
+    invocation: &PersistedInvocation,
+) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "invocation path requires a parent".to_string())?;
+    ensure_private_directory(parent)?;
+    let sequence = INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_file_name(format!(
+        ".{}.{}.{}.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("invocation"),
+        std::process::id(),
+        sequence
+    ));
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("create invocation temporary file: {error}"))?;
+    let result = (|| {
+        file.write_all(invocation.to_json()?.as_bytes())
+            .map_err(|error| format!("write invocation state: {error}"))?;
+        file.write_all(b"\n")
+            .map_err(|error| format!("write invocation newline: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync invocation state: {error}"))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| format!("publish invocation state: {error}"))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+pub(crate) fn recover_invocation(
+    path: &Path,
+    expected: &BridgeIdentity,
+) -> Result<Option<PersistedInvocation>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    reject_symlink_path(path)?;
+    let invocation = PersistedInvocation::from_json(
+        &fs::read_to_string(path).map_err(|error| format!("read invocation state: {error}"))?,
+    )?;
+    if &invocation.identity != expected {
+        return Err("persisted invocation identity does not match the current claim".to_string());
+    }
+    if invocation.terminal_result.is_some() {
+        return Err("terminal invocation is not recoverable as active work".to_string());
+    }
+    let scope_root = invocation
+        .identity
+        .worktree
+        .parent()
+        .ok_or_else(|| "persisted worktree has no private root".to_string())?;
+    validate_recovery_worktree(
+        &invocation.identity.worktree,
+        &invocation.identity.branch,
+        scope_root,
+    )?;
+    let observed_base = git_stdout(
+        &invocation.identity.worktree,
+        &["rev-parse", "--verify", &format!("{}^{{commit}}", invocation.identity.base_ref)],
+    )?;
+    if observed_base != invocation.identity.base_oid {
+        return Err("persisted invocation base identity no longer matches".to_string());
+    }
+    Ok(Some(invocation))
+}
+
+fn validate_recovery_worktree(path: &Path, branch: &str, scope_root: &Path) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if fs::metadata(path)
+            .map_err(|error| format!("read recovery worktree metadata: {error}"))?
+            .uid()
+            != fs::metadata(scope_root)
+                .map_err(|error| format!("read recovery scope metadata: {error}"))?
+                .uid()
+        {
+            return Err("recovery worktree owner mismatch".to_string());
+        }
+    }
+    let observed_branch = git_stdout(path, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    if observed_branch != branch {
+        return Err("recovery worktree branch mismatch".to_string());
+    }
+    if !git_stdout(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
+        return Err("recovery worktree is not clean".to_string());
+    }
+    Ok(())
+}
+
+fn git(repo: &Path, args: &[&str]) -> Result<(), String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .map_err(|error| format!("run git {args:?}: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .output()
+        .map_err(|error| format!("run git {args:?}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8(output.stdout)
+        .map_err(|error| format!("git output is not UTF-8: {error}"))?
+        .trim()
+        .to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -634,10 +1144,13 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::process::Command;
 
     use super::{
-        BridgeIdentity, BridgePhase, HarnessConfig, HarnessKind, PersistedInvocation,
-        ProcessIdentity, CLAUDE_BUILTIN_TOOLS, CLAUDE_FORBIDDEN_TOOLS, CLAUDE_LOCAL_TOOLS,
+        provision_issue_worktree, recover_invocation, resolve_base, runtime_session_adapter,
+        write_invocation_atomic, BridgeIdentity, BridgePhase, HarnessConfig, HarnessKind,
+        PersistedInvocation, ProcessIdentity, CLAUDE_BUILTIN_TOOLS, CLAUDE_FORBIDDEN_TOOLS,
+        CLAUDE_LOCAL_TOOLS,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -672,6 +1185,335 @@ mod tests {
         "claude\ttrue\t--dangerously-skip-permissions\tClaude Code\n\
          codex\tsh\t--yolo\tCodex CLI\n\
          opencode\tfalse\t\tOpenCode\n"
+    }
+
+    struct GitFixture {
+        root: PathBuf,
+        repo: PathBuf,
+    }
+
+    impl GitFixture {
+        fn new(label: &str) -> Self {
+            let root = test_root(label);
+            let remote = root.join("remote.git");
+            let seed = root.join("seed");
+            let repo = root.join("repo");
+            git(&root, &["init", "--bare", remote.to_str().expect("remote path")]);
+            git(&root, &["init", seed.to_str().expect("seed path")]);
+            git(&seed, &["config", "user.email", "autospec@example.invalid"]);
+            git(&seed, &["config", "user.name", "Autospec Test"]);
+            fs::write(seed.join("README.md"), "fixture\n").expect("write fixture");
+            git(&seed, &["add", "README.md"]);
+            git(&seed, &["commit", "-m", "fixture"]);
+            git(&seed, &["branch", "-M", "main"]);
+            git(
+                &seed,
+                &["remote", "add", "origin", remote.to_str().expect("remote path")],
+            );
+            git(&seed, &["push", "-u", "origin", "main"]);
+            git(
+                &root,
+                &[
+                    "--git-dir",
+                    remote.to_str().expect("remote path"),
+                    "symbolic-ref",
+                    "HEAD",
+                    "refs/heads/main",
+                ],
+            );
+            git(
+                &root,
+                &[
+                    "clone",
+                    remote.to_str().expect("remote path"),
+                    repo.to_str().expect("repo path"),
+                ],
+            );
+            git(&repo, &["config", "user.email", "autospec@example.invalid"]);
+            git(&repo, &["config", "user.name", "Autospec Test"]);
+            Self { root, repo }
+        }
+
+        fn branch(&self, branch: &str) -> String {
+            git(&self.repo, &["checkout", "-b", branch]);
+            let filename = format!("{}.txt", branch.replace('/', "_"));
+            fs::write(self.repo.join(filename), branch).expect("write branch file");
+            git(&self.repo, &["add", "."]);
+            git(&self.repo, &["commit", "-m", branch]);
+            git(&self.repo, &["push", "-u", "origin", branch]);
+            git(&self.repo, &["checkout", "main"]);
+            git_stdout(&self.repo, &["rev-parse", &format!("origin/{branch}")])
+        }
+    }
+
+    impl Drop for GitFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn git(directory: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(directory: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git UTF-8")
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_resolves_validated_base_precedence() {
+        let fixture = GitFixture::new("base-precedence");
+        let config_oid = fixture.branch("configured");
+        let env_oid = fixture.branch("environment");
+        let explore_oid = fixture.branch("autospec/explore-safe");
+        fs::create_dir_all(fixture.repo.join(".autospec")).expect("create config directory");
+        fs::write(
+            fixture.repo.join(".autospec/autospec.yml"),
+            "git:\n  base_branch: configured\n",
+        )
+        .expect("write base config");
+        let env = BTreeMap::from([(
+            "AUTOSPEC_BASE_BRANCH".to_string(),
+            OsString::from("environment"),
+        )]);
+
+        let selected = resolve_base(&fixture.repo, &env).expect("environment base");
+        assert_eq!(selected.base_ref, "origin/environment");
+        assert_eq!(selected.base_oid, env_oid);
+
+        fs::write(
+            fixture.repo.join(".autospec/explore-mode.json"),
+            format!(
+                "{{\"branch\":\"autospec/explore-safe\",\"slug\":\"safe\",\"base\":\"main\",\"head_sha\":\"{explore_oid}\",\"created_at\":\"now\"}}\n"
+            ),
+        )
+        .expect("write explore mode");
+        let selected = resolve_base(&fixture.repo, &env).expect("explore base");
+        assert_eq!(selected.base_ref, "origin/autospec/explore-safe");
+        assert_eq!(selected.base_oid, explore_oid);
+        assert!(selected.explore_mode);
+
+        fs::remove_file(fixture.repo.join(".autospec/explore-mode.json")).expect("remove explore");
+        let selected = resolve_base(&fixture.repo, &BTreeMap::new()).expect("configured base");
+        assert_eq!(selected.base_oid, config_oid);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_explore_main_and_unverified_head() {
+        let fixture = GitFixture::new("explore-reject");
+        fs::create_dir_all(fixture.repo.join(".autospec")).expect("create config directory");
+        for body in [
+            r#"{"branch":"main","head_sha":"0000000000000000000000000000000000000000"}"#,
+            r#"{"branch":"autospec/missing","head_sha":"0000000000000000000000000000000000000000"}"#,
+        ] {
+            fs::write(fixture.repo.join(".autospec/explore-mode.json"), body)
+                .expect("write invalid mode");
+            assert!(resolve_base(&fixture.repo, &BTreeMap::new()).is_err());
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_provisions_and_recovers_owned_worktree() {
+        let fixture = GitFixture::new("worktree");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!("owner_repo_{}", TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let worktree =
+            provision_issue_worktree(&fixture.repo, &scope, 42, &base).expect("provision worktree");
+        assert_eq!(worktree.branch, "feat/autonomous-issue-42");
+        assert!(worktree.path.starts_with("/tmp/autospec-executor"));
+        assert_eq!(
+            git_stdout(&worktree.path, &["rev-parse", "HEAD"]),
+            base.base_oid
+        );
+        let adopted =
+            provision_issue_worktree(&fixture.repo, &scope, 42, &base).expect("adopt worktree");
+        assert_eq!(adopted, worktree);
+
+        fs::write(worktree.path.join("dirty.txt"), "dirty").expect("dirty worktree");
+        assert!(provision_issue_worktree(&fixture.repo, &scope, 42, &base).is_err());
+        let _ = fs::remove_file(worktree.path.join("dirty.txt"));
+        git(&fixture.repo, &["worktree", "remove", worktree.path.to_str().unwrap()]);
+        let _ = fs::remove_dir_all(
+            worktree.path.parent().and_then(Path::parent).expect("scope root"),
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_foreign_symlink_and_detached_reuse() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = GitFixture::new("unsafe-reuse");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let foreign_scope =
+            format!("foreign_{}", TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let scope_path = PathBuf::from("/tmp/autospec-executor")
+            .join(super::safe_scope(&foreign_scope).expect("safe scope"));
+        fs::create_dir_all(&scope_path).expect("create scope");
+        fs::create_dir_all(fixture.root.join("foreign")).expect("create foreign directory");
+        symlink(fixture.root.join("foreign"), scope_path.join("issue-13"))
+            .expect("create foreign symlink");
+        assert!(
+            provision_issue_worktree(&fixture.repo, &foreign_scope, 13, &base).is_err(),
+            "symlinked foreign state must fail closed"
+        );
+        fs::remove_file(scope_path.join("issue-13")).expect("remove foreign symlink");
+        fs::create_dir(scope_path.join("issue-13")).expect("create unregistered directory");
+        assert!(
+            provision_issue_worktree(&fixture.repo, &foreign_scope, 13, &base).is_err(),
+            "unregistered foreign state must fail closed"
+        );
+        fs::remove_dir(scope_path.join("issue-13")).expect("remove foreign directory");
+        fs::remove_dir_all(&scope_path).expect("remove foreign scope");
+
+        let detached_scope =
+            format!("detached_{}", TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let worktree = provision_issue_worktree(&fixture.repo, &detached_scope, 14, &base)
+            .expect("provision worktree");
+        git(&worktree.path, &["checkout", "--detach"]);
+        assert!(
+            provision_issue_worktree(&fixture.repo, &detached_scope, 14, &base).is_err(),
+            "detached worktree must fail closed"
+        );
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                worktree.path.to_str().unwrap(),
+            ],
+        );
+        let _ = fs::remove_dir_all(worktree.path.parent().expect("detached scope"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_isolates_equal_issue_numbers_and_runtime_plans() {
+        let first = GitFixture::new("same-issue-first");
+        let second = GitFixture::new("same-issue-second");
+        let base_one = resolve_base(&first.repo, &BTreeMap::new()).expect("first base");
+        let base_two = resolve_base(&second.repo, &BTreeMap::new()).expect("second base");
+        let one = provision_issue_worktree(&first.repo, "owner_first", 7, &base_one)
+            .expect("first worktree");
+        let two = provision_issue_worktree(&second.repo, "owner_second", 7, &base_two)
+            .expect("second worktree");
+        assert_ne!(one.path, two.path);
+        assert_eq!(
+            runtime_session_adapter(&one.path).expect("no-manifest adapter"),
+            None
+        );
+        assert_eq!(
+            runtime_session_adapter(&two.path).expect("no-manifest adapter"),
+            None
+        );
+        fs::create_dir_all(one.path.join(".autospec")).expect("runtime config");
+        fs::write(one.path.join(".autospec/runtime.yml"), "version: 2\n")
+            .expect("runtime manifest");
+        fs::write(two.path.join(".agent-runtime.yml"), "version: 2\n")
+            .expect("second runtime manifest");
+        let adapter_one = runtime_session_adapter(&one.path)
+            .expect("valid runtime adapter")
+            .expect("manifest-backed runtime");
+        let adapter_two = runtime_session_adapter(&two.path)
+            .expect("valid second runtime adapter")
+            .expect("second manifest-backed runtime");
+        assert_eq!(adapter_one.mode, "auto");
+        assert_eq!(adapter_one.repo, one.path);
+        assert_ne!(adapter_one.session_id, adapter_two.session_id);
+        assert_eq!(
+            adapter_one.command_args(&["/usr/bin/true".to_string()]),
+            vec![
+                "env",
+                "session",
+                "--repo",
+                one.path.to_str().expect("worktree UTF-8"),
+                "--mode",
+                "auto",
+                "--",
+                "/usr/bin/true",
+            ]
+        );
+
+        fs::remove_file(one.path.join(".autospec/runtime.yml")).expect("remove runtime manifest");
+        fs::remove_dir(one.path.join(".autospec")).expect("remove runtime config");
+        fs::remove_file(two.path.join(".agent-runtime.yml")).expect("remove second manifest");
+        git(&first.repo, &["worktree", "remove", one.path.to_str().unwrap()]);
+        git(&second.repo, &["worktree", "remove", two.path.to_str().unwrap()]);
+        let _ = fs::remove_dir_all(one.path.parent().expect("first scope root"));
+        let _ = fs::remove_dir_all(two.path.parent().expect("second scope root"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_persists_nonterminal_recovery_atomically() {
+        let fixture = GitFixture::new("recovery");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!("owner_recovery_{}", TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed));
+        let worktree = provision_issue_worktree(&fixture.repo, &scope, 9, &base)
+            .expect("provision worktree");
+        let state_path = fixture.root.join("state/invocation.json");
+        let invocation = PersistedInvocation {
+            schema: super::INVOCATION_SCHEMA,
+            identity: BridgeIdentity {
+                repository: "owner/recovery".into(),
+                issue: 9,
+                worker_id: "worker".into(),
+                branch: worktree.branch.clone(),
+                claim_id: "claim".into(),
+                invocation_id: "invocation".into(),
+                base_ref: base.base_ref.clone(),
+                base_oid: base.base_oid.clone(),
+                worktree: worktree.path.clone(),
+                runtime_session_id: None,
+            },
+            harness: HarnessKind::Codex,
+            phase: BridgePhase::Implementing,
+            process: None,
+            progress_at: 1,
+            pr: None,
+            head_oid: None,
+            terminal_result: None,
+        };
+        write_invocation_atomic(&state_path, &invocation).expect("persist invocation");
+        let recovered = recover_invocation(&state_path, &invocation.identity)
+            .expect("recover invocation")
+            .expect("state exists");
+        assert_eq!(recovered, invocation);
+        assert!(fs::read_dir(state_path.parent().unwrap())
+            .expect("state directory")
+            .all(|entry| !entry.unwrap().file_name().to_string_lossy().ends_with(".tmp")));
+
+        let mut foreign = invocation.identity.clone();
+        foreign.claim_id = "takeover".into();
+        assert!(recover_invocation(&state_path, &foreign).is_err());
+        git(
+            &fixture.repo,
+            &["worktree", "remove", worktree.path.to_str().unwrap()],
+        );
+        let _ = fs::remove_dir_all(
+            worktree.path.parent().and_then(Path::parent).expect("scope root"),
+        );
     }
 
     #[test]
