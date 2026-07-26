@@ -756,16 +756,37 @@ pub(crate) fn build_implementer_prompt(
 pub(crate) struct MutationSnapshot {
     primary_branch: String,
     primary_head: String,
-    primary_status: String,
+    primary_status: Vec<u8>,
+    dirty_paths: BTreeMap<PathBuf, SnapshotNodeIdentity>,
     protected_refs: BTreeMap<String, String>,
     worktrees: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SnapshotNodeIdentity {
+    kind: SnapshotNodeKind,
+    mode: u32,
+    payload_sha256: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SnapshotNodeKind {
+    Missing,
+    RegularFile,
+    Symlink,
+    Directory,
+    Other,
 }
 
 impl MutationSnapshot {
     pub(crate) fn capture(repo: &Path, issue_branch: &str) -> Result<Self, String> {
         let primary_branch = git_stdout(repo, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
         let primary_head = git_stdout(repo, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-        let primary_status = git_stdout(repo, &["status", "--porcelain", "--untracked-files=all"])?;
+        let primary_status = git_bytes(
+            repo,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?;
+        let dirty_paths = dirty_path_identities(repo, &primary_status)?;
         let refs = git_stdout(
             repo,
             &[
@@ -787,6 +808,7 @@ impl MutationSnapshot {
             primary_branch,
             primary_head,
             primary_status,
+            dirty_paths,
             protected_refs,
             worktrees,
         })
@@ -805,6 +827,114 @@ impl MutationSnapshot {
                 .to_string())
         }
     }
+}
+
+fn dirty_path_identities(
+    repo: &Path,
+    porcelain: &[u8],
+) -> Result<BTreeMap<PathBuf, SnapshotNodeIdentity>, String> {
+    let mut identities = BTreeMap::new();
+    let mut fields = porcelain
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty());
+    while let Some(record) = fields.next() {
+        if record.len() < 4 || record[2] != b' ' {
+            return Err("git status returned a malformed porcelain record".to_string());
+        }
+        let status = [record[0], record[1]];
+        let path = snapshot_relative_path(&record[3..])?;
+        identities.insert(path.clone(), snapshot_node_identity(&repo.join(path))?);
+        if status.iter().any(|code| matches!(*code, b'R' | b'C')) {
+            let original = fields
+                .next()
+                .ok_or_else(|| "git status omitted a rename/copy source path".to_string())?;
+            let original = snapshot_relative_path(original)?;
+            identities.insert(
+                original.clone(),
+                snapshot_node_identity(&repo.join(original))?,
+            );
+        }
+    }
+    Ok(identities)
+}
+
+fn snapshot_relative_path(bytes: &[u8]) -> Result<PathBuf, String> {
+    if bytes.is_empty() {
+        return Err("git status returned an empty path".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(PathBuf::from(OsString::from_vec(bytes.to_vec())))
+    }
+    #[cfg(not(unix))]
+    {
+        let path = String::from_utf8(bytes.to_vec())
+            .map_err(|error| format!("git status path is not UTF-8: {error}"))?;
+        Ok(PathBuf::from(path))
+    }
+}
+
+fn snapshot_node_identity(path: &Path) -> Result<SnapshotNodeIdentity, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SnapshotNodeIdentity {
+                kind: SnapshotNodeKind::Missing,
+                mode: 0,
+                payload_sha256: None,
+            });
+        }
+        Err(error) => {
+            return Err(format!(
+                "inspect dirty primary path {}: {error}",
+                path.display()
+            ));
+        }
+    };
+    let file_type = metadata.file_type();
+    let (kind, payload_sha256) = if file_type.is_file() {
+        let contents = fs::read(path)
+            .map_err(|error| format!("read dirty primary path {}: {error}", path.display()))?;
+        (SnapshotNodeKind::RegularFile, Some(sha256_hex(&contents)))
+    } else if file_type.is_symlink() {
+        let target = fs::read_link(path)
+            .map_err(|error| format!("read dirty symlink {}: {error}", path.display()))?;
+        (
+            SnapshotNodeKind::Symlink,
+            Some(sha256_hex(&snapshot_os_bytes(target.as_os_str()))),
+        )
+    } else if file_type.is_dir() {
+        (SnapshotNodeKind::Directory, None)
+    } else {
+        (SnapshotNodeKind::Other, None)
+    };
+    Ok(SnapshotNodeIdentity {
+        kind,
+        mode: snapshot_mode(&metadata),
+        payload_sha256,
+    })
+}
+
+#[cfg(unix)]
+fn snapshot_os_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    value.as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn snapshot_os_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
+    value.to_string_lossy().as_bytes().to_vec()
+}
+
+#[cfg(unix)]
+fn snapshot_mode(metadata: &fs::Metadata) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    metadata.mode()
+}
+
+#[cfg(not(unix))]
+fn snapshot_mode(metadata: &fs::Metadata) -> u32 {
+    u32::from(metadata.permissions().readonly())
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -884,6 +1014,7 @@ enum LaunchFailpoint {
     None = 0,
     PersistAfterSpawn = 1,
     LogAfterSpawn = 2,
+    BeforeSnapshotVerification = 3,
 }
 
 #[cfg(test)]
@@ -900,6 +1031,7 @@ fn fail_launch_at(label: &str) -> Result<(), String> {
         let expected = match label {
             "persist" => LaunchFailpoint::PersistAfterSpawn,
             "log" => LaunchFailpoint::LogAfterSpawn,
+            "pre-verify" => LaunchFailpoint::BeforeSnapshotVerification,
             _ => LaunchFailpoint::None,
         };
         if LAUNCH_FAILPOINT.load(Ordering::SeqCst) == expected as u8
@@ -1390,6 +1522,17 @@ fn launch_and_supervise(
                     cleanup_owned_descendants(process.process_group)?;
                     readers.poll()?;
                     readers.flush_if_due(state_path, event_log, state, true)?;
+                    fail_launch_at("pre-verify")?;
+                    if let Err(error) =
+                        snapshot.verify(&state.identity.repository_path, &state.identity.branch)
+                    {
+                        state.phase = BridgePhase::Interrupted;
+                        state.process = None;
+                        state.progress_at = unix_now()?;
+                        write_invocation_atomic(state_path, state)?;
+                        append_executor_event(event_log, state, "protected_mutation", None)?;
+                        return Err(error);
+                    }
                     state.phase = if status.code == 0 {
                         BridgePhase::ImplementationComplete
                     } else {
@@ -1404,15 +1547,6 @@ fn launch_and_supervise(
                         "child_exited",
                         Some(serde_json::json!({"exit_code": status.code})),
                     )?;
-                    if let Err(error) =
-                        snapshot.verify(&state.identity.repository_path, &state.identity.branch)
-                    {
-                        state.phase = BridgePhase::Interrupted;
-                        state.progress_at = unix_now()?;
-                        write_invocation_atomic(state_path, state)?;
-                        append_executor_event(event_log, state, "protected_mutation", None)?;
-                        return Err(error);
-                    }
                     return Ok(SupervisionOutcome::Exited {
                         exit_code: status.code,
                     });
@@ -2826,6 +2960,13 @@ fn git(repo: &Path, args: &[&str]) -> Result<(), String> {
 }
 
 fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, String> {
+    Ok(String::from_utf8(git_bytes(repo, args)?)
+        .map_err(|error| format!("git output is not UTF-8: {error}"))?
+        .trim()
+        .to_string())
+}
+
+fn git_bytes(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .args(args)
         .current_dir(repo)
@@ -2837,10 +2978,7 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, String> {
             String::from_utf8_lossy(&output.stderr).trim()
         ));
     }
-    Ok(String::from_utf8(output.stdout)
-        .map_err(|error| format!("git output is not UTF-8: {error}"))?
-        .trim()
-        .to_string())
+    Ok(output.stdout)
 }
 
 #[cfg(test)]
@@ -2848,6 +2986,8 @@ mod tests {
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::fs::{self, File};
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -4725,6 +4865,206 @@ mod tests {
             error.contains("mutated the primary checkout"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_snapshot_seals_dirty_tracked_contents() {
+        let fixture = GitFixture::new("snapshot-dirty-tracked");
+        let tracked = fixture.repo.join("README.md");
+        fs::write(&tracked, "operator edit before launch\n").expect("dirty tracked file");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, "feat/autonomous-issue-42").expect("snapshot");
+
+        fs::write(&tracked, "executor replacement\n").expect("replace dirty tracked file");
+
+        assert!(
+            snapshot
+                .verify(&fixture.repo, "feat/autonomous-issue-42")
+                .is_err(),
+            "same porcelain status must not hide dirty tracked content replacement"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_snapshot_seals_untracked_contents() {
+        let fixture = GitFixture::new("snapshot-untracked");
+        let untracked = fixture.repo.join("operator-notes.txt");
+        fs::write(&untracked, "operator notes before launch\n").expect("untracked file");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, "feat/autonomous-issue-42").expect("snapshot");
+
+        fs::write(&untracked, "executor replacement\n").expect("replace untracked file");
+
+        assert!(
+            snapshot
+                .verify(&fixture.repo, "feat/autonomous-issue-42")
+                .is_err(),
+            "same porcelain status must not hide untracked content replacement"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_snapshot_seals_modes_symlink_targets_and_types() {
+        let fixture = GitFixture::new("snapshot-node-identity");
+        let tracked = fixture.repo.join("README.md");
+        fs::write(&tracked, "operator edit before launch\n").expect("dirty tracked file");
+        fs::set_permissions(&tracked, fs::Permissions::from_mode(0o744))
+            .expect("set dirty tracked mode");
+        let link = fixture.repo.join("operator-link");
+        symlink("operator-target-a", &link).expect("create untracked symlink");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, "feat/autonomous-issue-42").expect("snapshot");
+
+        fs::set_permissions(&tracked, fs::Permissions::from_mode(0o644))
+            .expect("change dirty tracked mode");
+        assert!(
+            snapshot
+                .verify(&fixture.repo, "feat/autonomous-issue-42")
+                .is_err(),
+            "mode-only changes must invalidate the snapshot"
+        );
+
+        fs::set_permissions(&tracked, fs::Permissions::from_mode(0o744))
+            .expect("restore captured dirty tracked mode");
+        let symlink_snapshot =
+            MutationSnapshot::capture(&fixture.repo, "feat/autonomous-issue-42").expect("snapshot");
+        fs::remove_file(&link).expect("remove untracked symlink");
+        symlink("operator-target-b", &link).expect("replace untracked symlink target");
+        assert!(
+            symlink_snapshot
+                .verify(&fixture.repo, "feat/autonomous-issue-42")
+                .is_err(),
+            "symlink-target-only changes must invalidate the snapshot"
+        );
+
+        let type_snapshot =
+            MutationSnapshot::capture(&fixture.repo, "feat/autonomous-issue-42").expect("snapshot");
+        fs::remove_file(&link).expect("remove symlink before type change");
+        fs::create_dir(&link).expect("replace symlink with directory");
+        assert!(
+            type_snapshot
+                .verify(&fixture.repo, "feat/autonomous-issue-42")
+                .is_err(),
+            "node type changes must invalidate the snapshot"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_snapshot_seals_deletion_and_same_status_type_change() {
+        let fixture = GitFixture::new("snapshot-deletion-type");
+        let node = fixture.repo.join("operator-node");
+        fs::write(&node, "operator bytes\n").expect("create untracked file");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, "feat/autonomous-issue-42").expect("snapshot");
+
+        fs::remove_file(&node).expect("remove untracked file");
+        symlink("operator-target", &node).expect("replace file with symlink");
+        assert!(
+            snapshot
+                .verify(&fixture.repo, "feat/autonomous-issue-42")
+                .is_err(),
+            "same untracked porcelain entry must not hide a node type change"
+        );
+
+        fs::remove_file(&node).expect("delete dirty path");
+        assert!(
+            snapshot
+                .verify(&fixture.repo, "feat/autonomous-issue-42")
+                .is_err(),
+            "deleting a pre-existing dirty path must invalidate the snapshot"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_mutation_failure_persists_only_interrupted() {
+        let fixture = GitFixture::new("snapshot-persist-interrupted");
+        let tracked = fixture.repo.join("README.md");
+        fs::write(&tracked, "operator edit before launch\n").expect("dirty tracked file");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+
+        let error = supervise_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &shell_invocation(
+                &fixture.repo,
+                "printf 'executor replacement\\n' > README.md",
+            ),
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect_err("dirty primary checkout mutation must fail closed");
+
+        assert!(error.contains("mutated the primary checkout"), "{error}");
+        let persisted = PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("persisted invocation"),
+        )
+        .expect("strict invocation");
+        assert_eq!(persisted.phase, BridgePhase::Interrupted);
+        assert!(persisted.process.is_none());
+        assert!(
+            !fs::read_to_string(&state_path)
+                .expect("state text")
+                .contains("\"phase\":\"implementation_complete\""),
+            "unverified completion must never be the durable recovery boundary"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_preverification_crash_never_publishes_complete() {
+        let fixture = GitFixture::new("snapshot-preverify-crash");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let invocation = shell_invocation(&fixture.repo, "exit 0");
+
+        super::set_launch_failpoint(super::LaunchFailpoint::BeforeSnapshotVerification);
+        let error = supervise_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &invocation,
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect_err("injected crash before snapshot verification");
+        super::set_launch_failpoint(super::LaunchFailpoint::None);
+
+        assert!(error.contains("pre-verify"), "{error}");
+        let mut recovered = PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("persisted invocation"),
+        )
+        .expect("strict invocation");
+        assert_eq!(recovered.phase, BridgePhase::Implementing);
+        assert!(recovered.process.is_some());
+
+        let recovery_error = supervise_harness(
+            &state_path,
+            &event_log,
+            &mut recovered,
+            &invocation,
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect_err("dead pre-verification process requires recovery");
+        assert!(
+            recovery_error.contains("recovery classification"),
+            "{recovery_error}"
+        );
+        let recovered_again = PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("recovered invocation"),
+        )
+        .expect("strict invocation");
+        assert_eq!(recovered_again.phase, BridgePhase::Interrupted);
+        assert!(recovered_again.process.is_none());
     }
 
     #[test]
