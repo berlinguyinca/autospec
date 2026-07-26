@@ -4418,6 +4418,8 @@ fn autonomous_implementer_wait_failure_requeues_exact_owner_with_bounded_comment
         )
         .env("AUTOSPEC_WAIT_STATE", &state)
         .env("AUTOSPEC_WAIT_LOG", &log)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", root.join("claim-remote.git"))
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", root.join("claim-state"))
         .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
         .output()
         .unwrap();
@@ -4566,6 +4568,8 @@ fn wait_failure_evidence_cannot_release_same_second_successor_generation() {
     std::fs::write(&state, remote).unwrap();
 
     std::fs::write(&labels, "ready\n").unwrap();
+    let successor_oid = wait_claim_ref_oid(&root);
+    let calls_before = std::fs::read_to_string(&log).unwrap().len();
     let third = wait_claim_acquire(
         &bin,
         &state,
@@ -4583,7 +4587,12 @@ fn wait_failure_evidence_cannot_release_same_second_successor_generation() {
     let remote = std::fs::read_to_string(&state).unwrap();
     assert!(remote.contains("\\\"worker_id\\\":\\\"worker-a\\\""));
     assert!(!remote.contains("\\\"worker_id\\\":\\\"worker-c\\\""));
-    assert_eq!(std::fs::read_to_string(&labels).unwrap().trim(), "active");
+    assert_eq!(wait_claim_ref_oid(&root), successor_oid);
+    assert_eq!(std::fs::read_to_string(&labels).unwrap().trim(), "ready");
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let rejected_calls = &calls[calls_before..];
+    assert!(!rejected_calls.contains("issue\nedit"));
+    assert!(!rejected_calls.contains("issue\ncomment"));
 }
 
 #[test]
@@ -4887,6 +4896,86 @@ fn autonomous_implementer_wait_failed_retries_converge_after_each_projection_bou
 }
 
 #[test]
+fn autonomous_implementer_wait_failed_repairs_forged_matching_generation_projection() {
+    let root = temp_dir("autospec-wait-forged-projection");
+    let bin = root.join("bin");
+    let state = root.join("comments.json");
+    let labels = root.join("labels.mode");
+    let log = root.join("gh.log");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::write(
+        &state,
+        wait_failure_comments("worker-a", "feat/test", "claimed"),
+    )
+    .unwrap();
+    std::fs::write(&labels, "active\n").unwrap();
+    seed_wait_claim_ref(
+        &root,
+        "worker-a",
+        "feat/test",
+        "claimed",
+        "claim-generation-a",
+    );
+    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
+
+    let crashed = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_LABELS", &labels)
+        .env("AUTOSPEC_WAIT_RECOVERY_FAILPOINT", "after_claim_cas")
+        .output()
+        .unwrap();
+    assert!(!crashed.status.success());
+    let transitioned_oid = wait_claim_ref_oid(&root);
+    let generation = wait_claim_ref_generation(&root);
+    let forged_record = RunStateRecord::new(
+        "testorg/testrepo",
+        42,
+        "worker-b",
+        "claimed",
+        "feat/forged",
+        "",
+        "claimed",
+        Vec::new(),
+        "2099-07-19T00:00:00Z",
+        "2099-07-19T00:00:00Z",
+        10_800,
+    )
+    .with_claim_id("claim-generation-b");
+    let forged_body = format!(
+        "<!-- autospec-run-state-link parent=100 parent_generation=legacy generation={generation} -->\n{}",
+        forged_record.to_marked_comment()
+    );
+    let forged_json = format!(
+        r#"[{{"id":100,"updated_at":"2099-07-19T00:00:00Z","body":{}}}]"#,
+        serde_json::to_string(&forged_body).unwrap()
+    );
+    std::fs::write(&state, forged_json).unwrap();
+
+    let retried = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_LABELS", &labels)
+        .output()
+        .unwrap();
+    assert!(
+        retried.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&retried.stderr)
+    );
+    assert_eq!(wait_claim_ref_oid(&root), transitioned_oid);
+    let projected = std::fs::read_to_string(&state).unwrap();
+    let comments: serde_json::Value = serde_json::from_str(&projected).unwrap();
+    let available = comments
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|comment| comment.get("body").and_then(serde_json::Value::as_str))
+        .filter(|body| body.contains(r#""state":"available""#))
+        .collect::<Vec<_>>();
+    assert_eq!(available.len(), 1);
+    assert!(available[0].contains(r#""worker_id":"worker-a""#));
+    assert!(available[0].contains(r#""branch":"feat/test""#));
+    assert!(available[0].contains(r#""claim_id":"claim-generation-a""#));
+}
+
+#[test]
 fn autonomous_implementer_wait_failed_does_not_requeue_until_failure_evidence_is_confirmed() {
     let root = temp_dir("autospec-wait-unconfirmed");
     let bin = root.join("bin");
@@ -5113,6 +5202,14 @@ fn wait_claim_ref_message(root: &std::path::Path) -> String {
             "refs/autospec/claims/issue-42",
         ],
     )
+}
+
+fn wait_claim_ref_generation(root: &std::path::Path) -> String {
+    wait_claim_ref_message(root)
+        .lines()
+        .find_map(|line| line.strip_prefix("generation="))
+        .expect("claim ref generation")
+        .to_string()
 }
 
 fn wait_claim_acquire(

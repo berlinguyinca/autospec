@@ -1714,6 +1714,7 @@ fn ensure_claim_ref_projection(repo: &str, head: &ClaimRefHead) -> Result<(), Co
     let comments = list_comments(repo, head.record.issue)?;
     if comments.iter().any(|comment| {
         run_state_link(&comment.body).is_some_and(|link| link.generation == head.generation)
+            && parse_run_state_comment(&comment.body).is_ok_and(|record| record == head.record)
     }) {
         return Ok(());
     }
