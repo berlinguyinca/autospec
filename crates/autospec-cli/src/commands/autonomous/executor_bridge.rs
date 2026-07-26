@@ -1,32 +1,33 @@
 use std::collections::BTreeMap;
 use std::ffi::{CString, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::fd::OwnedFd;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use autospec_core::autonomous::waterfall::sha256_hex;
 #[cfg(unix)]
 use nix::fcntl::OFlag;
 #[cfg(unix)]
-use nix::sys::signal::{killpg, Signal};
+use nix::sys::signal::{kill, killpg, Signal};
 #[cfg(unix)]
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 #[cfg(unix)]
 use nix::unistd::{
-    chdir, dup2_stderr, dup2_stdout, execve, fork, getpgid, pipe2, read as fd_read, setpgid,
-    write as fd_write, ForkResult, Pid,
+    chdir, dup2_stderr, dup2_stdout, execve, fork, getpgid, getpid, pipe2, read as fd_read,
+    setpgid, write as fd_write, ForkResult, Pid,
 };
 use yaml_edit::Document;
 pub(crate) const CLAUDE_BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,Bash";
@@ -828,14 +829,40 @@ pub(crate) enum SupervisionOutcome {
     Stalled,
 }
 
-struct OutputReaders {
-    events: Receiver<OutputEvent>,
-    handles: Vec<JoinHandle<()>>,
-}
+const OUTPUT_LINE_LIMIT: usize = 4_096;
+const OUTPUT_EVENTS_PER_HEARTBEAT: usize = 16;
+const OUTPUT_READ_LIMIT: usize = 64 * 1_024;
+const OUTPUT_SINK_LIMIT: u64 = 1_048_576;
+const OUTPUT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
 
+#[derive(Clone, Debug)]
 struct OutputEvent {
     stream: &'static str,
-    chunk: String,
+    line: String,
+    truncated: bool,
+    io_error: bool,
+}
+
+#[derive(Clone, Debug)]
+struct OutputSinkPaths {
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+struct DurableOutputStream {
+    name: &'static str,
+    path: PathBuf,
+    file: File,
+    offset: u64,
+    partial: Vec<u8>,
+    discarding_oversized: bool,
+}
+
+struct DurableOutputReaders {
+    streams: Vec<DurableOutputStream>,
+    pending: Vec<OutputEvent>,
+    last_flush: Instant,
+    io_failed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -986,14 +1013,15 @@ fn supervise_validated_harness(
         return Err("executor supervision intervals must be non-zero".to_string());
     }
     if let Some(expected) = state.process.as_ref() {
+        let expected = expected.clone();
         return match observe_process_identity(expected.pid, &expected.argv_digest)? {
             Some(observed) if expected.matches(&observed) => {
                 append_executor_event(event_log, state, "child_adopted", None)?;
-                Ok(SupervisionOutcome::AlreadyRunning)
+                supervise_adopted_process(state_path, event_log, state, &expected, snapshot, config)
             }
             Some(observed) if expected.same_birth(&observed) => {
                 append_executor_event(event_log, state, "child_launch_handshake_adopted", None)?;
-                Ok(SupervisionOutcome::AlreadyRunning)
+                supervise_adopted_process(state_path, event_log, state, &expected, snapshot, config)
             }
             Some(_) => Err(
                 "executor child identity mismatch; refusing duplicate launch or signal".to_string(),
@@ -1003,7 +1031,19 @@ fn supervise_validated_harness(
                 state.process = None;
                 state.progress_at = unix_now()?;
                 write_invocation_atomic(state_path, state)?;
-                launch_and_supervise(state_path, event_log, state, harness, snapshot, config)
+                append_executor_event(
+                    event_log,
+                    state,
+                    "child_recovery_required",
+                    Some(serde_json::json!({
+                        "last_progress_at": state.progress_at,
+                        "reason": "persisted child is dead; classify the last proven local boundary before relaunch"
+                    })),
+                )?;
+                Err(
+                    "executor child is dead; recovery classification is required before relaunch"
+                        .to_string(),
+                )
             }
         };
     }
@@ -1021,8 +1061,6 @@ struct ForkedChild {
     pid: Pid,
     barrier: Option<OwnedFd>,
     exec_status: Option<File>,
-    stdout: Option<File>,
-    stderr: Option<File>,
     reaped: Option<ChildExit>,
 }
 
@@ -1102,8 +1140,53 @@ impl Drop for LaunchGuard {
     }
 }
 
+fn output_sink_paths(state_path: &Path, invocation_id: &str) -> Result<OutputSinkPaths, String> {
+    let parent = state_path
+        .parent()
+        .ok_or_else(|| "executor state path requires a parent".to_string())?
+        .join("executor-output");
+    ensure_private_directory(&parent)?;
+    let scope = &sha256_hex(invocation_id.as_bytes())[..16];
+    Ok(OutputSinkPaths {
+        stdout: parent.join(format!("{scope}.stdout.log")),
+        stderr: parent.join(format!("{scope}.stderr.log")),
+    })
+}
+
 #[cfg(unix)]
-fn spawn_blocked_harness(harness: &ValidatedInvocation) -> Result<ForkedChild, String> {
+fn open_output_sink(path: &Path, truncate: bool) -> Result<File, String> {
+    reject_symlink_path(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "executor output sink requires a parent".to_string())?;
+    ensure_private_directory(parent)?;
+    if truncate {
+        OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| {
+                format!(
+                    "initialize executor output sink {}: {error}",
+                    path.display()
+                )
+            })?;
+    }
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|error| format!("open executor output sink {}: {error}", path.display()))
+}
+
+#[cfg(unix)]
+fn spawn_blocked_harness(
+    harness: &ValidatedInvocation,
+    sinks: &OutputSinkPaths,
+) -> Result<ForkedChild, String> {
     let executable = CString::new(harness.program.as_os_str().as_bytes())
         .map_err(|_| "executor program contains a NUL byte".to_string())?;
     let mut argv = Vec::with_capacity(harness.args.len() + 1);
@@ -1139,10 +1222,8 @@ fn spawn_blocked_harness(harness: &ValidatedInvocation) -> Result<ForkedChild, S
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create launch ready pipe: {error}"))?;
     let (status_read, status_write) =
         pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create exec status pipe: {error}"))?;
-    let (stdout_read, stdout_write) =
-        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create executor stdout pipe: {error}"))?;
-    let (stderr_read, stderr_write) =
-        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create executor stderr pipe: {error}"))?;
+    let stdout_write = open_output_sink(&sinks.stdout, true)?;
+    let stderr_write = open_output_sink(&sinks.stderr, true)?;
 
     // SAFETY: the child branch performs only async-signal-safe syscalls before
     // execve. All CString allocation and environment construction happened above.
@@ -1163,8 +1244,6 @@ fn spawn_blocked_harness(harness: &ValidatedInvocation) -> Result<ForkedChild, S
                 pid: child,
                 barrier: Some(barrier_write),
                 exec_status: Some(File::from(status_read)),
-                stdout: Some(File::from(stdout_read)),
-                stderr: Some(File::from(stderr_read)),
                 reaped: None,
             })
         }
@@ -1172,8 +1251,6 @@ fn spawn_blocked_harness(harness: &ValidatedInvocation) -> Result<ForkedChild, S
             drop(barrier_write);
             drop(ready_read);
             drop(status_read);
-            drop(stdout_read);
-            drop(stderr_read);
             let result = setpgid(Pid::from_raw(0), Pid::from_raw(0))
                 .and_then(|_| dup2_stdout(&stdout_write))
                 .and_then(|_| dup2_stderr(&stderr_write))
@@ -1215,8 +1292,12 @@ fn launch_and_supervise(
 
     #[cfg(not(unix))]
     return Err("executor harness launch requires Unix process isolation".to_string());
+    #[cfg(target_os = "linux")]
+    nix::sys::prctl::set_child_subreaper(true)
+        .map_err(|error| format!("enable executor descendant ownership: {error}"))?;
+    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
     #[cfg(unix)]
-    let child = spawn_blocked_harness(harness)?;
+    let child = spawn_blocked_harness(harness, &sinks)?;
     let args_digest = argv_digest(&harness.args);
     #[cfg(unix)]
     let birth = observe_process_birth(child.id())?
@@ -1245,35 +1326,49 @@ fn launch_and_supervise(
     #[cfg(unix)]
     guard.child_mut().release_launch_barrier()?;
 
-    let mut readers = take_output_readers(guard.child_mut())?;
+    let mut readers = DurableOutputReaders::open(&sinks, false)?;
     let mut last_progress = Instant::now();
     loop {
-        match readers.events.recv_timeout(config.poll_interval) {
-            Ok(event) => {
-                last_progress = Instant::now();
-                state.progress_at = unix_now()?;
-                write_invocation_atomic(state_path, state)?;
-                append_executor_event(
-                    event_log,
-                    state,
-                    "child_output",
-                    Some((event.stream, &event.chunk)),
-                )?;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {}
+        thread::sleep(config.poll_interval);
+        if readers.poll()? {
+            last_progress = Instant::now();
+        }
+        if readers.io_failed() {
+            terminate_owned_forked_process_group(&process, guard.child_mut())?;
+            cleanup_owned_descendants(process.process_group)?;
+            readers.flush_if_due(state_path, event_log, state, true)?;
+            state.phase = BridgePhase::Interrupted;
+            state.process = None;
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+            return Err("executor output supervision failed; child was cleaned".to_string());
+        }
+        if readers.flush_if_due(state_path, event_log, state, false)? {
+            last_progress = Instant::now();
         }
 
         match observe_process_identity(process.pid, &process.argv_digest)? {
             Some(observed) if process.matches(&observed) => {
                 if last_progress.elapsed() >= config.stall_timeout {
                     terminate_owned_forked_process_group(&process, guard.child_mut())?;
-                    join_output_readers(&mut readers);
+                    cleanup_owned_descendants(process.process_group)?;
+                    readers.poll()?;
+                    readers.flush_if_due(state_path, event_log, state, true)?;
                     state.phase = BridgePhase::Interrupted;
                     state.process = None;
                     state.progress_at = unix_now()?;
                     write_invocation_atomic(state_path, state)?;
-                    append_executor_event(event_log, state, "child_stalled", None)?;
+                    append_executor_event(
+                        event_log,
+                        state,
+                        "child_stalled",
+                        Some(serde_json::json!({
+                            "stall_timeout_ms": config.stall_timeout.as_millis(),
+                            "last_progress_at": state.progress_at.saturating_sub(
+                                config.stall_timeout.as_secs()
+                            )
+                        })),
+                    )?;
                     snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
                     return Ok(SupervisionOutcome::Stalled);
                 }
@@ -1292,8 +1387,9 @@ fn launch_and_supervise(
                     .try_wait()
                     .map_err(|error| format!("observe executor child exit: {error}"))?;
                 if let Some(status) = status {
-                    join_output_readers(&mut readers);
-                    drain_output_events(state_path, event_log, state, &readers.events)?;
+                    cleanup_owned_descendants(process.process_group)?;
+                    readers.poll()?;
+                    readers.flush_if_due(state_path, event_log, state, true)?;
                     state.phase = if status.code == 0 {
                         BridgePhase::ImplementationComplete
                     } else {
@@ -1302,7 +1398,12 @@ fn launch_and_supervise(
                     state.process = None;
                     state.progress_at = unix_now()?;
                     write_invocation_atomic(state_path, state)?;
-                    append_executor_event(event_log, state, "child_exited", None)?;
+                    append_executor_event(
+                        event_log,
+                        state,
+                        "child_exited",
+                        Some(serde_json::json!({"exit_code": status.code})),
+                    )?;
                     if let Err(error) =
                         snapshot.verify(&state.identity.repository_path, &state.identity.branch)
                     {
@@ -1328,68 +1429,316 @@ fn launch_and_supervise(
     }
 }
 
-#[cfg(unix)]
-fn take_output_readers(child: &mut ForkedChild) -> Result<OutputReaders, String> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "executor child stdout was not piped".to_string())?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| "executor child stderr was not piped".to_string())?;
-    let (sender, events) = mpsc::channel();
-    let stdout_sender = sender.clone();
-    Ok(OutputReaders {
-        events,
-        handles: vec![
-            thread::spawn(move || read_output_chunks(stdout, "stdout", stdout_sender)),
-            thread::spawn(move || read_output_chunks(stderr, "stderr", sender)),
-        ],
-    })
-}
+fn supervise_adopted_process(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    process: &ProcessIdentity,
+    snapshot: &MutationSnapshot,
+    config: SupervisionConfig,
+) -> Result<SupervisionOutcome, String> {
+    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    #[cfg(unix)]
+    {
+        let _ = open_output_sink(&sinks.stdout, false)?;
+        let _ = open_output_sink(&sinks.stderr, false)?;
+    }
+    let mut readers = DurableOutputReaders::open(&sinks, true)?;
+    let persisted_time = UNIX_EPOCH + Duration::from_secs(state.progress_at);
+    let latest_progress = readers
+        .newest_mtime()
+        .map(|mtime| mtime.max(persisted_time))
+        .unwrap_or(persisted_time);
+    let elapsed = SystemTime::now()
+        .duration_since(latest_progress)
+        .unwrap_or_default();
+    let mut last_progress = Instant::now()
+        .checked_sub(elapsed)
+        .unwrap_or_else(Instant::now);
 
-fn read_output_chunks<R: Read>(
-    mut reader: R,
-    stream: &'static str,
-    sender: mpsc::Sender<OutputEvent>,
-) {
-    let mut buffer = [0_u8; 4096];
     loop {
-        match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => return,
-            Ok(count) => {
-                let chunk = String::from_utf8_lossy(&buffer[..count]).to_string();
-                if sender.send(OutputEvent { stream, chunk }).is_err() {
-                    return;
+        thread::sleep(config.poll_interval);
+        if readers.poll()? {
+            last_progress = Instant::now();
+        }
+        if readers.io_failed() {
+            terminate_live_exact_process_group(process)?;
+            readers.flush_if_due(state_path, event_log, state, true)?;
+            state.phase = BridgePhase::Interrupted;
+            state.process = None;
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+            return Err(
+                "adopted executor output supervision failed; child was cleaned".to_string(),
+            );
+        }
+        if readers.flush_if_due(state_path, event_log, state, false)? {
+            last_progress = Instant::now();
+        }
+        match observe_process_identity(process.pid, &process.argv_digest)? {
+            Some(observed) if process.matches(&observed) || process.same_birth(&observed) => {
+                if last_progress.elapsed() >= config.stall_timeout {
+                    terminate_live_exact_process_group(process)?;
+                    readers.poll()?;
+                    readers.flush_if_due(state_path, event_log, state, true)?;
+                    let last_progress_at = state.progress_at;
+                    state.phase = BridgePhase::Interrupted;
+                    state.process = None;
+                    state.progress_at = unix_now()?;
+                    write_invocation_atomic(state_path, state)?;
+                    append_executor_event(
+                        event_log,
+                        state,
+                        "child_stalled",
+                        Some(serde_json::json!({
+                            "stall_timeout_ms": config.stall_timeout.as_millis(),
+                            "last_progress_at": last_progress_at,
+                            "adopted": true
+                        })),
+                    )?;
+                    snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
+                    return Ok(SupervisionOutcome::Stalled);
                 }
+            }
+            Some(observed) => {
+                return Err(format!(
+                    "adopted executor identity changed; refusing reused PID: expected={process:?} observed={observed:?}"
+                ));
+            }
+            None => {
+                readers.poll()?;
+                readers.flush_if_due(state_path, event_log, state, true)?;
+                let last_progress_at = state.progress_at;
+                snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
+                state.phase = BridgePhase::Interrupted;
+                state.process = None;
+                state.progress_at = unix_now()?;
+                write_invocation_atomic(state_path, state)?;
+                append_executor_event(
+                    event_log,
+                    state,
+                    "child_exited",
+                    Some(serde_json::json!({
+                        "exit_code": serde_json::Value::Null,
+                        "last_progress_at": last_progress_at,
+                        "recovery_required": true,
+                        "adopted": true
+                    })),
+                )?;
+                return Err(
+                    "adopted executor exited; recovery classification is required before relaunch"
+                        .to_string(),
+                );
             }
         }
     }
 }
 
-fn join_output_readers(readers: &mut OutputReaders) {
-    for handle in readers.handles.drain(..) {
-        let _ = handle.join();
+impl DurableOutputReaders {
+    fn open(paths: &OutputSinkPaths, start_at_end: bool) -> Result<Self, String> {
+        let streams = [("stdout", &paths.stdout), ("stderr", &paths.stderr)]
+            .into_iter()
+            .map(|(name, path)| {
+                reject_symlink_path(path)?;
+                let mut file = OpenOptions::new().read(true).open(path).map_err(|error| {
+                    format!(
+                        "open durable executor {name} sink {}: {error}",
+                        path.display()
+                    )
+                })?;
+                let offset = file
+                    .seek(if start_at_end {
+                        SeekFrom::End(0)
+                    } else {
+                        SeekFrom::Start(0)
+                    })
+                    .map_err(|error| format!("seek durable executor {name} sink: {error}"))?;
+                Ok(DurableOutputStream {
+                    name,
+                    path: path.clone(),
+                    file,
+                    offset,
+                    partial: Vec::new(),
+                    discarding_oversized: false,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(Self {
+            streams,
+            pending: Vec::new(),
+            last_flush: Instant::now(),
+            io_failed: false,
+        })
+    }
+
+    fn newest_mtime(&self) -> Option<SystemTime> {
+        self.streams
+            .iter()
+            .filter_map(|stream| fs::metadata(&stream.path).ok()?.modified().ok())
+            .max()
+    }
+
+    fn poll(&mut self) -> Result<bool, String> {
+        let mut progressed = false;
+        for stream in &mut self.streams {
+            let mut remaining = OUTPUT_READ_LIMIT;
+            while remaining > 0 && self.pending.len() < OUTPUT_EVENTS_PER_HEARTBEAT {
+                let mut buffer = [0_u8; 4_096];
+                let requested = remaining.min(buffer.len());
+                stream
+                    .file
+                    .seek(SeekFrom::Start(stream.offset))
+                    .map_err(|error| {
+                        format!("seek durable executor {} sink: {error}", stream.name)
+                    })?;
+                let count = match stream.file.read(&mut buffer[..requested]) {
+                    Ok(0) => break,
+                    Ok(count) => count,
+                    Err(error) => {
+                        self.io_failed = true;
+                        self.pending.push(OutputEvent {
+                            stream: stream.name,
+                            line: format!("executor output read failed: {error}"),
+                            truncated: false,
+                            io_error: true,
+                        });
+                        break;
+                    }
+                };
+                progressed = true;
+                stream.offset += count as u64;
+                remaining -= count;
+                frame_output_bytes(stream, &buffer[..count], &mut self.pending);
+            }
+            bound_output_sink(stream)?;
+        }
+        Ok(progressed)
+    }
+
+    fn io_failed(&self) -> bool {
+        self.io_failed
+    }
+
+    fn flush_if_due(
+        &mut self,
+        state_path: &Path,
+        event_log: &Path,
+        state: &mut PersistedInvocation,
+        force: bool,
+    ) -> Result<bool, String> {
+        if self.pending.is_empty() && force {
+            for stream in &mut self.streams {
+                if !stream.partial.is_empty() {
+                    self.pending.push(OutputEvent {
+                        stream: stream.name,
+                        line: String::from_utf8_lossy(&stream.partial).to_string(),
+                        truncated: stream.discarding_oversized,
+                        io_error: false,
+                    });
+                    stream.partial.clear();
+                }
+            }
+        }
+        if self.pending.is_empty() {
+            return Ok(false);
+        }
+        if !force && self.last_flush.elapsed() < OUTPUT_HEARTBEAT_INTERVAL {
+            return Ok(false);
+        }
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+        for event in self.pending.drain(..) {
+            append_executor_event(
+                event_log,
+                state,
+                if event.io_error {
+                    "child_output_error"
+                } else {
+                    "child_output"
+                },
+                Some(serde_json::json!({
+                    "stream": event.stream,
+                    "output": event.line,
+                    "truncated": event.truncated,
+                })),
+            )?;
+        }
+        self.last_flush = Instant::now();
+        Ok(true)
     }
 }
 
-fn drain_output_events(
-    state_path: &Path,
-    event_log: &Path,
-    state: &mut PersistedInvocation,
-    events: &Receiver<OutputEvent>,
-) -> Result<(), String> {
-    for event in events.try_iter() {
-        state.progress_at = unix_now()?;
-        write_invocation_atomic(state_path, state)?;
-        append_executor_event(
-            event_log,
-            state,
-            "child_output",
-            Some((event.stream, &event.chunk)),
-        )?;
+fn frame_output_bytes(
+    stream: &mut DurableOutputStream,
+    bytes: &[u8],
+    events: &mut Vec<OutputEvent>,
+) {
+    for byte in bytes {
+        if stream.discarding_oversized {
+            if *byte == b'\n' {
+                stream.discarding_oversized = false;
+            }
+            continue;
+        }
+        if *byte == b'\n' {
+            events.push(OutputEvent {
+                stream: stream.name,
+                line: String::from_utf8_lossy(&stream.partial).to_string(),
+                truncated: false,
+                io_error: false,
+            });
+            stream.partial.clear();
+        } else if stream.partial.len() < OUTPUT_LINE_LIMIT {
+            stream.partial.push(*byte);
+        } else {
+            events.push(OutputEvent {
+                stream: stream.name,
+                line: String::from_utf8_lossy(&stream.partial).to_string(),
+                truncated: true,
+                io_error: false,
+            });
+            stream.partial.clear();
+            stream.discarding_oversized = true;
+        }
+        if events.len() >= OUTPUT_EVENTS_PER_HEARTBEAT {
+            break;
+        }
     }
+}
+
+fn bound_output_sink(stream: &mut DurableOutputStream) -> Result<(), String> {
+    let length = fs::metadata(&stream.path)
+        .map_err(|error| format!("inspect durable executor output sink: {error}"))?
+        .len();
+    if length <= OUTPUT_SINK_LIMIT {
+        return Ok(());
+    }
+    let keep = OUTPUT_SINK_LIMIT / 2;
+    stream
+        .file
+        .seek(SeekFrom::End(-(keep as i64)))
+        .map_err(|error| format!("seek bounded executor output tail: {error}"))?;
+    let mut tail = Vec::with_capacity(keep as usize);
+    stream
+        .file
+        .read_to_end(&mut tail)
+        .map_err(|error| format!("read bounded executor output tail: {error}"))?;
+    let mut writer = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&stream.path)
+        .map_err(|error| format!("truncate durable executor output sink: {error}"))?;
+    writer
+        .write_all(&tail)
+        .map_err(|error| format!("rewrite durable executor output tail: {error}"))?;
+    writer
+        .sync_data()
+        .map_err(|error| format!("sync bounded executor output tail: {error}"))?;
+    stream.offset = tail.len() as u64;
+    stream
+        .file
+        .seek(SeekFrom::Start(stream.offset))
+        .map_err(|error| format!("reseat durable executor output reader: {error}"))?;
     Ok(())
 }
 
@@ -1397,7 +1746,7 @@ fn append_executor_event(
     path: &Path,
     state: &PersistedInvocation,
     event: &str,
-    output: Option<(&str, &str)>,
+    details: Option<serde_json::Value>,
 ) -> Result<(), String> {
     reject_symlink_path(path)?;
     let parent = path
@@ -1419,9 +1768,11 @@ fn append_executor_event(
         "phase": state.phase.as_str(),
         "progress_at": state.progress_at,
     });
-    if let Some((stream, chunk)) = output {
-        value["stream"] = serde_json::Value::String(stream.to_string());
-        value["output"] = serde_json::Value::String(chunk.to_string());
+    if let Some(serde_json::Value::Object(details)) = details {
+        value
+            .as_object_mut()
+            .expect("executor event is an object")
+            .extend(details);
     }
     writeln!(file, "{value}").map_err(|error| format!("write executor event log: {error}"))
 }
@@ -1616,34 +1967,212 @@ fn terminate_owned_forked_process_group(
         i32::try_from(expected.process_group)
             .map_err(|_| "executor process group is out of range".to_string())?,
     );
+    let members = process_group_members(expected.process_group)?;
     killpg(group, Signal::SIGTERM)
         .map_err(|error| format!("terminate executor process group: {error}"))?;
     for _ in 0..20 {
         let _ = child.try_wait()?;
-        if !process_group_is_alive(group)? {
+        if !any_exact_birth_alive(&members)? {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(25));
     }
-    let Some(observed) = observe_process_birth(expected.pid)? else {
-        return Err(
-            "executor leader exited before forced cleanup; refusing reused process-group signal"
-                .to_string(),
-        );
-    };
-    if !expected.owns_birth(&observed) {
-        return Err("executor child birth changed before forced cleanup".to_string());
+    for member in &members {
+        signal_exact_birth(member, Signal::SIGKILL)?;
     }
-    killpg(group, Signal::SIGKILL)
-        .map_err(|error| format!("kill executor process group: {error}"))?;
     for _ in 0..20 {
         let _ = child.try_wait()?;
-        if !process_group_is_alive(group)? {
+        if !any_exact_birth_alive(&members)? {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(25));
     }
     Err("executor process group survived forced cleanup".to_string())
+}
+
+#[cfg(unix)]
+fn terminate_live_exact_process_group(expected: &ProcessIdentity) -> Result<(), String> {
+    let observed = observe_process_identity(expected.pid, &expected.argv_digest)?
+        .ok_or_else(|| "executor child disappeared before adopted cleanup".to_string())?;
+    if !expected.matches(&observed) && !expected.same_birth(&observed) {
+        return Err("executor child identity mismatch; refusing adopted cleanup".to_string());
+    }
+    let members = process_group_members(expected.process_group)?;
+    let group = Pid::from_raw(
+        i32::try_from(expected.process_group)
+            .map_err(|_| "executor process group is out of range".to_string())?,
+    );
+    killpg(group, Signal::SIGTERM)
+        .map_err(|error| format!("terminate adopted executor process group: {error}"))?;
+    for _ in 0..20 {
+        if !any_exact_birth_alive(&members)? {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    for member in &members {
+        signal_exact_birth(member, Signal::SIGKILL)?;
+    }
+    for _ in 0..20 {
+        if !any_exact_birth_alive(&members)? {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err("adopted executor descendants survived exact cleanup".to_string())
+}
+
+#[cfg(unix)]
+fn cleanup_owned_descendants(process_group: u32) -> Result<(), String> {
+    // The bridge is a child subreaper. Once the harness leader exits, its
+    // remaining descendants are reparented here; that parent identity is the
+    // durable provenance used instead of signaling a potentially reused PGID.
+    for attempt in 0..20 {
+        let members = owned_orphan_descendants(process_group)?;
+        if members.is_empty() {
+            if attempt > 1 {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        let signal = if attempt < 10 {
+            Signal::SIGTERM
+        } else {
+            Signal::SIGKILL
+        };
+        for member in &members {
+            signal_exact_birth(member, signal)?;
+        }
+        thread::sleep(Duration::from_millis(25));
+        for member in &members {
+            let pid = Pid::from_raw(
+                i32::try_from(member.pid)
+                    .map_err(|_| "executor descendant PID is out of range".to_string())?,
+            );
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(_) | Err(nix::errno::Errno::ECHILD) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(error) => return Err(format!("reap owned executor descendant: {error}")),
+            }
+        }
+    }
+    if owned_orphan_descendants(process_group)?.is_empty() {
+        Ok(())
+    } else {
+        Err("owned executor descendants survived bounded cleanup".to_string())
+    }
+}
+
+#[cfg(unix)]
+fn owned_orphan_descendants(process_group: u32) -> Result<Vec<ProcessBirth>, String> {
+    let owner = u32::try_from(getpid().as_raw())
+        .map_err(|_| "executor supervisor PID is negative".to_string())?;
+    process_table_entries()?
+        .into_iter()
+        .filter(|(parent, birth)| *parent == owner && birth.process_group == process_group)
+        .map(|(_, birth)| Ok(birth))
+        .collect()
+}
+
+#[cfg(unix)]
+fn process_group_members(process_group: u32) -> Result<Vec<ProcessBirth>, String> {
+    Ok(process_table_entries()?
+        .into_iter()
+        .filter_map(|(_, birth)| (birth.process_group == process_group).then_some(birth))
+        .collect())
+}
+
+#[cfg(unix)]
+fn process_table_entries() -> Result<Vec<(u32, ProcessBirth)>, String> {
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map_err(|error| format!("read executor boot identity: {error}"))?
+        .trim()
+        .to_string();
+    let mut entries = Vec::new();
+    for entry in fs::read_dir("/proc").map_err(|error| format!("scan process table: {error}"))? {
+        let entry = entry.map_err(|error| format!("scan process table entry: {error}"))?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let stat = match fs::read_to_string(entry.path().join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => continue,
+            Err(error) => return Err(format!("read process table stat: {error}")),
+        };
+        let Some(close) = stat.rfind(')') else {
+            continue;
+        };
+        let fields: Vec<_> = stat[close + 1..].split_whitespace().collect();
+        let (Some(parent), Some(group), Some(start_identity)) =
+            (fields.get(1), fields.get(2), fields.get(19))
+        else {
+            continue;
+        };
+        let (Ok(parent), Ok(process_group)) = (parent.parse::<u32>(), group.parse::<u32>()) else {
+            continue;
+        };
+        entries.push((
+            parent,
+            ProcessBirth {
+                pid,
+                process_group,
+                boot_id: boot_id.clone(),
+                start_identity: (*start_identity).to_string(),
+            },
+        ));
+    }
+    Ok(entries)
+}
+
+#[cfg(unix)]
+fn any_exact_birth_alive(expected: &[ProcessBirth]) -> Result<bool, String> {
+    for expected in expected {
+        if observe_process_birth(expected.pid)?.is_some_and(|observed| observed == *expected)
+            && !process_is_zombie(expected.pid)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn process_is_zombie(pid: u32) -> Result<bool, String> {
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("read executor process state: {error}")),
+    };
+    let close = stat
+        .rfind(')')
+        .ok_or_else(|| "executor process stat is malformed".to_string())?;
+    Ok(stat[close + 1..]
+        .split_whitespace()
+        .next()
+        .is_some_and(|state| state == "Z"))
+}
+
+#[cfg(unix)]
+fn signal_exact_birth(expected: &ProcessBirth, signal: Signal) -> Result<(), String> {
+    let Some(observed) = observe_process_birth(expected.pid)? else {
+        return Ok(());
+    };
+    if &observed != expected {
+        return Err("executor descendant birth changed; refusing reused PID signal".to_string());
+    }
+    let pid = Pid::from_raw(
+        i32::try_from(expected.pid)
+            .map_err(|_| "executor descendant PID is out of range".to_string())?,
+    );
+    match kill(pid, signal) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(error) => Err(format!("signal exact executor descendant: {error}")),
+    }
 }
 
 #[cfg(unix)]
@@ -2318,11 +2847,11 @@ fn git_stdout(repo: &Path, args: &[&str]) -> Result<String, String> {
 mod tests {
     use std::collections::BTreeMap;
     use std::ffi::OsString;
-    use std::fs;
+    use std::fs::{self, File};
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use autospec_core::runtime_env::{EnvironmentLifecycle, EnvironmentOwner};
 
@@ -4128,10 +4657,27 @@ mod tests {
             &snapshot,
             supervision_config(500),
         )
-        .expect("adopt exact live process");
-        assert_eq!(outcome, SupervisionOutcome::AlreadyRunning);
+        .expect("adopt and stall-supervise exact live process");
+        assert_eq!(outcome, SupervisionOutcome::Stalled);
         assert!(!launches.exists(), "a duplicate harness was launched");
+        let _ = running.try_wait().expect("reap stalled fixture");
 
+        let mut replacement = Command::new("/bin/sh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            replacement.process_group(0);
+        }
+        let mut replacement = replacement
+            .args(["-c", "sleep 30"])
+            .spawn()
+            .expect("spawn mismatched identity fixture");
+        let replacement_identity =
+            super::observe_process_identity(replacement.id(), &super::argv_digest(&args))
+                .expect("observe replacement")
+                .expect("live replacement");
+        state.process = Some(replacement_identity.clone());
+        state.phase = BridgePhase::Implementing;
         state
             .process
             .as_mut()
@@ -4151,8 +4697,8 @@ mod tests {
             error.contains("identity mismatch"),
             "unexpected error: {error}"
         );
-        assert!(running.try_wait().expect("observe fixture").is_none());
-        super::terminate_exact_process_group(&expected, &mut running)
+        assert!(replacement.try_wait().expect("observe fixture").is_none());
+        super::terminate_exact_process_group(&replacement_identity, &mut replacement)
             .expect("clean identity fixture");
     }
 
@@ -4307,7 +4853,12 @@ mod tests {
             &state.identity.worktree,
         )
         .expect("validated fixture");
-        let child = super::spawn_blocked_harness(&validated).expect("blocked child");
+        let sinks = super::output_sink_paths(
+            &fixture.root.join("state/invocation.json"),
+            &state.identity.invocation_id,
+        )
+        .expect("output sinks");
+        let child = super::spawn_blocked_harness(&validated, &sinks).expect("blocked child");
         let birth = super::observe_process_birth(child.id())
             .expect("observe birth")
             .expect("live child");
@@ -4334,10 +4885,221 @@ mod tests {
             &snapshot,
             supervision_config(2_000),
         )
-        .expect("restart adopts durable launch handshake");
+        .expect("restart adopts and stall-supervises durable launch handshake");
 
-        assert_eq!(outcome, SupervisionOutcome::AlreadyRunning);
-        assert!(guard.child_mut().try_wait().expect("child alive").is_none());
+        assert_eq!(outcome, SupervisionOutcome::Stalled);
+        assert!(guard
+            .child_mut()
+            .try_wait()
+            .expect("child reaped after adopted stall")
+            .is_some());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_dead_recovery_requires_classification_before_relaunch() {
+        let fixture = GitFixture::new("supervise-dead-recovery");
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::Implementing;
+        state.process = Some(ProcessIdentity {
+            pid: u32::MAX - 1,
+            process_group: u32::MAX - 1,
+            executable: PathBuf::from("/bin/sh"),
+            argv_digest: "a".repeat(64),
+            boot_id: fs::read_to_string("/proc/sys/kernel/random/boot_id")
+                .expect("boot id")
+                .trim()
+                .to_string(),
+            start_identity: "1".to_string(),
+        });
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let launches = fixture.root.join("unexpected-launch");
+
+        let error = supervise_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &shell_invocation(
+                &fixture.repo,
+                &format!("printf launched > '{}'", launches.display()),
+            ),
+            &snapshot,
+            supervision_config(500),
+        )
+        .expect_err("dead recovery must stop at the local-classification boundary");
+
+        assert!(error.contains("recovery classification"), "{error}");
+        assert_eq!(state.phase, BridgePhase::Interrupted);
+        assert!(state.process.is_none());
+        assert!(!launches.exists(), "dead child was blindly relaunched");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_normal_exit_cleans_inherited_pipe_descendant() {
+        let fixture = GitFixture::new("supervise-daemon-success");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let descendant_pid = fixture.root.join("descendant.pid");
+        let script = format!(
+            "sleep 30 & child=$!; printf '%s\\n' \"$child\" > '{}'; exit 0",
+            descendant_pid.display()
+        );
+
+        let outcome = supervise_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &shell_invocation(&fixture.repo, &script),
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("successful leader exit must clean descendants");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        let descendant = fs::read_to_string(descendant_pid)
+            .expect("descendant pid")
+            .trim()
+            .to_string();
+        assert!(
+            !Path::new(&format!("/proc/{descendant}")).exists(),
+            "background descendant survived successful leader exit"
+        );
+        let events = fs::read_to_string(fixture.root.join("log/executor.jsonl")).expect("events");
+        assert!(events.contains("\"exit_code\":0"), "{events}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_bounds_oversized_unterminated_output() {
+        let fixture = GitFixture::new("supervise-bounded-output");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let outcome = supervise_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &shell_invocation(&fixture.repo, "head -c 131072 /dev/zero | tr '\\0' x"),
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("bounded output supervision");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        let events = fs::read_to_string(fixture.root.join("log/executor.jsonl")).expect("events");
+        assert!(
+            events.len() < 32_768,
+            "event log was not bounded: {}",
+            events.len()
+        );
+        assert!(events.contains("\"truncated\":true"), "{events}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_failing_leader_cleans_background_descendant() {
+        let fixture = GitFixture::new("supervise-daemon-failure");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let descendant_pid = fixture.root.join("descendant.pid");
+
+        let outcome = supervise_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &shell_invocation(
+                &fixture.repo,
+                &format!(
+                    "sleep 30 & child=$!; printf '%s\\n' \"$child\" > '{}'; exit 7",
+                    descendant_pid.display()
+                ),
+            ),
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("failing leader remains attributable");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 7 });
+        let descendant = fs::read_to_string(descendant_pid)
+            .expect("descendant pid")
+            .trim()
+            .to_string();
+        assert!(!Path::new(&format!("/proc/{descendant}")).exists());
+        let events = fs::read_to_string(fixture.root.join("log/executor.jsonl")).expect("events");
+        assert!(events.contains("\"exit_code\":7"), "{events}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_frames_split_utf8_and_bounds_sustained_output() {
+        let fixture = GitFixture::new("supervise-split-utf8");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let outcome = supervise_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &shell_invocation(
+                &fixture.repo,
+                "printf '\\342'; sleep 0.03; printf '\\202'; sleep 0.03; printf '\\254\\n'; i=0; while [ \"$i\" -lt 2000 ]; do printf 'line-%s\\n' \"$i\"; i=$((i+1)); done",
+            ),
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("split UTF-8 and sustained output");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        let events = fs::read_to_string(fixture.root.join("log/executor.jsonl")).expect("events");
+        assert!(events.contains('€'), "{events}");
+        assert!(events.len() < 64_000, "sustained output was not coalesced");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_closed_streams_live_child_transitions_to_stall() {
+        let fixture = GitFixture::new("supervise-closed-streams");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let outcome = supervise_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &shell_invocation(&fixture.repo, "exec >/dev/null 2>&1; sleep 30"),
+            &snapshot,
+            supervision_config(100),
+        )
+        .expect("closed streams must remain timed supervision");
+
+        assert_eq!(outcome, SupervisionOutcome::Stalled);
+        let events = fs::read_to_string(fixture.root.join("log/executor.jsonl")).expect("events");
+        assert!(events.contains("\"stall_timeout_ms\":100"), "{events}");
+        assert!(events.contains("\"last_progress_at\":"), "{events}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_reader_io_error_is_structured() {
+        let fixture = GitFixture::new("supervise-reader-error");
+        let directory = File::open(&fixture.root).expect("open real directory descriptor");
+        let mut readers = super::DurableOutputReaders {
+            streams: vec![super::DurableOutputStream {
+                name: "stdout",
+                path: fixture.root.clone(),
+                file: directory,
+                offset: 0,
+                partial: Vec::new(),
+                discarding_oversized: false,
+            }],
+            pending: Vec::new(),
+            last_flush: Instant::now() - Duration::from_secs(1),
+            io_failed: false,
+        };
+
+        assert!(!readers.poll().expect("I/O error becomes an event"));
+        assert!(readers.io_failed());
+        assert!(readers.pending.iter().any(|event| event.io_error));
     }
 
     #[test]
