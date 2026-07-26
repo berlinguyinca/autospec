@@ -1105,6 +1105,9 @@ fn pid_is_dead(pid: u32) -> bool {
     if pid == 0 || pid > i32::MAX as u32 {
         return true;
     }
+    if super::process_is_zombie(pid as i32) {
+        return true;
+    }
     pid_probe_is_dead(nix::sys::signal::kill(
         nix::unistd::Pid::from_raw(pid as i32),
         None,

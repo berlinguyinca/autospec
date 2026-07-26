@@ -33,6 +33,8 @@ use nix::errno::Errno;
 #[cfg(unix)]
 use nix::sys::signal::{kill, killpg, Signal};
 #[cfg(unix)]
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+#[cfg(unix)]
 use nix::unistd::Pid;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -1619,6 +1621,7 @@ fn repair_stopped_conductor(
     // lease were released first, another supervisor could publish replacement metadata here.
     remove_stale_unit_metadata(recorded)?;
     if !recorded.pid.is_empty() {
+        reap_terminated_child(&recorded.pid)?;
         release_terminated_owner(layout, &recorded.pid)?;
     }
     let (lifecycle, lease) = acquire_lifecycle_start(layout, options, LifecycleTransition::Start)
@@ -4829,6 +4832,9 @@ fn probe_process(pid: &str) -> ProcessProbe {
     let Some(pid) = pid.parse::<i32>().ok().filter(|pid| *pid > 0) else {
         return ProcessProbe::Indeterminate;
     };
+    if process_is_zombie(pid) {
+        return ProcessProbe::Missing;
+    }
     match kill(Pid::from_raw(pid), None) {
         Ok(()) => ProcessProbe::Alive,
         Err(Errno::ESRCH) => ProcessProbe::Missing,
@@ -4843,6 +4849,46 @@ fn probe_process(_pid: &str) -> ProcessProbe {
 
 fn process_alive(pid: &str) -> bool {
     probe_process(pid) == ProcessProbe::Alive
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_zombie(pid: i32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| stat.rsplit_once(") ").map(|(_, fields)| fields.to_string()))
+        .and_then(|fields| fields.split_whitespace().next().map(str::to_string))
+        .as_deref()
+        == Some("Z")
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_is_zombie(_pid: i32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn reap_terminated_child(pid: &str) -> Result<(), String> {
+    let pid = pid
+        .parse::<i32>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| format!("cannot reap invalid conductor pid {pid}"))?;
+    match waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WNOHANG)) {
+        Ok(WaitStatus::Exited(_, _))
+        | Ok(WaitStatus::Signaled(_, _, _))
+        | Ok(WaitStatus::StillAlive)
+        | Err(Errno::ECHILD)
+        | Err(Errno::ESRCH) => Ok(()),
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!(
+            "cannot reap terminated conductor pid {pid}: {error}"
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+fn reap_terminated_child(_pid: &str) -> Result<(), String> {
+    Ok(())
 }
 
 fn terminate_unit(name: &str, unit: &UnitStatus) -> Result<bool, String> {

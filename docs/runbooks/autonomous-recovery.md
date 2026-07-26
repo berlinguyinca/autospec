@@ -25,7 +25,10 @@ unless a stop flag is present, it releases only that terminated owner's lease,
 acquires a fresh lease, and relaunches the persisted `run-foreground` options.
 Live or ambiguous metadata never starts a second conductor. Supervisor output
 reports `restarted-conductor` only after replacement process identity is
-verified.
+verified. On Linux, an exited child in process state `Z` is stopped rather than
+live: the owning supervisor reaps that exact PID before releasing its lease,
+while non-child zombies are treated as terminated without attempting to reap a
+foreign process.
 
 Explore drains export an inherited recursion marker; a nested drain request
 returns a dry suppression result instead of launching another harness tree.

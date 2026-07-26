@@ -3376,6 +3376,72 @@ fn autonomous_supervise_contention_tracks_exactly_one_replacement_conductor() {
 }
 
 #[test]
+fn autonomous_supervise_reaps_and_relaunches_two_finite_conductors() {
+    let temp = temp_dir("autospec-autonomous-supervise-reap");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let state_dir = temp.join("state");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    let bin = fake_bin(&temp, None, Some("#!/bin/sh\nexit 1\n"));
+    let path = path_with(&bin);
+
+    let start = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--max-cycles",
+            "1",
+            "--interval-sec",
+            "1",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", path)
+        .output()
+        .expect("autospec autonomous start runs");
+    assert!(
+        start.status.success(),
+        "{}",
+        String::from_utf8_lossy(&start.stderr)
+    );
+    let supervisor_log =
+        std::fs::read_to_string(scope.join("supervisor.logpath")).expect("supervisor logpath");
+    let supervisor_log = std::path::PathBuf::from(supervisor_log.trim());
+    let mut restarted = 0;
+    for _ in 0..80 {
+        restarted = std::fs::read_to_string(&supervisor_log)
+            .unwrap_or_default()
+            .matches("action=restarted-conductor")
+            .count();
+        if restarted >= 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    assert!(
+        restarted >= 2,
+        "supervisor log={}",
+        std::fs::read_to_string(&supervisor_log).unwrap_or_default()
+    );
+    let tracked_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("tracked conductor pid");
+    assert!(
+        process_is_alive(&tracked_pid) || process_is_zombie(&tracked_pid),
+        "latest replacement must still be tracked until the next supervisor tick"
+    );
+    cleanup_pids(&scope);
+}
+
+#[test]
 fn autonomous_supervise_does_not_relaunch_after_a_stop_request() {
     let temp = temp_dir("autospec-autonomous-supervise-stop");
     let operator_dir = temp.join("operator");
@@ -3722,6 +3788,15 @@ fn process_is_alive(pid: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn process_is_zombie(pid: &str) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| stat.rsplit_once(") ").map(|(_, fields)| fields.to_string()))
+        .and_then(|fields| fields.split_whitespace().next().map(str::to_string))
+        .as_deref()
+        == Some("Z")
 }
 
 fn terminate_fixture_process(pid: &str) {
