@@ -1,12 +1,16 @@
 use std::collections::BTreeMap;
-use std::ffi::OsString;
-use std::fs::{self, OpenOptions};
+use std::ffi::{CString, OsString};
+use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, Command};
 use std::str::FromStr;
+#[cfg(test)]
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
@@ -14,9 +18,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use autospec_core::autonomous::waterfall::sha256_hex;
 #[cfg(unix)]
+use nix::fcntl::OFlag;
+#[cfg(unix)]
 use nix::sys::signal::{killpg, Signal};
 #[cfg(unix)]
-use nix::unistd::{getpgid, Pid};
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
+#[cfg(unix)]
+use nix::unistd::{
+    chdir, dup2_stderr, dup2_stdout, execve, fork, getpgid, pipe2, read as fd_read, setpgid,
+    write as fd_write, ForkResult, Pid,
+};
 use yaml_edit::Document;
 pub(crate) const CLAUDE_BUILTIN_TOOLS: &str = "Read,Edit,Write,Glob,Grep,Bash";
 pub(crate) const CLAUDE_LOCAL_TOOLS: &str = concat!(
@@ -448,6 +459,28 @@ impl ProcessIdentity {
     pub(crate) fn matches(&self, observed: &Self) -> bool {
         self == observed
     }
+
+    fn same_birth(&self, observed: &Self) -> bool {
+        self.pid == observed.pid
+            && self.process_group == observed.process_group
+            && self.boot_id == observed.boot_id
+            && self.start_identity == observed.start_identity
+    }
+
+    fn owns_birth(&self, observed: &ProcessBirth) -> bool {
+        self.pid == observed.pid
+            && self.process_group == observed.process_group
+            && self.boot_id == observed.boot_id
+            && self.start_identity == observed.start_identity
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProcessBirth {
+    pid: u32,
+    process_group: u32,
+    boot_id: String,
+    start_identity: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -805,11 +838,147 @@ struct OutputEvent {
     chunk: String,
 }
 
-pub(crate) fn supervise_harness(
+#[derive(Clone, Debug)]
+struct ValidatedInvocation {
+    program: PathBuf,
+    args: Vec<String>,
+    current_dir: PathBuf,
+}
+
+pub(crate) struct HarnessLaunch<'a> {
+    pub(crate) resolved: &'a ResolvedHarness,
+    pub(crate) artifact: &'a Path,
+    pub(crate) prompt: &'a str,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LaunchFailpoint {
+    None = 0,
+    PersistAfterSpawn = 1,
+    LogAfterSpawn = 2,
+}
+
+#[cfg(test)]
+static LAUNCH_FAILPOINT: AtomicU8 = AtomicU8::new(LaunchFailpoint::None as u8);
+
+#[cfg(test)]
+fn set_launch_failpoint(failpoint: LaunchFailpoint) {
+    LAUNCH_FAILPOINT.store(failpoint as u8, Ordering::SeqCst);
+}
+
+fn fail_launch_at(label: &str) -> Result<(), String> {
+    #[cfg(test)]
+    {
+        let expected = match label {
+            "persist" => LaunchFailpoint::PersistAfterSpawn,
+            "log" => LaunchFailpoint::LogAfterSpawn,
+            _ => LaunchFailpoint::None,
+        };
+        if LAUNCH_FAILPOINT.load(Ordering::SeqCst) == expected as u8
+            && expected != LaunchFailpoint::None
+        {
+            return Err(format!("injected {label} failure after executor spawn"));
+        }
+    }
+    let _ = label;
+    Ok(())
+}
+
+pub(crate) fn supervise_resolved_harness(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    launch: HarnessLaunch<'_>,
+    snapshot: &MutationSnapshot,
+    config: SupervisionConfig,
+) -> Result<SupervisionOutcome, String> {
+    let worktree = validate_launch_worktree(state)?;
+    let invocation = launch
+        .resolved
+        .invocation(&worktree, launch.artifact, launch.prompt)?;
+    let validated = validate_invocation(&invocation, &worktree)?;
+    supervise_validated_harness(state_path, event_log, state, &validated, snapshot, config)
+}
+
+fn validate_launch_worktree(state: &PersistedInvocation) -> Result<PathBuf, String> {
+    reject_symlink_path(&state.identity.worktree)?;
+    let canonical = fs::canonicalize(&state.identity.worktree)
+        .map_err(|error| format!("canonicalize validated executor worktree: {error}"))?;
+    if canonical != state.identity.worktree {
+        return Err("validated executor worktree path is not canonical".to_string());
+    }
+    let repository = fs::canonicalize(&state.identity.repository_path)
+        .map_err(|error| format!("canonicalize persisted repository: {error}"))?;
+    if !registered_worktree_paths(&repository)?
+        .iter()
+        .any(|registered| registered == &canonical)
+    {
+        return Err("validated executor worktree is not registered".to_string());
+    }
+    let branch = git_stdout(&canonical, &["symbolic-ref", "--quiet", "--short", "HEAD"])?;
+    if branch != state.identity.branch {
+        return Err("validated executor worktree branch mismatch".to_string());
+    }
+    Ok(canonical)
+}
+
+fn validate_invocation(
+    invocation: &HarnessInvocation,
+    expected_worktree: &Path,
+) -> Result<ValidatedInvocation, String> {
+    let program = fs::canonicalize(&invocation.program)
+        .map_err(|error| format!("canonicalize executor program before spawn: {error}"))?;
+    if program != invocation.program {
+        return Err("executor program must already be canonical before spawn".to_string());
+    }
+    let current_dir = fs::canonicalize(&invocation.current_dir).map_err(|error| {
+        format!("canonicalize executor current directory before spawn: {error}")
+    })?;
+    if current_dir != expected_worktree {
+        return Err(
+            "executor invocation current directory is not the validated worktree".to_string(),
+        );
+    }
+    if invocation
+        .args
+        .iter()
+        .any(|arg| arg.as_bytes().contains(&0))
+    {
+        return Err("executor invocation contains a NUL byte".to_string());
+    }
+    Ok(ValidatedInvocation {
+        program,
+        args: invocation.args.clone(),
+        current_dir,
+    })
+}
+
+#[cfg(test)]
+fn supervise_harness(
     state_path: &Path,
     event_log: &Path,
     state: &mut PersistedInvocation,
     harness: &HarnessInvocation,
+    snapshot: &MutationSnapshot,
+    config: SupervisionConfig,
+) -> Result<SupervisionOutcome, String> {
+    let expected_worktree = fs::canonicalize(&state.identity.worktree)
+        .map_err(|error| format!("canonicalize fixture worktree: {error}"))?;
+    let mut fixture = harness.clone();
+    fixture.program = fs::canonicalize(&fixture.program)
+        .map_err(|error| format!("canonicalize fixture program: {error}"))?;
+    fixture.current_dir = fs::canonicalize(&fixture.current_dir)
+        .map_err(|error| format!("canonicalize fixture current directory: {error}"))?;
+    let validated = validate_invocation(&fixture, &expected_worktree)?;
+    supervise_validated_harness(state_path, event_log, state, &validated, snapshot, config)
+}
+
+fn supervise_validated_harness(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    harness: &ValidatedInvocation,
     snapshot: &MutationSnapshot,
     config: SupervisionConfig,
 ) -> Result<SupervisionOutcome, String> {
@@ -820,6 +989,10 @@ pub(crate) fn supervise_harness(
         return match observe_process_identity(expected.pid, &expected.argv_digest)? {
             Some(observed) if expected.matches(&observed) => {
                 append_executor_event(event_log, state, "child_adopted", None)?;
+                Ok(SupervisionOutcome::AlreadyRunning)
+            }
+            Some(observed) if expected.same_birth(&observed) => {
+                append_executor_event(event_log, state, "child_launch_handshake_adopted", None)?;
                 Ok(SupervisionOutcome::AlreadyRunning)
             }
             Some(_) => Err(
@@ -837,11 +1010,201 @@ pub(crate) fn supervise_harness(
     launch_and_supervise(state_path, event_log, state, harness, snapshot, config)
 }
 
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug)]
+struct ChildExit {
+    code: i32,
+}
+
+#[cfg(unix)]
+struct ForkedChild {
+    pid: Pid,
+    barrier: Option<OwnedFd>,
+    exec_status: Option<File>,
+    stdout: Option<File>,
+    stderr: Option<File>,
+    reaped: Option<ChildExit>,
+}
+
+#[cfg(unix)]
+impl ForkedChild {
+    fn id(&self) -> u32 {
+        u32::try_from(self.pid.as_raw()).expect("positive child PID")
+    }
+
+    fn release_launch_barrier(&mut self) -> Result<(), String> {
+        let barrier = self
+            .barrier
+            .take()
+            .ok_or_else(|| "executor launch barrier was already released".to_string())?;
+        fd_write(&barrier, b"\n")
+            .map_err(|error| format!("release executor launch barrier: {error}"))?;
+        drop(barrier);
+        let mut status = self
+            .exec_status
+            .take()
+            .ok_or_else(|| "executor exec status pipe is missing".to_string())?;
+        let mut failure = [0_u8; 1];
+        match status.read(&mut failure) {
+            Ok(0) => Ok(()),
+            Ok(_) => Err("executor child failed before exact harness exec".to_string()),
+            Err(error) => Err(format!("read executor exec status: {error}")),
+        }
+    }
+
+    fn try_wait(&mut self) -> Result<Option<ChildExit>, String> {
+        if let Some(exit) = self.reaped {
+            return Ok(Some(exit));
+        }
+        match waitpid(self.pid, Some(WaitPidFlag::WNOHANG))
+            .map_err(|error| format!("observe executor child exit: {error}"))?
+        {
+            WaitStatus::StillAlive => Ok(None),
+            status => {
+                let exit = ChildExit {
+                    code: wait_status_code(status),
+                };
+                self.reaped = Some(exit);
+                Ok(Some(exit))
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn wait_status_code(status: WaitStatus) -> i32 {
+    match status {
+        WaitStatus::Exited(_, code) => code,
+        WaitStatus::Signaled(_, signal, _) => 128 + signal as i32,
+        _ => 1,
+    }
+}
+
+#[cfg(unix)]
+struct LaunchGuard {
+    child: Option<ForkedChild>,
+    birth: ProcessIdentity,
+}
+
+#[cfg(unix)]
+impl LaunchGuard {
+    fn child_mut(&mut self) -> &mut ForkedChild {
+        self.child.as_mut().expect("launch guard owns child")
+    }
+}
+
+#[cfg(unix)]
+impl Drop for LaunchGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = terminate_owned_forked_process_group(&self.birth, child);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn spawn_blocked_harness(harness: &ValidatedInvocation) -> Result<ForkedChild, String> {
+    let executable = CString::new(harness.program.as_os_str().as_bytes())
+        .map_err(|_| "executor program contains a NUL byte".to_string())?;
+    let mut argv = Vec::with_capacity(harness.args.len() + 1);
+    argv.push(executable.clone());
+    for arg in &harness.args {
+        argv.push(
+            CString::new(arg.as_bytes())
+                .map_err(|_| "executor argument contains a NUL byte".to_string())?,
+        );
+    }
+    let worktree = CString::new(harness.current_dir.as_os_str().as_bytes())
+        .map_err(|_| "executor worktree contains a NUL byte".to_string())?;
+    let forbidden = [
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "GITHUB_PAT",
+        "GLAB_TOKEN",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+    ];
+    let environment = std::env::vars_os()
+        .filter(|(key, _)| !forbidden.iter().any(|forbidden| key == forbidden))
+        .map(|(key, value)| {
+            let mut entry = key.as_os_str().as_bytes().to_vec();
+            entry.push(b'=');
+            entry.extend_from_slice(value.as_os_str().as_bytes());
+            CString::new(entry).map_err(|_| "executor environment contains a NUL byte".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let (barrier_read, barrier_write) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create launch barrier: {error}"))?;
+    let (ready_read, ready_write) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create launch ready pipe: {error}"))?;
+    let (status_read, status_write) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create exec status pipe: {error}"))?;
+    let (stdout_read, stdout_write) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create executor stdout pipe: {error}"))?;
+    let (stderr_read, stderr_write) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create executor stderr pipe: {error}"))?;
+
+    // SAFETY: the child branch performs only async-signal-safe syscalls before
+    // execve. All CString allocation and environment construction happened above.
+    match unsafe { fork() }.map_err(|error| format!("fork executor harness: {error}"))? {
+        ForkResult::Parent { child } => {
+            drop(barrier_read);
+            drop(ready_write);
+            drop(status_write);
+            drop(stdout_write);
+            drop(stderr_write);
+            let mut ready = File::from(ready_read);
+            let mut marker = [0_u8; 1];
+            if ready.read_exact(&mut marker).is_err() || marker[0] != b'R' {
+                let _ = waitpid(child, None);
+                return Err("executor child failed before launch barrier readiness".to_string());
+            }
+            Ok(ForkedChild {
+                pid: child,
+                barrier: Some(barrier_write),
+                exec_status: Some(File::from(status_read)),
+                stdout: Some(File::from(stdout_read)),
+                stderr: Some(File::from(stderr_read)),
+                reaped: None,
+            })
+        }
+        ForkResult::Child => {
+            drop(barrier_write);
+            drop(ready_read);
+            drop(status_read);
+            drop(stdout_read);
+            drop(stderr_read);
+            let result = setpgid(Pid::from_raw(0), Pid::from_raw(0))
+                .and_then(|_| dup2_stdout(&stdout_write))
+                .and_then(|_| dup2_stderr(&stderr_write))
+                .and_then(|_| chdir(worktree.as_c_str()))
+                .and_then(|_| fd_write(&ready_write, b"R").map(|_| ()))
+                .and_then(|_| {
+                    let mut release = [0_u8; 1];
+                    match fd_read(&barrier_read, &mut release)? {
+                        1 if release[0] == b'\n' => Ok(()),
+                        _ => Err(nix::errno::Errno::EPIPE),
+                    }
+                })
+                .and_then(|_| execve(&executable, &argv, &environment).map(drop));
+            if result.is_err() {
+                let _ = fd_write(&status_write, b"!");
+            }
+            // SIGKILL after fork when execve fails ensures no parent-process
+            // destructors run and no inherited buffers are flushed.
+            let _ = nix::sys::signal::raise(Signal::SIGKILL);
+            loop {
+                std::hint::spin_loop();
+            }
+        }
+    }
+}
+
 fn launch_and_supervise(
     state_path: &Path,
     event_log: &Path,
     state: &mut PersistedInvocation,
-    harness: &HarnessInvocation,
+    harness: &ValidatedInvocation,
     snapshot: &MutationSnapshot,
     config: SupervisionConfig,
 ) -> Result<SupervisionOutcome, String> {
@@ -850,38 +1213,39 @@ fn launch_and_supervise(
     state.progress_at = unix_now()?;
     write_invocation_atomic(state_path, state)?;
 
-    let mut command = Command::new(&harness.program);
-    command
-        .args(&harness.args)
-        .current_dir(&harness.current_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for credential in [
-        "GH_TOKEN",
-        "GITHUB_TOKEN",
-        "GITHUB_PAT",
-        "GLAB_TOKEN",
-        "GIT_ASKPASS",
-        "SSH_ASKPASS",
-    ] {
-        command.env_remove(credential);
-    }
+    #[cfg(not(unix))]
+    return Err("executor harness launch requires Unix process isolation".to_string());
     #[cfg(unix)]
-    command.process_group(0);
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("launch executor harness: {error}"))?;
+    let child = spawn_blocked_harness(harness)?;
     let args_digest = argv_digest(&harness.args);
-    let expected_executable = fs::canonicalize(&harness.program)
-        .map_err(|error| format!("canonicalize launched executor harness: {error}"))?;
-    let process = observe_launched_process(&mut child, &expected_executable, &args_digest)?;
+    #[cfg(unix)]
+    let birth = observe_process_birth(child.id())?
+        .ok_or_else(|| "executor child disappeared before birth identity capture".to_string())?;
+    #[cfg(unix)]
+    let process = ProcessIdentity {
+        pid: birth.pid,
+        process_group: birth.process_group,
+        executable: harness.program.clone(),
+        argv_digest: args_digest,
+        boot_id: birth.boot_id,
+        start_identity: birth.start_identity,
+    };
+    #[cfg(unix)]
+    let mut guard = LaunchGuard {
+        child: Some(child),
+        birth: process.clone(),
+    };
+    fail_launch_at("persist")?;
     state.phase = BridgePhase::Implementing;
     state.process = Some(process.clone());
     state.progress_at = unix_now()?;
     write_invocation_atomic(state_path, state)?;
+    fail_launch_at("log")?;
     append_executor_event(event_log, state, "child_started", None)?;
+    #[cfg(unix)]
+    guard.child_mut().release_launch_barrier()?;
 
-    let mut readers = take_output_readers(&mut child)?;
+    let mut readers = take_output_readers(guard.child_mut())?;
     let mut last_progress = Instant::now();
     loop {
         match readers.events.recv_timeout(config.poll_interval) {
@@ -903,7 +1267,7 @@ fn launch_and_supervise(
         match observe_process_identity(process.pid, &process.argv_digest)? {
             Some(observed) if process.matches(&observed) => {
                 if last_progress.elapsed() >= config.stall_timeout {
-                    terminate_exact_process_group(&process, &mut child)?;
+                    terminate_owned_forked_process_group(&process, guard.child_mut())?;
                     join_output_readers(&mut readers);
                     state.phase = BridgePhase::Interrupted;
                     state.process = None;
@@ -914,23 +1278,23 @@ fn launch_and_supervise(
                     return Ok(SupervisionOutcome::Stalled);
                 }
             }
-            Some(_) => {
+            Some(observed) => {
                 state.phase = BridgePhase::Interrupted;
                 state.progress_at = unix_now()?;
                 write_invocation_atomic(state_path, state)?;
-                return Err(
-                    "executor child identity changed; refusing to observe or signal reused PID"
-                        .to_string(),
-                );
+                return Err(format!(
+                    "executor child identity changed; refusing to observe or signal reused PID: expected={process:?} observed={observed:?}"
+                ));
             }
             None => {
-                let status = child
+                let status = guard
+                    .child_mut()
                     .try_wait()
                     .map_err(|error| format!("observe executor child exit: {error}"))?;
                 if let Some(status) = status {
                     join_output_readers(&mut readers);
                     drain_output_events(state_path, event_log, state, &readers.events)?;
-                    state.phase = if status.success() {
+                    state.phase = if status.code == 0 {
                         BridgePhase::ImplementationComplete
                     } else {
                         BridgePhase::Interrupted
@@ -949,7 +1313,7 @@ fn launch_and_supervise(
                         return Err(error);
                     }
                     return Ok(SupervisionOutcome::Exited {
-                        exit_code: exit_code(status),
+                        exit_code: status.code,
                     });
                 }
                 state.phase = BridgePhase::Interrupted;
@@ -964,54 +1328,8 @@ fn launch_and_supervise(
     }
 }
 
-fn observe_launched_process(
-    child: &mut Child,
-    expected_executable: &Path,
-    expected_argv_digest: &str,
-) -> Result<ProcessIdentity, String> {
-    let mut last_observed = None;
-    for _ in 0..20 {
-        match observe_process_identity(child.id(), expected_argv_digest)? {
-            Some(observed)
-                if observed.executable == expected_executable
-                    && observed.argv_digest == expected_argv_digest
-                    && observed.process_group == observed.pid =>
-            {
-                return Ok(observed);
-            }
-            Some(observed) => last_observed = Some(observed),
-            None => {
-                if child
-                    .try_wait()
-                    .map_err(|error| format!("observe launched executor exit: {error}"))?
-                    .is_some()
-                {
-                    return Err(
-                        "executor child exited before its exact process identity could be persisted"
-                            .to_string(),
-                    );
-                }
-            }
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
-    if let Some(observed) = last_observed {
-        terminate_exact_process_group(&observed, child)?;
-        Err(format!(
-            "launched executor process identity does not match the exact harness invocation: expected executable={} argv_digest={} pgid={}, observed executable={} argv_digest={} pgid={}",
-            expected_executable.display(),
-            expected_argv_digest,
-            observed.pid,
-            observed.executable.display(),
-            observed.argv_digest,
-            observed.process_group,
-        ))
-    } else {
-        Err("executor child identity remained unobservable after launch".to_string())
-    }
-}
-
-fn take_output_readers(child: &mut Child) -> Result<OutputReaders, String> {
+#[cfg(unix)]
+fn take_output_readers(child: &mut ForkedChild) -> Result<OutputReaders, String> {
     let stdout = child
         .stdout
         .take()
@@ -1119,6 +1437,19 @@ fn argv_digest(args: &[String]) -> String {
 
 fn observe_process_identity(
     pid: u32,
+    expected_argv_digest: &str,
+) -> Result<Option<ProcessIdentity>, String> {
+    for _ in 0..3 {
+        if let Some(observed) = observe_process_identity_once(pid, expected_argv_digest)? {
+            return Ok(Some(observed));
+        }
+        thread::yield_now();
+    }
+    Ok(None)
+}
+
+fn observe_process_identity_once(
+    pid: u32,
     _expected_argv_digest: &str,
 ) -> Result<Option<ProcessIdentity>, String> {
     #[cfg(not(target_os = "linux"))]
@@ -1129,7 +1460,64 @@ fn observe_process_identity(
     #[cfg(target_os = "linux")]
     {
         let proc_root = PathBuf::from(format!("/proc/{pid}"));
-        let stat = match fs::read_to_string(proc_root.join("stat")) {
+        let birth_before = match observe_process_birth(pid)? {
+            Some(birth) => birth,
+            None => return Ok(None),
+        };
+        let executable = match fs::canonicalize(proc_root.join("exe")) {
+            Ok(executable) => executable,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("observe executor executable: {error}")),
+        };
+        let command_line = match fs::read(proc_root.join("cmdline")) {
+            Ok(command_line) if command_line.is_empty() => return Ok(None),
+            Ok(command_line) => command_line,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("observe executor argv: {error}")),
+        };
+        let executable_after = match fs::canonicalize(proc_root.join("exe")) {
+            Ok(executable) => executable,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(format!("re-observe executor executable: {error}")),
+        };
+        if executable != executable_after {
+            return Ok(None);
+        }
+        let args = command_line
+            .split(|byte| *byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .skip(1)
+            .map(|arg| String::from_utf8(arg.to_vec()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("executor argv is not UTF-8: {error}"))?;
+        let observed_digest = argv_digest(&args);
+        let birth_after = match observe_process_birth(pid)? {
+            Some(birth) => birth,
+            None => return Ok(None),
+        };
+        if birth_before != birth_after {
+            return Ok(None);
+        }
+        Ok(Some(ProcessIdentity {
+            pid,
+            process_group: birth_before.process_group,
+            executable,
+            argv_digest: observed_digest,
+            boot_id: birth_before.boot_id,
+            start_identity: birth_before.start_identity,
+        }))
+    }
+}
+
+fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        return Err("executor process birth observation requires Linux /proc".to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(format!("read executor process stat: {error}")),
@@ -1142,25 +1530,6 @@ fn observe_process_identity(
             .get(19)
             .ok_or_else(|| "executor process stat lacks start identity".to_string())?
             .to_string();
-        let executable = match fs::canonicalize(proc_root.join("exe")) {
-            Ok(executable) => executable,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(format!("observe executor executable: {error}")),
-        };
-        let command_line = match fs::read(proc_root.join("cmdline")) {
-            Ok(command_line) if command_line.is_empty() => return Ok(None),
-            Ok(command_line) => command_line,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(format!("observe executor argv: {error}")),
-        };
-        let args = command_line
-            .split(|byte| *byte == 0)
-            .filter(|arg| !arg.is_empty())
-            .skip(1)
-            .map(|arg| String::from_utf8(arg.to_vec()))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("executor argv is not UTF-8: {error}"))?;
-        let observed_digest = argv_digest(&args);
         let process_group = getpgid(Some(Pid::from_raw(
             i32::try_from(pid).map_err(|_| "executor PID is out of range".to_string())?,
         )))
@@ -1171,11 +1540,9 @@ fn observe_process_identity(
             .map_err(|error| format!("read executor boot identity: {error}"))?
             .trim()
             .to_string();
-        Ok(Some(ProcessIdentity {
+        Ok(Some(ProcessBirth {
             pid,
             process_group,
-            executable,
-            argv_digest: observed_digest,
             boot_id,
             start_identity,
         }))
@@ -1234,6 +1601,52 @@ fn terminate_exact_process_group(
 }
 
 #[cfg(unix)]
+fn terminate_owned_forked_process_group(
+    expected: &ProcessIdentity,
+    child: &mut ForkedChild,
+) -> Result<(), String> {
+    let Some(observed) = observe_process_birth(expected.pid)? else {
+        let _ = child.try_wait();
+        return Ok(());
+    };
+    if !expected.owns_birth(&observed) {
+        return Err("executor child birth identity mismatch; refusing to signal reused PID".into());
+    }
+    let group = Pid::from_raw(
+        i32::try_from(expected.process_group)
+            .map_err(|_| "executor process group is out of range".to_string())?,
+    );
+    killpg(group, Signal::SIGTERM)
+        .map_err(|error| format!("terminate executor process group: {error}"))?;
+    for _ in 0..20 {
+        let _ = child.try_wait()?;
+        if !process_group_is_alive(group)? {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    let Some(observed) = observe_process_birth(expected.pid)? else {
+        return Err(
+            "executor leader exited before forced cleanup; refusing reused process-group signal"
+                .to_string(),
+        );
+    };
+    if !expected.owns_birth(&observed) {
+        return Err("executor child birth changed before forced cleanup".to_string());
+    }
+    killpg(group, Signal::SIGKILL)
+        .map_err(|error| format!("kill executor process group: {error}"))?;
+    for _ in 0..20 {
+        let _ = child.try_wait()?;
+        if !process_group_is_alive(group)? {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    Err("executor process group survived forced cleanup".to_string())
+}
+
+#[cfg(unix)]
 fn process_group_is_alive(group: Pid) -> Result<bool, String> {
     match killpg(group, None) {
         Ok(()) => Ok(true),
@@ -1247,10 +1660,6 @@ fn unix_now() -> Result<u64, String> {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .map_err(|error| format!("system clock before Unix epoch: {error}"))
-}
-
-fn exit_code(status: ExitStatus) -> i32 {
-    status.code().unwrap_or(1)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3785,5 +4194,182 @@ mod tests {
             assert_eq!(recovered.phase, phase);
             assert!(recovered.terminal_result.is_none());
         }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_spawn_state_failure_cleans_owned_child() {
+        let fixture = GitFixture::new("supervise-state-failure");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let child_pid = fixture.root.join("child.pid");
+        let invocation = shell_invocation(
+            &fixture.repo,
+            &format!(
+                "printf '%s\\n' \"$$\" > '{}'; sleep 30",
+                child_pid.display()
+            ),
+        );
+
+        super::set_launch_failpoint(super::LaunchFailpoint::PersistAfterSpawn);
+        let error = supervise_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &invocation,
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect_err("injected state persistence failure");
+        super::set_launch_failpoint(super::LaunchFailpoint::None);
+
+        assert!(error.contains("injected"));
+        assert!(
+            !child_pid.exists(),
+            "barrier released before durable process identity"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_spawn_log_failure_cleans_without_releasing_child() {
+        let fixture = GitFixture::new("supervise-log-failure");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let child_pid = fixture.root.join("child.pid");
+        let invocation = shell_invocation(
+            &fixture.repo,
+            &format!(
+                "printf '%s\\n' \"$$\" > '{}'; sleep 30",
+                child_pid.display()
+            ),
+        );
+
+        super::set_launch_failpoint(super::LaunchFailpoint::LogAfterSpawn);
+        let error = supervise_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &invocation,
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect_err("injected log failure");
+        super::set_launch_failpoint(super::LaunchFailpoint::None);
+
+        assert!(error.contains("injected"));
+        assert!(!child_pid.exists(), "barrier released after log failure");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_fast_exit_is_observed_after_durable_handshake() {
+        let fixture = GitFixture::new("supervise-fast-exit");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let outcome = supervise_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &shell_invocation(&fixture.repo, "exit 0"),
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("fast child remains attributable");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        let events = fs::read_to_string(fixture.root.join("log/executor.jsonl")).expect("events");
+        assert!(events.contains("\"event\":\"child_started\""));
+        assert!(events.contains("\"event\":\"child_exited\""));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_restart_adopts_exact_launch_handshake_birth() {
+        let fixture = GitFixture::new("supervise-restart-handshake");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let invocation = shell_invocation(&fixture.repo, "sleep 30");
+        let validated = super::validate_invocation(
+            &HarnessInvocation {
+                program: invocation
+                    .program
+                    .canonicalize()
+                    .expect("canonical program"),
+                args: invocation.args.clone(),
+                current_dir: invocation
+                    .current_dir
+                    .canonicalize()
+                    .expect("canonical worktree"),
+                requires_mutation_snapshots: false,
+            },
+            &state.identity.worktree,
+        )
+        .expect("validated fixture");
+        let child = super::spawn_blocked_harness(&validated).expect("blocked child");
+        let birth = super::observe_process_birth(child.id())
+            .expect("observe birth")
+            .expect("live child");
+        let expected = ProcessIdentity {
+            pid: birth.pid,
+            process_group: birth.process_group,
+            executable: validated.program.clone(),
+            argv_digest: super::argv_digest(&validated.args),
+            boot_id: birth.boot_id,
+            start_identity: birth.start_identity,
+        };
+        state.phase = BridgePhase::Implementing;
+        state.process = Some(expected.clone());
+        let mut guard = super::LaunchGuard {
+            child: Some(child),
+            birth: expected,
+        };
+
+        let outcome = super::supervise_validated_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &validated,
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("restart adopts durable launch handshake");
+
+        assert_eq!(outcome, SupervisionOutcome::AlreadyRunning);
+        assert!(guard.child_mut().try_wait().expect("child alive").is_none());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_production_entry_rejects_foreign_worktree() {
+        let fixture = GitFixture::new("supervise-production-worktree");
+        let mut state = supervision_state(&fixture);
+        state.identity.worktree = fixture.root.join("foreign");
+        fs::create_dir(&state.identity.worktree).expect("foreign worktree");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let harness = super::ResolvedHarness {
+            kind: HarnessKind::Codex,
+            executable: PathBuf::from("/bin/sh")
+                .canonicalize()
+                .expect("canonical shell"),
+            opencode_adapter: None,
+        };
+
+        let error = super::supervise_resolved_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            super::HarnessLaunch {
+                resolved: &harness,
+                artifact: &fixture.root.join("artifact"),
+                prompt: "prompt",
+            },
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect_err("foreign worktree must be rejected");
+
+        assert!(error.contains("validated executor worktree"));
     }
 }
