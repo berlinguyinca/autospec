@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{CString, OsString};
 use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(unix)]
@@ -9,7 +9,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU32, AtomicU8};
@@ -29,7 +29,7 @@ use nix::fcntl::OFlag;
 #[cfg(unix)]
 use nix::sys::signal::Signal;
 #[cfg(unix)]
-use nix::sys::wait::{waitpid, WaitPidFlag};
+use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 #[cfg(unix)]
 use nix::unistd::{fork, getpgid, pipe2, write as fd_write, ForkResult, Pid};
 use yaml_edit::Document;
@@ -964,8 +964,8 @@ fn worktree_registry_snapshot(porcelain: &str, issue_branch: &str) -> String {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ImplementationProof {
-    pub(crate) head_oid: String,
-    pub(crate) closeout_body: String,
+    head_oid: String,
+    closeout_body: String,
 }
 
 pub(crate) fn prove_implementation(
@@ -1054,9 +1054,9 @@ pub(crate) fn prove_implementation(
         );
     }
     snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
+    let closeout_body = validate_closeout_report(&state.identity.worktree, closeout_path)?;
     let canonical_closeout = fs::canonicalize(closeout_path)
         .map_err(|error| format!("canonicalize executor Closeout report: {error}"))?;
-    let closeout_body = validate_closeout_report(&state.identity.worktree, &canonical_closeout)?;
     let closeout_digest = sha256_hex(closeout_body.as_bytes());
     if initial_proof {
         state.phase = BridgePhase::ImplementationProven;
@@ -1123,18 +1123,10 @@ fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, Stri
     {
         return Err("executor Closeout report contains content outside its section".to_string());
     }
-    if lines.iter().any(|line| {
-        let lower = line.trim().to_ascii_lowercase();
-        let Some((keyword, remainder)) = lower.split_once(|character: char| {
-            character.is_whitespace() || matches!(character, ':' | '-')
-        }) else {
-            return false;
-        };
-        matches!(keyword, "closes" | "fixes" | "resolves")
-            && remainder
-                .split_whitespace()
-                .any(|token| token.trim_matches([':', '-', ',']).starts_with('#'))
-    }) {
+    if lines
+        .iter()
+        .any(|line| contains_issue_closing_directive(line))
+    {
         return Err(
             "executor Closeout report must not contain an issue-closing directive".to_string(),
         );
@@ -1191,6 +1183,14 @@ fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, Stri
             }
         }
     }
+    for line in &lines[headings[0].0 + 1..] {
+        let line = line.trim();
+        if !line.is_empty() && !required.iter().any(|field| line.starts_with(field)) {
+            return Err(
+                "executor Closeout report contains an unrecognized nonblank line".to_string(),
+            );
+        }
+    }
     let claims = lines
         .iter()
         .filter_map(|line| line.trim().strip_prefix("Claims:"))
@@ -1213,6 +1213,58 @@ fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, Stri
         );
     }
     Ok(body)
+}
+
+fn contains_issue_closing_directive(line: &str) -> bool {
+    let mut non_code = String::with_capacity(line.len());
+    let mut in_code = false;
+    for character in line.chars() {
+        if character == '`' {
+            in_code = !in_code;
+            non_code.push(' ');
+        } else if in_code {
+            non_code.push(' ');
+        } else {
+            non_code.push(character.to_ascii_lowercase());
+        }
+    }
+    for keyword in ["closes", "fixes", "resolves"] {
+        for (offset, _) in non_code.match_indices(keyword) {
+            let before = non_code[..offset].chars().next_back();
+            let after_offset = offset + keyword.len();
+            let after = non_code[after_offset..].chars().next();
+            if before.is_some_and(|character| character.is_alphanumeric() || character == '_')
+                || after.is_some_and(|character| character.is_alphanumeric() || character == '_')
+            {
+                continue;
+            }
+            let reference = non_code[after_offset..]
+                .trim_start_matches(|character: char| {
+                    character.is_whitespace() || matches!(character, ':' | '-' | ',' | '.')
+                })
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .trim_matches(|character: char| {
+                    matches!(
+                        character,
+                        '(' | ')' | '[' | ']' | '{' | '}' | ',' | '.' | ';'
+                    )
+                });
+            let issue = reference.strip_prefix('#').or_else(|| {
+                reference
+                    .rsplit_once('/')
+                    .map(|(_, tail)| tail)
+                    .and_then(|tail| tail.split_once('#').map(|(_, number)| number))
+            });
+            if issue.is_some_and(|number| {
+                !number.is_empty() && number.chars().all(|character| character.is_ascii_digit())
+            }) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[derive(Clone, Debug)]
@@ -1245,13 +1297,25 @@ impl RemoteMutationSnapshot {
         if state.phase != BridgePhase::Pending || state.remote_snapshot_digest.is_some() {
             return Err("executor remote snapshot is create-once in Pending phase".to_string());
         }
-        let snapshot = Self::capture(state, adapter)?;
         let path = remote_snapshot_path(state_path);
         reject_symlink_path(&path)?;
         ensure_private_directory(
             path.parent()
                 .ok_or_else(|| "executor remote snapshot requires a parent".to_string())?,
         )?;
+        if path
+            .try_exists()
+            .map_err(|error| format!("inspect executor remote snapshot: {error}"))?
+        {
+            validate_private_state_file(&path)?;
+            let bytes = fs::read(&path)
+                .map_err(|error| format!("read executor prelaunch remote snapshot: {error}"))?;
+            let snapshot = Self::from_bytes(state, &bytes)?;
+            state.remote_snapshot_digest = Some(sha256_hex(&bytes));
+            write_invocation_atomic(state_path, state)?;
+            return Ok(snapshot);
+        }
+        let snapshot = Self::capture(state, adapter)?;
         let pull_requests = snapshot
             .pull_requests
             .iter()
@@ -1326,7 +1390,11 @@ impl RemoteMutationSnapshot {
                 "executor prelaunch remote snapshot digest or identity mismatch".to_string(),
             );
         }
-        let value: serde_json::Value = serde_json::from_slice(&bytes)
+        Self::from_bytes(state, &bytes)
+    }
+
+    fn from_bytes(state: &PersistedInvocation, bytes: &[u8]) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_slice(bytes)
             .map_err(|error| format!("parse executor prelaunch remote snapshot: {error}"))?;
         let object = value
             .as_object()
@@ -1385,6 +1453,49 @@ impl RemoteMutationSnapshot {
 
 fn remote_snapshot_path(state_path: &Path) -> PathBuf {
     state_path.with_extension("prelaunch-remote.json")
+}
+
+fn draft_release_receipt_path(state_path: &Path) -> PathBuf {
+    state_path.with_extension("draft-release")
+}
+
+fn draft_release_digest(state: &PersistedInvocation, process: &ProcessIdentity) -> String {
+    sha256_hex(
+        serde_json::json!({
+            "schema": 1,
+            "repository": state.identity.repository,
+            "issue": state.identity.issue,
+            "invocation_id": state.identity.invocation_id,
+            "process": process_identity_value(process),
+        })
+        .to_string()
+        .as_bytes(),
+    )
+}
+
+fn draft_release_was_recorded(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    let path = draft_release_receipt_path(state_path);
+    reject_symlink_path(&path)?;
+    if !path
+        .try_exists()
+        .map_err(|error| format!("inspect executor draft release receipt: {error}"))?
+    {
+        return Ok(false);
+    }
+    validate_private_state_file(&path)
+        .map_err(|error| format!("executor draft release receipt must be private: {error}"))?;
+    let process = state.draft_process.as_ref().ok_or_else(|| {
+        "executor draft release receipt has no durable process identity".to_string()
+    })?;
+    let observed = fs::read_to_string(&path)
+        .map_err(|error| format!("read executor draft release receipt: {error}"))?;
+    if observed.trim() != draft_release_digest(state, process) {
+        return Err("executor draft release receipt identity digest mismatch".to_string());
+    }
+    Ok(true)
 }
 
 fn write_private_atomic(path: &Path, body: &[u8], label: &str) -> Result<(), String> {
@@ -1528,6 +1639,12 @@ pub(crate) fn push_and_create_draft(
     issue_body: &str,
     adapter: &DraftPrAdapter,
 ) -> Result<u64, String> {
+    let proof_closeout_digest = sha256_hex(proof.closeout_body.as_bytes());
+    if state.closeout_digest.as_deref() != Some(proof_closeout_digest.as_str()) {
+        return Err(
+            "executor draft transaction Closeout body digest does not match durable proof".into(),
+        );
+    }
     if state.head_oid.as_deref() != Some(proof.head_oid.as_str())
         || !matches!(
             state.phase,
@@ -1640,15 +1757,18 @@ pub(crate) fn push_and_create_draft(
     }
     let pull_requests = if existing.is_empty() {
         if state.phase == BridgePhase::DraftCreating {
+            let released = draft_release_was_recorded(state_path, state)?;
             if let Some(expected) = &state.draft_process {
-                if let Some(observed) =
-                    observe_process_identity(expected.pid, &expected.argv_digest)?
-                {
-                    if expected.matches(&observed) {
-                        return Err(
-                            "executor draft creation remains in-flight; refusing a second request"
-                                .to_string(),
-                        );
+                if let Some(observed) = observe_process_birth(expected.pid)? {
+                    if expected.owns_birth(&observed) {
+                        let status = if released {
+                            "released request remains in-flight"
+                        } else {
+                            "prepared child remains live before release"
+                        };
+                        return Err(format!(
+                            "executor draft creation {status}; refusing a second request"
+                        ));
                     }
                     return Err(
                         "executor draft creation process identity changed; refusing retry"
@@ -1656,10 +1776,16 @@ pub(crate) fn push_and_create_draft(
                     );
                 }
             }
-            return Err(
-                "executor draft creation outcome is ambiguous; refusing a second request"
-                    .to_string(),
-            );
+            if released {
+                return Err(
+                    "executor released draft creation outcome is ambiguous; refusing a second request"
+                        .to_string(),
+                );
+            }
+            state.phase = BridgePhase::BranchPushed;
+            state.draft_process = None;
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
         }
         state.phase = BridgePhase::DraftCreating;
         state.progress_at = unix_now()?;
@@ -1738,13 +1864,7 @@ fn run_implementation_lint(
         repo: state.identity.worktree.clone(),
         tree_oid: proof.head_oid.clone(),
     };
-    let options = ImplementationLintOptions {
-        pre_commit_mode: true,
-        enable_vacuous_assertions: true,
-        enable_assertion_density: true,
-        enable_reuse_lens: true,
-        ..ImplementationLintOptions::default()
-    };
+    let options = implementation_lint_options();
     let result = lint_implementation(
         &diff,
         ImplementationLintContext {
@@ -1760,6 +1880,16 @@ fn run_implementation_lint(
             "executor implementation lint blocked remote mutation with {} finding(s)",
             result.blocking_count
         ))
+    }
+}
+
+fn implementation_lint_options() -> ImplementationLintOptions {
+    ImplementationLintOptions {
+        pre_commit_mode: true,
+        enable_vacuous_assertions: true,
+        enable_assertion_density: true,
+        enable_reuse_lens: std::env::var("AUTOSPEC_REUSE_LENS").is_ok_and(|value| value == "1"),
+        ..ImplementationLintOptions::default()
     }
 }
 
@@ -1790,6 +1920,25 @@ fn verify_proven_local_state(
         return Err("executor proven implementation HEAD changed before mutation".to_string());
     }
     Ok(())
+}
+
+fn resolve_draft_executable(adapter: &DraftPrAdapter) -> Result<PathBuf, String> {
+    let candidate = if adapter.gh.is_absolute() {
+        adapter.gh.clone()
+    } else {
+        let path = adapter
+            .environment
+            .get(std::ffi::OsStr::new("PATH"))
+            .cloned()
+            .or_else(|| std::env::var_os("PATH"))
+            .ok_or_else(|| "executor draft gh PATH is unavailable".to_string())?;
+        std::env::split_paths(&path)
+            .map(|directory| directory.join(&adapter.gh))
+            .find(|candidate| candidate.is_file())
+            .ok_or_else(|| "executor draft gh executable was not found on PATH".to_string())?
+    };
+    fs::canonicalize(&candidate)
+        .map_err(|error| format!("canonicalize executor draft gh executable: {error}"))
 }
 
 fn create_draft_pull_request(
@@ -1823,48 +1972,268 @@ fn create_draft_pull_request(
         .map_err(|error| format!("write executor draft body: {error}"))?;
     file.sync_all()
         .map_err(|error| format!("sync executor draft body: {error}"))?;
-    let args = [
-        "pr",
-        "create",
-        "--repo",
-        &state.identity.repository,
-        "--draft",
-        "--head",
-        &state.identity.branch,
-        "--base",
-        base,
-        "--title",
-        issue_title,
-        "--body-file",
+    let args = vec![
+        "pr".to_string(),
+        "create".to_string(),
+        "--repo".to_string(),
+        state.identity.repository.clone(),
+        "--draft".to_string(),
+        "--head".to_string(),
+        state.identity.branch.clone(),
+        "--base".to_string(),
+        base.to_string(),
+        "--title".to_string(),
+        issue_title.to_string(),
+        "--body-file".to_string(),
         body_path
             .to_str()
-            .ok_or_else(|| "executor draft body path is not UTF-8".to_string())?,
+            .ok_or_else(|| "executor draft body path is not UTF-8".to_string())?
+            .to_string(),
     ];
-    let child = Command::new(&adapter.gh)
-        .args(args)
-        .envs(&adapter.environment)
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("create executor draft pull request: {error}"))?;
-    for _ in 0..20 {
-        if let Some(identity) = observe_process_identity(child.id(), "")? {
-            state.draft_process = Some(identity);
-            write_invocation_atomic(state_path, state)?;
-            break;
-        }
-        thread::yield_now();
+    let executable = resolve_draft_executable(adapter)?;
+    let receipt_path = draft_release_receipt_path(state_path);
+    reject_symlink_path(&receipt_path)?;
+    if receipt_path
+        .try_exists()
+        .map_err(|error| format!("inspect executor draft release receipt: {error}"))?
+    {
+        return Err("executor draft release receipt already exists".to_string());
     }
-    let output = child
-        .wait_with_output()
+    let receipt_parent = receipt_path
+        .parent()
+        .ok_or_else(|| "executor draft release receipt requires a parent".to_string())?;
+    ensure_private_directory(receipt_parent)?;
+    let receipt_temporary = receipt_path.with_file_name(format!(
+        ".draft-release.{}.{}.tmp",
+        std::process::id(),
+        INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let receipt_file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&receipt_temporary)
+        .map_err(|error| format!("create executor draft release temporary: {error}"))?;
+    let receipt_directory = File::open(receipt_parent)
+        .map_err(|error| format!("open executor draft release parent: {error}"))?;
+    let receipt_temporary_c = CString::new(receipt_temporary.as_os_str().as_bytes())
+        .map_err(|_| "executor draft release temporary path contains NUL".to_string())?;
+    let receipt_path_c = CString::new(receipt_path.as_os_str().as_bytes())
+        .map_err(|_| "executor draft release path contains NUL".to_string())?;
+    let (release_read, release_write) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft release pipe: {error}"))?;
+    let (digest_read, digest_write) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft digest pipe: {error}"))?;
+    let (stderr_read, stderr_write) =
+        pipe2(OFlag::O_CLOEXEC).map_err(|error| format!("create draft stderr pipe: {error}"))?;
+    let null = OpenOptions::new()
+        .write(true)
+        .open("/dev/null")
+        .map_err(|error| format!("open executor draft null output: {error}"))?;
+    let executable_c = CString::new(executable.as_os_str().as_bytes())
+        .map_err(|_| "executor draft executable contains NUL".to_string())?;
+    let mut argv = Vec::with_capacity(args.len() + 1);
+    argv.push(executable_c.clone());
+    for arg in &args {
+        argv.push(
+            CString::new(arg.as_bytes())
+                .map_err(|_| "executor draft argument contains NUL".to_string())?,
+        );
+    }
+    let mut environment = std::env::vars_os().collect::<BTreeMap<_, _>>();
+    environment.extend(adapter.environment.clone());
+    environment.insert(
+        "AUTOSPEC_DRAFT_RELEASE_RECEIPT".into(),
+        receipt_path.as_os_str().to_os_string(),
+    );
+    let environment = environment
+        .into_iter()
+        .map(|(key, value)| {
+            let mut entry = key.as_os_str().as_bytes().to_vec();
+            entry.push(b'=');
+            entry.extend_from_slice(value.as_os_str().as_bytes());
+            CString::new(entry).map_err(|_| "executor draft environment contains NUL".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut argv_pointers = argv.iter().map(|value| value.as_ptr()).collect::<Vec<_>>();
+    argv_pointers.push(std::ptr::null());
+    let mut environment_pointers = environment
+        .iter()
+        .map(|value| value.as_ptr())
+        .collect::<Vec<_>>();
+    environment_pointers.push(std::ptr::null());
+    let release_read_fd = release_read.as_raw_fd();
+    let release_write_fd = release_write.as_raw_fd();
+    let digest_read_fd = digest_read.as_raw_fd();
+    let digest_write_fd = digest_write.as_raw_fd();
+    let stderr_read_fd = stderr_read.as_raw_fd();
+    let stderr_write_fd = stderr_write.as_raw_fd();
+    let null_fd = null.as_raw_fd();
+    let receipt_fd = receipt_file.as_raw_fd();
+    let receipt_directory_fd = receipt_directory.as_raw_fd();
+    // SAFETY: every allocation and pointer array is complete before fork. The child branch
+    // performs only async-signal-safe syscalls before execve and never returns to Rust.
+    let child = match unsafe { fork() }
+        .map_err(|error| format!("fork executor draft pull request: {error}"))?
+    {
+        ForkResult::Child => unsafe {
+            nix::libc::close(release_write_fd);
+            nix::libc::close(digest_write_fd);
+            nix::libc::close(stderr_read_fd);
+            if nix::libc::dup2(null_fd, nix::libc::STDOUT_FILENO) < 0
+                || nix::libc::dup2(stderr_write_fd, nix::libc::STDERR_FILENO) < 0
+            {
+                terminate_post_fork(126);
+            }
+            nix::libc::close(stderr_write_fd);
+            nix::libc::close(null_fd);
+            let mut release = 0_u8;
+            let release_count = loop {
+                let count =
+                    nix::libc::read(release_read_fd, std::ptr::addr_of_mut!(release).cast(), 1);
+                if count < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                    continue;
+                }
+                break count;
+            };
+            if release_count != 1 || release != b'R' {
+                nix::libc::unlink(receipt_temporary_c.as_ptr());
+                terminate_post_fork(125);
+            }
+            let mut digest = [0_u8; 64];
+            let mut offset = 0_usize;
+            while offset < digest.len() {
+                let count = nix::libc::read(
+                    digest_read_fd,
+                    digest[offset..].as_mut_ptr().cast(),
+                    digest.len() - offset,
+                );
+                if count < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                    continue;
+                }
+                if count <= 0 {
+                    nix::libc::unlink(receipt_temporary_c.as_ptr());
+                    terminate_post_fork(126);
+                }
+                offset += count as usize;
+            }
+            offset = 0;
+            while offset < digest.len() {
+                let count = nix::libc::write(
+                    receipt_fd,
+                    digest[offset..].as_ptr().cast(),
+                    digest.len() - offset,
+                );
+                if count < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                    continue;
+                }
+                if count <= 0 {
+                    nix::libc::unlink(receipt_temporary_c.as_ptr());
+                    terminate_post_fork(126);
+                }
+                offset += count as usize;
+            }
+            if nix::libc::fsync(receipt_fd) != 0
+                || nix::libc::link(receipt_temporary_c.as_ptr(), receipt_path_c.as_ptr()) != 0
+                || nix::libc::fsync(receipt_directory_fd) != 0
+                || nix::libc::unlink(receipt_temporary_c.as_ptr()) != 0
+            {
+                terminate_post_fork(126);
+            }
+            nix::libc::close(release_read_fd);
+            nix::libc::close(digest_read_fd);
+            nix::libc::close(receipt_fd);
+            nix::libc::close(receipt_directory_fd);
+            nix::libc::execve(
+                executable_c.as_ptr(),
+                argv_pointers.as_ptr(),
+                environment_pointers.as_ptr(),
+            );
+            let marker = b"executor draft launch failed\n";
+            nix::libc::write(
+                nix::libc::STDERR_FILENO,
+                marker.as_ptr().cast(),
+                marker.len(),
+            );
+            terminate_post_fork(127);
+        },
+        ForkResult::Parent { child } => child,
+    };
+    drop(release_read);
+    drop(digest_read);
+    drop(receipt_file);
+    drop(receipt_directory);
+    drop(stderr_write);
+    drop(null);
+    let stderr_reader = thread::spawn(move || {
+        let mut stderr = Vec::new();
+        let mut file = File::from(stderr_read);
+        let _ = Read::by_ref(&mut file)
+            .take(64 * 1024)
+            .read_to_end(&mut stderr);
+        stderr
+    });
+    let child_pid = child.as_raw() as u32;
+    let birth = observe_process_birth(child_pid)?
+        .ok_or_else(|| "executor draft child exited before durable identity capture".to_string())?;
+    let process = ProcessIdentity {
+        pid: birth.pid,
+        process_group: birth.process_group,
+        executable,
+        argv_digest: argv_digest(&args),
+        boot_id: birth.boot_id,
+        start_identity: birth.start_identity,
+    };
+    state.draft_process = Some(process.clone());
+    if let Err(error) = write_invocation_atomic(state_path, state) {
+        drop(release_write);
+        drop(digest_write);
+        let _ = waitpid(child, None);
+        let _ = stderr_reader.join();
+        let _ = fs::remove_file(&receipt_temporary);
+        return Err(error);
+    }
+    #[cfg(test)]
+    if adapter.environment.contains_key(std::ffi::OsStr::new(
+        "AUTOSPEC_TEST_DRAFT_ABORT_BEFORE_RELEASE",
+    )) {
+        drop(release_write);
+        drop(digest_write);
+        let _ = waitpid(child, None);
+        let _ = stderr_reader.join();
+        let _ = fs::remove_file(&receipt_temporary);
+        let _ = fs::remove_file(&body_path);
+        return Err("injected executor draft parent loss before release".to_string());
+    }
+    let digest = draft_release_digest(state, &process);
+    let release_result = (|| {
+        let digest_count = fd_write(&digest_write, digest.as_bytes())
+            .map_err(|error| format!("write executor draft release digest: {error}"))?;
+        if digest_count != digest.len() {
+            return Err("write executor draft release digest was incomplete".to_string());
+        }
+        let release_count = fd_write(&release_write, b"R")
+            .map_err(|error| format!("release executor draft child: {error}"))?;
+        if release_count != 1 {
+            return Err("release executor draft child was incomplete".to_string());
+        }
+        Ok(())
+    })();
+    drop(digest_write);
+    drop(release_write);
+    let status = waitpid(child, None)
         .map_err(|error| format!("wait for executor draft pull request: {error}"))?;
+    let stderr = stderr_reader
+        .join()
+        .map_err(|_| "join executor draft stderr reader".to_string())?;
     let _ = fs::remove_file(&body_path);
-    if output.status.success() {
+    release_result?;
+    if matches!(status, WaitStatus::Exited(_, 0)) {
         Ok(())
     } else {
         Err(format!(
             "create executor draft pull request failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&stderr).trim()
         ))
     }
 }
@@ -1907,23 +2276,25 @@ fn list_bridge_pull_requests(
 
 fn remote_head_refs(repo: &Path) -> Result<BTreeMap<String, String>, String> {
     let output = git_stdout(repo, &["ls-remote", "--refs", "origin"])?;
-    output
-        .lines()
-        .map(|line| {
-            let (oid, reference) = line
-                .split_once('\t')
-                .ok_or_else(|| "executor remote ref evidence is malformed".to_string())?;
-            if !["refs/heads/", "refs/tags/", "refs/notes/"]
-                .iter()
-                .any(|prefix| reference.starts_with(prefix))
-            {
-                return Err(format!(
-                    "executor remote advertised unsupported ref namespace: {reference}"
-                ));
-            }
-            Ok((reference.to_string(), oid.to_string()))
-        })
-        .collect()
+    let mut refs = BTreeMap::new();
+    for line in output.lines() {
+        let (oid, reference) = line
+            .split_once('\t')
+            .ok_or_else(|| "executor remote ref evidence is malformed".to_string())?;
+        if reference.starts_with("refs/pull/") {
+            continue;
+        }
+        if !["refs/heads/", "refs/tags/", "refs/notes/"]
+            .iter()
+            .any(|prefix| reference.starts_with(prefix))
+        {
+            return Err(format!(
+                "executor remote advertised unsupported ref namespace: {reference}"
+            ));
+        }
+        refs.insert(reference.to_string(), oid.to_string());
+    }
+    Ok(refs)
 }
 
 fn exact_draft_candidates<'a>(
@@ -10061,6 +10432,71 @@ mod tests {
             assert!(error.contains(expected), "{label}: {error}");
         }
 
+        for (label, body, expected) in [
+            (
+                "bullet-close",
+                "## Closeout report\n\n\
+                 Result: shipped\n\
+                 Claims: [verified] static behavior is covered\n\
+                 Proof type: static\n\
+                 Before/after: 0 to 1\n\
+                 Artifacts: README.md\n\
+                 Scoped git status: README.md\n\
+                 One likely hidden failure: none observed\n\
+                 - Closes #999\n",
+                "issue-closing directive",
+            ),
+            (
+                "field-close",
+                "## Closeout report\n\n\
+                 Result: Closes #999\n\
+                 Claims: [verified] static behavior is covered\n\
+                 Proof type: static\n\
+                 Before/after: 0 to 1\n\
+                 Artifacts: README.md\n\
+                 Scoped git status: README.md\n\
+                 One likely hidden failure: none observed\n",
+                "issue-closing directive",
+            ),
+            (
+                "cross-repository-close",
+                "## Closeout report\n\n\
+                 Result: shipped\n\
+                 Claims: [verified] static behavior is covered\n\
+                 Proof type: static\n\
+                 Before/after: 0 to 1\n\
+                 Artifacts: Resolves owner/repository#999\n\
+                 Scoped git status: README.md\n\
+                 One likely hidden failure: none observed\n",
+                "issue-closing directive",
+            ),
+            (
+                "unclassified-prose",
+                "## Closeout report\n\n\
+                 Result: shipped\n\
+                 Claims: [verified] static behavior is covered\n\
+                 Proof type: static\n\
+                 Before/after: 0 to 1\n\
+                 Artifacts: README.md\n\
+                 Scoped git status: README.md\n\
+                 One likely hidden failure: none observed\n\
+                 This assertion has no evidence label.\n",
+                "unrecognized",
+            ),
+        ] {
+            let (fixture, _, _, closeout) =
+                implementation_proof_fixture(&format!("closeout-structure-{label}"));
+            fs::write(&closeout, body).expect("malformed closeout");
+            fs::set_permissions(&closeout, fs::Permissions::from_mode(0o600))
+                .expect("private closeout");
+
+            let error =
+                super::validate_closeout_report(&fixture.root.join("issue-worktree"), &closeout)
+                    .expect_err("structurally invalid report must fail closed");
+
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+
         let (fixture, _, _, closeout) = implementation_proof_fixture("closeout-parent-dir");
         let outside = fixture.root.join("outside.md");
         fs::copy(&closeout, &outside).expect("outside closeout");
@@ -10084,6 +10520,27 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_original_closeout_symlink_before_canonicalization() {
+        // Break caught: canonicalizing the caller path before symlink rejection erasing the link.
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("closeout-original-symlink");
+        let symlink = closeout.with_file_name("closeout-link.md");
+        std::os::unix::fs::symlink(&closeout, &symlink).expect("in-worktree closeout symlink");
+        commit_implementation(&state);
+
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &symlink,
+        )
+        .expect_err("original symlink path must fail closed");
+
+        assert!(error.contains("symlink"), "{error}");
+    }
+
+    #[cfg(unix)]
     fn draft_pr_adapter_fixture(
         fixture: &GitFixture,
         state_path: &Path,
@@ -10103,6 +10560,10 @@ mod tests {
              if [ \"$1 $2\" = \"pr list\" ]; then cat \"$GH_PR_STATE\"; exit 0; fi\n\
              if [ \"$1 $2\" = \"pr create\" ]; then\n\
                grep -q '\"phase\":\"draft_creating\"' \"$BRIDGE_STATE\"\n\
+               if [ -n \"${GH_REQUIRE_DURABLE_RELEASE:-}\" ]; then\n\
+                 grep -q '\"draft_process\":{' \"$BRIDGE_STATE\"\n\
+                 test -s \"$AUTOSPEC_DRAFT_RELEASE_RECEIPT\"\n\
+               fi\n\
                if [ -n \"${GH_CREATE_DELAY:-}\" ]; then\n\
                  if ! mkdir \"$GH_INFLIGHT\" 2>/dev/null; then exit 65; fi\n\
                  touch \"$GH_CREATE_STARTED\"\n\
@@ -10110,6 +10571,7 @@ mod tests {
                  rmdir \"$GH_INFLIGHT\"\n\
                fi\n\
                if [ -n \"${GH_MUTATE_REF:-}\" ]; then git --git-dir \"$GH_REMOTE\" update-ref refs/tags/during-create \"$GH_MUTATE_REF\"; fi\n\
+               if [ -n \"${GH_MUTATE_PULL_REF:-}\" ]; then git --git-dir \"$GH_REMOTE\" update-ref refs/pull/17/head \"$GH_MUTATE_PULL_REF\"; fi\n\
                cp \"$GH_CREATED_PR\" \"$GH_PR_STATE\"\n\
                printf 'https://example.invalid/pull/17\\n'\n\
                exit 0\n\
@@ -10306,16 +10768,13 @@ mod tests {
             .expect("create intent");
         fs::write(before_create.fixture.root.join("gh-calls"), "").expect("clear calls");
 
-        let error = before_create
+        let pr = before_create
             .publish()
-            .expect_err("ambiguous create intent must not retry");
-        assert!(
-            error.contains("ambiguous") || error.contains("in-flight"),
-            "{error}"
-        );
+            .expect("unreleased create intent is safe to retry");
+        assert_eq!(pr, 17);
         let calls =
             fs::read_to_string(before_create.fixture.root.join("gh-calls")).expect("gh calls");
-        assert_eq!(calls.matches("pr create").count(), 0);
+        assert_eq!(calls.matches("pr create").count(), 1);
     }
 
     #[cfg(target_os = "linux")]
@@ -10360,6 +10819,126 @@ mod tests {
         let (prepared, result) = publisher.join().expect("join publisher");
         assert_eq!(result.expect("finish single create"), 17);
         assert!(prepared.state.draft_process.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_durable_release_gate_precedes_gh_start() {
+        // Break caught: gh starting before its exact prepared identity/release is durable.
+        let mut prepared = prepared_draft_transaction("draft-create-release-gate");
+        prepared
+            .adapter
+            .environment
+            .insert("GH_REQUIRE_DURABLE_RELEASE".into(), "1".into());
+
+        let pull_request = prepared
+            .publish()
+            .expect("durable release gate must precede gh start");
+
+        assert_eq!(pull_request, 17);
+        assert!(prepared.state.draft_process.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_retries_only_a_proven_never_released_draft_child() {
+        // Break caught: a parent crash before release permanently stranding a safe create intent.
+        let mut prepared = prepared_draft_transaction("draft-create-never-released");
+        prepared.push_exact_at_intent();
+        prepared.state.phase = BridgePhase::DraftCreating;
+        prepared.state.draft_process = Some(super::ProcessIdentity {
+            pid: 4_000_000,
+            process_group: 4_000_000,
+            executable: prepared.adapter.gh.clone(),
+            argv_digest: "prepared-never-released".to_string(),
+            boot_id: "missing-boot".to_string(),
+            start_identity: "missing-start".to_string(),
+        });
+        super::write_invocation_atomic(&prepared.state_path, &prepared.state)
+            .expect("prepared create identity");
+
+        let pull_request = prepared
+            .publish()
+            .expect("dead child without release receipt is safe to retry");
+
+        assert_eq!(pull_request, 17);
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_parent_loss_before_release_never_starts_gh() {
+        // Break caught: the suspended child sending a request after its parent disappears pre-release.
+        let mut prepared = prepared_draft_transaction("draft-create-parent-loss");
+        prepared.adapter.environment.insert(
+            "AUTOSPEC_TEST_DRAFT_ABORT_BEFORE_RELEASE".into(),
+            "1".into(),
+        );
+
+        let error = prepared
+            .publish()
+            .expect_err("injected parent loss must stop before release");
+
+        assert!(error.contains("before release"), "{error}");
+        assert_eq!(prepared.state.phase, BridgePhase::DraftCreating);
+        assert!(prepared.state.draft_process.is_some());
+        assert!(!super::draft_release_receipt_path(&prepared.state_path).exists());
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+
+        prepared.adapter.environment.remove(std::ffi::OsStr::new(
+            "AUTOSPEC_TEST_DRAFT_ABORT_BEFORE_RELEASE",
+        ));
+        let pull_request = prepared
+            .publish()
+            .expect("restart safely retries the never-released child");
+        assert_eq!(pull_request, 17);
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_never_retries_a_released_draft_without_visible_pr() {
+        // Break caught: treating a child-recorded request release as a safe pre-request crash.
+        let mut prepared = prepared_draft_transaction("draft-create-released-ambiguous");
+        prepared.push_exact_at_intent();
+        prepared.state.phase = BridgePhase::DraftCreating;
+        prepared.state.draft_process = Some(super::ProcessIdentity {
+            pid: 4_000_001,
+            process_group: 4_000_001,
+            executable: prepared.adapter.gh.clone(),
+            argv_digest: "released-request".to_string(),
+            boot_id: "missing-boot".to_string(),
+            start_identity: "missing-start".to_string(),
+        });
+        super::write_invocation_atomic(&prepared.state_path, &prepared.state)
+            .expect("released create identity");
+        let receipt = super::draft_release_receipt_path(&prepared.state_path);
+        let digest = super::draft_release_digest(
+            &prepared.state,
+            prepared
+                .state
+                .draft_process
+                .as_ref()
+                .expect("draft process"),
+        );
+        fs::write(&receipt, digest).expect("released receipt");
+        fs::set_permissions(&receipt, fs::Permissions::from_mode(0o600))
+            .expect("private release receipt");
+        fs::write(prepared.fixture.root.join("gh-calls"), "").expect("clear calls");
+
+        let error = prepared
+            .publish()
+            .expect_err("released request without an authoritative PR is ambiguous");
+
+        assert!(
+            error.contains("released") && error.contains("ambiguous"),
+            "{error}"
+        );
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
     }
 
     #[cfg(unix)]
@@ -10407,6 +10986,22 @@ mod tests {
         .all(|line| !line.ends_with(&format!("refs/heads/{}", state.identity.branch))));
         let calls = fs::read_to_string(fixture.root.join("gh-calls")).expect("gh calls");
         assert_eq!(calls.matches("pr create").count(), 0);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_reuse_lens_follows_exact_environment_contract() {
+        // Break caught: draft publication enabling reuse-only detectors when the shell gate is off.
+        let original = std::env::var_os("AUTOSPEC_REUSE_LENS");
+        std::env::remove_var("AUTOSPEC_REUSE_LENS");
+        assert!(!super::implementation_lint_options().enable_reuse_lens);
+        std::env::set_var("AUTOSPEC_REUSE_LENS", "off");
+        assert!(!super::implementation_lint_options().enable_reuse_lens);
+        std::env::set_var("AUTOSPEC_REUSE_LENS", "1");
+        assert!(super::implementation_lint_options().enable_reuse_lens);
+        match original {
+            Some(value) => std::env::set_var("AUTOSPEC_REUSE_LENS", value),
+            None => std::env::remove_var("AUTOSPEC_REUSE_LENS"),
+        }
     }
 
     #[cfg(unix)]
@@ -10609,6 +11204,47 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn autonomous_executor_bridge_excludes_server_managed_pull_refs_from_mutation_ownership() {
+        // Break caught: GitHub refs/pull advertisements making the operator-owned ref proof unusable.
+        let mut prepared = prepared_draft_transaction("draft-server-managed-refs");
+        let remote = prepared.fixture.root.join("remote.git");
+        git(
+            &prepared.fixture.root,
+            &[
+                "--git-dir",
+                remote.to_str().expect("remote path"),
+                "update-ref",
+                "refs/pull/1/head",
+                &prepared.state.identity.base_oid,
+            ],
+        );
+        prepared.adapter.environment.insert(
+            "GH_MUTATE_PULL_REF".into(),
+            prepared.state.identity.base_oid.clone().into(),
+        );
+
+        let pull_request = prepared
+            .publish()
+            .expect("server-managed pull refs must be excluded");
+
+        assert_eq!(pull_request, 17);
+        assert_eq!(prepared.state.phase, BridgePhase::DraftCreated);
+        assert_eq!(
+            git_stdout(
+                &prepared.fixture.root,
+                &[
+                    "--git-dir",
+                    remote.to_str().expect("remote path"),
+                    "rev-parse",
+                    "refs/pull/17/head",
+                ],
+            ),
+            prepared.state.identity.base_oid
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn autonomous_executor_bridge_snapshot_is_create_once_and_full_identity_bound() {
         // Break caught: a same-invocation recapture blessing a new remote baseline.
         let (fixture, mut state, _, _) = implementation_proof_fixture("snapshot-create-once");
@@ -10617,13 +11253,23 @@ mod tests {
         super::write_invocation_atomic(&state_path, &state).expect("pending invocation");
         let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
 
-        super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
-            .expect("first prelaunch snapshot");
+        let first =
+            super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+                .expect("first prelaunch snapshot");
         let persisted = fs::read_to_string(&state_path).expect("persisted invocation");
         assert!(
             persisted.contains("\"remote_snapshot_digest\":\""),
             "invocation must bind the snapshot digest"
         );
+        state.remote_snapshot_digest = None;
+        super::write_invocation_atomic(&state_path, &state)
+            .expect("simulate crash before digest binding");
+        let recovered =
+            super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+                .expect("adopt create-once snapshot after binding crash");
+        assert_eq!(recovered, first);
+        assert!(state.remote_snapshot_digest.is_some());
+
         let error =
             super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
                 .expect_err("snapshot recapture must fail closed");
@@ -10639,6 +11285,47 @@ mod tests {
             error.contains("identity") || error.contains("digest"),
             "{error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_snapshot_recovery_rejects_foreign_and_malformed_files() {
+        // Break caught: Pending crash recovery binding a pre-existing snapshot without validation.
+        for variant in ["foreign", "malformed"] {
+            let (fixture, mut state, _, _) =
+                implementation_proof_fixture(&format!("snapshot-recovery-{variant}"));
+            let state_path = fixture.root.join("state/invocation.json");
+            state.phase = BridgePhase::Pending;
+            super::write_invocation_atomic(&state_path, &state).expect("pending invocation");
+            let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
+            super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+                .expect("initial snapshot");
+            state.remote_snapshot_digest = None;
+            super::write_invocation_atomic(&state_path, &state)
+                .expect("simulate digest-binding crash");
+            let snapshot_path = state_path.with_extension("prelaunch-remote.json");
+            if variant == "foreign" {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(&snapshot_path).unwrap()).unwrap();
+                value["identity"]["worker_id"] = "foreign-worker".into();
+                fs::write(&snapshot_path, value.to_string()).expect("foreign snapshot");
+            } else {
+                fs::write(&snapshot_path, "{malformed").expect("malformed snapshot");
+            }
+
+            let error = super::RemoteMutationSnapshot::capture_and_persist(
+                &state_path,
+                &mut state,
+                &adapter,
+            )
+            .expect_err("invalid existing snapshot must not be rebound");
+
+            assert!(
+                error.contains("identity") || error.contains("parse"),
+                "{variant}: {error}"
+            );
+            assert!(state.remote_snapshot_digest.is_none());
+        }
     }
 
     #[cfg(unix)]
@@ -10662,6 +11349,44 @@ mod tests {
 
         assert_eq!(state.phase, BridgePhase::BranchPushed);
         assert_eq!(recovered.head_oid, state.head_oid.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_a_forged_closeout_body_at_mutation_boundary() {
+        // Break caught: a caller constructing an exact-head proof with an unvalidated PR body.
+        let mut prepared = prepared_draft_transaction("proof-forged-closeout");
+        let forged = super::ImplementationProof {
+            head_oid: prepared.proof.head_oid.clone(),
+            closeout_body: prepared
+                .proof
+                .closeout_body
+                .replace("Result: shipped", "Result: forged"),
+        };
+
+        let error = super::push_and_create_draft(
+            &prepared.state_path,
+            &mut prepared.state,
+            &forged,
+            "Implement issue",
+            DRAFT_ISSUE_BODY,
+            &prepared.adapter,
+        )
+        .expect_err("forged proof body must fail before mutation");
+
+        assert!(error.contains("digest"), "{error}");
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+        assert!(git_stdout(
+            &prepared.fixture.root,
+            &[
+                "--git-dir",
+                prepared.fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        )
+        .lines()
+        .all(|line| !line.ends_with(&format!("refs/heads/{}", prepared.state.identity.branch))));
     }
 
     #[cfg(unix)]
