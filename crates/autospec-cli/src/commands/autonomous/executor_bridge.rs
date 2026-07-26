@@ -518,20 +518,47 @@ impl PersistedInvocation {
     }
 }
 
+fn process_identity_value(process: &ProcessIdentity) -> serde_json::Value {
+    serde_json::json!({
+        "pid": process.pid,
+        "process_group": process.process_group,
+        "executable": process.executable,
+        "argv_digest": process.argv_digest,
+        "boot_id": process.boot_id,
+        "start_identity": process.start_identity,
+    })
+}
+
+fn parse_process_identity(
+    value: serde_json::Value,
+    label: &str,
+) -> Result<ProcessIdentity, String> {
+    let process = strict_object(
+        value,
+        &[
+            "pid",
+            "process_group",
+            "executable",
+            "argv_digest",
+            "boot_id",
+            "start_identity",
+        ],
+        label,
+    )?;
+    Ok(ProcessIdentity {
+        pid: checked_u32(&process, "pid")?,
+        process_group: checked_u32(&process, "process_group")?,
+        executable: PathBuf::from(text(&process, "executable")?),
+        argv_digest: text(&process, "argv_digest")?,
+        boot_id: text(&process, "boot_id")?,
+        start_identity: text(&process, "start_identity")?,
+    })
+}
+
 fn invocation_to_value(invocation: &PersistedInvocation) -> serde_json::Value {
     let identity = &invocation.identity;
-    let process_value = |process: &ProcessIdentity| {
-        serde_json::json!({
-            "pid": process.pid,
-            "process_group": process.process_group,
-            "executable": process.executable,
-            "argv_digest": process.argv_digest,
-            "boot_id": process.boot_id,
-            "start_identity": process.start_identity,
-        })
-    };
-    let supervisor = invocation.supervisor.as_ref().map(process_value);
-    let process = invocation.process.as_ref().map(process_value);
+    let supervisor = invocation.supervisor.as_ref().map(process_identity_value);
+    let process = invocation.process.as_ref().map(process_identity_value);
     serde_json::json!({
         "schema": invocation.schema,
         "identity": {
@@ -595,28 +622,7 @@ fn invocation_from_value(value: serde_json::Value) -> Result<PersistedInvocation
     let parse_process = |field: &str| -> Result<Option<ProcessIdentity>, String> {
         Ok(match required(&object, field)? {
             serde_json::Value::Null => None,
-            value => {
-                let process = strict_object(
-                    value.clone(),
-                    &[
-                        "pid",
-                        "process_group",
-                        "executable",
-                        "argv_digest",
-                        "boot_id",
-                        "start_identity",
-                    ],
-                    field,
-                )?;
-                Some(ProcessIdentity {
-                    pid: checked_u32(&process, "pid")?,
-                    process_group: checked_u32(&process, "process_group")?,
-                    executable: PathBuf::from(text(&process, "executable")?),
-                    argv_digest: text(&process, "argv_digest")?,
-                    boot_id: text(&process, "boot_id")?,
-                    start_identity: text(&process, "start_identity")?,
-                })
-            }
+            value => Some(parse_process_identity(value.clone(), field)?),
         })
     };
     let supervisor = parse_process("supervisor")?;
@@ -1008,6 +1014,7 @@ struct OutputSinkPaths {
     stdout_reader_cursor: PathBuf,
     stderr_reader_cursor: PathBuf,
     exit_status: PathBuf,
+    supervisor_identity: PathBuf,
 }
 
 struct DurableOutputStream {
@@ -1147,6 +1154,8 @@ enum LaunchFailpoint {
     ParentBirthRefresh = 14,
     RingBeforeSync = 15,
     DirectSetup = 16,
+    PostReturnIdentity = 17,
+    CleanupFreezeWindow = 18,
 }
 
 #[cfg(test)]
@@ -1161,6 +1170,8 @@ const LAUNCH_FAILPOINT_NEVER_READY: u8 = 4;
 const LAUNCH_FAILPOINT_NEVER_CLOSE_EXEC_STATUS: u8 = 5;
 const CLEANUP_FAILPOINT_SIGNAL: u8 = 10;
 const CLEANUP_FAILPOINT_LIVENESS: u8 = 11;
+#[cfg(test)]
+const CLEANUP_FAILPOINT_FREEZE_WINDOW: u8 = 18;
 const LAUNCH_FAILPOINT_RING_BEFORE_SYNC: u8 = 15;
 
 fn launch_child_failpoint() -> u8 {
@@ -1439,6 +1450,7 @@ fn fail_launch_at(label: &str) -> Result<(), String> {
             "parent-harness" => LaunchFailpoint::ParentHarnessCapture,
             "parent-refresh" => LaunchFailpoint::ParentBirthRefresh,
             "direct-setup" => LaunchFailpoint::DirectSetup,
+            "direct-post-return-identity" => LaunchFailpoint::PostReturnIdentity,
             _ => LaunchFailpoint::None,
         };
         if LAUNCH_FAILPOINT.load(Ordering::SeqCst) == expected as u8
@@ -1637,6 +1649,33 @@ fn supervise_validated_harness(
     }
     if let Some(expected) = state.process.as_ref() {
         let expected = expected.clone();
+        let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+        if let Some(supervisor) = read_supervisor_identity(&sinks.supervisor_identity)? {
+            match OwnedProcess::capture_identity(&supervisor) {
+                Ok(_) => {
+                    state.supervisor = Some(supervisor.clone());
+                    write_invocation_atomic(state_path, state)?;
+                    return supervise_adopted_process(
+                        state_path,
+                        event_log,
+                        state,
+                        &supervisor,
+                        Some(&expected),
+                        snapshot,
+                        config,
+                    );
+                }
+                Err(error)
+                    if observe_process_identity(supervisor.pid, &supervisor.argv_digest)?
+                        .is_some() =>
+                {
+                    return Err(format!(
+                        "journaled executor supervisor identity is quarantined: {error}"
+                    ));
+                }
+                Err(_) => {}
+            }
+        }
         return match resolve_legacy_supervisor(&expected) {
             Ok(supervisor) => {
                 state.supervisor = Some(supervisor.clone());
@@ -1747,6 +1786,10 @@ struct ChildExit {
 const LAUNCH_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(200);
 #[cfg(not(test))]
 const LAUNCH_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const HARNESS_EXIT_STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(not(test))]
+const HARNESS_EXIT_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
@@ -1860,6 +1903,30 @@ impl OwnedProcess {
             Err(format!("signal owned executor pidfd: {error}"))
         }
     }
+
+    fn is_stopped(&self) -> Result<bool, String> {
+        if !self.is_live()? {
+            return Ok(true);
+        }
+        let observed = observe_process_birth(self.birth.pid)?
+            .ok_or_else(|| "owned executor disappeared while verifying SIGSTOP".to_string())?;
+        if observed != self.birth {
+            return Err(
+                "owned executor birth changed while verifying SIGSTOP; refusing reused PID"
+                    .to_string(),
+            );
+        }
+        let stat = fs::read_to_string(format!("/proc/{}/stat", self.birth.pid))
+            .map_err(|error| format!("read stopped executor state: {error}"))?;
+        let close = stat
+            .rfind(')')
+            .ok_or_else(|| "stopped executor stat is malformed".to_string())?;
+        let state = stat[close + 1..]
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| "stopped executor stat lacks process state".to_string())?;
+        Ok(matches!(state, "T" | "t" | "Z" | "X" | "x"))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1867,6 +1934,14 @@ impl OwnedProcess {
 struct OwnedProcessSet {
     leader: OwnedProcess,
     descendants: BTreeMap<(u32, String), OwnedProcess>,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct AdoptionFailure {
+    reason: String,
+    cleanup_error: Option<String>,
+    cleanup_succeeded: bool,
 }
 
 #[cfg(target_os = "linux")]
@@ -1888,30 +1963,47 @@ impl OwnedProcessSet {
     fn adopt_supervised(
         supervisor: &ProcessIdentity,
         harness: Option<&ProcessIdentity>,
-    ) -> Result<Self, String> {
-        let mut guard = AdoptedProcessGuard::new(Self::adopt(supervisor)?);
-        guard
-            .processes_mut()
-            .capture_descendants_while_leader_live()?;
-        if let Some(harness) = harness {
-            match OwnedProcess::capture_identity(harness) {
-                Ok(exact_harness) => {
-                    let key = (
-                        exact_harness.birth.pid,
-                        exact_harness.birth.start_identity.clone(),
-                    );
-                    if !guard.processes_mut().descendants.contains_key(&key) {
-                        return Err(
-                            "executor harness is not a descendant of the persisted supervisor"
-                                .to_string(),
+    ) -> Result<Self, AdoptionFailure> {
+        let processes = Self::adopt(supervisor).map_err(|reason| AdoptionFailure {
+            reason,
+            cleanup_error: None,
+            cleanup_succeeded: false,
+        })?;
+        let mut guard = AdoptedProcessGuard::new(processes);
+        let prepare = (|| -> Result<(), String> {
+            guard
+                .processes_mut()
+                .capture_descendants_while_leader_live()?;
+            if let Some(harness) = harness {
+                match OwnedProcess::capture_identity(harness) {
+                    Ok(exact_harness) => {
+                        let key = (
+                            exact_harness.birth.pid,
+                            exact_harness.birth.start_identity.clone(),
                         );
+                        if !guard.processes_mut().descendants.contains_key(&key) {
+                            return Err(
+                                "executor harness is not a descendant of the persisted supervisor"
+                                    .to_string(),
+                            );
+                        }
+                        guard.processes_mut().descendants.insert(key, exact_harness);
                     }
-                    guard.processes_mut().descendants.insert(key, exact_harness);
+                    Err(_error)
+                        if observe_process_identity(harness.pid, &harness.argv_digest)?
+                            .is_none() => {}
+                    Err(error) => return Err(error),
                 }
-                Err(_error)
-                    if observe_process_identity(harness.pid, &harness.argv_digest)?.is_none() => {}
-                Err(error) => return Err(error),
             }
+            Ok(())
+        })();
+        if let Err(reason) = prepare {
+            let cleanup = guard.terminate();
+            return Err(AdoptionFailure {
+                reason,
+                cleanup_succeeded: cleanup.is_ok(),
+                cleanup_error: cleanup.err(),
+            });
         }
         Ok(guard.release())
     }
@@ -2007,45 +2099,61 @@ impl OwnedProcessSet {
     }
 
     fn terminate(&mut self) -> Result<(), String> {
-        for signal in [Signal::SIGTERM, Signal::SIGKILL] {
-            let mut quiescent = 0_u8;
-            for _ in 0..10 {
-                let before = self.descendants.len();
-                self.capture_descendants_while_leader_live()?;
-                self.signal_descendants(signal)?;
-                self.reap_descendants()?;
-                let grew = self.descendants.len() != before;
-                if !self.any_descendants_live()? && !grew {
-                    quiescent += 1;
-                    if quiescent >= 2 {
-                        break;
-                    }
-                } else {
-                    quiescent = 0;
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            if !self.any_descendants_live()? {
-                break;
-            }
+        self.leader.signal(Signal::SIGSTOP)?;
+        #[cfg(test)]
+        if cleanup_failpoint() == CLEANUP_FAILPOINT_FREEZE_WINDOW {
+            thread::sleep(Duration::from_millis(100));
         }
-        if self.any_descendants_live()? {
+
+        let mut stable_rounds = 0_u8;
+        for _ in 0..20 {
+            let before = self.descendants.len();
+            self.capture_descendants_while_leader_live()?;
+            self.signal_descendants(Signal::SIGSTOP)?;
+            let mut all_stopped = self.leader.is_stopped()?;
+            for descendant in self.descendants.values() {
+                all_stopped &= descendant.is_stopped()?;
+            }
+            if all_stopped && self.descendants.len() == before {
+                stable_rounds += 1;
+                if stable_rounds >= 2 {
+                    break;
+                }
+            } else {
+                stable_rounds = 0;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        if stable_rounds < 2 {
             return Err(
-                "executor descendants survived bounded pidfd cleanup; supervisor retained"
+                "executor tree did not reach a stable pidfd-frozen boundary; supervisor retained"
                     .to_string(),
             );
         }
-        for signal in [Signal::SIGTERM, Signal::SIGKILL] {
-            self.leader.signal(signal)?;
-            for _ in 0..10 {
-                self.reap_descendants()?;
-                if !self.leader.is_live()? {
-                    return Ok(());
-                }
-                thread::sleep(Duration::from_millis(10));
+
+        self.signal_descendants(Signal::SIGKILL)?;
+        for _ in 0..20 {
+            self.reap_descendants()?;
+            if !self.any_descendants_live()? {
+                break;
             }
+            thread::sleep(Duration::from_millis(5));
         }
-        Err("executor supervisor survived forced pidfd cleanup".to_string())
+        if self.any_descendants_live()? {
+            return Err(
+                "executor descendants survived frozen pidfd cleanup; supervisor retained"
+                    .to_string(),
+            );
+        }
+        self.leader.signal(Signal::SIGKILL)?;
+        for _ in 0..20 {
+            self.reap_descendants()?;
+            if !self.leader.is_live()? {
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        Err("executor supervisor survived frozen pidfd cleanup".to_string())
     }
 }
 
@@ -2096,10 +2204,22 @@ impl SpawnParentGuard {
             .expect("spawn parent guard owns supervisor")
     }
 
-    fn disarm(mut self) -> OwnedProcessSet {
+    fn disarm(&mut self) -> OwnedProcessSet {
         self.processes
             .take()
             .expect("spawn parent guard owns supervisor")
+    }
+
+    fn terminate(&mut self) -> Result<(), String> {
+        let result = self
+            .processes
+            .as_mut()
+            .expect("spawn parent guard owns supervisor")
+            .terminate();
+        if result.is_ok() {
+            self.processes = None;
+        }
+        result
     }
 }
 
@@ -2177,7 +2297,7 @@ impl ForkedChild {
         read_exact_pipe_until_deadline(
             status.as_raw_fd(),
             &mut bytes,
-            LAUNCH_HANDSHAKE_TIMEOUT,
+            HARNESS_EXIT_STATUS_TIMEOUT,
             "executor harness exit-status",
         )?;
         let exit = ChildExit {
@@ -2362,7 +2482,56 @@ fn output_sink_paths(state_path: &Path, invocation_id: &str) -> Result<OutputSin
         stdout_reader_cursor: parent.join(format!("{scope}.stdout.reader")),
         stderr_reader_cursor: parent.join(format!("{scope}.stderr.reader")),
         exit_status: parent.join(format!("{scope}.exit")),
+        supervisor_identity: parent.join(format!("{scope}.supervisor.json")),
     })
+}
+
+fn write_supervisor_identity(path: &Path, identity: &ProcessIdentity) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "executor supervisor journal requires a parent".to_string())?;
+    ensure_private_directory(parent)?;
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    reject_symlink_path(&temporary)?;
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("create executor supervisor journal: {error}"))?;
+    let result = (|| {
+        file.write_all(process_identity_value(identity).to_string().as_bytes())
+            .map_err(|error| format!("write executor supervisor journal: {error}"))?;
+        file.write_all(b"\n")
+            .map_err(|error| format!("write executor supervisor journal newline: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync executor supervisor journal: {error}"))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| format!("publish executor supervisor journal: {error}"))?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync executor supervisor journal directory: {error}"))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn read_supervisor_identity(path: &Path) -> Result<Option<ProcessIdentity>, String> {
+    reject_symlink_path(path)?;
+    let body = match fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read executor supervisor journal: {error}")),
+    };
+    let value = serde_json::from_str(&body)
+        .map_err(|error| format!("invalid executor supervisor journal: {error}"))?;
+    parse_process_identity(value, "supervisor journal").map(Some)
 }
 
 #[cfg(unix)]
@@ -2437,6 +2606,12 @@ fn spawn_blocked_harness(
     harness: &ValidatedInvocation,
     sinks: &OutputSinkPaths,
 ) -> Result<ForkedChild, String> {
+    let supervisor_executable = fs::canonicalize(
+        std::env::current_exe()
+            .map_err(|error| format!("resolve executor supervisor executable: {error}"))?,
+    )
+    .map_err(|error| format!("canonicalize executor supervisor executable: {error}"))?;
+    let supervisor_argv_digest = argv_digest(&std::env::args().skip(1).collect::<Vec<_>>());
     let executable = CString::new(harness.program.as_os_str().as_bytes())
         .map_err(|_| "executor program contains a NUL byte".to_string())?;
     let mut argv = Vec::with_capacity(harness.args.len() + 1);
@@ -2509,59 +2684,87 @@ fn spawn_blocked_harness(
                 }
             };
             let mut spawn_guard = SpawnParentGuard::new(child, processes);
-            fail_launch_at("parent-pidfd")?;
-            drop(barrier_read);
-            drop(ready_write);
-            drop(status_write);
-            drop(harness_pid_write);
-            drop(harness_exit_write);
-            drop(stdout_read);
-            drop(stdout_write);
-            drop(stderr_read);
-            drop(stderr_write);
-            drop(accept_read);
-            drop(pump);
-            let harness_pid_file = File::from(harness_pid_read);
-            let mut harness_pid_bytes = [0_u8; 4];
-            read_exact_pipe_until_deadline(
-                harness_pid_file.as_raw_fd(),
-                &mut harness_pid_bytes,
-                LAUNCH_HANDSHAKE_TIMEOUT,
-                "executor harness PID",
-            )?;
-            let harness_pid = u32::from_ne_bytes(harness_pid_bytes);
-            #[cfg(test)]
-            LAST_SPAWN_HARNESS.store(harness_pid, Ordering::SeqCst);
-            let harness_birth = observe_process_birth(harness_pid)?
-                .ok_or_else(|| "executor harness exited before pidfd capture".to_string())?;
-            let harness_process = OwnedProcess::capture(&harness_birth)?;
-            fail_launch_at("parent-harness")?;
-            let ready = File::from(ready_read);
-            let readiness = read_pipe_until_deadline(
-                ready.as_raw_fd(),
-                LAUNCH_HANDSHAKE_TIMEOUT,
-                "executor launch readiness",
-            );
-            if !matches!(readiness, Ok(Some(b'R'))) {
-                return Err(match readiness {
-                    Err(error) => error,
-                    Ok(_) => "executor child failed before launch barrier readiness".to_string(),
-                });
+            let setup = (|| -> Result<ForkedChild, String> {
+                drop(barrier_read);
+                drop(ready_write);
+                drop(status_write);
+                drop(harness_pid_write);
+                drop(harness_exit_write);
+                drop(stdout_read);
+                drop(stdout_write);
+                drop(stderr_read);
+                drop(stderr_write);
+                drop(accept_read);
+                drop(pump);
+                let harness_pid_file = File::from(harness_pid_read);
+                let mut harness_pid_bytes = [0_u8; 4];
+                read_exact_pipe_until_deadline(
+                    harness_pid_file.as_raw_fd(),
+                    &mut harness_pid_bytes,
+                    LAUNCH_HANDSHAKE_TIMEOUT,
+                    "executor harness PID",
+                )?;
+                let harness_pid = u32::from_ne_bytes(harness_pid_bytes);
+                #[cfg(test)]
+                LAST_SPAWN_HARNESS.store(harness_pid, Ordering::SeqCst);
+                let harness_birth = observe_process_birth(harness_pid)?
+                    .ok_or_else(|| "executor harness exited before pidfd capture".to_string())?;
+                let harness_process = OwnedProcess::capture(&harness_birth)?;
+                let ready = File::from(ready_read);
+                let readiness = read_pipe_until_deadline(
+                    ready.as_raw_fd(),
+                    LAUNCH_HANDSHAKE_TIMEOUT,
+                    "executor launch readiness",
+                );
+                if !matches!(readiness, Ok(Some(b'R'))) {
+                    return Err(match readiness {
+                        Err(error) => error,
+                        Ok(_) => {
+                            "executor child failed before launch barrier readiness".to_string()
+                        }
+                    });
+                }
+                spawn_guard.processes_mut().leader.refresh_birth()?;
+                let supervisor_birth = spawn_guard.processes_mut().leader.birth.clone();
+                write_supervisor_identity(
+                    &sinks.supervisor_identity,
+                    &ProcessIdentity {
+                        pid: supervisor_birth.pid,
+                        process_group: supervisor_birth.process_group,
+                        executable: supervisor_executable.clone(),
+                        argv_digest: supervisor_argv_digest.clone(),
+                        boot_id: supervisor_birth.boot_id,
+                        start_identity: supervisor_birth.start_identity,
+                    },
+                )?;
+                fail_launch_at("parent-pidfd")?;
+                fail_launch_at("parent-harness")?;
+                fail_launch_at("parent-refresh")?;
+                fd_write(&accept_write, b"A")
+                    .map_err(|error| format!("accept executor supervisor ownership: {error}"))?;
+                drop(accept_write);
+                Ok(ForkedChild {
+                    supervisor_pid: child,
+                    harness: harness_process,
+                    processes: spawn_guard.disarm(),
+                    barrier: Some(barrier_write),
+                    exec_status: Some(File::from(status_read)),
+                    harness_exit: Some(File::from(harness_exit_read)),
+                    reaped: None,
+                })
+            })();
+            match setup {
+                Ok(child) => Ok(child),
+                Err(error) => {
+                    let cleanup = spawn_guard.terminate();
+                    Err(match cleanup {
+                        Ok(()) => error,
+                        Err(cleanup) => {
+                            format!("{error}; cleanup quarantined: {cleanup}")
+                        }
+                    })
+                }
             }
-            spawn_guard.processes_mut().leader.refresh_birth()?;
-            fail_launch_at("parent-refresh")?;
-            fd_write(&accept_write, b"A")
-                .map_err(|error| format!("accept executor supervisor ownership: {error}"))?;
-            drop(accept_write);
-            Ok(ForkedChild {
-                supervisor_pid: child,
-                harness: harness_process,
-                processes: spawn_guard.disarm(),
-                barrier: Some(barrier_write),
-                exec_status: Some(File::from(status_read)),
-                harness_exit: Some(File::from(harness_exit_read)),
-                reaped: None,
-            })
         }
         ForkResult::Child => {
             // No Rust allocation, formatting, or destructor runs after fork. The pointer arrays
@@ -2721,9 +2924,49 @@ fn launch_and_supervise(
         .map_err(|error| format!("enable executor descendant ownership: {error}"))?;
     let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
     #[cfg(unix)]
-    let child = spawn_blocked_harness(harness, &sinks)?;
-    #[cfg(unix)]
-    let supervisor_birth = child.supervisor_birth().clone();
+    let child = match spawn_blocked_harness(harness, &sinks) {
+        Ok(child) => child,
+        Err(error) => {
+            let supervisor = read_supervisor_identity(&sinks.supervisor_identity)?;
+            state.phase = BridgePhase::Interrupted;
+            let cleanup_unproven = error.contains("cleanup quarantined");
+            state.supervisor = if cleanup_unproven {
+                supervisor
+            } else {
+                match supervisor {
+                    Some(identity)
+                        if observe_process_identity(identity.pid, &identity.argv_digest)?
+                            .is_some_and(|observed| identity.matches(&observed)) =>
+                    {
+                        Some(identity)
+                    }
+                    _ => None,
+                }
+            };
+            state.process = None;
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+            append_executor_event(
+                event_log,
+                state,
+                "child_supervision_error",
+                Some(serde_json::json!({
+                    "reason": error,
+                    "cleanup_error": if state.supervisor.is_some() {
+                        Some("spawn cleanup did not prove supervisor exit")
+                    } else {
+                        None
+                    },
+                    "adopted": false
+                })),
+            )?;
+            return Err(if state.supervisor.is_some() {
+                format!("executor launch failed: {error}; cleanup quarantined")
+            } else {
+                format!("executor launch failed: {error}")
+            });
+        }
+    };
     #[cfg(unix)]
     let birth = child.birth().clone();
     #[cfg(unix)]
@@ -2736,20 +2979,43 @@ fn launch_and_supervise(
         start_identity: birth.start_identity,
     };
     #[cfg(unix)]
-    let supervisor = ProcessIdentity {
-        pid: supervisor_birth.pid,
-        process_group: supervisor_birth.process_group,
-        executable: std::env::current_exe()
-            .map_err(|error| format!("resolve executor supervisor executable: {error}"))?,
-        argv_digest: argv_digest(&std::env::args().skip(1).collect::<Vec<_>>()),
-        boot_id: supervisor_birth.boot_id,
-        start_identity: supervisor_birth.start_identity,
-    };
-    #[cfg(unix)]
     let mut guard = LaunchGuard {
         child: Some(child),
         birth: process.clone(),
     };
+    #[cfg(unix)]
+    if let Err(error) = fail_launch_at("direct-post-return-identity") {
+        let cleanup = guard.terminate();
+        state.phase = BridgePhase::Interrupted;
+        if cleanup.is_ok() {
+            state.supervisor = None;
+            state.process = None;
+        } else {
+            state.supervisor = read_supervisor_identity(&sinks.supervisor_identity)?;
+            state.process = Some(process.clone());
+        }
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+        append_executor_event(
+            event_log,
+            state,
+            "child_supervision_error",
+            Some(serde_json::json!({
+                "reason": error,
+                "cleanup_error": cleanup.as_ref().err(),
+                "adopted": false
+            })),
+        )?;
+        return Err(match cleanup {
+            Ok(()) => format!("executor supervision failed: {error}"),
+            Err(cleanup) => {
+                format!("executor supervision failed: {error}; cleanup quarantined: {cleanup}")
+            }
+        });
+    }
+    #[cfg(unix)]
+    let supervisor = read_supervisor_identity(&sinks.supervisor_identity)?
+        .ok_or_else(|| "executor supervisor journal disappeared after launch".to_string())?;
     fail_launch_at("persist")?;
     state.phase = BridgePhase::Implementing;
     state.supervisor = Some(supervisor.clone());
@@ -2922,7 +3188,43 @@ fn supervise_adopted_process(
 ) -> Result<SupervisionOutcome, String> {
     #[cfg(target_os = "linux")]
     let owned_processes = if harness.is_some() {
-        OwnedProcessSet::adopt_supervised(anchor, harness)?
+        match OwnedProcessSet::adopt_supervised(anchor, harness) {
+            Ok(processes) => processes,
+            Err(failure) => {
+                state.phase = BridgePhase::Interrupted;
+                if failure.cleanup_succeeded {
+                    state.supervisor = None;
+                    state.process = None;
+                }
+                state.progress_at = unix_now().unwrap_or(state.progress_at);
+                let state_error = write_invocation_atomic(state_path, state).err();
+                let _ = append_executor_event(
+                    event_log,
+                    state,
+                    "child_supervision_error",
+                    Some(serde_json::json!({
+                        "reason": &failure.reason,
+                        "cleanup_error": &failure.cleanup_error,
+                        "cleanup_succeeded": failure.cleanup_succeeded,
+                        "state_error": state_error,
+                        "adopted": true
+                    })),
+                );
+                return Err(match failure.cleanup_error {
+                    Some(cleanup) => format!(
+                        "adopted executor capture failed: {}; cleanup quarantined: {cleanup}",
+                        failure.reason
+                    ),
+                    None if failure.cleanup_succeeded => {
+                        format!("adopted executor capture failed: {}", failure.reason)
+                    }
+                    None => format!(
+                        "adopted executor capture failed: {}; cleanup not proven, ownership quarantined",
+                        failure.reason
+                    ),
+                });
+            }
+        }
     } else {
         OwnedProcessSet::adopt(anchor)?
     };
@@ -4400,6 +4702,53 @@ mod tests {
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(target_os = "linux")]
+    struct DetachedSupervisorCleanup(ProcessIdentity);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for DetachedSupervisorCleanup {
+        fn drop(&mut self) {
+            if let Ok(mut processes) = super::OwnedProcessSet::adopt(&self.0) {
+                let _ = processes.terminate();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct DetachedBirthCleanup(super::ProcessBirth);
+
+    #[cfg(target_os = "linux")]
+    impl Drop for DetachedBirthCleanup {
+        fn drop(&mut self) {
+            if let Ok(leader) = super::OwnedProcess::capture(&self.0) {
+                let mut processes = super::OwnedProcessSet {
+                    leader,
+                    descendants: BTreeMap::new(),
+                };
+                let _ = processes.terminate();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn observe_spawned_identity(pid: u32, args: &[String]) -> ProcessIdentity {
+        let executable = fs::canonicalize("/bin/sh").expect("canonical fixture shell");
+        for _ in 0..100 {
+            if let Some(identity) = super::observe_process_identity(pid, &super::argv_digest(args))
+                .expect("observe spawned fixture")
+            {
+                if identity.executable == executable
+                    && identity.argv_digest == super::argv_digest(args)
+                    && super::OwnedProcess::capture_identity(&identity).is_ok()
+                {
+                    return identity;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("spawned fixture never reached its stable exec identity");
+    }
 
     fn test_root(label: &str) -> PathBuf {
         let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -6220,6 +6569,10 @@ mod tests {
         let event_log = fixture.root.join("log/executor.jsonl");
         let validated = detach_harness_for_adoption(&fixture, &state_path, &mut state, "exit 0");
         let harness = state.process.clone().expect("persisted harness");
+        let supervisor = state.supervisor.clone().expect("persisted supervisor");
+        state.supervisor = None;
+        super::write_invocation_atomic(&state_path, &state)
+            .expect("persist process-only restart state");
         let sinks =
             super::output_sink_paths(&state_path, &state.identity.invocation_id).expect("sinks");
         for _ in 0..100 {
@@ -6246,17 +6599,32 @@ mod tests {
         let snapshot =
             MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
 
-        let outcome = super::supervise_validated_harness(
+        let result = super::supervise_validated_harness(
             &state_path,
             &event_log,
             &mut state,
             &validated,
             &snapshot,
             supervision_config(500),
-        )
-        .expect("stable supervisor exit sidecar remains attributable");
+        );
+        if super::observe_process_identity(supervisor.pid, &supervisor.argv_digest)
+            .expect("observe legacy supervisor after recovery")
+            .is_some()
+        {
+            let mut owned =
+                super::OwnedProcessSet::adopt(&supervisor).expect("capture leaked supervisor");
+            owned.terminate().expect("clean RED fixture supervisor");
+        }
+        let outcome =
+            result.expect("process-only restart recovers supervisor from durable journal");
 
         assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        assert!(
+            super::observe_process_birth(supervisor.pid)
+                .expect("final supervisor observation")
+                .is_none(),
+            "process-only fast exit left the stable supervisor alive"
+        );
         assert!(state.supervisor.is_none());
         assert!(state.process.is_none());
     }
@@ -6312,6 +6680,77 @@ mod tests {
                 "partial adoption leaked owned PID {pid}"
             );
         }
+        let durable = PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("durable partial-adoption failure"),
+        )
+        .expect("strict partial-adoption failure");
+        assert_eq!(durable.phase, BridgePhase::Interrupted);
+        assert!(durable.supervisor.is_none());
+        assert!(durable.process.is_none());
+        let events = fs::read_to_string(event_log).expect("partial-adoption event");
+        assert_eq!(
+            events
+                .matches("\"event\":\"child_supervision_error\"")
+                .count(),
+            1
+        );
+        assert!(events.contains("\"adopted\":true"), "{events}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_partial_adoption_cleanup_failure_retains_identities() {
+        let fixture = GitFixture::new("adopt-partial-quarantine");
+        let mut state = supervision_state(&fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let validated = detach_harness_for_adoption(
+            &fixture,
+            &state_path,
+            &mut state,
+            "while :; do sleep 1; done",
+        );
+        let supervisor = state.supervisor.clone().expect("supervisor identity");
+        let harness = state.process.clone().expect("harness identity");
+        state
+            .process
+            .as_mut()
+            .expect("persisted harness")
+            .argv_digest = "f".repeat(64);
+        super::write_invocation_atomic(&state_path, &state).expect("persist mismatched identity");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        super::set_cleanup_failpoint(super::LaunchFailpoint::CleanupSignal);
+        let error = super::supervise_validated_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &validated,
+            &snapshot,
+            supervision_config(100),
+        )
+        .expect_err("partial adoption cleanup failure");
+        let durable = PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("durable partial quarantine"),
+        )
+        .expect("strict partial quarantine");
+        super::set_cleanup_failpoint(super::LaunchFailpoint::None);
+        if super::observe_process_identity(supervisor.pid, &supervisor.argv_digest)
+            .expect("observe quarantined supervisor")
+            .is_some()
+        {
+            let mut owned = super::OwnedProcessSet::adopt_supervised(&supervisor, Some(&harness))
+                .expect("recapture quarantined tree");
+            owned.terminate().expect("clean quarantined tree");
+        }
+
+        assert!(error.contains("cleanup"), "{error}");
+        assert_eq!(durable.phase, BridgePhase::Interrupted);
+        assert!(durable.supervisor.is_some());
+        assert!(durable.process.is_some());
+        let events = fs::read_to_string(event_log).expect("partial quarantine event");
+        assert!(events.contains("\"event\":\"child_supervision_error\""));
+        assert!(events.contains("\"adopted\":true"), "{events}");
     }
 
     #[cfg(target_os = "linux")]
@@ -6327,9 +6766,17 @@ mod tests {
             &mut state,
             "sleep 0.1; head -c 2097152 /dev/zero | tr '\\0' x; printf '\\ncrash-window-marker\\n'; exit 0",
         );
+        let _cleanup = DetachedSupervisorCleanup(
+            state
+                .supervisor
+                .clone()
+                .expect("detached supervisor identity"),
+        );
         let sinks =
             super::output_sink_paths(&state_path, &state.identity.invocation_id).expect("sinks");
-        for _ in 0..1_000 {
+        // The supervisor fdatasyncs every 64 KiB ring write. On a loaded CI disk, the
+        // 2 MiB overwrite fixture can legitimately need longer than ten seconds.
+        for _ in 0..3_000 {
             if super::read_executor_exit_status(&sinks.exit_status)
                 .expect("exit record")
                 .is_some()
@@ -6565,9 +7012,11 @@ mod tests {
             .spawn()
             .expect("spawn pre-exec fixture");
         let args = vec!["-c".to_string(), "read _; exec sleep 30".to_string()];
-        let expected = super::observe_process_identity(child.id(), &super::argv_digest(&args))
-            .expect("observe pre-exec identity")
-            .expect("live pre-exec identity");
+        let birth = super::observe_process_birth(child.id())
+            .expect("observe pre-exec birth")
+            .expect("live pre-exec birth");
+        let _cleanup = DetachedBirthCleanup(birth);
+        let expected = observe_spawned_identity(child.id(), &args);
         child
             .stdin
             .take()
@@ -6575,11 +7024,13 @@ mod tests {
             .write_all(b"go\n")
             .expect("release exec");
         for _ in 0..100 {
-            let observed = super::observe_process_identity(child.id(), &expected.argv_digest)
-                .expect("observe exec transition")
-                .expect("live exec fixture");
-            if observed.executable != expected.executable {
-                break;
+            if let Some(observed) =
+                super::observe_process_identity(child.id(), &expected.argv_digest)
+                    .expect("observe exec transition")
+            {
+                if observed.executable != expected.executable {
+                    break;
+                }
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -6760,6 +7211,7 @@ mod tests {
     #[test]
     fn autonomous_executor_bridge_direct_poll_error_is_structured_and_cleared() {
         for failpoint in [
+            super::LaunchFailpoint::PostReturnIdentity,
             super::LaunchFailpoint::DirectSetup,
             super::LaunchFailpoint::DirectPoll,
         ] {
@@ -6839,6 +7291,69 @@ mod tests {
                         .is_none(),
                     "post-fork setup failure leaked PID {pid}"
                 );
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_parent_cleanup_failure_persists_quarantine() {
+        for parent_failpoint in [
+            super::LaunchFailpoint::ParentAfterPidfd,
+            super::LaunchFailpoint::ParentHarnessCapture,
+            super::LaunchFailpoint::ParentBirthRefresh,
+        ] {
+            for cleanup_failpoint in [
+                super::LaunchFailpoint::CleanupSignal,
+                super::LaunchFailpoint::CleanupLiveness,
+            ] {
+                let fixture = GitFixture::new(&format!(
+                    "parent-quarantine-{parent_failpoint:?}-{cleanup_failpoint:?}"
+                ));
+                let mut state = supervision_state(&fixture);
+                let state_path = fixture.root.join("state/invocation.json");
+                let event_log = fixture.root.join("log/executor.jsonl");
+                let snapshot = MutationSnapshot::capture(&fixture.repo, &state.identity.branch)
+                    .expect("snapshot");
+                super::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
+                super::set_launch_failpoint(parent_failpoint);
+                super::set_cleanup_failpoint(cleanup_failpoint);
+                let error = supervise_harness(
+                    &state_path,
+                    &event_log,
+                    &mut state,
+                    &shell_invocation(&fixture.repo, "sleep 30"),
+                    &snapshot,
+                    supervision_config(100),
+                )
+                .expect_err("parent setup cleanup failure");
+                let durable = PersistedInvocation::from_json(
+                    &fs::read_to_string(&state_path).expect("durable parent quarantine"),
+                )
+                .expect("strict parent quarantine");
+                super::set_launch_failpoint(super::LaunchFailpoint::None);
+                super::set_cleanup_failpoint(super::LaunchFailpoint::None);
+
+                let supervisor_pid = super::LAST_SPAWN_SUPERVISOR.load(Ordering::SeqCst);
+                if supervisor_pid != 0
+                    && super::observe_process_birth(supervisor_pid)
+                        .expect("observe RED supervisor")
+                        .is_some()
+                {
+                    let mut owned = super::OwnedProcessSet::from_forked_child(supervisor_pid)
+                        .expect("capture RED supervisor");
+                    owned.terminate().expect("clean RED supervisor tree");
+                }
+
+                assert!(error.contains("cleanup"), "{error}");
+                assert_eq!(durable.phase, BridgePhase::Interrupted);
+                assert!(
+                    durable.supervisor.is_some(),
+                    "cleanup failure erased the captured supervisor identity"
+                );
+                assert!(fs::read_to_string(event_log)
+                    .expect("parent cleanup event")
+                    .contains("\"event\":\"child_supervision_error\""));
             }
         }
     }
@@ -6972,13 +7487,12 @@ mod tests {
             running.process_group(0);
         }
         let mut running = running
-            .args(["-c", "sleep 30"])
+            .args(["-c", "while :; do sleep 1; done"])
             .spawn()
             .expect("spawn identity fixture");
-        let args = vec!["-c".to_string(), "sleep 30".to_string()];
-        let expected = super::observe_process_identity(running.id(), &super::argv_digest(&args))
-            .expect("observe fixture")
-            .expect("live fixture");
+        let args = vec!["-c".to_string(), "while :; do sleep 1; done".to_string()];
+        let expected = observe_spawned_identity(running.id(), &args);
+        let _running_cleanup = DetachedSupervisorCleanup(expected.clone());
         let mut state = supervision_state(&fixture);
         state.process = Some(expected.clone());
         state.phase = BridgePhase::Implementing;
@@ -7015,13 +7529,11 @@ mod tests {
             replacement.process_group(0);
         }
         let mut replacement = replacement
-            .args(["-c", "sleep 30"])
+            .args(["-c", "while :; do sleep 1; done"])
             .spawn()
             .expect("spawn mismatched identity fixture");
-        let replacement_identity =
-            super::observe_process_identity(replacement.id(), &super::argv_digest(&args))
-                .expect("observe replacement")
-                .expect("live replacement");
+        let replacement_identity = observe_spawned_identity(replacement.id(), &args);
+        let _replacement_cleanup = DetachedSupervisorCleanup(replacement_identity.clone());
         state.process = Some(replacement_identity.clone());
         state.phase = BridgePhase::Implementing;
         state
@@ -7721,17 +8233,18 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn autonomous_executor_bridge_cleanup_rescans_descendant_forked_after_term() {
+    fn autonomous_executor_bridge_freeze_captures_descendant_forked_in_cleanup_window() {
         let fixture = GitFixture::new("cleanup-fork-race");
         let mut state = supervision_state(&fixture);
         let snapshot =
             MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
         let late_pid = fixture.root.join("late-descendant.pid");
         let script = format!(
-            "trap 'sleep 30 & printf \"%s\\\\n\" \"$!\" > \"{}\"' TERM; while :; do sleep 0.01; done",
+            "while :; do state=$(sed -E 's/^[0-9]+ \\(.*\\) ([A-Z]).*/\\1/' /proc/$PPID/stat); if [ \"$state\" = T ]; then sleep 30 & printf '%s\\n' \"$!\" > '{}'; break; fi; sleep 0.001; done; while :; do sleep 1; done",
             late_pid.display()
         );
 
+        super::set_cleanup_failpoint(super::LaunchFailpoint::CleanupFreezeWindow);
         let outcome = supervise_harness(
             &fixture.root.join("state/invocation.json"),
             &fixture.root.join("log/executor.jsonl"),
@@ -7741,18 +8254,21 @@ mod tests {
             supervision_config(100),
         )
         .expect("stalled harness cleanup");
+        super::set_cleanup_failpoint(super::LaunchFailpoint::None);
 
         assert_eq!(outcome, SupervisionOutcome::Stalled);
-        if late_pid.exists() {
-            let pid = fs::read_to_string(late_pid)
-                .expect("late descendant PID")
-                .trim()
-                .to_string();
-            assert!(
-                !Path::new(&format!("/proc/{pid}")).exists(),
-                "descendant forked during cleanup survived"
-            );
-        }
+        assert!(
+            late_pid.exists(),
+            "fixture never synchronized a fork into the frozen cleanup window"
+        );
+        let pid = fs::read_to_string(late_pid)
+            .expect("late descendant PID")
+            .trim()
+            .to_string();
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "descendant forked during cleanup survived"
+        );
     }
 
     #[test]
