@@ -201,6 +201,7 @@ chmod +x "$ISOLATED_BIN/id" "$ISOLATED_BIN/sudo" "$ISOLATED_BIN/apt-get" "$ISOLA
 set +e
 scanner_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
     CARGO_TARGET_DIR="$TEST_CARGO_TARGET_DIR" \
+    AUTOSPEC_REQUIRED_SYSTEM_TOOLS="git bash curl cargo python3 gh jq npm" \
     AUTOSPEC_SYSTEM_TOOLS=true \
     AUTOSPEC_HARNESS_TOOLS=codex \
     AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1 \
@@ -235,6 +236,7 @@ rm -f "$ISOLATED_BIN/semgrep"
 set +e
 skipped_scanner_output=$(HOME="$FAKE_HOME" PATH="$ISOLATED_BIN" \
     CARGO_TARGET_DIR="$TEST_CARGO_TARGET_DIR" \
+    AUTOSPEC_REQUIRED_SYSTEM_TOOLS="git bash curl cargo python3 gh jq npm" \
     AUTOSPEC_SKIP_ENSURE_TOOL_SEMGREP=1 \
     AUTOSPEC_SYSTEM_TOOLS=true \
     AUTOSPEC_HARNESS_TOOLS=codex \
