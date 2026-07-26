@@ -1216,18 +1216,7 @@ fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, Stri
 }
 
 fn contains_issue_closing_directive(line: &str) -> bool {
-    let mut non_code = String::with_capacity(line.len());
-    let mut in_code = false;
-    for character in line.chars() {
-        if character == '`' {
-            in_code = !in_code;
-            non_code.push(' ');
-        } else if in_code {
-            non_code.push(' ');
-        } else {
-            non_code.push(character.to_ascii_lowercase());
-        }
-    }
+    let non_code = line.to_ascii_lowercase();
     for keyword in ["closes", "fixes", "resolves"] {
         for (offset, _) in non_code.match_indices(keyword) {
             let before = non_code[..offset].chars().next_back();
@@ -2143,12 +2132,22 @@ fn create_draft_pull_request(
             nix::libc::close(release_read_fd);
             nix::libc::close(digest_read_fd);
             nix::libc::close(receipt_fd);
-            nix::libc::close(receipt_directory_fd);
             nix::libc::execve(
                 executable_c.as_ptr(),
                 argv_pointers.as_ptr(),
                 environment_pointers.as_ptr(),
             );
+            let removed = loop {
+                let result = nix::libc::unlink(receipt_path_c.as_ptr());
+                if result < 0 && *nix::libc::__errno_location() == nix::libc::EINTR {
+                    continue;
+                }
+                break result;
+            };
+            if removed == 0 {
+                nix::libc::fsync(receipt_directory_fd);
+            }
+            nix::libc::close(receipt_directory_fd);
             let marker = b"executor draft launch failed\n";
             nix::libc::write(
                 nix::libc::STDERR_FILENO,
@@ -2204,6 +2203,22 @@ fn create_draft_pull_request(
         let _ = fs::remove_file(&receipt_temporary);
         let _ = fs::remove_file(&body_path);
         return Err("injected executor draft parent loss before release".to_string());
+    }
+    #[cfg(test)]
+    if adapter.environment.contains_key(std::ffi::OsStr::new(
+        "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE",
+    )) {
+        if let Err(error) = fs::remove_file(&process.executable) {
+            drop(release_write);
+            drop(digest_write);
+            let _ = waitpid(child, None);
+            let _ = stderr_reader.join();
+            let _ = fs::remove_file(&receipt_temporary);
+            let _ = fs::remove_file(&body_path);
+            return Err(format!(
+                "remove executor draft executable before release: {error}"
+            ));
+        }
     }
     let digest = draft_release_digest(state, &process);
     let release_result = (|| {
@@ -10459,6 +10474,18 @@ mod tests {
                 "issue-closing directive",
             ),
             (
+                "escaped-backtick-close",
+                "## Closeout report\n\n\
+                 Result: \\` Closes #999\n\
+                 Claims: [verified] static behavior is covered\n\
+                 Proof type: static\n\
+                 Before/after: 0 to 1\n\
+                 Artifacts: README.md\n\
+                 Scoped git status: README.md\n\
+                 One likely hidden failure: none observed\n",
+                "issue-closing directive",
+            ),
+            (
                 "cross-repository-close",
                 "## Closeout report\n\n\
                  Result: shipped\n\
@@ -10893,6 +10920,51 @@ mod tests {
         let pull_request = prepared
             .publish()
             .expect("restart safely retries the never-released child");
+        assert_eq!(pull_request, 17);
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_launch_failure_after_release_is_safely_retryable() {
+        // Break caught: failed child launch leaving a release receipt that permanently blocks retry.
+        let mut prepared = prepared_draft_transaction("draft-create-launch-failure");
+        let executable = prepared.adapter.gh.clone();
+        let executable_body = fs::read(&executable).expect("fixture executable body");
+        let executable_mode = fs::metadata(&executable)
+            .expect("fixture executable metadata")
+            .permissions()
+            .mode();
+        prepared.adapter.environment.insert(
+            "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE".into(),
+            "1".into(),
+        );
+
+        let error = prepared
+            .publish()
+            .expect_err("removed executable must fail after durable release");
+
+        assert!(
+            error.contains("list executor open pull requests")
+                || error.contains("draft pull request failed"),
+            "{error}"
+        );
+        assert!(!super::draft_release_receipt_path(&prepared.state_path).exists());
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+
+        fs::write(&executable, executable_body).expect("restore fixture executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(executable_mode))
+            .expect("restore fixture executable mode");
+        prepared.adapter.environment.remove(std::ffi::OsStr::new(
+            "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE",
+        ));
+
+        let pull_request = prepared
+            .publish()
+            .expect("known-safe launch failure must retry once");
+
         assert_eq!(pull_request, 17);
         let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
         assert_eq!(calls.matches("pr create").count(), 1);
