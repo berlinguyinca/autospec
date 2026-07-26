@@ -1730,11 +1730,12 @@ mod tests {
     }
 
     #[test]
-    fn autonomous_executor_bridge_explicit_runtime_abort_surfaces_cleanup_failure() {
+    fn autonomous_executor_bridge_cleanup_failure_publication_holds_environment_lease() {
         let fixture = GitFixture::new("runtime-abort-failure");
         let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
         let scope = format!(
-            "runtime_abort_{}",
+            "runtime_abort_{}_{}",
+            std::process::id(),
             TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let worktree =
@@ -1768,11 +1769,27 @@ mod tests {
             .map(|entry| entry.path())
             .find(|path| path.join("owner.json").is_file())
             .expect("authoritative runtime environment");
-        let failure = adapter
-            .abort()
+        let (publication_entered, allow_publication) =
+            crate::commands::runtime::env::install_cleanup_failure_test_hook();
+        let abort = std::thread::spawn(move || adapter.abort());
+        publication_entered.wait();
+        let transition_interleaved =
+            crate::commands::runtime::env::try_transition_environment_lifecycle_for_test(
+                &environment,
+                EnvironmentLifecycle::Active,
+            )
+            .expect("try concurrent lifecycle transition");
+        allow_publication.wait();
+        let failure = abort
+            .join()
+            .expect("abort thread")
             .expect_err("explicit abort must report failing cleanup");
 
         assert_eq!(failure.exit_code, 42);
+        assert!(
+            !transition_interleaved,
+            "a newer lifecycle transition acquired the lease before cleanup evidence was published"
+        );
         let owner: EnvironmentOwner =
             autospec_core::runtime_env::read_json(&environment.join("owner.json"))
                 .expect("recoverable authoritative owner");
@@ -1780,6 +1797,15 @@ mod tests {
         assert!(environment.join("plan.json").is_file());
         assert!(environment.join("inventory.json").is_file());
         assert!(session_record_ids(&state_root).is_empty());
+        crate::commands::runtime::env::transition_environment_lifecycle_for_test(
+            &environment,
+            EnvironmentLifecycle::Active,
+        )
+        .expect("newer lifecycle transition after cleanup publication");
+        let owner: EnvironmentOwner =
+            autospec_core::runtime_env::read_json(&environment.join("owner.json"))
+                .expect("newer authoritative owner");
+        assert_eq!(owner.lifecycle, EnvironmentLifecycle::Active);
 
         match previous_state_root {
             Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),

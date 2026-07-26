@@ -4,13 +4,15 @@ use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use autospec_core::runtime_env::{
-    random_session_token, read_json, write_json_atomic, ReleaseDecision, ResourcePlan,
-    RuntimeContext, RuntimeState, SessionRecord, SessionSet,
+    random_session_token, read_json, write_json_atomic, EnvironmentLifecycle, ReleaseDecision,
+    ResourcePlan, RuntimeContext, RuntimeState, SessionRecord, SessionSet,
 };
 
 use crate::commands::CommandFailure;
 
-use super::state::EnvironmentLease;
+use super::state::{
+    layout_for_context, read_authoritative_state, write_lifecycle, EnvironmentLease,
+};
 use super::worker::ChildGuard;
 
 enum SessionWait {
@@ -137,7 +139,7 @@ fn session_result(
     }
 }
 
-fn add_secondary_failure(
+pub(super) fn add_secondary_failure(
     primary: Option<CommandFailure>,
     label: &str,
     secondary: CommandFailure,
@@ -165,17 +167,45 @@ pub(super) fn cleanup_session(
     should_teardown: bool,
 ) -> Result<(), CommandFailure> {
     let _lease = EnvironmentLease::acquire(&context.environment_dir)?;
-    let session_id = session_lease.session_id().to_string();
-    let mut sessions = SessionSet::default();
-    for record in live_sessions(&context.environment_dir)? {
-        sessions.register(record);
+    let cleanup = (|| {
+        let session_id = session_lease.session_id().to_string();
+        let mut sessions = SessionSet::default();
+        for record in live_sessions(&context.environment_dir)? {
+            sessions.register(record);
+        }
+        session_lease.release()?;
+        let decision = sessions.release(&session_id);
+        if should_teardown && decision == ReleaseDecision::TearDown {
+            super::lifecycle::teardown_locked(context, Some(state), plan)?;
+        }
+        Ok(())
+    })();
+    let Err(primary) = cleanup else {
+        return Ok(());
+    };
+    super::wait_for_cleanup_failure_test_hook();
+    match record_cleanup_failure(context) {
+        Ok(()) => Err(primary),
+        Err(evidence) => Err(add_secondary_failure(
+            Some(primary),
+            "persist cleanup-failure evidence also failed",
+            evidence,
+        )),
     }
-    session_lease.release()?;
-    let decision = sessions.release(&session_id);
-    if should_teardown && decision == ReleaseDecision::TearDown {
-        super::lifecycle::teardown_locked(context, Some(state), plan)?;
-    }
-    Ok(())
+}
+
+fn record_cleanup_failure(context: &RuntimeContext) -> Result<(), CommandFailure> {
+    let layout = layout_for_context(context);
+    let Some(mut authoritative) = read_authoritative_state(&layout)? else {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_PARTIAL_STATE: cleanup failure has no authoritative owner",
+        ));
+    };
+    write_lifecycle(
+        &layout,
+        &mut authoritative.owner,
+        EnvironmentLifecycle::CleanupFailed,
+    )
 }
 
 #[cfg(unix)]
