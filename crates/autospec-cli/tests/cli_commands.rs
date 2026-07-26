@@ -3107,6 +3107,341 @@ fn autonomous_supervise_reports_stale_metadata_action_for_dead_recorded_pid() {
 }
 
 #[test]
+fn autonomous_supervise_relaunches_a_dead_conductor_with_a_fresh_lease() {
+    let temp = temp_dir("autospec-autonomous-supervise-relaunch");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let state_dir = temp.join("state");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+
+    let start = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--max-cycles",
+            "7",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .output()
+        .expect("autospec autonomous start runs");
+    assert!(start.status.success());
+    let old_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("conductor pid");
+    let observe_live = autospec()
+        .args([
+            "autonomous",
+            "supervise",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--max-cycles",
+            "7",
+            "--once",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .output()
+        .expect("autospec autonomous supervise observes live conductor");
+    assert!(String::from_utf8_lossy(&observe_live.stdout).contains("\"action\":\"none\""));
+    assert_eq!(
+        cleanup_pid(&read_pid(&scope, "conductor")).as_deref(),
+        Some(old_pid.as_str())
+    );
+    let launch = std::fs::read_to_string(scope.join("launch.json")).expect("launch manifest");
+    assert!(launch.contains("\"supervisor_argv\""));
+    assert!(launch.contains("\"--max-cycles\",\"7\""));
+    terminate_fixture_process(&old_pid);
+
+    let repair = autospec()
+        .args([
+            "autonomous",
+            "supervise",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--max-cycles",
+            "7",
+            "--once",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .output()
+        .expect("autospec autonomous supervise runs");
+    let stdout = String::from_utf8_lossy(&repair.stdout);
+    let new_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("replacement pid");
+
+    assert!(
+        repair.status.success(),
+        "{}",
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    assert!(
+        stdout.contains("\"action\":\"restarted-conductor\""),
+        "stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    assert_ne!(old_pid, new_pid);
+    assert!(process_is_alive(&new_pid));
+    cleanup_pids(&scope);
+}
+
+#[test]
+fn autonomous_supervise_releases_a_fresh_lease_when_relaunch_preparation_fails() {
+    let temp = temp_dir("autospec-autonomous-supervise-retry");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let state_dir = temp.join("state");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+
+    let start = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .output()
+        .expect("autospec autonomous start runs");
+    assert!(start.status.success());
+    let old_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("conductor pid");
+    terminate_fixture_process(&old_pid);
+    std::fs::remove_dir_all(&log_dir).expect("remove log directory");
+    std::fs::write(&log_dir, "blocks log directory creation").expect("obstruct log directory");
+
+    let failed_repair = autospec()
+        .args([
+            "autonomous",
+            "supervise",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--once",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .output()
+        .expect("autospec autonomous supervise reports deferred repair");
+    assert!(failed_repair.status.success());
+    assert!(
+        String::from_utf8_lossy(&failed_repair.stdout).contains("\"action\":\"repair-deferred\"")
+    );
+
+    std::fs::remove_file(&log_dir).expect("remove log obstruction");
+    std::fs::create_dir_all(&log_dir).expect("restore log directory");
+    let retry = autospec()
+        .args([
+            "autonomous",
+            "supervise",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--once",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .output()
+        .expect("autospec autonomous supervise retries");
+    let stdout = String::from_utf8_lossy(&retry.stdout);
+    let new_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("replacement pid");
+
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert!(
+        stdout.contains("\"action\":\"restarted-conductor\""),
+        "stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert!(process_is_alive(&new_pid));
+    cleanup_pids(&scope);
+}
+
+#[test]
+fn autonomous_supervise_contention_tracks_exactly_one_replacement_conductor() {
+    let temp = temp_dir("autospec-autonomous-supervise-contention");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let state_dir = temp.join("state");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    let path = hermetic_autonomous_path(&temp);
+
+    let start = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("PATH", &path)
+        .output()
+        .expect("autospec autonomous start runs");
+    assert!(start.status.success());
+    let old_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("conductor pid");
+    terminate_fixture_process(&old_pid);
+
+    let supervisor = || {
+        let mut command = autospec();
+        command
+            .args([
+                "autonomous",
+                "supervise",
+                "--repo",
+                "berlinguyinca/autospec",
+                "--repo-dir",
+                repo_dir.to_str().unwrap(),
+                "--once",
+                "--json",
+            ])
+            .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+            .env("AUTOSPEC_STATE_DIR", &state_dir)
+            .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+            .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+            .env("PATH", &path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    };
+    let first = supervisor().spawn().expect("first supervisor starts");
+    let second = supervisor().spawn().expect("second supervisor starts");
+    let outputs = [
+        first.wait_with_output().expect("first supervisor exits"),
+        second.wait_with_output().expect("second supervisor exits"),
+    ];
+    let restarted = outputs
+        .iter()
+        .filter(|output| {
+            String::from_utf8_lossy(&output.stdout).contains("\"action\":\"restarted-conductor\"")
+        })
+        .count();
+    let tracked_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("tracked replacement pid");
+
+    assert!(outputs.iter().all(|output| output.status.success()));
+    assert_eq!(restarted, 1, "outputs={outputs:?}");
+    assert!(process_is_alive(&tracked_pid));
+    cleanup_pids(&scope);
+}
+
+#[test]
+fn autonomous_supervise_does_not_relaunch_after_a_stop_request() {
+    let temp = temp_dir("autospec-autonomous-supervise-stop");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let state_dir = temp.join("state");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+
+    let start = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .output()
+        .expect("autospec autonomous start runs");
+    assert!(start.status.success());
+    let old_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("conductor pid");
+    terminate_fixture_process(&old_pid);
+    std::fs::write(scope.join("stop.flag"), "graceful\noperator@test\n").expect("stop flag");
+
+    let repair = autospec()
+        .args([
+            "autonomous",
+            "supervise",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--once",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .output()
+        .expect("autospec autonomous supervise runs");
+    let stdout = String::from_utf8_lossy(&repair.stdout);
+
+    assert!(repair.status.success());
+    assert!(
+        stdout.contains("\"action\":\"stop-requested\""),
+        "stdout={stdout} stderr={}",
+        String::from_utf8_lossy(&repair.stderr)
+    );
+    assert!(!process_is_alive(&old_pid));
+    assert_eq!(
+        cleanup_pid(&read_pid(&scope, "conductor")).as_deref(),
+        Some(old_pid.as_str())
+    );
+}
+
+#[test]
 fn autonomous_restart_rejects_a_fresh_existing_lease_without_killing_conductor_or_clearing_stop() {
     let temp = temp_dir("autospec-autonomous-restart");
     let operator_dir = temp.join("operator");
@@ -3387,6 +3722,24 @@ fn process_is_alive(pid: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn terminate_fixture_process(pid: &str) {
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", &format!("-{pid}")])
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("kill")
+        .args(["-KILL", "--", pid])
+        .stderr(Stdio::null())
+        .status();
+    for _ in 0..50 {
+        if !process_is_alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    panic!("fixture process {pid} did not stop");
 }
 
 fn assert_lease_held(output: &Output) {

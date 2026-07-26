@@ -19,6 +19,14 @@ ownership, so legacy wrapper children cannot revive a stale conductor during
 the handoff. New unit metadata binds the PID to its process-group ID and start
 time; mismatched live identities fail closed instead of signaling a reused PID.
 
+Detached conductors intentionally exit after finite claim and executor
+boundaries. The supervisor treats a verified stopped conductor as recoverable:
+unless a stop flag is present, it releases only that terminated owner's lease,
+acquires a fresh lease, and relaunches the persisted `run-foreground` options.
+Live or ambiguous metadata never starts a second conductor. Supervisor output
+reports `restarted-conductor` only after replacement process identity is
+verified.
+
 Explore drains export an inherited recursion marker; a nested drain request
 returns a dry suppression result instead of launching another harness tree.
 They also enforce a 900-second absolute runtime cap via
