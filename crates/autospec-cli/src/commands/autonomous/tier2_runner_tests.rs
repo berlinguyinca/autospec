@@ -1,12 +1,6 @@
 use std::time::Duration;
 
 use autospec_core::autonomous::tier2::{Tier2FailureCode, Tier2Stage};
-#[cfg(unix)]
-use nix::errno::Errno;
-#[cfg(unix)]
-use nix::sys::signal::kill;
-#[cfg(unix)]
-use nix::unistd::Pid;
 
 use super::tier2_receipts_tests::collector;
 use super::tier2_runner::{
@@ -194,7 +188,98 @@ fn bounded_child_kills_a_timed_out_process_group() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn process_state(pid: i32) -> Option<char> {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => panic!("read process state for PID {pid}: {error}"),
+    };
+    let close = stat.rfind(')').expect("process stat command terminator");
+    stat[close + 1..]
+        .split_whitespace()
+        .next()
+        .expect("process stat state")
+        .chars()
+        .next()
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_running(pid: i32) -> bool {
+    !matches!(process_state(pid), None | Some('Z' | 'X' | 'x'))
+}
+
+#[cfg(target_os = "linux")]
+struct ChildFixture(Option<std::process::Child>);
+
+#[cfg(target_os = "linux")]
+impl ChildFixture {
+    fn spawn(mut command: std::process::Command) -> Self {
+        Self(Some(command.spawn().expect("spawn process fixture")))
+    }
+
+    fn pid(&self) -> i32 {
+        self.0.as_ref().expect("live process fixture").id() as i32
+    }
+
+    fn reap(&mut self) {
+        self.0
+            .take()
+            .expect("unreaped process fixture")
+            .wait()
+            .expect("reap process fixture");
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ChildFixture {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn process_running_probe_rejects_zombies_without_hiding_live_children() {
+    let mut exited = std::process::Command::new("/bin/sh");
+    exited.args(["-c", "exit 0"]);
+    let mut zombie = ChildFixture::spawn(exited);
+    let zombie_pid = zombie.pid();
+    for _ in 0..100 {
+        if process_state(zombie_pid) == Some('Z') {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        process_state(zombie_pid),
+        Some('Z'),
+        "fixture child never reached an unreaped zombie state"
+    );
+    assert!(
+        !process_is_running(zombie_pid),
+        "unreaped zombie was classified as running"
+    );
+
+    let mut sleeping = std::process::Command::new("/bin/sleep");
+    sleeping.arg("30");
+    let live = ChildFixture::spawn(sleeping);
+    assert!(
+        process_is_running(live.pid()),
+        "live sleep was classified as terminated"
+    );
+
+    zombie.reap();
+    assert!(
+        !process_is_running(zombie_pid),
+        "reaped zombie was classified as running"
+    );
+}
+
+#[cfg(target_os = "linux")]
 #[test]
 fn bounded_child_kills_descendants_in_its_process_group() {
     let child_pid_path = std::env::temp_dir().join(format!(
@@ -217,20 +302,19 @@ fn bounded_child_kills_descendants_in_its_process_group() {
         .expect("child records descendant pid")
         .parse::<i32>()
         .expect("descendant pid is numeric");
-    let mut probe = kill(Pid::from_raw(descendant), None);
+    let mut running = process_is_running(descendant);
     for _ in 0..100 {
-        if probe == Err(Errno::ESRCH) {
+        if !running {
             break;
         }
         std::thread::sleep(Duration::from_millis(20));
-        probe = kill(Pid::from_raw(descendant), None);
+        running = process_is_running(descendant);
     }
     let _ = std::fs::remove_file(child_pid_path);
 
-    assert_eq!(
-        probe,
-        Err(Errno::ESRCH),
-        "descendant survived process-group cleanup"
+    assert!(
+        !running,
+        "descendant remained in a running process state after process-group cleanup"
     );
 }
 
