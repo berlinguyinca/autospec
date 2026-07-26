@@ -514,7 +514,11 @@ fn foreground_fails_closed_when_executor_outcome_loses_its_claim() {
         .expect("run foreground");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("claim ownership changed"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("claim ownership changed"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(fs::read_to_string(&fixture.comments)
         .expect("read comments")
         .contains("foreign-worker"));
@@ -2596,7 +2600,13 @@ if [ "$1" = issue ] && [ "$2" = comment ]; then
   if [ "${AUTOSPEC_FOREGROUND_FAIL_EVIDENCE_CREATE:-0}" = 1 ] && printf '%s' "$body" | grep -q '<!-- autospec-executor-result:begin -->'; then
     exit 1
   fi
-  jq --arg body "$body" '. + [{"id":100,"updated_at":"2026-07-15T00:00:00Z","body":$body}]' "$AUTOSPEC_FOREGROUND_COMMENTS" > "$AUTOSPEC_FOREGROUND_COMMENTS.tmp"
+  if [ "${AUTOSPEC_FOREGROUND_STEAL_ON_OUTCOME:-0}" = 1 ] && printf '%s' "$body" | grep -q executor_pending; then
+    parent=$(printf '%s\n' "$body" | sed -n 's/^<!-- autospec-run-state-link parent=\([^ ]*\) .*generation=.*$/\1/p')
+    foreign=$(printf '<!-- autospec-run-state-link parent=%s generation=foreign-generation -->\n<!-- autospec-run-state:begin -->\n{"schema":1,"repo":"test/repo","issue":42,"worker_id":"foreign-worker","state":"claimed","branch":"foreign/issue-42","pr":"","step":"claimed","paths":[],"claimed_at":"2026-07-15T00:00:00Z","updated_at":"2026-07-15T00:00:00Z","ttl_seconds":10800}\n<!-- autospec-run-state:end -->' "$parent")
+    jq --arg foreign "$foreign" --arg body "$body" '. as $comments | ((map(.id) | max // 99) + 1) as $next | $comments + [{"id":$next,"updated_at":"2026-07-15T00:00:00Z","body":$foreign},{"id":($next + 1),"updated_at":"2026-07-15T00:00:01Z","body":$body}]' "$AUTOSPEC_FOREGROUND_COMMENTS" > "$AUTOSPEC_FOREGROUND_COMMENTS.tmp"
+  else
+    jq --arg body "$body" '. + [{"id":((map(.id) | max // 99) + 1),"updated_at":"2026-07-15T00:00:00Z","body":$body}]' "$AUTOSPEC_FOREGROUND_COMMENTS" > "$AUTOSPEC_FOREGROUND_COMMENTS.tmp"
+  fi
   mv "$AUTOSPEC_FOREGROUND_COMMENTS.tmp" "$AUTOSPEC_FOREGROUND_COMMENTS"
   exit 0
 fi

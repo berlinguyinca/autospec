@@ -70,6 +70,313 @@ fn claim_refresh_comments(
     )
 }
 
+fn linked_claim_body(
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    parent: u64,
+    generation: &str,
+) -> String {
+    format!(
+        "<!-- autospec-run-state-link parent={parent} generation={generation} -->\n{}",
+        claim_refresh_comments(worker_id, branch, claim_id, "2030-01-01T00:00:00Z")
+            .trim_start_matches("[{\"id\":100,\"updated_at\":\"2030-01-01T00:00:00Z\",\"body\":\"")
+            .trim_end_matches("\"}]")
+            .replace("\\n", "\n")
+            .replace("\\\"", "\"")
+    )
+}
+
+fn run_append_only_claim_refresh(
+    fixture: &std::path::Path,
+    comments: &std::path::Path,
+    mode: &str,
+) -> std::process::Output {
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+{
+  printf 'CALL\n'
+  printf '%s\n' "$@"
+} >> "$AUTOSPEC_CLAIM_LOG"
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then
+  cat "$AUTOSPEC_CLAIM_COMMENTS"
+  exit 0
+fi
+if [ "$1" = issue ] && [ "$2" = comment ]; then
+  body=''
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --body) body="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  while ! mkdir "$AUTOSPEC_CLAIM_LOCK" 2>/dev/null; do sleep 0.01; done
+  trap 'rmdir "$AUTOSPEC_CLAIM_LOCK"' EXIT
+  case "$AUTOSPEC_CLAIM_APPEND_MODE" in
+    takeover-first)
+      jq --arg takeover "$AUTOSPEC_CLAIM_TAKEOVER_BODY" --arg own "$body" \
+        '. + [{id:101,updated_at:"2030-01-01T00:00:01Z",body:$takeover},{id:102,updated_at:"2030-01-01T00:00:02Z",body:$own}]' \
+        "$AUTOSPEC_CLAIM_COMMENTS" > "$AUTOSPEC_CLAIM_COMMENTS.tmp"
+      ;;
+    renewal-first)
+      jq --arg takeover "$AUTOSPEC_CLAIM_TAKEOVER_BODY" --arg own "$body" \
+        '. + [{id:101,updated_at:"2030-01-01T00:00:01Z",body:$own},{id:102,updated_at:"2030-01-01T00:00:02Z",body:$takeover}]' \
+        "$AUTOSPEC_CLAIM_COMMENTS" > "$AUTOSPEC_CLAIM_COMMENTS.tmp"
+      ;;
+    ambiguous)
+      jq --arg own "$body" \
+        '. + [{id:101,updated_at:"2030-01-01T00:00:01Z",body:$own}]' \
+        "$AUTOSPEC_CLAIM_COMMENTS" > "$AUTOSPEC_CLAIM_COMMENTS.tmp"
+      ;;
+  esac
+  mv "$AUTOSPEC_CLAIM_COMMENTS.tmp" "$AUTOSPEC_CLAIM_COMMENTS"
+  [ "$AUTOSPEC_CLAIM_APPEND_MODE" != ambiguous ]
+  exit
+fi
+exit 17
+"#,
+    );
+    let takeover = linked_claim_body(
+        "worker-takeover",
+        "feat/takeover",
+        "claim-takeover",
+        100,
+        "takeover-generation",
+    );
+    autospec()
+        .args([
+            "claim",
+            "state",
+            "refresh",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-a",
+            "--step",
+            "verification",
+            "--pr",
+            "17",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_COMMENTS", comments)
+        .env("AUTOSPEC_CLAIM_APPEND_MODE", mode)
+        .env("AUTOSPEC_CLAIM_TAKEOVER_BODY", takeover)
+        .env("AUTOSPEC_CLAIM_LOCK", fixture.join("lock"))
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .env("AUTOSPEC_GH_API_RETRIES", "3")
+        .output()
+        .expect("append-only refresh starts")
+}
+
+fn run_paged_claim_refresh(
+    fixture: &std::path::Path,
+    first_page: &std::path::Path,
+    second_page: &std::path::Path,
+) -> std::process::Output {
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+{
+  printf 'CALL\n'
+  printf '%s\n' "$@"
+} >> "$AUTOSPEC_CLAIM_LOG"
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then
+  paginate=0
+  for argument in "$@"; do [ "$argument" = --paginate ] && paginate=1; done
+  if [ "$paginate" -eq 1 ]; then
+    jq -s '.[0] + .[1]' "$AUTOSPEC_CLAIM_PAGE_ONE" "$AUTOSPEC_CLAIM_PAGE_TWO"
+  else
+    cat "$AUTOSPEC_CLAIM_PAGE_ONE"
+  fi
+  exit 0
+fi
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/comments/100 ]; then
+  body=''
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -f) body="${2#body=}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  jq --arg body "$body" '.[0].body=$body' "$AUTOSPEC_CLAIM_PAGE_ONE" > "$AUTOSPEC_CLAIM_PAGE_ONE.tmp"
+  mv "$AUTOSPEC_CLAIM_PAGE_ONE.tmp" "$AUTOSPEC_CLAIM_PAGE_ONE"
+  exit 0
+fi
+if [ "$1" = issue ] && [ "$2" = comment ]; then
+  exit 0
+fi
+exit 17
+"#,
+    );
+    autospec()
+        .args([
+            "claim",
+            "state",
+            "refresh",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-a",
+            "--step",
+            "verification",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_PAGE_ONE", first_page)
+        .env("AUTOSPEC_CLAIM_PAGE_TWO", second_page)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .env("AUTOSPEC_GH_API_RETRIES", "1")
+        .output()
+        .expect("paged refresh starts")
+}
+
+#[test]
+fn claim_refresh_loses_when_takeover_successor_gets_the_lower_comment_id() {
+    // Break caught: read/PATCH/read lets stale renewal overwrite a takeover.
+    let fixture = temp_dir("autospec-claim-refresh-takeover-first");
+    let comments = fixture.join("comments.json");
+    std::fs::write(
+        &comments,
+        claim_refresh_comments("worker-a", "feat/test", "claim-a", "2000-01-01T00:00:00Z"),
+    )
+    .expect("claim comments fixture");
+
+    let output = run_append_only_claim_refresh(&fixture, &comments, "takeover-first");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"ownership_lost\""));
+    let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh log");
+    assert_eq!(calls.matches("issue\ncomment\n42").count(), 1);
+    assert!(!calls.contains("issues/comments/100"));
+}
+
+#[test]
+fn claim_refresh_wins_when_renewal_successor_gets_the_lower_comment_id() {
+    // Break caught: selecting the highest child lets a later takeover steal an already-won race.
+    let fixture = temp_dir("autospec-claim-refresh-renewal-first");
+    let comments = fixture.join("comments.json");
+    std::fs::write(
+        &comments,
+        claim_refresh_comments("worker-a", "feat/test", "claim-a", "2000-01-01T00:00:00Z"),
+    )
+    .expect("claim comments fixture");
+
+    let output = run_append_only_claim_refresh(&fixture, &comments, "renewal-first");
+
+    assert!(output.status.success());
+    assert_eq!(
+        claim_run_state(&output.stdout).claim_id.as_deref(),
+        Some("claim-a")
+    );
+    let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh log");
+    assert_eq!(calls.matches("issue\ncomment\n42").count(), 1);
+    assert!(!calls.contains("issues/comments/100"));
+}
+
+#[test]
+fn claim_refresh_recovers_an_ambiguous_post_by_rereading_without_reposting() {
+    // Break caught: retrying POST after an ambiguous response creates duplicate successors.
+    let fixture = temp_dir("autospec-claim-refresh-ambiguous-post");
+    let comments = fixture.join("comments.json");
+    std::fs::write(
+        &comments,
+        claim_refresh_comments("worker-a", "feat/test", "claim-a", "2000-01-01T00:00:00Z"),
+    )
+    .expect("claim comments fixture");
+
+    let output = run_append_only_claim_refresh(&fixture, &comments, "ambiguous");
+
+    assert!(output.status.success());
+    let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh log");
+    assert_eq!(calls.matches("issue\ncomment\n42").count(), 1);
+}
+
+#[test]
+fn claim_refresh_follows_a_successor_on_a_later_comment_page() {
+    // Break caught: one-page reads renew an ancestor after a later-page takeover.
+    let fixture = temp_dir("autospec-claim-refresh-paged-successor");
+    let first_page = fixture.join("page-one.json");
+    let second_page = fixture.join("page-two.json");
+    std::fs::write(
+        &first_page,
+        claim_refresh_comments("worker-a", "feat/test", "claim-a", "2000-01-01T00:00:00Z"),
+    )
+    .expect("first comment page");
+    std::fs::write(
+        &second_page,
+        serde_json::json!([{
+            "id": 101,
+            "updated_at": "2030-01-01T00:00:01Z",
+            "body": linked_claim_body(
+                "worker-takeover",
+                "feat/takeover",
+                "claim-takeover",
+                100,
+                "takeover-generation",
+            )
+        }])
+        .to_string(),
+    )
+    .expect("second comment page");
+
+    let output = run_paged_claim_refresh(&fixture, &first_page, &second_page);
+
+    assert_eq!(output.status.code(), Some(2));
+    let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh log");
+    assert!(calls.contains("--paginate"));
+    assert!(!calls.contains("issues/comments/100"));
+}
+
+#[test]
+fn claim_refresh_stops_for_terminal_evidence_on_a_later_comment_page() {
+    // Break caught: one-page reads can mutate a claim after terminal merge evidence.
+    let fixture = temp_dir("autospec-claim-refresh-paged-terminal");
+    let first_page = fixture.join("page-one.json");
+    let second_page = fixture.join("page-two.json");
+    std::fs::write(
+        &first_page,
+        claim_refresh_comments("worker-a", "feat/test", "claim-a", "2000-01-01T00:00:00Z"),
+    )
+    .expect("first comment page");
+    std::fs::write(
+        &second_page,
+        r#"[{"id":201,"updated_at":"2030-01-01T00:00:01Z","body":"<!-- autospec-run-terminal:begin -->\n{ \"state\" : \"merged\" }\n<!-- autospec-run-terminal:end -->"}]"#,
+    )
+    .expect("second comment page");
+
+    let output = run_paged_claim_refresh(&fixture, &first_page, &second_page);
+
+    assert_eq!(output.status.code(), Some(2));
+    let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh log");
+    assert!(calls.contains("--paginate"));
+    assert!(!calls.contains("issues/comments/100"));
+    assert!(!calls.contains("issue\ncomment\n42"));
+}
+
 fn run_claim_refresh(
     fixture: &std::path::Path,
     comments: &std::path::Path,
@@ -91,22 +398,22 @@ if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then
   cat "$AUTOSPEC_CLAIM_COMMENTS"
   exit 0
 fi
-if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/comments/100 ]; then
+if [ "$1" = issue ] && [ "$2" = comment ]; then
   body=''
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      -f) body="${2#body=}"; shift 2 ;;
+      --body) body="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
   if [ "$AUTOSPEC_CLAIM_REFRESH_MODE" = takeover ]; then
-    jq --arg body "$AUTOSPEC_CLAIM_TAKEOVER_BODY" \
-      '.[0].body=$body | .[0].updated_at="2030-01-01T00:00:01Z"' \
+    jq --arg takeover "$AUTOSPEC_CLAIM_TAKEOVER_BODY" --arg own "$body" \
+      '. + [{id:101,updated_at:"2030-01-01T00:00:01Z",body:$takeover},{id:102,updated_at:"2030-01-01T00:00:02Z",body:$own}]' \
       "$AUTOSPEC_CLAIM_COMMENTS" > "$AUTOSPEC_CLAIM_COMMENTS.tmp"
   else
     jq --arg body "$body" \
-      '.[0].body=$body | .[0].updated_at="2030-01-01T00:00:00Z"' \
+      '. + [{id:101,updated_at:"2030-01-01T00:00:00Z",body:$body}]' \
       "$AUTOSPEC_CLAIM_COMMENTS" > "$AUTOSPEC_CLAIM_COMMENTS.tmp"
   fi
   mv "$AUTOSPEC_CLAIM_COMMENTS.tmp" "$AUTOSPEC_CLAIM_COMMENTS"
@@ -115,11 +422,12 @@ fi
 exit 17
 "#,
     );
-    let takeover_body = claim_refresh_comments(
+    let takeover_body = linked_claim_body(
         "worker-takeover",
         "feat/takeover",
         "claim-takeover",
-        "2030-01-01T00:00:01Z",
+        100,
+        "takeover-generation",
     );
 
     autospec()
@@ -186,12 +494,7 @@ fn claim_state_refresh_updates_only_heartbeat_step_and_pr_for_the_exact_generati
     assert_eq!(state.pr, "17");
     assert_ne!(state.updated_at, "2026-07-14T00:00:00Z");
     let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh call log");
-    assert_eq!(
-        calls
-            .matches("repos/testorg/testrepo/issues/comments/100")
-            .count(),
-        1
-    );
+    assert_eq!(calls.matches("issue\ncomment\n42").count(), 1);
     assert_eq!(
         calls
             .matches("repos/testorg/testrepo/issues/42/comments")
@@ -201,7 +504,7 @@ fn claim_state_refresh_updates_only_heartbeat_step_and_pr_for_the_exact_generati
 }
 
 #[test]
-fn claim_state_refresh_rejects_a_stale_claim_generation_before_patch() {
+fn claim_state_refresh_rejects_a_stale_claim_generation_before_append() {
     // Break caught: an old conductor refreshing a successor's claim by worker/branch alone.
     let fixture = temp_dir("autospec-claim-refresh-stale-generation");
     let comments = fixture.join("comments.json");
@@ -228,7 +531,7 @@ fn claim_state_refresh_rejects_a_stale_claim_generation_before_patch() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"ownership_lost\""));
     let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh call log");
-    assert!(!calls.contains("repos/testorg/testrepo/issues/comments/100"));
+    assert!(!calls.contains("issue\ncomment\n42"));
 }
 
 #[test]
@@ -255,10 +558,7 @@ fn claim_state_refresh_rejects_changed_worker_branch_and_claim_id() {
             "{label}"
         );
         let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh call log");
-        assert!(
-            !calls.contains("repos/testorg/testrepo/issues/comments/100"),
-            "{label}"
-        );
+        assert!(!calls.contains("issue\ncomment\n42"), "{label}");
     }
 }
 
@@ -290,8 +590,8 @@ fn claim_state_refresh_renews_an_exact_generation_after_its_ttl_elapsed() {
 }
 
 #[test]
-fn claim_state_refresh_reports_takeover_when_confirmation_observes_a_successor() {
-    // Break caught: treating a successful PATCH exit as ownership proof after a concurrent takeover.
+fn claim_state_refresh_reports_takeover_when_a_lower_sibling_wins() {
+    // Break caught: treating a successful POST exit as ownership proof after a concurrent takeover.
     let fixture = temp_dir("autospec-claim-refresh-takeover");
     let comments = fixture.join("comments.json");
     std::fs::write(
@@ -314,47 +614,7 @@ fn claim_state_refresh_reports_takeover_when_confirmation_observes_a_successor()
     let persisted = std::fs::read_to_string(&comments).expect("takeover comments");
     assert!(persisted.contains("claim-takeover"));
     let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh call log");
-    assert_eq!(
-        calls
-            .matches("repos/testorg/testrepo/issues/comments/100")
-            .count(),
-        1
-    );
-}
-
-/// One `gh api <endpoint> [-X <method>]` invocation recovered from the call
-/// log the fake `gh` script appends (one CLI argument per line, invocations
-/// concatenated with no delimiter between them).
-#[derive(Debug, PartialEq, Eq)]
-struct GhApiCall {
-    endpoint: String,
-    method: Option<String>,
-}
-
-/// Parses the raw call log into the `gh api <endpoint> [-X <method>]`
-/// invocations it contains. Replaces matching on raw newline-joined
-/// substrings (fragile to one endpoint's logged args being a prefix/suffix
-/// of another's) with a parsed, structurally-compared call list.
-fn gh_api_calls(log: &str) -> Vec<GhApiCall> {
-    let lines: Vec<&str> = log.lines().collect();
-    let mut calls = Vec::new();
-    let mut i = 0;
-    while i < lines.len() {
-        if lines[i] == "api" && i + 1 < lines.len() {
-            let endpoint = lines[i + 1].to_string();
-            let method = if lines.get(i + 2) == Some(&"-X") {
-                lines.get(i + 3).map(|m| (*m).to_string())
-            } else {
-                None
-            };
-            let advance = if method.is_some() { 4 } else { 2 };
-            calls.push(GhApiCall { endpoint, method });
-            i += advance;
-        } else {
-            i += 1;
-        }
-    }
-    calls
+    assert_eq!(calls.matches("issue\ncomment\n42").count(), 1);
 }
 
 #[test]
@@ -393,19 +653,24 @@ fn claim_state_read_selects_the_lowest_marked_github_comment() {
 }
 
 #[test]
-fn claim_state_upsert_patches_the_lowest_comment_and_deletes_higher_duplicates() {
+fn claim_state_upsert_appends_to_the_authoritative_parent_without_deleting_history() {
     let fixture = temp_dir("autospec-claim-state-upsert");
     let bin = fixture.join("bin");
     let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
     std::fs::create_dir_all(&bin).expect("fake bin directory");
     write_executable(
         &bin.join("gh"),
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; fi\n",
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id:102,updated_at:\"2030-01-01T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nexit 17\n",
     );
-    let comments = r#"[
+    std::fs::write(
+        &comments,
+        r#"[
       {"id":101,"updated_at":"2026-07-14T00:01:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-b\",\"state\":\"claimed\",\"branch\":\"feat/test\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:01:00Z\",\"updated_at\":\"2026-07-14T00:01:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"},
       {"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"feat/test\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}
-    ]"#;
+    ]"#,
+    )
+    .expect("comments fixture");
 
     let output = autospec()
         .args([
@@ -428,7 +693,7 @@ fn claim_state_upsert_patches_the_lowest_comment_and_deletes_higher_duplicates()
             "7200",
         ])
         .env("PATH", path_with(&bin))
-        .env("AUTOSPEC_CLAIM_COMMENTS", comments)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
         .env("AUTOSPEC_CLAIM_LOG", &log)
         .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
         .output()
@@ -441,29 +706,32 @@ fn claim_state_upsert_patches_the_lowest_comment_and_deletes_higher_duplicates()
     assert_eq!(state.ttl_seconds, 7200);
     assert_eq!(state.claimed_at, "2026-07-14T00:00:00Z");
     let calls = std::fs::read_to_string(log).expect("gh call log");
-    let api_calls = gh_api_calls(&calls);
-    assert!(api_calls.contains(&GhApiCall {
-        endpoint: "repos/testorg/testrepo/issues/comments/100".to_string(),
-        method: Some("PATCH".to_string()),
-    }));
-    assert!(api_calls.contains(&GhApiCall {
-        endpoint: "repos/testorg/testrepo/issues/comments/101".to_string(),
-        method: Some("DELETE".to_string()),
-    }));
+    assert_eq!(calls.matches("issue\ncomment\n42").count(), 1);
+    assert!(!calls.contains("\nPATCH\n"));
+    assert!(!calls.contains("\nDELETE\n"));
+    let persisted = std::fs::read_to_string(comments).expect("appended comments");
+    assert!(persisted.contains(
+        "autospec-run-state-link parent=100 parent_generation=legacy generation=run-state-"
+    ));
+    assert!(persisted.contains("worker-b"));
 }
 
 #[test]
-fn claim_state_upsert_retries_a_transient_patch_failure() {
+fn claim_state_upsert_recovers_an_ambiguous_post_without_repeating_it() {
     let fixture = temp_dir("autospec-claim-state-retry");
     let bin = fixture.join("bin");
     let log = fixture.join("gh.log");
-    let failed_once = fixture.join("failed-once");
+    let comments = fixture.join("comments.json");
     std::fs::create_dir_all(&bin).expect("fake bin directory");
     write_executable(
         &bin.join("gh"),
-        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/comments/100 ]; then\n  if [ ! -f \"$AUTOSPEC_CLAIM_FAILED_ONCE\" ]; then touch \"$AUTOSPEC_CLAIM_FAILED_ONCE\"; exit 1; fi\n  exit 0\nfi\nexit 0\n",
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id:101,updated_at:\"2030-01-01T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 1\nfi\nexit 17\n",
     );
-    let comments = r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#;
+    std::fs::write(
+        &comments,
+        r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#,
+    )
+    .expect("comments fixture");
 
     let output = autospec()
         .args([
@@ -481,21 +749,14 @@ fn claim_state_upsert_retries_a_transient_patch_failure() {
         ])
         .env("PATH", path_with(&bin))
         .env("AUTOSPEC_CLAIM_LOG", &log)
-        .env("AUTOSPEC_CLAIM_COMMENTS", comments)
-        .env("AUTOSPEC_CLAIM_FAILED_ONCE", &failed_once)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
         .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
         .output()
         .expect("autospec claim state upsert starts");
 
     assert!(output.status.success());
-    assert!(failed_once.exists());
     let calls = std::fs::read_to_string(log).expect("gh call log");
-    assert_eq!(
-        calls
-            .matches("repos/testorg/testrepo/issues/comments/100")
-            .count(),
-        2
-    );
+    assert_eq!(calls.matches("issue\ncomment\n42").count(), 1);
 }
 
 #[test]
@@ -627,12 +888,17 @@ fn claim_state_reconcile_records_a_linked_pr_before_posting_one_handoff_blocker(
     let fixture = temp_dir("autospec-claim-state-reconcile");
     let bin = fixture.join("bin");
     let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
     std::fs::create_dir_all(&bin).expect("fake bin directory");
     write_executable(
         &bin.join("gh"),
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; elif [ \"$1\" = pr ] && [ \"$2\" = list ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_PRS\"; elif [ \"$1\" = pr ] && [ \"$2\" = checks ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_CHECKS\"; fi\n",
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = pr ] && [ \"$2\" = list ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_PRS\"; exit 0; fi\nif [ \"$1\" = pr ] && [ \"$2\" = checks ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_CHECKS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id: ((map(.id)|max) + 1),updated_at:\"2030-01-01T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nexit 17\n",
     );
-    let comments = r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"feat/test\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"},{"id":101,"updated_at":"2026-07-14T00:01:00Z","body":"<!-- autospec-executor-result:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"branch\":\"feat/test\",\"outcome\":\"succeeded\",\"pr\":75,\"step\":\"executor_succeeded\",\"receipt_id\":\"result-75\",\"claim_id\":\"claim-a\",\"commit\":\"7575757575757575757575757575757575757575\",\"premerge_receipt\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n<!-- autospec-executor-result:end -->"}]"#;
+    std::fs::write(
+        &comments,
+        r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"feat/test\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"},{"id":101,"updated_at":"2026-07-14T00:01:00Z","body":"<!-- autospec-executor-result:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"branch\":\"feat/test\",\"outcome\":\"succeeded\",\"pr\":75,\"step\":\"executor_succeeded\",\"receipt_id\":\"result-75\",\"claim_id\":\"claim-a\",\"commit\":\"7575757575757575757575757575757575757575\",\"premerge_receipt\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}\n<!-- autospec-executor-result:end -->"}]"#,
+    )
+    .expect("comments fixture");
     let pull_requests = r#"[
       {"number":77,"body":"Fixes #42\n\n## Closeout report\n\n## Closeout report","headRefName":"feat/other","headRefOid":"7777777777777777777777777777777777777777"},
       {"number":75,"body":"Closes #42\n\n## Closeout report\n\n**Result** shipped.","headRefName":"feat/test","headRefOid":"7575757575757575757575757575757575757575"}
@@ -649,7 +915,7 @@ fn claim_state_reconcile_records_a_linked_pr_before_posting_one_handoff_blocker(
             "testorg/testrepo",
         ])
         .env("PATH", path_with(&bin))
-        .env("AUTOSPEC_CLAIM_COMMENTS", comments)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
         .env("AUTOSPEC_CLAIM_PRS", pull_requests)
         .env(
             "AUTOSPEC_CLAIM_CHECKS",
@@ -666,8 +932,8 @@ fn claim_state_reconcile_records_a_linked_pr_before_posting_one_handoff_blocker(
     assert!(stdout.contains("\"reconciled\":true"));
     assert!(stdout.contains("\"pr\":\"75\""));
     let calls = std::fs::read_to_string(log).expect("gh call log");
-    assert!(calls.contains("repos/testorg/testrepo/issues/comments/100\n-X\nPATCH"));
-    assert!(calls.contains("issue\ncomment\n42\n--repo\ntestorg/testrepo\n--body"));
+    assert_eq!(calls.matches("issue\ncomment\n42").count(), 2);
+    assert!(!calls.contains("\nPATCH\n"));
 }
 
 #[test]
@@ -675,12 +941,17 @@ fn claim_release_records_terminal_merge_before_removing_the_active_label() {
     let fixture = temp_dir("autospec-claim-release");
     let bin = fixture.join("bin");
     let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
     std::fs::create_dir_all(&bin).expect("fake bin directory");
     write_executable(
         &bin.join("gh"),
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; fi\n",
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id: ((map(.id)|max) + 1),updated_at:\"2030-01-01T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then exit 0; fi\nexit 17\n",
     );
-    let comments = r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"feat/test\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#;
+    std::fs::write(
+        &comments,
+        r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"feat/test\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#,
+    )
+    .expect("comments fixture");
 
     let output = autospec()
         .args([
@@ -700,7 +971,7 @@ fn claim_release_records_terminal_merge_before_removing_the_active_label() {
             "99",
         ])
         .env("PATH", path_with(&bin))
-        .env("AUTOSPEC_CLAIM_COMMENTS", comments)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
         .env("AUTOSPEC_CLAIM_LOG", &log)
         .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
         .output()
@@ -712,16 +983,15 @@ fn claim_release_records_terminal_merge_before_removing_the_active_label() {
     assert!(stdout.contains("\"released\":true"));
     assert!(stdout.contains("\"state\":\"merged\""));
     let calls = std::fs::read_to_string(log).expect("gh call log");
-    let patch = calls
-        .find("repos/testorg/testrepo/issues/comments/100\n-X\nPATCH")
-        .unwrap();
-    let terminal = calls
-        .find("issue\ncomment\n42\n--repo\ntestorg/testrepo\n--body")
+    let terminal = calls.find("issue\ncomment\n42").unwrap();
+    let successor = calls[terminal + 1..]
+        .find("issue\ncomment\n42")
+        .map(|offset| terminal + 1 + offset)
         .unwrap();
     let labels = calls
         .find("issue\nedit\n42\n--repo\ntestorg/testrepo\n--remove-label\nin-progress-by-bot")
         .unwrap();
-    assert!(terminal < patch && patch < labels);
+    assert!(terminal < successor && successor < labels);
 }
 
 #[test]
@@ -842,7 +1112,7 @@ fn claim_acquire_never_reclaims_a_fresh_foreign_lowest_comment() {
         "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_ISSUE\"; elif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; fi\n",
     );
     let issue = r###"{"labels":["auto-implement","safety:reviewed"],"title":"Add Rust claim","body":"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","author":"agent"}"###;
-    let comments = r#"[{"id":100,"updated_at":"2026-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-b\",\"state\":\"claimed\",\"branch\":\"feat/other\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#;
+    let comments = r#"[{"id":100,"updated_at":"2999-07-14T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-b\",\"state\":\"claimed\",\"branch\":\"feat/other\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2999-07-14T00:00:00Z\",\"updated_at\":\"2999-07-14T00:00:00Z\",\"ttl_seconds\":1}\n<!-- autospec-run-state:end -->"}]"#;
 
     let output = autospec()
         .args([
@@ -893,7 +1163,7 @@ fn claim_acquire_reclaims_a_stale_foreign_lowest_comment_after_confirming_the_ca
     std::fs::write(&mode, "ready\n").expect("label mode fixture");
     write_executable(
         &bin.join("gh"),
-        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then\n  if [ \"$(cat \"$AUTOSPEC_CLAIM_MODE\")\" = active ]; then labels='[\"in-progress-by-bot\",\"safety:reviewed\"]'; else labels='[\"auto-implement\",\"safety:reviewed\"]'; fi\n  jq -n --argjson labels \"$labels\" --arg body \"$AUTOSPEC_CLAIM_ISSUE_BODY\" '{labels:$labels,title:\"Add Rust claim\",body:$body,author:\"agent\"}'\n  exit 0\nfi\nif [ \"$1\" = label ] && [ \"$2\" = create ]; then exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then printf active > \"$AUTOSPEC_CLAIM_MODE\"; exit 0; fi\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/comments/100 ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in -f) body=\"${2#body=}\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '.[0].body=$body | .[0].updated_at=\"2026-07-14T00:00:00Z\"' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nexit 0\n",
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then\n  if [ \"$(cat \"$AUTOSPEC_CLAIM_MODE\")\" = active ]; then labels='[\"in-progress-by-bot\",\"safety:reviewed\"]'; else labels='[\"auto-implement\",\"safety:reviewed\"]'; fi\n  jq -n --argjson labels \"$labels\" --arg body \"$AUTOSPEC_CLAIM_ISSUE_BODY\" '{labels:$labels,title:\"Add Rust claim\",body:$body,author:\"agent\"}'\n  exit 0\nfi\nif [ \"$1\" = label ] && [ \"$2\" = create ]; then exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then printf active > \"$AUTOSPEC_CLAIM_MODE\"; exit 0; fi\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id:101,updated_at:\"2026-07-14T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nexit 0\n",
     );
     let body = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Goal\nAdd the Rust implementation.";
 
@@ -916,7 +1186,7 @@ fn claim_acquire_reclaims_a_stale_foreign_lowest_comment_after_confirming_the_ca
         .env("AUTOSPEC_CLAIM_MODE", &mode)
         .env("AUTOSPEC_CLAIM_ISSUE_BODY", body)
         .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
-        .env("AUTOSPEC_CLAIM_LEASE_SECONDS", "1")
+        .env("AUTOSPEC_CLAIM_LEASE_SECONDS", "9999999999")
         .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
         .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
         .output()
@@ -927,9 +1197,9 @@ fn claim_acquire_reclaims_a_stale_foreign_lowest_comment_after_confirming_the_ca
     assert!(std::fs::read_to_string(&comments)
         .expect("claimed comments")
         .contains("worker-a"));
-    assert!(std::fs::read_to_string(log)
-        .expect("gh log")
-        .contains("repos/testorg/testrepo/issues/comments/100\n-X\nPATCH"));
+    let calls = std::fs::read_to_string(log).expect("gh log");
+    assert!(calls.contains("issue\ncomment\n42"));
+    assert!(!calls.contains("\nPATCH\n"));
 }
 
 #[test]

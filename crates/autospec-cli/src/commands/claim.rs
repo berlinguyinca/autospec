@@ -10,13 +10,14 @@ use autospec_core::autonomous_lifecycle::{
     WorkerId, ABANDONED_LEASE_SECS, STALE_LEASE_SECS,
 };
 use autospec_core::claim::{
-    claim_losing_worker_comment_id, evaluate_merge_ready_claim_recovery,
-    executor_result_evidence_exists, executor_wait_failure_relinquishes_claim,
-    find_reconcilable_pull_request, is_executor_result_pull_request, is_reconcilable_pull_request,
-    lowest_marked_comment, parse_claim_issue_json, parse_open_pull_requests_json,
-    parse_paths_argument, parse_remote_comments_json, parse_required_checks_json, select_run_state,
+    evaluate_merge_ready_claim_recovery, executor_result_evidence_exists,
+    executor_wait_failure_relinquishes_claim, find_reconcilable_pull_request,
+    is_executor_result_pull_request, is_reconcilable_pull_request, parse_claim_issue_json,
+    parse_open_pull_requests_json, parse_paths_argument, parse_remote_comments_json,
+    parse_required_checks_json, parse_run_state_comment,
     successful_executor_result_for_pull_request, terminal_merged_comment_exists,
-    ClaimRecoveryDecision, ExecutorResultEvidence, RunStateRecord, RUN_TERMINAL_BEGIN_MARKER,
+    ClaimRecoveryDecision, ExecutorResultEvidence, RemoteComment, RunStateRecord, SelectedRunState,
+    RUN_STATE_BEGIN_MARKER, RUN_STATE_END_MARKER, RUN_TERMINAL_BEGIN_MARKER,
     RUN_TERMINAL_END_MARKER,
 };
 use autospec_core::coordination::ConductorOutcome;
@@ -27,6 +28,8 @@ use super::CommandFailure;
 
 static UNIQUE_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const WAIT_FAILURE_MARKER: &str = "<!-- autospec-implementer-wait-failed -->";
+const RUN_STATE_LINK_PREFIX: &str = "<!-- autospec-run-state-link parent=";
+const RUN_STATE_LINK_SUFFIX: &str = " -->";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WaitFailureRecovery {
@@ -280,7 +283,7 @@ pub(crate) fn active_claim_generation_matches(
         && selected.record.claim_id.as_deref() == Some(claim_id)
         && selected.record.branch == branch
         && selected.record.state == "claimed"
-        && server_lease_is_fresh(&selected.server_updated_at, claim_ttl_seconds()))
+        && server_lease_is_fresh(&selected.server_updated_at, selected.record.ttl_seconds))
 }
 
 fn lifecycle_lease_freshness(server_timestamp: &str) -> LeaseFreshness {
@@ -387,7 +390,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     let foreign_fresh_owner = selected.as_ref().and_then(|selected| {
         (selected.record.worker_id != worker_id
             && !wait_failure_relinquished
-            && !server_lease_is_stale(&selected.server_updated_at, ttl_seconds))
+            && !server_lease_is_stale(&selected.server_updated_at, selected.record.ttl_seconds))
         .then_some(selected.record.worker_id.as_str())
     });
     if let Some(owner) = foreign_fresh_owner {
@@ -565,6 +568,195 @@ pub(crate) enum ClaimRefreshResult {
     OwnershipLost,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunStateLink {
+    parent: Option<u64>,
+    parent_generation: Option<String>,
+    generation: String,
+}
+
+fn run_state_link(body: &str) -> Option<RunStateLink> {
+    let line = body
+        .lines()
+        .find(|line| line.starts_with(RUN_STATE_LINK_PREFIX))?;
+    let fields = line
+        .strip_prefix(RUN_STATE_LINK_PREFIX)?
+        .strip_suffix(RUN_STATE_LINK_SUFFIX)?;
+    let mut fields = fields.split_whitespace();
+    let parent = match fields.next()? {
+        "none" => None,
+        value => Some(value.parse().ok()?),
+    };
+    let mut parent_generation = None;
+    let mut generation = None;
+    for field in fields {
+        let (name, value) = field.split_once('=')?;
+        match name {
+            "parent_generation" => parent_generation = Some(value.to_string()),
+            "generation" => generation = Some(value.to_string()),
+            _ => return None,
+        }
+    }
+    let generation = generation?;
+    let valid_token = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    };
+    if !valid_token(&generation)
+        || parent_generation
+            .as_deref()
+            .is_some_and(|value| !valid_token(value))
+        || parent.is_none()
+            && parent_generation
+                .as_deref()
+                .is_some_and(|value| value != "none")
+    {
+        return None;
+    }
+    if parent.is_some() && parent_generation.is_none() {
+        parent_generation = Some("legacy".to_string());
+    }
+    Some(RunStateLink {
+        parent,
+        parent_generation,
+        generation,
+    })
+}
+
+fn run_state_parent(body: &str) -> Option<Option<u64>> {
+    let line = body
+        .lines()
+        .find(|line| line.starts_with(RUN_STATE_LINK_PREFIX))?;
+    let parent = line
+        .strip_prefix(RUN_STATE_LINK_PREFIX)?
+        .split_once(' ')
+        .map(|(parent, _)| parent)?;
+    match parent {
+        "none" => Some(None),
+        value => value.parse().ok().map(Some),
+    }
+}
+
+fn marked_run_state(comment: &RemoteComment) -> bool {
+    comment.body.contains(RUN_STATE_BEGIN_MARKER) && comment.body.contains(RUN_STATE_END_MARKER)
+}
+
+fn authoritative_run_state_comment(comments: &[RemoteComment]) -> Option<&RemoteComment> {
+    let mut current = comments
+        .iter()
+        .filter(|comment| {
+            marked_run_state(comment)
+                && run_state_parent(&comment.body).is_none_or(|parent| parent.is_none())
+        })
+        .min_by_key(|comment| comment.id)?;
+    loop {
+        let child = comments
+            .iter()
+            .filter(|comment| {
+                comment.id > current.id
+                    && marked_run_state(comment)
+                    && run_state_parent(&comment.body)
+                        .is_some_and(|parent| parent == Some(current.id))
+            })
+            .min_by_key(|comment| comment.id);
+        match child {
+            Some(child) => current = child,
+            None => return Some(current),
+        }
+    }
+}
+
+fn select_run_state(
+    comments: &[RemoteComment],
+    repo: &str,
+    issue: u64,
+) -> Option<SelectedRunState> {
+    let comment = authoritative_run_state_comment(comments)?;
+    if comment.body.contains(RUN_STATE_LINK_PREFIX) && run_state_link(&comment.body).is_none() {
+        return None;
+    }
+    let record = parse_run_state_comment(&comment.body).ok()?;
+    if record.repo != repo || record.issue != issue {
+        return None;
+    }
+    Some(SelectedRunState {
+        comment_id: comment.id,
+        server_updated_at: comment.updated_at.clone(),
+        record,
+    })
+}
+
+fn lowest_marked_comment(comments: &[RemoteComment]) -> Option<&RemoteComment> {
+    authoritative_run_state_comment(comments)
+}
+
+fn linked_run_state_comment(
+    record: &RunStateRecord,
+    parent: Option<&RemoteComment>,
+    generation: &str,
+) -> String {
+    let (parent, parent_generation) = parent.map_or_else(
+        || ("none".to_string(), "none".to_string()),
+        |comment| {
+            (
+                comment.id.to_string(),
+                run_state_link(&comment.body)
+                    .map(|link| link.generation)
+                    .unwrap_or_else(|| "legacy".to_string()),
+            )
+        },
+    );
+    format!(
+        "{RUN_STATE_LINK_PREFIX}{parent} parent_generation={parent_generation} generation={generation}{RUN_STATE_LINK_SUFFIX}\n{}",
+        record.to_marked_comment()
+    )
+}
+
+fn selected_generation_matches(
+    selected: &SelectedRunState,
+    comments: &[RemoteComment],
+    generation: &str,
+    record: &RunStateRecord,
+) -> bool {
+    selected.record == *record
+        && comments
+            .iter()
+            .find(|comment| comment.id == selected.comment_id)
+            .and_then(|comment| run_state_link(&comment.body))
+            .is_some_and(|link| link.generation == generation)
+}
+
+fn post_run_state_successor_once(
+    repo: &str,
+    issue: u64,
+    parent: Option<&RemoteComment>,
+    record: &RunStateRecord,
+) -> Result<String, CommandFailure> {
+    let generation = unique_operation_id("run-state")?;
+    let body = linked_run_state_comment(record, parent, &generation);
+    let output = Command::new("gh")
+        .args([
+            "issue",
+            "comment",
+            &issue.to_string(),
+            "--repo",
+            repo,
+            "--body",
+            &body,
+        ])
+        .output()
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("could not create run-state successor: {error}"))
+        })?;
+    // A failed transport response is ambiguous: the immutable POST may already
+    // have committed. The caller always re-reads and identifies this generation
+    // before deciding, and must never retry this POST.
+    let _ = output;
+    Ok(generation)
+}
+
 /// Renew one exact claim generation without changing its immutable identity.
 ///
 /// The lowest marked GitHub comment is the linearization point. An expired
@@ -591,14 +783,17 @@ pub(crate) fn refresh_claim_generation(
         return Ok(ClaimRefreshResult::OwnershipLost);
     }
 
-    let comment_id = selected.comment_id;
+    let parent = comments
+        .iter()
+        .find(|comment| comment.id == selected.comment_id)
+        .ok_or_else(|| CommandFailure::diagnostic("authoritative claim comment disappeared"))?;
     let mut refreshed = selected.record;
     refreshed.updated_at = utc_now_iso()?;
     refreshed.step = step.to_string();
     if let Some(pull_request) = pull_request {
         refreshed.pr = pull_request.to_string();
     }
-    patch_comment(repo, comment_id, &refreshed.to_marked_comment())?;
+    let generation = post_run_state_successor_once(repo, issue, Some(parent), &refreshed)?;
 
     let confirmed_comments = list_comments(repo, issue)?;
     if terminal_merged_exists(&confirmed_comments) {
@@ -607,9 +802,8 @@ pub(crate) fn refresh_claim_generation(
     let Some(confirmed) = select_run_state(&confirmed_comments, repo, issue) else {
         return Ok(ClaimRefreshResult::OwnershipLost);
     };
-    if confirmed.comment_id != comment_id
-        || !has_exact_claim_generation(&confirmed.record, worker_id, claim_id, branch)
-        || confirmed.record != refreshed
+    if !has_exact_claim_generation(&confirmed.record, worker_id, claim_id, branch)
+        || !selected_generation_matches(&confirmed, &confirmed_comments, &generation, &refreshed)
     {
         return Ok(ClaimRefreshResult::OwnershipLost);
     }
@@ -633,22 +827,20 @@ fn upsert_record(
     comments: &[autospec_core::claim::RemoteComment],
     record: &RunStateRecord,
 ) -> Result<(), CommandFailure> {
-    let body = record.to_marked_comment();
-    if let Some(comment) = lowest_marked_comment(comments) {
-        patch_comment(repo, comment.id, &body)?;
-        for duplicate in comments.iter().filter(|candidate| {
-            candidate.id != comment.id
-                && candidate
-                    .body
-                    .contains(autospec_core::claim::RUN_STATE_BEGIN_MARKER)
-                && candidate
-                    .body
-                    .contains(autospec_core::claim::RUN_STATE_END_MARKER)
-        }) {
-            let _ = delete_comment(repo, duplicate.id);
-        }
-    } else {
-        create_comment(repo, record.issue, &body)?;
+    let parent = authoritative_run_state_comment(comments);
+    let generation = post_run_state_successor_once(repo, record.issue, parent, record)?;
+    let confirmed_comments = list_comments(repo, record.issue)?;
+    if terminal_merged_exists(&confirmed_comments) && record.state != "merged" {
+        return Err(CommandFailure::diagnostic(
+            "run-state successor lost to terminal evidence",
+        ));
+    }
+    let confirmed = select_run_state(&confirmed_comments, repo, record.issue)
+        .ok_or_else(|| CommandFailure::diagnostic("run-state successor is not authoritative"))?;
+    if !selected_generation_matches(&confirmed, &confirmed_comments, &generation, record) {
+        return Err(CommandFailure::diagnostic(
+            "claim ownership changed: run-state successor lost the authoritative parent race",
+        ));
     }
     Ok(())
 }
@@ -1950,8 +2142,10 @@ fn list_comments(
         .args([
             "api",
             endpoint.as_str(),
+            "--paginate",
+            "--slurp",
             "--jq",
-            "[.[] | {id,body,updated_at}]",
+            "add | [.[] | {id,body,updated_at}]",
         ])
         .output()
         .map_err(|error| {
@@ -2392,14 +2586,13 @@ fn branch_ref_exists(branch: &str) -> bool {
 }
 
 fn cleanup_own_marked_comments(
-    repo: &str,
+    _repo: &str,
     _issue: u64,
-    worker_id: &str,
-    comments: &[autospec_core::claim::RemoteComment],
+    _worker_id: &str,
+    _comments: &[autospec_core::claim::RemoteComment],
 ) {
-    if let Some(comment_id) = claim_losing_worker_comment_id(comments, worker_id) {
-        let _ = delete_comment(repo, comment_id);
-    }
+    // Run-state generations are immutable audit evidence. A losing child stays
+    // present but unreachable because the lowest sibling comment ID wins.
 }
 
 fn claim_ttl_seconds() -> u64 {
@@ -2705,7 +2898,7 @@ fn print_help() {
 
 fn print_state_help() {
     println!(
-        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim state clear --issue <N> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> [--repo OWNER/REPO] [--worker-id ID]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the lowest-ID authoritative run-state comment\n    upsert                 Patch or create the lowest-ID authoritative run-state comment\n    refresh                Renew one exact claim generation and confirm ownership\n    clear                  Delete marked run-state comments\n    reconcile-linked-pr    Record a linked PR before post-PR handoff recovery\n    recover-stale-startup  Release only an evidenceless stale startup claim"
+        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim state clear --issue <N> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> [--repo OWNER/REPO] [--worker-id ID]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the authoritative parent-linked run-state generation\n    upsert                 Append one successor to the authoritative run-state generation\n    refresh                Renew one exact claim generation and confirm ownership\n    clear                  Delete marked run-state comments\n    reconcile-linked-pr    Record a linked PR before post-PR handoff recovery\n    recover-stale-startup  Release only an evidenceless stale startup claim"
     );
 }
 

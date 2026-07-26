@@ -444,7 +444,7 @@ impl ClaimRenewalPhase {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BridgeClaimOwnership {
-    Refreshed,
+    Refreshed { ttl_seconds: u64 },
     Lost,
 }
 
@@ -464,7 +464,9 @@ pub(crate) fn refresh_bridge_claim(
     )
     .map_err(|error| error.message)
     .map(|result| match result {
-        ClaimRefreshResult::Refreshed(_) => BridgeClaimOwnership::Refreshed,
+        ClaimRefreshResult::Refreshed(record) => BridgeClaimOwnership::Refreshed {
+            ttl_seconds: record.ttl_seconds,
+        },
         ClaimRefreshResult::OwnershipLost => BridgeClaimOwnership::Lost,
     })
 }
@@ -1022,6 +1024,7 @@ pub(crate) enum SupervisionOutcome {
 #[derive(Clone, Copy, Debug)]
 enum ClaimRenewalSchedule {
     Disabled,
+    Pending,
     Every {
         interval: Duration,
         refreshed_at: Instant,
@@ -1046,12 +1049,12 @@ impl ClaimRenewalSchedule {
     }
 
     fn is_enabled(self) -> bool {
-        matches!(self, Self::Every { .. })
+        !matches!(self, Self::Disabled)
     }
 
     fn is_due(self) -> bool {
         match self {
-            Self::Disabled => false,
+            Self::Disabled | Self::Pending => false,
             Self::Every {
                 interval,
                 refreshed_at,
@@ -1059,24 +1062,17 @@ impl ClaimRenewalSchedule {
         }
     }
 
-    fn mark_refreshed(&mut self) {
-        if let Self::Every { refreshed_at, .. } = self {
-            *refreshed_at = Instant::now();
-        }
+    fn mark_refreshed(&mut self, ttl_seconds: u64) {
+        *self = Self::Every {
+            interval: Duration::from_secs((ttl_seconds / 3).max(1)),
+            refreshed_at: Instant::now(),
+        };
     }
-}
-
-fn claim_renewal_interval() -> Duration {
-    let seconds = std::env::var("AUTOSPEC_CLAIM_LEASE_SECONDS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(10_800);
-    Duration::from_secs((seconds / 3).max(1))
 }
 
 const OUTPUT_LINE_LIMIT: usize = 4_096;
 const OUTPUT_EVENTS_PER_HEARTBEAT: usize = 16;
+const OUTPUT_EVENTS_PER_INVOCATION: usize = 64;
 const OUTPUT_READ_LIMIT: usize = 64 * 1_024;
 const OUTPUT_SINK_LIMIT: u64 = 1_048_576;
 const OUTPUT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(100);
@@ -1122,6 +1118,8 @@ struct DurableOutputReaders {
     pending: Vec<OutputEvent>,
     last_flush: Instant,
     io_failed: bool,
+    reported_events: usize,
+    coalesced_reported: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1518,7 +1516,7 @@ pub(crate) fn supervise_resolved_harness(
         &validated,
         snapshot,
         config,
-        ClaimRenewalSchedule::enabled(claim_renewal_interval())?,
+        ClaimRenewalSchedule::Pending,
     )
 }
 
@@ -1769,14 +1767,17 @@ fn supervise_validated_harness_with_claim_renewal(
             }
         };
     }
-    if renewal.is_enabled()
-        && refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)?
-            == BridgeClaimOwnership::Lost
-    {
-        record_claim_ownership_loss(state_path, event_log, state)?;
-        return Ok(SupervisionOutcome::OwnershipLost);
+    if renewal.is_enabled() {
+        match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)? {
+            BridgeClaimOwnership::Refreshed { ttl_seconds } => {
+                renewal.mark_refreshed(ttl_seconds);
+            }
+            BridgeClaimOwnership::Lost => {
+                record_claim_ownership_loss(state_path, event_log, state)?;
+                return Ok(SupervisionOutcome::OwnershipLost);
+            }
+        }
     }
-    renewal.mark_refreshed();
     launch_and_supervise(
         state_path,
         event_log,
@@ -2711,7 +2712,9 @@ fn launch_and_supervise(
         }
         if renewal.is_due() {
             match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)? {
-                BridgeClaimOwnership::Refreshed => renewal.mark_refreshed(),
+                BridgeClaimOwnership::Refreshed { ttl_seconds } => {
+                    renewal.mark_refreshed(ttl_seconds);
+                }
                 BridgeClaimOwnership::Lost => {
                     terminate_owned_forked_process_group(&process, guard.child_mut())?;
                     readers.poll()?;
@@ -2864,7 +2867,9 @@ fn supervise_adopted_process(
     let result = (|| -> Result<SupervisionOutcome, String> {
         if renewal.is_enabled() {
             match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)? {
-                BridgeClaimOwnership::Refreshed => renewal.mark_refreshed(),
+                BridgeClaimOwnership::Refreshed { ttl_seconds } => {
+                    renewal.mark_refreshed(ttl_seconds);
+                }
                 BridgeClaimOwnership::Lost => {
                     guard.terminate()?;
                     record_claim_ownership_loss(state_path, event_log, state)?;
@@ -2893,7 +2898,9 @@ fn supervise_adopted_process(
             }
             if renewal.is_due() {
                 match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)? {
-                    BridgeClaimOwnership::Refreshed => renewal.mark_refreshed(),
+                    BridgeClaimOwnership::Refreshed { ttl_seconds } => {
+                        renewal.mark_refreshed(ttl_seconds);
+                    }
                     BridgeClaimOwnership::Lost => {
                         guard.terminate()?;
                         readers.poll()?;
@@ -3107,6 +3114,8 @@ impl DurableOutputReaders {
             pending: Vec::new(),
             last_flush: Instant::now(),
             io_failed: false,
+            reported_events: 0,
+            coalesced_reported: false,
         })
     }
 
@@ -3205,7 +3214,29 @@ impl DurableOutputReaders {
         event_log: &Path,
         state: &mut PersistedInvocation,
     ) -> Result<(), String> {
-        let max_polls = (OUTPUT_SINK_LIMIT / OUTPUT_READ_LIMIT as u64 + 4) as usize;
+        let unread_bytes = self.streams.iter().try_fold(0_u64, |total, stream| {
+            let writer = read_output_cursor(&stream.writer_cursor).map_err(|error| {
+                format!(
+                    "read durable executor {} completion cursor: {error}",
+                    stream.name
+                )
+            })?;
+            Ok::<u64, String>(
+                total.saturating_add(
+                    writer
+                        .total
+                        .saturating_sub(stream.offset)
+                        .min(OUTPUT_SINK_LIMIT),
+                ),
+            )
+        })?;
+        // A poll can stop at the event cap before reaching the byte cap. In
+        // the worst case each queued event is a one-byte newline, so a
+        // byte-derived `/ OUTPUT_READ_LIMIT` bound can expire with valid data
+        // remaining. Bound by the minimum event-cap progress instead.
+        let max_polls = (unread_bytes / OUTPUT_EVENTS_PER_HEARTBEAT as u64)
+            .saturating_add(self.streams.len() as u64 * 4)
+            .saturating_add(4) as usize;
         for _ in 0..max_polls {
             let progressed = self.poll()?;
             self.last_flush = Instant::now() - OUTPUT_HEARTBEAT_INTERVAL;
@@ -3245,7 +3276,25 @@ impl DurableOutputReaders {
         if !force && self.last_flush.elapsed() < OUTPUT_HEARTBEAT_INTERVAL {
             return Ok(false);
         }
-        let events = std::mem::take(&mut self.pending);
+        let mut events = std::mem::take(&mut self.pending);
+        let remaining = OUTPUT_EVENTS_PER_INVOCATION.saturating_sub(self.reported_events);
+        let suppressed_bytes = events
+            .iter()
+            .skip(remaining)
+            .map(|event| event.line.len() as u64 + 1)
+            .sum::<u64>();
+        events.truncate(remaining);
+        self.reported_events += events.len();
+        if suppressed_bytes > 0 && !self.coalesced_reported {
+            events.push(OutputEvent {
+                stream: "combined",
+                line: "executor output was coalesced after the bounded progress sample".to_string(),
+                truncated: true,
+                io_error: false,
+                dropped: suppressed_bytes,
+            });
+            self.coalesced_reported = true;
+        }
         state.progress_at = unix_now()?;
         write_invocation_atomic(state_path, state)?;
         for event in &events {
@@ -4288,6 +4337,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use autospec_core::runtime_env::{EnvironmentLifecycle, EnvironmentOwner};
@@ -4304,6 +4354,7 @@ mod tests {
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
 
     fn test_root(label: &str) -> PathBuf {
         let sequence = TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
@@ -4675,6 +4726,7 @@ mod tests {
 
     #[test]
     fn autonomous_executor_bridge_isolates_equal_issue_numbers_and_runtime_sessions() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let first = GitFixture::new("same-issue-first");
         let second = GitFixture::new("same-issue-second");
         let base_one = resolve_base(&first.repo, &BTreeMap::new()).expect("first base");
@@ -4738,6 +4790,7 @@ mod tests {
 
     #[test]
     fn autonomous_executor_bridge_cleanup_failure_publication_holds_environment_lease() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let fixture = GitFixture::new("runtime-abort-failure");
         let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
         let scope = format!(
@@ -6415,6 +6468,7 @@ mod tests {
 
     #[test]
     fn autonomous_executor_bridge_stops_before_more_remote_work_after_claim_takeover() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         // Break caught: a long-running implementation continuing after its exact claim was replaced.
         let fixture = GitFixture::new("supervise-claim-takeover");
         let mut state = supervision_state(&fixture);
@@ -6424,10 +6478,10 @@ mod tests {
         let event_log = fixture.root.join("log/executor.jsonl");
         let bin = fixture.root.join("bin");
         let comments = fixture.root.join("comments.json");
-        let reads = fixture.root.join("reads");
+        let posts = fixture.root.join("posts");
         let gh_log = fixture.root.join("gh.log");
         fs::create_dir(&bin).expect("claim fixture bin");
-        fs::write(&reads, "0\n").expect("claim read counter");
+        fs::write(&posts, "0\n").expect("claim post counter");
         let claimed = autospec_core::claim::RunStateRecord::new(
             "owner/repo",
             42,
@@ -6459,27 +6513,30 @@ set -eu
 printf 'CALL\n' >> "$AUTOSPEC_BRIDGE_GH_LOG"
 printf '%s\n' "$@" >> "$AUTOSPEC_BRIDGE_GH_LOG"
 if [ "$1" = api ] && [ "$2" = repos/owner/repo/issues/42/comments ]; then
-  count=$(cat "$AUTOSPEC_BRIDGE_READS")
-  count=$((count + 1))
-  printf '%s\n' "$count" > "$AUTOSPEC_BRIDGE_READS"
-  if [ "$count" -eq 3 ]; then
-    printf '%s\n' "$AUTOSPEC_BRIDGE_TAKEOVER" > "$AUTOSPEC_BRIDGE_COMMENTS"
-  fi
   cat "$AUTOSPEC_BRIDGE_COMMENTS"
   exit 0
 fi
-if [ "$1" = api ] && [ "$2" = repos/owner/repo/issues/comments/100 ]; then
+if [ "$1" = issue ] && [ "$2" = comment ]; then
   body=''
   shift 2
   while [ "$#" -gt 0 ]; do
     case "$1" in
-      -f) body="${2#body=}"; shift 2 ;;
+      --body) body="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
-  jq --arg body "$body" \
-    '.[0].body=$body | .[0].updated_at="2030-01-01T00:00:00Z"' \
-    "$AUTOSPEC_BRIDGE_COMMENTS" > "$AUTOSPEC_BRIDGE_COMMENTS.tmp"
+  count=$(cat "$AUTOSPEC_BRIDGE_POSTS")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$AUTOSPEC_BRIDGE_POSTS"
+  if [ "$count" -eq 1 ]; then
+    jq --arg body "$body" \
+      '. + [{id:101,updated_at:"2030-01-01T00:00:00Z",body:$body}]' \
+      "$AUTOSPEC_BRIDGE_COMMENTS" > "$AUTOSPEC_BRIDGE_COMMENTS.tmp"
+  else
+    jq --arg takeover "$AUTOSPEC_BRIDGE_TAKEOVER" --arg body "$body" \
+      '. + [{id:102,updated_at:"2030-01-01T00:00:01Z",body:$takeover},{id:103,updated_at:"2030-01-01T00:00:02Z",body:$body}]' \
+      "$AUTOSPEC_BRIDGE_COMMENTS" > "$AUTOSPEC_BRIDGE_COMMENTS.tmp"
+  fi
   mv "$AUTOSPEC_BRIDGE_COMMENTS.tmp" "$AUTOSPEC_BRIDGE_COMMENTS"
   exit 0
 fi
@@ -6500,13 +6557,14 @@ exit 19
             1,
         )
         .with_claim_id("claim-takeover");
-        let takeover = serde_json::json!([{
-            "id": 100,
-            "updated_at": "2030-01-01T00:00:01Z",
-            "body": takeover_record.to_marked_comment()
-        }])
-        .to_string();
+        let takeover_link = [
+            "<!-- autospec-",
+            "run-state-link parent=101 generation=takeover-generation -->",
+        ]
+        .concat();
+        let takeover = format!("{takeover_link}\n{}", takeover_record.to_marked_comment());
         let original_path = std::env::var_os("PATH");
+        let original_lease = std::env::var_os("AUTOSPEC_CLAIM_LEASE_SECONDS");
         std::env::set_var(
             "PATH",
             format!(
@@ -6520,9 +6578,10 @@ exit 19
         );
         std::env::set_var("AUTOSPEC_BRIDGE_GH_LOG", &gh_log);
         std::env::set_var("AUTOSPEC_BRIDGE_COMMENTS", &comments);
-        std::env::set_var("AUTOSPEC_BRIDGE_READS", &reads);
+        std::env::set_var("AUTOSPEC_BRIDGE_POSTS", &posts);
         std::env::set_var("AUTOSPEC_BRIDGE_TAKEOVER", &takeover);
         std::env::set_var("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0");
+        std::env::set_var("AUTOSPEC_CLAIM_LEASE_SECONDS", "999999");
 
         let outcome = super::supervise_harness_with_claim_renewal(
             &state_path,
@@ -6538,10 +6597,14 @@ exit 19
             Some(path) => std::env::set_var("PATH", path),
             None => std::env::remove_var("PATH"),
         }
+        match original_lease {
+            Some(value) => std::env::set_var("AUTOSPEC_CLAIM_LEASE_SECONDS", value),
+            None => std::env::remove_var("AUTOSPEC_CLAIM_LEASE_SECONDS"),
+        }
         for name in [
             "AUTOSPEC_BRIDGE_GH_LOG",
             "AUTOSPEC_BRIDGE_COMMENTS",
-            "AUTOSPEC_BRIDGE_READS",
+            "AUTOSPEC_BRIDGE_POSTS",
             "AUTOSPEC_BRIDGE_TAKEOVER",
             "AUTOSPEC_CLAIM_RETRY_SLEEP_MS",
         ] {
@@ -6559,11 +6622,13 @@ exit 19
         assert!(events.contains("\"event\":\"claim_ownership_lost\""));
         let calls = fs::read_to_string(gh_log).expect("claim gh calls");
         assert_eq!(
-            calls
-                .matches("repos/owner/repo/issues/comments/100")
-                .count(),
-            1,
-            "no patch may follow the confirmed takeover: {calls}"
+            calls.matches("issue\ncomment\n42").count(),
+            2,
+            "authoritative ttl=1 must renew before env ttl=999999 expires: {calls}"
+        );
+        assert!(
+            !calls.contains("\nPATCH\n"),
+            "run-state is append-only: {calls}"
         );
     }
 
@@ -7544,6 +7609,8 @@ exit 19
             pending: Vec::new(),
             last_flush: Instant::now() - Duration::from_secs(1),
             io_failed: false,
+            reported_events: 0,
+            coalesced_reported: false,
         };
 
         assert!(!readers.poll().expect("I/O error becomes an event"));
