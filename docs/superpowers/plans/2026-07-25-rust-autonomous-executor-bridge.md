@@ -18,7 +18,7 @@ integration tests. No new dependencies.
 ## Constraints
 
 - Work only in the issue worktree created from the configured base resolver:
-  `AUTOSPEC_BASE_BRANCH`, repo config, then remote default.
+  explore sandbox, `AUTOSPEC_BASE_BRANCH`, repo config, then remote default.
 - Write a failing regression before each behavior change.
 - Never invoke `autospec-run`, `omx`, a shell conductor, or the primary checkout.
 - Never treat process exit, free-form stdout, or a harness claim as proof.
@@ -29,7 +29,23 @@ integration tests. No new dependencies.
 - Rust owns push, draft creation, ready transition, CI admission, merge,
   terminal claim release, and cleanup.
 
-### Task 1: Add typed harness and invocation contracts
+### Task 1: Install and verify required executor scanners
+
+**Files:**
+
+- Modify `install.sh`
+- Modify `skills/autospec-shared/scripts/ensure-tool.sh`
+- Modify `tests/install/test_required_dependencies.sh`
+
+1. Add failing installer tests proving gitleaks, semgrep, trivy, and
+   license-checker are attempted and then verified for autonomous installs.
+2. Extend cross-platform installer fallbacks, including the existing approved
+   sudo system-package path, without running real package managers in tests.
+3. Preserve global/per-tool skip controls, but report the exact missing scanner
+   so executor security admission can fail closed.
+4. Commit scanner dependency provisioning.
+
+### Task 2: Add typed harness and invocation contracts
 
 **Files:**
 
@@ -49,7 +65,7 @@ integration tests. No new dependencies.
    launch it only through an explicitly configured, proven containment adapter.
 5. Commit the typed contract and tests.
 
-### Task 2: Provision and recover isolated worktree and runtime state
+### Task 3: Provision and recover isolated worktree and runtime state
 
 **Files:**
 
@@ -59,8 +75,10 @@ integration tests. No new dependencies.
 
 1. Add a failing integration fixture backed by a real local Git repository and
    bare remote.
-2. Resolve `AUTOSPEC_BASE_BRANCH`, then `.autospec/autospec.yml`
-   `git.base_branch`, then remote default; persist the exact base ref and OID.
+2. Resolve validated `.autospec/explore-mode.json` sandbox base first; otherwise
+   resolve `AUTOSPEC_BASE_BRANCH`, then `.autospec/autospec.yml`
+   `git.base_branch`, then remote default. Reject a main target in explore mode
+   and persist the exact base ref and OID.
 3. Fetch and create the exact `feat/autonomous-issue-<N>` branch under the private
    `/tmp/autospec-executor/<repository-scope>/issue-<N>` root.
 4. Adopt only a matching clean branch/worktree; fail closed on dirty, detached,
@@ -72,7 +90,7 @@ integration tests. No new dependencies.
 7. Test two repositories with the same issue number and two isolated runtime
    manifests, then commit worktree/runtime recovery behavior.
 
-### Task 3: Launch and supervise the implementation harness
+### Task 4: Launch and supervise the implementation harness
 
 **Files:**
 
@@ -92,7 +110,7 @@ integration tests. No new dependencies.
 7. Add PID-reuse and malicious primary/protected-ref mutation fixtures.
 8. Commit supervision behavior.
 
-### Task 4: Add compare-and-set claim renewal
+### Task 5: Add compare-and-set claim renewal
 
 **Files:**
 
@@ -110,7 +128,7 @@ integration tests. No new dependencies.
    inertly before further remote mutation when ownership is lost.
 4. Commit claim renewal and takeover safety.
 
-### Task 5: Prove and create the draft PR
+### Task 6: Prove and create the draft PR
 
 **Files:**
 
@@ -130,7 +148,7 @@ integration tests. No new dependencies.
 5. Require exact draft/head/base/issue-close identity after creation.
 6. Commit draft-PR proof and Rust-owned mutation.
 
-### Task 6: Produce full QA and security evidence
+### Task 7: Produce full QA and security evidence
 
 **Files:**
 
@@ -157,7 +175,7 @@ integration tests. No new dependencies.
    scanner results, evaluate premerge, and require Pass.
 6. Commit deterministic premerge evidence.
 
-### Task 7: Review, wait for CI, merge, and release
+### Task 8: Review, wait for CI, merge, and release
 
 **Files:**
 
@@ -166,21 +184,27 @@ integration tests. No new dependencies.
 - Modify `crates/autospec-cli/tests/autonomous_conductor_commands.rs`
 
 1. Add failing tests for draft-to-ready, pending/failing/advisory CI, non-LGTM
-   review, merge failure, observed merged state, terminal claim release, and
-   invocation-owned cleanup. Include retryable release-to-queue and exhausted
+   review, base drift after premerge, merge failure after accepted result,
+   observed merged state, terminal claim release, and invocation-owned cleanup.
+   Include retryable release-to-queue and exhausted
    release-to-`autospec:needs-human` cases that leave no active claim.
 2. Mark the exact draft ready only after premerge Pass, poll all non-advisory
    required checks, and refresh the claim throughout the wait.
 3. Launch a bounded independent reviewer; strict LGTM can admit only after all
    deterministic/runtime gates pass and any finding blocks.
-4. Admin-squash-merge the exact PR, confirm merged state, write terminal merged
-   claim state, tear down the owned runtime session, and remove the worktree.
-5. On retryable failure, preserve WIP and release back to `auto-implement`. On
+4. Re-read configured base/head immediately before admission. On drift, update
+   without force and regenerate every commit-bound gate: smoke, full suite,
+   scanner artifacts, typed QA/security, Pass receipt, push, CI, and LGTM.
+5. While the exact PR remains open, ingest strict successful executor-result
+   evidence for the stable head/receipt. Then admin-squash-merge, confirm merged
+   state, write terminal merged claim state, tear down the owned runtime session,
+   and remove the worktree. A merge failure resumes from accepted evidence.
+6. On retryable failure, preserve WIP and release back to `auto-implement`. On
    exhaustion/non-retryable failure, preserve evidence, label
    `autospec:needs-human`, remove queue/claim ownership, and continue other work.
-6. Commit end-to-end completion.
+7. Commit end-to-end completion.
 
-### Task 8: Wire the conductor and remove terminal pending replay
+### Task 9: Wire the conductor and remove terminal pending replay
 
 **Files:**
 
@@ -196,7 +220,7 @@ integration tests. No new dependencies.
 4. Record conductor success only after the bridge observes merged PR state.
 5. Commit conductor integration.
 
-### Task 9: Document, review, merge, reinstall, and dogfood
+### Task 10: Document, review, merge, reinstall, and dogfood
 
 **Files:**
 
@@ -214,7 +238,8 @@ integration tests. No new dependencies.
 3. Run an independent review and repair every blocking finding.
 4. Open the issue-linked PR, wait for required CI, admin-squash-merge, fetch
    exact merged main, build from a clean detached worktree, and install it.
-5. Restart autospec-gui autonomy with follow enabled and prove issue #36 creates
+5. Verify all four scanners from the installed environment.
+6. Restart autospec-gui autonomy with follow enabled and prove issue #36 creates
    and merges a PR, then observe #34 and #35 without touching its existing
    `.gitignore` change.
 

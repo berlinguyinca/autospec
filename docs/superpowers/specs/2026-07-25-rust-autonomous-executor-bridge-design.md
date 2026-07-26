@@ -29,10 +29,12 @@ The bridge is a recoverable state machine:
 
 1. Resolve the harness from `AUTOSPEC_HANDOFF_DISPATCHER_KIND`, active-session
    markers, then the installed runtime-alias table and PATH.
-2. Resolve the base branch using `AUTOSPEC_BASE_BRANCH`, then
-   `.autospec/autospec.yml` `git.base_branch`, then the remote default branch.
-   Persist its ref and OID, fetch it, and create or adopt the exact clean
-   private `/tmp/autospec-executor/<repository-scope>/issue-<N>` worktree and
+2. When `.autospec/explore-mode.json` exists, resolve and validate its sandbox
+   branch as the mandatory base and reject any main-targeting mutation.
+   Otherwise resolve `AUTOSPEC_BASE_BRANCH`, then `.autospec/autospec.yml`
+   `git.base_branch`, then the remote default branch. Persist the ref and OID,
+   fetch it, and create or adopt the exact clean private
+   `/tmp/autospec-executor/<repository-scope>/issue-<N>` worktree and
    `feat/autonomous-issue-<N>` branch.
 3. Persist the invocation identity and `implementing` phase before launch.
 4. Start or adopt the target repository's isolated runtime through
@@ -55,13 +57,19 @@ The bridge is a recoverable state machine:
    results—not a model verdict—produce the existing typed QA/security evidence.
    A bounded model reviewer may only add findings or block; it cannot originate
    a Pass.
-8. Evaluate the existing immutable premerge decision, require Pass, and mark
-   the exact draft PR ready. Wait for all non-advisory required CI checks,
-   dispatch the independent LGTM reviewer, and require its strict LGTM result.
-9. Admin-squash-merge the exact auto-implement PR under the existing authority,
-   write the terminal merged claim transition, tear down only the invocation's
-   runtime session, and remove the owned worktree. The conductor records
-   success only after GitHub reports the PR merged.
+8. Evaluate the existing immutable premerge decision and require Pass. Mark the
+   exact draft PR ready, wait for all non-advisory required CI checks, dispatch
+   the independent LGTM reviewer, and require its strict LGTM result.
+9. Re-read the configured base and head before admission. If either changed,
+   update without force and repeat smoke, full suite, scanners, typed evidence,
+   Pass receipt, push, CI, and LGTM until one stable head/base pair spans every
+   gate.
+10. While that exact PR remains open, ingest the strict successful
+    `executor-result` bound to its head and receipt. Then admin-squash-merge
+    under the existing authority, observe merged state, write the terminal
+    merged claim transition, tear down only the invocation's runtime session,
+    and remove the owned worktree. A merge failure preserves the accepted
+    result and resumes at merge without re-implementing.
 
 The bridge never trusts a harness statement as Git or GitHub proof. Git, GitHub,
 claim, PR, and premerge identities are re-read by Rust at every transition.
@@ -93,6 +101,12 @@ The alias table and argument builder still recognize OpenCode so installation,
 selection, and diagnostics stay synchronized across all three harnesses.
 Execution returns `executor_harness_uncontained` before launch until an exact
 containment adapter is configured and its path passes the same safety checks.
+
+The installer treats gitleaks, semgrep, trivy, and license-checker as required
+autonomous executor dependencies. It invokes the existing cross-platform
+dependency mechanism, including the approved sudo path for system packages,
+then verifies every scanner. An explicit install opt-out remains available but
+causes executor security admission to fail closed rather than degrade silently.
 
 ## Persistence and recovery
 
