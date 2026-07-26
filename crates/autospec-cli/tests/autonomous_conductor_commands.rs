@@ -1971,7 +1971,7 @@ fn executor_result_rejects_success_without_exactly_one_closeout_report() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+        r#"[{"number":17,"body":"Closes #42","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":false,"baseRefName":"main"}]"#,
     );
     fixture.persist_pass_receipt(
         "pass",
@@ -2026,7 +2026,7 @@ fn executor_result_accepts_a_claim_owner_success_with_linked_closeout_evidence()
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     let before = fixture.claim_record();
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":false,"baseRefName":"main"}]"#,
     );
     fixture.persist_pass_receipt(
         "pass",
@@ -2374,7 +2374,7 @@ fn executor_result_rejects_an_expired_matching_lease_without_mutating_claim() {
     );
     let before = fs::read_to_string(&fixture.comments).expect("read expired claim");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":false,"baseRefName":"main"}]"#,
     );
 
     let output = fixture
@@ -2397,7 +2397,7 @@ fn executor_result_ignores_a_terminal_audit_comment_without_a_terminal_claim_ref
     fixture.append_terminal_merged_marker();
     let before = fs::read_to_string(&fixture.comments).expect("read terminal claim");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":false,"baseRefName":"main"}]"#,
     );
 
     let output = fixture
@@ -2421,7 +2421,7 @@ fn executor_result_rejects_a_valid_closeout_pr_from_a_foreign_branch() {
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     let before = fs::read_to_string(&fixture.comments).expect("read claimed run state");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"foreign/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"foreign/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":false,"baseRefName":"main"}]"#,
     );
 
     let output = fixture
@@ -2443,7 +2443,7 @@ fn executor_result_does_not_overwrite_a_takeover_after_validating_the_result() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":false,"baseRefName":"main"}]"#,
     );
 
     let output = fixture
@@ -2464,7 +2464,7 @@ fn executor_result_reports_a_post_write_confirmation_failure_as_blocked() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":false,"baseRefName":"main"}]"#,
     );
 
     let output = fixture
@@ -2488,7 +2488,7 @@ fn executor_result_reports_a_pre_write_failure_as_blocked() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
     fixture.set_open_pull_requests(
-        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report\n\nResult: shipped","headRefName":"autonomous/issue-42","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":false,"baseRefName":"main"}]"#,
     );
     let before = fs::read_to_string(&fixture.comments).expect("read claim before failed evidence");
 
@@ -3097,7 +3097,7 @@ exit 1
 
     fn set_valid_open_pull_request(&self, commit: &str) {
         self.set_open_pull_requests(&format!(
-            "[{{\"number\":17,\"body\":\"Closes #42\\n\\n## Closeout report\\n\\nResult: shipped\",\"headRefName\":\"autonomous/issue-42\",\"headRefOid\":\"{commit}\"}}]"
+            "[{{\"number\":17,\"body\":\"Closes #42\\n\\n## Closeout report\\n\\nResult: shipped\",\"headRefName\":\"autonomous/issue-42\",\"headRefOid\":\"{commit}\",\"isDraft\":false,\"baseRefName\":\"main\"}}]"
         ));
     }
 

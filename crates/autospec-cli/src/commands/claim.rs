@@ -2829,7 +2829,7 @@ fn list_open_pull_requests(
             "--limit",
             "100",
             "--json",
-            "number,body,headRefName,headRefOid",
+            "number,body,headRefName,headRefOid,isDraft,baseRefName",
         ])
         .output()
         .map_err(|error| {

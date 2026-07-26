@@ -1,7 +1,7 @@
 use autospec_core::claim::{
-    claim_losing_worker_comment_id, executor_result_evidence_exists, lowest_marked_comment,
-    parse_open_pull_requests_json, select_run_state, ExecutorResultEvidence, RemoteComment,
-    RunStateRecord,
+    claim_losing_worker_comment_id, executor_result_evidence_exists,
+    is_executor_result_pull_request, lowest_marked_comment, parse_open_pull_requests_json,
+    select_run_state, ExecutorResultEvidence, RemoteComment, RunStateRecord,
 };
 
 const RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -75,7 +75,7 @@ fn dotted_worker_id_cleanup_uses_literal_equality_not_regex_matching() {
 #[test]
 fn executor_result_pull_request_requires_the_head_commit_oid() {
     let pull_requests = parse_open_pull_requests_json(
-        r#"[{"number":17,"body":"Closes #42","headRefName":"feat/claim","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+        r#"[{"number":17,"body":"Closes #42","headRefName":"feat/claim","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":true,"baseRefName":"main"}]"#,
     )
     .expect("parse exact open pull request evidence");
 
@@ -83,6 +83,17 @@ fn executor_result_pull_request_requires_the_head_commit_oid() {
         pull_requests[0].head_ref_oid,
         "0123456789abcdef0123456789abcdef01234567"
     );
+    assert!(pull_requests[0].is_draft);
+    assert_eq!(pull_requests[0].base_ref_name, "main");
+    assert!(
+        !is_executor_result_pull_request(&pull_requests[0], 42, "feat/claim"),
+        "a draft PR cannot be terminal success evidence"
+    );
+    let ready = parse_open_pull_requests_json(
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report","headRefName":"feat/claim","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":false,"baseRefName":"main"}]"#,
+    )
+    .expect("parse ready pull request");
+    assert!(is_executor_result_pull_request(&ready[0], 42, "feat/claim"));
     assert!(parse_open_pull_requests_json(
         r#"[{"number":17,"body":"Closes #42","headRefName":"feat/claim"}]"#
     )

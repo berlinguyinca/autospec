@@ -1094,6 +1094,8 @@ pub struct OpenPullRequest {
     pub body: String,
     pub head_ref_name: String,
     pub head_ref_oid: String,
+    pub is_draft: bool,
+    pub base_ref_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1217,7 +1219,17 @@ pub fn parse_open_pull_requests_json(input: &str) -> Result<Vec<OpenPullRequest>
         .map(|(index, value)| {
             let context = format!("GitHub open pull requests[{index}]");
             let mut object = value.into_object(&context)?;
-            require_only_keys(&object, &["number", "body", "headRefName", "headRefOid"])?;
+            require_only_keys(
+                &object,
+                &[
+                    "number",
+                    "body",
+                    "headRefName",
+                    "headRefOid",
+                    "isDraft",
+                    "baseRefName",
+                ],
+            )?;
             Ok(OpenPullRequest {
                 number: take_required(&mut object, "number")?
                     .into_number(&format!("{context} number"))?,
@@ -1226,6 +1238,10 @@ pub fn parse_open_pull_requests_json(input: &str) -> Result<Vec<OpenPullRequest>
                     .unwrap_or_default(),
                 head_ref_oid: take_required(&mut object, "headRefOid")?
                     .into_string(&format!("{context} headRefOid"))?,
+                is_draft: take_required(&mut object, "isDraft")?
+                    .into_bool(&format!("{context} isDraft"))?,
+                base_ref_name: take_required(&mut object, "baseRefName")?
+                    .into_string(&format!("{context} baseRefName"))?,
             })
         })
         .collect()
@@ -1242,7 +1258,9 @@ pub fn find_reconcilable_pull_request(
 }
 
 pub fn is_reconcilable_pull_request(pull_request: &OpenPullRequest, issue: u64) -> bool {
-    closes_issue(&pull_request.body, issue) && closeout_count(&pull_request.body) == 1
+    !pull_request.is_draft
+        && closes_issue(&pull_request.body, issue)
+        && closeout_count(&pull_request.body) == 1
 }
 
 pub fn is_executor_result_pull_request(

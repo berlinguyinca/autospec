@@ -420,6 +420,10 @@ pub(crate) enum BridgePhase {
     Pending,
     Implementing,
     ImplementationComplete,
+    ImplementationProven,
+    BranchPushed,
+    DraftCreating,
+    DraftCreated,
     Interrupted,
 }
 
@@ -477,6 +481,10 @@ impl BridgePhase {
             Self::Pending => "pending",
             Self::Implementing => "implementing",
             Self::ImplementationComplete => "implementation_complete",
+            Self::ImplementationProven => "implementation_proven",
+            Self::BranchPushed => "branch_pushed",
+            Self::DraftCreating => "draft_creating",
+            Self::DraftCreated => "draft_created",
             Self::Interrupted => "interrupted",
         }
     }
@@ -486,6 +494,10 @@ impl BridgePhase {
             "pending" => Ok(Self::Pending),
             "implementing" => Ok(Self::Implementing),
             "implementation_complete" => Ok(Self::ImplementationComplete),
+            "implementation_proven" => Ok(Self::ImplementationProven),
+            "branch_pushed" => Ok(Self::BranchPushed),
+            "draft_creating" => Ok(Self::DraftCreating),
+            "draft_created" => Ok(Self::DraftCreated),
             "interrupted" => Ok(Self::Interrupted),
             other => Err(format!("unsupported bridge phase: {other}")),
         }
@@ -876,7 +888,10 @@ impl MutationSnapshot {
             .filter(|(reference, _)| *reference != issue_ref)
             .map(|(reference, oid)| (reference.to_string(), oid.to_string()))
             .collect();
-        let worktrees = git_stdout(repo, &["worktree", "list", "--porcelain"])?;
+        let worktrees = worktree_registry_snapshot(
+            &git_stdout(repo, &["worktree", "list", "--porcelain"])?,
+            issue_branch,
+        );
         Ok(Self {
             primary_branch,
             primary_head,
@@ -900,6 +915,188 @@ impl MutationSnapshot {
                 .to_string())
         }
     }
+}
+
+fn worktree_registry_snapshot(porcelain: &str, issue_branch: &str) -> String {
+    let issue_ref = format!("branch refs/heads/{issue_branch}");
+    porcelain
+        .split("\n\n")
+        .map(|block| {
+            let issue_worktree = block.lines().any(|line| line == issue_ref);
+            block
+                .lines()
+                .filter(|line| !(issue_worktree && line.starts_with("HEAD ")))
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ImplementationProof {
+    head_oid: String,
+    closeout_body: String,
+}
+
+fn prove_implementation(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    snapshot: &MutationSnapshot,
+    closeout_path: &Path,
+) -> Result<ImplementationProof, String> {
+    let branch = git_stdout(
+        &state.identity.worktree,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+    )?;
+    if branch != state.identity.branch {
+        return Err(format!(
+            "executor implementation branch mismatch: expected {}, observed {branch}",
+            state.identity.branch
+        ));
+    }
+    if !git_bytes(
+        &state.identity.worktree,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?
+    .is_empty()
+    {
+        return Err("executor implementation worktree must be clean".to_string());
+    }
+    let head = git_stdout(
+        &state.identity.worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    if head == state.identity.base_oid {
+        return Err(
+            "executor implementation HEAD is unchanged from the validated base".to_string(),
+        );
+    }
+    let base_branch = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor validated base ref must name origin".to_string())?;
+    let remote_base = git_stdout(
+        &state.identity.repository_path,
+        &[
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            &format!("refs/heads/{base_branch}"),
+        ],
+    )?
+    .split_whitespace()
+    .next()
+    .ok_or_else(|| "executor remote base ref returned no OID".to_string())?
+    .to_string();
+    if remote_base != state.identity.base_oid {
+        return Err(format!(
+            "executor validated base OID drifted: expected {}, observed {remote_base}",
+            state.identity.base_oid
+        ));
+    }
+    let ancestry = Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &state.identity.base_oid,
+            &head,
+        ])
+        .current_dir(&state.identity.worktree)
+        .output()
+        .map_err(|error| format!("verify executor base ancestry: {error}"))?;
+    if !ancestry.status.success() {
+        return Err(
+            "executor validated base is not an ancestor of implementation HEAD".to_string(),
+        );
+    }
+    snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
+    let closeout_body = validate_closeout_report(&state.identity.worktree, closeout_path)?;
+    state.phase = BridgePhase::ImplementationProven;
+    state.head_oid = Some(head.clone());
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    Ok(ImplementationProof {
+        head_oid: head,
+        closeout_body,
+    })
+}
+
+fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, String> {
+    if !path.is_absolute() || !path.starts_with(worktree) {
+        return Err("executor Closeout report must be inside the exact worktree".to_string());
+    }
+    reject_symlink_path(path)?;
+    let body = fs::read_to_string(path)
+        .map_err(|error| format!("read executor Closeout report {}: {error}", path.display()))?;
+    if body.len() > 64 * 1024 {
+        return Err("executor Closeout report exceeds 64 KiB".to_string());
+    }
+    let heading_count = body
+        .lines()
+        .filter(|line| line.trim() == "## Closeout report")
+        .count();
+    if heading_count != 1 {
+        return Err("executor Closeout report must contain exactly one report heading".to_string());
+    }
+    let required = [
+        "Result:",
+        "Claims:",
+        "Proof type:",
+        "Before/after:",
+        "Artifacts:",
+        "Scoped git status:",
+        "One likely hidden failure:",
+    ];
+    for field in required {
+        let value = body
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(field))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "executor Closeout report requires nonempty {}",
+                    field.trim_end_matches(':')
+                )
+            })?;
+        if field == "Claims:"
+            && ![
+                "[verified]",
+                "[assumed]",
+                "[couldnt-verify]",
+                "[likely-wrong]",
+            ]
+            .iter()
+            .any(|label| value.contains(label))
+        {
+            return Err(
+                "executor Closeout report Claims require an explicit evidence label".to_string(),
+            );
+        }
+    }
+    let claims = body
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Claims:"))
+        .unwrap_or_default();
+    let proof_type = body
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Proof type:"))
+        .unwrap_or_default()
+        .trim();
+    if !matches!(proof_type, "runtime" | "static") {
+        return Err("executor Closeout report Proof type must be runtime or static".to_string());
+    }
+    if claims.contains("[verified]")
+        && claims.to_ascii_lowercase().contains("runtime")
+        && proof_type != "runtime"
+    {
+        return Err(
+            "executor Closeout report runtime [verified] claim requires runtime proof".to_string(),
+        );
+    }
+    Ok(body)
 }
 
 fn dirty_path_identities(
@@ -8452,6 +8649,513 @@ mod tests {
         )
         .expect("strict invocation");
         assert_eq!(recovered.phase, BridgePhase::ImplementationComplete);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_unchanged_head_before_remote_mutation() {
+        // Break caught: a zero-change harness exit being pushed and opened as a draft PR.
+        let fixture = GitFixture::new("proof-unchanged-head");
+        git(
+            &fixture.repo,
+            &["checkout", "-b", "feat/autonomous-issue-42"],
+        );
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::ImplementationComplete;
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let closeout = fixture.root.join("closeout.md");
+        fs::write(
+            &closeout,
+            "## Closeout report\n\n\
+             Result: shipped\n\
+             Claims: [verified] behavior is covered\n\
+             Proof type: static\n\
+             Before/after: 0 to 1\n\
+             Artifacts: README.md; `git diff origin/main...HEAD`\n\
+             Scoped git status: README.md\n\
+             One likely hidden failure: none observed\n",
+        )
+        .expect("write closeout");
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture
+                    .root
+                    .join("remote.git")
+                    .to_str()
+                    .expect("remote path"),
+                "show-ref",
+            ],
+        );
+
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &closeout,
+        )
+        .expect_err("unchanged HEAD must fail closed");
+
+        assert!(error.contains("HEAD"), "{error}");
+        assert_eq!(state.phase, BridgePhase::ImplementationComplete);
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture
+                        .root
+                        .join("remote.git")
+                        .to_str()
+                        .expect("remote path"),
+                    "show-ref",
+                ],
+            ),
+            remote_before,
+            "proof failure mutated the bare remote"
+        );
+    }
+
+    fn implementation_proof_fixture(
+        label: &str,
+    ) -> (GitFixture, PersistedInvocation, MutationSnapshot, PathBuf) {
+        let fixture = GitFixture::new(label);
+        let worktree = fixture.root.join("issue-worktree");
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/autonomous-issue-42",
+                worktree.to_str().expect("worktree path"),
+                "origin/main",
+            ],
+        );
+        let mut state = supervision_state(&fixture);
+        state.identity.worktree = worktree.canonicalize().expect("canonical worktree");
+        state.phase = BridgePhase::ImplementationComplete;
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let closeout = state.identity.worktree.join(".autospec/closeout.md");
+        fs::create_dir_all(closeout.parent().expect("closeout parent"))
+            .expect("closeout directory");
+        fs::write(
+            &closeout,
+            "## Closeout report\n\n\
+             Result: shipped\n\
+             Claims: [verified] behavior is covered\n\
+             Proof type: static\n\
+             Before/after: 0 to 1\n\
+             Artifacts: README.md; `git diff origin/main...HEAD`\n\
+             Scoped git status: README.md\n\
+             One likely hidden failure: none observed\n",
+        )
+        .expect("write closeout");
+        (fixture, state, snapshot, closeout)
+    }
+
+    fn commit_implementation(state: &PersistedInvocation) {
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "implemented\n",
+        )
+        .expect("write implementation");
+        git(&state.identity.worktree, &["add", "."]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "feat: implement fixture"],
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_dirty_implementation_before_remote_mutation() {
+        // Break caught: an uncommitted harness edit escaping the exact pushed commit.
+        let (fixture, mut state, snapshot, closeout) = implementation_proof_fixture("proof-dirty");
+        commit_implementation(&state);
+        fs::write(state.identity.worktree.join("dirty.txt"), "dirty\n").expect("dirty path");
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &closeout,
+        )
+        .expect_err("dirty implementation must fail closed");
+
+        assert!(error.contains("clean"), "{error}");
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref"
+                ]
+            ),
+            remote_before
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_foreign_branch_before_remote_mutation() {
+        // Break caught: proof accepting a clean commit from a branch outside the claim identity.
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("proof-foreign-branch");
+        git(
+            &state.identity.worktree,
+            &["checkout", "-b", "foreign/issue-42"],
+        );
+        commit_implementation(&state);
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &closeout,
+        )
+        .expect_err("foreign branch must fail closed");
+
+        assert!(error.contains("branch"), "{error}");
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref"
+                ]
+            ),
+            remote_before
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_base_oid_drift_before_remote_mutation() {
+        // Break caught: a push proceeding after the configured remote base moved.
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("proof-base-drift");
+        commit_implementation(&state);
+        fs::write(fixture.root.join("seed/base-drift.txt"), "drift\n").expect("base drift");
+        git(&fixture.root.join("seed"), &["add", "base-drift.txt"]);
+        git(&fixture.root.join("seed"), &["commit", "-m", "base drift"]);
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &closeout,
+        )
+        .expect_err("base OID drift must fail closed");
+
+        assert!(error.contains("base"), "{error}");
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref"
+                ]
+            ),
+            remote_before
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_head_without_base_ancestry_before_remote_mutation() {
+        // Break caught: an unrelated root commit replacing rather than extending the validated base.
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("proof-unbased-head");
+        commit_implementation(&state);
+        let tree = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD^{tree}"]);
+        let head = Command::new("git")
+            .args(["commit-tree", &tree, "-m", "unrelated root"])
+            .current_dir(&state.identity.worktree)
+            .output()
+            .expect("create unrelated root");
+        assert!(head.status.success());
+        let head = String::from_utf8(head.stdout).unwrap();
+        git(&state.identity.worktree, &["reset", "--hard", head.trim()]);
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &closeout,
+        )
+        .expect_err("unbased head must fail closed");
+
+        assert!(error.contains("ancestor"), "{error}");
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref"
+                ]
+            ),
+            remote_before
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_primary_head_mutation_before_remote_mutation() {
+        // Break caught: the harness advancing the operator's primary checkout while its issue commit is valid.
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("proof-primary-head");
+        commit_implementation(&state);
+        fs::write(fixture.repo.join("primary.txt"), "mutated\n").expect("primary mutation");
+        git(&fixture.repo, &["add", "primary.txt"]);
+        git(&fixture.repo, &["commit", "-m", "primary mutation"]);
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &closeout,
+        )
+        .expect_err("primary checkout mutation must fail closed");
+
+        assert!(error.contains("primary checkout"), "{error}");
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref"
+                ]
+            ),
+            remote_before
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_foreign_worktree_head_mutation_before_remote_mutation() {
+        // Break caught: globally ignoring worktree HEAD lines hiding mutation of an unrelated worktree.
+        let (fixture, mut state, _snapshot, closeout) =
+            implementation_proof_fixture("proof-foreign-worktree-head");
+        let foreign = fixture.root.join("foreign-worktree");
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                foreign.to_str().unwrap(),
+                "origin/main",
+            ],
+        );
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        commit_implementation(&state);
+        fs::write(foreign.join("foreign.txt"), "mutated\n").expect("foreign mutation");
+        git(&foreign, &["add", "foreign.txt"]);
+        git(&foreign, &["commit", "-m", "foreign mutation"]);
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &closeout,
+        )
+        .expect_err("foreign worktree HEAD mutation must fail closed");
+
+        assert!(error.contains("worktree registry"), "{error}");
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref"
+                ]
+            ),
+            remote_before
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_malformed_closeout_before_remote_mutation() {
+        // Break caught: a draft PR body missing mandatory Closeout evidence fields.
+        let required = [
+            ("Result:", "Outcome: shipped"),
+            ("Claims:", "Assertions: [verified] behavior is covered"),
+            ("Proof type:", "Proof: static"),
+            ("Before/after:", "Delta: 0 to 1"),
+            ("Artifacts:", "Files: README.md"),
+            ("Scoped git status:", "Status: README.md"),
+            ("One likely hidden failure:", "Risk: none observed"),
+        ];
+        for (field, replacement) in required {
+            let (fixture, mut state, snapshot, closeout) =
+                implementation_proof_fixture(&format!("proof-closeout-{}", field.len()));
+            let body = fs::read_to_string(&closeout).expect("valid closeout");
+            fs::write(&closeout, body.replace(field, replacement)).expect("malformed closeout");
+            commit_implementation(&state);
+            let remote_before = git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref",
+                ],
+            );
+
+            let error = super::prove_implementation(
+                &fixture.root.join("state/invocation.json"),
+                &mut state,
+                &snapshot,
+                &closeout,
+            )
+            .expect_err("missing Closeout field must fail closed");
+
+            assert!(
+                error.contains(field.trim_end_matches(':')),
+                "{field}: {error}"
+            );
+            assert_eq!(
+                git_stdout(
+                    &fixture.root,
+                    &[
+                        "--git-dir",
+                        fixture.root.join("remote.git").to_str().unwrap(),
+                        "show-ref"
+                    ]
+                ),
+                remote_before
+            );
+        }
+        for (label, transform, expected) in [
+            (
+                "duplicate",
+                "\n## Closeout report\n\nResult: duplicate\n",
+                "exactly one",
+            ),
+            (
+                "unlabeled-claim",
+                "\nClaims: behavior is covered\n",
+                "label",
+            ),
+            (
+                "runtime-static",
+                "\nClaims: [verified] runtime behavior is covered\nProof type: static\n",
+                "runtime",
+            ),
+        ] {
+            let (fixture, mut state, snapshot, closeout) =
+                implementation_proof_fixture(&format!("proof-closeout-{label}"));
+            let mut body = fs::read_to_string(&closeout).expect("valid closeout");
+            if label == "unlabeled-claim" {
+                body = body.replace(
+                    "Claims: [verified] behavior is covered\n",
+                    transform.trim_start(),
+                );
+            } else if label == "runtime-static" {
+                body = body
+                    .replace(
+                        "Claims: [verified] behavior is covered\n",
+                        "Claims: [verified] runtime behavior is covered\n",
+                    )
+                    .replace("Proof type: static\n", "Proof type: static\n");
+            } else {
+                body.push_str(transform);
+            }
+            fs::write(&closeout, body).expect("malformed closeout");
+            commit_implementation(&state);
+            let error = super::prove_implementation(
+                &fixture.root.join("state/invocation.json"),
+                &mut state,
+                &snapshot,
+                &closeout,
+            )
+            .expect_err("malformed Closeout must fail closed");
+            assert!(error.contains(expected), "{label}: {error}");
+        }
+
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("proof-closeout-missing");
+        fs::remove_file(&closeout).expect("remove closeout");
+        commit_implementation(&state);
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &closeout,
+        )
+        .expect_err("missing Closeout must fail closed");
+        assert!(error.contains("Closeout"), "{error}");
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref"
+                ]
+            ),
+            remote_before
+        );
     }
 
     #[cfg(target_os = "linux")]
