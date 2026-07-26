@@ -1323,40 +1323,6 @@ fn recover_stale_startup(args: &[String]) -> Result<(), CommandFailure> {
     Ok(())
 }
 
-pub(crate) fn recover_active_issue(
-    repo: &str,
-    issue: u64,
-    timeout_seconds: u64,
-) -> Result<bool, CommandFailure> {
-    recover_stale_startup_record(repo, issue, timeout_seconds).map(|outcome| outcome.recovered)
-}
-
-/// A newly-created claim without a heartbeat, branch, or PR is kept during its
-/// startup grace period but must not consume a worker slot yet. Read failures
-/// and malformed records remain counted so the queue fails closed.
-pub(crate) fn active_issue_counts_toward_worker_capacity(
-    repo: &str,
-    issue: u64,
-    timeout_seconds: u64,
-) -> Result<bool, CommandFailure> {
-    let comments = list_comments(repo, issue)?;
-    let Some(selected) = select_run_state(&comments, repo, issue) else {
-        return Ok(true);
-    };
-    if !selected.record.pr.is_empty()
-        || startup_heartbeat_exists(repo, issue)
-        || branch_ref_exists(&selected.record.branch)
-    {
-        return Ok(true);
-    }
-    let Some(updated_at) = parse_iso_timestamp(&selected.record.updated_at) else {
-        return Ok(true);
-    };
-    Ok(unix_now()
-        .map(|now| now.saturating_sub(updated_at) > timeout_seconds)
-        .unwrap_or(true))
-}
-
 struct RecoveryOutcome {
     recovered: bool,
     reason: String,
@@ -1683,30 +1649,35 @@ pub(crate) fn recover_implementer_wait_failure(
     let Some(selected) = read_claim_ref(repo, issue)? else {
         return Ok(WaitFailureRecovery::OwnershipLost);
     };
-    if selected.record.worker_id == worker_id
+    let already_transitioned = selected.record.worker_id == worker_id
         && selected.record.branch == branch
         && selected.record.claim_id.as_deref() == Some(expected_claim_id)
         && selected.record.state == "available"
-        && selected.record.step == "implementer_wait_failed"
-    {
-        return Ok(WaitFailureRecovery::AlreadyRecovered);
-    }
+        && selected.record.step == "implementer_wait_failed";
     if selected.record.claim_id.as_deref() != Some(expected_claim_id) {
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
-    if !has_active_executor_claim(&selected.record, worker_id, branch) {
+    if !already_transitioned && !has_active_executor_claim(&selected.record, worker_id, branch) {
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
 
-    let mut available = selected.record.clone();
-    available.state = "available".to_string();
-    available.step = "implementer_wait_failed".to_string();
-    available.updated_at = utc_now_iso()?;
-    let head = match advance_claim_ref(repo, issue, Some(&selected), &available)? {
-        ClaimRefAdvance::Won(head) => head,
-        ClaimRefAdvance::Lost => return Ok(WaitFailureRecovery::OwnershipLost),
+    let head = if already_transitioned {
+        selected
+    } else {
+        let mut available = selected.record.clone();
+        available.state = "available".to_string();
+        available.step = "implementer_wait_failed".to_string();
+        available.updated_at = utc_now_iso()?;
+        match advance_claim_ref(repo, issue, Some(&selected), &available)? {
+            ClaimRefAdvance::Won(head) => {
+                wait_recovery_failpoint("after_claim_cas")?;
+                *head
+            }
+            ClaimRefAdvance::Lost => return Ok(WaitFailureRecovery::OwnershipLost),
+        }
     };
-    project_claim_ref_to_comments(repo, &head);
+    ensure_claim_ref_projection(repo, &head)?;
+    wait_recovery_failpoint("after_ref_projection")?;
 
     let comments = list_comments(repo, issue)?;
     let evidence = wait_failure_evidence(
@@ -1727,14 +1698,40 @@ pub(crate) fn recover_implementer_wait_failure(
             "implementer wait-failure evidence was not persisted",
         ));
     }
+    wait_recovery_failpoint("after_evidence_projection")?;
 
     requeue_wait_failure(repo, issue)?;
+    wait_recovery_failpoint("after_label_requeue")?;
     upsert_wait_failure_comment(repo, issue, worker_id, branch, session_id, diagnostic)?;
-    Ok(if already {
+    Ok(if already_transitioned || already {
         WaitFailureRecovery::AlreadyRecovered
     } else {
         WaitFailureRecovery::Requeued
     })
+}
+
+fn ensure_claim_ref_projection(repo: &str, head: &ClaimRefHead) -> Result<(), CommandFailure> {
+    let comments = list_comments(repo, head.record.issue)?;
+    if comments.iter().any(|comment| {
+        run_state_link(&comment.body).is_some_and(|link| link.generation == head.generation)
+    }) {
+        return Ok(());
+    }
+    let parent = authoritative_run_state_comment(&comments);
+    create_comment(
+        repo,
+        head.record.issue,
+        &linked_run_state_comment(&head.record, parent, &head.generation),
+    )
+}
+
+fn wait_recovery_failpoint(point: &str) -> Result<(), CommandFailure> {
+    if std::env::var("AUTOSPEC_WAIT_RECOVERY_FAILPOINT").as_deref() == Ok(point) {
+        return Err(CommandFailure::diagnostic(format!(
+            "implementer wait-failure recovery stopped at failpoint {point}"
+        )));
+    }
+    Ok(())
 }
 
 fn wait_failure_evidence(

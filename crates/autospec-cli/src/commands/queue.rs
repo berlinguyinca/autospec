@@ -11,7 +11,6 @@ use autospec_core::coordination::{
     QueueIssueView, QueuePolicy, ReadyQueueInput, ReadyQueuePlan, RemoteIssue, RemoteIssuePage,
 };
 
-use super::claim::{active_issue_counts_toward_worker_capacity, recover_active_issue};
 use super::lint::{
     confirm_issue_safety_for_queue, load_issue_safety_policy, review_issue_safety_for_queue,
 };
@@ -471,16 +470,7 @@ pub(crate) fn ready_plan_for(
     batch_size: usize,
 ) -> Result<ReadyQueuePlan, CommandFailure> {
     let candidates = list_issues(repo, "auto-implement")?;
-    let mut active = list_issues(repo, "in-progress-by-bot")?;
-    for issue in &active {
-        let _ = recover_active_issue(repo, issue.number, 300);
-    }
-    active = list_issues(repo, "in-progress-by-bot")?
-        .into_iter()
-        .filter(|issue| {
-            active_issue_counts_toward_worker_capacity(repo, issue.number, 300).unwrap_or(true)
-        })
-        .collect();
+    let active = list_issues(repo, "in-progress-by-bot")?;
     let dependencies = load_dependencies(repo, &candidates);
     let pull_requests = list_pull_requests(repo);
     let only_issues = only_issues();
