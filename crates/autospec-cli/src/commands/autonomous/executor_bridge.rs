@@ -1551,6 +1551,119 @@ fn clear_draft_release_intent(state_path: &Path) -> Result<(), String> {
         .map_err(|error| format!("sync cleared executor draft release intent parent: {error}"))
 }
 
+fn prove_absent_draft_release_guard(
+    path: &Path,
+    label: &str,
+    inject_directory_sync_failure: bool,
+) -> Result<(), String> {
+    reject_symlink_path(path)
+        .map_err(|error| format!("executor draft cleanup recovery {label} is unsafe: {error}"))?;
+    if path
+        .try_exists()
+        .map_err(|error| format!("inspect executor draft cleanup recovery {label}: {error}"))?
+    {
+        return Err(format!(
+            "executor draft cleanup recovery {label} still exists; refusing retry"
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("executor draft cleanup recovery {label} requires a parent"))?;
+    validate_private_directory(parent).map_err(|error| {
+        format!("executor draft cleanup recovery {label} parent is unsafe: {error}")
+    })?;
+    if inject_directory_sync_failure {
+        return Err(format!(
+            "executor draft cleanup recovery {label} parent sync failed: injected failure"
+        ));
+    }
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!("executor draft cleanup recovery {label} parent sync failed: {error}")
+        })
+}
+
+fn validate_private_directory(path: &Path) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("read executor directory metadata: {error}"))?;
+    if !metadata.is_dir() {
+        return Err("executor directory path is not a directory".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        unsafe extern "C" {
+            fn geteuid() -> u32;
+        }
+        // SAFETY: geteuid has no arguments or memory-safety preconditions.
+        if metadata.uid() != unsafe { geteuid() } || metadata.mode() & 0o077 != 0 {
+            return Err("executor directory ownership or mode is not private".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn recover_draft_cleanup_pending(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    _adapter: &DraftPrAdapter,
+) -> Result<(), String> {
+    let expected = state.draft_process.as_ref().ok_or_else(|| {
+        "executor draft cleanup recovery has no recorded child identity".to_string()
+    })?;
+    if let Some(observed) = observe_process_birth(expected.pid)? {
+        if expected.owns_birth(&observed) {
+            return Err(
+                "executor draft cleanup recovery child remains live; refusing retry".to_string(),
+            );
+        }
+        return Err(
+            "executor draft cleanup recovery child identity changed; refusing retry".to_string(),
+        );
+    }
+    #[cfg(test)]
+    let fail_receipt_sync = _adapter.environment.contains_key(std::ffi::OsStr::new(
+        "AUTOSPEC_TEST_DRAFT_FAIL_CLEANUP_RECOVERY_RECEIPT_FSYNC",
+    ));
+    #[cfg(not(test))]
+    let fail_receipt_sync = false;
+    #[cfg(test)]
+    let fail_intent_sync = _adapter.environment.contains_key(std::ffi::OsStr::new(
+        "AUTOSPEC_TEST_DRAFT_FAIL_CLEANUP_RECOVERY_INTENT_FSYNC",
+    ));
+    #[cfg(not(test))]
+    let fail_intent_sync = false;
+    prove_absent_draft_release_guard(
+        &draft_release_receipt_path(state_path),
+        "release receipt",
+        fail_receipt_sync,
+    )?;
+    prove_absent_draft_release_guard(
+        &draft_release_intent_path(state_path),
+        "release intent",
+        fail_intent_sync,
+    )?;
+    let durable = PersistedInvocation::from_json(
+        &fs::read_to_string(state_path)
+            .map_err(|error| format!("read executor draft cleanup recovery state: {error}"))?,
+    )?;
+    if durable != *state {
+        return Err(
+            "executor draft cleanup recovery durable state or identity changed; refusing retry"
+                .to_string(),
+        );
+    }
+    let mut recovered = state.clone();
+    recovered.phase = BridgePhase::BranchPushed;
+    recovered.draft_process = None;
+    recovered.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, &recovered)?;
+    *state = recovered;
+    Ok(())
+}
+
 fn write_private_atomic(path: &Path, body: &[u8], label: &str) -> Result<(), String> {
     reject_symlink_path(path)?;
     let parent = path
@@ -1810,9 +1923,15 @@ pub(crate) fn push_and_create_draft(
     {
         return Err("executor open pull requests changed before draft creation".into());
     }
+    if state.phase == BridgePhase::DraftCleanupPending && !existing.is_empty() {
+        return Err(
+            "executor draft cleanup recovery requires zero exact pull requests; refusing retry"
+                .to_string(),
+        );
+    }
     let pull_requests = if existing.is_empty() {
         if state.phase == BridgePhase::DraftCleanupPending {
-            return Err("executor draft release intent cleanup failed; refusing retry".to_string());
+            recover_draft_cleanup_pending(state_path, state, adapter)?;
         }
         if state.phase == BridgePhase::DraftCreating {
             let released = draft_release_was_recorded(state_path, state)?;
@@ -2411,6 +2530,15 @@ fn create_draft_pull_request(
                 clear_draft_release_intent(state_path).map_err(|error| {
                     format!("executor draft launch cleanup intent failed: {error}")
                 })?;
+                #[cfg(test)]
+                if adapter.environment.contains_key(std::ffi::OsStr::new(
+                    "AUTOSPEC_TEST_DRAFT_ABORT_AFTER_INTENT_CLEAR",
+                )) {
+                    return Err(
+                        "injected executor draft crash after intent clear before durable reset"
+                            .to_string(),
+                    );
+                }
                 state.phase = BridgePhase::BranchPushed;
                 state.draft_process = None;
                 state.progress_at = unix_now()?;
@@ -11159,6 +11287,261 @@ mod tests {
         assert_eq!(pull_request, 17);
         let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
         assert_eq!(calls.matches("pr create").count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_recovers_after_durable_intent_clear_crash() {
+        // Break caught: a crash after durable intent removal permanently stranding a safe retry.
+        let mut prepared = prepared_draft_transaction("draft-create-intent-clear-crash");
+        let executable = prepared.adapter.gh.clone();
+        let executable_body = fs::read(&executable).expect("fixture executable body");
+        let executable_mode = fs::metadata(&executable)
+            .expect("fixture executable metadata")
+            .permissions()
+            .mode();
+        prepared.adapter.environment.insert(
+            "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE".into(),
+            "1".into(),
+        );
+        prepared.adapter.environment.insert(
+            "AUTOSPEC_TEST_DRAFT_ABORT_AFTER_INTENT_CLEAR".into(),
+            "1".into(),
+        );
+
+        let error = prepared
+            .publish()
+            .expect_err("post-intent-clear crash must interrupt the durable reset");
+
+        assert!(error.contains("after intent clear"), "{error}");
+        let durable = PersistedInvocation::from_json(
+            &fs::read_to_string(&prepared.state_path).expect("cleanup-pending invocation"),
+        )
+        .expect("strict cleanup-pending invocation");
+        assert_eq!(durable.phase, BridgePhase::DraftCleanupPending);
+        assert!(durable.draft_process.is_some());
+        assert!(!super::draft_release_receipt_path(&prepared.state_path).exists());
+        assert!(!super::draft_release_intent_path(&prepared.state_path).exists());
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+
+        fs::write(&executable, executable_body).expect("restore fixture executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(executable_mode))
+            .expect("restore fixture executable mode");
+        prepared.adapter.environment.remove(std::ffi::OsStr::new(
+            "AUTOSPEC_TEST_DRAFT_REMOVE_EXECUTABLE_BEFORE_RELEASE",
+        ));
+        prepared.adapter.environment.remove(std::ffi::OsStr::new(
+            "AUTOSPEC_TEST_DRAFT_ABORT_AFTER_INTENT_CLEAR",
+        ));
+        prepared.state = durable;
+
+        let pull_request = prepared
+            .publish()
+            .expect("durably cleared cleanup guards must authorize one retry");
+
+        assert_eq!(pull_request, 17);
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 1);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn cleanup_pending_transaction(label: &str) -> PreparedDraftTransaction {
+        let mut prepared = prepared_draft_transaction(label);
+        prepared.push_exact_at_intent();
+        prepared.state.phase = BridgePhase::DraftCleanupPending;
+        prepared.state.draft_process = Some(super::ProcessIdentity {
+            pid: 4_000_002,
+            process_group: 4_000_002,
+            executable: prepared.adapter.gh.clone(),
+            argv_digest: format!("{label}-dead-draft"),
+            boot_id: "missing-boot".to_string(),
+            start_identity: "missing-start".to_string(),
+        });
+        super::write_invocation_atomic(&prepared.state_path, &prepared.state)
+            .expect("cleanup-pending invocation");
+        fs::write(prepared.fixture.root.join("gh-calls"), "").expect("clear calls");
+        prepared
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_cleanup_restart_requires_both_guards_absent() {
+        // Break caught: cleanup recovery retrying while a release guard still exists.
+        for guard in ["receipt", "intent"] {
+            let mut prepared = cleanup_pending_transaction(&format!("draft-cleanup-guard-{guard}"));
+            let path = if guard == "receipt" {
+                super::draft_release_receipt_path(&prepared.state_path)
+            } else {
+                super::draft_release_intent_path(&prepared.state_path)
+            };
+            let process = prepared
+                .state
+                .draft_process
+                .as_ref()
+                .expect("draft process");
+            fs::write(&path, super::draft_release_digest(&prepared.state, process))
+                .expect("release guard");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .expect("private release guard");
+
+            let error = prepared
+                .publish()
+                .expect_err("present release guard must prohibit cleanup recovery");
+
+            assert!(
+                error.contains("cleanup") || error.contains("release"),
+                "{error}"
+            );
+            let calls =
+                fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+            assert_eq!(calls.matches("pr create").count(), 0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_cleanup_restart_requires_both_directory_syncs() {
+        // Break caught: cleanup recovery authorizing retry after either parent sync fails.
+        for failpoint in [
+            "AUTOSPEC_TEST_DRAFT_FAIL_CLEANUP_RECOVERY_RECEIPT_FSYNC",
+            "AUTOSPEC_TEST_DRAFT_FAIL_CLEANUP_RECOVERY_INTENT_FSYNC",
+        ] {
+            let mut prepared =
+                cleanup_pending_transaction(&format!("draft-cleanup-recovery-fsync-{failpoint}"));
+            prepared
+                .adapter
+                .environment
+                .insert(failpoint.into(), "1".into());
+
+            let error = prepared
+                .publish()
+                .expect_err("failed cleanup recovery sync must prohibit retry");
+
+            assert!(
+                error.contains("cleanup") || error.contains("sync"),
+                "{error}"
+            );
+            let calls =
+                fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+            assert_eq!(calls.matches("pr create").count(), 0);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_cleanup_restart_rejects_public_guard_parent() {
+        // Break caught: cleanup recovery silently repairing an untrusted guard directory.
+        let mut prepared = cleanup_pending_transaction("draft-cleanup-public-guard-parent");
+        let parent = prepared.state_path.parent().expect("state parent");
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o755))
+            .expect("public guard parent");
+
+        let error = prepared
+            .publish()
+            .expect_err("public guard parent must prohibit cleanup recovery");
+
+        assert!(
+            error.contains("private") || error.contains("unsafe"),
+            "{error}"
+        );
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_cleanup_restart_requires_durable_state_match() {
+        // Break caught: cleanup recovery trusting in-memory identity not bound to durable state.
+        let mut prepared = cleanup_pending_transaction("draft-cleanup-durable-state");
+        prepared
+            .state
+            .draft_process
+            .as_mut()
+            .expect("draft process")
+            .argv_digest = "foreign-in-memory-argv".to_string();
+
+        let error = prepared
+            .publish()
+            .expect_err("in-memory cleanup identity must match durable state");
+
+        assert!(
+            error.contains("durable") || error.contains("state"),
+            "{error}"
+        );
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_cleanup_restart_rejects_live_and_foreign_child_identity() {
+        // Break caught: cleanup recovery retrying while the recorded PID is live or reused.
+        for foreign in [false, true] {
+            let mut prepared = cleanup_pending_transaction(if foreign {
+                "draft-cleanup-foreign-child"
+            } else {
+                "draft-cleanup-live-child"
+            });
+            let mut child = Command::new("/bin/sh")
+                .args(["-c", "sleep 30"])
+                .spawn()
+                .expect("live draft child");
+            let birth = super::observe_process_birth(child.id())
+                .expect("observe draft child")
+                .expect("live draft child birth");
+            prepared.state.draft_process = Some(super::ProcessIdentity {
+                pid: birth.pid,
+                process_group: birth.process_group,
+                executable: PathBuf::from("/bin/sh"),
+                argv_digest: "cleanup-live-child".to_string(),
+                boot_id: birth.boot_id,
+                start_identity: if foreign {
+                    format!("{}-foreign", birth.start_identity)
+                } else {
+                    birth.start_identity
+                },
+            });
+            super::write_invocation_atomic(&prepared.state_path, &prepared.state)
+                .expect("live cleanup-pending invocation");
+
+            let error = prepared
+                .publish()
+                .expect_err("live or foreign draft identity must prohibit retry");
+
+            assert!(
+                error.contains("live") || error.contains("identity") || error.contains("cleanup"),
+                "{error}"
+            );
+            let calls =
+                fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+            assert_eq!(calls.matches("pr create").count(), 0);
+            child.kill().expect("stop live draft child");
+            child.wait().expect("reap live draft child");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_cleanup_restart_rejects_any_exact_draft() {
+        // Break caught: cleanup recovery adopting an exact PR instead of proving zero requests.
+        let mut prepared = cleanup_pending_transaction("draft-cleanup-exact-pr");
+        fs::copy(
+            adapter_path(&prepared.adapter, "GH_CREATED_PR"),
+            adapter_path(&prepared.adapter, "GH_PR_STATE"),
+        )
+        .expect("exact draft fixture");
+
+        let error = prepared
+            .publish()
+            .expect_err("cleanup recovery requires zero exact drafts");
+
+        assert!(
+            error.contains("pull request") || error.contains("remote"),
+            "{error}"
+        );
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert_eq!(calls.matches("pr create").count(), 0);
     }
 
     #[cfg(target_os = "linux")]
