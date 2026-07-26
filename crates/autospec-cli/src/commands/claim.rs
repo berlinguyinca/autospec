@@ -11,10 +11,9 @@ use autospec_core::autonomous_lifecycle::{
 };
 use autospec_core::claim::{
     evaluate_merge_ready_claim_recovery, executor_result_evidence_exists,
-    executor_wait_failure_relinquishes_claim, find_reconcilable_pull_request,
-    is_executor_result_pull_request, is_reconcilable_pull_request, parse_claim_issue_json,
-    parse_open_pull_requests_json, parse_paths_argument, parse_remote_comments_json,
-    parse_required_checks_json, parse_run_state_comment,
+    find_reconcilable_pull_request, is_executor_result_pull_request, is_reconcilable_pull_request,
+    parse_claim_issue_json, parse_open_pull_requests_json, parse_paths_argument,
+    parse_remote_comments_json, parse_required_checks_json, parse_run_state_comment,
     successful_executor_result_for_pull_request, ClaimRecoveryDecision, ExecutorResultEvidence,
     RemoteComment, RunStateRecord, SelectedRunState, RUN_STATE_BEGIN_MARKER, RUN_STATE_END_MARKER,
     RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
@@ -368,13 +367,52 @@ fn resolve_claim_remote(repo: &str) -> Result<String, CommandFailure> {
 }
 
 fn validated_claim_remote(repo: &str, url: &str) -> Result<String, CommandFailure> {
-    let expected_suffix = format!("/{repo}");
-    if !(url.starts_with("https://") && url.trim_end_matches(".git").ends_with(&expected_suffix)) {
-        return Err(CommandFailure::diagnostic(
+    let invalid = || {
+        CommandFailure::diagnostic(
             "authenticated claim repository URL does not match the requested owner/repo",
-        ));
+        )
+    };
+    let (expected_owner, expected_repo) = repo.split_once('/').ok_or_else(invalid)?;
+    if expected_owner.is_empty()
+        || expected_repo.is_empty()
+        || expected_repo.contains('/')
+        || !safe_repository_segment(expected_owner)
+        || !safe_repository_segment(expected_repo)
+    {
+        return Err(invalid());
     }
-    Ok(format!("{}.git", url.trim_end_matches(".git")))
+    let remainder = url.strip_prefix("https://").ok_or_else(invalid)?;
+    let (authority, path) = remainder.split_once('/').ok_or_else(invalid)?;
+    if authority.is_empty()
+        || authority.contains(['@', '?', '#'])
+        || authority.chars().any(char::is_whitespace)
+        || path.contains(['?', '#'])
+    {
+        return Err(invalid());
+    }
+    let mut segments = path.split('/');
+    let owner = segments.next().ok_or_else(invalid)?;
+    let repository = segments.next().ok_or_else(invalid)?;
+    if segments.next().is_some() {
+        return Err(invalid());
+    }
+    let repository = repository.strip_suffix(".git").unwrap_or(repository);
+    if owner != expected_owner
+        || repository != expected_repo
+        || !safe_repository_segment(owner)
+        || !safe_repository_segment(repository)
+    {
+        return Err(invalid());
+    }
+    Ok(format!("https://{authority}/{owner}/{repository}.git"))
+}
+
+fn safe_repository_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && !matches!(segment, "." | "..")
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 struct PrivateClaimGitDir {
@@ -803,13 +841,8 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     {
         return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
     }
-    let comments = list_comments(&repo, options.issue)?;
-    let wait_failure_relinquished = prior
-        .as_ref()
-        .is_some_and(|head| executor_wait_failure_relinquishes_claim(&comments, &head.record));
     if let Some(owner) = prior.as_ref().and_then(|head| {
-        (head.record.worker_id != worker_id
-            && !wait_failure_relinquished
+        (!matches!(head.record.state.as_str(), "available" | "released")
             && !server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds))
         .then_some(head.record.worker_id.as_str())
     }) {
@@ -836,11 +869,6 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     }
     let ttl_seconds = claim_ttl_seconds();
     let now = utc_now_iso()?;
-    let claimed_at = prior
-        .as_ref()
-        .filter(|_| !wait_failure_relinquished)
-        .map(|head| head.record.claimed_at.clone())
-        .unwrap_or_else(|| now.clone());
     let record = RunStateRecord::new(
         &repo,
         options.issue,
@@ -850,8 +878,8 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         "",
         "claimed",
         Vec::new(),
-        claimed_at,
-        now,
+        &now,
+        &now,
         ttl_seconds,
     )
     .with_claim_id(claim_id.clone());
@@ -961,11 +989,14 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
     let selected = read_claim_ref(&repo, options.issue)?.ok_or_else(|| {
         CommandFailure::diagnostic("claim state upsert requires an active claim ref")
     })?;
-    if selected.record.worker_id != options.worker_id
-        || (!options.branch.is_empty() && selected.record.branch != options.branch)
-    {
+    if !has_exact_claim_generation(
+        &selected.record,
+        &options.worker_id,
+        &options.claim_id,
+        &options.branch,
+    ) {
         return Err(CommandFailure::diagnostic(
-            "claim state upsert lost exact worker or branch ownership",
+            "claim state upsert lost exact worker, branch, or claim ID ownership",
         ));
     }
     let claimed_at = selected.record.claimed_at.clone();
@@ -982,8 +1013,8 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
         now,
         options.ttl_seconds,
     );
-    record.claim_id = selected.record.claim_id.clone();
-    upsert_record(&repo, &[], &record)?;
+    record.claim_id = Some(options.claim_id.clone());
+    upsert_record(&repo, &[], &options.claim_id, &record)?;
     emit_claim_telemetry("session.step", &repo, options.issue, &record.step);
     println!("{}", record.to_json());
     Ok(())
@@ -1219,13 +1250,15 @@ fn has_exact_claim_generation(
 fn upsert_record(
     repo: &str,
     _comments: &[autospec_core::claim::RemoteComment],
+    expected_claim_id: &str,
     record: &RunStateRecord,
 ) -> Result<(), CommandFailure> {
     let parent = read_claim_ref(repo, record.issue)?
         .ok_or_else(|| CommandFailure::diagnostic("run-state mutation requires a claim ref"))?;
     if parent.record.worker_id != record.worker_id
         || parent.record.branch != record.branch
-        || parent.record.claim_id != record.claim_id
+        || parent.record.claim_id.as_deref() != Some(expected_claim_id)
+        || record.claim_id.as_deref() != Some(expected_claim_id)
     {
         return Err(CommandFailure::diagnostic(
             "run-state mutation lost exact worker, branch, or claim ID ownership",
@@ -1243,18 +1276,38 @@ fn upsert_record(
 }
 
 fn clear(args: &[String]) -> Result<(), CommandFailure> {
-    let options = parse_read_options(args)?;
+    let options = parse_clear_options(args)?;
     let repo = match options.repo {
         Some(repo) => repo,
         None => infer_repo()?,
     };
-    let comments = list_comments(&repo, options.issue)?;
-    if read_claim_ref(&repo, options.issue)?.is_some() {
+    let Some(selected) = read_claim_ref(&repo, options.issue)? else {
         return Err(CommandFailure::diagnostic(
-            "claim state clear refuses to bypass the authoritative claim ref; use claim release with exact identity",
+            "claim state clear requires an authoritative claim ref",
+        ));
+    };
+    if !has_exact_claim_generation(
+        &selected.record,
+        &options.worker_id,
+        &options.claim_id,
+        &options.branch,
+    ) {
+        return Err(CommandFailure::diagnostic(
+            "claim state clear lost exact worker, branch, or claim ID ownership",
         ));
     }
-    clear_marked_state(&repo, &comments)?;
+    let mut released = selected.record.clone();
+    released.state = "released".to_string();
+    released.step = "cleared".to_string();
+    released.updated_at = utc_now_iso()?;
+    match advance_claim_ref(&repo, options.issue, Some(&selected), &released)? {
+        ClaimRefAdvance::Won(head) => project_claim_ref_to_comments(&repo, &head),
+        ClaimRefAdvance::Lost => {
+            return Err(CommandFailure::diagnostic(
+                "claim state clear lost the authoritative ref race",
+            ))
+        }
+    }
     emit_claim_telemetry("session.terminal", &repo, options.issue, "");
     Ok(())
 }
@@ -1314,10 +1367,48 @@ fn recover_stale_startup_record(
     issue: u64,
     timeout_seconds: u64,
 ) -> Result<RecoveryOutcome, CommandFailure> {
-    if read_claim_ref(repo, issue)?.is_some() {
+    if let Some(selected) = read_claim_ref(repo, issue)? {
+        if selected.record.state != "claimed"
+            || !selected.record.pr.is_empty()
+            || startup_heartbeat_exists(repo, issue)
+            || branch_ref_exists(&selected.record.branch)
+            || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
+        {
+            return Ok(RecoveryOutcome {
+                recovered: false,
+                reason: "claim_evidence_or_fresh_state".to_string(),
+            });
+        }
+        let mut available = selected.record.clone();
+        available.state = "available".to_string();
+        available.step = "stale_startup_recovered".to_string();
+        available.updated_at = utc_now_iso()?;
+        let head = match advance_claim_ref(repo, issue, Some(&selected), &available)? {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => {
+                return Ok(RecoveryOutcome {
+                    recovered: false,
+                    reason: "ownership_lost".to_string(),
+                })
+            }
+        };
+        project_claim_ref_to_comments(repo, &head);
+        let release_labels = [
+            "issue".to_string(),
+            "edit".to_string(),
+            issue.to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--remove-label".to_string(),
+            "in-progress-by-bot".to_string(),
+            "--add-label".to_string(),
+            "auto-implement".to_string(),
+        ];
+        run_gh_with_retry(&release_labels, "release stale startup claim labels")?;
+        emit_claim_telemetry("session.terminal", repo, issue, "stale_startup_recovered");
         return Ok(RecoveryOutcome {
-            recovered: false,
-            reason: "authoritative_claim_ref_requires_exact_release".to_string(),
+            recovered: true,
+            reason: "released_stale_startup_claim".to_string(),
         });
     }
     let comments = list_comments(repo, issue)?;
@@ -1403,7 +1494,13 @@ fn reconcile_linked_pr(args: &[String]) -> Result<(), CommandFailure> {
         Some(repo) => repo,
         None => infer_repo()?,
     };
-    let outcome = reconcile_linked_pr_record(&repo, options.issue, options.worker_id.as_deref())?;
+    let outcome = reconcile_linked_pr_record(
+        &repo,
+        options.issue,
+        &options.worker_id,
+        &options.branch,
+        &options.claim_id,
+    )?;
     print_reconcile_result(
         outcome.reconciled,
         options.issue,
@@ -1414,8 +1511,14 @@ fn reconcile_linked_pr(args: &[String]) -> Result<(), CommandFailure> {
     Ok(())
 }
 
-pub(crate) fn reconcile_active_issue(repo: &str, issue: u64) -> Result<(), CommandFailure> {
-    let _ = reconcile_linked_pr_record(repo, issue, None)?;
+pub(crate) fn reconcile_active_issue(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    expected_claim_id: &str,
+) -> Result<(), CommandFailure> {
+    let _ = reconcile_linked_pr_record(repo, issue, worker_id, branch, expected_claim_id)?;
     Ok(())
 }
 
@@ -1432,23 +1535,38 @@ pub(crate) struct ExecutorSuccessBinding<'a> {
     pub(crate) premerge_receipt: &'a str,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ClaimMutationIdentity<'a> {
+    pub(crate) repo: &'a str,
+    pub(crate) issue: u64,
+    pub(crate) worker_id: &'a str,
+    pub(crate) branch: &'a str,
+    pub(crate) claim_id: &'a str,
+}
+
 pub(crate) fn record_executor_result(
-    repo: &str,
-    issue: u64,
-    worker_id: &str,
-    branch: &str,
+    identity: ClaimMutationIdentity<'_>,
     outcome: &ConductorOutcome,
     pull_request: Option<u64>,
     success: Option<ExecutorSuccessBinding<'_>>,
 ) -> Result<ExecutorResultRecord, CommandFailure> {
+    let ClaimMutationIdentity {
+        repo,
+        issue,
+        worker_id,
+        branch,
+        claim_id: expected_claim_id,
+    } = identity;
     let Some(selected) = read_claim_ref(repo, issue)? else {
         return Ok(ExecutorResultRecord::OwnershipLost);
     };
-    if !has_active_executor_claim(&selected.record, worker_id, branch) {
+    if !has_active_executor_claim(&selected.record, worker_id, branch)
+        || selected.record.claim_id.as_deref() != Some(expected_claim_id)
+    {
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
     if matches!(outcome, ConductorOutcome::Succeeded)
-        && selected.record.claim_id.as_deref() != success.as_ref().map(|binding| binding.claim_id)
+        && success.as_ref().map(|binding| binding.claim_id) != Some(expected_claim_id)
     {
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
@@ -1485,6 +1603,10 @@ pub(crate) fn record_executor_result(
     };
 
     let receipt_id = executor_result_receipt_id()?;
+    match advance_claim_ref(repo, issue, Some(&selected), &selected.record)? {
+        ClaimRefAdvance::Won(_) => {}
+        ClaimRefAdvance::Lost => return Ok(ExecutorResultRecord::OwnershipLost),
+    }
     let evidence = ExecutorResultEvidence::new(
         repo,
         issue,
@@ -1494,7 +1616,7 @@ pub(crate) fn record_executor_result(
         pull_request,
         executor_result_step(outcome),
         receipt_id,
-        success.as_ref().map(|binding| binding.claim_id.to_string()),
+        Some(expected_claim_id.to_string()),
         success.as_ref().map(|binding| binding.commit.to_string()),
         success
             .as_ref()
@@ -1511,7 +1633,9 @@ pub(crate) fn record_executor_result(
     let Some(confirmed) = read_claim_ref(repo, issue)? else {
         return Ok(ExecutorResultRecord::OwnershipLost);
     };
-    if !has_active_executor_claim(&confirmed.record, worker_id, branch) {
+    if !has_active_executor_claim(&confirmed.record, worker_id, branch)
+        || confirmed.record.claim_id.as_deref() != Some(expected_claim_id)
+    {
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
     if matches!(outcome, ConductorOutcome::Succeeded)
@@ -1523,10 +1647,7 @@ pub(crate) fn record_executor_result(
 }
 
 pub(crate) fn record_executor_outcome(
-    repo: &str,
-    issue: u64,
-    worker_id: &str,
-    branch: &str,
+    identity: ClaimMutationIdentity<'_>,
     outcome: &str,
 ) -> Result<(), CommandFailure> {
     if outcome.trim().is_empty() {
@@ -1535,10 +1656,7 @@ pub(crate) fn record_executor_outcome(
         ));
     }
     match record_executor_result_with_step(
-        repo,
-        issue,
-        worker_id,
-        branch,
+        identity,
         &ConductorOutcome::Blocked(outcome.to_string()),
         None,
         outcome,
@@ -1562,10 +1680,17 @@ pub(crate) fn recover_implementer_wait_failure(
     session_id: &str,
     diagnostic: &str,
 ) -> Result<WaitFailureRecovery, CommandFailure> {
-    let comments = list_comments(repo, issue)?;
     let Some(selected) = read_claim_ref(repo, issue)? else {
         return Ok(WaitFailureRecovery::OwnershipLost);
     };
+    if selected.record.worker_id == worker_id
+        && selected.record.branch == branch
+        && selected.record.claim_id.as_deref() == Some(expected_claim_id)
+        && selected.record.state == "available"
+        && selected.record.step == "implementer_wait_failed"
+    {
+        return Ok(WaitFailureRecovery::AlreadyRecovered);
+    }
     if selected.record.claim_id.as_deref() != Some(expected_claim_id) {
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
@@ -1573,6 +1698,17 @@ pub(crate) fn recover_implementer_wait_failure(
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
 
+    let mut available = selected.record.clone();
+    available.state = "available".to_string();
+    available.step = "implementer_wait_failed".to_string();
+    available.updated_at = utc_now_iso()?;
+    let head = match advance_claim_ref(repo, issue, Some(&selected), &available)? {
+        ClaimRefAdvance::Won(head) => head,
+        ClaimRefAdvance::Lost => return Ok(WaitFailureRecovery::OwnershipLost),
+    };
+    project_claim_ref_to_comments(repo, &head);
+
+    let comments = list_comments(repo, issue)?;
     let evidence = wait_failure_evidence(
         repo,
         issue,
@@ -1590,14 +1726,6 @@ pub(crate) fn recover_implementer_wait_failure(
         return Err(CommandFailure::diagnostic(
             "implementer wait-failure evidence was not persisted",
         ));
-    }
-    let Some(confirmed) = read_claim_ref(repo, issue)? else {
-        return Ok(WaitFailureRecovery::OwnershipLost);
-    };
-    if !has_active_executor_claim(&confirmed.record, worker_id, branch)
-        || confirmed.record.claim_id.as_deref() != Some(expected_claim_id)
-    {
-        return Ok(WaitFailureRecovery::OwnershipLost);
     }
 
     requeue_wait_failure(repo, issue)?;
@@ -1626,7 +1754,7 @@ fn wait_failure_evidence(
         None,
         "implementer_wait_failed",
         format!("implementer-wait-failed:{claim_id}:{session_id}"),
-        None,
+        Some(claim_id.to_string()),
         None,
         None,
     )
@@ -1679,19 +1807,23 @@ fn safe_wait_diagnostic(value: &str) -> String {
 }
 
 fn record_executor_result_with_step(
-    repo: &str,
-    issue: u64,
-    worker_id: &str,
-    branch: &str,
+    identity: ClaimMutationIdentity<'_>,
     outcome: &ConductorOutcome,
     pull_request: Option<u64>,
     step: &str,
 ) -> Result<ExecutorResultRecord, CommandFailure> {
+    let ClaimMutationIdentity {
+        repo,
+        issue,
+        worker_id,
+        branch,
+        claim_id: expected_claim_id,
+    } = identity;
     let comments = list_comments(repo, issue)?;
     let Some(selected) = read_claim_ref(repo, issue)? else {
         return Ok(ExecutorResultRecord::OwnershipLost);
     };
-    if !has_executor_claim_owner(&selected.record, worker_id, branch) {
+    if !has_exact_claim_generation(&selected.record, worker_id, expected_claim_id, branch) {
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
 
@@ -1726,11 +1858,11 @@ fn record_executor_result_with_step(
     record.step = step.to_string();
     record.pr = verified_pr.clone();
     record.updated_at = utc_now_iso()?;
-    upsert_record(repo, &comments, &record)?;
+    upsert_record(repo, &comments, expected_claim_id, &record)?;
     let Some(confirmed) = read_claim_ref(repo, issue)? else {
         return Ok(ExecutorResultRecord::OwnershipLost);
     };
-    if !has_executor_claim_owner(&confirmed.record, worker_id, branch)
+    if !has_exact_claim_generation(&confirmed.record, worker_id, expected_claim_id, branch)
         || confirmed.record.step != step
         || confirmed.record.pr != verified_pr
     {
@@ -1812,7 +1944,9 @@ struct ReconcileOutcome {
 fn reconcile_linked_pr_record(
     repo: &str,
     issue: u64,
-    worker_id: Option<&str>,
+    worker_id: &str,
+    branch: &str,
+    expected_claim_id: &str,
 ) -> Result<ReconcileOutcome, CommandFailure> {
     let comments = list_comments(repo, issue)?;
     let Some(selected) = read_claim_ref(repo, issue)? else {
@@ -1822,6 +1956,13 @@ fn reconcile_linked_pr_record(
             reason: "missing_run_state".to_string(),
         });
     };
+    if !has_exact_claim_generation(&selected.record, worker_id, expected_claim_id, branch) {
+        return Ok(ReconcileOutcome {
+            reconciled: false,
+            pr: None,
+            reason: "identity_mismatch".to_string(),
+        });
+    }
     if !selected.record.pr.is_empty() {
         return Ok(ReconcileOutcome {
             reconciled: false,
@@ -1837,13 +1978,6 @@ fn reconcile_linked_pr_record(
             reason: "no_linked_pr_with_one_closeout".to_string(),
         });
     };
-    if worker_id.is_some_and(|worker_id| worker_id != selected.record.worker_id) {
-        return Ok(ReconcileOutcome {
-            reconciled: false,
-            pr: Some(pull_request.number.to_string()),
-            reason: "identity_mismatch".to_string(),
-        });
-    }
     let Some(evidence) =
         successful_executor_result_for_pull_request(&comments, pull_request.number)
     else {
@@ -1877,7 +2011,7 @@ fn reconcile_linked_pr_record(
     record.step = "post_pr_handoff_failed".to_string();
     record.pr = pull_request.number.to_string();
     record.updated_at = utc_now_iso()?;
-    upsert_record(repo, &comments, &record)?;
+    upsert_record(repo, &comments, expected_claim_id, &record)?;
 
     let marker = format!(
         "<!-- autospec-linked-pr-run-state-reconcile:pr:{} -->",
@@ -1907,10 +2041,20 @@ struct ReadOptions {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct ClearOptions {
+    issue: u64,
+    repo: Option<String>,
+    worker_id: String,
+    claim_id: String,
+    branch: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct UpsertOptions {
     issue: u64,
     repo: Option<String>,
     worker_id: String,
+    claim_id: String,
     state: String,
     step: Option<String>,
     branch: String,
@@ -1934,7 +2078,9 @@ struct RefreshOptions {
 struct ReconcileOptions {
     issue: u64,
     repo: Option<String>,
-    worker_id: Option<String>,
+    worker_id: String,
+    claim_id: String,
+    branch: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2015,6 +2161,71 @@ fn parse_read_options(args: &[String]) -> Result<ReadOptions, CommandFailure> {
     Ok(ReadOptions { issue, repo })
 }
 
+fn parse_clear_options(args: &[String]) -> Result<ClearOptions, CommandFailure> {
+    let mut issue = None;
+    let mut repo = None;
+    let mut worker_id = None;
+    let mut claim_id = None;
+    let mut branch = None;
+    let mut index = 0;
+    while index < args.len() {
+        let option = args[index].as_str();
+        let value = match option {
+            "--issue" | "--repo" | "--worker-id" | "--claim-id" | "--branch" => {
+                argument_value(args, &mut index, option)?
+            }
+            _ => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autospec claim state clear option: {option}"
+                )))
+            }
+        };
+        match option {
+            "--issue" => {
+                let parsed = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        CommandFailure::diagnostic("--issue must be a positive integer")
+                    })?;
+                set_once(
+                    &mut issue,
+                    parsed,
+                    "--issue accepts exactly one issue number",
+                )?;
+            }
+            "--repo" => set_once(&mut repo, value, "--repo accepts exactly one repository")?,
+            "--worker-id" => set_once(
+                &mut worker_id,
+                value,
+                "--worker-id accepts exactly one worker identifier",
+            )?,
+            "--claim-id" => set_once(
+                &mut claim_id,
+                value,
+                "--claim-id accepts exactly one claim generation",
+            )?,
+            "--branch" => set_once(&mut branch, value, "--branch accepts exactly one branch")?,
+            _ => unreachable!("options were matched before parsing"),
+        }
+        index += 1;
+    }
+    Ok(ClearOptions {
+        issue: issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?,
+        repo,
+        worker_id: worker_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--worker-id is required"))?,
+        claim_id: claim_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
+        branch: branch
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--branch is required"))?,
+    })
+}
+
 fn parse_recover_options(args: &[String]) -> Result<RecoverOptions, CommandFailure> {
     let mut issue = None;
     let mut repo = None;
@@ -2082,6 +2293,7 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
     let mut issue = None;
     let mut repo = None;
     let mut worker_id = None;
+    let mut claim_id = None;
     let mut state = None;
     let mut step = None;
     let mut branch = String::new();
@@ -2095,8 +2307,10 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
     while index < args.len() {
         let option = args[index].as_str();
         let value = match option {
-            "--issue" | "--repo" | "--worker-id" | "--state" | "--step" | "--branch" | "--pr"
-            | "--paths" | "--ttl-seconds" => argument_value(args, &mut index, option)?,
+            "--issue" | "--repo" | "--worker-id" | "--claim-id" | "--state" | "--step"
+            | "--branch" | "--pr" | "--paths" | "--ttl-seconds" => {
+                argument_value(args, &mut index, option)?
+            }
             _ => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown autospec claim state upsert option: {option}"
@@ -2123,6 +2337,11 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
                 &mut worker_id,
                 value,
                 "--worker-id accepts exactly one worker identifier",
+            )?,
+            "--claim-id" => set_once(
+                &mut claim_id,
+                value,
+                "--claim-id accepts exactly one claim generation",
             )?,
             "--state" => set_once(&mut state, value, "--state accepts exactly one state")?,
             "--step" => set_once(&mut step, value, "--step accepts exactly one step")?,
@@ -2168,10 +2387,16 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
         issue: issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?,
         repo,
         worker_id: worker_id
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| CommandFailure::diagnostic("--worker-id is required"))?,
+        claim_id: claim_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
         state: state.ok_or_else(|| CommandFailure::diagnostic("--state is required"))?,
         step,
-        branch,
+        branch: (!branch.trim().is_empty())
+            .then_some(branch)
+            .ok_or_else(|| CommandFailure::diagnostic("--branch is required"))?,
         pr,
         paths,
         ttl_seconds,
@@ -2254,11 +2479,15 @@ fn parse_reconcile_options(args: &[String]) -> Result<ReconcileOptions, CommandF
     let mut issue = None;
     let mut repo = None;
     let mut worker_id = None;
+    let mut claim_id = None;
+    let mut branch = None;
     let mut index = 0;
     while index < args.len() {
         let option = args[index].as_str();
         let value = match option {
-            "--issue" | "--repo" | "--worker-id" => argument_value(args, &mut index, option)?,
+            "--issue" | "--repo" | "--worker-id" | "--claim-id" | "--branch" => {
+                argument_value(args, &mut index, option)?
+            }
             _ => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown autospec claim state reconcile-linked-pr option: {option}"
@@ -2286,6 +2515,12 @@ fn parse_reconcile_options(args: &[String]) -> Result<ReconcileOptions, CommandF
                 value,
                 "--worker-id accepts exactly one worker identifier",
             )?,
+            "--claim-id" => set_once(
+                &mut claim_id,
+                value,
+                "--claim-id accepts exactly one claim generation",
+            )?,
+            "--branch" => set_once(&mut branch, value, "--branch accepts exactly one branch")?,
             _ => unreachable!("options were matched before parsing"),
         }
         index += 1;
@@ -2293,7 +2528,15 @@ fn parse_reconcile_options(args: &[String]) -> Result<ReconcileOptions, CommandF
     Ok(ReconcileOptions {
         issue: issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?,
         repo,
-        worker_id,
+        worker_id: worker_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--worker-id is required"))?,
+        claim_id: claim_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
+        branch: branch
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--branch is required"))?,
     })
 }
 
@@ -3261,13 +3504,13 @@ fn unavailable_claim_with_observed_owner<T>(
 
 fn print_help() {
     println!(
-        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> --claim-id <ID> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
+        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> --claim-id <ID> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
     );
 }
 
 fn print_state_help() {
     println!(
-        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim state clear --issue <N> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> [--repo OWNER/REPO] [--worker-id ID]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the authoritative parent-linked run-state generation\n    upsert                 Append one successor to the authoritative run-state generation\n    refresh                Renew one exact claim generation and confirm ownership\n    clear                  Delete marked run-state comments\n    reconcile-linked-pr    Record a linked PR before post-PR handoff recovery\n    recover-stale-startup  Release only an evidenceless stale startup claim"
+        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim state clear --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the authoritative parent-linked run-state generation\n    upsert                 Append one exact-owner successor generation\n    refresh                Renew one exact claim generation and confirm ownership\n    clear                  CAS the exact claim generation to released\n    reconcile-linked-pr    Record a linked PR for one exact claim generation\n    recover-stale-startup  CAS an evidenceless stale startup claim to available"
     );
 }
 
@@ -3851,6 +4094,23 @@ mod tests {
     }
 
     #[test]
+    fn validated_claim_remote_rejects_unsafe_https_shapes() {
+        for url in [
+            "https://github.example/prefix/owner/repo",
+            "https://github.example/owner/repo?token=secret",
+            "https://github.example/owner/repo#fragment",
+            "https://attacker@example.com/owner/repo",
+            "https://github.example/not-owner/repo",
+            "https://github.example/owner/repo/extra",
+        ] {
+            assert!(
+                validated_claim_remote("owner/repo", url).is_err(),
+                "accepted unsafe claim remote {url}"
+            );
+        }
+    }
+
+    #[test]
     fn claim_ref_private_git_dirs_are_distinct_and_leave_target_git_metadata_unchanged() {
         // Break caught: claim fetches mutating FETCH_HEAD/objects in a shared target worktree.
         use std::os::unix::fs::PermissionsExt;
@@ -3916,16 +4176,19 @@ mod tests {
             "acquire_record",
             "refresh_claim_generation",
             "upsert_record",
+            "clear",
+            "recover_stale_startup_record",
+            "record_executor_result",
         ] {
             assert!(
                 source_function(source, function).contains("advance_claim_ref"),
                 "{function} must advance the claim ref before audit projection"
             );
         }
-        assert!(source_function(source, "clear").contains("read_claim_ref"));
-        assert!(source_function(source, "clear").contains("refuses to bypass"));
-        assert!(source_function(source, "recover_stale_startup_record")
-            .contains("authoritative_claim_ref_requires_exact_release"));
+        assert!(source_function(source, "clear").contains("has_exact_claim_generation"));
+        let recovery = source_function(source, "recover_stale_startup_record");
+        assert!(recovery.contains("\"available\""));
+        assert!(recovery.contains("\"stale_startup_recovered\""));
         for function in [
             "record_executor_result_with_step",
             "reconcile_linked_pr_record",

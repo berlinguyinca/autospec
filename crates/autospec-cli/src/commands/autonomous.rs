@@ -2807,13 +2807,22 @@ fn dispatch_foreground(
             })?;
         persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
         claim::record_executor_outcome(
+            claim::ClaimMutationIdentity {
+                repo: &lease.repo,
+                issue: lease.issue,
+                worker_id: &lease.worker_id,
+                branch: &lease.branch,
+                claim_id: &lease.claim_id,
+            },
+            &receipt.claim_step,
+        )?;
+        claim::reconcile_active_issue(
             &lease.repo,
             lease.issue,
             &lease.worker_id,
             &lease.branch,
-            &receipt.claim_step,
+            &lease.claim_id,
         )?;
-        claim::reconcile_active_issue(&lease.repo, lease.issue)?;
         state =
             reconcile_successful_foreground_dispatch(state).map_err(CommandFailure::diagnostic)?;
         persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
@@ -3141,10 +3150,16 @@ fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
                 .expect("validated success receipt"),
         });
     let recorded = match claim::record_executor_result(
-        &input.repo,
-        input.issue,
-        &input.worker_id,
-        &input.branch,
+        claim::ClaimMutationIdentity {
+            repo: &input.repo,
+            issue: input.issue,
+            worker_id: &input.worker_id,
+            branch: &input.branch,
+            claim_id: input
+                .claim_id
+                .as_deref()
+                .expect("validated explicit executor result claim ID"),
+        },
         &input.outcome,
         input.pr,
         success,
@@ -3298,7 +3313,7 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
         {
             (ConductorOutcome::Succeeded, pr, None)
         }
-        "blocked" if pr.is_none() && claim_id.is_none() && premerge_receipt.is_none() => {
+        "blocked" if pr.is_none() && claim_id.is_some() && premerge_receipt.is_none() => {
             let reason =
                 reason.ok_or_else(|| "blocked executor-result requires --reason".to_string())?;
             (
@@ -3307,7 +3322,7 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
                 Some(reason),
             )
         }
-        "retryable" if pr.is_none() && claim_id.is_none() && premerge_receipt.is_none() => {
+        "retryable" if pr.is_none() && claim_id.is_some() && premerge_receipt.is_none() => {
             let reason =
                 reason.ok_or_else(|| "retryable executor-result requires --reason".to_string())?;
             (
@@ -3321,7 +3336,7 @@ fn parse_executor_result_input(args: &[String]) -> Result<ExecutorResultInvocati
         }
         "blocked" | "retryable" => {
             return Err(
-                "blocked and retryable executor-results require --reason and reject --pr, --claim-id, and --premerge-receipt"
+                "blocked and retryable executor-results require --reason and --claim-id and reject --pr and --premerge-receipt"
                     .to_string(),
             )
         }

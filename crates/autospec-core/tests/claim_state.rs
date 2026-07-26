@@ -32,6 +32,7 @@ fn recovery_claim() -> RunStateRecord {
         "2026-07-14T00:00:00Z",
         10_800,
     )
+    .with_claim_id("claim-a")
 }
 
 fn recovery_evidence() -> ExecutorResultEvidence {
@@ -208,7 +209,7 @@ fn recovers_an_expired_merge_ready_claim_with_exact_identity() {
 
 #[test]
 fn blocks_recovery_when_any_claim_identity_field_differs() {
-    let claim = recovery_claim();
+    let claim = recovery_claim().with_claim_id("claim-a");
     let pull_request = recovery_pull_request();
     let checks = [RequiredCheck::new("CI", "SUCCESS")];
 
@@ -235,6 +236,23 @@ fn blocks_recovery_when_any_claim_identity_field_differs() {
             ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::IdentityMismatch)
         );
     }
+}
+
+#[test]
+fn merge_ready_recovery_rejects_mismatched_claim_id() {
+    let claim = recovery_claim().with_claim_id("claim-b");
+    let evidence = recovery_evidence();
+
+    assert_eq!(
+        evaluate_merge_ready_claim_recovery(
+            &claim,
+            &evidence,
+            &recovery_pull_request(),
+            &[RequiredCheck::new("CI", "SUCCESS")],
+            false,
+        ),
+        ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::IdentityMismatch)
+    );
 }
 
 #[test]

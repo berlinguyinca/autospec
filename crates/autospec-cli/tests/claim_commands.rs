@@ -129,6 +129,23 @@ fn transition_claim_ref(repo: &std::path::Path, record: &RunStateRecord) {
     git(repo, &["push", &remote, &format!("{oid}:{reference}")]);
 }
 
+fn claim_ref_oid(repo: &std::path::Path, issue: u64) -> String {
+    let remote = git(repo, &["remote", "get-url", "origin"]);
+    let reference = format!("refs/autospec/claims/issue-{issue}");
+    git(repo, &["ls-remote", "--refs", &remote, &reference])
+        .split_whitespace()
+        .next()
+        .expect("claim ref oid")
+        .to_string()
+}
+
+fn claim_ref_message(repo: &std::path::Path, issue: u64) -> String {
+    let remote = git(repo, &["remote", "get-url", "origin"]);
+    let reference = format!("refs/autospec/claims/issue-{issue}");
+    git(repo, &["fetch", "--no-tags", &remote, &reference]);
+    git(repo, &["show", "-s", "--format=%B", "FETCH_HEAD"])
+}
+
 fn claim_refresh_comments(
     worker_id: &str,
     branch: &str,
@@ -856,14 +873,15 @@ fn claim_state_upsert_appends_to_the_authoritative_parent_without_deleting_histo
             42,
             "worker-c",
             "claimed",
-            "",
+            "feat/test",
             "",
             "claimed",
             Vec::new(),
             "2026-07-14T00:00:00Z",
             "2026-07-14T00:00:00Z",
             10_800,
-        ),
+        )
+        .with_claim_id("claim-c"),
     );
     std::fs::create_dir_all(&bin).expect("fake bin directory");
     write_executable(
@@ -890,6 +908,10 @@ fn claim_state_upsert_appends_to_the_authoritative_parent_without_deleting_histo
             "testorg/testrepo",
             "--worker-id",
             "worker-c",
+            "--claim-id",
+            "claim-c",
+            "--branch",
+            "feat/test",
             "--state",
             "worktree_ready",
             "--step",
@@ -929,6 +951,125 @@ fn claim_state_upsert_appends_to_the_authoritative_parent_without_deleting_histo
 }
 
 #[test]
+fn claim_state_upsert_requires_expected_claim_id() {
+    let fixture = temp_dir("autospec-claim-upsert-requires-generation");
+    let bin = fixture.join("bin");
+    let comments = fixture.join("comments.json");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/test",
+            "",
+            "claimed",
+            Vec::new(),
+            "2999-07-25T00:00:00Z",
+            "2999-07-25T00:00:00Z",
+            10_800,
+        )
+        .with_claim_id("claim-a"),
+    );
+    let original_oid = claim_ref_oid(&repo, 42);
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    std::fs::write(&comments, "[]\n").expect("comments fixture");
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nset -eu\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then exit 0; fi\nexit 17\n",
+    );
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "upsert",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--state",
+            "implementing",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .output()
+        .expect("autospec claim state upsert starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--claim-id is required"));
+    assert_eq!(claim_ref_oid(&repo, 42), original_oid);
+}
+
+#[test]
+fn stale_claim_generation_cannot_upsert_successor_state() {
+    let fixture = temp_dir("autospec-claim-upsert-stale-generation");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/test",
+            "",
+            "claimed",
+            Vec::new(),
+            "2999-07-25T00:00:00Z",
+            "2999-07-25T00:00:00Z",
+            10_800,
+        )
+        .with_claim_id("claim-b"),
+    );
+    let original_oid = claim_ref_oid(&repo, 42);
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "upsert",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-a",
+            "--state",
+            "blocked",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .output()
+        .expect("autospec stale upsert starts");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("claim ID ownership"));
+    assert_eq!(claim_ref_oid(&repo, 42), original_oid);
+    assert!(claim_ref_message(&repo, 42).contains("\"claim_id\":\"claim-b\""));
+}
+
+#[test]
 fn claim_state_upsert_recovers_an_ambiguous_post_without_repeating_it() {
     let fixture = temp_dir("autospec-claim-state-retry");
     let bin = fixture.join("bin");
@@ -942,14 +1083,15 @@ fn claim_state_upsert_recovers_an_ambiguous_post_without_repeating_it() {
             42,
             "worker-a",
             "claimed",
-            "",
+            "feat/test",
             "",
             "claimed",
             Vec::new(),
             "2026-07-14T00:00:00Z",
             "2026-07-14T00:00:00Z",
             10_800,
-        ),
+        )
+        .with_claim_id("claim-a"),
     );
     std::fs::create_dir_all(&bin).expect("fake bin directory");
     write_executable(
@@ -973,6 +1115,10 @@ fn claim_state_upsert_recovers_an_ambiguous_post_without_repeating_it() {
             "testorg/testrepo",
             "--worker-id",
             "worker-a",
+            "--claim-id",
+            "claim-a",
+            "--branch",
+            "feat/test",
             "--state",
             "worktree_ready",
         ])
@@ -995,11 +1141,12 @@ fn claim_state_upsert_recovers_an_ambiguous_post_without_repeating_it() {
 }
 
 #[test]
-fn claim_state_clear_deletes_every_marked_comment_without_touching_unmarked_history() {
+fn claim_state_clear_without_exact_identity_leaves_audit_history_untouched() {
     let fixture = temp_dir("autospec-claim-state-clear");
     let bin = fixture.join("bin");
     let log = fixture.join("gh.log");
     std::fs::create_dir_all(&bin).expect("fake bin directory");
+    std::fs::write(&log, "").expect("gh log fixture");
     write_executable(
         &bin.join("gh"),
         "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_COMMENTS\"; fi\n",
@@ -1027,13 +1174,11 @@ fn claim_state_clear_deletes_every_marked_comment_without_touching_unmarked_hist
         .output()
         .expect("autospec claim state clear starts");
 
-    assert!(output.status.success());
+    assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--worker-id is required"));
     let calls = std::fs::read_to_string(log).expect("gh call log");
-    assert!(calls.contains("repos/testorg/testrepo/issues/comments/100\n-X\nDELETE"));
-    assert!(calls.contains("repos/testorg/testrepo/issues/comments/101\n-X\nDELETE"));
-    assert!(!calls.contains("repos/testorg/testrepo/issues/comments/99\n-X\nDELETE"));
+    assert!(!calls.contains("\n-X\nDELETE"));
 }
 
 #[test]
@@ -1119,6 +1264,215 @@ fn claim_state_recover_stale_startup_preserves_a_fresh_claim_without_label_mutat
 }
 
 #[test]
+fn stale_startup_recovery_advances_ref_to_available_before_requeue() {
+    let fixture = temp_dir("autospec-claim-recover-stale-ref");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "",
+            "",
+            "claimed",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-a"),
+    );
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    std::fs::write(&comments, "[]\n").expect("comments fixture");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" >> "$AUTOSPEC_CLAIM_LOG"
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then
+  cat "$AUTOSPEC_CLAIM_COMMENTS"
+  exit 0
+fi
+if { [ "$1" = issue ] && [ "$2" = comment ]; } || { [ "$1" = issue ] && [ "$2" = edit ]; }; then
+  git --git-dir "$AUTOSPEC_CLAIM_REMOTE" show -s --format=%B refs/autospec/claims/issue-42 |
+    grep -Fq '"state":"available"' || exit 45
+  exit 0
+fi
+exit 17
+"#,
+    );
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "recover-stale-startup",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--timeout-seconds",
+            "300",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .env("AUTOSPEC_CLAIM_REMOTE", fixture.join("claim-remote.git"))
+        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .output()
+        .expect("autospec stale startup recovery starts");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":true"));
+    let message = claim_ref_message(&repo, 42);
+    assert!(message.contains("\"state\":\"available\""));
+    assert!(message.contains("\"step\":\"stale_startup_recovered\""));
+    assert!(message.contains("\"claim_id\":\"claim-a\""));
+}
+
+#[test]
+fn clear_releases_exact_claim_generation_without_deleting_ref() {
+    let fixture = temp_dir("autospec-claim-clear-exact-generation");
+    let bin = fixture.join("bin");
+    let comments = fixture.join("comments.json");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/test",
+            "",
+            "claimed",
+            Vec::new(),
+            "2999-07-25T00:00:00Z",
+            "2999-07-25T00:00:00Z",
+            10_800,
+        )
+        .with_claim_id("claim-a"),
+    );
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    std::fs::write(&comments, "[]\n").expect("comments fixture");
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nset -eu\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then exit 0; fi\nexit 17\n",
+    );
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "clear",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-a",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .output()
+        .expect("autospec claim state clear starts");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let message = claim_ref_message(&repo, 42);
+    assert!(message.contains("\"state\":\"released\""));
+    assert!(message.contains("\"step\":\"cleared\""));
+    assert!(message.contains("\"claim_id\":\"claim-a\""));
+}
+
+#[test]
+fn clear_wrong_identity_leaves_authoritative_ref_unchanged() {
+    for (label, worker, branch, claim_id) in [
+        ("worker", "worker-b", "feat/test", "claim-a"),
+        ("branch", "worker-a", "feat/other", "claim-a"),
+        ("claim", "worker-a", "feat/test", "claim-b"),
+    ] {
+        let fixture = temp_dir(&format!("autospec-claim-clear-wrong-{label}"));
+        let repo = claim_git_repo(&fixture);
+        transition_claim_ref(
+            &repo,
+            &RunStateRecord::new(
+                "testorg/testrepo",
+                42,
+                "worker-a",
+                "claimed",
+                "feat/test",
+                "",
+                "claimed",
+                Vec::new(),
+                "2999-07-25T00:00:00Z",
+                "2999-07-25T00:00:00Z",
+                10_800,
+            )
+            .with_claim_id("claim-a"),
+        );
+        let original_oid = claim_ref_oid(&repo, 42);
+
+        let output = autospec()
+            .args([
+                "claim",
+                "state",
+                "clear",
+                "--issue",
+                "42",
+                "--repo",
+                "testorg/testrepo",
+                "--worker-id",
+                worker,
+                "--branch",
+                branch,
+                "--claim-id",
+                claim_id,
+            ])
+            .current_dir(&repo)
+            .env(
+                "AUTOSPEC_CLAIM_GIT_REMOTE",
+                fixture.join("claim-remote.git"),
+            )
+            .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+            .output()
+            .expect("autospec claim state clear starts");
+
+        assert!(!output.status.success(), "{label}");
+        assert_eq!(claim_ref_oid(&repo, 42), original_oid, "{label}");
+        let message = claim_ref_message(&repo, 42);
+        assert!(message.contains("\"state\":\"claimed\""), "{label}");
+        assert!(message.contains("\"claim_id\":\"claim-a\""), "{label}");
+    }
+}
+
+#[test]
 fn claim_state_reconcile_records_a_linked_pr_before_posting_one_handoff_blocker() {
     let fixture = temp_dir("autospec-claim-state-reconcile");
     let bin = fixture.join("bin");
@@ -1166,6 +1520,12 @@ fn claim_state_reconcile_records_a_linked_pr_before_posting_one_handoff_blocker(
             "42",
             "--repo",
             "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-a",
         ])
         .env(
             "AUTOSPEC_CLAIM_GIT_REMOTE",
@@ -1379,6 +1739,178 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     let label_edit = calls.find("issue\nedit\n42").expect("label edit");
     let create_comment = calls.find("issue\ncomment\n42").expect("claim comment");
     assert!(create_comment < label_edit);
+}
+
+#[test]
+fn fresh_claim_blocks_same_worker_reacquire_even_with_wait_failure_comment() {
+    let fixture = temp_dir("autospec-claim-acquire-same-owner");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
+    let heartbeats = fixture.join("heartbeats");
+    let repo = claim_git_repo(&fixture);
+    let record = RunStateRecord::new(
+        "testorg/testrepo",
+        42,
+        "worker-a",
+        "claimed",
+        "feat/test",
+        "",
+        "claimed",
+        Vec::new(),
+        "2999-07-25T00:00:00Z",
+        "2999-07-25T00:00:00Z",
+        10_800,
+    )
+    .with_claim_id("claim-a");
+    transition_claim_ref(&repo, &record);
+    let original_oid = claim_ref_oid(&repo, 42);
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    std::fs::write(
+        &comments,
+        r#"[{"id":101,"updated_at":"2999-07-25T00:00:01Z","body":"<!-- autospec-executor-result:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"branch\":\"feat/test\",\"outcome\":\"failed\",\"pr\":null,\"step\":\"implementer_wait_failed\",\"receipt_id\":\"implementer-wait-failed:claim-a:session-a\",\"claim_id\":null,\"commit\":null,\"premerge_receipt\":null}\n<!-- autospec-executor-result:end -->"}]"#,
+    )
+    .expect("wait-failure audit comment");
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then printf '%s\\n' \"$AUTOSPEC_CLAIM_ISSUE\"; exit 0; fi\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nexit 0\n",
+    );
+    let issue = r###"{"labels":["auto-implement","safety:reviewed"],"title":"Add Rust claim","body":"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","author":"agent"}"###;
+
+    let output = autospec()
+        .args([
+            "claim",
+            "acquire",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_ISSUE", issue)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .output()
+        .expect("autospec claim acquire starts");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"claim_lost\""));
+    assert_eq!(claim_ref_oid(&repo, 42), original_oid);
+    let calls = std::fs::read_to_string(log).expect("gh call log");
+    assert!(!calls.contains("issue\ncomment"));
+    assert!(!calls.contains("issue\nedit"));
+}
+
+#[test]
+fn wait_failure_recovery_advances_claim_ref_before_side_effects() {
+    let fixture = temp_dir("autospec-wait-failure-ref-first");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/test",
+            "",
+            "claimed",
+            Vec::new(),
+            "2999-07-25T00:00:00Z",
+            "2999-07-25T00:00:00Z",
+            10_800,
+        )
+        .with_claim_id("claim-a"),
+    );
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    std::fs::write(&comments, "[]\n").expect("comments fixture");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" >> "$AUTOSPEC_CLAIM_LOG"
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then
+  cat "$AUTOSPEC_CLAIM_COMMENTS"
+  exit 0
+fi
+if { [ "$1" = issue ] && [ "$2" = comment ]; } || { [ "$1" = issue ] && [ "$2" = edit ]; }; then
+  git --git-dir "$AUTOSPEC_CLAIM_REMOTE" show -s --format=%B refs/autospec/claims/issue-42 |
+    grep -Fq '"state":"available"' || exit 45
+fi
+if [ "$1" = issue ] && [ "$2" = comment ]; then
+  body=''
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in --body) body="$2"; shift 2;; *) shift;; esac
+  done
+  jq --arg body "$body" '. + [{id:101,updated_at:"2999-07-25T00:00:01Z",body:$body}]' \
+    "$AUTOSPEC_CLAIM_COMMENTS" > "$AUTOSPEC_CLAIM_COMMENTS.tmp"
+  mv "$AUTOSPEC_CLAIM_COMMENTS.tmp" "$AUTOSPEC_CLAIM_COMMENTS"
+  exit 0
+fi
+if [ "$1" = issue ] && [ "$2" = edit ]; then exit 0; fi
+exit 17
+"#,
+    );
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "implementer-wait-failed",
+            "--repo",
+            "testorg/testrepo",
+            "--issue",
+            "42",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--claim-id",
+            "claim-a",
+            "--session-id",
+            "session-a",
+            "--diagnostic",
+            "stdin closed",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .env("AUTOSPEC_CLAIM_REMOTE", fixture.join("claim-remote.git"))
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .env("AUTOSPEC_GH_API_RETRIES", "1")
+        .output()
+        .expect("autospec wait-failure recovery starts");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let message = claim_ref_message(&repo, 42);
+    assert!(message.contains("\"state\":\"available\""));
+    assert!(message.contains("\"step\":\"implementer_wait_failed\""));
+    assert!(message.contains("\"claim_id\":\"claim-a\""));
 }
 
 #[test]

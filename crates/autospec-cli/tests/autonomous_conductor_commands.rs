@@ -1741,6 +1741,8 @@ fn executor_result_records_an_owner_verified_blocked_outcome() {
             "rust-foreground-conductor-1",
             "--branch",
             "autonomous/issue-42",
+            "--claim-id",
+            EXECUTOR_CLAIM_ID,
             "--outcome",
             "blocked",
             "--reason",
@@ -1762,6 +1764,93 @@ fn executor_result_records_an_owner_verified_blocked_outcome() {
     assert!(fs::read_to_string(&fixture.comments)
         .expect("read executor evidence")
         .contains("<!-- autospec-executor-result:begin -->"));
+}
+
+#[test]
+fn executor_result_blocked_and_retryable_require_expected_claim_id() {
+    for (outcome, reason, old_exit) in [
+        ("blocked", "waiting-for-review", 20),
+        ("retryable", "transient-network-error", 10),
+    ] {
+        let fixture = ForegroundFixture::new();
+        fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+        let output = fixture
+            .configured_command()
+            .args([
+                "autonomous",
+                "executor-result",
+                "--repo",
+                "test/repo",
+                "--issue",
+                "42",
+                "--worker-id",
+                "rust-foreground-conductor-1",
+                "--branch",
+                "autonomous/issue-42",
+                "--outcome",
+                outcome,
+                "--reason",
+                reason,
+            ])
+            .output()
+            .expect("record executor result without claim generation");
+
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{outcome} unexpectedly retained legacy exit {old_exit}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"malformed\""));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("--claim-id"));
+    }
+}
+
+#[test]
+fn stale_claim_generation_cannot_record_blocked_or_retryable_executor_result() {
+    for (outcome, reason) in [
+        ("blocked", "waiting-for-review"),
+        ("retryable", "transient-network-error"),
+    ] {
+        let fixture = ForegroundFixture::new();
+        fixture.seed_claim_with_id(
+            "rust-foreground-conductor-1",
+            "autonomous/issue-42",
+            "claim-generation-b",
+        );
+        let before = fixture.claim_record();
+        let output = fixture
+            .configured_command()
+            .args([
+                "autonomous",
+                "executor-result",
+                "--repo",
+                "test/repo",
+                "--issue",
+                "42",
+                "--worker-id",
+                "rust-foreground-conductor-1",
+                "--branch",
+                "autonomous/issue-42",
+                "--claim-id",
+                "claim-generation-a",
+                "--outcome",
+                outcome,
+                "--reason",
+                reason,
+            ])
+            .output()
+            .expect("record stale executor result");
+
+        assert_eq!(output.status.code(), Some(3), "{outcome}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("\"status\":\"ownership_lost\""),
+            "{outcome}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(fixture.claim_record(), before, "{outcome}");
+    }
 }
 
 #[test]
@@ -1854,6 +1943,8 @@ fn executor_result_rejects_foreign_worker_or_branch_without_mutating_claim_state
                 worker_id,
                 "--branch",
                 branch,
+                "--claim-id",
+                EXECUTOR_CLAIM_ID,
                 "--outcome",
                 "blocked",
                 "--reason",
@@ -2248,6 +2339,8 @@ fn executor_result_records_an_owner_verified_retryable_outcome() {
             "rust-foreground-conductor-1",
             "--branch",
             "autonomous/issue-42",
+            "--claim-id",
+            EXECUTOR_CLAIM_ID,
             "--outcome",
             "retryable",
             "--reason",
