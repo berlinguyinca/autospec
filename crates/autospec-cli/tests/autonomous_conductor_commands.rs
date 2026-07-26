@@ -219,6 +219,39 @@ fn foreground_source_has_no_legacy_shell_authority() {
 }
 
 #[test]
+fn native_executor_bridge_source_owns_child_supervision_contract() {
+    let source = fs::read_to_string(
+        workspace_root().join("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs"),
+    )
+    .expect("read native executor bridge");
+
+    for required in [
+        "build_implementer_prompt",
+        "supervise_harness",
+        "process_group(0)",
+        "observe_process_identity",
+        "terminate_exact_process_group",
+        "MutationSnapshot",
+        "child_output",
+        "BridgePhase::Interrupted",
+    ] {
+        assert!(
+            source.contains(required),
+            "native executor bridge omitted supervision contract: {required}"
+        );
+    }
+    assert_no_forbidden_authority(
+        &source,
+        &[
+            SourcePattern::Literal("autospec-autonomous.sh"),
+            SourcePattern::Literal("autospec-run"),
+            SourcePattern::Literal("omx autospec"),
+        ],
+        "native executor bridge",
+    );
+}
+
+#[test]
 fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() {
     let fixture = ForegroundFixture::new();
     let first = fixture
