@@ -189,38 +189,93 @@ fn bounded_child_kills_a_timed_out_process_group() {
 }
 
 #[cfg(target_os = "linux")]
-fn process_is_running(pid: i32) -> bool {
+fn process_state(pid: i32) -> Option<char> {
     let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => stat,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
         Err(error) => panic!("read process state for PID {pid}: {error}"),
     };
     let close = stat.rfind(')').expect("process stat command terminator");
-    !matches!(
-        stat[close + 1..]
-            .split_whitespace()
-            .next()
-            .expect("process stat state"),
-        "Z" | "X" | "x"
-    )
+    stat[close + 1..]
+        .split_whitespace()
+        .next()
+        .expect("process stat state")
+        .chars()
+        .next()
+}
+
+#[cfg(target_os = "linux")]
+fn process_is_running(pid: i32) -> bool {
+    !matches!(process_state(pid), None | Some('Z' | 'X' | 'x'))
+}
+
+#[cfg(target_os = "linux")]
+struct ChildFixture(Option<std::process::Child>);
+
+#[cfg(target_os = "linux")]
+impl ChildFixture {
+    fn spawn(mut command: std::process::Command) -> Self {
+        Self(Some(command.spawn().expect("spawn process fixture")))
+    }
+
+    fn pid(&self) -> i32 {
+        self.0.as_ref().expect("live process fixture").id() as i32
+    }
+
+    fn reap(&mut self) {
+        self.0
+            .take()
+            .expect("unreaped process fixture")
+            .wait()
+            .expect("reap process fixture");
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for ChildFixture {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn process_running_probe_rejects_zombies_without_hiding_live_children() {
-    let mut child = std::process::Command::new("/bin/sleep")
-        .arg("30")
-        .spawn()
-        .expect("spawn live probe fixture");
+    let mut exited = std::process::Command::new("/bin/sh");
+    exited.args(["-c", "exit 0"]);
+    let mut zombie = ChildFixture::spawn(exited);
+    let zombie_pid = zombie.pid();
+    for _ in 0..100 {
+        if process_state(zombie_pid) == Some('Z') {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        process_state(zombie_pid),
+        Some('Z'),
+        "fixture child never reached an unreaped zombie state"
+    );
     assert!(
-        process_is_running(child.id() as i32),
+        !process_is_running(zombie_pid),
+        "unreaped zombie was classified as running"
+    );
+
+    let mut sleeping = std::process::Command::new("/bin/sleep");
+    sleeping.arg("30");
+    let live = ChildFixture::spawn(sleeping);
+    assert!(
+        process_is_running(live.pid()),
         "live sleep was classified as terminated"
     );
-    child.kill().expect("terminate live probe fixture");
-    child.wait().expect("reap live probe fixture");
+
+    zombie.reap();
     assert!(
-        !process_is_running(child.id() as i32),
-        "reaped sleep was classified as running"
+        !process_is_running(zombie_pid),
+        "reaped zombie was classified as running"
     );
 }
 

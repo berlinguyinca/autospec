@@ -1177,6 +1177,10 @@ static CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER: AtomicU8 = AtomicU8::new(2);
 static LAST_SPAWN_SUPERVISOR: AtomicU32 = AtomicU32::new(0);
 #[cfg(test)]
 static LAST_SPAWN_HARNESS: AtomicU32 = AtomicU32::new(0);
+#[cfg(test)]
+static PARENT_CAPTURE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static PARENT_REAP_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 const LAUNCH_FAILPOINT_NEVER_READY: u8 = 4;
 const LAUNCH_FAILPOINT_NEVER_CLOSE_EXEC_STATUS: u8 = 5;
 const CLEANUP_FAILPOINT_SIGNAL: u8 = 10;
@@ -1428,6 +1432,53 @@ unsafe fn raw_supervisor_loop(
 #[cfg(test)]
 fn set_launch_failpoint(failpoint: LaunchFailpoint) {
     LAUNCH_FAILPOINT.store(failpoint as u8, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum ParentReapFailpoint {
+    None = 0,
+    InterruptedOnce = 1,
+    Failure = 2,
+}
+
+#[cfg(test)]
+fn set_parent_capture_failpoint(enabled: bool) {
+    PARENT_CAPTURE_FAILPOINT.store(u8::from(enabled), Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn set_parent_reap_failpoint(failpoint: ParentReapFailpoint) {
+    PARENT_REAP_FAILPOINT.store(failpoint as u8, Ordering::SeqCst);
+}
+
+#[cfg(target_os = "linux")]
+fn reap_after_capture_failure(child: Pid) -> Result<(), String> {
+    loop {
+        #[cfg(test)]
+        let result = match PARENT_REAP_FAILPOINT.load(Ordering::SeqCst) {
+            value if value == ParentReapFailpoint::InterruptedOnce as u8 => {
+                PARENT_REAP_FAILPOINT.store(ParentReapFailpoint::None as u8, Ordering::SeqCst);
+                Err(nix::errno::Errno::EINTR)
+            }
+            value if value == ParentReapFailpoint::Failure as u8 => Err(nix::errno::Errno::EIO),
+            _ => waitpid(child, None),
+        };
+        #[cfg(not(test))]
+        let result = waitpid(child, None);
+        match result {
+            Err(nix::errno::Errno::EINTR) => continue,
+            Ok(
+                nix::sys::wait::WaitStatus::Exited(..) | nix::sys::wait::WaitStatus::Signaled(..),
+            ) => return Ok(()),
+            Ok(status) => {
+                return Err(format!(
+                    "exact executor supervisor was not terminal after wait: {status:?}"
+                ));
+            }
+            Err(error) => return Err(format!("reap exact executor supervisor: {error}")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2092,6 +2143,10 @@ struct AdoptionFailure {
 #[cfg(target_os = "linux")]
 impl OwnedProcessSet {
     fn from_forked_child(pid: u32) -> Result<Self, String> {
+        #[cfg(test)]
+        if PARENT_CAPTURE_FAILPOINT.load(Ordering::SeqCst) != 0 {
+            return Err("capture forked executor ownership failpoint".to_string());
+        }
         Ok(Self {
             leader: OwnedProcess::capture_forked_child(pid)?,
             descendants: BTreeMap::new(),
@@ -2852,15 +2907,52 @@ fn spawn_blocked_harness(
         ForkResult::Parent { child } => {
             #[cfg(test)]
             LAST_SPAWN_SUPERVISOR.store(child.as_raw() as u32, Ordering::SeqCst);
-            let child_pid = u32::try_from(child.as_raw())
-                .map_err(|_| "executor child PID is negative".to_string())?;
+            // fork(2) only returns a positive child PID in the parent branch.
+            let child_pid = child.as_raw() as u32;
+            let supervisor_birth = match observe_process_birth(child_pid) {
+                Ok(birth) => birth,
+                Err(error) => {
+                    drop(accept_write);
+                    drop(barrier_write);
+                    let cleanup = reap_after_capture_failure(child);
+                    return Err(SpawnFailure {
+                        reason: error,
+                        supervisor: None,
+                        process: None,
+                        cleanup_succeeded: cleanup.is_ok(),
+                        cleanup_error: cleanup.err(),
+                    });
+                }
+            };
+            let captured_supervisor = supervisor_birth.map(|birth| {
+                Box::new(ProcessIdentity {
+                    pid: birth.pid,
+                    process_group: birth.process_group,
+                    executable: supervisor_executable.clone(),
+                    argv_digest: supervisor_argv_digest.clone(),
+                    boot_id: birth.boot_id,
+                    start_identity: birth.start_identity,
+                })
+            });
             let processes = match OwnedProcessSet::from_forked_child(child_pid) {
                 Ok(processes) => processes,
                 Err(error) => {
                     drop(accept_write);
                     drop(barrier_write);
-                    let _ = waitpid(child, None);
-                    return Err(error.into());
+                    let cleanup = reap_after_capture_failure(child);
+                    let cleanup_succeeded = cleanup.is_ok();
+                    let cleanup_error = cleanup.err();
+                    return Err(SpawnFailure {
+                        reason: error,
+                        supervisor: if cleanup_succeeded {
+                            None
+                        } else {
+                            captured_supervisor
+                        },
+                        process: None,
+                        cleanup_error,
+                        cleanup_succeeded,
+                    });
                 }
             };
             let mut spawn_guard = SpawnParentGuard::new(child, processes);
@@ -7699,6 +7791,116 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_capture_failure_retries_interrupted_exact_reap() {
+        let fixture = GitFixture::new("capture-reap-interrupted");
+        let mut state = supervision_state(&fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        super::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
+        super::set_parent_capture_failpoint(true);
+        super::set_parent_reap_failpoint(super::ParentReapFailpoint::InterruptedOnce);
+
+        let error = supervise_harness(
+            &state_path,
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &shell_invocation(&fixture.repo, "sleep 30"),
+            &snapshot,
+            supervision_config(100),
+        )
+        .expect_err("capture failure after fork");
+        super::set_parent_capture_failpoint(false);
+        super::set_parent_reap_failpoint(super::ParentReapFailpoint::None);
+
+        let supervisor = super::LAST_SPAWN_SUPERVISOR.load(Ordering::SeqCst);
+        assert!(error.contains("capture"), "{error}");
+        assert_eq!(state.phase, BridgePhase::Interrupted);
+        assert!(state.supervisor.is_none());
+        assert!(state.process.is_none());
+        assert!(
+            super::observe_process_birth(supervisor)
+                .expect("observe reaped supervisor")
+                .is_none(),
+            "EINTR retry did not reap the exact direct child"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine() {
+        nix::sys::prctl::set_child_subreaper(false).expect("clear fixture subreaper");
+        let fixture = GitFixture::new("capture-reap-quarantine");
+        let mut state = supervision_state(&fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let launches = fixture.root.join("launches");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        super::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
+        super::set_parent_capture_failpoint(true);
+        super::set_parent_reap_failpoint(super::ParentReapFailpoint::Failure);
+
+        let error = supervise_harness(
+            &state_path,
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &shell_invocation(
+                &fixture.repo,
+                &format!("printf launched > '{}'", launches.display()),
+            ),
+            &snapshot,
+            supervision_config(100),
+        )
+        .expect_err("capture plus exact reap failure");
+        let durable = PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("durable capture quarantine"),
+        )
+        .expect("strict capture quarantine");
+        let supervisor = super::LAST_SPAWN_SUPERVISOR.load(Ordering::SeqCst);
+        let mut subreaper = 0_i32;
+        // SAFETY: PR_GET_CHILD_SUBREAPER writes one integer to the supplied valid pointer.
+        let get_result = unsafe {
+            nix::libc::prctl(
+                nix::libc::PR_GET_CHILD_SUBREAPER,
+                std::ptr::addr_of_mut!(subreaper),
+                0,
+                0,
+                0,
+            )
+        };
+
+        super::set_parent_capture_failpoint(false);
+        super::set_parent_reap_failpoint(super::ParentReapFailpoint::None);
+        let _ = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(supervisor as i32), None);
+        nix::sys::prctl::set_child_subreaper(false).expect("restore fixture subreaper");
+
+        assert!(error.contains("quarantin"), "{error}");
+        assert_eq!(durable.phase, BridgePhase::Interrupted);
+        assert_eq!(
+            durable
+                .supervisor
+                .as_ref()
+                .expect("durable exact supervisor")
+                .pid,
+            supervisor
+        );
+        assert!(durable.process.is_none());
+        assert_eq!(get_result, 0);
+        assert_eq!(
+            subreaper, 1,
+            "unproven exact reap restored subreaper ownership"
+        );
+        assert!(!launches.exists(), "capture failure released the harness");
+        assert!(
+            super::observe_process_birth(supervisor)
+                .expect("final supervisor observation")
+                .is_none(),
+            "fixture cleanup left the supervisor"
+        );
     }
 
     #[cfg(target_os = "linux")]
