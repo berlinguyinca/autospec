@@ -1,12 +1,10 @@
+use std::ffi::OsString;
 use std::fs;
-use std::fs::File;
-use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-
+use std::process::Command;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::Duration;
 
 use autospec_core::runtime_env::{
     ComposeNormalizer, EnvironmentLifecycle, ResourcePlan, RuntimeContext, RuntimeManifest,
@@ -91,19 +89,6 @@ pub(crate) struct PreparedRuntimeSession {
     inner: Option<PreparedRuntimeSessionInner>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ObservedChildTerminal {
-    Exited(i32),
-    Signaled(i32),
-}
-
-pub(crate) struct RuntimeOwnedObservedChild<'session> {
-    guard: worker::ChildGuard,
-    process_group: u32,
-    terminal: Option<ObservedChildTerminal>,
-    _session: PhantomData<&'session mut PreparedRuntimeSession>,
-}
-
 struct PreparedRuntimeSessionInner {
     context: RuntimeContext,
     state: RuntimeState,
@@ -143,6 +128,28 @@ impl PreparedRuntimeSession {
             .verify_active(expected_session_id)
     }
 
+    pub(crate) fn observed_environment(&self) -> Result<Vec<(OsString, OsString)>, CommandFailure> {
+        let inner = self.inner.as_ref().ok_or_else(|| {
+            CommandFailure::diagnostic("prepared runtime session is already closed")
+        })?;
+        inner
+            .state
+            .validate_child_environment(&inner.context)
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        let mut values = inner
+            .state
+            .values()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect::<Vec<_>>();
+        if inner.bypassed {
+            values.push((
+                OsString::from("AUTOSPEC_ISOLATION_BYPASSED"),
+                OsString::from("1"),
+            ));
+        }
+        Ok(values)
+    }
+
     pub(crate) fn run(mut self, command: &[String]) -> Result<(), CommandFailure> {
         let inner = self
             .inner
@@ -169,52 +176,6 @@ impl PreparedRuntimeSession {
 
     pub(crate) fn close_verified(self) -> Result<(), CommandFailure> {
         self.abort()
-    }
-
-    pub(crate) fn spawn_observed_child<'session>(
-        &'session mut self,
-        command: &[String],
-        stdout: File,
-        stderr: File,
-    ) -> Result<RuntimeOwnedObservedChild<'session>, CommandFailure> {
-        let inner = self
-            .inner
-            .as_ref()
-            .expect("prepared runtime session is available before consumption");
-        let (program, arguments) = command
-            .split_first()
-            .ok_or_else(|| CommandFailure::diagnostic("observed runtime child command is empty"))?;
-        let mut process = Command::new(program);
-        process
-            .args(arguments)
-            .current_dir(&inner.context.repo)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout))
-            .stderr(Stdio::from(stderr));
-        worker::scrub_external_environment(&mut process);
-        worker::configure_runtime_environment(
-            &mut process,
-            &inner.context,
-            &inner.state,
-            inner.bypassed,
-        )?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            process.process_group(0);
-        }
-        let child = process.spawn().map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "could not start observed runtime child {program}: {error}"
-            ))
-        })?;
-        let process_group = child.id();
-        Ok(RuntimeOwnedObservedChild {
-            guard: worker::ChildGuard::new(child, cfg!(unix)),
-            process_group,
-            terminal: None,
-            _session: PhantomData,
-        })
     }
 }
 
@@ -273,105 +234,6 @@ fn cleanup_prepared_session(inner: PreparedRuntimeSessionInner) -> Result<(), Co
         inner.session_lease,
         true,
     )
-}
-
-impl RuntimeOwnedObservedChild<'_> {
-    pub(crate) fn poll(&mut self) -> Result<Option<ObservedChildTerminal>, CommandFailure> {
-        if let Some(terminal) = self.terminal {
-            return Ok(Some(terminal));
-        }
-        let Some(status) = self.guard.child().try_wait().map_err(|error| {
-            CommandFailure::diagnostic(format!("could not poll observed runtime child: {error}"))
-        })?
-        else {
-            return Ok(None);
-        };
-        let terminal = observed_terminal(status)?;
-        self.terminal = Some(terminal);
-        Ok(Some(terminal))
-    }
-
-    pub(crate) fn terminate(&mut self) -> Result<ObservedChildTerminal, CommandFailure> {
-        self.guard.terminate()?;
-        wait_for_observed_group_absence(self.process_group)?;
-        let terminal = ObservedChildTerminal::Signaled(9);
-        self.terminal = Some(terminal);
-        Ok(terminal)
-    }
-
-    pub(crate) fn finish(mut self) -> Result<ObservedChildTerminal, CommandFailure> {
-        let terminal = self
-            .terminal
-            .ok_or_else(|| CommandFailure::diagnostic("observed runtime child is not terminal"))?;
-        if observed_group_alive(self.process_group)? {
-            self.guard.terminate()?;
-            wait_for_observed_group_absence(self.process_group)?;
-            return Err(CommandFailure::diagnostic(
-                "RUNTIME_OBSERVED_DESCENDANT: observed child exited with a surviving descendant",
-            ));
-        }
-        self.guard.disarm();
-        Ok(terminal)
-    }
-}
-
-fn observed_terminal(
-    status: std::process::ExitStatus,
-) -> Result<ObservedChildTerminal, CommandFailure> {
-    if let Some(code) = status.code() {
-        return Ok(ObservedChildTerminal::Exited(code));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::ExitStatusExt;
-        status
-            .signal()
-            .map(ObservedChildTerminal::Signaled)
-            .ok_or_else(|| {
-                CommandFailure::diagnostic(
-                    "observed runtime child has no exit code or termination signal",
-                )
-            })
-    }
-    #[cfg(not(unix))]
-    Err(CommandFailure::diagnostic(
-        "observed runtime child has no exit code",
-    ))
-}
-
-#[cfg(unix)]
-fn observed_group_alive(process_group: u32) -> Result<bool, CommandFailure> {
-    let process_group = i32::try_from(process_group)
-        .map_err(|_| CommandFailure::diagnostic("observed process group exceeds i32"))?;
-    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(-process_group), None) {
-        Ok(()) => Ok(true),
-        Err(nix::errno::Errno::ESRCH) => Ok(false),
-        Err(error) => Err(CommandFailure::diagnostic(format!(
-            "could not inspect observed runtime process group: {error}"
-        ))),
-    }
-}
-
-#[cfg(not(unix))]
-fn observed_group_alive(_process_group: u32) -> Result<bool, CommandFailure> {
-    Ok(false)
-}
-
-fn wait_for_observed_group_absence(process_group: u32) -> Result<(), CommandFailure> {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        if !observed_group_alive(process_group)? {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    if observed_group_alive(process_group)? {
-        Err(CommandFailure::diagnostic(
-            "RUNTIME_OBSERVED_DESCENDANT: process group survived termination",
-        ))
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -1354,14 +1216,13 @@ fn print_help() {
 }
 
 #[cfg(test)]
-mod observed_child_tests {
-    use super::{prepare_runtime_session, ObservedChildTerminal};
-    use std::fs::{self, File};
-    use std::os::unix::fs::PermissionsExt;
+mod runtime_session_tests {
+    use super::prepare_runtime_session;
+    use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::sync::Mutex;
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     static ENVIRONMENT: Mutex<()> = Mutex::new(());
 
@@ -1419,14 +1280,6 @@ mod observed_child_tests {
             }
         }
 
-        fn private_output(&self, name: &str) -> File {
-            let path = self.root.join(name);
-            let file = File::create(&path).expect("output artifact");
-            let mut permissions = fs::metadata(path).expect("output metadata").permissions();
-            permissions.set_mode(0o600);
-            file
-        }
-
         fn session_record_exists(&self, session_id: &str) -> bool {
             contains_named_file(&self.state_root, &format!("{session_id}.json"))
         }
@@ -1467,93 +1320,6 @@ mod observed_child_tests {
             path.file_name().and_then(|value| value.to_str()) == Some(name)
                 || (path.is_dir() && contains_named_file(&path, name))
         })
-    }
-
-    fn wait_terminal(child: &mut super::RuntimeOwnedObservedChild) -> ObservedChildTerminal {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(terminal) = child.poll().expect("poll observed child") {
-                return terminal;
-            }
-            assert!(Instant::now() < deadline, "observed child did not exit");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    #[test]
-    fn prepared_runtime_owns_successful_observed_child_and_verified_close() {
-        let _environment = ENVIRONMENT.lock().expect("runtime test environment");
-        let fixture = RuntimeFixture::new("success", false);
-        let mut session =
-            prepare_runtime_session(&fixture.repo, "auto", "observed-test").expect("session");
-        let session_id = session.session_id().to_string();
-        let mut child = session
-            .spawn_observed_child(
-                &["/usr/bin/printf".to_string(), "observed".to_string()],
-                fixture.private_output("stdout"),
-                fixture.private_output("stderr"),
-            )
-            .expect("observed child");
-
-        assert_eq!(wait_terminal(&mut child), ObservedChildTerminal::Exited(0));
-        child.finish().expect("successful child has no descendants");
-        session.close_verified().expect("verified broker cleanup");
-        assert!(!fixture.session_record_exists(&session_id));
-    }
-
-    #[test]
-    fn prepared_runtime_terminates_timed_out_observed_child_before_verified_close() {
-        let _environment = ENVIRONMENT.lock().expect("runtime test environment");
-        let fixture = RuntimeFixture::new("timeout", false);
-        let mut session =
-            prepare_runtime_session(&fixture.repo, "auto", "observed-test").expect("session");
-        let session_id = session.session_id().to_string();
-        let mut child = session
-            .spawn_observed_child(
-                &["/usr/bin/sleep".to_string(), "30".to_string()],
-                fixture.private_output("stdout"),
-                fixture.private_output("stderr"),
-            )
-            .expect("observed child");
-
-        assert_eq!(
-            child.terminate().expect("terminate observed child"),
-            ObservedChildTerminal::Signaled(9)
-        );
-        child.finish().expect("terminated group is absent");
-        session.close_verified().expect("verified broker cleanup");
-        assert!(!fixture.session_record_exists(&session_id));
-    }
-
-    #[test]
-    fn prepared_runtime_detects_and_reaps_descendant_after_leader_termination() {
-        let _environment = ENVIRONMENT.lock().expect("runtime test environment");
-        let fixture = RuntimeFixture::new("descendant", false);
-        let descendant_pid = fixture.root.join("descendant.pid");
-        fs::write(
-            fixture.repo.join("fork.py"),
-            format!(
-                "import os, time\npid=os.fork()\nif pid == 0:\n time.sleep(30)\nelse:\n open({:?}, 'w').write(str(pid))\n",
-                descendant_pid
-            ),
-        )
-        .expect("descendant fixture");
-        let mut session =
-            prepare_runtime_session(&fixture.repo, "auto", "observed-test").expect("session");
-        let mut child = session
-            .spawn_observed_child(
-                &["/usr/bin/python3".to_string(), "fork.py".to_string()],
-                fixture.private_output("stdout"),
-                fixture.private_output("stderr"),
-            )
-            .expect("observed child");
-
-        assert_eq!(wait_terminal(&mut child), ObservedChildTerminal::Exited(0));
-        let error = child
-            .finish()
-            .expect_err("surviving descendant must fail observed command");
-        assert!(error.message.contains("descendant"), "{}", error.message);
-        session.close_verified().expect("verified broker cleanup");
     }
 
     #[test]

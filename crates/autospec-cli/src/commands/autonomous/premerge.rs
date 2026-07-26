@@ -1,7 +1,10 @@
 use std::fs;
+use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(test)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use autospec_core::autonomous::premerge::{
     evaluate_premerge, EvidenceAvailability, EvidenceVerdict, PremergeDecision,
@@ -10,6 +13,14 @@ use autospec_core::autonomous::premerge::{
 
 use super::{atomic_write, json_escape, Options, RunLayout};
 use crate::commands::{claim, CommandFailure};
+
+#[cfg(test)]
+static COMPLETE_PUBLICATION_FAILPOINT: AtomicBool = AtomicBool::new(false);
+
+#[cfg(test)]
+pub(super) fn set_complete_publication_failpoint(enabled: bool) {
+    COMPLETE_PUBLICATION_FAILPOINT.store(enabled, Ordering::SeqCst);
+}
 
 #[derive(Default)]
 struct EvaluateOptions {
@@ -167,6 +178,14 @@ pub(crate) fn persist_observed_bridge_evidence(
     if qa.lane != security.lane {
         return Err("observed QA and security evidence lanes differ".to_string());
     }
+    let live_decision = evaluate_premerge(
+        &qa.lane,
+        EvidenceAvailability::Present(qa.clone()),
+        EvidenceAvailability::Present(security.clone()),
+    );
+    if !matches!(live_decision, PremergeDecision::Pass { .. }) {
+        return Err("observed bridge evidence is not a live passing generation".to_string());
+    }
     let repo_dir = fs::canonicalize(repo_dir)
         .map_err(|error| format!("canonicalize observed evidence repository: {error}"))?;
     let branch = git_stdout(&repo_dir, &["symbolic-ref", "--quiet", "--short", "HEAD"])
@@ -206,8 +225,16 @@ pub(crate) fn persist_observed_bridge_evidence(
     let qa_body = format!("{}\n", qa.to_json());
     let security_body = format!("{}\n", security.to_json());
     let cleanup_digest = bundle.cleanup_digest()?;
-    atomic_private_write(&qa_path, &qa_body)?;
-    atomic_private_write(&security_path, &security_body)?;
+    super::executor_bridge::write_private_create_once(
+        &qa_path,
+        qa_body.as_bytes(),
+        "attempt QA evidence",
+    )?;
+    super::executor_bridge::write_private_create_once(
+        &security_path,
+        security_body.as_bytes(),
+        "attempt security evidence",
+    )?;
     let seal = serde_json::json!({
         "schema": 1,
         "lane_digest": qa.lane.lane_digest(),
@@ -218,27 +245,148 @@ pub(crate) fn persist_observed_bridge_evidence(
         "security_digest": autospec_core::autonomous::waterfall::sha256_hex(security_body.as_bytes()),
     })
     .to_string();
-    atomic_private_write(&bundle.attempt_root().join("seal.json"), &seal)?;
+    super::executor_bridge::write_private_create_once(
+        &bundle.attempt_root().join("seal.json"),
+        seal.as_bytes(),
+        "attempt evidence seal",
+    )?;
+    archive_current_complete(&repo_dir, &qa.lane.lane_digest(), &directory)?;
+    let generation = attempt_relative
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "observed evidence attempt has no generation".to_string())?;
     let complete = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "lane_digest": qa.lane.lane_digest(),
         "attempt_path": attempt_relative,
+        "generation": generation,
         "seal_digest": autospec_core::autonomous::waterfall::sha256_hex(seal.as_bytes()),
     })
     .to_string();
-    atomic_private_write(&directory.join("complete.json"), &complete)?;
+    publish_complete_marker(&directory.join("complete.json"), &complete)?;
+    #[cfg(test)]
+    if COMPLETE_PUBLICATION_FAILPOINT.load(Ordering::SeqCst) {
+        return Err("injected failure after complete marker fsync".to_string());
+    }
     let (reread_qa, reread_security) =
         read_validated_bundle(&repo_dir, &qa.lane.lane_digest()).map_err(|error| error.message)?;
     if reread_qa != EvidenceAvailability::Present(qa.clone())
         || reread_security != EvidenceAvailability::Present(security.clone())
     {
-        return Err("observed evidence changed after atomic persistence".to_string());
+        return Err(format!(
+            "observed evidence changed after atomic persistence: qa={reread_qa:?} security={reread_security:?}"
+        ));
     }
-    let decision = evaluate_premerge(&qa.lane, reread_qa, reread_security);
-    let document = decision_document(&decision);
-    persist_decision(&qa.lane.repo, &repo_dir, &decision, &document)
+    let document = decision_document(&live_decision);
+    persist_decision(&qa.lane.repo, &repo_dir, &live_decision, &document)
         .map_err(|error| error.message)?;
-    Ok(decision)
+    Ok(live_decision)
+}
+
+fn archive_current_complete(
+    repo_dir: &Path,
+    lane_digest: &str,
+    directory: &Path,
+) -> Result<(), String> {
+    let complete_path = directory.join("complete.json");
+    if !complete_path
+        .try_exists()
+        .map_err(|error| format!("inspect current complete marker: {error}"))?
+    {
+        return Ok(());
+    }
+    let (qa, security) =
+        read_validated_bundle(repo_dir, lane_digest).map_err(|error| error.message)?;
+    if !matches!(qa, EvidenceAvailability::Present(_))
+        || !matches!(security, EvidenceAvailability::Present(_))
+    {
+        return Err(format!(
+            "current complete generation is malformed and cannot be archived: qa={qa:?} security={security:?}"
+        ));
+    }
+    let body = fs::read_to_string(&complete_path)
+        .map_err(|error| format!("read current complete marker for archive: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| format!("parse current complete marker for archive: {error}"))?;
+    let attempt = value
+        .get("attempt_path")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|path| Path::new(path).file_name())
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "current complete marker has no generation".to_string())?;
+    let completed = directory.join("completed");
+    ensure_private_evidence_directory(&completed)?;
+    super::executor_bridge::write_private_create_once(
+        &completed.join(format!("{attempt}.json")),
+        body.as_bytes(),
+        "archived complete generation",
+    )
+}
+
+fn publish_complete_marker(path: &Path, contents: &str) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err(format!(
+                    "observed evidence path is not a regular file: {}",
+                    path.display()
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if metadata.permissions().mode() & 0o077 != 0 {
+                    return Err(format!(
+                        "observed evidence path is not private: {}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return super::executor_bridge::write_private_create_once(
+                path,
+                contents.as_bytes(),
+                "complete generation pointer",
+            );
+        }
+        Err(error) => {
+            return Err(format!(
+                "inspect observed evidence path {}: {error}",
+                path.display()
+            ));
+        }
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "complete generation pointer has no parent".to_string())?;
+    let temporary = path.with_file_name(format!(".complete.{}.pending", std::process::id()));
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    use std::io::Write;
+    let mut file = options
+        .open(&temporary)
+        .map_err(|error| format!("create complete generation temporary file: {error}"))?;
+    let result = (|| {
+        file.write_all(contents.as_bytes())
+            .map_err(|error| format!("write complete generation pointer: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync complete generation pointer: {error}"))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| format!("publish complete generation pointer: {error}"))?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync complete generation parent: {error}"))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn read_validated_bundle(
@@ -321,9 +469,8 @@ fn validate_complete_bundle(
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| format!("bundle marker is missing {name}"))
     };
-    if complete.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
-        || complete_field("lane_digest")? != lane_digest
-    {
+    let schema = complete.get("schema").and_then(serde_json::Value::as_u64);
+    if !matches!(schema, Some(1) | Some(2)) || complete_field("lane_digest")? != lane_digest {
         return Err("bundle marker schema or lane identity is invalid".to_string());
     }
     let qa = match qa {
@@ -357,6 +504,9 @@ fn validate_complete_bundle(
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
         return Err("bundle attempt path is not attempts/<24 lowercase hex>".to_string());
+    }
+    if schema == Some(2) && complete_field("generation")? != components[1] {
+        return Err("bundle generation does not match its attempt selector".to_string());
     }
     let attempt_root = directory.join(attempt_relative);
     let intent_body = fs::read_to_string(attempt_root.join("intent.json"))
@@ -567,76 +717,6 @@ fn ensure_private_evidence_directory(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-fn atomic_private_write(path: &Path, contents: &str) -> Result<(), String> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(format!(
-                    "observed evidence path is not a regular file: {}",
-                    path.display()
-                ));
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                if metadata.permissions().mode() & 0o077 != 0 {
-                    return Err(format!(
-                        "observed evidence path is not private: {}",
-                        path.display()
-                    ));
-                }
-            }
-            let existing = fs::read_to_string(path)
-                .map_err(|error| format!("read observed evidence for recovery: {error}"))?;
-            if existing == contents {
-                return Ok(());
-            }
-            return Err(format!(
-                "observed evidence path already exists with different contents: {}",
-                path.display()
-            ));
-        }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "inspect observed evidence path {}: {error}",
-                path.display()
-            ));
-        }
-    }
-    let temporary = path.with_file_name(format!(
-        ".{}.{}.pending",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("evidence"),
-        std::process::id()
-    ));
-    let mut options = fs::OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    use std::io::Write;
-    let mut file = options
-        .open(&temporary)
-        .map_err(|error| format!("create observed evidence temporary file: {error}"))?;
-    let result = (|| {
-        file.write_all(contents.as_bytes())
-            .map_err(|error| format!("write observed evidence: {error}"))?;
-        file.sync_all()
-            .map_err(|error| format!("sync observed evidence: {error}"))?;
-        fs::rename(&temporary, path)
-            .map_err(|error| format!("publish observed evidence: {error}"))?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
 }
 
 fn unix_now() -> u64 {
