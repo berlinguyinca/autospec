@@ -87,6 +87,7 @@ fn run_state(args: &[String]) -> Result<(), CommandFailure> {
         }
         [command, rest @ ..] if command == "read" => read(rest),
         [command, rest @ ..] if command == "upsert" => upsert(rest),
+        [command, rest @ ..] if command == "refresh" => refresh(rest),
         [command, rest @ ..] if command == "clear" => clear(rest),
         [command, rest @ ..] if command == "reconcile-linked-pr" => reconcile_linked_pr(rest),
         [command, rest @ ..] if command == "recover-stale-startup" => recover_stale_startup(rest),
@@ -526,6 +527,105 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
     );
     println!("{}", record.to_json());
     Ok(())
+}
+
+fn refresh(args: &[String]) -> Result<(), CommandFailure> {
+    let options = parse_refresh_options(args)?;
+    let repo = match options.repo {
+        Some(repo) => repo,
+        None => infer_repo()?,
+    };
+    match refresh_claim_generation(
+        &repo,
+        options.issue,
+        &options.worker_id,
+        &options.claim_id,
+        &options.branch,
+        &options.step,
+        options.pr.as_deref(),
+    )? {
+        ClaimRefreshResult::Refreshed(record) => {
+            println!("{}", record.to_json());
+            Ok(())
+        }
+        ClaimRefreshResult::OwnershipLost => {
+            println!(
+                "{{\"refreshed\":false,\"repo\":\"{}\",\"issue\":{},\"reason\":\"ownership_lost\"}}",
+                json_escape(&repo),
+                options.issue
+            );
+            Err(CommandFailure::status(String::new(), 2))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClaimRefreshResult {
+    Refreshed(Box<RunStateRecord>),
+    OwnershipLost,
+}
+
+/// Renew one exact claim generation without changing its immutable identity.
+///
+/// The lowest marked GitHub comment is the linearization point. An expired
+/// heartbeat may still be renewed when that exact generation remains
+/// authoritative; any changed owner, branch, claim ID, terminal marker, or
+/// post-write takeover makes the caller inert.
+pub(crate) fn refresh_claim_generation(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    claim_id: &str,
+    branch: &str,
+    step: &str,
+    pull_request: Option<&str>,
+) -> Result<ClaimRefreshResult, CommandFailure> {
+    let comments = list_comments(repo, issue)?;
+    if terminal_merged_exists(&comments) {
+        return Ok(ClaimRefreshResult::OwnershipLost);
+    }
+    let Some(selected) = select_run_state(&comments, repo, issue) else {
+        return Ok(ClaimRefreshResult::OwnershipLost);
+    };
+    if !has_exact_claim_generation(&selected.record, worker_id, claim_id, branch) {
+        return Ok(ClaimRefreshResult::OwnershipLost);
+    }
+
+    let comment_id = selected.comment_id;
+    let mut refreshed = selected.record;
+    refreshed.updated_at = utc_now_iso()?;
+    refreshed.step = step.to_string();
+    if let Some(pull_request) = pull_request {
+        refreshed.pr = pull_request.to_string();
+    }
+    patch_comment(repo, comment_id, &refreshed.to_marked_comment())?;
+
+    let confirmed_comments = list_comments(repo, issue)?;
+    if terminal_merged_exists(&confirmed_comments) {
+        return Ok(ClaimRefreshResult::OwnershipLost);
+    }
+    let Some(confirmed) = select_run_state(&confirmed_comments, repo, issue) else {
+        return Ok(ClaimRefreshResult::OwnershipLost);
+    };
+    if confirmed.comment_id != comment_id
+        || !has_exact_claim_generation(&confirmed.record, worker_id, claim_id, branch)
+        || confirmed.record != refreshed
+    {
+        return Ok(ClaimRefreshResult::OwnershipLost);
+    }
+    Ok(ClaimRefreshResult::Refreshed(Box::new(confirmed.record)))
+}
+
+fn has_exact_claim_generation(
+    record: &RunStateRecord,
+    worker_id: &str,
+    claim_id: &str,
+    branch: &str,
+) -> bool {
+    record.state == "claimed"
+        && record.worker_id == worker_id
+        && record.claim_id.as_deref() == Some(claim_id)
+        && record.branch == branch
 }
 
 fn upsert_record(
@@ -1252,6 +1352,17 @@ struct UpsertOptions {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct RefreshOptions {
+    issue: u64,
+    repo: Option<String>,
+    worker_id: String,
+    claim_id: String,
+    branch: String,
+    step: String,
+    pr: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct ReconcileOptions {
     issue: u64,
     repo: Option<String>,
@@ -1495,6 +1606,78 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
         pr,
         paths,
         ttl_seconds,
+    })
+}
+
+fn parse_refresh_options(args: &[String]) -> Result<RefreshOptions, CommandFailure> {
+    let mut issue = None;
+    let mut repo = None;
+    let mut worker_id = None;
+    let mut claim_id = None;
+    let mut branch = None;
+    let mut step = None;
+    let mut pr = None;
+    let mut index = 0;
+    while index < args.len() {
+        let option = args[index].as_str();
+        let value = match option {
+            "--issue" | "--repo" | "--worker-id" | "--claim-id" | "--branch" | "--step"
+            | "--pr" => argument_value(args, &mut index, option)?,
+            _ => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autospec claim state refresh option: {option}"
+                )))
+            }
+        };
+        match option {
+            "--issue" => {
+                let parsed = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        CommandFailure::diagnostic("--issue must be a positive integer")
+                    })?;
+                set_once(
+                    &mut issue,
+                    parsed,
+                    "--issue accepts exactly one issue number",
+                )?;
+            }
+            "--repo" => set_once(&mut repo, value, "--repo accepts exactly one repository")?,
+            "--worker-id" => set_once(
+                &mut worker_id,
+                value,
+                "--worker-id accepts exactly one worker identifier",
+            )?,
+            "--claim-id" => set_once(
+                &mut claim_id,
+                value,
+                "--claim-id accepts exactly one claim generation",
+            )?,
+            "--branch" => set_once(&mut branch, value, "--branch accepts exactly one branch")?,
+            "--step" => set_once(&mut step, value, "--step accepts exactly one step")?,
+            "--pr" => set_once(&mut pr, value, "--pr accepts exactly one pull request")?,
+            _ => unreachable!("options were matched before parsing"),
+        }
+        index += 1;
+    }
+    Ok(RefreshOptions {
+        issue: issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?,
+        repo,
+        worker_id: worker_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--worker-id is required"))?,
+        claim_id: claim_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
+        branch: branch
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--branch is required"))?,
+        step: step
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--step is required"))?,
+        pr,
     })
 }
 
@@ -2516,13 +2699,13 @@ fn unavailable_claim_with_observed_owner<T>(
 
 fn print_help() {
     println!(
-        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
+        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
     );
 }
 
 fn print_state_help() {
     println!(
-        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state clear --issue <N> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> [--repo OWNER/REPO] [--worker-id ID]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the lowest-ID authoritative run-state comment\n    upsert                 Patch or create the lowest-ID authoritative run-state comment\n    clear                  Delete marked run-state comments\n    reconcile-linked-pr    Record a linked PR before post-PR handoff recovery\n    recover-stale-startup  Release only an evidenceless stale startup claim"
+        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim state clear --issue <N> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> [--repo OWNER/REPO] [--worker-id ID]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the lowest-ID authoritative run-state comment\n    upsert                 Patch or create the lowest-ID authoritative run-state comment\n    refresh                Renew one exact claim generation and confirm ownership\n    clear                  Delete marked run-state comments\n    reconcile-linked-pr    Record a linked PR before post-PR handoff recovery\n    recover-stale-startup  Release only an evidenceless stale startup claim"
     );
 }
 

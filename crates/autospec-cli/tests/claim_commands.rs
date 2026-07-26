@@ -59,6 +59,269 @@ fn claim_run_state(stdout: &[u8]) -> RunStateRecord {
     RunStateRecord::parse_json(text.trim()).expect("claim state stdout is a run-state JSON object")
 }
 
+fn claim_refresh_comments(
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    server_updated_at: &str,
+) -> String {
+    format!(
+        r#"[{{"id":100,"updated_at":"{server_updated_at}","body":"<!-- autospec-run-state:begin -->\n{{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"{worker_id}\",\"state\":\"claimed\",\"branch\":\"{branch}\",\"pr\":\"11\",\"step\":\"implementing\",\"paths\":[\"src/lib.rs\"],\"claimed_at\":\"2026-07-14T00:00:00Z\",\"updated_at\":\"2026-07-14T00:00:00Z\",\"ttl_seconds\":1,\"claim_id\":\"{claim_id}\"}}\n<!-- autospec-run-state:end -->"}}]"#
+    )
+}
+
+fn run_claim_refresh(
+    fixture: &std::path::Path,
+    comments: &std::path::Path,
+    worker_id: &str,
+    branch: &str,
+    claim_id: &str,
+    mode: &str,
+) -> std::process::Output {
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+printf 'CALL\n' >> "$AUTOSPEC_CLAIM_LOG"
+printf '%s\n' "$@" >> "$AUTOSPEC_CLAIM_LOG"
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then
+  cat "$AUTOSPEC_CLAIM_COMMENTS"
+  exit 0
+fi
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/comments/100 ]; then
+  body=''
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -f) body="${2#body=}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  if [ "$AUTOSPEC_CLAIM_REFRESH_MODE" = takeover ]; then
+    jq --arg body "$AUTOSPEC_CLAIM_TAKEOVER_BODY" \
+      '.[0].body=$body | .[0].updated_at="2030-01-01T00:00:01Z"' \
+      "$AUTOSPEC_CLAIM_COMMENTS" > "$AUTOSPEC_CLAIM_COMMENTS.tmp"
+  else
+    jq --arg body "$body" \
+      '.[0].body=$body | .[0].updated_at="2030-01-01T00:00:00Z"' \
+      "$AUTOSPEC_CLAIM_COMMENTS" > "$AUTOSPEC_CLAIM_COMMENTS.tmp"
+  fi
+  mv "$AUTOSPEC_CLAIM_COMMENTS.tmp" "$AUTOSPEC_CLAIM_COMMENTS"
+  exit 0
+fi
+exit 17
+"#,
+    );
+    let takeover_body = claim_refresh_comments(
+        "worker-takeover",
+        "feat/takeover",
+        "claim-takeover",
+        "2030-01-01T00:00:01Z",
+    );
+
+    autospec()
+        .args([
+            "claim",
+            "state",
+            "refresh",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            worker_id,
+            "--branch",
+            branch,
+            "--claim-id",
+            claim_id,
+            "--step",
+            "verification",
+            "--pr",
+            "17",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_COMMENTS", comments)
+        .env("AUTOSPEC_CLAIM_REFRESH_MODE", mode)
+        .env("AUTOSPEC_CLAIM_TAKEOVER_BODY", takeover_body)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .env("AUTOSPEC_GH_API_RETRIES", "1")
+        .output()
+        .expect("autospec claim state refresh starts")
+}
+
+#[test]
+fn claim_state_refresh_updates_only_heartbeat_step_and_pr_for_the_exact_generation() {
+    // Break caught: renewal reconstructing or replacing immutable claim identity fields.
+    let fixture = temp_dir("autospec-claim-refresh-exact");
+    let comments = fixture.join("comments.json");
+    std::fs::write(
+        &comments,
+        claim_refresh_comments("worker-a", "feat/test", "claim-a", "2026-07-14T00:00:00Z"),
+    )
+    .expect("claim comments fixture");
+
+    let output = run_claim_refresh(
+        &fixture,
+        &comments,
+        "worker-a",
+        "feat/test",
+        "claim-a",
+        "apply",
+    );
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+    let state = claim_run_state(&output.stdout);
+    assert_eq!(state.worker_id, "worker-a");
+    assert_eq!(state.branch, "feat/test");
+    assert_eq!(state.claim_id.as_deref(), Some("claim-a"));
+    assert_eq!(state.claimed_at, "2026-07-14T00:00:00Z");
+    assert_eq!(state.paths, ["src/lib.rs"]);
+    assert_eq!(state.ttl_seconds, 1);
+    assert_eq!(state.step, "verification");
+    assert_eq!(state.pr, "17");
+    assert_ne!(state.updated_at, "2026-07-14T00:00:00Z");
+    let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh call log");
+    assert_eq!(
+        calls
+            .matches("repos/testorg/testrepo/issues/comments/100")
+            .count(),
+        1
+    );
+    assert_eq!(
+        calls
+            .matches("repos/testorg/testrepo/issues/42/comments")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn claim_state_refresh_rejects_a_stale_claim_generation_before_patch() {
+    // Break caught: an old conductor refreshing a successor's claim by worker/branch alone.
+    let fixture = temp_dir("autospec-claim-refresh-stale-generation");
+    let comments = fixture.join("comments.json");
+    std::fs::write(
+        &comments,
+        claim_refresh_comments(
+            "worker-a",
+            "feat/test",
+            "claim-successor",
+            "2026-07-14T00:00:00Z",
+        ),
+    )
+    .expect("claim comments fixture");
+
+    let output = run_claim_refresh(
+        &fixture,
+        &comments,
+        "worker-a",
+        "feat/test",
+        "claim-a",
+        "apply",
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"ownership_lost\""));
+    let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh call log");
+    assert!(!calls.contains("repos/testorg/testrepo/issues/comments/100"));
+}
+
+#[test]
+fn claim_state_refresh_rejects_changed_worker_branch_and_claim_id() {
+    // Break caught: partial identity comparison allowing any one foreign owner field.
+    for (label, worker_id, branch, claim_id) in [
+        ("worker", "worker-b", "feat/test", "claim-a"),
+        ("branch", "worker-a", "feat/other", "claim-a"),
+        ("claim", "worker-a", "feat/test", "claim-b"),
+    ] {
+        let fixture = temp_dir(&format!("autospec-claim-refresh-{label}"));
+        let comments = fixture.join("comments.json");
+        std::fs::write(
+            &comments,
+            claim_refresh_comments("worker-a", "feat/test", "claim-a", "2026-07-14T00:00:00Z"),
+        )
+        .expect("claim comments fixture");
+
+        let output = run_claim_refresh(&fixture, &comments, worker_id, branch, claim_id, "apply");
+
+        assert_eq!(output.status.code(), Some(2), "{label}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"ownership_lost\""),
+            "{label}"
+        );
+        let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh call log");
+        assert!(
+            !calls.contains("repos/testorg/testrepo/issues/comments/100"),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+fn claim_state_refresh_renews_an_exact_generation_after_its_ttl_elapsed() {
+    // Break caught: freshness-gating the rightful owner so a slow implementation cannot renew.
+    let fixture = temp_dir("autospec-claim-refresh-expired-heartbeat");
+    let comments = fixture.join("comments.json");
+    std::fs::write(
+        &comments,
+        claim_refresh_comments("worker-a", "feat/test", "claim-a", "2000-01-01T00:00:00Z"),
+    )
+    .expect("expired claim comments fixture");
+
+    let output = run_claim_refresh(
+        &fixture,
+        &comments,
+        "worker-a",
+        "feat/test",
+        "claim-a",
+        "apply",
+    );
+
+    assert!(output.status.success());
+    assert_eq!(
+        claim_run_state(&output.stdout).claim_id.as_deref(),
+        Some("claim-a")
+    );
+}
+
+#[test]
+fn claim_state_refresh_reports_takeover_when_confirmation_observes_a_successor() {
+    // Break caught: treating a successful PATCH exit as ownership proof after a concurrent takeover.
+    let fixture = temp_dir("autospec-claim-refresh-takeover");
+    let comments = fixture.join("comments.json");
+    std::fs::write(
+        &comments,
+        claim_refresh_comments("worker-a", "feat/test", "claim-a", "2026-07-14T00:00:00Z"),
+    )
+    .expect("claim comments fixture");
+
+    let output = run_claim_refresh(
+        &fixture,
+        &comments,
+        "worker-a",
+        "feat/test",
+        "claim-a",
+        "takeover",
+    );
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"ownership_lost\""));
+    let persisted = std::fs::read_to_string(&comments).expect("takeover comments");
+    assert!(persisted.contains("claim-takeover"));
+    let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh call log");
+    assert_eq!(
+        calls
+            .matches("repos/testorg/testrepo/issues/comments/100")
+            .count(),
+        1
+    );
+}
+
 /// One `gh api <endpoint> [-X <method>]` invocation recovered from the call
 /// log the fake `gh` script appends (one CLI argument per line, invocations
 /// concatenated with no delimiter between them).

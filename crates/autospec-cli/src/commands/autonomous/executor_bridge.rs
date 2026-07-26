@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::commands::claim::{refresh_claim_generation, ClaimRefreshResult};
 use autospec_core::autonomous::waterfall::sha256_hex;
 #[cfg(unix)]
 use nix::fcntl::OFlag;
@@ -420,6 +421,52 @@ pub(crate) enum BridgePhase {
     Implementing,
     ImplementationComplete,
     Interrupted,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ClaimRenewalPhase {
+    Implementation,
+    Verification,
+    CiWait,
+    Review,
+}
+
+impl ClaimRenewalPhase {
+    fn as_step(self) -> &'static str {
+        match self {
+            Self::Implementation => "implementing",
+            Self::Verification => "verification",
+            Self::CiWait => "ci_wait",
+            Self::Review => "review",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BridgeClaimOwnership {
+    Refreshed,
+    Lost,
+}
+
+pub(crate) fn refresh_bridge_claim(
+    state: &PersistedInvocation,
+    phase: ClaimRenewalPhase,
+) -> Result<BridgeClaimOwnership, String> {
+    let pull_request = state.pr.map(|number| number.to_string());
+    refresh_claim_generation(
+        &state.identity.repository,
+        state.identity.issue,
+        &state.identity.worker_id,
+        &state.identity.claim_id,
+        &state.identity.branch,
+        phase.as_step(),
+        pull_request.as_deref(),
+    )
+    .map_err(|error| error.message)
+    .map(|result| match result {
+        ClaimRefreshResult::Refreshed(_) => BridgeClaimOwnership::Refreshed,
+        ClaimRefreshResult::OwnershipLost => BridgeClaimOwnership::Lost,
+    })
 }
 
 impl BridgePhase {
@@ -969,6 +1016,63 @@ pub(crate) enum SupervisionOutcome {
     AlreadyRunning,
     Exited { exit_code: i32 },
     Stalled,
+    OwnershipLost,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ClaimRenewalSchedule {
+    Disabled,
+    Every {
+        interval: Duration,
+        refreshed_at: Instant,
+    },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SupervisionPolicy {
+    config: SupervisionConfig,
+    renewal: ClaimRenewalSchedule,
+}
+
+impl ClaimRenewalSchedule {
+    fn enabled(interval: Duration) -> Result<Self, String> {
+        if interval.is_zero() {
+            return Err("executor claim renewal interval must be non-zero".to_string());
+        }
+        Ok(Self::Every {
+            interval,
+            refreshed_at: Instant::now(),
+        })
+    }
+
+    fn is_enabled(self) -> bool {
+        matches!(self, Self::Every { .. })
+    }
+
+    fn is_due(self) -> bool {
+        match self {
+            Self::Disabled => false,
+            Self::Every {
+                interval,
+                refreshed_at,
+            } => refreshed_at.elapsed() >= interval,
+        }
+    }
+
+    fn mark_refreshed(&mut self) {
+        if let Self::Every { refreshed_at, .. } = self {
+            *refreshed_at = Instant::now();
+        }
+    }
+}
+
+fn claim_renewal_interval() -> Duration {
+    let seconds = std::env::var("AUTOSPEC_CLAIM_LEASE_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(10_800);
+    Duration::from_secs((seconds / 3).max(1))
 }
 
 const OUTPUT_LINE_LIMIT: usize = 4_096;
@@ -1407,7 +1511,15 @@ pub(crate) fn supervise_resolved_harness(
         .resolved
         .invocation(&worktree, launch.artifact, launch.prompt)?;
     let validated = validate_invocation(&invocation, &worktree)?;
-    supervise_validated_harness(state_path, event_log, state, &validated, snapshot, config)
+    supervise_validated_harness_with_claim_renewal(
+        state_path,
+        event_log,
+        state,
+        &validated,
+        snapshot,
+        config,
+        ClaimRenewalSchedule::enabled(claim_renewal_interval())?,
+    )
 }
 
 fn validate_launch_artifact(worktree: &Path, artifact: &Path) -> Result<(), String> {
@@ -1498,9 +1610,47 @@ fn supervise_harness(
     fixture.current_dir = fs::canonicalize(&fixture.current_dir)
         .map_err(|error| format!("canonicalize fixture current directory: {error}"))?;
     let validated = validate_invocation(&fixture, &expected_worktree)?;
-    supervise_validated_harness(state_path, event_log, state, &validated, snapshot, config)
+    supervise_validated_harness_with_claim_renewal(
+        state_path,
+        event_log,
+        state,
+        &validated,
+        snapshot,
+        config,
+        ClaimRenewalSchedule::Disabled,
+    )
 }
 
+#[cfg(test)]
+fn supervise_harness_with_claim_renewal(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    harness: &HarnessInvocation,
+    snapshot: &MutationSnapshot,
+    config: SupervisionConfig,
+    interval: Duration,
+) -> Result<SupervisionOutcome, String> {
+    let expected_worktree = fs::canonicalize(&state.identity.worktree)
+        .map_err(|error| format!("canonicalize fixture worktree: {error}"))?;
+    let mut fixture = harness.clone();
+    fixture.program = fs::canonicalize(&fixture.program)
+        .map_err(|error| format!("canonicalize fixture program: {error}"))?;
+    fixture.current_dir = fs::canonicalize(&fixture.current_dir)
+        .map_err(|error| format!("canonicalize fixture current directory: {error}"))?;
+    let validated = validate_invocation(&fixture, &expected_worktree)?;
+    supervise_validated_harness_with_claim_renewal(
+        state_path,
+        event_log,
+        state,
+        &validated,
+        snapshot,
+        config,
+        ClaimRenewalSchedule::enabled(interval)?,
+    )
+}
+
+#[cfg(test)]
 fn supervise_validated_harness(
     state_path: &Path,
     event_log: &Path,
@@ -1508,6 +1658,26 @@ fn supervise_validated_harness(
     harness: &ValidatedInvocation,
     snapshot: &MutationSnapshot,
     config: SupervisionConfig,
+) -> Result<SupervisionOutcome, String> {
+    supervise_validated_harness_with_claim_renewal(
+        state_path,
+        event_log,
+        state,
+        harness,
+        snapshot,
+        config,
+        ClaimRenewalSchedule::Disabled,
+    )
+}
+
+fn supervise_validated_harness_with_claim_renewal(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    harness: &ValidatedInvocation,
+    snapshot: &MutationSnapshot,
+    config: SupervisionConfig,
+    mut renewal: ClaimRenewalSchedule,
 ) -> Result<SupervisionOutcome, String> {
     if config.stall_timeout.is_zero() || config.poll_interval.is_zero() {
         return Err("executor supervision intervals must be non-zero".to_string());
@@ -1524,7 +1694,7 @@ fn supervise_validated_harness(
                     &expected_supervisor,
                     expected_process.as_ref(),
                     snapshot,
-                    config,
+                    SupervisionPolicy { config, renewal },
                 )
             }
             Some(_) => Err(
@@ -1557,10 +1727,22 @@ fn supervise_validated_harness(
         let expected = expected.clone();
         return match observe_process_identity(expected.pid, &expected.argv_digest)? {
             Some(observed) if expected.matches(&observed) => supervise_adopted_process(
-                state_path, event_log, state, &expected, None, snapshot, config,
+                state_path,
+                event_log,
+                state,
+                &expected,
+                None,
+                snapshot,
+                SupervisionPolicy { config, renewal },
             ),
             Some(observed) if expected.same_birth(&observed) => supervise_adopted_process(
-                state_path, event_log, state, &expected, None, snapshot, config,
+                state_path,
+                event_log,
+                state,
+                &expected,
+                None,
+                snapshot,
+                SupervisionPolicy { config, renewal },
             ),
             Some(_) => Err(
                 "executor child identity mismatch; refusing duplicate launch or signal".to_string(),
@@ -1587,7 +1769,22 @@ fn supervise_validated_harness(
             }
         };
     }
-    launch_and_supervise(state_path, event_log, state, harness, snapshot, config)
+    if renewal.is_enabled()
+        && refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)?
+            == BridgeClaimOwnership::Lost
+    {
+        record_claim_ownership_loss(state_path, event_log, state)?;
+        return Ok(SupervisionOutcome::OwnershipLost);
+    }
+    renewal.mark_refreshed();
+    launch_and_supervise(
+        state_path,
+        event_log,
+        state,
+        harness,
+        snapshot,
+        SupervisionPolicy { config, renewal },
+    )
 }
 
 #[cfg(unix)]
@@ -2419,8 +2616,10 @@ fn launch_and_supervise(
     state: &mut PersistedInvocation,
     harness: &ValidatedInvocation,
     snapshot: &MutationSnapshot,
-    config: SupervisionConfig,
+    policy: SupervisionPolicy,
 ) -> Result<SupervisionOutcome, String> {
+    let config = policy.config;
+    let mut renewal = policy.renewal;
     state.phase = BridgePhase::Pending;
     state.supervisor = None;
     state.process = None;
@@ -2509,6 +2708,18 @@ fn launch_and_supervise(
         }
         if readers.flush_if_due(state_path, event_log, state, false)? {
             last_progress = Instant::now();
+        }
+        if renewal.is_due() {
+            match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)? {
+                BridgeClaimOwnership::Refreshed => renewal.mark_refreshed(),
+                BridgeClaimOwnership::Lost => {
+                    terminate_owned_forked_process_group(&process, guard.child_mut())?;
+                    readers.poll()?;
+                    readers.flush_if_due(state_path, event_log, state, true)?;
+                    record_claim_ownership_loss(state_path, event_log, state)?;
+                    return Ok(SupervisionOutcome::OwnershipLost);
+                }
+            }
         }
 
         match observe_process_identity(process.pid, &process.argv_digest)? {
@@ -2602,8 +2813,10 @@ fn supervise_adopted_process(
     anchor: &ProcessIdentity,
     harness: Option<&ProcessIdentity>,
     snapshot: &MutationSnapshot,
-    config: SupervisionConfig,
+    policy: SupervisionPolicy,
 ) -> Result<SupervisionOutcome, String> {
+    let config = policy.config;
+    let mut renewal = policy.renewal;
     #[cfg(target_os = "linux")]
     let owned_processes = if harness.is_some() {
         OwnedProcessSet::adopt_supervised(anchor, harness)?
@@ -2649,6 +2862,16 @@ fn supervise_adopted_process(
         .unwrap_or_else(Instant::now);
 
     let result = (|| -> Result<SupervisionOutcome, String> {
+        if renewal.is_enabled() {
+            match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)? {
+                BridgeClaimOwnership::Refreshed => renewal.mark_refreshed(),
+                BridgeClaimOwnership::Lost => {
+                    guard.terminate()?;
+                    record_claim_ownership_loss(state_path, event_log, state)?;
+                    return Ok(SupervisionOutcome::OwnershipLost);
+                }
+            }
+        }
         append_executor_event(event_log, state, "child_adopted", None)?;
         loop {
             thread::sleep(config.poll_interval);
@@ -2667,6 +2890,18 @@ fn supervise_adopted_process(
             fail_launch_at("adopt-log")?;
             if readers.flush_if_due(state_path, event_log, state, false)? {
                 last_progress = Instant::now();
+            }
+            if renewal.is_due() {
+                match refresh_bridge_claim(state, ClaimRenewalPhase::Implementation)? {
+                    BridgeClaimOwnership::Refreshed => renewal.mark_refreshed(),
+                    BridgeClaimOwnership::Lost => {
+                        guard.terminate()?;
+                        readers.poll()?;
+                        readers.flush_if_due(state_path, event_log, state, true)?;
+                        record_claim_ownership_loss(state_path, event_log, state)?;
+                        return Ok(SupervisionOutcome::OwnershipLost);
+                    }
+                }
             }
 
             if let Some(exit_code) = read_executor_exit_status(&sinks.exit_status)? {
@@ -3093,6 +3328,26 @@ fn frame_output_bytes(
         }
     }
     bytes.len()
+}
+
+fn record_claim_ownership_loss(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+) -> Result<(), String> {
+    state.phase = BridgePhase::Interrupted;
+    state.supervisor = None;
+    state.process = None;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    append_executor_event(
+        event_log,
+        state,
+        "claim_ownership_lost",
+        Some(serde_json::json!({
+            "reason": "exact claim generation changed; executor is inert"
+        })),
+    )
 }
 
 fn append_executor_event(
@@ -4064,6 +4319,18 @@ mod tests {
         let path = root.join("harness-runtime-aliases.tsv");
         fs::write(&path, body).expect("write harness alias table");
         path
+    }
+
+    fn write_executable(path: &Path, body: &str) {
+        fs::write(path, body).expect("write executable fixture");
+        #[cfg(unix)]
+        {
+            let mut permissions = fs::metadata(path)
+                .expect("executable fixture metadata")
+                .permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(path, permissions).expect("executable fixture mode");
+        }
     }
 
     fn environment(table: &Path) -> BTreeMap<String, OsString> {
@@ -6144,6 +6411,160 @@ mod tests {
         )
         .expect("strict invocation");
         assert_eq!(recovered.phase, BridgePhase::ImplementationComplete);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_stops_before_more_remote_work_after_claim_takeover() {
+        // Break caught: a long-running implementation continuing after its exact claim was replaced.
+        let fixture = GitFixture::new("supervise-claim-takeover");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let bin = fixture.root.join("bin");
+        let comments = fixture.root.join("comments.json");
+        let reads = fixture.root.join("reads");
+        let gh_log = fixture.root.join("gh.log");
+        fs::create_dir(&bin).expect("claim fixture bin");
+        fs::write(&reads, "0\n").expect("claim read counter");
+        let claimed = autospec_core::claim::RunStateRecord::new(
+            "owner/repo",
+            42,
+            "worker-1",
+            "claimed",
+            "feat/autonomous-issue-42",
+            "",
+            "claimed",
+            Vec::new(),
+            "2026-07-14T00:00:00Z",
+            "2026-07-14T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-42");
+        fs::write(
+            &comments,
+            serde_json::json!([{
+                "id": 100,
+                "updated_at": "2026-07-14T00:00:00Z",
+                "body": claimed.to_marked_comment()
+            }])
+            .to_string(),
+        )
+        .expect("claim fixture");
+        write_executable(
+            &bin.join("gh"),
+            r#"#!/bin/sh
+set -eu
+printf 'CALL\n' >> "$AUTOSPEC_BRIDGE_GH_LOG"
+printf '%s\n' "$@" >> "$AUTOSPEC_BRIDGE_GH_LOG"
+if [ "$1" = api ] && [ "$2" = repos/owner/repo/issues/42/comments ]; then
+  count=$(cat "$AUTOSPEC_BRIDGE_READS")
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$AUTOSPEC_BRIDGE_READS"
+  if [ "$count" -eq 3 ]; then
+    printf '%s\n' "$AUTOSPEC_BRIDGE_TAKEOVER" > "$AUTOSPEC_BRIDGE_COMMENTS"
+  fi
+  cat "$AUTOSPEC_BRIDGE_COMMENTS"
+  exit 0
+fi
+if [ "$1" = api ] && [ "$2" = repos/owner/repo/issues/comments/100 ]; then
+  body=''
+  shift 2
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -f) body="${2#body=}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  jq --arg body "$body" \
+    '.[0].body=$body | .[0].updated_at="2030-01-01T00:00:00Z"' \
+    "$AUTOSPEC_BRIDGE_COMMENTS" > "$AUTOSPEC_BRIDGE_COMMENTS.tmp"
+  mv "$AUTOSPEC_BRIDGE_COMMENTS.tmp" "$AUTOSPEC_BRIDGE_COMMENTS"
+  exit 0
+fi
+exit 19
+"#,
+        );
+        let takeover_record = autospec_core::claim::RunStateRecord::new(
+            "owner/repo",
+            42,
+            "worker-2",
+            "claimed",
+            "feat/takeover",
+            "",
+            "claimed",
+            Vec::new(),
+            "2030-01-01T00:00:01Z",
+            "2030-01-01T00:00:01Z",
+            1,
+        )
+        .with_claim_id("claim-takeover");
+        let takeover = serde_json::json!([{
+            "id": 100,
+            "updated_at": "2030-01-01T00:00:01Z",
+            "body": takeover_record.to_marked_comment()
+        }])
+        .to_string();
+        let original_path = std::env::var_os("PATH");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                original_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
+        );
+        std::env::set_var("AUTOSPEC_BRIDGE_GH_LOG", &gh_log);
+        std::env::set_var("AUTOSPEC_BRIDGE_COMMENTS", &comments);
+        std::env::set_var("AUTOSPEC_BRIDGE_READS", &reads);
+        std::env::set_var("AUTOSPEC_BRIDGE_TAKEOVER", &takeover);
+        std::env::set_var("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0");
+
+        let outcome = super::supervise_harness_with_claim_renewal(
+            &state_path,
+            &event_log,
+            &mut state,
+            &shell_invocation(&fixture.repo, "printf 'started\\n'; sleep 30"),
+            &snapshot,
+            supervision_config(2_000),
+            Duration::from_millis(20),
+        );
+
+        match original_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        for name in [
+            "AUTOSPEC_BRIDGE_GH_LOG",
+            "AUTOSPEC_BRIDGE_COMMENTS",
+            "AUTOSPEC_BRIDGE_READS",
+            "AUTOSPEC_BRIDGE_TAKEOVER",
+            "AUTOSPEC_CLAIM_RETRY_SLEEP_MS",
+        ] {
+            std::env::remove_var(name);
+        }
+
+        assert_eq!(
+            outcome.expect("claim loss is a supervised outcome"),
+            SupervisionOutcome::OwnershipLost
+        );
+        assert_eq!(state.phase, BridgePhase::Interrupted);
+        assert!(state.supervisor.is_none());
+        assert!(state.process.is_none());
+        let events = fs::read_to_string(event_log).expect("claim loss event");
+        assert!(events.contains("\"event\":\"claim_ownership_lost\""));
+        let calls = fs::read_to_string(gh_log).expect("claim gh calls");
+        assert_eq!(
+            calls
+                .matches("repos/owner/repo/issues/comments/100")
+                .count(),
+            1,
+            "no patch may follow the confirmed takeover: {calls}"
+        );
     }
 
     #[test]
