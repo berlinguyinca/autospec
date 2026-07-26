@@ -222,8 +222,8 @@ they have a skill/shared canonical source.
 |---|---|---|
 | `AUTOSPEC_REVIEWER_TIER` | tier-policy default | Override the model tier for the LGTM/guardian reviewer. |
 | `AUTOSPEC_HARNESS_DISPATCHER` | auto-detected | Force a harness dispatcher (claude/opencode/codex). |
-| `AUTOSPEC_HANDOFF_DISPATCHER_KIND` | initiating session | Select the native autonomous executor (`claude`, `codex`, or `opencode`); overrides runtime markers. |
-| `AUTOSPEC_HARNESS_RUNTIME_ALIASES` | installed alias table | Four-column TSV mapping harness kind, executable alias, approval alias, and display name. |
+| `AUTOSPEC_HANDOFF_DISPATCHER_KIND` | initiating session | Select the native autonomous executor (`claude`, `codex`, or `opencode`); overrides Codex, Claude, and OpenCode runtime markers. Without a marker, executors are PATH-probed in alias-table order. |
+| `AUTOSPEC_HARNESS_RUNTIME_ALIASES` | `$AUTOSPEC_CONFIG_DIR/harness-runtime-aliases.tsv`, otherwise `~/.autospec/config/harness-runtime-aliases.tsv` | Override the installed four-column TSV mapping harness kind, executable alias, approval alias, and display name. |
 | `AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER` | (unset) | Absolute proven containment adapter required before the native executor may launch OpenCode. |
 | `AUTOSPEC_NO_GUARDIAN` | (unset) | Disable the guardian RULE_ID pass (not recommended). |
 
