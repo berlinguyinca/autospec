@@ -208,7 +208,6 @@ impl ResolvedHarness {
                     "--tools".into(),
                     CLAUDE_BUILTIN_TOOLS.into(),
                     "--safe-mode".into(),
-                    "--bare".into(),
                     "--disable-slash-commands".into(),
                     "--setting-sources".into(),
                     String::new(),
@@ -833,7 +832,6 @@ mod tests {
                 "--tools",
                 CLAUDE_BUILTIN_TOOLS,
                 "--safe-mode",
-                "--bare",
                 "--disable-slash-commands",
                 "--setting-sources",
                 "",
@@ -857,13 +855,16 @@ mod tests {
             .args
             .iter()
             .any(|arg| arg == "--dangerously-skip-permissions"));
+        assert!(
+            !invocation.args.iter().any(|arg| arg == "--bare"),
+            "Claude invocation must preserve normal OAuth/keychain authentication"
+        );
         assert_eq!(
             CLAUDE_BUILTIN_TOOLS, "Read,Edit,Write,Glob,Grep,Bash",
             "Claude must expose only the six local built-ins needed for implementation"
         );
         for isolation_flag in [
             "--safe-mode",
-            "--bare",
             "--disable-slash-commands",
             "--strict-mcp-config",
         ] {
