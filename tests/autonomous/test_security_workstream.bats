@@ -149,6 +149,15 @@ fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine(
                 0,
             )
     };
+    let _duplicate = unsafe {
+            nix::libc::prctl(
+                nix::libc::PR_GET_CHILD_SUBREAPER,
+                std::ptr::addr_of_mut!(subreaper),
+                0,
+                0,
+                0,
+            )
+    };
 }
 fn wrong_location() {
     let mut value = 0_i32;
@@ -170,10 +179,19 @@ fn autonomous_executor_bridge_clean_supervision_restores_prior_subreaper_state()
                 std::ptr::null_mut::<i32>(), 1, 2, 3)
     };
 }
+const MODULE_SCOPE_DUPLICATE: i32 = unsafe {
+        nix::libc::prctl(
+            nix::libc::PR_GET_CHILD_SUBREAPER,
+            std::ptr::addr_of_mut!(subreaper),
+            0,
+            0,
+            0,
+        )
+};
 EOF
     run "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$root" --out "$WORK/boundaries.jsonl"
     [ "$status" -eq 0 ]
-    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/boundaries.jsonl")" -eq 3 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/boundaries.jsonl")" -eq 6 ]
 }
 
 @test "issue filing: high-severity findings produce lint-clean remediation issues" {

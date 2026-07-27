@@ -115,7 +115,9 @@ def approved_unsafe_boundary(relative_path, source, match):
         ("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs", "autonomous_executor_bridge_clean_supervision_preserves_enabled_subreaper_state"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(observed), 0, 0, 0, ) }",
         ("crates/autospec-cli/src/commands/runtime/env/session.rs", "verify_active"): "unsafe { nix::libc::geteuid() }",
     }
-    if body == reviewed.get((relative_path, function_name)):
+    expected_body = reviewed.get((relative_path, function_name))
+    normalized_code = " ".join(code.split())
+    if body == expected_body and normalized_code.count(expected_body) == 1:
         return True
     if relative_path != RUNTIME_SIGNAL_FFI_PATH:
         return False
