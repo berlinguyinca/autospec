@@ -779,14 +779,154 @@ fn foreground_recovery_refuses_a_foreign_claim_without_a_local_acquisition_recei
 }
 
 #[test]
-fn foreground_recovery_adopts_an_exact_local_acquisition_receipt() {
+fn foreground_legacy_executor_pending_without_receipt_retires_to_scan() {
+    let fixture = ForegroundFixture::new();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(
+        fixture.state_path(),
+        legacy_executor_pending_state().to_json(),
+    )
+    .expect("seed legacy executor-pending state");
+
+    let output = fixture.command().output().expect("retire legacy state");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let state = fixture.read_state();
+    assert_eq!(state.phase(), ConductorPhase::Scan);
+    assert_eq!(state.selected_issue(), None);
+    assert!(
+        !fs::read_to_string(&fixture.calls)
+            .expect("read GitHub calls")
+            .contains("\npr\ncreate\n"),
+        "receiptless legacy ownership must retire before executor launch"
+    );
+}
+
+#[test]
+fn foreground_legacy_executor_pending_with_orphaned_receipt_retires_without_claiming() {
+    let fixture = ForegroundFixture::new();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(
+        fixture.state_path(),
+        legacy_executor_pending_state().to_json(),
+    )
+    .expect("seed legacy executor-pending state");
+    fixture.seed_claim_acquisition_receipt(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+
+    let output = fixture
+        .command()
+        .output()
+        .expect("retire orphaned legacy receipt");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    assert!(
+        !fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists(),
+        "orphaned local receipt must be retired"
+    );
+    let claim = Command::new("git")
+        .args([
+            "--git-dir",
+            fixture.claim_remote.to_str().expect("claim remote"),
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/autospec/claims/issue-42",
+        ])
+        .status()
+        .expect("inspect authoritative claim ref");
+    assert!(!claim.success(), "recovery must not acquire a new claim");
+    assert!(
+        !fs::read_to_string(&fixture.calls)
+            .expect("read GitHub calls")
+            .contains("\npr\ncreate\n"),
+        "orphaned receipt must retire before executor launch"
+    );
+}
+
+#[test]
+fn foreground_claim_phase_with_orphaned_receipt_retires_without_claiming() {
+    let fixture = ForegroundFixture::new();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(fixture.state_path(), selected_foreground_state().to_json())
+        .expect("seed persisted claim-phase state");
+    fixture.seed_claim_acquisition_receipt(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+
+    let output = fixture
+        .command()
+        .output()
+        .expect("retire orphaned claim-phase receipt");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    assert!(
+        !fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists(),
+        "orphaned claim-phase receipt must be retired"
+    );
+    let claim = Command::new("git")
+        .args([
+            "--git-dir",
+            fixture.claim_remote.to_str().expect("claim remote"),
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/autospec/claims/issue-42",
+        ])
+        .status()
+        .expect("inspect authoritative claim ref");
+    assert!(!claim.success(), "recovery must not acquire a new claim");
+    assert!(
+        !fs::read_to_string(&fixture.calls)
+            .expect("read GitHub calls")
+            .contains("\npr\ncreate\n"),
+        "orphaned claim phase must retire before executor launch"
+    );
+}
+
+#[test]
+fn foreground_legacy_executor_pending_resumes_exact_local_acquisition_receipt() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     fs::create_dir_all(fixture.state_path().parent().unwrap())
         .expect("create recovery state directory");
-    fs::write(fixture.state_path(), selected_foreground_state().to_json())
-        .expect("seed selected foreground state");
+    fs::write(
+        fixture.state_path(),
+        legacy_executor_pending_state().to_json(),
+    )
+    .expect("seed legacy executor-pending state");
     fixture.seed_claim_state_with_id(
         "rust-foreground-conductor-recovered",
         "feat/autonomous-issue-42",
@@ -944,6 +1084,16 @@ fn selected_foreground_state() -> ConductorState {
         .transition(ConductorEvent::Selected {
             issue: 42,
             serialization_reasons: Vec::new(),
+        })
+        .unwrap()
+}
+
+fn legacy_executor_pending_state() -> ConductorState {
+    selected_foreground_state()
+        .transition(ConductorEvent::Claimed)
+        .unwrap()
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Blocked("implementation_executor_pending".to_string()),
         })
         .unwrap()
 }

@@ -2503,6 +2503,35 @@ fn run_foreground_with_lease(
                 persist_foreground_state(&state_path, &state)
                     .map_err(CommandFailure::diagnostic)?;
                 return Ok(ForegroundCompletion::State(Box::new(state)));
+            } else if state.pause_reason() == Some(EXECUTOR_PENDING_REASON) {
+                let acquisition = load_claim_acquisition_receipt(&state_path, &layout.repo, issue)
+                    .map_err(CommandFailure::diagnostic)?;
+                let recoverable = if let Some(acquisition) = acquisition.as_ref() {
+                    let active =
+                        claim::recover_for_conductor(&layout.repo, issue, acquisition)?.is_some();
+                    active
+                        || recover_completed_bridge_lease(layout, issue, acquisition)
+                            .map_err(CommandFailure::diagnostic)?
+                            .is_some()
+                } else {
+                    false
+                };
+                if recoverable {
+                    state = state
+                        .transition(ConductorEvent::Resume)
+                        .map_err(CommandFailure::diagnostic)?;
+                    persist_foreground_state(&state_path, &state)
+                        .map_err(CommandFailure::diagnostic)?;
+                } else {
+                    clear_claim_acquisition_receipt(&state_path)
+                        .map_err(CommandFailure::diagnostic)?;
+                    state = state
+                        .transition(ConductorEvent::AbandonTerminal)
+                        .map_err(CommandFailure::diagnostic)?;
+                    persist_foreground_state(&state_path, &state)
+                        .map_err(CommandFailure::diagnostic)?;
+                    return Ok(ForegroundCompletion::State(Box::new(state)));
+                }
             } else if claim_terminal || state.pause_reason() == Some("executor_bridge_nonterminal")
             {
                 state = state
@@ -2566,6 +2595,17 @@ fn run_foreground_with_lease(
                     .map_err(CommandFailure::diagnostic)?,
                 None => None,
             };
+        }
+        if state.phase() == ConductorPhase::Claim
+            && local_acquisition.is_some()
+            && lease.is_none()
+        {
+            let dispatching = state
+                .transition(ConductorEvent::Claimed)
+                .map_err(CommandFailure::diagnostic)?;
+            let retired = retire_foreground_ownership(&state_path, dispatching)
+                .map_err(CommandFailure::diagnostic)?;
+            return Ok(ForegroundCompletion::State(Box::new(retired)));
         }
         if state.phase() != ConductorPhase::Claim && lease.is_none() {
             return Err(CommandFailure::diagnostic(
