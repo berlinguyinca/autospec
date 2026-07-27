@@ -770,9 +770,13 @@ fn run_executor_bridge_with_codex_probe(
         &request.issue_body,
         &closeout_path,
     )?;
-    if state.phase == BridgePhase::Implementing
-        && state.supervisor.is_some()
-        && state.process.is_some()
+    let launch_phase = matches!(
+        state.phase,
+        BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
+    );
+    if resolved_harness.is_none()
+        && launch_phase
+        && has_durable_harness_recovery_evidence(&request.state_path, &state)?
     {
         match supervise_recovered_harness_in_runtime(
             &request.state_path,
@@ -810,10 +814,6 @@ fn run_executor_bridge_with_codex_probe(
             SupervisionOutcome::TransientFailure(error) => return Err(error),
         }
     }
-    let launch_phase = matches!(
-        state.phase,
-        BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
-    );
     if launch_phase && resolved_harness.is_none() {
         let harness_config = HarnessConfig::load(&state.identity.repository_path, &environment)?;
         let mut resolved = harness_config.resolve(&environment)?;
@@ -6293,7 +6293,12 @@ impl CodexSandboxPolicy {
                      \"~/.azure\"=\"deny\",\
                      \"~/.cargo/credentials\"=\"deny\",\
                      \"~/.cargo/credentials.toml\"=\"deny\",\
-                     \"~/.codex\"=\"deny\",\
+                     \"~/.codex/archived_sessions\"=\"deny\",\
+                     \"~/.codex/auth.json\"=\"deny\",\
+                     \"~/.codex/config.toml\"=\"deny\",\
+                     \"~/.codex/history.jsonl\"=\"deny\",\
+                     \"~/.codex/sessions\"=\"deny\",\
+                     \"~/.codex/shell_snapshots\"=\"deny\",\
                      \"~/.config/containers\"=\"deny\",\
                      \"~/.config/gcloud\"=\"deny\",\
                      \"~/.config/gh\"=\"deny\",\
@@ -6322,11 +6327,23 @@ impl CodexSandboxPolicy {
                     let default_codex_home =
                         std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"));
                     if default_codex_home.as_ref() != Some(&codex_home) {
-                        let codex_home = codex_home.to_str().ok_or_else(|| {
-                            "CODEX_HOME must be UTF-8 for executor credential isolation".to_string()
-                        })?;
-                        let codex_home = codex_home.replace('\\', "\\\\").replace('"', "\\\"");
-                        filesystem.push_str(&format!(",\"{codex_home}\"=\"deny\""));
+                        for sensitive_path in [
+                            "archived_sessions",
+                            "auth.json",
+                            "config.toml",
+                            "history.jsonl",
+                            "sessions",
+                            "shell_snapshots",
+                        ] {
+                            let sensitive_path = codex_home.join(sensitive_path);
+                            let sensitive_path = sensitive_path.to_str().ok_or_else(|| {
+                                "CODEX_HOME must be UTF-8 for executor credential isolation"
+                                    .to_string()
+                            })?;
+                            let sensitive_path =
+                                sensitive_path.replace('\\', "\\\\").replace('"', "\\\"");
+                            filesystem.push_str(&format!(",\"{sensitive_path}\"=\"deny\""));
+                        }
                     }
                 }
                 filesystem.push('}');
@@ -13140,6 +13157,25 @@ pub(crate) fn supervise_resolved_harness(
     )
 }
 
+fn has_durable_harness_recovery_evidence(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    if state.supervisor.is_some() || state.process.is_some() {
+        return Ok(true);
+    }
+    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    for path in [&sinks.supervisor_identity, &sinks.exit_status] {
+        if path
+            .try_exists()
+            .map_err(|error| format!("inspect executor recovery evidence: {error}"))?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn supervise_resolved_harness_in_runtime(
     state_path: &Path,
     event_log: &Path,
@@ -19251,6 +19287,186 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn autonomous_executor_bridge_codex_sandbox_entrypoint_pending_sidecar_cleanup_skips_missing_harness(
+    ) {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("entrypoint-pending-sidecar-recovery");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "entrypoint_pending_sidecar_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &base,
+            Some(("claim-42", "invocation-42")),
+        )
+        .expect("provision issue worktree");
+        let mut state = supervision_state(&fixture);
+        state.identity.worktree = worktree.path.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let scope_root = worktree.path.parent().expect("scope root");
+        let state_path = scope_root.join("pending-sidecar-recovery-state.json");
+        let event_log = scope_root.join("pending-sidecar-recovery-events.jsonl");
+        let _ = detach_harness_for_adoption(
+            &fixture,
+            &state_path,
+            &mut state,
+            "while :; do /usr/bin/sleep 1; done",
+        );
+        let supervisor = state.supervisor.clone().expect("durable supervisor");
+        let harness = state.process.clone().expect("durable harness");
+        let _cleanup = DetachedSupervisorCleanup(supervisor.clone());
+        state.phase = BridgePhase::Pending;
+        state.supervisor = None;
+        state.process = None;
+        state.remote_snapshot_digest = Some("a".repeat(64));
+        super::write_invocation_atomic(&state_path, &state)
+            .expect("persist sidecar-only Pending state");
+        let aliases = fixture.root.join("missing-codex-aliases.tsv");
+        fs::write(&aliases, "codex\t/definitely/missing/codex\t\tCodex CLI\n")
+            .expect("write missing Codex alias");
+        let previous_aliases = std::env::var_os("AUTOSPEC_HARNESS_RUNTIME_ALIASES");
+        std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &aliases);
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: fixture.repo.clone(),
+            issue: state.identity.issue,
+            issue_title: "Clean the pending executor sidecar".to_string(),
+            issue_body: "## Goal\n\nClean the exact pending executor sidecar.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log,
+        };
+
+        let mut probe_calls = 0;
+        let outcome = super::run_executor_bridge_with_codex_probe(&request, |_| {
+            probe_calls += 1;
+            Err("injected failing Codex sandbox probe".to_string())
+        });
+        let supervisor_live =
+            super::cleanup_instance_is_live(&supervisor).expect("inspect pending supervisor");
+        let harness_live =
+            super::cleanup_instance_is_live(&harness).expect("inspect pending harness");
+
+        match previous_aliases {
+            Some(value) => std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", value),
+            None => std::env::remove_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES"),
+        }
+        assert_eq!(probe_calls, 0, "missing harness must not be probed");
+        assert!(
+            outcome.is_err(),
+            "fixture intentionally stops after cleanup"
+        );
+        assert!(
+            !supervisor_live && !harness_live,
+            "sidecar-only Pending executor was stranded before harness resolution"
+        );
+        let worktree_path = worktree.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        let _ = fs::remove_dir_all(scope_root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_entrypoint_interrupted_partial_cleanup_skips_failing_probe(
+    ) {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("entrypoint-interrupted-partial-recovery");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "entrypoint_interrupted_partial_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &base,
+            Some(("claim-42", "invocation-42")),
+        )
+        .expect("provision issue worktree");
+        let mut state = supervision_state(&fixture);
+        state.identity.worktree = worktree.path.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let scope_root = worktree.path.parent().expect("scope root");
+        let state_path = scope_root.join("interrupted-partial-recovery-state.json");
+        let event_log = scope_root.join("interrupted-partial-recovery-events.jsonl");
+        let _ = detach_harness_for_adoption(
+            &fixture,
+            &state_path,
+            &mut state,
+            "while :; do /usr/bin/sleep 1; done",
+        );
+        let supervisor = state.supervisor.clone().expect("durable supervisor");
+        let harness = state.process.clone().expect("durable harness");
+        let _cleanup = DetachedSupervisorCleanup(supervisor.clone());
+        state.phase = BridgePhase::Interrupted;
+        state.process = None;
+        super::write_invocation_atomic(&state_path, &state)
+            .expect("persist partial Interrupted state");
+        let aliases = fixture.root.join("codex-aliases.tsv");
+        fs::write(&aliases, "codex\t/bin/false\t\tCodex CLI\n").expect("write Codex alias");
+        let previous_aliases = std::env::var_os("AUTOSPEC_HARNESS_RUNTIME_ALIASES");
+        std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &aliases);
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: fixture.repo.clone(),
+            issue: state.identity.issue,
+            issue_title: "Clean the interrupted executor".to_string(),
+            issue_body: "## Goal\n\nClean the exact interrupted executor.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log,
+        };
+
+        let mut probe_calls = 0;
+        let outcome = super::run_executor_bridge_with_codex_probe(&request, |_| {
+            probe_calls += 1;
+            Err("injected failing Codex sandbox probe".to_string())
+        });
+        let supervisor_live =
+            super::cleanup_instance_is_live(&supervisor).expect("inspect interrupted supervisor");
+        let harness_live =
+            super::cleanup_instance_is_live(&harness).expect("inspect interrupted harness");
+
+        match previous_aliases {
+            Some(value) => std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", value),
+            None => std::env::remove_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES"),
+        }
+        assert_eq!(
+            probe_calls, 0,
+            "partial recovery must precede a fresh Codex probe"
+        );
+        assert!(
+            outcome.is_err(),
+            "fixture intentionally stops after cleanup"
+        );
+        assert!(
+            !supervisor_live && !harness_live,
+            "partial Interrupted executor was stranded before Codex probing"
+        );
+        let worktree_path = worktree.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        let _ = fs::remove_dir_all(scope_root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_skips_failing_probe() {
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let fixture = GitFixture::new("entrypoint-live-recovery");
@@ -20524,7 +20740,12 @@ mod tests {
             .expect("permission-profile filesystem policy");
         for denied in [
             "\"~/.aws\"=\"deny\"",
-            "\"~/.codex\"=\"deny\"",
+            "\"~/.codex/archived_sessions\"=\"deny\"",
+            "\"~/.codex/auth.json\"=\"deny\"",
+            "\"~/.codex/config.toml\"=\"deny\"",
+            "\"~/.codex/history.jsonl\"=\"deny\"",
+            "\"~/.codex/sessions\"=\"deny\"",
+            "\"~/.codex/shell_snapshots\"=\"deny\"",
             "\"~/.config/containers\"=\"deny\"",
             "\"~/.config/gh\"=\"deny\"",
             "\"~/.config/pip\"=\"deny\"",
@@ -20545,6 +20766,10 @@ mod tests {
                 "missing {denied}: {filesystem}"
             );
         }
+        assert!(
+            !filesystem.contains("\"~/.codex\"=\"deny\""),
+            "Codex package roots must remain readable: {filesystem}"
+        );
         assert!(filesystem.contains(&format!("\"{}\"=\"read\"", harness.executable.display())));
         assert!(invocation
             .args
@@ -20569,6 +20794,54 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn autonomous_executor_bridge_codex_sandbox_allows_executable_inside_real_codex_home() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let root = test_root("codex-permission-profile-real-home");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let env = std::env::vars_os()
+            .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+            .collect::<BTreeMap<_, _>>();
+        let codex = super::safe_executable(Path::new("codex"), &env)
+            .expect("Codex CLI is required for its permission-profile regression");
+        let home = env.get("HOME").map(PathBuf::from).expect("real HOME");
+        if !codex.starts_with(home.join(".codex")) {
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        std::env::remove_var("CODEX_HOME");
+        let profile_args = super::CodexSandboxPolicy::NetworkPermissionProfile
+            .permission_profile_args(&codex)
+            .expect("permission profile arguments");
+        let output = Command::new(&codex)
+            .arg("sandbox")
+            .arg("-C")
+            .arg(&workspace)
+            .arg("-P")
+            .arg(super::CODEX_NETWORK_PERMISSION_PROFILE)
+            .args(&profile_args)
+            .args(["--", "/bin/true"])
+            .output()
+            .expect("run Codex permission-profile sandbox from its real installation");
+        match previous_codex_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+
+        assert!(
+            output.status.success(),
+            "permission profile must allow its own executable at {}: stdout={} stderr={}",
+            codex.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential_files() {
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let root = test_root("codex-permission-profile");
@@ -20576,17 +20849,68 @@ mod tests {
         let codex_home = root.join("custom-codex-home");
         let workspace = root.join("workspace");
         fs::create_dir_all(home.join(".aws")).expect("AWS credential directory");
-        fs::create_dir_all(home.join(".codex")).expect("Codex credential directory");
+        for path in [
+            ".codex/archived_sessions",
+            ".codex/sessions",
+            ".codex/shell_snapshots",
+        ] {
+            fs::create_dir_all(home.join(path)).expect("Codex state directory");
+        }
         fs::create_dir_all(home.join(".config/gh")).expect("GitHub credential directory");
         fs::create_dir_all(home.join(".ssh")).expect("SSH credential directory");
-        fs::create_dir_all(&codex_home).expect("custom Codex credential directory");
+        for path in ["archived_sessions", "sessions", "shell_snapshots"] {
+            fs::create_dir_all(codex_home.join(path)).expect("custom Codex state directory");
+        }
         fs::create_dir_all(&workspace).expect("workspace");
         fs::write(home.join(".aws/credentials"), "aws-secret\n").expect("AWS credential");
         fs::write(home.join(".codex/auth.json"), "codex-secret\n").expect("Codex credential");
+        fs::write(
+            home.join(".codex/config.toml"),
+            "model_reasoning_effort = \"high\"\n",
+        )
+        .expect("Codex config");
+        fs::write(home.join(".codex/history.jsonl"), "history-secret\n").expect("Codex history");
+        fs::write(
+            home.join(".codex/archived_sessions/session.jsonl"),
+            "archive-secret\n",
+        )
+        .expect("Codex archived session");
+        fs::write(
+            home.join(".codex/sessions/session.jsonl"),
+            "session-secret\n",
+        )
+        .expect("Codex session");
+        fs::write(
+            home.join(".codex/shell_snapshots/snapshot.sh"),
+            "snapshot-secret\n",
+        )
+        .expect("Codex shell snapshot");
         fs::write(home.join(".config/gh/hosts.yml"), "gh-secret\n").expect("GitHub credential");
         fs::write(home.join(".ssh/id_ed25519"), "ssh-secret\n").expect("SSH credential");
         fs::write(codex_home.join("auth.json"), "custom-codex-secret\n")
             .expect("custom Codex credential");
+        fs::write(
+            codex_home.join("config.toml"),
+            "model_reasoning_effort = \"high\"\n",
+        )
+        .expect("custom Codex config");
+        fs::write(codex_home.join("history.jsonl"), "custom-history-secret\n")
+            .expect("custom Codex history");
+        fs::write(
+            codex_home.join("archived_sessions/session.jsonl"),
+            "custom-archive-secret\n",
+        )
+        .expect("custom Codex archived session");
+        fs::write(
+            codex_home.join("sessions/session.jsonl"),
+            "custom-session-secret\n",
+        )
+        .expect("custom Codex session");
+        fs::write(
+            codex_home.join("shell_snapshots/snapshot.sh"),
+            "custom-snapshot-secret\n",
+        )
+        .expect("custom Codex shell snapshot");
         git(&workspace, &["init"]);
         let env = std::env::vars_os()
             .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
@@ -20611,7 +20935,7 @@ mod tests {
                 "--",
                 "/bin/sh",
                 "-c",
-                "set -eu\nprintf written > workspace-proof\nfor path in \"$HOME/.aws/credentials\" \"$HOME/.codex/auth.json\" \"$HOME/.config/gh/hosts.yml\" \"$HOME/.ssh/id_ed25519\" \"$CODEX_HOME/auth.json\"; do if /bin/cat \"$path\" >/dev/null 2>&1; then exit 41; fi; done\ntest -z \"${CODEX_API_KEY:-}\"\ntest -z \"${OPENAI_API_KEY:-}\"",
+                "set -eu\nprintf written > workspace-proof\nfor path in \"$HOME/.aws/credentials\" \"$HOME/.codex/auth.json\" \"$HOME/.codex/config.toml\" \"$HOME/.codex/history.jsonl\" \"$HOME/.codex/archived_sessions/session.jsonl\" \"$HOME/.codex/sessions/session.jsonl\" \"$HOME/.codex/shell_snapshots/snapshot.sh\" \"$HOME/.config/gh/hosts.yml\" \"$HOME/.ssh/id_ed25519\" \"$CODEX_HOME/auth.json\" \"$CODEX_HOME/config.toml\" \"$CODEX_HOME/history.jsonl\" \"$CODEX_HOME/archived_sessions/session.jsonl\" \"$CODEX_HOME/sessions/session.jsonl\" \"$CODEX_HOME/shell_snapshots/snapshot.sh\"; do if /bin/cat \"$path\" >/dev/null 2>&1; then exit 41; fi; done\ntest -z \"${CODEX_API_KEY:-}\"\ntest -z \"${OPENAI_API_KEY:-}\"",
             ])
             .env("HOME", &home)
             .env("CODEX_HOME", &codex_home)
@@ -21618,12 +21942,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn detach_harness_for_adoption(
-        fixture: &GitFixture,
+        _fixture: &GitFixture,
         state_path: &Path,
         state: &mut PersistedInvocation,
         script: &str,
     ) -> super::ValidatedInvocation {
-        let invocation = shell_invocation(&fixture.repo, script);
+        let invocation = shell_invocation(&state.identity.worktree, script);
         let validated = super::validate_invocation(
             &HarnessInvocation {
                 program: invocation.program.canonicalize().expect("canonical shell"),
