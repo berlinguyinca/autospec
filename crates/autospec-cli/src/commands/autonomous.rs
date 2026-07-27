@@ -2600,10 +2600,12 @@ fn run_foreground_with_lease(
             && local_acquisition.is_some()
             && lease.is_none()
         {
-            return Err(CommandFailure::diagnostic(
-                "foreground claim recovery has stale local acquisition evidence",
-            )
-            .into());
+            let dispatching = state
+                .transition(ConductorEvent::Claimed)
+                .map_err(CommandFailure::diagnostic)?;
+            let retired = retire_foreground_ownership(&state_path, dispatching)
+                .map_err(CommandFailure::diagnostic)?;
+            return Ok(ForegroundCompletion::State(Box::new(retired)));
         }
         if state.phase() != ConductorPhase::Claim && lease.is_none() {
             return Err(CommandFailure::diagnostic(
