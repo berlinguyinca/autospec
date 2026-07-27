@@ -2506,13 +2506,25 @@ fn run_foreground_with_lease(
             } else if state.pause_reason() == Some(EXECUTOR_PENDING_REASON) {
                 let acquisition = load_claim_acquisition_receipt(&state_path, &layout.repo, issue)
                     .map_err(CommandFailure::diagnostic)?;
-                if acquisition.is_some() {
+                let recoverable = if let Some(acquisition) = acquisition.as_ref() {
+                    let active =
+                        claim::recover_for_conductor(&layout.repo, issue, acquisition)?.is_some();
+                    active
+                        || recover_completed_bridge_lease(layout, issue, acquisition)
+                            .map_err(CommandFailure::diagnostic)?
+                            .is_some()
+                } else {
+                    false
+                };
+                if recoverable {
                     state = state
                         .transition(ConductorEvent::Resume)
                         .map_err(CommandFailure::diagnostic)?;
                     persist_foreground_state(&state_path, &state)
                         .map_err(CommandFailure::diagnostic)?;
                 } else {
+                    clear_claim_acquisition_receipt(&state_path)
+                        .map_err(CommandFailure::diagnostic)?;
                     state = state
                         .transition(ConductorEvent::AbandonTerminal)
                         .map_err(CommandFailure::diagnostic)?;
@@ -2583,6 +2595,15 @@ fn run_foreground_with_lease(
                     .map_err(CommandFailure::diagnostic)?,
                 None => None,
             };
+        }
+        if state.phase() == ConductorPhase::Claim
+            && local_acquisition.is_some()
+            && lease.is_none()
+        {
+            return Err(CommandFailure::diagnostic(
+                "foreground claim recovery has stale local acquisition evidence",
+            )
+            .into());
         }
         if state.phase() != ConductorPhase::Claim && lease.is_none() {
             return Err(CommandFailure::diagnostic(
