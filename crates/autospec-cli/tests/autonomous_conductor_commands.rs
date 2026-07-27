@@ -281,7 +281,8 @@ fn native_executor_bridge_source_owns_ready_through_cleanup_contract() {
         "transition_bridge_claim",
         "BridgeClaimDisposition::Retryable",
         "BridgeClaimDisposition::NeedsHuman",
-        "BridgeTerminalMode::Resume",
+        "BridgeTerminalMode::Prepared",
+        "BridgeTerminalMode::Complete",
     ] {
         assert!(
             claim.contains(required),
@@ -351,7 +352,9 @@ fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() 
 
     assert!(
         first.status.success(),
-        "stderr={}",
+        "status={:?} stdout={} stderr={}",
+        first.status.code(),
+        String::from_utf8_lossy(&first.stdout),
         String::from_utf8_lossy(&first.stderr)
     );
     assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
@@ -514,25 +517,17 @@ fn foreground_records_a_typed_deferred_receipt_and_keeps_the_selected_issue() {
     assert_eq!(
         state.last_outcome(),
         Some(&ConductorOutcome::Blocked(
-            "implementation_executor_pending".to_string()
+            "executor_receipt_failed".to_string()
         ))
     );
-    assert_eq!(
-        state.pause_reason(),
-        Some("implementation_executor_pending")
-    );
+    assert_eq!(state.pause_reason(), Some("executor_receipt_failed"));
     let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
     let review = calls
         .find("repos/test/repo/issues/42\n--jq")
         .expect("issue reread");
     let claim = calls.find("issue\nedit\n42").expect("claim label change");
     assert!(review < claim, "safety review must precede claim selection");
-    assert!(calls.contains("executor_pending"));
-    let invocations = fs::read_dir(fixture.repo_dir.join(".autospec/executor-invocations"))
-        .expect("invocation receipts")
-        .count();
-    assert_eq!(invocations, 1, "one invocation receipt is persisted");
-
+    assert!(!calls.contains("executor_pending"));
     let second = fixture.run_foreground();
     assert!(
         second.status.success(),
@@ -540,12 +535,106 @@ fn foreground_records_a_typed_deferred_receipt_and_keeps_the_selected_issue() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert_eq!(fixture.read_state(), state);
+    assert!(!fs::read_to_string(&fixture.calls)
+        .expect("calls after retained-state replay")
+        .contains("\npr\ncreate\n"));
+}
+
+#[test]
+fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let mut command = fixture.command();
+    command
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+
+    let first = command.output().expect("execute selected issue");
+    assert!(
+        first.status.success(),
+        "status={:?} stdout={} stderr={}",
+        first.status.code(),
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let terminal = fs::read_dir(fixture.scoped_dir().join("executor"))
+        .expect("executor state directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("issue-42-") && name.ends_with(".terminal.json")
+                })
+        })
+        .expect("generation-scoped terminal receipt");
+    assert!(
+        terminal.is_file(),
+        "bridge did not reach a terminal receipt; stderr={} state={:?} calls={}",
+        String::from_utf8_lossy(&first.stderr),
+        fixture.read_state(),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
     assert_eq!(
-        fs::read_dir(fixture.repo_dir.join(".autospec/executor-invocations"))
-            .expect("replayed invocation receipts")
-            .count(),
-        1,
-        "restart replays the terminal invocation"
+        git_fixture(
+            &fixture.root,
+            &[
+                "--git-dir",
+                bridge.remote.to_str().unwrap(),
+                "show",
+                "refs/heads/main:tests/smoke/generation.sh",
+            ],
+        ),
+        "#!/bin/sh\nexit 0"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("read bridge calls");
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
+    assert!(calls.lines().any(|line| line == "--match-head-commit"));
+    let receipt = fs::read_to_string(&terminal).expect("terminal bridge receipt");
+    assert!(receipt.contains("\"status\":\"merged\""));
+    assert!(receipt.contains("\"claim_released\":true"));
+    assert!(
+        !Path::new("/tmp/autospec-executor")
+            .join(format!("test_repo-{}", &sha256_hex(b"test/repo")[..12]))
+            .join("issue-42")
+            .exists(),
+        "verified completion removes only the owned issue worktree"
+    );
+
+    let before = fs::read_to_string(&fixture.calls).expect("calls before replay");
+    let second = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .output()
+        .expect("replay completed foreground");
+    assert!(
+        second.status.success() || second.status.code() == Some(3),
+        "replay stderr={}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let after = fs::read_to_string(&fixture.calls).expect("calls after replay");
+    assert_eq!(
+        after.matches("\npr\ncreate\n").count(),
+        before.matches("\npr\ncreate\n").count()
+    );
+    assert_eq!(
+        after.matches("\npr\nmerge\n").count(),
+        before.matches("\npr\nmerge\n").count()
     );
 }
 
@@ -594,7 +683,7 @@ fn foreground_state_is_partitioned_by_run_scope() {
 }
 
 #[test]
-fn foreground_fails_closed_when_executor_outcome_loses_its_claim() {
+fn foreground_bridge_failure_does_not_publish_a_duplicate_executor_outcome() {
     let fixture = ForegroundFixture::new();
     let output = fixture
         .command()
@@ -602,15 +691,12 @@ fn foreground_fails_closed_when_executor_outcome_loses_its_claim() {
         .output()
         .expect("run foreground");
 
-    assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("claim ownership changed"),
-        "stderr={}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("executor bridge failed"));
     let record = fixture.claim_record();
-    assert_eq!(record.worker_id, "foreign-worker");
-    assert_eq!(record.branch, "foreign/issue-42");
+    assert!(record.worker_id.starts_with("rust-foreground-conductor-"));
+    assert_eq!(record.branch, "feat/autonomous-issue-42");
+    assert_ne!(record.step, "executor_pending");
 }
 
 #[test]
@@ -1438,9 +1524,9 @@ fn ignored_failed_check_is_advisory_for_foreground_admission() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(fs::read_to_string(&fixture.calls)
-        .expect("read GitHub calls")
-        .contains("executor_pending"));
+    let calls = fs::read_to_string(&fixture.calls).expect("read GitHub calls");
+    assert!(calls.contains("issue\nedit\n42"));
+    assert!(!calls.contains("executor_pending"));
 }
 
 #[test]
@@ -2174,6 +2260,8 @@ fn executor_result_accepts_a_claim_owner_success_with_linked_closeout_evidence()
 fn supervised_executor_child_accepts_a_typed_success_result() {
     let fixture = ForegroundFixture::new();
     fixture.seed_claim("rust-foreground-conductor-1", "autonomous/issue-42");
+    let claim_before = fixture.claim_record();
+    let comments_before = fs::read_to_string(&fixture.comments).expect("comments before child");
     fixture.set_valid_open_pull_request(EXECUTOR_COMMIT);
     fixture.persist_pass_receipt(
         "pass",
@@ -2219,6 +2307,12 @@ fn supervised_executor_child_accepts_a_typed_success_result() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"status\":\"accepted\""));
+    assert_eq!(fixture.claim_record(), claim_before);
+    assert_eq!(
+        fs::read_to_string(&fixture.comments).expect("comments after child"),
+        comments_before,
+        "a compatibility artifact is nonterminal and cannot mutate claim authority"
+    );
 }
 
 #[test]
@@ -2672,6 +2766,13 @@ struct ForegroundFixture {
     claim_state: PathBuf,
 }
 
+struct RealBridgeEnvironment {
+    bin: PathBuf,
+    aliases: PathBuf,
+    remote: PathBuf,
+    merged: PathBuf,
+}
+
 impl ForegroundFixture {
     fn new() -> Self {
         let root = temp_dir("autospec-foreground-conductor");
@@ -2709,13 +2810,20 @@ if [ "${AUTOSPEC_FOREGROUND_BLOCK_GH:-0}" = 1 ]; then
 fi
 mode="$(cat "$AUTOSPEC_FOREGROUND_MODE")"
 issue() {
-  if [ "$mode" = unreviewed ]; then
+  if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
+    printf '%s\n' '{"number":42,"title":"Ship the bridge fixture","body":"## Goal\n\nAdd `tests/smoke/generation.sh` proving the native executor bridge runs.\n\n## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Implementation outline\n\n- `tests/smoke/generation.sh`\n\n## Tests required\n\n- smoke\n\n### Primary smoke test (inner loop)\n\n```bash\n/usr/bin/test -s tests/smoke/generation.sh\n```\n\n### Operator/full verification\n\n```bash\n/usr/bin/test -s tests/smoke/generation.sh\n```","labels":[{"name":"auto-implement"},{"name":"safety:reviewed"}],"author":{"login":"agent"}}'
+  elif [ "$mode" = unreviewed ]; then
     printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Goal\n\nAdd the foreground adapter.","labels":[{"name":"auto-implement"}],"author":{"login":"agent"}}'
   else
     printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","labels":[{"name":"auto-implement"},{"name":"safety:reviewed"}],"author":{"login":"agent"}}'
   fi
 }
 claim_issue() {
+  if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
+    case " $* " in
+      *" --json labels "*) printf '%s\n' '{"labels":[]}'; return ;;
+    esac
+  fi
   if [ "$mode" = claimed ]; then labels='["in-progress-by-bot","safety:reviewed"]'; else labels='["auto-implement","safety:reviewed"]'; fi
   printf '%s\n' "{\"labels\":$labels,\"title\":\"Add Rust foreground\",\"body\":\"## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\",\"author\":\"agent\"}"
 }
@@ -2792,11 +2900,15 @@ if [ "$1" = api ]; then
         *) printf '%s\n' '{"raw_count":0,"items":[]}' ;;
       esac
       exit 0 ;;
-    repos/test/repo/issues/42/comments)
+    repos/test/repo/issues/42/comments*)
       if [ "${AUTOSPEC_FOREGROUND_FAIL_EVIDENCE_CONFIRM:-0}" = 1 ] && grep -q '<!-- autospec-executor-result:begin -->' "$AUTOSPEC_FOREGROUND_COMMENTS"; then
         exit 1
       fi
       cat "$AUTOSPEC_FOREGROUND_COMMENTS"
+      exit 0 ;;
+    repos/test/repo/pulls/17) printf '%s\n' '{}'; exit 0 ;;
+    repos/test/repo/issues/17/comments*|repos/test/repo/pulls/17/reviews*|repos/test/repo/pulls/17/comments*)
+      printf '%s\n' '[]'
       exit 0 ;;
     repos/test/repo/issues/42/labels) printf 'reviewed\n' > "$AUTOSPEC_FOREGROUND_MODE"; exit 0 ;;
     repos/test/repo/issues/42)
@@ -2813,7 +2925,7 @@ if [ "$1" = api ]; then
       exit 0 ;;
   esac
 fi
-if [ "$1" = issue ] && [ "$2" = view ]; then claim_issue; exit 0; fi
+if [ "$1" = issue ] && [ "$2" = view ]; then claim_issue "$@"; exit 0; fi
 if [ "$1" = label ] && [ "$2" = create ]; then exit 0; fi
 if [ "$1" = issue ] && [ "$2" = edit ]; then printf 'claimed\n' > "$AUTOSPEC_FOREGROUND_MODE"; exit 0; fi
 if [ "$1" = issue ] && [ "$2" = comment ]; then
@@ -2834,6 +2946,45 @@ if [ "$1" = pr ] && [ "$2" = list ]; then
     steal_claim
   fi
   cat "$AUTOSPEC_FOREGROUND_PULL_REQUESTS"
+  exit 0
+fi
+if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = create ]; then
+  head=$(git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" rev-parse refs/heads/feat/autonomous-issue-42)
+  body_file=""; previous=""
+  for value in "$@"; do
+    if [ "$previous" = --body-file ]; then body_file="$value"; fi
+    previous="$value"
+  done
+  jq -n --rawfile body "$body_file" --arg head "$head" '[{"number":17,"body":$body,"headRefName":"feat/autonomous-issue-42","headRefOid":$head,"isDraft":true,"baseRefName":"main"}]' > "$AUTOSPEC_FOREGROUND_PULL_REQUESTS"
+  printf '%s\n' 'https://example.invalid/test/repo/pull/17'
+  exit 0
+fi
+if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = ready ]; then
+  jq '.[0].isDraft = false' "$AUTOSPEC_FOREGROUND_PULL_REQUESTS" > "$AUTOSPEC_FOREGROUND_PULL_REQUESTS.tmp"
+  mv "$AUTOSPEC_FOREGROUND_PULL_REQUESTS.tmp" "$AUTOSPEC_FOREGROUND_PULL_REQUESTS"
+  exit 0
+fi
+if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = view ]; then
+  head=$(jq -r '.[0].headRefOid' "$AUTOSPEC_FOREGROUND_PULL_REQUESTS")
+  case " $* " in
+    *" headRefOid,statusCheckRollup "*)
+      printf '%s\n' "{\"headRefOid\":\"$head\",\"statusCheckRollup\":[{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}" ;;
+    *)
+      if [ -e "$AUTOSPEC_BRIDGE_MERGED" ]; then
+        merge=$(cat "$AUTOSPEC_BRIDGE_MERGED")
+        printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":{\"oid\":\"$merge\"}}"
+      else
+        printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":null}"
+      fi ;;
+  esac
+  exit 0
+fi
+if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = merge ]; then
+  head=$(jq -r '.[0].headRefOid' "$AUTOSPEC_FOREGROUND_PULL_REQUESTS")
+  case " $* " in *" --match-head-commit $head "*) ;; *) exit 74 ;; esac
+  git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" update-ref refs/heads/main "$head"
+  git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" update-ref -d refs/heads/feat/autonomous-issue-42
+  printf '%s\n' "$head" > "$AUTOSPEC_BRIDGE_MERGED"
   exit 0
 fi
 printf 'unexpected gh invocation: %s\n' "$*" >&2
@@ -2871,6 +3022,121 @@ exit 1
             "main",
         ]);
         command
+    }
+
+    fn configure_real_bridge(&self) -> RealBridgeEnvironment {
+        let executor_fixture = Path::new("/tmp/autospec-executor")
+            .join(format!("test_repo-{}", &sha256_hex(b"test/repo")[..12]));
+        if executor_fixture.exists() {
+            fs::remove_dir_all(&executor_fixture).expect("clear stale bridge test fixture");
+        }
+        let remote = self.root.join("bridge-origin.git");
+        git_fixture(&self.root, &["init", "--bare", remote.to_str().unwrap()]);
+        git_fixture(&self.repo_dir, &["init", "-b", "main"]);
+        fs::write(self.repo_dir.join(".git/info/exclude"), ".autospec/\n")
+            .expect("ignore bridge evidence artifacts");
+        git_fixture(
+            &self.repo_dir,
+            &["config", "user.name", "Autospec Bridge Test"],
+        );
+        git_fixture(
+            &self.repo_dir,
+            &["config", "user.email", "bridge-test@example.invalid"],
+        );
+        fs::write(self.repo_dir.join("README.md"), "bridge fixture\n")
+            .expect("write bridge baseline");
+        git_fixture(&self.repo_dir, &["add", "README.md"]);
+        git_fixture(&self.repo_dir, &["commit", "-m", "bridge fixture"]);
+        git_fixture(
+            &self.repo_dir,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_fixture(&self.repo_dir, &["push", "-u", "origin", "main"]);
+        git_fixture(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        git_fixture(&self.repo_dir, &["remote", "set-head", "origin", "main"]);
+
+        let safe_root = PathBuf::from(std::env::var_os("HOME").expect("HOME for bridge tools"))
+            .join(".autospec-test-fixtures")
+            .join(format!(
+                "bridge-e2e-{}",
+                self.root
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("fixture name")
+            ));
+        let bin = safe_root.join("bin");
+        fs::create_dir_all(&bin).expect("create bridge tools");
+        fs::copy(self.bin.join("gh"), bin.join("gh")).expect("copy bridge gh fixture");
+        fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755))
+            .expect("make bridge gh executable");
+        write_executable(
+            &bin.join("codex-bridge-fixture"),
+            r#"#!/bin/sh
+set -eu
+artifact=""
+previous=""
+for value in "$@"; do
+  if [ "$previous" = "--output-last-message" ]; then artifact="$value"; fi
+  previous="$value"
+done
+test -n "$artifact"
+mkdir -p tests/smoke "$(dirname "$artifact")"
+printf '%s\n' '#!/bin/sh' 'exit 0' > tests/smoke/generation.sh
+chmod 755 tests/smoke/generation.sh
+git add tests/smoke/generation.sh
+git commit -m 'test: prove native bridge execution'
+cat > "$artifact" <<'EOF'
+## Closeout report
+
+Result: Added the native bridge smoke artifact.
+Claims: [verified] static tests/smoke/generation.sh is committed.
+Proof type: static
+Before/after: 0 to 1 bridge smoke artifacts.
+Artifacts: tests/smoke/generation.sh; /usr/bin/test -s tests/smoke/generation.sh
+Scoped git status: tests/smoke/generation.sh
+One likely hidden failure: scanner behavior outside this hermetic fixture.
+EOF
+chmod 600 "$artifact"
+"#,
+        );
+        for (scanner, output) in [
+            ("semgrep", r#"{"results":[],"errors":[]}"#),
+            ("trivy", r#"{"Results":[]}"#),
+            ("license-checker", r#"{"fixture@1.0.0":{"licenses":"MIT"}}"#),
+        ] {
+            write_executable(
+                &bin.join(scanner),
+                &format!("#!/bin/sh\nset -eu\nprintf '%s\\n' '{output}'\n"),
+            );
+        }
+        write_executable(
+            &bin.join("gitleaks"),
+            r#"#!/bin/sh
+set -eu
+report=""
+previous=""
+for value in "$@"; do
+  if [ "$previous" = "--report-path" ]; then report="$value"; fi
+  previous="$value"
+done
+printf '%s\n' '[]' > "$report"
+"#,
+        );
+        let aliases = safe_root.join("harness-runtime-aliases.tsv");
+        fs::write(
+            &aliases,
+            format!(
+                "codex\t{}\tautospec-codex\tCodex bridge fixture\n",
+                bin.join("codex-bridge-fixture").display()
+            ),
+        )
+        .expect("write bridge alias table");
+        RealBridgeEnvironment {
+            bin,
+            aliases,
+            remote,
+            merged: self.root.join("bridge-merged"),
+        }
     }
 
     fn configured_command(&self) -> Command {

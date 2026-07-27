@@ -19,10 +19,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::commands::claim::{
-    authoritative_executor_result, record_executor_result_with_receipt, refresh_claim_generation,
-    transition_bridge_claim, BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity,
-    ClaimRefreshResult, ExecutorResultAuthorityBinding, ExecutorResultRecord,
-    ExecutorSuccessBinding,
+    authoritative_executor_result, observe_terminal_bridge_claim,
+    record_executor_result_with_receipt, refresh_claim_generation, transition_bridge_claim,
+    BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity, ClaimRefreshResult,
+    ExecutorResultAuthorityBinding, ExecutorResultRecord, ExecutorSuccessBinding,
 };
 use autospec_core::autonomous::premerge::{
     EvidenceVerdict, PremergeDecision, PremergeLaneIdentity, QaEvidence, SecurityAuditEvidence,
@@ -85,6 +85,781 @@ static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static BASE_DRIFT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static RUNTIME_CLOSE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum BridgeRunStatus {
+    Pending,
+    Accepted {
+        pull_request: u64,
+        head_oid: String,
+        premerge_receipt: String,
+    },
+    Merged {
+        pull_request: u64,
+        head_oid: String,
+        merge_oid: String,
+    },
+    Retryable {
+        reason: String,
+    },
+    Blocked {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BridgeRunReceipt {
+    pub(crate) repository: String,
+    pub(crate) issue: u64,
+    pub(crate) worker_id: String,
+    pub(crate) branch: String,
+    pub(crate) claim_id: String,
+    pub(crate) invocation_id: String,
+    pub(crate) status: BridgeRunStatus,
+}
+
+impl BridgeRunReceipt {
+    pub(crate) fn from_json(document: &str) -> Result<Self, String> {
+        reject_duplicate_top_level_keys(document)?;
+        let value: serde_json::Value = serde_json::from_str(document)
+            .map_err(|error| format!("invalid executor bridge receipt JSON: {error}"))?;
+        let status = value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "executor bridge receipt requires status".to_string())?
+            .to_string();
+        let specific = match status.as_str() {
+            "pending" => &[][..],
+            "accepted" => &["pr", "head_oid", "premerge_receipt"][..],
+            "merged" => &["pr", "head_oid", "merge_oid", "claim_released"][..],
+            "retryable" | "blocked" => &["reason", "claim_released"][..],
+            other => {
+                return Err(format!(
+                    "unsupported executor bridge receipt status: {other}"
+                ))
+            }
+        };
+        let mut fields = vec![
+            "schema",
+            "status",
+            "repo",
+            "issue",
+            "worker_id",
+            "branch",
+            "claim_id",
+            "invocation_id",
+        ];
+        fields.extend_from_slice(specific);
+        let object = strict_object(value, &fields, "executor bridge receipt")?;
+        if number(&object, "schema")? != 1 {
+            return Err("unsupported executor bridge receipt schema".to_string());
+        }
+        let canonical_oid = |field: &str| -> Result<String, String> {
+            let value = text(&object, field)?;
+            if !canonical_git_oid(&value) {
+                return Err(format!("executor bridge receipt {field} is invalid"));
+            }
+            Ok(value)
+        };
+        let canonical_digest = |field: &str| -> Result<String, String> {
+            let value = text(&object, field)?;
+            if !canonical_sha256(&value) {
+                return Err(format!("executor bridge receipt {field} is invalid"));
+            }
+            Ok(value)
+        };
+        let released = || -> Result<(), String> {
+            if required(&object, "claim_released")?.as_bool() != Some(true) {
+                return Err(
+                    "terminal executor bridge receipt requires observed claim release".to_string(),
+                );
+            }
+            Ok(())
+        };
+        let status = match status.as_str() {
+            "pending" => BridgeRunStatus::Pending,
+            "accepted" => BridgeRunStatus::Accepted {
+                pull_request: positive_number(&object, "pr")?,
+                head_oid: canonical_oid("head_oid")?,
+                premerge_receipt: canonical_digest("premerge_receipt")?,
+            },
+            "merged" => {
+                released()?;
+                BridgeRunStatus::Merged {
+                    pull_request: positive_number(&object, "pr")?,
+                    head_oid: canonical_oid("head_oid")?,
+                    merge_oid: canonical_oid("merge_oid")?,
+                }
+            }
+            "retryable" => {
+                released()?;
+                BridgeRunStatus::Retryable {
+                    reason: nonempty_text(&object, "reason")?,
+                }
+            }
+            "blocked" => {
+                released()?;
+                BridgeRunStatus::Blocked {
+                    reason: nonempty_text(&object, "reason")?,
+                }
+            }
+            _ => unreachable!("status validated above"),
+        };
+        Ok(Self {
+            repository: nonempty_text(&object, "repo")?,
+            issue: positive_number(&object, "issue")?,
+            worker_id: nonempty_text(&object, "worker_id")?,
+            branch: nonempty_text(&object, "branch")?,
+            claim_id: nonempty_text(&object, "claim_id")?,
+            invocation_id: nonempty_text(&object, "invocation_id")?,
+            status,
+        })
+    }
+
+    pub(crate) fn to_json(&self) -> String {
+        let mut value = serde_json::json!({
+            "schema": 1,
+            "status": match &self.status {
+                BridgeRunStatus::Pending => "pending",
+                BridgeRunStatus::Accepted { .. } => "accepted",
+                BridgeRunStatus::Merged { .. } => "merged",
+                BridgeRunStatus::Retryable { .. } => "retryable",
+                BridgeRunStatus::Blocked { .. } => "blocked",
+            },
+            "repo": self.repository,
+            "issue": self.issue,
+            "worker_id": self.worker_id,
+            "branch": self.branch,
+            "claim_id": self.claim_id,
+            "invocation_id": self.invocation_id,
+        });
+        let object = value
+            .as_object_mut()
+            .expect("executor bridge receipt is an object");
+        match &self.status {
+            BridgeRunStatus::Pending => {}
+            BridgeRunStatus::Accepted {
+                pull_request,
+                head_oid,
+                premerge_receipt,
+            } => {
+                object.insert("pr".into(), (*pull_request).into());
+                object.insert("head_oid".into(), head_oid.clone().into());
+                object.insert("premerge_receipt".into(), premerge_receipt.clone().into());
+            }
+            BridgeRunStatus::Merged {
+                pull_request,
+                head_oid,
+                merge_oid,
+            } => {
+                object.insert("pr".into(), (*pull_request).into());
+                object.insert("head_oid".into(), head_oid.clone().into());
+                object.insert("merge_oid".into(), merge_oid.clone().into());
+                object.insert("claim_released".into(), true.into());
+            }
+            BridgeRunStatus::Retryable { reason } | BridgeRunStatus::Blocked { reason } => {
+                object.insert("reason".into(), reason.clone().into());
+                object.insert("claim_released".into(), true.into());
+            }
+        }
+        value.to_string()
+    }
+}
+
+fn reject_duplicate_top_level_keys(document: &str) -> Result<(), String> {
+    let bytes = document.as_bytes();
+    let mut keys = BTreeSet::new();
+    let mut depth = 0_u32;
+    let mut expect_key = false;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => {
+                depth = depth.saturating_add(1);
+                if depth == 1 {
+                    expect_key = true;
+                }
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                index += 1;
+            }
+            b',' if depth == 1 => {
+                expect_key = true;
+                index += 1;
+            }
+            b'"' => {
+                let start = index;
+                index += 1;
+                let mut escaped = false;
+                while index < bytes.len() {
+                    let byte = bytes[index];
+                    index += 1;
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        break;
+                    }
+                }
+                if depth == 1 && expect_key && index <= bytes.len() {
+                    let key: String =
+                        serde_json::from_str(&document[start..index]).map_err(|error| {
+                            format!("invalid executor bridge receipt JSON: {error}")
+                        })?;
+                    if !keys.insert(key.clone()) {
+                        return Err(format!(
+                            "executor bridge receipt contains duplicate field: {key}"
+                        ));
+                    }
+                    expect_key = false;
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    Ok(())
+}
+
+fn positive_number(object: &JsonObject, field: &str) -> Result<u64, String> {
+    number(object, field).and_then(|value| {
+        (value > 0)
+            .then_some(value)
+            .ok_or_else(|| format!("executor bridge receipt {field} must be positive"))
+    })
+}
+
+fn nonempty_text(object: &JsonObject, field: &str) -> Result<String, String> {
+    text(object, field).and_then(|value| {
+        (!value.trim().is_empty())
+            .then_some(value)
+            .ok_or_else(|| format!("executor bridge receipt {field} must not be empty"))
+    })
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ExecutorBridgeRequest {
+    pub(crate) repository: String,
+    pub(crate) repository_path: PathBuf,
+    pub(crate) issue: u64,
+    pub(crate) issue_title: String,
+    pub(crate) issue_body: String,
+    pub(crate) worker_id: String,
+    pub(crate) claim_id: String,
+    pub(crate) invocation_id: String,
+    pub(crate) state_path: PathBuf,
+    pub(crate) event_log: PathBuf,
+}
+
+pub(crate) fn run_executor_bridge(
+    request: &ExecutorBridgeRequest,
+) -> Result<BridgeRunReceipt, String> {
+    let terminal_path = request.state_path.with_extension("terminal.json");
+    if terminal_path.is_file() {
+        validate_private_state_file(&terminal_path)?;
+        let receipt = BridgeRunReceipt::from_json(
+            &fs::read_to_string(&terminal_path)
+                .map_err(|error| format!("read executor terminal receipt: {error}"))?,
+        )?;
+        validate_bridge_request_receipt(request, &receipt)?;
+        verify_completed_terminal_receipt(request, &receipt)?;
+        return Ok(receipt);
+    }
+
+    let repository_path = fs::canonicalize(&request.repository_path)
+        .map_err(|error| format!("canonicalize executor repository: {error}"))?;
+    if request.state_path.starts_with(&repository_path) {
+        return Err("executor durable state must be outside the target repository".to_string());
+    }
+    let environment = std::env::vars_os()
+        .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+        .collect::<BTreeMap<_, _>>();
+    let base = resolve_base(&repository_path, &environment)?;
+    let worktree =
+        provision_issue_worktree(&repository_path, &request.repository, request.issue, &base)?;
+    let canonical_branch = format!("feat/autonomous-issue-{}", request.issue);
+    if worktree.branch != canonical_branch {
+        return Err("executor worktree did not use the canonical issue branch".to_string());
+    }
+    let mut runtime = runtime_session_adapter(&worktree.path)?;
+    let runtime_session_id = runtime.as_ref().map(|runtime| runtime.session_id.clone());
+    let identity = BridgeIdentity {
+        repository: request.repository.clone(),
+        repository_path,
+        issue: request.issue,
+        worker_id: request.worker_id.clone(),
+        branch: canonical_branch,
+        claim_id: request.claim_id.clone(),
+        invocation_id: request.invocation_id.clone(),
+        base_ref: worktree.base_ref,
+        base_oid: worktree.base_oid,
+        worktree: fs::canonicalize(&worktree.path)
+            .map_err(|error| format!("canonicalize executor worktree: {error}"))?,
+        runtime_session_id,
+    };
+    let harness_config = HarnessConfig::load(&identity.repository_path, &environment)?;
+    let resolved_harness = harness_config.resolve(&environment)?;
+    let mut state = match recover_invocation(&request.state_path, &identity)? {
+        Some(state) => state,
+        None => {
+            let state = PersistedInvocation {
+                schema: INVOCATION_SCHEMA,
+                identity,
+                harness: resolved_harness.kind,
+                phase: BridgePhase::Pending,
+                supervisor: None,
+                process: None,
+                progress_at: unix_now()?,
+                pr: None,
+                head_oid: None,
+                closeout_path: None,
+                closeout_digest: None,
+                remote_snapshot_digest: None,
+                draft_process: None,
+                terminal_result: None,
+            };
+            write_invocation_atomic(&request.state_path, &state)?;
+            state
+        }
+    };
+    if state.harness != resolved_harness.kind {
+        return Err("executor recovered invocation changed harness kind".to_string());
+    }
+    let remote = DraftPrAdapter::github_cli();
+    if state.phase == BridgePhase::Pending && state.remote_snapshot_digest.is_none() {
+        RemoteMutationSnapshot::capture_and_persist(&request.state_path, &mut state, &remote)?;
+    }
+    let protected =
+        MutationSnapshot::capture(&state.identity.repository_path, &state.identity.branch)?;
+    let closeout_path = state
+        .identity
+        .worktree
+        .join(".autospec/executor-closeout.md");
+    let prompt = build_implementer_prompt(
+        &state.identity,
+        &request.issue_title,
+        &request.issue_body,
+        &closeout_path,
+    )?;
+    if matches!(
+        state.phase,
+        BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
+    ) {
+        match supervise_resolved_harness_in_runtime(
+            &request.state_path,
+            &request.event_log,
+            &mut state,
+            HarnessLaunch {
+                resolved: &resolved_harness,
+                artifact: &closeout_path,
+                prompt: &prompt,
+            },
+            &protected,
+            SupervisionConfig::default(),
+            runtime.as_ref().map(RuntimeSessionAdapter::direct),
+        )? {
+            SupervisionOutcome::AlreadyRunning => return pending_bridge_receipt(request),
+            SupervisionOutcome::Exited { exit_code: 0 } => {}
+            SupervisionOutcome::Exited { exit_code } => {
+                return finalize_bridge_failure(
+                    request,
+                    &mut state,
+                    runtime.take(),
+                    &remote,
+                    &format!("executor_harness_exit_{exit_code}"),
+                )
+            }
+            SupervisionOutcome::Stalled => {
+                return finalize_bridge_failure(
+                    request,
+                    &mut state,
+                    runtime.take(),
+                    &remote,
+                    "executor_harness_stalled",
+                )
+            }
+            SupervisionOutcome::OwnershipLost => {
+                return Err("executor bridge lost exact claim ownership".to_string())
+            }
+        }
+    }
+    let proof = recover_or_prove_implementation(
+        &request.state_path,
+        &mut state,
+        &protected,
+        &closeout_path,
+    )?;
+    if matches!(
+        state.phase,
+        BridgePhase::ImplementationProven
+            | BridgePhase::BranchPushing
+            | BridgePhase::BranchPushed
+            | BridgePhase::DraftCreating
+            | BridgePhase::DraftCleanupPending
+    ) {
+        push_and_create_draft(
+            &request.state_path,
+            &mut state,
+            &proof,
+            &request.issue_title,
+            &request.issue_body,
+            &remote,
+        )?;
+    }
+    let Some(premerge_receipt) = ensure_premerge_and_review(
+        request,
+        &environment,
+        &remote,
+        &mut state,
+        &proof,
+        runtime.as_ref().map(RuntimeSessionAdapter::direct),
+    )?
+    else {
+        return pending_bridge_receipt(request);
+    };
+    if state.phase == BridgePhase::ReviewPassed {
+        originate_and_accept_executor_result(
+            &request.state_path,
+            &mut state,
+            &premerge_receipt,
+            &remote,
+        )?;
+    }
+    if matches!(
+        state.phase,
+        BridgePhase::ResultAccepted | BridgePhase::MergeRequested
+    ) {
+        admin_squash_merge_exact(&request.state_path, &mut state, &remote)?;
+    }
+    let merge_oid = state
+        .terminal_result
+        .clone()
+        .filter(|_| {
+            matches!(
+                state.phase,
+                BridgePhase::Merged | BridgePhase::CleanupPending
+            )
+        })
+        .ok_or_else(|| "executor bridge did not observe a merged pull request".to_string())?;
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "executor merged state has no pull request".to_string())?;
+    let head_oid = state
+        .head_oid
+        .clone()
+        .ok_or_else(|| "executor merged state has no stable head".to_string())?;
+    finalize_merged_executor(&request.state_path, &mut state, runtime.take())?;
+    if state.phase != BridgePhase::Complete {
+        return Err("executor bridge finalization did not reach Complete".to_string());
+    }
+    observe_terminal_label_release(&state, &remote)?;
+    let receipt = BridgeRunReceipt {
+        repository: request.repository.clone(),
+        issue: request.issue,
+        worker_id: request.worker_id.clone(),
+        branch: state.identity.branch.clone(),
+        claim_id: request.claim_id.clone(),
+        invocation_id: request.invocation_id.clone(),
+        status: BridgeRunStatus::Merged {
+            pull_request,
+            head_oid,
+            merge_oid,
+        },
+    };
+    write_private_create_once(
+        &terminal_path,
+        format!("{}\n", receipt.to_json()).as_bytes(),
+        "executor terminal receipt",
+    )?;
+    Ok(receipt)
+}
+
+fn pending_bridge_receipt(request: &ExecutorBridgeRequest) -> Result<BridgeRunReceipt, String> {
+    Ok(BridgeRunReceipt {
+        repository: request.repository.clone(),
+        issue: request.issue,
+        worker_id: request.worker_id.clone(),
+        branch: format!("feat/autonomous-issue-{}", request.issue),
+        claim_id: request.claim_id.clone(),
+        invocation_id: request.invocation_id.clone(),
+        status: BridgeRunStatus::Pending,
+    })
+}
+
+fn validate_bridge_request_receipt(
+    request: &ExecutorBridgeRequest,
+    receipt: &BridgeRunReceipt,
+) -> Result<(), String> {
+    if receipt.repository != request.repository
+        || receipt.issue != request.issue
+        || receipt.worker_id != request.worker_id
+        || receipt.branch != format!("feat/autonomous-issue-{}", request.issue)
+        || receipt.claim_id != request.claim_id
+        || receipt.invocation_id != request.invocation_id
+    {
+        return Err("executor terminal receipt belongs to another invocation".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_completed_terminal_receipt(
+    request: &ExecutorBridgeRequest,
+    receipt: &BridgeRunReceipt,
+) -> Result<(), String> {
+    validate_private_state_file(&request.state_path)?;
+    let state = PersistedInvocation::from_json(
+        &fs::read_to_string(&request.state_path)
+            .map_err(|error| format!("read completed executor invocation: {error}"))?,
+    )?;
+    if state.phase != BridgePhase::Complete
+        || state.identity.repository != receipt.repository
+        || state.identity.issue != receipt.issue
+        || state.identity.worker_id != receipt.worker_id
+        || state.identity.branch != receipt.branch
+        || state.identity.claim_id != receipt.claim_id
+        || state.identity.invocation_id != receipt.invocation_id
+    {
+        return Err(
+            "executor terminal receipt is not bound to an exact Complete invocation".to_string(),
+        );
+    }
+    match &receipt.status {
+        BridgeRunStatus::Merged {
+            pull_request,
+            head_oid,
+            merge_oid,
+        } if state.pr == Some(*pull_request)
+            && state.head_oid.as_deref() == Some(head_oid)
+            && state.terminal_result.as_deref() == Some(merge_oid) => {}
+        BridgeRunStatus::Retryable { reason }
+            if state.terminal_result.as_deref() == Some(format!("retryable:{reason}").as_str()) => {
+        }
+        BridgeRunStatus::Blocked { reason }
+            if state.terminal_result.as_deref()
+                == Some(format!("needs-human:{reason}").as_str()) => {}
+        _ => {
+            return Err(
+                "executor terminal receipt does not match persisted terminal evidence".to_string(),
+            )
+        }
+    }
+    observe_terminal_label_release(&state, &DraftPrAdapter::github_cli())
+}
+
+fn recover_or_prove_implementation(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    protected: &MutationSnapshot,
+    closeout_path: &Path,
+) -> Result<ImplementationProof, String> {
+    if matches!(
+        state.phase,
+        BridgePhase::ImplementationComplete
+            | BridgePhase::ImplementationProven
+            | BridgePhase::BranchPushing
+            | BridgePhase::BranchPushed
+            | BridgePhase::DraftCreating
+            | BridgePhase::DraftCleanupPending
+            | BridgePhase::DraftCreated
+    ) {
+        return prove_implementation(state_path, state, protected, closeout_path);
+    }
+    let head_oid = state
+        .head_oid
+        .clone()
+        .ok_or_else(|| "executor recovered phase has no proven head".to_string())?;
+    let closeout_path = state
+        .closeout_path
+        .as_deref()
+        .ok_or_else(|| "executor recovered phase has no Closeout artifact".to_string())?;
+    let closeout_body = validate_closeout_report(&state.identity.worktree, closeout_path)?;
+    Ok(ImplementationProof {
+        head_oid,
+        closeout_body,
+    })
+}
+
+fn ensure_premerge_and_review(
+    request: &ExecutorBridgeRequest,
+    environment: &BTreeMap<String, OsString>,
+    remote: &DraftPrAdapter,
+    state: &mut PersistedInvocation,
+    proof: &ImplementationProof,
+    runtime: Option<&DirectRuntimeAdapter>,
+) -> Result<Option<String>, String> {
+    let digest_path = request
+        .state_path
+        .with_extension(format!("premerge-{}.digest", proof.head_oid));
+    if state.phase == BridgePhase::DraftCreated {
+        let scanners = ScannerExecutables::resolve(environment)?;
+        let artifact_root = state
+            .identity
+            .worktree
+            .join(".autospec/evidence/premerge")
+            .join(
+                PremergeLaneIdentity::new(
+                    state.identity.repository.clone(),
+                    state.identity.issue,
+                    state.identity.worker_id.clone(),
+                    state.identity.claim_id.clone(),
+                    state.identity.branch.clone(),
+                    proof.head_oid.clone(),
+                )?
+                .lane_digest(),
+            );
+        let evidence = produce_deterministic_premerge_evidence(DeterministicEvidenceRequest {
+            state,
+            proof,
+            issue_body: &request.issue_body,
+            spec_documents: &[],
+            env: environment,
+            scanners: &scanners,
+            artifact_root: &artifact_root,
+            runtime,
+            model_output: None,
+            stall_timeout: Duration::from_secs(300),
+        })?;
+        let receipt = match &evidence.decision {
+            PremergeDecision::Pass {
+                evidence_digest, ..
+            } => evidence_digest.clone(),
+            _ => return Err("executor deterministic premerge decision did not pass".to_string()),
+        };
+        write_private_create_once(
+            &digest_path,
+            format!("{receipt}\n").as_bytes(),
+            "executor premerge receipt binding",
+        )?;
+        mark_exact_draft_ready(&request.state_path, state, &evidence.decision, remote)?;
+    }
+    let receipt = fs::read_to_string(&digest_path)
+        .map_err(|error| format!("read executor premerge receipt binding: {error}"))?
+        .trim()
+        .to_string();
+    if !canonical_sha256(&receipt) {
+        return Err("executor premerge receipt binding is invalid".to_string());
+    }
+    if state.phase == BridgePhase::Ready {
+        poll_exact_required_ci(
+            &request.state_path,
+            state,
+            remote,
+            &configured_advisory_checks(remote)?,
+            40,
+        )?;
+    }
+    if state.phase == BridgePhase::CiPassed {
+        let review = environment
+            .get("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                "AUTOSPEC_EXECUTOR_REVIEW_COMMAND is required for independent review".to_string()
+            })?;
+        let plan = parse_direct_command_plan(review)?;
+        run_strict_independent_reviewer(
+            &request.state_path,
+            state,
+            &plan,
+            &request.state_path.with_extension("review-artifacts"),
+            Duration::from_secs(300),
+            remote,
+        )?;
+    }
+    if state.phase == BridgePhase::ReviewPassed && reconcile_base_drift(&request.state_path, state)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(receipt))
+}
+
+fn finalize_bridge_failure(
+    request: &ExecutorBridgeRequest,
+    state: &mut PersistedInvocation,
+    runtime: Option<RuntimeSessionAdapter>,
+    remote: &DraftPrAdapter,
+    reason: &str,
+) -> Result<BridgeRunReceipt, String> {
+    finalize_failed_executor(
+        &request.state_path,
+        state,
+        runtime,
+        Some(remote),
+        true,
+        false,
+        reason,
+    )?;
+    observe_terminal_label_release(state, remote)?;
+    let receipt = BridgeRunReceipt {
+        repository: request.repository.clone(),
+        issue: request.issue,
+        worker_id: request.worker_id.clone(),
+        branch: state.identity.branch.clone(),
+        claim_id: request.claim_id.clone(),
+        invocation_id: request.invocation_id.clone(),
+        status: BridgeRunStatus::Retryable {
+            reason: reason.to_string(),
+        },
+    };
+    write_private_create_once(
+        &request.state_path.with_extension("terminal.json"),
+        format!("{}\n", receipt.to_json()).as_bytes(),
+        "executor terminal receipt",
+    )?;
+    Ok(receipt)
+}
+
+fn observe_terminal_label_release(
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<(), String> {
+    let disposition = match state.terminal_result.as_deref() {
+        Some(result) if canonical_git_oid(result) => BridgeClaimDisposition::Merged,
+        Some(result) if result.starts_with("retryable:") => BridgeClaimDisposition::Retryable,
+        Some(result) if result.starts_with("needs-human:") => BridgeClaimDisposition::NeedsHuman,
+        _ => return Err("terminal executor state has no canonical disposition".to_string()),
+    };
+    if !observe_terminal_bridge_claim(bridge_claim_identity(state), state.pr, disposition)
+        .map_err(|error| error.message)?
+    {
+        return Err(
+            "terminal executor receipt is not bound to the terminal claim generation".to_string(),
+        );
+    }
+    let output = Command::new(&adapter.gh)
+        .args([
+            "issue",
+            "view",
+            &state.identity.issue.to_string(),
+            "--repo",
+            &state.identity.repository,
+            "--json",
+            "labels",
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| format!("observe terminal executor labels: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "observe terminal executor labels failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("parse terminal executor labels: {error}"))?;
+    let object = strict_object(value, &["labels"], "terminal executor labels")?;
+    let labels = required(&object, "labels")?
+        .as_array()
+        .ok_or_else(|| "terminal executor labels must be an array".to_string())?;
+    for label in labels {
+        let label = strict_object(label.clone(), &["name"], "terminal executor label")?;
+        if text(&label, "name")? == "in-progress-by-bot" {
+            return Err("terminal executor receipt still owns in-progress-by-bot".to_string());
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DirectCommand {
@@ -2120,14 +2895,21 @@ impl DirectRuntimeAdapter {
             "autospec-autonomous-evidence",
         )
         .map_err(|error| error.message)?;
+        Ok(Self::from_prepared(repo, session))
+    }
+
+    fn from_prepared(
+        repo: PathBuf,
+        session: crate::commands::runtime::env::PreparedRuntimeSession,
+    ) -> Self {
         let session_id = session.session_id().to_string();
         let environment_dir = session.environment_dir().to_path_buf();
-        Ok(Self {
+        Self {
             repo,
             session_id,
             environment_dir,
             session: RefCell::new(Some(session)),
-        })
+        }
     }
 
     pub(crate) fn session_id(&self) -> &str {
@@ -2176,6 +2958,14 @@ impl DirectRuntimeAdapter {
             return Ok(());
         };
         session.close_verified().map_err(|error| error.message)
+    }
+
+    fn into_prepared(
+        self,
+    ) -> Result<crate::commands::runtime::env::PreparedRuntimeSession, String> {
+        self.session
+            .into_inner()
+            .ok_or_else(|| "runtime evidence session is already closed".to_string())
     }
 }
 
@@ -10674,12 +11464,38 @@ pub(crate) fn supervise_resolved_harness(
     snapshot: &MutationSnapshot,
     config: SupervisionConfig,
 ) -> Result<SupervisionOutcome, String> {
+    supervise_resolved_harness_in_runtime(
+        state_path, event_log, state, launch, snapshot, config, None,
+    )
+}
+
+fn supervise_resolved_harness_in_runtime(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    launch: HarnessLaunch<'_>,
+    snapshot: &MutationSnapshot,
+    config: SupervisionConfig,
+    runtime: Option<&DirectRuntimeAdapter>,
+) -> Result<SupervisionOutcome, String> {
     let worktree = validate_launch_worktree(state)?;
     validate_launch_artifact(&worktree, launch.artifact)?;
     let invocation = launch
         .resolved
         .invocation(&worktree, launch.artifact, launch.prompt)?;
-    let validated = validate_invocation(&invocation, &worktree)?;
+    let mut validated = validate_invocation(&invocation, &worktree)?;
+    if let Some(runtime) = runtime {
+        let expected_session_id =
+            state
+                .identity
+                .runtime_session_id
+                .as_deref()
+                .ok_or_else(|| {
+                    "executor invocation runtime is not bound to bridge state".to_string()
+                })?;
+        runtime.verify_active(expected_session_id)?;
+        validated.environment_overrides = runtime.environment_overrides()?;
+    }
     supervise_validated_harness_with_claim_renewal(
         state_path,
         event_log,
@@ -14277,7 +15093,7 @@ pub(crate) struct RuntimeSessionAdapter {
     pub(crate) repo: PathBuf,
     pub(crate) mode: String,
     pub(crate) session_id: String,
-    session: crate::commands::runtime::env::PreparedRuntimeSession,
+    direct: DirectRuntimeAdapter,
 }
 
 impl std::fmt::Debug for RuntimeSessionAdapter {
@@ -14293,15 +15109,25 @@ impl std::fmt::Debug for RuntimeSessionAdapter {
 
 impl RuntimeSessionAdapter {
     pub(crate) fn environment_dir(&self) -> &Path {
-        self.session.environment_dir()
+        self.direct.environment_dir()
+    }
+
+    fn direct(&self) -> &DirectRuntimeAdapter {
+        &self.direct
     }
 
     pub(crate) fn run(self, command: &[String]) -> Result<(), crate::commands::CommandFailure> {
-        self.session.run(command)
+        self.direct
+            .into_prepared()
+            .map_err(crate::commands::CommandFailure::diagnostic)?
+            .run(command)
     }
 
     pub(crate) fn abort(self) -> Result<(), crate::commands::CommandFailure> {
-        self.session.abort()
+        self.direct
+            .into_prepared()
+            .map_err(crate::commands::CommandFailure::diagnostic)?
+            .abort()
     }
 }
 
@@ -14572,9 +15398,9 @@ fn validate_existing_worktree(
             "executor worktree branch mismatch: expected {branch}, observed {observed_branch}"
         ));
     }
-    if !git_stdout(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
-        return Err("executor worktree is dirty and cannot be adopted".to_string());
-    }
+    // An exact repo/branch/path ownership match may contain a prior retryable
+    // generation's partial implementation. Preserve it for the next harness;
+    // proof still requires a clean committed tree before any remote mutation.
     reconcile_preserved_worktree_base(repo, path, branch, scope_root, base)?;
     validate_worktree_creation_identity(repo, path, branch, base)?;
     Ok(())
@@ -14844,12 +15670,13 @@ pub(crate) fn runtime_session_adapter(
         "autospec-autonomous-executor",
     )
     .map_err(|error| error.message)?;
-    let session_id = session.session_id().to_string();
+    let direct = DirectRuntimeAdapter::from_prepared(canonical.clone(), session);
+    let session_id = direct.session_id().to_string();
     Ok(Some(RuntimeSessionAdapter {
         repo: canonical,
         mode: "auto".to_string(),
         session_id,
-        session,
+        direct,
     }))
 }
 
