@@ -224,6 +224,14 @@ def unsafe_findings_for_source(relative_path, source):
         line = code.count("\n", 0, unsafe_offset) + 1
         if approved_unsafe_boundary(relative_path, source, match):
             continue
+        syntax = (
+            "attribute"
+            if match.group(0).lstrip().startswith("#")
+            else re.search(
+                r"\bunsafe\s*(\{|fn\b|trait\b|impl\b|extern\b)",
+                match.group(0),
+            ).group(1)
+        )
         findings.append({
             "gap_id": f"U{len(findings)+1}",
             "dimension": "unsafe",
@@ -233,7 +241,7 @@ def unsafe_findings_for_source(relative_path, source):
             "title": "Unsafe code requires security review",
             "body": "Unsafe code was detected. Replace it with a safe primitive or document an independent security review and invariant proof.",
             "dedupe_key": title_hash(f"unsafe:{relative_path}:{line}"),
-            "_unsafe_syntax": " ".join(match.group(0).split()),
+            "_unsafe_syntax": syntax,
         })
     return findings
 
