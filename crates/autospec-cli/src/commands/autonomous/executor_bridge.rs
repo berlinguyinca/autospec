@@ -376,56 +376,104 @@ pub(crate) fn run_executor_bridge(
     let environment = std::env::vars_os()
         .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
         .collect::<BTreeMap<_, _>>();
-    let base = resolve_base(&repository_path, &environment)?;
-    let worktree =
-        provision_issue_worktree(&repository_path, &request.repository, request.issue, &base)?;
     let canonical_branch = format!("feat/autonomous-issue-{}", request.issue);
-    if worktree.branch != canonical_branch {
-        return Err("executor worktree did not use the canonical issue branch".to_string());
-    }
-    let mut runtime = runtime_session_adapter(&worktree.path)?;
-    let runtime_session_id = runtime.as_ref().map(|runtime| runtime.session_id.clone());
-    let identity = BridgeIdentity {
-        repository: request.repository.clone(),
-        repository_path,
-        issue: request.issue,
-        worker_id: request.worker_id.clone(),
-        branch: canonical_branch,
-        claim_id: request.claim_id.clone(),
-        invocation_id: request.invocation_id.clone(),
-        base_ref: worktree.base_ref,
-        base_oid: worktree.base_oid,
-        worktree: fs::canonicalize(&worktree.path)
-            .map_err(|error| format!("canonicalize executor worktree: {error}"))?,
-        runtime_session_id,
-    };
-    let harness_config = HarnessConfig::load(&identity.repository_path, &environment)?;
-    let resolved_harness = harness_config.resolve(&environment)?;
-    let mut state = match recover_invocation(&request.state_path, &identity)? {
-        Some(state) => state,
-        None => {
-            let state = PersistedInvocation {
-                schema: INVOCATION_SCHEMA,
-                identity,
-                harness: resolved_harness.kind,
-                phase: BridgePhase::Pending,
-                supervisor: None,
-                process: None,
-                progress_at: unix_now()?,
-                pr: None,
-                head_oid: None,
-                closeout_path: None,
-                closeout_digest: None,
-                remote_snapshot_digest: None,
-                draft_process: None,
-                terminal_result: None,
-            };
-            write_invocation_atomic(&request.state_path, &state)?;
-            state
+    let recovered = load_invocation_for_request(request, &repository_path, &canonical_branch)?;
+    if let Some(recovered) = recovered.as_ref() {
+        if recovered.phase == BridgePhase::Complete {
+            return publish_complete_receipt(request, recovered, &terminal_path);
         }
+    }
+    let (mut state, mut runtime) = if let Some(recovered) = recovered {
+        let state = recover_invocation(&request.state_path, &recovered.identity)?
+            .ok_or_else(|| "executor recovery state disappeared".to_string())?;
+        if persisted_executor_is_live(&state)? {
+            return pending_bridge_receipt(request);
+        }
+        let needs_runtime = matches!(
+            state.phase,
+            BridgePhase::Pending
+                | BridgePhase::Implementing
+                | BridgePhase::Interrupted
+                | BridgePhase::ImplementationComplete
+                | BridgePhase::ImplementationProven
+                | BridgePhase::BranchPushing
+                | BridgePhase::BranchPushed
+                | BridgePhase::DraftCreating
+                | BridgePhase::DraftCleanupPending
+                | BridgePhase::DraftCreated
+        );
+        let runtime = match (
+            needs_runtime,
+            state.identity.runtime_environment_dir.as_deref(),
+            state.identity.runtime_session_id.as_deref(),
+        ) {
+            (true, Some(environment_dir), Some(session_id)) => reattach_runtime_session_adapter(
+                &state.identity.worktree,
+                environment_dir,
+                session_id,
+            )?,
+            (true, None, None) => None,
+            (true, _, _) => {
+                return Err("persisted runtime binding is incomplete".to_string());
+            }
+            (false, _, _) => None,
+        };
+        (state, runtime)
+    } else {
+        let base = resolve_base(&repository_path, &environment)?;
+        let worktree =
+            provision_issue_worktree(&repository_path, &request.repository, request.issue, &base)?;
+        if worktree.branch != canonical_branch {
+            return Err("executor worktree did not use the canonical issue branch".to_string());
+        }
+        let runtime = runtime_session_adapter(&worktree.path)?;
+        let identity = BridgeIdentity {
+            repository: request.repository.clone(),
+            repository_path: repository_path.clone(),
+            issue: request.issue,
+            worker_id: request.worker_id.clone(),
+            branch: canonical_branch,
+            claim_id: request.claim_id.clone(),
+            invocation_id: request.invocation_id.clone(),
+            base_ref: worktree.base_ref,
+            base_oid: worktree.base_oid,
+            worktree: fs::canonicalize(&worktree.path)
+                .map_err(|error| format!("canonicalize executor worktree: {error}"))?,
+            runtime_environment_dir: runtime
+                .as_ref()
+                .map(|runtime| runtime.environment_dir().to_path_buf()),
+            runtime_session_id: runtime.as_ref().map(|runtime| runtime.session_id.clone()),
+        };
+        let state = PersistedInvocation {
+            schema: INVOCATION_SCHEMA,
+            identity,
+            harness: HarnessKind::Codex,
+            phase: BridgePhase::Pending,
+            supervisor: None,
+            process: None,
+            progress_at: unix_now()?,
+            pr: None,
+            head_oid: None,
+            closeout_path: None,
+            closeout_digest: None,
+            remote_snapshot_digest: None,
+            draft_process: None,
+            terminal_result: None,
+        };
+        (state, runtime)
     };
+    let harness_config = HarnessConfig::load(&state.identity.repository_path, &environment)?;
+    let resolved_harness = harness_config.resolve(&environment)?;
+    if !request.state_path.exists() {
+        state.harness = resolved_harness.kind;
+        write_invocation_atomic(&request.state_path, &state)?;
+    }
     if state.harness != resolved_harness.kind {
         return Err("executor recovered invocation changed harness kind".to_string());
+    }
+    if state.phase == BridgePhase::CleanupPending {
+        finalize_merged_executor(&request.state_path, &mut state, runtime.take())?;
+        return publish_complete_receipt(request, &state, &terminal_path);
     }
     let remote = DraftPrAdapter::github_cli();
     if state.phase == BridgePhase::Pending && state.remote_snapshot_digest.is_none() {
@@ -484,6 +532,24 @@ pub(crate) fn run_executor_bridge(
                 return Err("executor bridge lost exact claim ownership".to_string())
             }
         }
+    }
+    if state.phase == BridgePhase::ImplementationComplete {
+        let scope_root = state
+            .identity
+            .worktree
+            .parent()
+            .ok_or_else(|| "executor worktree has no private scope root".to_string())?;
+        reconcile_preserved_worktree_base(
+            &state.identity.repository_path,
+            &state.identity.worktree,
+            &state.identity.branch,
+            scope_root,
+            &ResolvedBase {
+                base_ref: state.identity.base_ref.clone(),
+                base_oid: state.identity.base_oid.clone(),
+                explore_mode: false,
+            },
+        )?;
     }
     let proof = recover_or_prove_implementation(
         &request.state_path,
@@ -574,6 +640,115 @@ pub(crate) fn run_executor_bridge(
         "executor terminal receipt",
     )?;
     Ok(receipt)
+}
+
+#[cfg(target_os = "linux")]
+fn persisted_executor_is_live(state: &PersistedInvocation) -> Result<bool, String> {
+    for expected in [state.supervisor.as_ref(), state.process.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        match OwnedProcess::capture_identity(expected) {
+            Ok(process) => {
+                if process.is_live()? {
+                    return Ok(true);
+                }
+            }
+            Err(error)
+                if observe_process_identity(expected.pid, &expected.argv_digest)?.is_some() =>
+            {
+                return Err(format!(
+                    "persisted executor identity is live but cannot be adopted before runtime recovery: {error}"
+                ));
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn persisted_executor_is_live(_state: &PersistedInvocation) -> Result<bool, String> {
+    Ok(false)
+}
+
+fn publish_complete_receipt(
+    request: &ExecutorBridgeRequest,
+    state: &PersistedInvocation,
+    terminal_path: &Path,
+) -> Result<BridgeRunReceipt, String> {
+    if state.phase != BridgePhase::Complete {
+        return Err("executor terminal reconstruction requires Complete state".to_string());
+    }
+    let terminal = state
+        .terminal_result
+        .as_deref()
+        .ok_or_else(|| "executor Complete state has no terminal result".to_string())?;
+    let status = if let Some(reason) = terminal.strip_prefix("retryable:") {
+        BridgeRunStatus::Retryable {
+            reason: reason.to_string(),
+        }
+    } else if let Some(reason) = terminal.strip_prefix("needs-human:") {
+        BridgeRunStatus::Blocked {
+            reason: reason.to_string(),
+        }
+    } else if canonical_git_oid(terminal) {
+        BridgeRunStatus::Merged {
+            pull_request: state
+                .pr
+                .ok_or_else(|| "executor Complete merge has no pull request".to_string())?,
+            head_oid: state
+                .head_oid
+                .clone()
+                .ok_or_else(|| "executor Complete merge has no head OID".to_string())?,
+            merge_oid: terminal.to_string(),
+        }
+    } else {
+        return Err("executor Complete terminal result is invalid".to_string());
+    };
+    observe_terminal_label_release(state, &DraftPrAdapter::github_cli())?;
+    let receipt = BridgeRunReceipt {
+        repository: request.repository.clone(),
+        issue: request.issue,
+        worker_id: request.worker_id.clone(),
+        branch: state.identity.branch.clone(),
+        claim_id: request.claim_id.clone(),
+        invocation_id: request.invocation_id.clone(),
+        status,
+    };
+    write_private_create_once(
+        terminal_path,
+        format!("{}\n", receipt.to_json()).as_bytes(),
+        "executor terminal receipt",
+    )?;
+    Ok(receipt)
+}
+
+fn load_invocation_for_request(
+    request: &ExecutorBridgeRequest,
+    repository_path: &Path,
+    canonical_branch: &str,
+) -> Result<Option<PersistedInvocation>, String> {
+    reject_symlink_path(&request.state_path)?;
+    if !request.state_path.exists() {
+        return Ok(None);
+    }
+    validate_private_state_file(&request.state_path)?;
+    let state = PersistedInvocation::from_json(
+        &fs::read_to_string(&request.state_path)
+            .map_err(|error| format!("read executor invocation before recovery: {error}"))?,
+    )?;
+    if state.identity.repository != request.repository
+        || state.identity.repository_path != repository_path
+        || state.identity.issue != request.issue
+        || state.identity.worker_id != request.worker_id
+        || state.identity.branch != canonical_branch
+        || state.identity.claim_id != request.claim_id
+        || state.identity.invocation_id != request.invocation_id
+    {
+        return Err("persisted invocation does not belong to the requested claim".to_string());
+    }
+    Ok(Some(state))
 }
 
 fn pending_bridge_receipt(request: &ExecutorBridgeRequest) -> Result<BridgeRunReceipt, String> {
@@ -2960,11 +3135,12 @@ impl DirectRuntimeAdapter {
         session.close_verified().map_err(|error| error.message)
     }
 
-    fn into_prepared(
-        self,
+    fn take_prepared(
+        &self,
     ) -> Result<crate::commands::runtime::env::PreparedRuntimeSession, String> {
         self.session
-            .into_inner()
+            .borrow_mut()
+            .take()
             .ok_or_else(|| "runtime evidence session is already closed".to_string())
     }
 }
@@ -4323,6 +4499,10 @@ fn reconcile_direct_launch(
             .transpose()?
             .unwrap_or(false);
         if complete && !supervisor_live && !process_live {
+            reap_terminal_direct_identity(&supervisor)?;
+            if let Some(process) = process.as_ref() {
+                reap_terminal_direct_identity(process)?;
+            }
             true
         } else {
             let cleanup_harness = if complete { None } else { process.as_ref() };
@@ -4429,6 +4609,36 @@ fn reconcile_direct_launch(
         retire_direct_launch(paths, &attempt_id)?;
     }
     Ok(had_launch)
+}
+
+#[cfg(unix)]
+fn reap_terminal_direct_identity(identity: &ProcessIdentity) -> Result<(), String> {
+    let pid = Pid::from_raw(
+        i32::try_from(identity.pid)
+            .map_err(|_| "completed direct process PID is out of range".to_string())?,
+    );
+    loop {
+        match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..))
+            | Err(nix::errno::Errno::ECHILD)
+            | Err(nix::errno::Errno::ESRCH) => return Ok(()),
+            Err(nix::errno::Errno::EINTR) => continue,
+            Ok(WaitStatus::StillAlive) => {
+                return Err("completed direct process remained live during exact reap".to_string())
+            }
+            Ok(status) => {
+                return Err(format!(
+                    "completed direct process was not terminal during exact reap: {status:?}"
+                ))
+            }
+            Err(error) => return Err(format!("reap completed direct process: {error}")),
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn reap_terminal_direct_identity(_identity: &ProcessIdentity) -> Result<(), String> {
+    Ok(())
 }
 
 fn direct_failure_archive_pending(paths: &DirectAttemptPaths) -> PathBuf {
@@ -5973,6 +6183,7 @@ pub(crate) struct BridgeIdentity {
     pub(crate) base_ref: String,
     pub(crate) base_oid: String,
     pub(crate) worktree: PathBuf,
+    pub(crate) runtime_environment_dir: Option<PathBuf>,
     pub(crate) runtime_session_id: Option<String>,
 }
 
@@ -6696,6 +6907,7 @@ fn invocation_to_value(invocation: &PersistedInvocation) -> serde_json::Value {
             "base_ref": identity.base_ref,
             "base_oid": identity.base_oid,
             "worktree": identity.worktree,
+            "runtime_environment_dir": identity.runtime_environment_dir,
             "runtime_session_id": identity.runtime_session_id,
         },
         "harness": invocation.harness.as_str(),
@@ -6747,6 +6959,7 @@ fn invocation_from_value(value: serde_json::Value) -> Result<PersistedInvocation
             "base_ref",
             "base_oid",
             "worktree",
+            "runtime_environment_dir",
             "runtime_session_id",
         ],
         "identity",
@@ -6778,6 +6991,8 @@ fn invocation_from_value(value: serde_json::Value) -> Result<PersistedInvocation
             base_ref: text(&identity, "base_ref")?,
             base_oid: text(&identity, "base_oid")?,
             worktree: PathBuf::from(text(&identity, "worktree")?),
+            runtime_environment_dir: optional_text(&identity, "runtime_environment_dir")?
+                .map(PathBuf::from),
             runtime_session_id: optional_text(&identity, "runtime_session_id")?,
         },
         harness: HarnessKind::parse(&text(&object, "harness")?)?,
@@ -7371,11 +7586,17 @@ impl RemoteMutationSnapshot {
             &state.identity.worktree,
             &["rev-parse", "--verify", "HEAD^{commit}"],
         )?;
+        let dirty_wip = !git_stdout(
+            &state.identity.worktree,
+            &["status", "--porcelain=v1", "--untracked-files=all"],
+        )?
+        .is_empty();
         if local_head != state.identity.base_oid
             && snapshot
                 .refs
                 .get(&format!("refs/heads/{}", state.identity.branch))
                 != Some(&local_head)
+            && !dirty_wip
         {
             return Err(
                 "executor prelaunch local HEAD must equal the base or exact preserved remote WIP"
@@ -7398,6 +7619,7 @@ impl RemoteMutationSnapshot {
                 "worktree": fs::canonicalize(&state.identity.worktree)
                     .map_err(|error| format!("canonicalize worktree: {error}"))?,
                 "local_head": local_head,
+                "dirty_wip": dirty_wip,
             },
             "refs": &snapshot.refs,
             "pull_requests": pull_requests,
@@ -7460,8 +7682,15 @@ impl RemoteMutationSnapshot {
             .and_then(serde_json::Value::as_object)
             .and_then(|refs| refs.get(&format!("refs/heads/{}", state.identity.branch)))
             .and_then(serde_json::Value::as_str);
+        let dirty_wip = object
+            .get("identity")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|identity| identity.get("dirty_wip"))
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| "executor prelaunch dirty-WIP evidence is invalid".to_string())?;
         if persisted_local_head != state.identity.base_oid
             && preserved_ref != Some(persisted_local_head)
+            && !dirty_wip
         {
             return Err(
                 "executor prelaunch local HEAD is not the base or exact preserved WIP".to_string(),
@@ -7481,6 +7710,7 @@ impl RemoteMutationSnapshot {
             "worktree": fs::canonicalize(&state.identity.worktree)
                 .map_err(|error| format!("canonicalize worktree: {error}"))?,
             "local_head": persisted_local_head,
+            "dirty_wip": dirty_wip,
         });
         if object.get("identity") != Some(&expected_identity) {
             return Err(
@@ -9457,12 +9687,21 @@ fn close_owned_runtime(
     state: &PersistedInvocation,
     runtime: Option<RuntimeSessionAdapter>,
 ) -> Result<(), String> {
-    let Some(expected_session) = state.identity.runtime_session_id.as_deref() else {
-        return if runtime.is_none() {
-            Ok(())
-        } else {
-            Err("executor cleanup received an unbound runtime session".to_string())
-        };
+    let (expected_session, persisted_environment_dir) = match (
+        state.identity.runtime_session_id.as_deref(),
+        state.identity.runtime_environment_dir.as_deref(),
+    ) {
+        (None, None) if runtime.is_none() => return Ok(()),
+        (None, None) => {
+            return Err("executor cleanup received an unbound runtime session".to_string())
+        }
+        (Some(session), Some(environment_dir)) => (session, environment_dir),
+        _ => {
+            return Err(
+                "executor cleanup requires a complete persisted runtime session binding"
+                    .to_string(),
+            )
+        }
     };
     let binding = cleanup_binding(state);
     let intent_path = cleanup_record_path(state_path, "runtime-intent.json");
@@ -9481,24 +9720,34 @@ fn close_owned_runtime(
         }
         (runtime.environment_dir().to_path_buf(), Some(runtime))
     } else {
-        let body = fs::read_to_string(&intent_path).map_err(|error| {
-            format!("executor runtime session cleanup requires durable recovery intent: {error}")
-        })?;
-        validate_private_state_file(&intent_path)?;
-        let value: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|error| format!("parse executor runtime cleanup intent: {error}"))?;
-        let object = strict_object(
-            value,
-            &["schema", "binding", "session_id", "environment_dir"],
-            "executor runtime cleanup intent",
-        )?;
-        if checked_u32(&object, "schema")? != 1
-            || text(&object, "binding")? != binding
-            || text(&object, "session_id")? != expected_session
-        {
-            return Err("executor runtime cleanup intent identity mismatch".to_string());
+        if intent_path.exists() {
+            let body = fs::read_to_string(&intent_path)
+                .map_err(|error| format!("read executor runtime cleanup intent: {error}"))?;
+            validate_private_state_file(&intent_path)?;
+            let value: serde_json::Value = serde_json::from_str(&body)
+                .map_err(|error| format!("parse executor runtime cleanup intent: {error}"))?;
+            let object = strict_object(
+                value,
+                &["schema", "binding", "session_id", "environment_dir"],
+                "executor runtime cleanup intent",
+            )?;
+            if checked_u32(&object, "schema")? != 1
+                || text(&object, "binding")? != binding
+                || text(&object, "session_id")? != expected_session
+            {
+                return Err("executor runtime cleanup intent identity mismatch".to_string());
+            }
+            (PathBuf::from(text(&object, "environment_dir")?), None)
+        } else {
+            if !persisted_environment_dir.is_dir() {
+                return Err(
+                    "executor runtime session cleanup has no durable owned environment proof"
+                        .to_string(),
+                );
+            }
+            let environment_dir = persisted_environment_dir.to_path_buf();
+            (environment_dir, None)
         }
-        (PathBuf::from(text(&object, "environment_dir")?), None)
     };
     if !environment_dir.is_absolute() {
         return Err("executor runtime cleanup environment path is not absolute".to_string());
@@ -11134,7 +11383,6 @@ unsafe fn raw_supervisor_loop(
     }
     let mut exit_code = None;
     let mut exit_notified = false;
-    let mut exit_recorded = false;
     loop {
         let mut pollfds = [
             nix::libc::pollfd {
@@ -11217,7 +11465,7 @@ unsafe fn raw_supervisor_loop(
                 exit_notified = true;
             }
         }
-        if !exit_recorded && pipe_descriptors[0] < 0 && pipe_descriptors[1] < 0 {
+        if pipe_descriptors[0] < 0 && pipe_descriptors[1] < 0 {
             if let Some(code) = exit_code {
                 // SAFETY: this supervisor is the dedicated subreaper for the harness tree.
                 let quiescent = unsafe { raw_children_quiescent() };
@@ -11245,7 +11493,7 @@ unsafe fn raw_supervisor_loop(
                 let _ = unsafe { raw_write_all(harness_exit, b"DONE") };
                 // SAFETY: this supervisor exclusively owns the notification descriptor.
                 unsafe { nix::libc::close(harness_exit) };
-                exit_recorded = true;
+                terminate_post_fork(0);
             }
         }
     }
@@ -11923,6 +12171,24 @@ fn supervise_validated_harness_with_claim_renewal(
                     return Err(format!(
                         "journaled executor supervisor identity is quarantined: {error}"
                     ));
+                }
+                Err(_)
+                    if observe_process_identity(expected.pid, &expected.argv_digest)?.is_none() =>
+                {
+                    if let Some(exit_code) = read_executor_exit_status(&sinks.exit_status)? {
+                        reap_terminal_direct_identity(&supervisor)?;
+                        reap_terminal_direct_identity(&expected)?;
+                        state.supervisor = Some(supervisor);
+                        return finalize_recovered_completion(
+                            state_path,
+                            event_log,
+                            state,
+                            snapshot,
+                            &sinks,
+                            &mut renewal,
+                            exit_code,
+                        );
+                    }
                 }
                 Err(_) => {}
             }
@@ -13838,11 +14104,6 @@ fn launch_and_supervise(
         loop {
             thread::sleep(config.poll_interval);
             guard.child_mut().capture_descendants()?;
-            if !guard.child_mut().processes.leader.is_live()? {
-                return Err(
-                    "executor supervisor exited before durable completion status".to_string(),
-                );
-            }
             fail_launch_at("direct-poll")?;
             if readers.poll()? > 0 {
                 last_progress = Instant::now();
@@ -13870,6 +14131,10 @@ fn launch_and_supervise(
 
             match observe_process_identity(process.pid, &process.argv_digest)? {
                 Some(observed) if process.matches(&observed) => {
+                    if !guard.child_mut().processes.leader.is_live()? {
+                        return Err("executor supervisor exited while its harness remained live"
+                            .to_string());
+                    }
                     if last_progress.elapsed() >= config.stall_timeout {
                         let last_progress_at = state.progress_at;
                         guard.terminate()?;
@@ -15118,16 +15383,24 @@ impl RuntimeSessionAdapter {
 
     pub(crate) fn run(self, command: &[String]) -> Result<(), crate::commands::CommandFailure> {
         self.direct
-            .into_prepared()
+            .take_prepared()
             .map_err(crate::commands::CommandFailure::diagnostic)?
             .run(command)
     }
 
     pub(crate) fn abort(self) -> Result<(), crate::commands::CommandFailure> {
         self.direct
-            .into_prepared()
+            .take_prepared()
             .map_err(crate::commands::CommandFailure::diagnostic)?
             .abort()
+    }
+}
+
+impl Drop for RuntimeSessionAdapter {
+    fn drop(&mut self) {
+        if let Some(session) = self.direct.session.borrow_mut().take() {
+            session.relinquish();
+        }
     }
 }
 
@@ -15402,7 +15675,6 @@ fn validate_existing_worktree(
     // generation's partial implementation. Preserve it for the next harness;
     // proof still requires a clean committed tree before any remote mutation.
     reconcile_preserved_worktree_base(repo, path, branch, scope_root, base)?;
-    validate_worktree_creation_identity(repo, path, branch, base)?;
     Ok(())
 }
 
@@ -15426,6 +15698,12 @@ fn reconcile_preserved_worktree_base(
     recorded_base.base_oid = configured_base.clone();
     validate_worktree_creation_identity(repo, path, branch, &recorded_base)?;
     if configured_base == base.base_oid {
+        return Ok(());
+    }
+    if !git_stdout(path, &["status", "--porcelain=v1", "--untracked-files=all"])?.is_empty() {
+        // Keep exact-owned uncommitted retry WIP on its recorded base. The
+        // harness must first make that work clean and committed; the normal
+        // commit-bound base-drift gate then integrates the current base.
         return Ok(());
     }
     if git(
@@ -15479,16 +15757,16 @@ fn reconcile_preserved_worktree_base(
 
     let reference = format!("refs/heads/{branch}");
     let refs = remote_head_refs(repo)?;
-    let remote_head = refs
-        .get(&reference)
-        .ok_or_else(|| "executor preserved WIP branch is missing from origin".to_string())?;
-    if remote_head != &intent.old_head && remote_head != &current_head {
+    let remote_head = refs.get(&reference);
+    if remote_head
+        .is_some_and(|remote_head| remote_head != &intent.old_head && remote_head != &current_head)
+    {
         return Err("executor preserved WIP branch changed before base reconciliation".to_string());
     }
 
     ensure_base_drift_intent(&state_anchor, &intent)?;
     let merged_head = verify_or_create_base_merge(path, &intent)?;
-    if remote_head != &merged_head {
+    if remote_head.is_some_and(|remote_head| remote_head != &merged_head) {
         let output = Command::new("git")
             .args([
                 "push",
@@ -15506,7 +15784,7 @@ fn reconcile_preserved_worktree_base(
             ));
         }
     }
-    if remote_head_refs(repo)?.get(&reference) != Some(&merged_head) {
+    if remote_head.is_some() && remote_head_refs(repo)?.get(&reference) != Some(&merged_head) {
         return Err("executor reconciled WIP is not the exact remote branch head".to_string());
     }
     record_worktree_creation_identity(repo, branch, base)
@@ -15645,6 +15923,21 @@ fn git_ref_exists(repo: &Path, reference: &str) -> Result<bool, String> {
 pub(crate) fn runtime_session_adapter(
     worktree: &Path,
 ) -> Result<Option<RuntimeSessionAdapter>, String> {
+    runtime_session_adapter_with_identity(worktree, None)
+}
+
+fn reattach_runtime_session_adapter(
+    worktree: &Path,
+    environment_dir: &Path,
+    session_id: &str,
+) -> Result<Option<RuntimeSessionAdapter>, String> {
+    runtime_session_adapter_with_identity(worktree, Some((environment_dir, session_id)))
+}
+
+fn runtime_session_adapter_with_identity(
+    worktree: &Path,
+    prior: Option<(&Path, &str)>,
+) -> Result<Option<RuntimeSessionAdapter>, String> {
     let autospec_manifest = worktree.join(".autospec/runtime.yml");
     let agent_manifest = worktree.join(".agent-runtime.yml");
     reject_symlink_path(&autospec_manifest)?;
@@ -15664,11 +15957,22 @@ pub(crate) fn runtime_session_adapter(
     }
     let canonical = fs::canonicalize(worktree)
         .map_err(|error| format!("canonicalize runtime worktree: {error}"))?;
-    let session = crate::commands::runtime::env::prepare_runtime_session(
-        &canonical,
-        "auto",
-        "autospec-autonomous-executor",
-    )
+    let session = match prior {
+        Some((environment_dir, session_id)) => {
+            crate::commands::runtime::env::reattach_runtime_session(
+                &canonical,
+                "auto",
+                environment_dir,
+                session_id,
+                "autospec-autonomous-executor",
+            )
+        }
+        None => crate::commands::runtime::env::prepare_runtime_session(
+            &canonical,
+            "auto",
+            "autospec-autonomous-executor",
+        ),
+    }
     .map_err(|error| error.message)?;
     let direct = DirectRuntimeAdapter::from_prepared(canonical.clone(), session);
     let session_id = direct.session_id().to_string();
@@ -15799,6 +16103,10 @@ pub(crate) fn recover_invocation(
             base_oid: invocation.identity.base_oid.clone(),
             explore_mode: false,
         },
+        matches!(
+            invocation.phase,
+            BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
+        ),
     )?;
     Ok(Some(invocation))
 }
@@ -15824,6 +16132,7 @@ fn validate_recovery_worktree(
     scope_root: &Path,
     state_path: &Path,
     base: &ResolvedBase,
+    allow_owned_wip: bool,
 ) -> Result<(), String> {
     reject_symlink_path(path)?;
     let canonical = fs::canonicalize(path)
@@ -15842,7 +16151,9 @@ fn validate_recovery_worktree(
     if observed_branch != branch {
         return Err("recovery worktree branch mismatch".to_string());
     }
-    if !git_stdout(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
+    if !allow_owned_wip
+        && !git_stdout(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty()
+    {
         return Err("recovery worktree is not clean".to_string());
     }
     validate_recovery_creation_identity(repo, path, branch, state_path, base)?;
@@ -16395,7 +16706,8 @@ mod tests {
         let fixture = GitFixture::new("worktree");
         let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
         let scope = format!(
-            "owner_repo_{}",
+            "owner_repo_{}_{}",
+            std::process::id(),
             TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
         let worktree =
@@ -16411,7 +16723,11 @@ mod tests {
         assert_eq!(adopted, worktree);
 
         fs::write(worktree.path.join("dirty.txt"), "dirty").expect("dirty worktree");
-        assert!(provision_issue_worktree(&fixture.repo, &scope, 42, &base).is_err());
+        assert_eq!(
+            provision_issue_worktree(&fixture.repo, &scope, 42, &base)
+                .expect("exact owned retry WIP is recoverable"),
+            worktree
+        );
         let _ = fs::remove_file(worktree.path.join("dirty.txt"));
         git(
             &fixture.repo,
@@ -16679,6 +16995,80 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_executor_bridge_runtime_binding_mismatch_is_zero_mutation() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("runtime-drift");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "runtime_drift_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree =
+            provision_issue_worktree(&fixture.repo, &scope, 18, &base).expect("provision worktree");
+        write_runtime_fixture(&worktree.path, ".autospec/runtime.yml", "before");
+        let state_root = fixture.root.join("runtime-drift-state");
+        let previous_state_root = std::env::var_os("AGENT_ENV_STATE_ROOT");
+        std::env::set_var("AGENT_ENV_STATE_ROOT", &state_root);
+        let adapter = runtime_session_adapter(&worktree.path)
+            .expect("prepare runtime")
+            .expect("manifest runtime");
+        let environment_dir = adapter.environment_dir().to_path_buf();
+        let session_id = adapter.session_id.clone();
+        let record_path = environment_dir
+            .join("sessions")
+            .join(format!("{session_id}.json"));
+        let before = fs::read(&record_path).expect("prior session record");
+        let wrong_environment = environment_dir.with_file_name("foreign-environment");
+        let error = super::reattach_runtime_session_adapter(
+            &worktree.path,
+            &wrong_environment,
+            &session_id,
+        )
+        .expect_err("environment drift must fail before prior-session mutation");
+
+        assert!(error.contains("RUNTIME_OWNER_MISMATCH"), "{error}");
+        assert_eq!(fs::read(&record_path).unwrap(), before);
+        assert!(environment_dir
+            .join("sessions")
+            .join(format!("{session_id}.lock"))
+            .is_file());
+        adapter.abort().expect("cleanup original runtime");
+
+        match previous_state_root {
+            Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),
+            None => std::env::remove_var("AGENT_ENV_STATE_ROOT"),
+        }
+        let _ = fs::remove_dir_all(&state_root);
+        remove_runtime_fixture(&worktree.path, ".autospec/runtime.yml", "before");
+        fs::remove_dir(worktree.path.join(".autospec")).expect("remove runtime config");
+        git(
+            &fixture.repo,
+            &["worktree", "remove", worktree.path.to_str().unwrap()],
+        );
+        let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_observes_live_persisted_child_before_runtime_recovery() {
+        let args = vec!["-c".to_string(), "sleep 30".to_string()];
+        let mut child = Command::new("/bin/sh")
+            .args(&args)
+            .spawn()
+            .expect("spawn persisted child");
+        let identity = observe_spawned_identity(child.id(), &args);
+        let mut state = persisted_invocation();
+        state.supervisor = Some(identity);
+
+        let live = super::persisted_executor_is_live(&state).expect("observe persisted child");
+
+        assert!(live);
+        child.kill().expect("stop persisted child");
+        child.wait().expect("reap persisted child");
+    }
+
+    #[test]
     fn autonomous_executor_bridge_cleanup_failure_publication_holds_environment_lease() {
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let fixture = GitFixture::new("runtime-abort-failure");
@@ -16873,6 +17263,7 @@ mod tests {
                 base_ref: base.base_ref.clone(),
                 base_oid: base.base_oid.clone(),
                 worktree: worktree.path.clone(),
+                runtime_environment_dir: None,
                 runtime_session_id: None,
             },
             harness: HarnessKind::Codex,
@@ -17103,6 +17494,7 @@ mod tests {
             base_ref: base.base_ref.clone(),
             base_oid: base.base_oid.clone(),
             worktree: worktree.path.clone(),
+            runtime_environment_dir: None,
             runtime_session_id: None,
         };
         let invocation = PersistedInvocation {
@@ -17872,6 +18264,7 @@ mod tests {
                 base_ref: "refs/remotes/origin/main".to_string(),
                 base_oid: "a".repeat(40),
                 worktree: PathBuf::from("/safe/worktree"),
+                runtime_environment_dir: Some(PathBuf::from("/safe/runtime")),
                 runtime_session_id: Some("runtime-42".to_string()),
             },
             harness: HarnessKind::Codex,
@@ -28578,6 +28971,7 @@ exit 19
         let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("cleanup-resume");
         commit_implementation(&state);
         state.phase = super::BridgePhase::CleanupPending;
+        state.identity.runtime_environment_dir = None;
         state.identity.runtime_session_id = None;
         let state_path = fixture.root.join("state/invocation.json");
         super::write_invocation_atomic(&state_path, &state).expect("cleanup state");
@@ -28655,6 +29049,71 @@ exit 19
     }
 
     #[test]
+    fn autonomous_executor_bridge_reattaches_after_error_and_derives_cleanup_intent() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("runtime-reattach-cleanup-intent");
+        let autospec = state.identity.worktree.join(".autospec");
+        fs::create_dir_all(&autospec).expect("runtime manifest directory");
+        fs::write(
+            state.identity.worktree.join("runtime-up.py"),
+            "import http.server, os\npid=os.fork()\nif not pid:\n http.server.HTTPServer(('127.0.0.1', int(os.environ['AGENT_FRONTEND_PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()\nelse:\n open('runtime.pid','w').write(str(pid))\n",
+        )
+        .expect("runtime up");
+        fs::write(
+            state.identity.worktree.join("runtime-down.py"),
+            "import os, signal\npid=int(open('runtime.pid').read())\nos.kill(pid, signal.SIGTERM)\nos.remove('runtime.pid')\n",
+        )
+        .expect("runtime down");
+        fs::write(
+            autospec.join("runtime.yml"),
+            "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: python3 runtime-up.py\n    down: python3 runtime-down.py\n",
+        )
+        .expect("runtime manifest");
+        let state_root = fixture.root.join("runtime-state");
+        let previous = std::env::var_os("AGENT_ENV_STATE_ROOT");
+        std::env::set_var("AGENT_ENV_STATE_ROOT", &state_root);
+        let runtime = super::runtime_session_adapter(&state.identity.worktree)
+            .expect("runtime adapter")
+            .expect("runtime manifest");
+        let environment_dir = runtime.environment_dir().to_path_buf();
+        let session_id = runtime.session_id.clone();
+        state.phase = super::BridgePhase::CleanupPending;
+        state.identity.runtime_environment_dir = Some(environment_dir.clone());
+        state.identity.runtime_session_id = Some(session_id.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("runtime state");
+
+        drop(runtime);
+        assert!(
+            !super::cleanup_record_path(&state_path, "runtime-intent.json").exists(),
+            "the crash window precedes cleanup intent"
+        );
+        let reattached = super::reattach_runtime_session_adapter(
+            &state.identity.worktree,
+            &environment_dir,
+            &session_id,
+        )
+        .expect("reattach exact durable runtime")
+        .expect("runtime manifest");
+        drop(reattached);
+        fs::write(
+            autospec.join("runtime.yml"),
+            "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: /bin/false\n    down: /bin/false\n",
+        )
+        .expect("replace live manifest after persisted runtime binding");
+
+        super::close_owned_runtime(&state_path, &state, None)
+            .expect("cleanup from persisted original manifest and binding");
+        assert!(super::cleanup_record_path(&state_path, "runtime-intent.json").exists());
+        assert!(super::cleanup_record_path(&state_path, "runtime-complete").exists());
+        match previous {
+            Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),
+            None => std::env::remove_var("AGENT_ENV_STATE_ROOT"),
+        }
+    }
+
+    #[test]
     fn autonomous_executor_bridge_runtime_close_retries_partial_teardown_failure() {
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let (fixture, mut state, _snapshot, _) =
@@ -28706,6 +29165,7 @@ exit 19
         let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("cleanup-no-intent");
         commit_implementation(&state);
         state.phase = super::BridgePhase::CleanupPending;
+        state.identity.runtime_environment_dir = None;
         state.identity.runtime_session_id = None;
         let state_path = fixture.root.join("state/invocation.json");
         super::write_invocation_atomic(&state_path, &state).expect("cleanup state");

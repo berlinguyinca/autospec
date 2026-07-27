@@ -2478,8 +2478,68 @@ fn run_foreground_with_lease(
     persist_foreground_lifecycle(layout, &lifecycle)?;
     let scope = foreground_scope(options, layout);
     let state_path = foreground_state_path(layout, scope);
-    let state =
+    let mut state =
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
+    if state.phase() == ConductorPhase::Paused {
+        if let Some(issue) = state.selected_issue() {
+            if claim::conductor_claim_is_terminal(&layout.repo, issue)?
+                || state.pause_reason() == Some("executor_bridge_nonterminal")
+            {
+                state = state
+                    .transition(ConductorEvent::Resume)
+                    .map_err(CommandFailure::diagnostic)?;
+                persist_foreground_state(&state_path, &state)
+                    .map_err(CommandFailure::diagnostic)?;
+            }
+        }
+    }
+    if state.phase() == ConductorPhase::Retry {
+        state = state
+            .transition(ConductorEvent::RetryScheduled)
+            .map_err(CommandFailure::diagnostic)?;
+        persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
+    }
+    if matches!(
+        state.phase(),
+        ConductorPhase::Claim | ConductorPhase::Dispatch | ConductorPhase::DispatchRecorded
+    ) {
+        let issue = state.selected_issue().ok_or_else(|| {
+            CommandFailure::diagnostic("foreground recovery has no selected issue")
+        })?;
+        let lease = claim::recover_for_conductor(&layout.repo, issue)?;
+        if state.phase() != ConductorPhase::Claim && lease.is_none() {
+            return Err(CommandFailure::diagnostic(
+                "foreground dispatch recovery has no authoritative claim",
+            )
+            .into());
+        }
+        if state.phase() == ConductorPhase::Claim && lease.is_some() {
+            state = state
+                .transition(ConductorEvent::Claimed)
+                .map_err(CommandFailure::diagnostic)?;
+            persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
+        }
+        let (title, body) = queue::issue_title_body(&layout.repo, issue)?;
+        let selection = ForegroundSelection {
+            issue,
+            title,
+            body,
+            serialization_reasons: state.serialization_reasons().to_vec(),
+        };
+        return match execute_foreground_dispatch(
+            layout,
+            options,
+            &state_path,
+            state,
+            selection,
+            lease,
+        )? {
+            ForegroundDispatchResult::State(state) => Ok(ForegroundCompletion::State(state)),
+            ForegroundDispatchResult::Lifecycle(lifecycle) => {
+                Ok(ForegroundCompletion::Lifecycle(lifecycle))
+            }
+        };
+    }
     if foreground_state_is_retained(&state) {
         return Ok(ForegroundCompletion::State(Box::new(state)));
     }
@@ -2767,14 +2827,36 @@ fn dispatch_foreground(
         return Ok(ForegroundDispatchResult::Lifecycle(lifecycle));
     }
     persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
-    let mut state = state;
+    execute_foreground_dispatch(layout, options, state_path, state, selection, None)
+}
+
+fn execute_foreground_dispatch(
+    layout: &RunLayout,
+    options: &Options,
+    state_path: &Path,
+    mut state: ConductorState,
+    selection: ForegroundSelection,
+    mut recovered_lease: Option<claim::ClaimLease>,
+) -> Result<ForegroundDispatchResult, ForegroundFailure> {
     loop {
-        let lease =
-            claim::acquire_for_conductor(&layout.repo, selection.issue, &worker_id, &branch)?;
-        state = state.transition(ConductorEvent::Claimed).map_err(|error| {
-            CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
-        })?;
-        persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+        let lease = match recovered_lease.take() {
+            Some(lease) => lease,
+            None => {
+                let branch = format!("feat/autonomous-issue-{}", selection.issue);
+                let worker_id = foreground_worker_id().map_err(CommandFailure::diagnostic)?;
+                let lease = claim::acquire_for_conductor(
+                    &layout.repo,
+                    selection.issue,
+                    &worker_id,
+                    &branch,
+                )?;
+                state = state.transition(ConductorEvent::Claimed).map_err(|error| {
+                    CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
+                })?;
+                persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+                lease
+            }
+        };
 
         let receipt = ExecutorRequest::for_selected(
             layout,
@@ -2787,6 +2869,10 @@ fn dispatch_foreground(
             &lease.claim_id,
         )
         .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
+        if receipt.pending {
+            persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+            return Ok(ForegroundDispatchResult::State(Box::new(state)));
+        }
         if let Some(issue) = options.issue {
             let mut selector =
                 load_one_shot_selector(layout, issue).map_err(CommandFailure::diagnostic)?;
@@ -2804,14 +2890,23 @@ fn dispatch_foreground(
                 .map_err(CommandFailure::diagnostic)?;
             persist_one_shot_selector(layout, &selector).map_err(CommandFailure::diagnostic)?;
         }
-        state = state
-            .transition(ConductorEvent::DispatchRecorded {
-                outcome: receipt.outcome.clone(),
-            })
-            .map_err(|error| {
-                CommandFailure::diagnostic(format!("cannot record executor receipt: {error}"))
-            })?;
-        persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+        if state.phase() == ConductorPhase::Dispatch {
+            state = state
+                .transition(ConductorEvent::DispatchRecorded {
+                    outcome: receipt.outcome.clone(),
+                })
+                .map_err(|error| {
+                    CommandFailure::diagnostic(format!("cannot record executor receipt: {error}"))
+                })?;
+            persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
+        } else if state.phase() == ConductorPhase::DispatchRecorded
+            && receipt.outcome != ConductorOutcome::Succeeded
+        {
+            return Err(CommandFailure::diagnostic(
+                "recovered successful dispatch no longer has a terminal merged receipt",
+            )
+            .into());
+        }
         if !receipt.bridge_finalized {
             claim::reconcile_active_issue(
                 &lease.repo,
@@ -3431,6 +3526,7 @@ struct ExecutorRequest {
 struct ExecutorReceipt {
     outcome: ConductorOutcome,
     bridge_finalized: bool,
+    pending: bool,
 }
 
 impl ExecutorRequest {
@@ -3498,6 +3594,7 @@ impl ExecutorReceipt {
         Self {
             outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
             bridge_finalized: false,
+            pending: false,
         }
     }
 
@@ -3526,18 +3623,22 @@ impl ExecutorReceipt {
             | executor_bridge::BridgeRunStatus::Accepted { .. } => Self {
                 outcome: ConductorOutcome::Blocked("executor_bridge_nonterminal".to_string()),
                 bridge_finalized: false,
+                pending: true,
             },
             executor_bridge::BridgeRunStatus::Merged { .. } => Self {
                 outcome: ConductorOutcome::Succeeded,
                 bridge_finalized: true,
+                pending: false,
             },
             executor_bridge::BridgeRunStatus::Retryable { reason } => Self {
                 outcome: ConductorOutcome::Retryable(reason),
                 bridge_finalized: true,
+                pending: false,
             },
             executor_bridge::BridgeRunStatus::Blocked { reason } => Self {
                 outcome: ConductorOutcome::Blocked(reason),
                 bridge_finalized: true,
+                pending: false,
             },
         })
     }
@@ -6645,6 +6746,10 @@ mod foreground_tests {
         assert!(
             !accepted.bridge_finalized,
             "accepted evidence is not a terminal result"
+        );
+        assert!(
+            accepted.pending,
+            "accepted evidence must leave the conductor dispatch recoverable"
         );
 
         let merged = ExecutorReceipt::from_bridge_json(

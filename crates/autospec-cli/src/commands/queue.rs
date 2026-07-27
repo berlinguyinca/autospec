@@ -279,6 +279,14 @@ fn read_issue(repo: &str, number: u64) -> Result<RemoteIssue, CommandFailure> {
     })
 }
 
+pub(crate) fn issue_title_body(
+    repo: &str,
+    number: u64,
+) -> Result<(String, String), CommandFailure> {
+    let issue = read_issue(repo, number)?;
+    Ok((issue.title, issue.body))
+}
+
 fn apply_passing_safety_review(repo: &str, issue: &RemoteIssue) -> Result<bool, CommandFailure> {
     let body = replace_safety_review_section(&issue.body, SafetyReviewDecision::Pass).map_err(
         |error| {

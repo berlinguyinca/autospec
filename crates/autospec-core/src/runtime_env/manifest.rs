@@ -124,6 +124,12 @@ impl RuntimeManifest {
         Self::parse_v1(source)
     }
 
+    pub fn parse_at(source: &str, path: PathBuf) -> Result<Self, RuntimeEnvError> {
+        let mut manifest = Self::parse(source)?;
+        manifest.path = path;
+        Ok(manifest)
+    }
+
     fn parse_v1(source: &str) -> Result<Self, RuntimeEnvError> {
         let (state, modes) = parse_legacy_fields(source)?;
         validate_version(state.version.as_deref())?;
