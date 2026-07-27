@@ -209,6 +209,9 @@ RS
     cp "$repo/src/lib.rs" "$repo/src/rename.rs"
     cp "$repo/src/lib.rs" "$repo/src/deleted.rs"
     printf '%s\n' 'fn formatting(ptr: *const i32) -> i32 { unsafe{ std::ptr::read(ptr) } }' > "$repo/src/format.rs"
+    printf '%s\n' \
+        'fn moved(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' \
+        'fn anchor() {}' > "$repo/src/internal-move.rs"
     printf '%s\n' 'fn replacement() -> i32 { 42 }' > "$repo/src/replacement.rs"
     cat > "$repo/src/attribute.rs" <<'RS'
 #[
@@ -224,6 +227,9 @@ RS
 
     sed -i 's/fn existing/fn renamed/' "$repo/src/lib.rs"
     sed -i 's/unsafe{/unsafe {/' "$repo/src/format.rs"
+    printf '%s\n' \
+        'fn anchor() {}' \
+        'fn moved(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$repo/src/internal-move.rs"
     sed -i '2s/cfg(any())/unsafe(no_mangle)/' "$repo/src/attribute.rs"
     printf '%s\n' 'fn replacement(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$repo/src/replacement.rs"
     git -C "$repo" mv src/rename.rs src/moved.rs
@@ -239,7 +245,7 @@ RS
 
     run bash "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$repo" --out "$WORK/tree.jsonl"
     [ "$status" -eq 0 ]
-    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/tree.jsonl")" -eq 5 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/tree.jsonl")" -eq 6 ]
 
     printf '%s\n' 'fn new(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$repo/src/untracked.rs"
     run bash "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$repo" --base "$base" --out "$WORK/untracked.jsonl"

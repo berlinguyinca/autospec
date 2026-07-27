@@ -400,7 +400,7 @@ def changed_rust_paths(root, merge_base):
         root,
         ["ls-files", "-z", "--others", "--exclude-standard", "--", "*.rs"],
     ).split("\0")
-    paths.extend(("A", "", path) for path in untracked if path)
+    paths.extend(("?", "", path) for path in untracked if path)
     return paths
 
 
@@ -432,7 +432,24 @@ def added_unsafe_token_lines(root, merge_base, old_path, current_path):
             added = len(re.findall(r"\bunsafe\b", line[1:]))
             if added:
                 counts[current_line] = counts.get(current_line, 0) + added
-    return counts
+    raw_diff = run_git(
+        root,
+        [
+            "diff",
+            "--unified=0",
+            "--find-renames",
+            merge_base,
+            "HEAD",
+            "--",
+            *pathspec,
+        ],
+    )
+    deleted = {}
+    for line in raw_diff.splitlines():
+        if line.startswith("-") and not line.startswith("---") and re.search(r"\bunsafe\b", line):
+            fingerprint = " ".join(line[1:].split())
+            deleted[fingerprint] = deleted.get(fingerprint, 0) + 1
+    return counts, deleted
 
 
 def unsafe_findings_pr(root, base):
@@ -445,52 +462,30 @@ def unsafe_findings_pr(root, base):
             current_file = Path(root) / current_path
             if status == "D" or not current_file.is_file():
                 continue
+            current_source = current_file.read_text(errors="ignore")
+            current_lines = current_source.splitlines()
             current = unsafe_findings_for_source(
                 current_path,
-                current_file.read_text(errors="ignore"),
+                current_source,
             )
-            baseline = []
-            if status != "A":
-                baseline_source = run_git(root, ["show", f"{merge_base}:{old_path}"])
-                baseline = unsafe_findings_for_source(current_path, baseline_source)
-            added_lines = (
-                {}
-                if status == "A"
-                else added_unsafe_token_lines(root, merge_base, old_path, current_path)
+            if status == "?":
+                findings.extend(current)
+                continue
+            added_lines, deleted = added_unsafe_token_lines(
+                root,
+                merge_base,
+                old_path,
+                current_path,
             )
-            baseline_counts = {}
-            for finding in baseline:
-                syntax = finding["_unsafe_syntax"]
-                baseline_counts[syntax] = baseline_counts.get(syntax, 0) + 1
-            current_counts = {}
-            for finding in current:
-                syntax = finding["_unsafe_syntax"]
-                current_counts[syntax] = current_counts.get(syntax, 0) + 1
-            reported_counts = {}
-            unreported = []
             for finding in current:
                 line = finding["line"]
                 if added_lines.get(line, 0):
                     added_lines[line] -= 1
-                    findings.append(finding)
-                    syntax = finding["_unsafe_syntax"]
-                    reported_counts[syntax] = reported_counts.get(syntax, 0) + 1
-                else:
-                    unreported.append(finding)
-            additional = {
-                syntax: max(
-                    count
-                    - baseline_counts.get(syntax, 0)
-                    - reported_counts.get(syntax, 0),
-                    0,
-                )
-                for syntax, count in current_counts.items()
-            }
-            for finding in unreported:
-                syntax = finding["_unsafe_syntax"]
-                if additional.get(syntax, 0):
-                    findings.append(finding)
-                    additional[syntax] -= 1
+                    fingerprint = " ".join(current_lines[line - 1].split())
+                    if deleted.get(fingerprint, 0):
+                        deleted[fingerprint] -= 1
+                    else:
+                        findings.append(finding)
         for index, finding in enumerate(findings, start=1):
             finding["gap_id"] = f"U{index}"
         return findings, None
