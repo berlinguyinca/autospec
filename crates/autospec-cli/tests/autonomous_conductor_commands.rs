@@ -1410,6 +1410,143 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
 }
 
 #[test]
+fn foreground_retries_an_exact_zero_effect_completion_on_a_fresh_claim_generation() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let zero_effect_once = fixture.root.join("harness.zero-effect");
+    let deleted_worktree = zero_effect_once.with_extension("deleted");
+    let terminal_transition_once = fixture.root.join("terminal-transition.failed");
+    let launches = fixture.root.join("harness-launches");
+    let configure = |command: &mut Command| {
+        command
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env("AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE", &zero_effect_once)
+            .env(
+                "AUTOSPEC_TEST_FAILURE_TRANSITION_FAIL_ONCE",
+                &terminal_transition_once,
+            )
+            .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &launches);
+    };
+    let mut first_command = fixture.command();
+    configure(&mut first_command);
+    let first = first_command
+        .output()
+        .expect("seed exact zero-effect completion");
+
+    assert!(
+        first.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert!(
+        zero_effect_once.exists(),
+        "zero-effect fixture did not run; stdout={} stderr={} state={:?} calls={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+        fixture.read_state(),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Paused);
+    assert_eq!(
+        fixture.read_state().pause_reason(),
+        Some("executor_receipt_failed")
+    );
+    wait_for_file_contents(&deleted_worktree, "");
+    let invocation = fs::read_dir(fixture.scoped_dir().join("executor"))
+        .expect("executor state directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| is_generation_invocation_path(path, 42))
+        .expect("zero-effect invocation");
+    let mut zero_effect_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&invocation).expect("read zero-effect invocation"),
+    )
+    .expect("parse zero-effect invocation");
+    zero_effect_state["phase"] = serde_json::json!("implementation_complete");
+    fs::write(&invocation, format!("{zero_effect_state}\n"))
+        .expect("seed exact post-child completion phase");
+
+    let mut retry_command = fixture.command();
+    configure(&mut retry_command);
+    let output = retry_command
+        .output()
+        .expect("retry exact zero-effect completion");
+    assert!(
+        terminal_transition_once.is_file(),
+        "terminal transition failpoint did not fire; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fixture.read_state().phase(),
+        ConductorPhase::Paused,
+        "terminal claim crash must preserve paused dispatch recovery"
+    );
+
+    let mut terminal_recovery_command = fixture.command();
+    configure(&mut terminal_recovery_command);
+    let output = terminal_recovery_command
+        .output()
+        .expect("resume exact terminal failure intent");
+    assert_eq!(
+        fixture.read_state().phase(),
+        ConductorPhase::Scan,
+        "state={:?} stderr={} calls={}",
+        fixture.read_state(),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(
+        fs::read_to_string(&launches)
+            .expect("harness launch ledger")
+            .lines()
+            .count(),
+        2,
+        "one zero-effect launch must be followed by exactly one fresh-generation launch"
+    );
+
+    let terminal_receipts = fs::read_dir(fixture.scoped_dir().join("executor"))
+        .expect("executor terminal receipts")
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            path.to_string_lossy()
+                .ends_with(".terminal.json")
+                .then(|| fs::read_to_string(path).ok())
+                .flatten()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal_receipts.len(),
+        2,
+        "retry and merged generations must both remain durable"
+    );
+    assert!(
+        terminal_receipts.iter().any(|receipt| {
+            receipt.contains("\"status\":\"retryable\"")
+                && receipt.contains("\"reason\":\"executor_zero_effect_completion\"")
+                && receipt.contains("\"claim_released\":true")
+        }),
+        "the exact old generation was not finalized as a released typed retry: {terminal_receipts:?}"
+    );
+    assert!(
+        terminal_receipts
+            .iter()
+            .any(|receipt| receipt.contains("\"status\":\"merged\"")),
+        "the fresh generation did not merge: {terminal_receipts:?}"
+    );
+}
+
+#[test]
 fn foreground_retry_preserves_dirty_wip_and_merges_on_a_fresh_claim_generation() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
@@ -4438,6 +4575,9 @@ exit 1
             &bin.join("codex-bridge-fixture"),
             r#"#!/bin/sh
 set -eu
+case " $* " in
+  *"sandbox"*) exit 0 ;;
+esac
 artifact=""
 previous=""
 for value in "$@"; do
@@ -4452,6 +4592,16 @@ fi
 if [ -n "${AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER" ]; then
   printf '%s\n' "$$" > "$AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER"
   sleep "${AUTOSPEC_BRIDGE_SLOW_HARNESS_SECONDS:-3}"
+fi
+if [ -n "${AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE" ]; then
+  : > "$AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE"
+  worktree=$PWD
+  (
+    sleep 0.2
+    rm -rf "$worktree"
+    : > "${AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE%.*}.deleted"
+  ) </dev/null >/dev/null 2>&1 &
+  exit 0
 fi
 if [ -n "${AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE" ]; then
   printf '%s\n' '#!/bin/sh' 'exit 42' > tests/smoke/generation.sh

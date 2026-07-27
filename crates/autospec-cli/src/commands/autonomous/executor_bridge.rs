@@ -85,6 +85,8 @@ static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
 static BASE_DRIFT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
+static EMPTY_RETRY_BASE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
 static RUNTIME_CLOSE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static METADATA_WIP_FAILPOINT: AtomicU8 = AtomicU8::new(0);
@@ -93,6 +95,74 @@ static METADATA_WIP_SYNC_EVENTS: std::sync::Mutex<Vec<&'static str>> =
     std::sync::Mutex::new(Vec::new());
 #[cfg(test)]
 static WORKTREE_REPAIR_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static ZERO_EFFECT_RECOVERY_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+
+#[derive(Clone, Copy)]
+enum ZeroEffectRecoveryFailpoint {
+    None = 0,
+    AfterRepair = 1,
+    AfterTransfer = 2,
+    AfterRuntimeClose = 3,
+    AfterClaimTransition = 4,
+}
+
+#[cfg(test)]
+fn set_zero_effect_recovery_failpoint(failpoint: ZeroEffectRecoveryFailpoint) {
+    ZERO_EFFECT_RECOVERY_FAILPOINT.store(failpoint as u8, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn zero_effect_recovery_failpoint(
+    failpoint: ZeroEffectRecoveryFailpoint,
+    boundary: &str,
+) -> Result<(), String> {
+    if ZERO_EFFECT_RECOVERY_FAILPOINT
+        .compare_exchange(
+            failpoint as u8,
+            ZeroEffectRecoveryFailpoint::None as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        return Err(format!(
+            "injected executor zero-effect recovery crash {boundary}"
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn zero_effect_recovery_failpoint(
+    _failpoint: ZeroEffectRecoveryFailpoint,
+    _boundary: &str,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn terminal_transition_process_failpoint() -> Result<(), String> {
+    let Some(path) =
+        std::env::var_os("AUTOSPEC_TEST_FAILURE_TRANSITION_FAIL_ONCE").map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+    if path.exists() {
+        return Ok(());
+    }
+    write_private_create_once(
+        &path,
+        b"terminal transition interrupted\n",
+        "executor terminal transition test failpoint",
+    )?;
+    Err("injected executor crash after terminal claim transition".to_string())
+}
+
+#[cfg(not(debug_assertions))]
+fn terminal_transition_process_failpoint() -> Result<(), String> {
+    Ok(())
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BridgeRunStatus {
@@ -539,6 +609,93 @@ pub(crate) fn recover_completed_bridge_identity(
     }
 }
 
+pub(crate) fn recover_terminal_failure_identity(
+    state_dir: &Path,
+    lease: &crate::commands::claim::ClaimLease,
+) -> Result<Option<BridgeIdentity>, String> {
+    let generation = &sha256_hex(lease.claim_id.as_bytes())[..16];
+    let state_path = state_dir.join(format!("issue-{}-{generation}.json", lease.issue));
+    if !state_path.is_file() {
+        return Ok(None);
+    }
+    validate_private_state_file(&state_path)?;
+    let state = PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path)
+            .map_err(|error| format!("read terminal failure invocation: {error}"))?,
+    )?;
+    if !invocation_matches_lease(&state, lease) {
+        return Err(
+            "terminal failure invocation does not match the durable local acquisition".to_string(),
+        );
+    }
+    if state.phase == BridgePhase::Complete
+        || state.terminal_result.is_some()
+        || state.supervisor.is_some()
+        || state.process.is_some()
+        || state.draft_process.is_some()
+    {
+        return Ok(None);
+    }
+    read_failure_cleanup_intent(&state_path, &state)?;
+    match (
+        state.identity.runtime_session_id.as_deref(),
+        state.identity.runtime_environment_dir.as_deref(),
+    ) {
+        (Some(_), Some(_)) => validate_cleanup_record(
+            &cleanup_record_path(&state_path, "runtime-complete"),
+            &cleanup_binding(&state),
+            "executor terminal failure runtime receipt",
+        )?,
+        (None, None) => {}
+        _ => return Err("executor terminal failure runtime binding is incomplete".to_string()),
+    }
+    if !observe_terminal_bridge_claim(
+        bridge_claim_identity(&state),
+        state.pr,
+        BridgeClaimDisposition::Retryable,
+    )
+    .map_err(|error| error.message)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(state.identity))
+}
+
+pub(crate) fn recoverable_zero_effect_completion(
+    state_dir: &Path,
+    lease: &crate::commands::claim::ClaimLease,
+) -> Result<bool, String> {
+    let generation = &sha256_hex(lease.claim_id.as_bytes())[..16];
+    let state_path = state_dir.join(format!("issue-{}-{generation}.json", lease.issue));
+    if !state_path.exists() {
+        return Ok(false);
+    }
+    validate_private_state_file(&state_path)?;
+    let state = PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path)
+            .map_err(|error| format!("read zero-effect executor invocation: {error}"))?,
+    )?;
+    if !invocation_matches_lease(&state, lease) {
+        return Err(
+            "zero-effect executor invocation does not match the durable local acquisition"
+                .to_string(),
+        );
+    }
+    recoverable_zero_effect_completion_for_state(&state_path, &state)
+}
+
+fn invocation_matches_lease(
+    state: &PersistedInvocation,
+    lease: &crate::commands::claim::ClaimLease,
+) -> bool {
+    state.identity.repository == lease.repo
+        && state.identity.issue == lease.issue
+        && state.identity.worker_id == lease.worker_id
+        && state.identity.branch == lease.branch
+        && state.identity.claim_id == lease.claim_id
+        && state.identity.invocation_id == format!("{}-{}", lease.issue, lease.claim_id)
+}
+
 pub(crate) fn legacy_bridge_proves_claim(
     state_dir: &Path,
     lease: &crate::commands::claim::ClaimLease,
@@ -627,8 +784,13 @@ fn run_executor_bridge_with_codex_probe(
         .collect::<BTreeMap<_, _>>();
     let canonical_branch = format!("feat/autonomous-issue-{}", request.issue);
     let recovered = load_invocation_for_request(request, &repository_path, &canonical_branch)?;
+    let mut repaired_zero_effect_completion = false;
     if let Some(recovered) = recovered.as_ref() {
-        repair_missing_post_child_worktree(recovered)?;
+        repaired_zero_effect_completion =
+            prepare_zero_effect_recovery(&request.state_path, recovered)?;
+        if !repaired_zero_effect_completion {
+            repair_missing_post_child_worktree(recovered)?;
+        }
         if recovered.phase == BridgePhase::Complete {
             return publish_complete_receipt(request, recovered, &terminal_path);
         }
@@ -647,19 +809,7 @@ fn run_executor_bridge_with_codex_probe(
     let (mut state, mut runtime) = if let Some(recovered) = recovered {
         let state = recover_invocation(&request.state_path, &recovered.identity)?
             .ok_or_else(|| "executor recovery state disappeared".to_string())?;
-        let needs_runtime = matches!(
-            state.phase,
-            BridgePhase::Pending
-                | BridgePhase::Implementing
-                | BridgePhase::Interrupted
-                | BridgePhase::ImplementationComplete
-                | BridgePhase::ImplementationProven
-                | BridgePhase::BranchPushing
-                | BridgePhase::BranchPushed
-                | BridgePhase::DraftCreating
-                | BridgePhase::DraftCleanupPending
-                | BridgePhase::DraftCreated
-        );
+        let needs_runtime = recovery_needs_runtime(&state, repaired_zero_effect_completion);
         let runtime = match (
             needs_runtime,
             state.identity.runtime_environment_dir.as_deref(),
@@ -897,12 +1047,28 @@ fn run_executor_bridge_with_codex_probe(
         )
         .map_err(bridge_provision_failure)?;
     }
-    let proof = recover_or_prove_implementation(
+    let proof = match recover_or_prove_implementation(
         &request.state_path,
         &mut state,
         &protected,
         &closeout_path,
-    )?;
+    ) {
+        Ok(proof) => proof,
+        Err(error)
+            if repaired_zero_effect_completion
+                && error == "executor implementation HEAD is unchanged from the validated base" =>
+        {
+            prepare_zero_effect_retry(&request.state_path, &state, runtime.take())?;
+            return finalize_bridge_failure(
+                request,
+                &mut state,
+                None,
+                &remote,
+                "executor_zero_effect_completion",
+            );
+        }
+        Err(error) => return Err(error.into()),
+    };
     if matches!(
         state.phase,
         BridgePhase::ImplementationProven
@@ -1311,6 +1477,23 @@ fn ensure_premerge_and_review(
         return Ok(None);
     }
     Ok(Some(receipt))
+}
+
+fn recovery_needs_runtime(state: &PersistedInvocation, zero_effect_recovery: bool) -> bool {
+    !zero_effect_recovery
+        && matches!(
+            state.phase,
+            BridgePhase::Pending
+                | BridgePhase::Implementing
+                | BridgePhase::Interrupted
+                | BridgePhase::ImplementationComplete
+                | BridgePhase::ImplementationProven
+                | BridgePhase::BranchPushing
+                | BridgePhase::BranchPushed
+                | BridgePhase::DraftCreating
+                | BridgePhase::DraftCleanupPending
+                | BridgePhase::DraftCreated
+        )
 }
 
 fn finalize_bridge_failure(
@@ -8450,6 +8633,16 @@ impl RemoteMutationSnapshot {
     }
 
     fn from_bytes(state: &PersistedInvocation, bytes: &[u8]) -> Result<Self, String> {
+        let canonical_worktree = fs::canonicalize(&state.identity.worktree)
+            .map_err(|error| format!("canonicalize worktree: {error}"))?;
+        Self::from_bytes_with_worktree(state, bytes, &canonical_worktree)
+    }
+
+    fn from_bytes_with_worktree(
+        state: &PersistedInvocation,
+        bytes: &[u8],
+        expected_worktree: &Path,
+    ) -> Result<Self, String> {
         let value: serde_json::Value = serde_json::from_slice(bytes)
             .map_err(|error| format!("parse executor prelaunch remote snapshot: {error}"))?;
         let object = value
@@ -8496,8 +8689,7 @@ impl RemoteMutationSnapshot {
             "invocation_id": state.identity.invocation_id,
             "base_ref": state.identity.base_ref,
             "base_oid": state.identity.base_oid,
-            "worktree": fs::canonicalize(&state.identity.worktree)
-                .map_err(|error| format!("canonicalize worktree: {error}"))?,
+            "worktree": expected_worktree,
             "local_head": persisted_local_head,
             "dirty_wip": dirty_wip,
         });
@@ -10180,6 +10372,20 @@ fn fail_base_drift_after_merge() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+fn fail_empty_retry_after_fast_forward() -> Result<(), String> {
+    if EMPTY_RETRY_BASE_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+        Err("injected crash after proven-empty base fast-forward".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(test))]
+fn fail_empty_retry_after_fast_forward() -> Result<(), String> {
+    Ok(())
+}
+
 pub(crate) fn reconcile_base_drift(
     state_path: &Path,
     state: &mut PersistedInvocation,
@@ -10356,17 +10562,21 @@ fn result_publication_record_path(
 
 fn ensure_cleanup_record(path: &Path, binding: &str, label: &str) -> Result<(), String> {
     if path.exists() {
-        validate_private_state_file(path)?;
-        if fs::read_to_string(path)
-            .map_err(|error| format!("read {label}: {error}"))?
-            .trim()
-            != binding
-        {
-            return Err(format!("{label} identity mismatch"));
-        }
-        return Ok(());
+        return validate_cleanup_record(path, binding, label);
     }
     write_private_create_once(path, format!("{binding}\n").as_bytes(), label)
+}
+
+fn validate_cleanup_record(path: &Path, binding: &str, label: &str) -> Result<(), String> {
+    validate_private_state_file(path).map_err(|error| format!("{label}: {error}"))?;
+    if fs::read_to_string(path)
+        .map_err(|error| format!("read {label}: {error}"))?
+        .trim()
+        != binding
+    {
+        return Err(format!("{label} identity mismatch"));
+    }
+    Ok(())
 }
 
 fn ownership_transfer_path(scope_root: &Path, issue: u64) -> PathBuf {
@@ -10379,6 +10589,14 @@ pub(crate) fn finalize_ownership_loss_local(state_path: &Path) -> Result<(), Str
         &fs::read_to_string(state_path)
             .map_err(|error| format!("read ownership-loss invocation: {error}"))?,
     )?;
+    prepare_available_worktree_transfer(state_path, &state, None)
+}
+
+fn prepare_available_worktree_transfer(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    runtime: Option<RuntimeSessionAdapter>,
+) -> Result<(), String> {
     if state.supervisor.is_some() || state.process.is_some() {
         return Err(
             "executor ownership-loss transfer requires all exact processes retired".to_string(),
@@ -10390,7 +10608,11 @@ pub(crate) fn finalize_ownership_loss_local(state_path: &Path) -> Result<(), Str
         .parent()
         .ok_or_else(|| "executor ownership-loss worktree has no scope root".to_string())?;
     let _lease = WorktreeLease::acquire(scope_root, state.identity.issue)?;
-    close_owned_runtime(state_path, &state, None)?;
+    close_owned_runtime(state_path, state, runtime)?;
+    zero_effect_recovery_failpoint(
+        ZeroEffectRecoveryFailpoint::AfterRuntimeClose,
+        "after runtime close",
+    )?;
     let canonical = fs::canonicalize(&state.identity.worktree)
         .map_err(|error| format!("canonicalize ownership-loss worktree: {error}"))?;
     if canonical != state.identity.worktree {
@@ -10414,7 +10636,7 @@ pub(crate) fn finalize_ownership_loss_local(state_path: &Path) -> Result<(), Str
     let runtime_receipt = if state.identity.runtime_session_id.is_some() {
         ensure_cleanup_record(
             &runtime_receipt,
-            &cleanup_binding(&state),
+            &cleanup_binding(state),
             "executor runtime cleanup receipt",
         )?;
         runtime_receipt
@@ -10434,7 +10656,7 @@ pub(crate) fn finalize_ownership_loss_local(state_path: &Path) -> Result<(), Str
         "head_oid": head_oid,
         "status_digest": status_digest,
         "runtime_receipt": runtime_receipt,
-        "cleanup_binding": cleanup_binding(&state),
+        "cleanup_binding": cleanup_binding(state),
     });
     if path.exists() {
         validate_private_state_file(&path)?;
@@ -10787,6 +11009,38 @@ pub(crate) fn finalize_failed_executor(
     exhausted: bool,
     reason: &str,
 ) -> Result<(), BridgeRunFailure> {
+    finalize_failed_executor_with_transition(
+        state_path,
+        state,
+        runtime,
+        adapter,
+        retryable,
+        exhausted,
+        reason,
+        |state, disposition| {
+            transition_bridge_claim(bridge_claim_identity(state), state.pr, disposition)
+                .map_err(bridge_command_failure)
+        },
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finalize_failed_executor_with_transition<Transition>(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    runtime: Option<RuntimeSessionAdapter>,
+    adapter: Option<&DraftPrAdapter>,
+    retryable: bool,
+    exhausted: bool,
+    reason: &str,
+    mut transition: Transition,
+) -> Result<(), BridgeRunFailure>
+where
+    Transition: FnMut(
+        &PersistedInvocation,
+        BridgeClaimDisposition,
+    ) -> Result<BridgeClaimTransition, BridgeRunFailure>,
+{
     ensure_failure_cleanup_intent(state_path, state, retryable, exhausted, reason)?;
     close_owned_runtime(state_path, state, runtime)?;
     let disposition = failure_disposition(retryable, exhausted);
@@ -10800,9 +11054,7 @@ pub(crate) fn finalize_failed_executor(
             || refresh_bridge_claim(state, ClaimRenewalPhase::Verification),
         )?;
     }
-    match transition_bridge_claim(bridge_claim_identity(state), state.pr, disposition)
-        .map_err(bridge_command_failure)?
-    {
+    match transition(state, disposition)? {
         BridgeClaimTransition::Transitioned => {}
         BridgeClaimTransition::OwnershipLost => {
             return Err(BridgeRunFailure::ownership_lost(
@@ -10810,6 +11062,11 @@ pub(crate) fn finalize_failed_executor(
             ))
         }
     }
+    zero_effect_recovery_failpoint(
+        ZeroEffectRecoveryFailpoint::AfterClaimTransition,
+        "after claim transition",
+    )?;
+    terminal_transition_process_failpoint()?;
     state.phase = BridgePhase::Complete;
     state.terminal_result = Some(match disposition {
         BridgeClaimDisposition::Retryable => format!("retryable:{reason}"),
@@ -17330,6 +17587,300 @@ fn provision_issue_worktree_for_claim(
     })
 }
 
+fn zero_effect_completion_header_is_exact(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    if state.phase != BridgePhase::ImplementationComplete
+        || state.supervisor.is_some()
+        || state.process.is_some()
+        || state.pr.is_some()
+        || state.head_oid.is_some()
+        || state.closeout_path.is_some()
+        || state.closeout_digest.is_some()
+        || state.draft_process.is_some()
+        || state.terminal_result.is_some()
+    {
+        return Ok(false);
+    }
+    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    if !sinks.exit_status.is_file() {
+        return Ok(false);
+    }
+    validate_private_state_file(&sinks.exit_status)?;
+    let exit_record = fs::read(&sinks.exit_status)
+        .map_err(|error| format!("read zero-effect executor exit status: {error}"))?;
+    if exit_record.len() != 16 {
+        return Err("executor zero-effect exit status is not exactly 16 bytes".to_string());
+    }
+    let exit_status = read_executor_exit_status(&sinks.exit_status)?;
+    if exit_status != Some(0) {
+        return Ok(false);
+    }
+    let closeout = state
+        .identity
+        .worktree
+        .join(".autospec/executor-closeout.md");
+    match fs::symlink_metadata(&closeout) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "inspect zero-effect executor Closeout report: {error}"
+            ))
+        }
+        Ok(_) => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn zero_effect_remote_snapshot_is_exact(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    let expected_digest = match state.remote_snapshot_digest.as_deref() {
+        Some(digest)
+            if digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) =>
+        {
+            digest
+        }
+        Some(_) => {
+            return Err(
+                "executor zero-effect prelaunch remote snapshot digest is invalid".to_string(),
+            )
+        }
+        None => return Ok(false),
+    };
+    let snapshot_path = remote_snapshot_path(state_path);
+    if !snapshot_path.is_file() {
+        return Ok(false);
+    }
+    validate_private_state_file(&snapshot_path)?;
+    let bytes = fs::read(&snapshot_path)
+        .map_err(|error| format!("read zero-effect prelaunch remote snapshot: {error}"))?;
+    if sha256_hex(&bytes) != expected_digest {
+        return Err("executor zero-effect prelaunch remote snapshot digest mismatch".to_string());
+    }
+    let snapshot =
+        RemoteMutationSnapshot::from_bytes_with_worktree(state, &bytes, &state.identity.worktree)?;
+    let base_branch = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor validated base ref must name origin".to_string())?;
+    let branch_ref = format!("refs/heads/{}", state.identity.branch);
+    Ok(!snapshot.refs.contains_key(&branch_ref)
+        && snapshot.refs.get(&format!("refs/heads/{base_branch}"))
+            == Some(&state.identity.base_oid)
+        && !snapshot
+            .pull_requests
+            .iter()
+            .any(|pull_request| pull_request.head_ref_name == state.identity.branch))
+}
+
+fn zero_effect_remote_and_branch_are_exact(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    let branch_ref = format!("refs/heads/{}", state.identity.branch);
+    let head = git_stdout(
+        &state.identity.repository_path,
+        &["rev-parse", "--verify", &format!("{branch_ref}^{{commit}}")],
+    )?;
+    if head != state.identity.base_oid {
+        return Ok(false);
+    }
+    let remote_refs = remote_head_refs(&state.identity.repository_path)?;
+    if remote_refs.contains_key(&branch_ref) {
+        return Ok(false);
+    }
+    zero_effect_remote_snapshot_is_exact(state_path, state)
+}
+
+fn exact_prunable_zero_effect_completion(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    if !zero_effect_completion_header_is_exact(state_path, state)?
+        || state.identity.worktree.exists()
+    {
+        return Ok(false);
+    }
+    let scope_root = state
+        .identity
+        .worktree
+        .parent()
+        .ok_or_else(|| "executor zero-effect worktree has no private scope root".to_string())?;
+    let repo = fs::canonicalize(&state.identity.repository_path)
+        .map_err(|error| format!("canonicalize zero-effect executor repository: {error}"))?;
+    if repo != state.identity.repository_path {
+        return Err("executor zero-effect repository identity changed".to_string());
+    }
+    validate_executor_ownership(&repo, &[scope_root])?;
+    reject_symlink_path(&state.identity.worktree)?;
+    if !zero_effect_remote_and_branch_are_exact(state_path, state)? {
+        return Ok(false);
+    }
+    let registry = git_stdout(&repo, &["worktree", "list", "--porcelain"])?;
+    let prunable = registry
+        .split("\n\n")
+        .filter(|block| {
+            block
+                .lines()
+                .any(|line| line == "prunable gitdir file points to non-existent location")
+        })
+        .collect::<Vec<_>>();
+    let expected = format!("worktree {}", state.identity.worktree.display());
+    Ok(prunable.len() == 1 && prunable[0].lines().any(|line| line == expected.as_str()))
+}
+
+fn zero_effect_recovery_marker_path(state_path: &Path) -> PathBuf {
+    state_path.with_extension("zero-effect-recovery.json")
+}
+
+fn zero_effect_recovery_marker(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<serde_json::Value, String> {
+    let snapshot_digest = state
+        .remote_snapshot_digest
+        .as_deref()
+        .ok_or_else(|| "executor zero-effect recovery has no prelaunch snapshot".to_string())?;
+    let exit_path = output_sink_paths(state_path, &state.identity.invocation_id)?.exit_status;
+    let exit = fs::read(&exit_path)
+        .map_err(|error| format!("read zero-effect recovery exit status: {error}"))?;
+    let binding = serde_json::json!({
+        "cleanup_binding": cleanup_binding(state),
+        "branch": state.identity.branch,
+        "base_ref": state.identity.base_ref,
+        "base_oid": state.identity.base_oid,
+        "exit_digest": sha256_hex(&exit),
+        "remote_snapshot_digest": snapshot_digest,
+    });
+    Ok(serde_json::json!({
+        "schema": 1,
+        "binding": sha256_hex(binding.to_string().as_bytes()),
+    }))
+}
+
+fn ensure_zero_effect_recovery_marker(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<(), String> {
+    let marker = zero_effect_recovery_marker(state_path, state)?;
+    write_private_create_once(
+        &zero_effect_recovery_marker_path(state_path),
+        format!(
+            "{}\n",
+            serde_json::to_string(&marker)
+                .map_err(|error| format!("serialize zero-effect recovery marker: {error}"))?
+        )
+        .as_bytes(),
+        "executor zero-effect recovery marker",
+    )
+}
+
+fn validate_zero_effect_recovery_marker(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<(), String> {
+    let path = zero_effect_recovery_marker_path(state_path);
+    validate_private_state_file(&path)?;
+    let observed: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&path)
+            .map_err(|error| format!("read zero-effect recovery marker: {error}"))?,
+    )
+    .map_err(|error| format!("parse zero-effect recovery marker: {error}"))?;
+    if observed != zero_effect_recovery_marker(state_path, state)? {
+        return Err("executor zero-effect recovery marker identity mismatch".to_string());
+    }
+    Ok(())
+}
+
+fn marked_zero_effect_completion_is_exact(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    validate_zero_effect_recovery_marker(state_path, state)?;
+    if !zero_effect_completion_header_is_exact(state_path, state)?
+        || !zero_effect_remote_and_branch_are_exact(state_path, state)?
+    {
+        return Ok(false);
+    }
+    if state.identity.worktree.exists() {
+        let scope_root =
+            state.identity.worktree.parent().ok_or_else(|| {
+                "executor zero-effect worktree has no private scope root".to_string()
+            })?;
+        validate_repaired_worktree(state, &state.identity.repository_path, scope_root)?;
+        return Ok(true);
+    }
+    let scope_root = state
+        .identity
+        .worktree
+        .parent()
+        .ok_or_else(|| "executor zero-effect worktree has no private scope root".to_string())?;
+    let repair_intent =
+        scope_root.join(format!("issue-{}.repair-intent.json", state.identity.issue));
+    Ok(repair_intent.is_file() || exact_prunable_zero_effect_completion(state_path, state)?)
+}
+
+fn recoverable_zero_effect_completion_for_state(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    if zero_effect_recovery_marker_path(state_path).exists() {
+        let exact = marked_zero_effect_completion_is_exact(state_path, state)?;
+        if !exact {
+            return Err(
+                "executor marked zero-effect recovery evidence changed after classification"
+                    .to_string(),
+            );
+        }
+        return Ok(true);
+    }
+    exact_prunable_zero_effect_completion(state_path, state)
+}
+
+fn prepare_zero_effect_recovery(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    let marker_path = zero_effect_recovery_marker_path(state_path);
+    if !marker_path.exists() {
+        if !exact_prunable_zero_effect_completion(state_path, state)? {
+            return Ok(false);
+        }
+        ensure_zero_effect_recovery_marker(state_path, state)?;
+    } else {
+        validate_zero_effect_recovery_marker(state_path, state)?;
+    }
+    if !marked_zero_effect_completion_is_exact(state_path, state)? {
+        return Err(
+            "executor marked zero-effect recovery evidence changed before repair".to_string(),
+        );
+    }
+    repair_missing_post_child_worktree(state)?;
+    if !marked_zero_effect_completion_is_exact(state_path, state)? {
+        return Err(
+            "executor marked zero-effect recovery evidence changed during repair".to_string(),
+        );
+    }
+    zero_effect_recovery_failpoint(ZeroEffectRecoveryFailpoint::AfterRepair, "after repair")?;
+    Ok(true)
+}
+
+fn prepare_zero_effect_retry(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    runtime: Option<RuntimeSessionAdapter>,
+) -> Result<(), String> {
+    prepare_available_worktree_transfer(state_path, state, runtime)?;
+    zero_effect_recovery_failpoint(ZeroEffectRecoveryFailpoint::AfterTransfer, "after transfer")
+}
+
 fn repair_missing_post_child_worktree(state: &PersistedInvocation) -> Result<bool, String> {
     let scope_root = state
         .identity
@@ -17929,12 +18480,39 @@ fn reconcile_preserved_worktree_base(
     }
 
     let current_head = git_stdout(path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let reference = format!("refs/heads/{branch}");
     let state_anchor = scope_root.join(format!(
         "{}.provision",
         path.file_name()
             .and_then(|name| name.to_str())
             .ok_or_else(|| "executor worktree name is not UTF-8".to_string())?
     ));
+    let empty_retry_intent = BaseDriftIntent {
+        old_base: configured_base.clone(),
+        old_head: configured_base.clone(),
+        new_base: base.base_oid.clone(),
+    };
+    let empty_retry_intent_exists =
+        base_drift_intent_path(&state_anchor, &empty_retry_intent).exists();
+    let refs =
+        remote_head_refs_typed(repo).map_err(|error| format!("TRANSIENT: {}", error.detail))?;
+    if !refs.contains_key(&reference)
+        && (current_head == configured_base
+            || (current_head == base.base_oid && empty_retry_intent_exists))
+    {
+        ensure_base_drift_intent(&state_anchor, &empty_retry_intent)?;
+        if current_head == configured_base {
+            git(path, &["merge", "--ff-only", &base.base_oid])?;
+            fail_empty_retry_after_fast_forward()?;
+        }
+        if git_stdout(path, &["rev-parse", "--verify", "HEAD^{commit}"])? != base.base_oid {
+            return Err(
+                "executor proven-empty retry did not fast-forward to the current base".to_string(),
+            );
+        }
+        record_worktree_creation_identity(repo, branch, base)?;
+        return Ok(());
+    }
     let parents = git_stdout(path, &["show", "-s", "--format=%P", &current_head])?;
     let parents = parents.split_whitespace().collect::<Vec<_>>();
     let recovery_intent = (parents.len() == 2 && parents[1] == base.base_oid)
@@ -17963,9 +18541,6 @@ fn reconcile_preserved_worktree_base(
         return Err("executor preserved WIP does not descend from the recorded base".to_string());
     }
 
-    let reference = format!("refs/heads/{branch}");
-    let refs =
-        remote_head_refs_typed(repo).map_err(|error| format!("TRANSIENT: {}", error.detail))?;
     let remote_head = refs.get(&reference);
     if remote_head
         .is_some_and(|remote_head| remote_head != &intent.old_head && remote_head != &current_head)
@@ -19147,6 +19722,355 @@ mod tests {
         let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
     }
 
+    fn zero_effect_classifier_fixture(
+        label: &str,
+        changed_head: bool,
+        remove_worktree: bool,
+    ) -> (GitFixture, PersistedInvocation, PathBuf, PathBuf) {
+        let fixture = GitFixture::new(label);
+        let worktree = fixture.root.join("zero-effect-worktree");
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat/autonomous-issue-42",
+                worktree.to_str().expect("worktree path"),
+                "origin/main",
+            ],
+        );
+        if changed_head {
+            fs::write(worktree.join("changed.txt"), "changed\n").expect("changed fixture");
+            git(&worktree, &["add", "changed.txt"]);
+            git(&worktree, &["commit", "-m", "changed fixture"]);
+        }
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::ImplementationComplete;
+        state.identity.worktree = fs::canonicalize(&worktree).expect("canonical worktree");
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let state_path = fixture.root.join("state/zero-effect.json");
+        let snapshot = format!(
+            "{}\n",
+            serde_json::json!({
+                "schema": 1,
+                "identity": {
+                    "repository": state.identity.repository,
+                    "repository_path": state.identity.repository_path,
+                    "issue": state.identity.issue,
+                    "worker_id": state.identity.worker_id,
+                    "branch": state.identity.branch,
+                    "claim_id": state.identity.claim_id,
+                    "invocation_id": state.identity.invocation_id,
+                    "base_ref": state.identity.base_ref,
+                    "base_oid": state.identity.base_oid,
+                    "worktree": state.identity.worktree,
+                    "local_head": state.identity.base_oid,
+                    "dirty_wip": false,
+                },
+                "refs": {
+                    "refs/heads/main": state.identity.base_oid,
+                },
+                "pull_requests": [],
+            })
+        );
+        let snapshot_path = super::remote_snapshot_path(&state_path);
+        fs::create_dir_all(snapshot_path.parent().expect("snapshot parent"))
+            .expect("create snapshot parent");
+        fs::write(&snapshot_path, &snapshot).expect("write prelaunch snapshot");
+        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+            .expect("private prelaunch snapshot");
+        state.remote_snapshot_digest = Some(super::sha256_hex(snapshot.as_bytes()));
+        super::write_invocation_atomic(&state_path, &state).expect("persist zero-effect state");
+        let sinks = super::output_sink_paths(&state_path, &state.identity.invocation_id)
+            .expect("zero-effect output sinks");
+        fs::create_dir_all(sinks.exit_status.parent().expect("exit parent"))
+            .expect("create exit parent");
+        let mut exit = [0_u8; 16];
+        exit[..4].copy_from_slice(&0_i32.to_ne_bytes());
+        exit[4..8].copy_from_slice(b"EXIT");
+        exit[8..12].copy_from_slice(&0_i32.to_ne_bytes());
+        exit[12..].copy_from_slice(b"DONE");
+        fs::write(&sinks.exit_status, exit).expect("write synced exit");
+        fs::set_permissions(&sinks.exit_status, fs::Permissions::from_mode(0o600))
+            .expect("private synced exit");
+        if remove_worktree {
+            fs::remove_dir_all(&worktree).expect("make worktree prunable");
+        }
+        (fixture, state, state_path, sinks.exit_status)
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_classifies_only_exact_zero_effect_recovery() {
+        let (_exact_fixture, exact, exact_state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-exact", false, true);
+        assert!(
+            super::exact_prunable_zero_effect_completion(&exact_state_path, &exact)
+                .expect("classify exact zero-effect completion")
+        );
+
+        let (_changed_fixture, changed, changed_state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-changed", true, true);
+        assert!(
+            !super::exact_prunable_zero_effect_completion(&changed_state_path, &changed)
+                .expect("changed HEAD remains fail-closed")
+        );
+
+        let (_dirty_fixture, dirty, dirty_state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-dirty", false, false);
+        fs::write(dirty.identity.worktree.join("dirty.txt"), "dirty\n").expect("dirty fixture");
+        assert!(
+            !super::exact_prunable_zero_effect_completion(&dirty_state_path, &dirty)
+                .expect("present dirty worktree remains fail-closed")
+        );
+
+        let (_malformed_fixture, malformed, malformed_state_path, malformed_exit) =
+            zero_effect_classifier_fixture("zero-effect-malformed", false, true);
+        fs::write(&malformed_exit, [1_u8; 16]).expect("malformed exit record");
+        assert!(
+            super::exact_prunable_zero_effect_completion(&malformed_state_path, &malformed)
+                .expect_err("malformed exit remains an invariant")
+                .contains("malformed")
+        );
+
+        let (_pr_fixture, mut pr_state, pr_state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-prelaunch-pr", false, true);
+        let snapshot_path = super::remote_snapshot_path(&pr_state_path);
+        let mut snapshot: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&snapshot_path).expect("read prelaunch snapshot"),
+        )
+        .expect("parse prelaunch snapshot");
+        snapshot["pull_requests"] = serde_json::json!([{
+            "number": 17,
+            "body": "pre-existing",
+            "headRefName": pr_state.identity.branch,
+            "headRefOid": pr_state.identity.base_oid,
+            "isDraft": true,
+            "baseRefName": "main",
+        }]);
+        let snapshot = format!("{snapshot}\n");
+        fs::write(&snapshot_path, &snapshot).expect("write prelaunch PR snapshot");
+        pr_state.remote_snapshot_digest = Some(super::sha256_hex(snapshot.as_bytes()));
+        super::write_invocation_atomic(&pr_state_path, &pr_state)
+            .expect("persist prelaunch PR digest");
+        assert!(
+            !super::exact_prunable_zero_effect_completion(&pr_state_path, &pr_state)
+                .expect("prelaunch feature PR remains fail-closed")
+        );
+
+        let (ambiguous_fixture, ambiguous, ambiguous_state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-ambiguous", false, true);
+        let other = ambiguous_fixture.root.join("other-prunable-worktree");
+        git(
+            &ambiguous_fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                other.to_str().expect("other worktree path"),
+                "origin/main",
+            ],
+        );
+        fs::remove_dir_all(other).expect("make second worktree prunable");
+        assert!(
+            !super::exact_prunable_zero_effect_completion(&ambiguous_state_path, &ambiguous)
+                .expect("ambiguous prunable registrations remain fail-closed")
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_zero_effect_marker_survives_repair_and_transfer_crashes() {
+        let (_fixture, state, state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-crash-windows", false, true);
+
+        super::set_zero_effect_recovery_failpoint(super::ZeroEffectRecoveryFailpoint::AfterRepair);
+        let repair_crash = super::prepare_zero_effect_recovery(&state_path, &state)
+            .expect_err("interrupt after repaired worktree");
+        super::set_zero_effect_recovery_failpoint(super::ZeroEffectRecoveryFailpoint::None);
+        assert!(repair_crash.contains("after repair"), "{repair_crash}");
+        assert!(state.identity.worktree.is_dir());
+        assert!(
+            super::recoverable_zero_effect_completion_for_state(&state_path, &state)
+                .expect("recognize marked repaired state")
+        );
+        assert!(super::prepare_zero_effect_recovery(&state_path, &state)
+            .expect("resume after repair crash"));
+
+        super::set_zero_effect_recovery_failpoint(
+            super::ZeroEffectRecoveryFailpoint::AfterTransfer,
+        );
+        let transfer_crash = super::prepare_zero_effect_retry(&state_path, &state, None)
+            .expect_err("interrupt after available transfer");
+        super::set_zero_effect_recovery_failpoint(super::ZeroEffectRecoveryFailpoint::None);
+        assert!(
+            transfer_crash.contains("after transfer"),
+            "{transfer_crash}"
+        );
+        assert!(
+            super::recoverable_zero_effect_completion_for_state(&state_path, &state)
+                .expect("recognize marked transferred state")
+        );
+        super::prepare_zero_effect_retry(&state_path, &state, None)
+            .expect("resume after transfer crash");
+
+        let (_runtime_fixture, mut runtime_state, runtime_state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-runtime-crash", false, true);
+        runtime_state.identity.runtime_environment_dir = Some(
+            runtime_state
+                .identity
+                .worktree
+                .parent()
+                .expect("runtime scope root")
+                .join("runtime-environment"),
+        );
+        runtime_state.identity.runtime_session_id = Some("runtime-session".to_string());
+        super::write_invocation_atomic(&runtime_state_path, &runtime_state)
+            .expect("persist runtime-bound invocation");
+        assert!(
+            super::prepare_zero_effect_recovery(&runtime_state_path, &runtime_state)
+                .expect("prepare runtime-bound recovery")
+        );
+        super::ensure_cleanup_record(
+            &super::cleanup_record_path(&runtime_state_path, "runtime-complete"),
+            &super::cleanup_binding(&runtime_state),
+            "test runtime cleanup receipt",
+        )
+        .expect("persist completed runtime cleanup");
+        assert!(
+            !super::recovery_needs_runtime(&runtime_state, true),
+            "marked zero-effect recovery must not reattach a released runtime"
+        );
+        super::set_zero_effect_recovery_failpoint(
+            super::ZeroEffectRecoveryFailpoint::AfterRuntimeClose,
+        );
+        let runtime_crash =
+            super::prepare_zero_effect_retry(&runtime_state_path, &runtime_state, None)
+                .expect_err("interrupt after durable runtime close");
+        super::set_zero_effect_recovery_failpoint(super::ZeroEffectRecoveryFailpoint::None);
+        assert!(
+            runtime_crash.contains("after runtime close"),
+            "{runtime_crash}"
+        );
+        assert!(super::recoverable_zero_effect_completion_for_state(
+            &runtime_state_path,
+            &runtime_state
+        )
+        .expect("recognize runtime-bound marked state"));
+        super::prepare_zero_effect_retry(&runtime_state_path, &runtime_state, None)
+            .expect("resume after runtime cleanup crash");
+
+        let marker = super::zero_effect_recovery_marker_path(&state_path);
+        fs::write(&marker, "{\"schema\":1,\"binding\":\"foreign\"}\n")
+            .expect("tamper recovery marker");
+        assert!(
+            super::recoverable_zero_effect_completion_for_state(&state_path, &state)
+                .expect_err("marker mismatch remains fail-closed")
+                .contains("identity mismatch")
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_resumes_failure_after_terminal_claim_transition_crash() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("terminal-failure-crash");
+        state.phase = super::BridgePhase::ImplementationComplete;
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let state_path = fixture.root.join("state/terminal-failure.json");
+        super::write_invocation_atomic(&state_path, &state).expect("persist failure state");
+
+        super::set_zero_effect_recovery_failpoint(
+            super::ZeroEffectRecoveryFailpoint::AfterClaimTransition,
+        );
+        let interrupted = super::finalize_failed_executor_with_transition(
+            &state_path,
+            &mut state,
+            None,
+            None,
+            true,
+            false,
+            "executor_zero_effect_completion",
+            |_, disposition| {
+                assert_eq!(disposition, super::BridgeClaimDisposition::Retryable);
+                Ok(super::BridgeClaimTransition::Transitioned)
+            },
+        )
+        .expect_err("interrupt after terminal claim transition");
+        super::set_zero_effect_recovery_failpoint(super::ZeroEffectRecoveryFailpoint::None);
+        assert!(
+            interrupted.to_string().contains("after claim transition"),
+            "{interrupted}"
+        );
+        let durable = super::PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("read interrupted state"),
+        )
+        .expect("parse interrupted state");
+        assert_eq!(durable.phase, super::BridgePhase::ImplementationComplete);
+        assert_eq!(
+            super::read_failure_cleanup_intent(&state_path, &durable)
+                .expect("read exact failure cleanup intent"),
+            "executor_zero_effect_completion"
+        );
+
+        super::finalize_failed_executor_with_transition(
+            &state_path,
+            &mut state,
+            None,
+            None,
+            true,
+            false,
+            "executor_zero_effect_completion",
+            |_, _| Ok(super::BridgeClaimTransition::Transitioned),
+        )
+        .expect("resume terminal failure finalization");
+        assert_eq!(state.phase, super::BridgePhase::Complete);
+        assert_eq!(
+            state.terminal_result.as_deref(),
+            Some("retryable:executor_zero_effect_completion")
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_terminal_failure_recovery_requires_runtime_receipt() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("terminal-runtime-receipt");
+        state.phase = super::BridgePhase::ImplementationComplete;
+        state.identity.claim_id = "claim-runtime".to_string();
+        state.identity.invocation_id = "42-claim-runtime".to_string();
+        state.identity.runtime_environment_dir = Some(fixture.root.join("runtime-environment"));
+        state.identity.runtime_session_id = Some("runtime-session".to_string());
+        let state_dir = fixture.root.join("state/executor");
+        let generation = &super::sha256_hex(state.identity.claim_id.as_bytes())[..16];
+        let state_path = state_dir.join(format!("issue-42-{generation}.json"));
+        super::write_invocation_atomic(&state_path, &state).expect("persist runtime failure");
+        super::ensure_failure_cleanup_intent(
+            &state_path,
+            &state,
+            true,
+            false,
+            "executor_zero_effect_completion",
+        )
+        .expect("persist failure cleanup intent");
+        let lease = crate::commands::claim::ClaimLease {
+            issue: 42,
+            repo: state.identity.repository.clone(),
+            worker_id: state.identity.worker_id.clone(),
+            branch: state.identity.branch.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            session_id: None,
+        };
+        let receipt = super::cleanup_record_path(&state_path, "runtime-complete");
+
+        let error = super::recover_terminal_failure_identity(&state_dir, &lease)
+            .expect_err("missing runtime receipt remains fail-closed");
+        assert!(error.contains("runtime receipt"), "{error}");
+        assert!(
+            !receipt.exists(),
+            "read-only terminal recovery created a runtime receipt"
+        );
+    }
+
     #[test]
     fn autonomous_executor_bridge_codex_sandbox_entrypoint_retries_pruned_worktree_repair() {
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
@@ -19763,6 +20687,62 @@ mod tests {
             ],
         );
         let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_retry_fast_forwards_proven_empty_worktree_to_advanced_base() {
+        let fixture = GitFixture::new("retry-empty-base-adoption");
+        let original =
+            resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve original base");
+        let scope = format!(
+            "retry_empty_base_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = provision_issue_worktree(&fixture.repo, &scope, 43, &original)
+            .expect("provision original worktree");
+        assert_eq!(
+            git_stdout(&worktree.path, &["rev-parse", "HEAD"]),
+            original.base_oid
+        );
+
+        fs::write(fixture.repo.join("base-advance.txt"), "advanced\n").expect("write base advance");
+        git(&fixture.repo, &["add", "base-advance.txt"]);
+        git(&fixture.repo, &["commit", "-m", "feat: advance base"]);
+        git(&fixture.repo, &["push", "origin", "main"]);
+        let advanced =
+            resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve advanced base");
+
+        super::EMPTY_RETRY_BASE_FAILPOINT.store(1, Ordering::SeqCst);
+        let interrupted = provision_issue_worktree(&fixture.repo, &scope, 43, &advanced)
+            .expect_err("interrupt after proven-empty fast-forward");
+        assert!(interrupted.contains("injected crash"), "{interrupted}");
+        assert_eq!(
+            git_stdout(&worktree.path, &["rev-parse", "HEAD"]),
+            advanced.base_oid
+        );
+        let adopted = provision_issue_worktree(&fixture.repo, &scope, 43, &advanced)
+            .expect("resume proven-empty worktree adoption");
+        assert_eq!(
+            git_stdout(&adopted.path, &["rev-parse", "HEAD"]),
+            advanced.base_oid,
+            "a proven-empty retry must start exactly at the current base"
+        );
+        assert_eq!(
+            git_stdout(&adopted.path, &["show", "-s", "--format=%P", "HEAD"]),
+            original.base_oid,
+            "the current base commit must not be wrapped in a synthetic merge"
+        );
+
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "remove",
+                adopted.path.to_str().expect("worktree path"),
+            ],
+        );
+        let _ = fs::remove_dir_all(adopted.path.parent().expect("scope root"));
     }
 
     #[test]
