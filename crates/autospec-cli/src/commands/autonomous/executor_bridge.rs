@@ -7240,6 +7240,35 @@ pub(crate) fn push_and_create_draft(
     issue_body: &str,
     adapter: &DraftPrAdapter,
 ) -> Result<u64, String> {
+    #[cfg(not(test))]
+    let snapshot = state.clone();
+    #[cfg(not(test))]
+    let refresh = || refresh_bridge_claim(&snapshot, ClaimRenewalPhase::Implementation);
+    #[cfg(test)]
+    let refresh = || Ok(BridgeClaimOwnership::Refreshed { ttl_seconds: 60 });
+    push_and_create_draft_with_refresh(
+        state_path,
+        state,
+        proof,
+        issue_title,
+        issue_body,
+        adapter,
+        refresh,
+    )
+}
+
+fn push_and_create_draft_with_refresh<Refresh>(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    proof: &ImplementationProof,
+    issue_title: &str,
+    issue_body: &str,
+    adapter: &DraftPrAdapter,
+    mut refresh: Refresh,
+) -> Result<u64, String>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+{
     let proof_closeout_digest = sha256_hex(proof.closeout_body.as_bytes());
     if state.closeout_digest.as_deref() != Some(proof_closeout_digest.as_str()) {
         return Err(
@@ -7336,6 +7365,9 @@ pub(crate) fn push_and_create_draft(
         write_invocation_atomic(state_path, state)?;
     }
     if state.phase == BridgePhase::BranchPushing && observed.refs == prelaunch.refs {
+        if refresh()? == BridgeClaimOwnership::Lost {
+            return Err("executor issue branch push lost exact claim ownership".to_string());
+        }
         let refspec = format!("{}:{issue_ref}", proof.head_oid);
         let output = Command::new("git")
             .args(["push", "--porcelain", "origin", &refspec])
@@ -7428,8 +7460,15 @@ pub(crate) fn push_and_create_draft(
         state.phase = BridgePhase::DraftCreating;
         state.progress_at = unix_now()?;
         write_invocation_atomic(state_path, state)?;
-        let creation =
-            create_draft_pull_request(state_path, state, proof, issue_title, &base, adapter);
+        let creation = create_draft_pull_request(
+            state_path,
+            state,
+            proof,
+            issue_title,
+            &base,
+            adapter,
+            &mut refresh,
+        );
         let authoritative = list_bridge_pull_requests(&state.identity.repository, adapter)
             .map_err(|error| {
                 if let Err(creation_error) = &creation {
@@ -7828,6 +7867,7 @@ fn revalidate_merge_admission(
                     state.identity.issue,
                     &state.identity.branch,
                 )
+                && pull_request_body_matches_closeout(candidate, state)
         })
         .collect::<Vec<_>>();
     if exact_prs.len() != 1 {
@@ -7859,6 +7899,20 @@ fn revalidate_merge_admission(
         return Err("executor merge admission required CI is no longer passing".to_string());
     }
     validate_review_receipt(state_path, state)
+}
+
+fn pull_request_body_matches_closeout(
+    pull_request: &OpenPullRequest,
+    state: &PersistedInvocation,
+) -> bool {
+    let Some(expected_digest) = state.closeout_digest.as_deref() else {
+        return false;
+    };
+    let prefix = format!("Closes #{}\n\n", state.identity.issue);
+    pull_request
+        .body
+        .strip_prefix(&prefix)
+        .is_some_and(|closeout| sha256_hex(closeout.as_bytes()) == expected_digest)
 }
 
 pub(crate) fn admin_squash_merge_exact(
@@ -7954,6 +8008,8 @@ where
             &state.identity.repository,
             "--admin",
             "--squash",
+            "--match-head-commit",
+            &head_oid,
             "--delete-branch",
         ])
         .envs(&adapter.environment)
@@ -9098,14 +9154,18 @@ fn resolve_draft_executable(adapter: &DraftPrAdapter) -> Result<PathBuf, String>
         .map_err(|error| format!("canonicalize executor draft gh executable: {error}"))
 }
 
-fn create_draft_pull_request(
+fn create_draft_pull_request<Refresh>(
     state_path: &Path,
     state: &mut PersistedInvocation,
     proof: &ImplementationProof,
     issue_title: &str,
     base: &str,
     adapter: &DraftPrAdapter,
-) -> Result<(), String> {
+    refresh: &mut Refresh,
+) -> Result<(), String>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+{
     let body_path = state_path.with_file_name(format!(
         "draft-body-{}-{}.md",
         state.identity.invocation_id,
@@ -9431,6 +9491,15 @@ fn create_draft_pull_request(
                 "remove executor draft executable before release: {error}"
             ));
         }
+    }
+    if refresh()? == BridgeClaimOwnership::Lost {
+        drop(release_write);
+        drop(digest_write);
+        let _ = waitpid(child, None);
+        let _ = stderr_reader.join();
+        let _ = fs::remove_file(&receipt_temporary);
+        let _ = fs::remove_file(&body_path);
+        return Err("executor draft creation lost exact claim ownership".to_string());
     }
     if let Err(error) = write_draft_release_intent(state_path, state, &process) {
         drop(release_write);
@@ -20510,6 +20579,82 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn autonomous_executor_bridge_takeover_before_push_blocks_all_remote_mutation() {
+        let mut prepared = prepared_draft_transaction("draft-push-takeover");
+        let error = super::push_and_create_draft_with_refresh(
+            &prepared.state_path,
+            &mut prepared.state,
+            &prepared.proof,
+            "Implement issue",
+            DRAFT_ISSUE_BODY,
+            &prepared.adapter,
+            || Ok(super::BridgeClaimOwnership::Lost),
+        )
+        .expect_err("takeover must block branch publication");
+
+        assert!(error.contains("ownership"), "{error}");
+        assert!(
+            !Command::new("git")
+                .args([
+                    "--git-dir",
+                    prepared
+                        .fixture
+                        .root
+                        .join("remote.git")
+                        .to_str()
+                        .expect("remote path"),
+                    "show-ref",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{}", prepared.state.identity.branch),
+                ])
+                .status()
+                .expect("inspect remote branch")
+                .success(),
+            "lost owner must not push the issue branch"
+        );
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert!(
+            !calls.contains("pr create"),
+            "lost owner must not create a PR"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_refreshes_again_before_draft_creation() {
+        let mut prepared = prepared_draft_transaction("draft-create-takeover");
+        let refreshes = std::cell::Cell::new(0_u8);
+        let error = super::push_and_create_draft_with_refresh(
+            &prepared.state_path,
+            &mut prepared.state,
+            &prepared.proof,
+            "Implement issue",
+            DRAFT_ISSUE_BODY,
+            &prepared.adapter,
+            || {
+                let attempt = refreshes.get() + 1;
+                refreshes.set(attempt);
+                Ok(if attempt == 1 {
+                    super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }
+                } else {
+                    super::BridgeClaimOwnership::Lost
+                })
+            },
+        )
+        .expect_err("takeover after push must block draft creation");
+
+        assert!(error.contains("ownership"), "{error}");
+        assert_eq!(refreshes.get(), 2, "each remote mutation needs a refresh");
+        let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
+        assert!(
+            !calls.contains("pr create"),
+            "lost owner must not create a PR"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn autonomous_executor_bridge_retry_adopts_preserved_remote_wip_branch() {
         let (fixture, mut state, _snapshot, closeout) =
             implementation_proof_fixture("retry-preserved-branch");
@@ -26753,6 +26898,10 @@ exit 19
         state.phase = super::BridgePhase::ReviewPassed;
         state.pr = Some(17);
         state.head_oid = Some(head.clone());
+        let closeout = "## Closeout report\n";
+        state.closeout_digest = Some(autospec_core::autonomous::waterfall::sha256_hex(
+            closeout.as_bytes(),
+        ));
         let receipt = "b".repeat(64);
         let evidence = autospec_core::claim::ExecutorResultEvidence::new(
             state.identity.repository.clone(),
@@ -26799,10 +26948,15 @@ exit 19
         let checks = fixture.root.join("merge-checks.json");
         fs::write(
             &pr_state,
-            format!(
-                "[{{\"number\":17,\"body\":\"Closes #42\\n\\n## Closeout report\\n\",\"headRefName\":\"{}\",\"headRefOid\":\"{head}\",\"isDraft\":false,\"baseRefName\":\"main\"}}]",
-                state.identity.branch
-            ),
+            serde_json::json!([{
+                "number": 17,
+                "body": format!("Closes #42\n\n{closeout}"),
+                "headRefName": state.identity.branch.clone(),
+                "headRefOid": head.clone(),
+                "isDraft": false,
+                "baseRefName": "main",
+            }])
+            .to_string(),
         )
         .expect("PR state");
         fs::write(
@@ -26857,7 +27011,7 @@ exit 19
         let adapter = super::DraftPrAdapter {
             gh,
             environment: BTreeMap::from([
-                ("PR_STATE".into(), pr_state.into_os_string()),
+                ("PR_STATE".into(), pr_state.clone().into_os_string()),
                 ("COMMENTS".into(), comments.clone().into_os_string()),
                 ("CHECKS".into(), checks.clone().into_os_string()),
             ]),
@@ -26865,6 +27019,36 @@ exit 19
 
         super::revalidate_merge_admission(&state_path, &state, &adapter)
             .expect("all current gates");
+        fs::write(
+            &pr_state,
+            serde_json::json!([{
+                "number": 17,
+                "body": "Closes #42\n\n## Closeout report\n\nResult: replaced\n",
+                "headRefName": state.identity.branch.clone(),
+                "headRefOid": head.clone(),
+                "isDraft": false,
+                "baseRefName": "main",
+            }])
+            .to_string(),
+        )
+        .expect("mutated PR body");
+        assert!(
+            super::revalidate_merge_admission(&state_path, &state, &adapter).is_err(),
+            "admin merge must reject a structurally valid replacement Closeout"
+        );
+        fs::write(
+            &pr_state,
+            serde_json::json!([{
+                "number": 17,
+                "body": format!("Closes #42\n\n{closeout}"),
+                "headRefName": state.identity.branch.clone(),
+                "headRefOid": head.clone(),
+                "isDraft": false,
+                "baseRefName": "main",
+            }])
+            .to_string(),
+        )
+        .expect("restore exact PR body");
         fs::write(
             &checks,
             serde_json::json!({
@@ -27076,6 +27260,7 @@ exit 19
                    exit 0\n\
                  fi\n\
                  if [ \"$1 $2\" = 'pr merge' ]; then\n\
+                   case \" $* \" in *\" --match-head-commit {head} \"*) ;; *) exit 74 ;; esac\n\
                    if [ -e \"$FAIL_ONCE\" ]; then rm \"$FAIL_ONCE\"; exit 73; fi\n\
                    touch \"$MERGED\"; exit 0\n\
                  fi\n\
