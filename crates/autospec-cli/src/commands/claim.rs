@@ -13,7 +13,7 @@ use autospec_core::claim::{
     evaluate_merge_ready_claim_recovery, executor_result_evidence_exists,
     find_reconcilable_pull_request, is_executor_result_pull_request, is_reconcilable_pull_request,
     parse_claim_issue_json, parse_open_pull_requests_json, parse_paths_argument,
-    parse_remote_comments_json, parse_required_checks_json, parse_run_state_comment,
+    parse_required_checks_json, parse_run_state_comment,
     successful_executor_result_for_pull_request, ClaimRecoveryDecision, ExecutorResultEvidence,
     RemoteComment, RunStateRecord, SelectedRunState, RUN_STATE_BEGIN_MARKER, RUN_STATE_END_MARKER,
     RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
@@ -3198,14 +3198,7 @@ fn list_comments(
 ) -> Result<Vec<autospec_core::claim::RemoteComment>, CommandFailure> {
     let endpoint = format!("repos/{repo}/issues/{issue}/comments");
     let output = Command::new("gh")
-        .args([
-            "api",
-            endpoint.as_str(),
-            "--paginate",
-            "--slurp",
-            "--jq",
-            "add | [.[] | {id,body,updated_at}]",
-        ])
+        .args(["api", endpoint.as_str(), "--paginate", "--slurp"])
         .output()
         .map_err(|error| {
             CommandFailure::transient(format!("could not run gh api issue comments: {error}"))
@@ -3216,9 +3209,58 @@ fn list_comments(
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    parse_remote_comments_json(&String::from_utf8_lossy(&output.stdout)).map_err(|error| {
+    parse_paginated_comments_json(&String::from_utf8_lossy(&output.stdout)).map_err(|error| {
         CommandFailure::diagnostic(format!("could not parse GitHub issue comments: {error}"))
     })
+}
+
+/// Flatten raw `gh api --paginate --slurp` pages into the typed comment boundary.
+///
+/// GitHub owns the raw object shape and may add unrelated fields, so this parser
+/// intentionally projects only `id`, `body`, and `updated_at`. The downstream
+/// typed value remains exact without coupling Autospec to every GitHub field.
+pub(crate) fn parse_paginated_comments_json(input: &str) -> Result<Vec<RemoteComment>, String> {
+    let value: serde_json::Value = serde_json::from_str(input)
+        .map_err(|error| format!("GitHub issue comments are not valid JSON: {error}"))?;
+    let pages = value
+        .as_array()
+        .ok_or_else(|| "GitHub issue comments are not an array".to_string())?;
+    let nested = pages.iter().any(serde_json::Value::is_array);
+    if nested && !pages.iter().all(serde_json::Value::is_array) {
+        return Err("GitHub issue comment pages mix arrays with comments".to_string());
+    }
+    let values = if nested {
+        pages
+            .iter()
+            .flat_map(|page| page.as_array().into_iter().flatten())
+            .collect::<Vec<_>>()
+    } else {
+        pages.iter().collect::<Vec<_>>()
+    };
+    values
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let context = format!("GitHub issue comments[{index}]");
+            let object = value
+                .as_object()
+                .ok_or_else(|| format!("{context} is not an object"))?;
+            let id = object
+                .get("id")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("{context} id is not an unsigned integer"))?;
+            let optional_string = |field: &str| match object.get(field) {
+                None | Some(serde_json::Value::Null) => Ok(String::new()),
+                Some(serde_json::Value::String(value)) => Ok(value.clone()),
+                Some(_) => Err(format!("{context} {field} is not a string or null")),
+            };
+            Ok(RemoteComment::new(
+                id,
+                optional_string("body")?,
+                optional_string("updated_at")?,
+            ))
+        })
+        .collect()
 }
 
 fn load_claim_issue(
@@ -3960,6 +4002,60 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
 
     static BRIDGE_TRANSITION_ENV: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn paginated_comments_parser_flattens_two_raw_pages() {
+        // Break caught: treating each slurped page array as a comment object.
+        let comments = super::parse_paginated_comments_json(
+            r#"[
+              [{"id":100,"body":"first","updated_at":"2026-07-27T00:00:00Z","user":{"login":"autospec"}}],
+              [{"id":101,"body":null,"updated_at":null,"reactions":{"total_count":2}}]
+            ]"#,
+        )
+        .expect("nested GitHub comment pages");
+
+        assert_eq!(
+            comments,
+            vec![
+                RemoteComment::new(100, "first", "2026-07-27T00:00:00Z"),
+                RemoteComment::new(101, "", ""),
+            ]
+        );
+    }
+
+    #[test]
+    fn paginated_comments_parser_preserves_flat_single_page_fixtures() {
+        // Break caught: requiring an outer page array would break existing projected fixtures.
+        let comments = super::parse_paginated_comments_json(
+            r#"[{"id":100,"body":"state","updated_at":"2026-07-27T00:00:00Z"}]"#,
+        )
+        .expect("flat projected fixture");
+
+        assert_eq!(
+            comments,
+            vec![RemoteComment::new(100, "state", "2026-07-27T00:00:00Z")]
+        );
+    }
+
+    #[test]
+    fn paginated_comments_parser_rejects_mixed_pages_and_malformed_fields() {
+        // Break caught: partially flattening a mixed payload could silently drop comments.
+        assert!(super::parse_paginated_comments_json(
+            r#"[[{"id":100,"body":"state","updated_at":"now"}],{"id":101,"body":"other","updated_at":"now"}]"#,
+        )
+        .is_err());
+
+        for malformed in [
+            r#"[{"id":"100","body":"state","updated_at":"now"}]"#,
+            r#"[{"id":100,"body":false,"updated_at":"now"}]"#,
+            r#"[{"id":100,"body":"state","updated_at":[]}]"#,
+        ] {
+            assert!(
+                super::parse_paginated_comments_json(malformed).is_err(),
+                "accepted malformed typed comment: {malformed}"
+            );
+        }
+    }
 
     #[test]
     fn claim_settle_millis_preserves_decimal_second_configuration() {

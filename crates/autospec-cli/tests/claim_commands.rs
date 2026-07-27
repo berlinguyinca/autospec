@@ -1226,6 +1226,75 @@ fn claim_state_recover_stale_startup_releases_only_an_old_evidenceless_claim() {
 }
 
 #[test]
+fn claim_paginated_comments_flatten_pages_without_combining_slurp_and_jq() {
+    // Break caught: gh rejects --slurp with --jq before returning paginated comments.
+    let fixture = temp_dir("autospec-claim-paginated-comments");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" >> "$AUTOSPEC_CLAIM_LOG"
+slurp=0
+jq=0
+for argument in "$@"; do
+  [ "$argument" = --slurp ] && slurp=1
+  [ "$argument" = --jq ] && jq=1
+done
+if [ "$slurp" -eq 1 ] && [ "$jq" -eq 1 ]; then
+  printf '%s\n' 'the `--slurp` option is not supported with `--jq` or `--template`' >&2
+  exit 64
+fi
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then
+  printf '%s\n' "$AUTOSPEC_CLAIM_COMMENTS"
+  exit 0
+fi
+if [ "$1" = issue ] && [ "$2" = edit ]; then exit 0; fi
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/comments/100 ]; then exit 0; fi
+exit 17
+"#,
+    );
+    let comments = r#"[
+      [{"id":99,"updated_at":"2000-01-01T00:00:00Z","body":"ordinary comment","user":{"login":"operator"}}],
+      [{"id":100,"updated_at":"2000-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2000-01-01T00:00:00Z\",\"updated_at\":\"2000-01-01T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->","user":{"login":"autospec"}}]
+    ]"#;
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "recover-stale-startup",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--timeout-seconds",
+            "300",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_COMMENTS", comments)
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+        .output()
+        .expect("autospec claim stale recovery starts");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":true"));
+    let calls = std::fs::read_to_string(log).expect("gh call log");
+    assert!(calls.contains("--paginate\n--slurp"));
+    assert!(!calls.contains("--jq"));
+    assert!(calls.contains("repos/testorg/testrepo/issues/comments/100\n-X\nDELETE"));
+}
+
+#[test]
 fn claim_state_recover_stale_startup_preserves_a_fresh_claim_without_label_mutation() {
     let fixture = temp_dir("autospec-claim-recover-fresh");
     let bin = fixture.join("bin");

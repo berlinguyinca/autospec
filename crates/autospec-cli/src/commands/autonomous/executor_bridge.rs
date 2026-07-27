@@ -30,9 +30,9 @@ use autospec_core::autonomous::premerge::{
 };
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::claim::{
-    is_executor_result_pull_request, parse_open_pull_requests_json, parse_remote_comments_json,
-    parse_required_checks_json, successful_executor_result_for_pull_request,
-    ExecutorResultEvidence, OpenPullRequest, RemoteComment,
+    is_executor_result_pull_request, parse_open_pull_requests_json, parse_required_checks_json,
+    successful_executor_result_for_pull_request, ExecutorResultEvidence, OpenPullRequest,
+    RemoteComment,
 };
 use autospec_core::coordination::ConductorOutcome;
 use autospec_core::lint::{
@@ -9417,14 +9417,7 @@ fn list_bridge_comments(
         state.identity.repository, state.identity.issue
     );
     let output = Command::new(&adapter.gh)
-        .args([
-            "api",
-            &endpoint,
-            "--paginate",
-            "--slurp",
-            "--jq",
-            "add | [.[] | {id,body,updated_at}]",
-        ])
+        .args(["api", &endpoint, "--paginate", "--slurp"])
         .envs(&adapter.environment)
         .output()
         .map_err(|error| {
@@ -9436,9 +9429,10 @@ fn list_bridge_comments(
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    parse_remote_comments_json(&String::from_utf8_lossy(&output.stdout)).map_err(|error| {
-        BridgeRunFailure::invariant(format!("parse executor issue comments: {error}"))
-    })
+    crate::commands::claim::parse_paginated_comments_json(&String::from_utf8_lossy(&output.stdout))
+        .map_err(|error| {
+            BridgeRunFailure::invariant(format!("parse executor issue comments: {error}"))
+        })
 }
 
 fn configured_advisory_checks(adapter: &DraftPrAdapter) -> Result<BTreeSet<String>, String> {
@@ -29981,6 +29975,47 @@ exit 19
                 "accepted non-strict review: {rejected:?}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_paginated_comments_flatten_exact_typed_values() {
+        // Break caught: executor comment reads combining --slurp and --jq never reach GitHub.
+        let fixture = GitFixture::new("paginated-comments");
+        let state = supervision_state(&fixture);
+        let gh = fixture.root.join("gh-paginated-comments");
+        write_executable(
+            &gh,
+            r#"#!/bin/sh
+set -eu
+slurp=0
+jq=0
+for argument in "$@"; do
+  [ "$argument" = --slurp ] && slurp=1
+  [ "$argument" = --jq ] && jq=1
+done
+if [ "$slurp" -eq 1 ] && [ "$jq" -eq 1 ]; then
+  printf '%s\n' 'the `--slurp` option is not supported with `--jq` or `--template`' >&2
+  exit 64
+fi
+printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z","user":{"login":"autospec"}}],[{"id":101,"body":null,"updated_at":null,"user":{"login":"operator"}}]]'
+"#,
+        );
+        let adapter = super::DraftPrAdapter {
+            gh,
+            environment: BTreeMap::new(),
+        };
+
+        let comments =
+            super::list_bridge_comments(&state, &adapter).expect("paginated comments parse");
+
+        assert_eq!(
+            comments,
+            vec![
+                autospec_core::claim::RemoteComment::new(100, "page one", "2026-07-27T00:00:00Z",),
+                autospec_core::claim::RemoteComment::new(101, "", ""),
+            ]
+        );
     }
 
     #[cfg(unix)]
