@@ -1594,6 +1594,8 @@ mod runtime_session_tests {
             git(&repo, &["add", "."]);
             git(&repo, &["commit", "-m", "runtime fixture"]);
             let previous_state_root = std::env::var_os("AGENT_ENV_STATE_ROOT");
+            // SECURITY-REVIEW: independent #2598 reviewer LGTM; test mutex serializes env mutation.
+            // SAFETY: TEST_ENVIRONMENT excludes concurrent access to this process environment key.
             unsafe {
                 std::env::set_var("AGENT_ENV_STATE_ROOT", &state_root);
             }
@@ -1612,6 +1614,8 @@ mod runtime_session_tests {
 
     impl Drop for RuntimeFixture {
         fn drop(&mut self) {
+            // SECURITY-REVIEW: independent #2598 reviewer LGTM; test mutex serializes env mutation.
+            // SAFETY: TEST_ENVIRONMENT excludes concurrent access to this process environment key.
             unsafe {
                 match self.previous_state_root.take() {
                     Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),

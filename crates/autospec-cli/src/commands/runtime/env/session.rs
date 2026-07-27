@@ -163,6 +163,7 @@ impl SessionLease {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                // SECURITY-REVIEW: independent #2598 reviewer LGTM; read-only effective UID probe.
                 // SAFETY: geteuid has no arguments or memory-safety preconditions.
                 let owner = unsafe { nix::libc::geteuid() };
                 if metadata.uid() != owner || metadata.permissions().mode() & 0o077 != 0 {

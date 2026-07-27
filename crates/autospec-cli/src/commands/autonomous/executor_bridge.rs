@@ -12786,6 +12786,7 @@ struct ScopedChildSubreaper {
 impl ScopedChildSubreaper {
     fn enable() -> Result<Self, String> {
         let mut previous = 0_i32;
+        // SECURITY-REVIEW: independent #2598 reviewer LGTM; read-only process-state probe.
         // SAFETY: PR_GET_CHILD_SUBREAPER writes one integer to the supplied valid pointer.
         let result = unsafe {
             nix::libc::prctl(
@@ -22365,6 +22366,7 @@ mod tests {
         .expect("strict capture quarantine");
         let supervisor = super::LAST_SPAWN_SUPERVISOR.load(Ordering::SeqCst);
         let mut subreaper = 0_i32;
+        // SECURITY-REVIEW: independent #2598 reviewer LGTM; read-only process-state probe.
         // SAFETY: PR_GET_CHILD_SUBREAPER writes one integer to the supplied valid pointer.
         let get_result = unsafe {
             nix::libc::prctl(
@@ -25133,6 +25135,7 @@ mod tests {
         )
         .expect("clean child supervision");
         let mut observed = 0_i32;
+        // SECURITY-REVIEW: independent #2598 reviewer LGTM; read-only process-state probe.
         // SAFETY: PR_GET_CHILD_SUBREAPER writes one integer to the supplied valid pointer.
         let get_result = unsafe {
             nix::libc::prctl(
@@ -25172,6 +25175,7 @@ mod tests {
         )
         .expect("clean child supervision");
         let mut observed = 0_i32;
+        // SECURITY-REVIEW: independent #2598 reviewer LGTM; read-only process-state probe.
         // SAFETY: PR_GET_CHILD_SUBREAPER writes one integer to the supplied valid pointer.
         let get_result = unsafe {
             nix::libc::prctl(
