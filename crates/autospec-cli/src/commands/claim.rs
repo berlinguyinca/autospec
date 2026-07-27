@@ -116,6 +116,7 @@ fn push_claim_ref_in(
     let arguments = claim_remote_arguments(&remote_url, &["push", remote, refspec]);
     let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
     run_git_in(git_program, workdir, &arguments, "advance claim ref")
+        .map_err(CommandFailure::into_transient)
 }
 
 fn parse_claim_ref_message(
@@ -163,9 +164,10 @@ fn read_claim_ref_in(
     let arguments =
         claim_remote_arguments(&remote_url, &["ls-remote", "--refs", remote, &reference]);
     let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
-    let output = run_git_in(git_program, workdir, &arguments, "read claim ref")?;
+    let output = run_git_in(git_program, workdir, &arguments, "read claim ref")
+        .map_err(CommandFailure::into_transient)?;
     if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "read claim ref: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -182,9 +184,10 @@ fn read_claim_ref_in(
     let arguments =
         claim_remote_arguments(&remote_url, &["fetch", "--no-tags", remote, &reference]);
     let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
-    let fetch = run_git_in(git_program, workdir, &arguments, "fetch claim ref")?;
+    let fetch = run_git_in(git_program, workdir, &arguments, "fetch claim ref")
+        .map_err(CommandFailure::into_transient)?;
     if !fetch.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "fetch claim ref: {}",
             String::from_utf8_lossy(&fetch.stderr).trim()
         )));
@@ -327,8 +330,13 @@ fn advance_claim_ref_in(
         Ok(ClaimRefAdvance::Won(Box::new(
             reread.expect("checked claim ref"),
         )))
-    } else {
+    } else if reread.as_ref().map(|head| &head.oid) != expected.map(|head| &head.oid) {
         Ok(ClaimRefAdvance::Lost)
+    } else {
+        Err(CommandFailure::transient(format!(
+            "advance claim ref failed without changing authoritative ownership: {}",
+            String::from_utf8_lossy(&push.stderr).trim()
+        )))
     }
 }
 
@@ -356,10 +364,10 @@ fn resolve_claim_remote(repo: &str) -> Result<String, CommandFailure> {
         .args(["repo", "view", repo, "--json", "url", "--jq", ".url"])
         .output()
         .map_err(|error| {
-            CommandFailure::diagnostic(format!("resolve authenticated claim repository: {error}"))
+            CommandFailure::transient(format!("resolve authenticated claim repository: {error}"))
         })?;
     if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "resolve authenticated claim repository {repo}: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -741,6 +749,7 @@ pub(crate) fn acquire_for_conductor(
 pub(crate) fn recover_for_conductor(
     repo: &str,
     issue: u64,
+    expected: &ClaimLease,
 ) -> Result<Option<ClaimLease>, CommandFailure> {
     let Some(selected) = read_claim_ref(repo, issue)? else {
         return Ok(None);
@@ -750,15 +759,92 @@ pub(crate) fn recover_for_conductor(
         || record.issue != issue
         || !matches!(
             record.state.as_str(),
-            "claimed" | "merged" | "retryable" | "needs-human"
+            "claimed" | "merged" | "released" | "failed" | "retryable" | "needs-human"
         )
     {
         return Err(CommandFailure::diagnostic(
             "foreground recovery claim is not authoritative for the selected issue",
         ));
     }
+    if record.state != "claimed" {
+        return Ok(None);
+    }
     let claim_id = record.claim_id.ok_or_else(|| {
         CommandFailure::diagnostic("foreground recovery claim has no generation identity")
+    })?;
+    if expected.repo != repo
+        || expected.issue != issue
+        || record.worker_id != expected.worker_id
+        || record.branch != expected.branch
+        || claim_id != expected.claim_id
+    {
+        return Err(CommandFailure::diagnostic(
+            "foreground recovery claim does not match the durable local acquisition",
+        ));
+    }
+    Ok(Some(ClaimLease {
+        issue,
+        repo: repo.to_string(),
+        worker_id: record.worker_id,
+        branch: record.branch,
+        claim_id,
+        session_id: None,
+    }))
+}
+
+pub(crate) fn recover_terminal_for_conductor(
+    repo: &str,
+    issue: u64,
+) -> Result<Option<ClaimLease>, CommandFailure> {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
+        return Ok(None);
+    };
+    let record = selected.record;
+    if record.repo != repo || record.issue != issue {
+        return Err(CommandFailure::diagnostic(
+            "foreground terminal recovery claim is not authoritative for the selected issue",
+        ));
+    }
+    if !matches!(
+        record.state.as_str(),
+        "merged" | "released" | "failed" | "retryable" | "needs-human"
+    ) {
+        return Ok(None);
+    }
+    let claim_id = record.claim_id.ok_or_else(|| {
+        CommandFailure::diagnostic("foreground terminal recovery claim has no generation identity")
+    })?;
+    Ok(Some(ClaimLease {
+        issue,
+        repo: repo.to_string(),
+        worker_id: record.worker_id,
+        branch: record.branch,
+        claim_id,
+        session_id: None,
+    }))
+}
+
+pub(crate) fn authoritative_lease_for_legacy_migration(
+    repo: &str,
+    issue: u64,
+) -> Result<Option<ClaimLease>, CommandFailure> {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
+        return Ok(None);
+    };
+    let record = selected.record;
+    if record.repo != repo
+        || record.issue != issue
+        || !matches!(
+            record.state.as_str(),
+            "claimed" | "merged" | "released" | "failed" | "retryable" | "needs-human"
+        )
+    {
+        return Err(CommandFailure::diagnostic(
+            "legacy migration claim is not authoritative for the selected issue",
+        ));
+    }
+    let claim_id = record.claim_id.ok_or_else(|| {
+        CommandFailure::diagnostic("legacy migration claim has no generation identity")
     })?;
     Ok(Some(ClaimLease {
         issue,
@@ -771,14 +857,7 @@ pub(crate) fn recover_for_conductor(
 }
 
 pub(crate) fn conductor_claim_is_terminal(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
-    Ok(read_claim_ref(repo, issue)?.is_some_and(|selected| {
-        selected.record.repo == repo
-            && selected.record.issue == issue
-            && matches!(
-                selected.record.state.as_str(),
-                "merged" | "retryable" | "needs-human"
-            )
-    }))
+    recover_terminal_for_conductor(repo, issue).map(|lease| lease.is_some())
 }
 
 /// Read the claim linearization point before the autonomous conductor mutates
@@ -891,8 +970,10 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
     }
     if let Some(owner) = prior.as_ref().and_then(|head| {
-        (!matches!(head.record.state.as_str(), "available" | "released")
-            && !server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds))
+        (!matches!(
+            head.record.state.as_str(),
+            "available" | "released" | "retryable"
+        ) && !server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds))
         .then_some(head.record.worker_id.as_str())
     }) {
         return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
@@ -3127,10 +3208,10 @@ fn list_comments(
         ])
         .output()
         .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not run gh api issue comments: {error}"))
+            CommandFailure::transient(format!("could not run gh api issue comments: {error}"))
         })?;
     if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "gh api issue comments failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -3157,9 +3238,9 @@ fn load_claim_issue(
             "{labels:[.labels[].name],body:(.body // \"\"),title:(.title // \"\"),author:(.author.login // \"\")}",
         ])
         .output()
-        .map_err(|error| CommandFailure::diagnostic(format!("could not run gh issue view: {error}")))?;
+        .map_err(|error| CommandFailure::transient(format!("could not run gh issue view: {error}")))?;
     if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "gh issue view failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -3186,11 +3267,9 @@ fn list_open_pull_requests(
             "number,body,headRefName,headRefOid,isDraft,baseRefName",
         ])
         .output()
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not run gh pr list: {error}"))
-        })?;
+        .map_err(|error| CommandFailure::transient(format!("could not run gh pr list: {error}")))?;
     if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "gh pr list failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -3219,10 +3298,10 @@ fn list_required_checks(
         ])
         .output()
         .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not run gh pr checks: {error}"))
+            CommandFailure::transient(format!("could not run gh pr checks: {error}"))
         })?;
     if output.stdout.is_empty() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "gh pr checks returned no required-check evidence: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -3287,7 +3366,7 @@ fn run_gh_with_retry(arguments: &[String], action: &str) -> Result<(), CommandFa
         let output = Command::new("gh")
             .args(arguments)
             .output()
-            .map_err(|error| CommandFailure::diagnostic(format!("could not {action}: {error}")))?;
+            .map_err(|error| CommandFailure::transient(format!("could not {action}: {error}")))?;
         if output.status.success() {
             return Ok(());
         }
@@ -3296,7 +3375,7 @@ fn run_gh_with_retry(arguments: &[String], action: &str) -> Result<(), CommandFa
             continue;
         }
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(CommandFailure::diagnostic(if detail.is_empty() {
+        return Err(CommandFailure::transient(if detail.is_empty() {
             format!("could not {action}: gh exited with {}", output.status)
         } else {
             format!("could not {action}: {detail}")
@@ -4737,6 +4816,54 @@ mod tests {
         .expect("claim ref");
         assert_eq!(head.record.worker_id, "worker-b");
         assert_eq!(head.record.state, "claimed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_ref_keeps_an_unchanged_failed_push_transient() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = ClaimRefFixture::new("unchanged-push-failure");
+        let original = claim_record("worker-a", "claim-a", "claimed");
+        let ClaimRefAdvance::Won(parent) = advance_claim_ref_in(
+            Path::new("git"),
+            &fixture.clients[0],
+            fixture.remote.to_str().unwrap(),
+            "owner/repo",
+            42,
+            None,
+            &original,
+        )
+        .expect("seed claim") else {
+            panic!("seed claim must win");
+        };
+        let wrapper = fixture.root.join("git-fail-push");
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = push ]; then echo outage >&2; exit 75; fi; done\nexec git \"$@\"\n",
+        )
+        .expect("git wrapper");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("git wrapper mode");
+        let refreshed = claim_record("worker-a", "claim-a", "claimed");
+
+        let error = advance_claim_ref_in(
+            &wrapper,
+            &fixture.clients[0],
+            fixture.remote.to_str().unwrap(),
+            "owner/repo",
+            42,
+            Some(&parent),
+            &refreshed,
+        )
+        .expect_err("unchanged failed push must remain retryable");
+
+        assert_eq!(error.kind, crate::commands::CommandFailureKind::Transient);
+        assert!(
+            error.message.contains("without changing"),
+            "{}",
+            error.message
+        );
     }
 
     fn seed_claim(fixture: &ClaimRefFixture) -> super::ClaimRefHead {
