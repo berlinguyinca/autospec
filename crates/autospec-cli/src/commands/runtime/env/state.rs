@@ -71,6 +71,25 @@ pub(super) fn layout_for_context(context: &RuntimeContext) -> StateLayout {
     StateLayout::new(root, &context.environment_id)
 }
 
+pub(super) fn validate_private_regular_file(path: &Path) -> Result<(), CommandFailure> {
+    reject_symlink(path)?;
+    let metadata = fs::metadata(path).map_err(io_error)?;
+    if !metadata.is_file() {
+        return Err(CommandFailure::diagnostic(format!(
+            "runtime state is not a regular file: {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o777 != PRIVATE_FILE_MODE {
+        return Err(CommandFailure::diagnostic(format!(
+            "runtime state file is not private: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 pub(super) fn read_authoritative_state(
     layout: &StateLayout,
 ) -> Result<Option<AuthoritativeState>, CommandFailure> {

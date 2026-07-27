@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
 use autospec_core::runtime_env::{
     random_session_token, read_json, write_json_atomic, EnvironmentLifecycle, ReleaseDecision,
     ResourcePlan, RuntimeContext, RuntimeState, SessionRecord, SessionSet,
@@ -515,10 +518,11 @@ fn inspect_record(path: &Path, live: &mut Vec<SessionRecord>) -> Result<(), Comm
 }
 
 fn create_locked(path: &Path) -> Result<File, CommandFailure> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create_new(true)
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options
         .open(path)
         .map_err(|error| diagnostic(format!("could not create {}: {error}", path.display())))?;
     file.lock()

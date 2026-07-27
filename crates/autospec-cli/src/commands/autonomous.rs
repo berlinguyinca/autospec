@@ -37,6 +37,8 @@ use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 #[cfg(unix)]
 use nix::unistd::Pid;
 #[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -109,6 +111,8 @@ mod waterfall_policy_tests;
 mod waterfall_tests;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
+const TERMINAL_RETIREMENT_PAUSE: &str = "executor_terminal_retirement";
+const OWNERSHIP_RETIREMENT_PAUSE: &str = "executor_ownership_retirement";
 const EXECUTOR_PENDING_REASON: &str = "implementation_executor_pending";
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -2482,8 +2486,24 @@ fn run_foreground_with_lease(
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
     if state.phase() == ConductorPhase::Paused {
         if let Some(issue) = state.selected_issue() {
-            if claim::conductor_claim_is_terminal(&layout.repo, issue)?
-                || state.pause_reason() == Some("executor_bridge_nonterminal")
+            let claim_terminal = claim::conductor_claim_is_terminal(&layout.repo, issue)?;
+            if state.pause_reason() == Some(OWNERSHIP_RETIREMENT_PAUSE) {
+                clear_claim_acquisition_receipt(&state_path).map_err(CommandFailure::diagnostic)?;
+                state = state
+                    .transition(ConductorEvent::AbandonOwnership)
+                    .map_err(CommandFailure::diagnostic)?;
+                persist_foreground_state(&state_path, &state)
+                    .map_err(CommandFailure::diagnostic)?;
+                return Ok(ForegroundCompletion::State(Box::new(state)));
+            } else if claim_terminal && state.pause_reason() == Some(TERMINAL_RETIREMENT_PAUSE) {
+                retire_recovered_claim_acquisition(&state_path, &layout.repo, issue)?;
+                state = state
+                    .transition(ConductorEvent::AbandonTerminal)
+                    .map_err(CommandFailure::diagnostic)?;
+                persist_foreground_state(&state_path, &state)
+                    .map_err(CommandFailure::diagnostic)?;
+                return Ok(ForegroundCompletion::State(Box::new(state)));
+            } else if claim_terminal || state.pause_reason() == Some("executor_bridge_nonterminal")
             {
                 state = state
                     .transition(ConductorEvent::Resume)
@@ -2494,6 +2514,10 @@ fn run_foreground_with_lease(
         }
     }
     if state.phase() == ConductorPhase::Retry {
+        let issue = state
+            .selected_issue()
+            .ok_or_else(|| CommandFailure::diagnostic("foreground retry has no selected issue"))?;
+        retire_recovered_claim_acquisition(&state_path, &layout.repo, issue)?;
         state = state
             .transition(ConductorEvent::RetryScheduled)
             .map_err(CommandFailure::diagnostic)?;
@@ -2506,7 +2530,43 @@ fn run_foreground_with_lease(
         let issue = state.selected_issue().ok_or_else(|| {
             CommandFailure::diagnostic("foreground recovery has no selected issue")
         })?;
-        let lease = claim::recover_for_conductor(&layout.repo, issue)?;
+        let mut local_acquisition =
+            load_claim_acquisition_receipt(&state_path, &layout.repo, issue)
+                .map_err(CommandFailure::diagnostic)?;
+        if local_acquisition.is_none() && state.phase() != ConductorPhase::Claim {
+            let legacy = claim::authoritative_lease_for_legacy_migration(&layout.repo, issue)?;
+            if let Some(legacy) = legacy {
+                if executor_bridge::legacy_bridge_proves_claim(
+                    &layout.state_dir.join("executor"),
+                    &legacy,
+                )
+                .map_err(CommandFailure::diagnostic)?
+                {
+                    persist_claim_acquisition_receipt(&state_path, &legacy)
+                        .map_err(CommandFailure::diagnostic)?;
+                    local_acquisition = Some(legacy);
+                } else {
+                    let retired = retire_foreground_ownership(&state_path, state)
+                        .map_err(CommandFailure::diagnostic)?;
+                    return Ok(ForegroundCompletion::State(Box::new(retired)));
+                }
+            } else {
+                let retired = retire_foreground_ownership(&state_path, state)
+                    .map_err(CommandFailure::diagnostic)?;
+                return Ok(ForegroundCompletion::State(Box::new(retired)));
+            }
+        }
+        let mut lease = match local_acquisition.as_ref() {
+            Some(receipt) => claim::recover_for_conductor(&layout.repo, issue, receipt)?,
+            None => None,
+        };
+        if lease.is_none() {
+            lease = match local_acquisition.as_ref() {
+                Some(receipt) => recover_completed_bridge_lease(layout, issue, receipt)
+                    .map_err(CommandFailure::diagnostic)?,
+                None => None,
+            };
+        }
         if state.phase() != ConductorPhase::Claim && lease.is_none() {
             return Err(CommandFailure::diagnostic(
                 "foreground dispatch recovery has no authoritative claim",
@@ -2593,6 +2653,65 @@ fn run_foreground_with_lease(
             Ok(ForegroundCompletion::Lifecycle(lifecycle))
         }
     }
+}
+
+fn recover_completed_bridge_lease(
+    layout: &RunLayout,
+    issue: u64,
+    local_acquisition: &claim::ClaimLease,
+) -> Result<Option<claim::ClaimLease>, String> {
+    let Some(terminal_lease) = claim::recover_terminal_for_conductor(&layout.repo, issue)
+        .map_err(|error| error.message)?
+    else {
+        return Ok(None);
+    };
+    if terminal_lease.issue != local_acquisition.issue
+        || terminal_lease.repo != local_acquisition.repo
+        || terminal_lease.worker_id != local_acquisition.worker_id
+        || terminal_lease.branch != local_acquisition.branch
+        || terminal_lease.claim_id != local_acquisition.claim_id
+    {
+        return Err(
+            "terminal claim does not match the durable local claim acquisition".to_string(),
+        );
+    }
+    let state_dir = layout.state_dir.join("executor");
+    if let Some(receipt) = executor_bridge::recover_completed_bridge_receipt(
+        &state_dir,
+        &layout.repo,
+        issue,
+        &terminal_lease.claim_id,
+    )? {
+        if receipt.issue != terminal_lease.issue
+            || receipt.repository != terminal_lease.repo
+            || receipt.worker_id != terminal_lease.worker_id
+            || receipt.branch != terminal_lease.branch
+        {
+            return Err(
+                "completed executor receipt does not match the terminal claim owner".to_string(),
+            );
+        }
+        return Ok(Some(terminal_lease));
+    }
+    let identity = executor_bridge::recover_completed_bridge_identity(
+        &state_dir,
+        &layout.repo,
+        issue,
+        &terminal_lease.claim_id,
+    )?;
+    if let Some(identity) = identity {
+        if identity.issue != terminal_lease.issue
+            || identity.repository != terminal_lease.repo
+            || identity.worker_id != terminal_lease.worker_id
+            || identity.branch != terminal_lease.branch
+        {
+            return Err(
+                "completed executor invocation does not match the terminal claim owner".to_string(),
+            );
+        }
+        return Ok(Some(terminal_lease));
+    }
+    Ok(None)
 }
 
 fn lifecycle_health(outcome: MainlineHealthOutcome) -> LifecycleHealth {
@@ -2850,6 +2969,8 @@ fn execute_foreground_dispatch(
                     &worker_id,
                     &branch,
                 )?;
+                persist_claim_acquisition_receipt(state_path, &lease)
+                    .map_err(CommandFailure::diagnostic)?;
                 state = state.transition(ConductorEvent::Claimed).map_err(|error| {
                     CommandFailure::diagnostic(format!("cannot record foreground claim: {error}"))
                 })?;
@@ -2868,10 +2989,38 @@ fn execute_foreground_dispatch(
             &lease.branch,
             &lease.claim_id,
         )
-        .map_or_else(|_| ExecutorReceipt::failed(), |request| request.run());
+        .map_or_else(
+            |error| ExecutorReceipt::failed(&executor_bridge::BridgeRunFailure::from(error)),
+            |request| request.run(),
+        );
+        if receipt.ownership_lost {
+            state = retire_foreground_ownership(state_path, state)
+                .map_err(CommandFailure::diagnostic)?;
+            return Ok(ForegroundDispatchResult::State(Box::new(state)));
+        }
         if receipt.pending {
             persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
             return Ok(ForegroundDispatchResult::State(Box::new(state)));
+        }
+        let retryable_released =
+            !receipt.bridge_finalized && matches!(receipt.outcome, ConductorOutcome::Retryable(_));
+        if retryable_released {
+            let transition = claim::transition_bridge_claim(
+                claim::ClaimMutationIdentity {
+                    repo: &lease.repo,
+                    issue: lease.issue,
+                    worker_id: &lease.worker_id,
+                    branch: &lease.branch,
+                    claim_id: &lease.claim_id,
+                },
+                None,
+                claim::BridgeClaimDisposition::Retryable,
+            )?;
+            if transition == claim::BridgeClaimTransition::OwnershipLost {
+                state = retire_foreground_ownership(state_path, state)
+                    .map_err(CommandFailure::diagnostic)?;
+                return Ok(ForegroundDispatchResult::State(Box::new(state)));
+            }
         }
         if let Some(issue) = options.issue {
             let mut selector =
@@ -2891,13 +3040,18 @@ fn execute_foreground_dispatch(
             persist_one_shot_selector(layout, &selector).map_err(CommandFailure::diagnostic)?;
         }
         if state.phase() == ConductorPhase::Dispatch {
-            state = state
-                .transition(ConductorEvent::DispatchRecorded {
+            let event = if receipt.bridge_finalized {
+                ConductorEvent::BeginTerminalRetirement {
                     outcome: receipt.outcome.clone(),
-                })
-                .map_err(|error| {
-                    CommandFailure::diagnostic(format!("cannot record executor receipt: {error}"))
-                })?;
+                }
+            } else {
+                ConductorEvent::DispatchRecorded {
+                    outcome: receipt.outcome.clone(),
+                }
+            };
+            state = state.transition(event).map_err(|error| {
+                CommandFailure::diagnostic(format!("cannot record executor receipt: {error}"))
+            })?;
             persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
         } else if state.phase() == ConductorPhase::DispatchRecorded
             && receipt.outcome != ConductorOutcome::Succeeded
@@ -2907,7 +3061,7 @@ fn execute_foreground_dispatch(
             )
             .into());
         }
-        if !receipt.bridge_finalized {
+        if !receipt.bridge_finalized && !retryable_released {
             claim::reconcile_active_issue(
                 &lease.repo,
                 lease.issue,
@@ -2916,14 +3070,27 @@ fn execute_foreground_dispatch(
                 &lease.claim_id,
             )?;
         }
+        if receipt.bridge_finalized && state.phase() == ConductorPhase::DispatchRecorded {
+            let retiring = state
+                .clone()
+                .transition(ConductorEvent::BeginTerminalRetirement {
+                    outcome: receipt.outcome.clone(),
+                })
+                .map_err(CommandFailure::diagnostic)?;
+            persist_foreground_state(state_path, &retiring).map_err(CommandFailure::diagnostic)?;
+        }
         state =
             reconcile_successful_foreground_dispatch(state).map_err(CommandFailure::diagnostic)?;
-        persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
-        let (next, scheduled) =
-            schedule_foreground_retry(state).map_err(CommandFailure::diagnostic)?;
+        let (next, scheduled) = advance_foreground_after_terminal(state, receipt.bridge_finalized)
+            .map_err(CommandFailure::diagnostic)?;
         state = next;
+        if receipt.bridge_finalized || retryable_released {
+            foreground_retirement_failpoint("before-clear").map_err(CommandFailure::diagnostic)?;
+            clear_claim_acquisition_receipt(state_path).map_err(CommandFailure::diagnostic)?;
+            foreground_retirement_failpoint("after-clear").map_err(CommandFailure::diagnostic)?;
+        }
+        persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
         if scheduled {
-            persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
             continue;
         }
         return Ok(ForegroundDispatchResult::State(Box::new(state)));
@@ -2946,6 +3113,19 @@ fn schedule_foreground_retry(state: ConductorState) -> Result<(ConductorState, b
     state
         .transition(ConductorEvent::RetryScheduled)
         .map(|state| (state, true))
+}
+
+fn advance_foreground_after_terminal(
+    state: ConductorState,
+    bridge_finalized: bool,
+) -> Result<(ConductorState, bool), String> {
+    let (state, scheduled) = schedule_foreground_retry(state)?;
+    if scheduled || !bridge_finalized || state.phase() != ConductorPhase::Paused {
+        return Ok((state, scheduled));
+    }
+    state
+        .transition(ConductorEvent::AbandonTerminal)
+        .map(|state| (state, false))
 }
 
 fn foreground_worker_id() -> Result<String, String> {
@@ -3527,6 +3707,7 @@ struct ExecutorReceipt {
     outcome: ConductorOutcome,
     bridge_finalized: bool,
     pending: bool,
+    ownership_lost: bool,
 }
 
 impl ExecutorRequest {
@@ -3569,11 +3750,55 @@ impl ExecutorRequest {
     }
 
     fn run(&self) -> ExecutorReceipt {
-        let receipt = match executor_bridge::run_executor_bridge(&self.bridge) {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                eprintln!("executor bridge failed: {error}");
-                return ExecutorReceipt::failed();
+        let receipt = {
+            let mut attempts = 0;
+            loop {
+                match executor_bridge::run_executor_bridge(&self.bridge) {
+                    Ok(receipt) => break receipt,
+                    Err(error)
+                        if error.kind == executor_bridge::BridgeFailureKind::Transient
+                            && attempts < 2 =>
+                    {
+                        attempts += 1;
+                        eprintln!(
+                            "executor bridge transient failure; retrying exact claim generation: {error}"
+                        );
+                    }
+                    Err(error)
+                        if error.kind == executor_bridge::BridgeFailureKind::Transient
+                            && self.bridge.state_path.is_file() =>
+                    {
+                        eprintln!(
+                            "executor bridge transient failure remains resumable on the exact claim: {error}"
+                        );
+                        match executor_bridge::pending_bridge_receipt(&self.bridge) {
+                            Ok(receipt) => break receipt,
+                            Err(pending_error) => {
+                                return ExecutorReceipt::failed(
+                                    &executor_bridge::BridgeRunFailure::from(pending_error),
+                                );
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        eprintln!("executor bridge failed: {error}");
+                        if error.kind == executor_bridge::BridgeFailureKind::OwnershipLost {
+                            if let Err(cleanup_error) =
+                                executor_bridge::finalize_ownership_loss_local(
+                                    &self.bridge.state_path,
+                                )
+                            {
+                                eprintln!(
+                                    "executor ownership-loss local cleanup is incomplete: {cleanup_error}"
+                                );
+                                return ExecutorReceipt::failed(
+                                    &executor_bridge::BridgeRunFailure::from(cleanup_error),
+                                );
+                            }
+                        }
+                        return ExecutorReceipt::failed(&error);
+                    }
+                }
             }
         };
         ExecutorReceipt::from_bridge_json(
@@ -3585,16 +3810,33 @@ impl ExecutorRequest {
             &self.bridge.claim_id,
             &self.bridge.invocation_id,
         )
-        .unwrap_or_else(|_| ExecutorReceipt::failed())
+        .unwrap_or_else(|error| {
+            ExecutorReceipt::failed(&executor_bridge::BridgeRunFailure::from(error))
+        })
     }
 }
 
 impl ExecutorReceipt {
-    fn failed() -> Self {
+    fn failed(error: &executor_bridge::BridgeRunFailure) -> Self {
+        let (outcome, ownership_lost) = match error.kind {
+            executor_bridge::BridgeFailureKind::Transient => (
+                ConductorOutcome::Retryable("executor_bridge_transient_failure".to_string()),
+                false,
+            ),
+            executor_bridge::BridgeFailureKind::InvariantNeedsHuman => (
+                ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+                false,
+            ),
+            executor_bridge::BridgeFailureKind::OwnershipLost => (
+                ConductorOutcome::Blocked("executor_bridge_ownership_lost".to_string()),
+                true,
+            ),
+        };
         Self {
-            outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+            outcome,
             bridge_finalized: false,
             pending: false,
+            ownership_lost,
         }
     }
 
@@ -3624,21 +3866,25 @@ impl ExecutorReceipt {
                 outcome: ConductorOutcome::Blocked("executor_bridge_nonterminal".to_string()),
                 bridge_finalized: false,
                 pending: true,
+                ownership_lost: false,
             },
             executor_bridge::BridgeRunStatus::Merged { .. } => Self {
                 outcome: ConductorOutcome::Succeeded,
                 bridge_finalized: true,
                 pending: false,
+                ownership_lost: false,
             },
             executor_bridge::BridgeRunStatus::Retryable { reason } => Self {
                 outcome: ConductorOutcome::Retryable(reason),
                 bridge_finalized: true,
                 pending: false,
+                ownership_lost: false,
             },
             executor_bridge::BridgeRunStatus::Blocked { reason } => Self {
                 outcome: ConductorOutcome::Blocked(reason),
                 bridge_finalized: true,
                 pending: false,
+                ownership_lost: false,
             },
         })
     }
@@ -3658,6 +3904,227 @@ fn foreground_state_path(layout: &RunLayout, scope: ConductorScope) -> PathBuf {
         "foreground-conductor-{}.json",
         foreground_scope_key(scope)
     ))
+}
+
+fn claim_acquisition_receipt_path(state_path: &Path) -> PathBuf {
+    state_path.with_extension("claim-acquisition.json")
+}
+
+fn validate_claim_acquisition_parent(path: &Path) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "claim acquisition receipt has no parent".to_string())?;
+    let metadata = fs::symlink_metadata(parent).map_err(|error| {
+        format!(
+            "cannot inspect claim acquisition receipt parent {}: {error}",
+            parent.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("claim acquisition receipt parent must be a private directory".to_string());
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o077 != 0 {
+        return Err("claim acquisition receipt parent must be private".to_string());
+    }
+    Ok(())
+}
+
+fn load_claim_acquisition_receipt(
+    state_path: &Path,
+    repo: &str,
+    issue: u64,
+) -> Result<Option<claim::ClaimLease>, String> {
+    let path = claim_acquisition_receipt_path(state_path);
+    if path.exists() {
+        validate_claim_acquisition_parent(&path)?;
+    }
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(format!(
+                "cannot inspect claim acquisition receipt {}: {error}",
+                path.display()
+            ))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("claim acquisition receipt must be a regular file".to_string());
+    }
+    #[cfg(unix)]
+    if metadata.permissions().mode() & 0o777 != 0o600 {
+        return Err("claim acquisition receipt must be private".to_string());
+    }
+    let source = fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "cannot read claim acquisition receipt {}: {error}",
+            path.display()
+        )
+    })?;
+    let value: serde_json::Value = serde_json::from_str(&source)
+        .map_err(|error| format!("invalid claim acquisition receipt JSON: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "claim acquisition receipt must be an object".to_string())?;
+    let fields = ["schema", "repo", "issue", "worker_id", "branch", "claim_id"];
+    if object.len() != fields.len()
+        || fields.iter().any(|field| !object.contains_key(*field))
+        || object.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+    {
+        return Err("claim acquisition receipt fields are invalid".to_string());
+    }
+    let text = |field: &str| {
+        object
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("claim acquisition receipt {field} is invalid"))
+    };
+    let receipt = claim::ClaimLease {
+        issue: object
+            .get("issue")
+            .and_then(serde_json::Value::as_u64)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| "claim acquisition receipt issue is invalid".to_string())?,
+        repo: text("repo")?,
+        worker_id: text("worker_id")?,
+        branch: text("branch")?,
+        claim_id: text("claim_id")?,
+        session_id: None,
+    };
+    if receipt.repo != repo || receipt.issue != issue {
+        return Err(
+            "claim acquisition receipt does not match the selected repository and issue"
+                .to_string(),
+        );
+    }
+    Ok(Some(receipt))
+}
+
+fn persist_claim_acquisition_receipt(
+    state_path: &Path,
+    lease: &claim::ClaimLease,
+) -> Result<(), String> {
+    if let Some(existing) = load_claim_acquisition_receipt(state_path, &lease.repo, lease.issue)? {
+        return if existing == *lease {
+            Ok(())
+        } else {
+            Err("claim acquisition receipt already belongs to another generation".to_string())
+        };
+    }
+    let path = claim_acquisition_receipt_path(state_path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| "claim acquisition receipt has no parent".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| {
+        format!(
+            "cannot create claim acquisition receipt parent {}: {error}",
+            parent.display()
+        )
+    })?;
+    #[cfg(unix)]
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        format!(
+            "cannot make claim acquisition receipt parent private {}: {error}",
+            parent.display()
+        )
+    })?;
+    validate_claim_acquisition_parent(&path)?;
+    let body = serde_json::json!({
+        "schema": 1,
+        "repo": lease.repo,
+        "issue": lease.issue,
+        "worker_id": lease.worker_id,
+        "branch": lease.branch,
+        "claim_id": lease.claim_id,
+    });
+    atomic_write_private(&path, &format!("{body}\n"))
+}
+
+fn clear_claim_acquisition_receipt(state_path: &Path) -> Result<(), String> {
+    let path = claim_acquisition_receipt_path(state_path);
+    if path.exists() {
+        validate_claim_acquisition_parent(&path)?;
+    }
+    match fs::remove_file(&path) {
+        Ok(()) => {
+            let parent = path
+                .parent()
+                .ok_or_else(|| "claim acquisition receipt has no parent".to_string())?;
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| format!("cannot sync {}: {error}", parent.display()))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!(
+            "cannot clear claim acquisition receipt {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+fn retire_recovered_claim_acquisition(
+    state_path: &Path,
+    repo: &str,
+    issue: u64,
+) -> Result<(), CommandFailure> {
+    let Some(receipt) = load_claim_acquisition_receipt(state_path, repo, issue)
+        .map_err(CommandFailure::diagnostic)?
+    else {
+        return Ok(());
+    };
+    let terminal = claim::recover_terminal_for_conductor(repo, issue)?.ok_or_else(|| {
+        CommandFailure::diagnostic("foreground recovery has no authoritative terminal claim")
+    })?;
+    if terminal != receipt {
+        return Err(CommandFailure::diagnostic(
+            "foreground terminal claim does not match the durable local acquisition",
+        ));
+    }
+    clear_claim_acquisition_receipt(state_path).map_err(CommandFailure::diagnostic)
+}
+
+fn foreground_retirement_failpoint(point: &str) -> Result<(), String> {
+    if std::env::var("AUTOSPEC_FOREGROUND_RETIRE_FAILPOINT").as_deref() != Ok(point) {
+        return Ok(());
+    }
+    let marker = std::env::var_os("AUTOSPEC_FOREGROUND_RETIRE_FAIL_ONCE")
+        .map(PathBuf::from)
+        .ok_or_else(|| "foreground retirement failpoint requires a marker path".to_string())?;
+    match OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&marker)
+    {
+        Ok(mut file) => {
+            file.write_all(point.as_bytes())
+                .map_err(|error| format!("write foreground retirement failpoint: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("sync foreground retirement failpoint: {error}"))?;
+            Err(format!("injected foreground retirement crash at {point}"))
+        }
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(format!(
+            "create foreground retirement failpoint {}: {error}",
+            marker.display()
+        )),
+    }
+}
+
+fn retire_foreground_ownership(
+    state_path: &Path,
+    state: ConductorState,
+) -> Result<ConductorState, String> {
+    let retiring = state.transition(ConductorEvent::BeginOwnershipRetirement)?;
+    persist_foreground_state(state_path, &retiring)?;
+    foreground_retirement_failpoint("before-clear")?;
+    clear_claim_acquisition_receipt(state_path)?;
+    foreground_retirement_failpoint("after-clear")?;
+    let abandoned = retiring.transition(ConductorEvent::AbandonOwnership)?;
+    persist_foreground_state(state_path, &abandoned)?;
+    Ok(abandoned)
 }
 
 fn foreground_scope_key(scope: ConductorScope) -> String {
@@ -4052,10 +4519,26 @@ fn atomic_temporary_path(path: &Path) -> PathBuf {
 }
 
 fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
+    atomic_write_with_mode(path, contents, None)
+}
+
+fn atomic_write_private(path: &Path, contents: &str) -> Result<(), String> {
+    atomic_write_with_mode(path, contents, Some(0o600))
+}
+
+fn atomic_write_with_mode(
+    path: &Path,
+    contents: &str,
+    #[allow(unused_variables)] mode: Option<u32>,
+) -> Result<(), String> {
     let temporary = atomic_temporary_path(path);
-    let mut file = OpenOptions::new()
-        .create_new(true)
-        .write(true)
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        options.mode(mode);
+    }
+    let mut file = options
         .open(&temporary)
         .map_err(|error| format!("cannot create {}: {error}", temporary.display()))?;
     let write_result = (|| {
@@ -4064,7 +4547,13 @@ fn atomic_write(path: &Path, contents: &str) -> Result<(), String> {
         file.sync_all()
             .map_err(|error| format!("cannot sync {}: {error}", temporary.display()))?;
         fs::rename(&temporary, path)
-            .map_err(|error| format!("cannot finalize {}: {error}", path.display()))
+            .map_err(|error| format!("cannot finalize {}: {error}", path.display()))?;
+        if let Some(parent) = path.parent() {
+            File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| format!("cannot sync {}: {error}", parent.display()))?;
+        }
+        Ok(())
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -6707,7 +7196,7 @@ mod foreground_tests {
     }
 
     #[test]
-    fn executor_launch_failure_becomes_a_blocked_receipt() {
+    fn executor_local_precondition_failure_remains_blocked() {
         let request = ExecutorRequest {
             bridge: executor_bridge::ExecutorBridgeRequest {
                 repository: "test/repo".to_string(),
@@ -6729,6 +7218,52 @@ mod foreground_tests {
             receipt.outcome,
             ConductorOutcome::Blocked("executor_receipt_failed".to_string())
         );
+        assert!(!receipt.bridge_finalized);
+        assert!(!receipt.pending);
+    }
+
+    #[test]
+    fn executor_remote_read_failure_becomes_a_retryable_nonterminal_receipt() {
+        for wording in ["temporary outage", "adapter wording changed completely"] {
+            let receipt =
+                ExecutorReceipt::failed(&executor_bridge::BridgeRunFailure::transient(wording));
+
+            assert_eq!(
+                receipt.outcome,
+                ConductorOutcome::Retryable("executor_bridge_transient_failure".to_string())
+            );
+            assert!(!receipt.bridge_finalized);
+            assert!(!receipt.pending);
+            assert!(!receipt.ownership_lost);
+        }
+    }
+
+    #[test]
+    fn executor_ownership_loss_is_inert_and_clears_the_selection() {
+        let receipt = ExecutorReceipt::failed(&executor_bridge::BridgeRunFailure::ownership_lost(
+            "exact claim changed",
+        ));
+        let state = ConductorState::new("test/repo", ConductorScope::Slice, 1)
+            .expect("state")
+            .transition(ConductorEvent::ScanFoundWork)
+            .expect("scan")
+            .transition(ConductorEvent::SafetyReviewed)
+            .expect("review")
+            .transition(ConductorEvent::Selected {
+                issue: 42,
+                serialization_reasons: Vec::new(),
+            })
+            .expect("selected")
+            .transition(ConductorEvent::Claimed)
+            .expect("claimed");
+
+        assert!(receipt.ownership_lost);
+        assert!(!receipt.bridge_finalized);
+        let state = state
+            .transition(ConductorEvent::AbandonOwnership)
+            .expect("abandon stale claim");
+        assert_eq!(state.phase(), ConductorPhase::Scan);
+        assert_eq!(state.selected_issue(), None);
     }
 
     #[test]
@@ -6853,7 +7388,7 @@ mod foreground_tests {
     }
 
     #[test]
-    fn foreground_retry_state_stops_when_the_retry_limit_is_exhausted() {
+    fn foreground_retry_exhaustion_abandons_the_issue_and_scans_next() {
         let state = ConductorState::new("test/repo", ConductorScope::Slice, 0)
             .expect("state")
             .transition(ConductorEvent::ScanFoundWork)
@@ -6872,11 +7407,40 @@ mod foreground_tests {
             })
             .expect("retryable");
 
-        let (state, scheduled) = schedule_foreground_retry(state).expect("inspect exhaustion");
+        let (state, scheduled) =
+            advance_foreground_after_terminal(state, true).expect("inspect exhaustion");
 
         assert!(!scheduled);
-        assert_eq!(state.phase(), ConductorPhase::Paused);
-        assert_eq!(state.pause_reason(), Some("retry_limit_exhausted"));
+        assert_eq!(state.phase(), ConductorPhase::Scan);
+        assert_eq!(state.selected_issue(), None);
+    }
+
+    #[test]
+    fn foreground_needs_human_abandons_the_issue_and_scans_next() {
+        let state = ConductorState::new("test/repo", ConductorScope::Slice, 1)
+            .expect("state")
+            .transition(ConductorEvent::ScanFoundWork)
+            .expect("scan")
+            .transition(ConductorEvent::SafetyReviewed)
+            .expect("review")
+            .transition(ConductorEvent::Selected {
+                issue: 42,
+                serialization_reasons: Vec::new(),
+            })
+            .expect("selected")
+            .transition(ConductorEvent::Claimed)
+            .expect("claimed")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Blocked("needs-human".to_string()),
+            })
+            .expect("blocked");
+
+        let (state, scheduled) =
+            advance_foreground_after_terminal(state, true).expect("abandon needs-human");
+
+        assert!(!scheduled);
+        assert_eq!(state.phase(), ConductorPhase::Scan);
+        assert_eq!(state.selected_issue(), None);
     }
 
     #[test]

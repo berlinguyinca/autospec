@@ -6,7 +6,7 @@ use autospec_core::coordination::{
     ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
 };
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -25,6 +25,20 @@ fn workspace_root() -> std::path::PathBuf {
         .join("../..")
         .canonicalize()
         .expect("workspace root")
+}
+
+fn is_generation_invocation_path(path: &Path, issue: u64) -> bool {
+    let Some(stem) = path.file_stem().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let Some(generation) = stem.strip_prefix(&format!("issue-{issue}-")) else {
+        return false;
+    };
+    path.extension().and_then(|value| value.to_str()) == Some("json")
+        && generation.len() == 16
+        && generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// How a forbidden-authority pattern must be located in source text.
@@ -625,15 +639,7 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
         .expect("executor state directory")
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| {
-                    name.starts_with("issue-42-")
-                        && name.ends_with(".json")
-                        && !name.ends_with(".terminal.json")
-                })
-        })
+        .find(|path| is_generation_invocation_path(path, 42))
         .expect("generation-scoped invocation");
     let mut cleanup_window: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&invocation).unwrap()).unwrap();
@@ -652,8 +658,25 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
         })
         .unwrap()
         .transition(ConductorEvent::Claimed)
+        .unwrap()
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Succeeded,
+        })
         .unwrap();
     fs::write(fixture.state_path(), dispatch.to_json()).expect("seed interrupted dispatch");
+    let terminal_receipt: serde_json::Value =
+        serde_json::from_str(&receipt).expect("parse terminal bridge receipt");
+    fixture.seed_claim_acquisition_receipt(
+        terminal_receipt["worker_id"]
+            .as_str()
+            .expect("terminal worker"),
+        terminal_receipt["branch"]
+            .as_str()
+            .expect("terminal branch"),
+        terminal_receipt["claim_id"]
+            .as_str()
+            .expect("terminal claim"),
+    );
     let before = fs::read_to_string(&fixture.calls).expect("calls before replay");
     let second = fixture
         .command()
@@ -713,19 +736,12 @@ fn foreground_recovers_complete_bridge_after_transient_terminal_observation_fail
         String::from_utf8_lossy(&first.stderr)
     );
     assert!(fail_once.exists());
-    assert_eq!(fixture.read_state().phase(), ConductorPhase::Paused);
-
-    let mut replay_command = fixture.command();
-    configure(&mut replay_command);
-    let replay = replay_command
-        .output()
-        .expect("replay Complete bridge state");
-    assert!(
-        replay.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&replay.stderr)
+    assert_eq!(
+        fixture.read_state().phase(),
+        ConductorPhase::Scan,
+        "typed terminal observation outages retry the same completed invocation"
     );
-    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+
     let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
     assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
     assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
@@ -736,9 +752,206 @@ fn foreground_recovers_complete_bridge_after_transient_terminal_observation_fail
 }
 
 #[test]
+fn foreground_recovery_refuses_a_foreign_claim_without_a_local_acquisition_receipt() {
+    let fixture = ForegroundFixture::new();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(fixture.state_path(), selected_foreground_state().to_json())
+        .expect("seed selected foreground state");
+    fixture.seed_claim_state_with_id(
+        "foreign-conductor",
+        "feat/foreign-issue-42",
+        "claimed",
+        &fresh_iso_timestamp(),
+        "foreign-generation",
+    );
+
+    let output = fixture.command().output().expect("run foreign recovery");
+
+    assert!(!output.status.success());
+    assert!(
+        !fs::read_to_string(&fixture.calls)
+            .expect("read GitHub calls")
+            .contains("\npr\ncreate\n"),
+        "foreign ownership must fail before executor launch"
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Claim);
+}
+
+#[test]
+fn foreground_recovery_adopts_an_exact_local_acquisition_receipt() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(fixture.state_path(), selected_foreground_state().to_json())
+        .expect("seed selected foreground state");
+    fixture.seed_claim_state_with_id(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        "claimed",
+        &fresh_iso_timestamp(),
+        EXECUTOR_CLAIM_ID,
+    );
+    fixture.seed_claim_acquisition_receipt(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+    fixture.copy_claim_ref_to(&bridge.remote);
+
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .output()
+        .expect("run exact recovery");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("read bridge calls");
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
+    assert!(
+        !fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists(),
+        "terminal recovery retires the local acquisition receipt"
+    );
+}
+
+#[test]
+fn foreground_recovery_rejects_a_tampered_local_acquisition_receipt() {
+    let fixture = ForegroundFixture::new();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(fixture.state_path(), selected_foreground_state().to_json())
+        .expect("seed selected foreground state");
+    fixture.seed_claim_state_with_id(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        "claimed",
+        &fresh_iso_timestamp(),
+        EXECUTOR_CLAIM_ID,
+    );
+    fixture.seed_claim_acquisition_receipt(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        "tampered-generation",
+    );
+
+    let output = fixture.command().output().expect("run tampered recovery");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("does not match the durable local acquisition"));
+    assert!(
+        !fs::read_to_string(&fixture.calls)
+            .expect("read GitHub calls")
+            .contains("\npr\ncreate\n"),
+        "tampered ownership must fail before executor launch"
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Claim);
+}
+
+#[test]
+fn foreground_recovery_rejects_a_nonprivate_local_acquisition_receipt() {
+    let fixture = ForegroundFixture::new();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(fixture.state_path(), selected_foreground_state().to_json())
+        .expect("seed selected foreground state");
+    fixture.seed_claim_state_with_id(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        "claimed",
+        &fresh_iso_timestamp(),
+        EXECUTOR_CLAIM_ID,
+    );
+    fixture.seed_claim_acquisition_receipt(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+    fs::set_permissions(
+        fixture
+            .state_path()
+            .with_extension("claim-acquisition.json"),
+        fs::Permissions::from_mode(0o644),
+    )
+    .expect("make receipt nonprivate");
+
+    let output = fixture.command().output().expect("run nonprivate recovery");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("receipt must be private"));
+}
+
+#[test]
+fn foreground_recovery_rejects_a_symlinked_local_acquisition_receipt() {
+    let fixture = ForegroundFixture::new();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(fixture.state_path(), selected_foreground_state().to_json())
+        .expect("seed selected foreground state");
+    fixture.seed_claim_state_with_id(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        "claimed",
+        &fresh_iso_timestamp(),
+        EXECUTOR_CLAIM_ID,
+    );
+    let target = fixture.root.join("foreign-receipt.json");
+    fs::write(&target, "{}\n").expect("write symlink target");
+    fs::set_permissions(
+        fixture.state_path().parent().unwrap(),
+        fs::Permissions::from_mode(0o700),
+    )
+    .expect("make receipt parent private");
+    std::os::unix::fs::symlink(
+        &target,
+        fixture
+            .state_path()
+            .with_extension("claim-acquisition.json"),
+    )
+    .expect("symlink acquisition receipt");
+
+    let output = fixture.command().output().expect("run symlink recovery");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("receipt must be a regular file"));
+}
+
+fn selected_foreground_state() -> ConductorState {
+    ConductorState::new("test/repo", ConductorScope::Repository, 3)
+        .unwrap()
+        .transition(ConductorEvent::ScanFoundWork)
+        .unwrap()
+        .transition(ConductorEvent::SafetyReviewed)
+        .unwrap()
+        .transition(ConductorEvent::Selected {
+            issue: 42,
+            serialization_reasons: Vec::new(),
+        })
+        .unwrap()
+}
+
+#[test]
 fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
-    for (name, state, active_claim) in [
+    for (name, state, seeded_claim_state) in [
         (
             "claim-before-acquire",
             ConductorState::new("test/repo", ConductorScope::Repository, 3)
@@ -752,7 +965,7 @@ fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() 
                     serialization_reasons: Vec::new(),
                 })
                 .unwrap(),
-            false,
+            None,
         ),
         (
             "claim-after-acquire",
@@ -767,7 +980,7 @@ fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() 
                     serialization_reasons: Vec::new(),
                 })
                 .unwrap(),
-            true,
+            Some("claimed"),
         ),
         (
             "retry-before-schedule",
@@ -788,7 +1001,7 @@ fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() 
                     outcome: ConductorOutcome::Retryable("transient".to_string()),
                 })
                 .unwrap(),
-            false,
+            Some("released"),
         ),
     ] {
         let fixture = ForegroundFixture::new();
@@ -796,10 +1009,23 @@ fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() 
         fs::create_dir_all(fixture.state_path().parent().unwrap())
             .expect("create crash-window state directory");
         fs::write(fixture.state_path(), state.to_json()).expect("seed crash-window state");
-        if active_claim {
-            fixture.seed_claim(
+        if let Some(claim_state) = seeded_claim_state {
+            let seeded_claim_id = if claim_state == "claimed" {
+                EXECUTOR_CLAIM_ID
+            } else {
+                "terminal-retry-generation"
+            };
+            fixture.seed_claim_state_with_id(
                 "rust-foreground-conductor-recovered",
                 "feat/autonomous-issue-42",
+                claim_state,
+                &fresh_iso_timestamp(),
+                seeded_claim_id,
+            );
+            fixture.seed_claim_acquisition_receipt(
+                "rust-foreground-conductor-recovered",
+                "feat/autonomous-issue-42",
+                seeded_claim_id,
             );
             let seeded = git_fixture(
                 &fixture.claim_repo,
@@ -819,7 +1045,15 @@ fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() 
                     &format!("{seeded}:refs/autospec/claims/issue-42"),
                 ],
             );
-            fs::write(&fixture.mode, "claimed\n").expect("seed claimed label projection");
+            fs::write(
+                &fixture.mode,
+                if claim_state == "claimed" {
+                    "claimed\n"
+                } else {
+                    "reviewed\n"
+                },
+            )
+            .expect("seed claim label projection");
         }
         let output = fixture
             .command()
@@ -844,6 +1078,33 @@ fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() 
         let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
         assert_eq!(calls.matches("\npr\ncreate\n").count(), 1, "{name}");
         assert_eq!(calls.matches("\npr\nmerge\n").count(), 1, "{name}");
+        assert!(
+            !fixture
+                .state_path()
+                .with_extension("claim-acquisition.json")
+                .exists(),
+            "{name}: terminal or released claims retire the acquisition receipt"
+        );
+        if seeded_claim_state == Some("released") {
+            let terminal_message = git_fixture(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    bridge.remote.to_str().expect("bridge remote"),
+                    "show",
+                    "-s",
+                    "--format=%B",
+                    "refs/autospec/claims/issue-42",
+                ],
+            );
+            let terminal_record =
+                parse_run_state_comment(&terminal_message).expect("parse final bridge claim");
+            assert_ne!(
+                terminal_record.claim_id.as_deref(),
+                Some("terminal-retry-generation"),
+                "retry restart reused a terminal claim generation"
+            );
+        }
         drop(bridge);
     }
 }
@@ -866,7 +1127,9 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
             .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
             .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
             .env("AUTOSPEC_HOST", "bridge-e2e-host")
+            .env("AUTOSPEC_CLAIM_LEASE_SECONDS", "1")
             .env("AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER", &started)
+            .env("AUTOSPEC_BRIDGE_SLOW_HARNESS_SECONDS", "6")
             .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &launches);
     };
 
@@ -875,26 +1138,104 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
     let mut first = first_command.spawn().expect("spawn first conductor");
     let first_pid = first.id();
     wait_for_file_contents(&started, "");
+    let harness_pid = fs::read_to_string(&started)
+        .expect("harness marker")
+        .trim()
+        .parse::<u32>()
+        .expect("harness PID");
+    let invocation_path = fs::read_dir(fixture.scoped_dir().join("executor"))
+        .expect("executor state directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| is_generation_invocation_path(path, 42))
+        .expect("live executor invocation");
+    let invocation: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&invocation_path).expect("read live executor invocation"),
+    )
+    .expect("parse live executor invocation");
+    let supervisor_pid = invocation["supervisor"]["pid"]
+        .as_u64()
+        .and_then(|pid| u32::try_from(pid).ok())
+        .expect("persisted supervisor PID");
+    let before_message = git_fixture(
+        &fixture.root,
+        &[
+            "--git-dir",
+            bridge.remote.to_str().expect("bridge remote"),
+            "show",
+            "-s",
+            "--format=%B",
+            "refs/autospec/claims/issue-42",
+        ],
+    );
+    let before_claim = parse_run_state_comment(&before_message).expect("initial live claim");
     first.kill().expect("kill conductor in live-harness window");
     let _ = first.wait();
 
     let mut live_restart = fixture.command();
     configure(&mut live_restart);
-    let pending = live_restart
-        .output()
-        .expect("restart while harness is live");
+    live_restart.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut replacement = live_restart.spawn().expect("restart while harness is live");
+    std::thread::sleep(std::time::Duration::from_millis(2500));
+    let refreshed_message = git_fixture(
+        &fixture.root,
+        &[
+            "--git-dir",
+            bridge.remote.to_str().expect("bridge remote"),
+            "show",
+            "-s",
+            "--format=%B",
+            "refs/autospec/claims/issue-42",
+        ],
+    );
+    let refreshed_claim =
+        parse_run_state_comment(&refreshed_message).expect("refreshed adopted claim");
+    assert_eq!(refreshed_claim.claim_id, before_claim.claim_id);
+    let replacement_status = replacement.try_wait().expect("inspect replacement");
+    let replacement_stderr = if replacement_status.is_some() {
+        let mut stderr = String::new();
+        replacement
+            .stderr
+            .take()
+            .expect("replacement stderr")
+            .read_to_string(&mut stderr)
+            .expect("read replacement stderr");
+        stderr
+    } else {
+        String::new()
+    };
+    assert_ne!(
+        refreshed_claim.updated_at, before_claim.updated_at,
+        "replacement must renew the exact claim while the adopted harness remains live; status={replacement_status:?} stderr={replacement_stderr} invocation={} calls={}",
+        fs::read_to_string(&invocation_path).unwrap_or_default(),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
     assert!(
-        pending.status.success(),
-        "pending restart status={:?} stdout={} stderr={} state={}",
-        pending.status.code(),
-        String::from_utf8_lossy(&pending.stdout),
-        String::from_utf8_lossy(&pending.stderr),
+        Path::new(&format!("/proc/{harness_pid}")).exists(),
+        "harness must still be live when renewal is observed"
+    );
+    let completed = replacement
+        .wait_with_output()
+        .expect("wait for adopting replacement");
+    assert!(
+        completed.status.success(),
+        "adopting restart status={:?} stdout={} stderr={} state={}",
+        completed.status.code(),
+        String::from_utf8_lossy(&completed.stdout),
+        String::from_utf8_lossy(&completed.stderr),
         // Keep the persisted owner visible if dead-owner reclamation regresses.
         fs::read_to_string(fixture.resilience_state_path()).unwrap_or_else(|_| {
             format!("missing resilience state for killed conductor {first_pid}")
         })
     );
-    assert_eq!(fixture.read_state().phase(), ConductorPhase::Dispatch);
+    assert_eq!(
+        fixture.read_state().phase(),
+        ConductorPhase::Scan,
+        "replacement conductor must supervise the live harness through completion; stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&completed.stdout),
+        String::from_utf8_lossy(&completed.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
     assert_eq!(
         fs::read_to_string(&launches)
             .expect("harness launches")
@@ -903,19 +1244,6 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
         1
     );
 
-    std::thread::sleep(std::time::Duration::from_secs(4));
-    let mut completed_restart = fixture.command();
-    configure(&mut completed_restart);
-    let completed = completed_restart
-        .output()
-        .expect("restart after harness completion");
-    assert!(
-        completed.status.success(),
-        "completed restart stderr={} calls={}",
-        String::from_utf8_lossy(&completed.stderr),
-        fs::read_to_string(&fixture.calls).unwrap_or_default()
-    );
-    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
     assert_eq!(
         fs::read_to_string(&launches)
             .expect("harness launches")
@@ -927,6 +1255,8 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
     let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
     assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
     assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
+    assert!(!Path::new(&format!("/proc/{supervisor_pid}")).exists());
+    assert!(!Path::new(&format!("/proc/{harness_pid}")).exists());
 }
 
 #[test]
@@ -974,6 +1304,480 @@ fn foreground_retry_preserves_dirty_wip_and_merges_on_a_fresh_claim_generation()
         .filter(|entry| entry.path().to_string_lossy().ends_with(".terminal.json"))
         .count();
     assert_eq!(receipts, 2, "retry and merged generations are both durable");
+
+    let executor_dir = fixture.scoped_dir().join("executor");
+    let merged_terminal = fs::read_dir(&executor_dir)
+        .expect("executor generations")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.to_string_lossy().ends_with(".terminal.json")
+                && fs::read_to_string(path)
+                    .ok()
+                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                    .and_then(|receipt| receipt["status"].as_str().map(str::to_string))
+                    .as_deref()
+                    == Some("merged")
+        })
+        .expect("merged terminal receipt");
+    let merged_receipt: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&merged_terminal).expect("read merged terminal receipt"),
+    )
+    .expect("parse merged terminal receipt");
+    fs::remove_file(&merged_terminal).expect("simulate crash before merged receipt publication");
+    let replay_state = ConductorState::new("test/repo", ConductorScope::Repository, 3)
+        .unwrap()
+        .transition(ConductorEvent::ScanFoundWork)
+        .unwrap()
+        .transition(ConductorEvent::SafetyReviewed)
+        .unwrap()
+        .transition(ConductorEvent::Selected {
+            issue: 42,
+            serialization_reasons: Vec::new(),
+        })
+        .unwrap()
+        .transition(ConductorEvent::Claimed)
+        .unwrap();
+    fs::write(fixture.state_path(), replay_state.to_json()).expect("seed merged replay crash");
+    fixture.seed_claim_acquisition_receipt(
+        merged_receipt["worker_id"].as_str().expect("merged worker"),
+        merged_receipt["branch"].as_str().expect("merged branch"),
+        merged_receipt["claim_id"].as_str().expect("merged claim"),
+    );
+    let calls_before = fs::read_to_string(&fixture.calls).expect("calls before replay");
+    let replay = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .output()
+        .expect("replay exact merged generation");
+    assert!(
+        replay.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&replay.stdout),
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    let calls_after = fs::read_to_string(&fixture.calls).expect("calls after replay");
+    assert_eq!(
+        calls_after.matches("\npr\ncreate\n").count(),
+        calls_before.matches("\npr\ncreate\n").count()
+    );
+    assert_eq!(
+        calls_after.matches("\npr\nmerge\n").count(),
+        calls_before.matches("\npr\nmerge\n").count()
+    );
+}
+
+#[test]
+fn foreground_post_harness_gh_read_outage_resumes_the_exact_claim() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let fail_once = fixture.root.join("bridge-gh-read.failed");
+    let harness_done = fixture.root.join("bridge-harness.done");
+    let harness_launches = fixture.root.join("bridge-harness.launches");
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env("AUTOSPEC_BRIDGE_FAIL_GH_READ_ONCE", &fail_once)
+        .env("AUTOSPEC_BRIDGE_HARNESS_DONE", &harness_done)
+        .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches)
+        .env("AUTOSPEC_BRIDGE_FAIL_GH_AFTER_BRANCH", "1")
+        .output()
+        .expect("run transient bridge recovery");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert!(fail_once.exists(), "bridge read failpoint must fire");
+    assert_eq!(
+        fixture.read_state().phase(),
+        ConductorPhase::Scan,
+        "state={:?} stdout={} stderr={} calls={}",
+        fixture.read_state(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
+    assert_eq!(
+        fs::read_to_string(&harness_launches)
+            .expect("harness launch ledger")
+            .lines()
+            .count(),
+        1,
+        "late transport retries resume the exact invocation without rerunning the harness"
+    );
+}
+
+#[test]
+fn foreground_persistent_post_create_outage_stays_on_the_exact_claim() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let harness_launches = fixture.root.join("persistent-outage-harness.launches");
+    let configure = |command: &mut Command| {
+        command
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches);
+    };
+    let mut first_command = fixture.command();
+    configure(&mut first_command);
+    first_command.env("AUTOSPEC_BRIDGE_FAIL_GH_AFTER_CREATE_ALWAYS", "1");
+    let first = first_command.output().expect("run persistent outage");
+    assert!(
+        first.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Dispatch);
+    assert!(
+        fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .is_file(),
+        "resumable transient must retain its exact acquisition"
+    );
+    let before = fs::read_to_string(&fixture.calls).expect("calls during outage");
+    assert_eq!(before.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(before.matches("\npr\nmerge\n").count(), 0);
+
+    let mut recovery = fixture.command();
+    configure(&mut recovery);
+    let recovered = recovery.output().expect("resume persistent outage");
+    assert!(
+        recovered.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    let after = fs::read_to_string(&fixture.calls).expect("calls after outage");
+    assert_eq!(after.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(after.matches("\npr\nmerge\n").count(), 1);
+    assert_eq!(
+        fs::read_to_string(harness_launches)
+            .expect("harness launch ledger")
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn foreground_receipt_retirement_crash_windows_resume_without_replay() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    for (scenario, failpoint, fail_harness, expected_phase, receipt_remains) in [
+        (
+            "retry-before-clear",
+            "before-clear",
+            true,
+            ConductorPhase::Retry,
+            true,
+        ),
+        (
+            "retry-after-clear",
+            "after-clear",
+            true,
+            ConductorPhase::Retry,
+            false,
+        ),
+        (
+            "terminal-before-clear",
+            "before-clear",
+            false,
+            ConductorPhase::Paused,
+            true,
+        ),
+        (
+            "terminal-after-clear",
+            "after-clear",
+            false,
+            ConductorPhase::Paused,
+            false,
+        ),
+    ] {
+        let fixture = ForegroundFixture::new();
+        let bridge = fixture.configure_real_bridge();
+        let marker = fixture.root.join(format!("{scenario}.failed"));
+        let configure = |command: &mut Command| {
+            command
+                .env("PATH", path_with(&bridge.bin))
+                .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+                .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+                .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+                .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+                .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+                .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+                .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+        };
+        let mut first_command = fixture.command();
+        configure(&mut first_command);
+        first_command
+            .env("AUTOSPEC_FOREGROUND_RETIRE_FAILPOINT", failpoint)
+            .env("AUTOSPEC_FOREGROUND_RETIRE_FAIL_ONCE", &marker);
+        if fail_harness {
+            first_command.env(
+                "AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE",
+                fixture.root.join(format!("{scenario}.harness-failed")),
+            );
+        }
+        let first = first_command.output().expect("run retirement failpoint");
+        assert!(
+            !first.status.success(),
+            "{scenario}: failpoint must interrupt retirement"
+        );
+        assert_eq!(
+            fixture.read_state().phase(),
+            expected_phase,
+            "{scenario}: old-generation state must remain durable"
+        );
+        assert_eq!(
+            fixture
+                .state_path()
+                .with_extension("claim-acquisition.json")
+                .exists(),
+            receipt_remains,
+            "{scenario}: receipt retirement boundary"
+        );
+        let calls_before = fs::read_to_string(&fixture.calls).expect("calls before recovery");
+
+        let mut recovery = fixture.command();
+        configure(&mut recovery);
+        let recovered = recovery.output().expect("resume retirement crash");
+        assert!(
+            recovered.status.success(),
+            "{scenario}: stdout={} stderr={}",
+            String::from_utf8_lossy(&recovered.stdout),
+            String::from_utf8_lossy(&recovered.stderr)
+        );
+        let recovered_state = fixture.read_state();
+        if fail_harness {
+            assert_eq!(
+                recovered_state.phase(),
+                ConductorPhase::Scan,
+                "{scenario}: state={recovered_state:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    recovered_state.phase(),
+                    ConductorPhase::Scan | ConductorPhase::Paused
+                ) && recovered_state.selected_issue().is_none(),
+                "{scenario}: finalized recovery must leave the old issue; state={recovered_state:?}"
+            );
+        }
+        assert!(
+            !fixture
+                .state_path()
+                .with_extension("claim-acquisition.json")
+                .exists(),
+            "{scenario}: recovery retires the old acquisition receipt"
+        );
+        let calls_after = fs::read_to_string(&fixture.calls).expect("calls after recovery");
+        if !fail_harness {
+            assert_eq!(
+                calls_after.matches("\npr\ncreate\n").count(),
+                calls_before.matches("\npr\ncreate\n").count(),
+                "{scenario}: terminal replay must not create another PR"
+            );
+            assert_eq!(
+                calls_after.matches("\npr\nmerge\n").count(),
+                calls_before.matches("\npr\nmerge\n").count(),
+                "{scenario}: terminal replay must not merge twice"
+            );
+        }
+    }
+}
+
+#[test]
+fn foreground_exhausted_retry_recovers_after_receipt_retirement_crash() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    let dispatch = selected_foreground_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("seed dispatch")
+        .to_json()
+        .replace("\"retry_count\":0", "\"retry_count\":3");
+    fs::write(
+        fixture.state_path(),
+        ConductorState::parse_json(&dispatch)
+            .expect("parse exhausted dispatch")
+            .to_json(),
+    )
+    .expect("seed exhausted dispatch");
+    fixture.seed_claim_state_with_id(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        "claimed",
+        &fresh_iso_timestamp(),
+        EXECUTOR_CLAIM_ID,
+    );
+    fixture.seed_claim_acquisition_receipt(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+    fixture.copy_claim_ref_to(&bridge.remote);
+    let crash_marker = fixture.root.join("exhausted-after-clear.failed");
+    let configure = |command: &mut Command| {
+        command
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+    };
+    let mut first_command = fixture.command();
+    configure(&mut first_command);
+    let first = first_command
+        .env(
+            "AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE",
+            fixture.root.join("exhausted.harness-failed"),
+        )
+        .env("AUTOSPEC_FOREGROUND_RETIRE_FAILPOINT", "after-clear")
+        .env("AUTOSPEC_FOREGROUND_RETIRE_FAIL_ONCE", &crash_marker)
+        .output()
+        .expect("run exhausted retirement failpoint");
+    assert!(!first.status.success(), "after-clear failpoint must fire");
+    let retiring = fixture.read_state();
+    assert_eq!(retiring.phase(), ConductorPhase::Paused);
+    assert_eq!(
+        retiring.pause_reason(),
+        Some("executor_terminal_retirement")
+    );
+    assert!(
+        !fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists(),
+        "receipt was retired before the injected crash"
+    );
+
+    let mut recovery = fixture.command();
+    configure(&mut recovery);
+    let recovered = recovery.output().expect("recover exhausted retirement");
+    assert!(
+        recovered.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr)
+    );
+    let recovered_state = fixture.read_state();
+    assert_eq!(recovered_state.phase(), ConductorPhase::Scan);
+    assert_eq!(recovered_state.selected_issue(), None);
+}
+
+#[test]
+fn foreground_ownership_retirement_recovers_across_receipt_clear_crashes() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    for (failpoint, receipt_remains) in [("before-clear", true), ("after-clear", false)] {
+        let fixture = ForegroundFixture::new();
+        let bridge = fixture.configure_real_bridge();
+        let harness_done = fixture
+            .root
+            .join(format!("ownership-{failpoint}.harness-done"));
+        let takeover_done = fixture
+            .root
+            .join(format!("ownership-{failpoint}.takeover-done"));
+        let crash_marker = fixture.root.join(format!("ownership-{failpoint}.failed"));
+        let foreign_claim = fixture.prepare_foreign_claim_object_in(&bridge.remote);
+        let configure = |command: &mut Command| {
+            command
+                .env("PATH", path_with(&bridge.bin))
+                .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+                .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+                .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+                .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+                .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+                .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+                .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+        };
+        let mut first_command = fixture.command();
+        configure(&mut first_command);
+        let first = first_command
+            .env("AUTOSPEC_BRIDGE_HARNESS_DONE", &harness_done)
+            .env("AUTOSPEC_BRIDGE_TAKEOVER_OID", &foreign_claim)
+            .env("AUTOSPEC_BRIDGE_TAKEOVER_DONE", &takeover_done)
+            .env("AUTOSPEC_FOREGROUND_RETIRE_FAILPOINT", failpoint)
+            .env("AUTOSPEC_FOREGROUND_RETIRE_FAIL_ONCE", &crash_marker)
+            .output()
+            .expect("run ownership-loss conductor");
+        assert!(
+            !first.status.success(),
+            "{failpoint}: failpoint must fire; stdout={} stderr={} state={:?} calls={}",
+            String::from_utf8_lossy(&first.stdout),
+            String::from_utf8_lossy(&first.stderr),
+            fixture.read_state(),
+            fs::read_to_string(&fixture.calls).unwrap_or_default()
+        );
+        assert!(takeover_done.exists(), "{failpoint}: takeover must occur");
+        let retiring = fixture.read_state();
+        assert_eq!(retiring.phase(), ConductorPhase::Paused);
+        assert_eq!(
+            retiring.pause_reason(),
+            Some("executor_ownership_retirement")
+        );
+        assert_eq!(
+            fixture
+                .state_path()
+                .with_extension("claim-acquisition.json")
+                .exists(),
+            receipt_remains,
+            "{failpoint}: acquisition receipt boundary"
+        );
+
+        let mut recovery = fixture.command();
+        configure(&mut recovery);
+        let recovered = recovery.output().expect("recover ownership retirement");
+        assert!(
+            recovered.status.success(),
+            "{failpoint}: stdout={} stderr={}",
+            String::from_utf8_lossy(&recovered.stdout),
+            String::from_utf8_lossy(&recovered.stderr)
+        );
+        let state = fixture.read_state();
+        assert_eq!(state.phase(), ConductorPhase::Scan);
+        assert_eq!(state.selected_issue(), None);
+        assert!(!fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists());
+    }
 }
 
 #[test]
@@ -3179,6 +3983,17 @@ if [ "${AUTOSPEC_FOREGROUND_BLOCK_GH:-0}" = 1 ]; then
   while :; do sleep 1; done
 fi
 mode="$(cat "$AUTOSPEC_FOREGROUND_MODE")"
+if [ "$1" = pr ] && [ "${2:-}" = list ] && [ -n "${AUTOSPEC_BRIDGE_TAKEOVER_OID:-}" ] && [ -e "${AUTOSPEC_BRIDGE_HARNESS_DONE:-/nonexistent}" ] && [ ! -e "${AUTOSPEC_BRIDGE_TAKEOVER_DONE:-/nonexistent}" ]; then
+  git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" update-ref refs/autospec/claims/issue-42 "$AUTOSPEC_BRIDGE_TAKEOVER_OID"
+  : > "$AUTOSPEC_BRIDGE_TAKEOVER_DONE"
+fi
+if [ "$1" = pr ] && [ "${2:-}" = list ] && [ -n "${AUTOSPEC_BRIDGE_FAIL_GH_READ_ONCE:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_FAIL_GH_READ_ONCE" ] && { [ -z "${AUTOSPEC_BRIDGE_HARNESS_DONE:-}" ] || [ -e "$AUTOSPEC_BRIDGE_HARNESS_DONE" ]; } && { [ "${AUTOSPEC_BRIDGE_FAIL_GH_AFTER_BRANCH:-0}" != 1 ] || git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" show-ref --verify --quiet refs/heads/feat/autonomous-issue-42; }; then
+  : > "$AUTOSPEC_BRIDGE_FAIL_GH_READ_ONCE"
+  exit 42
+fi
+if [ "$1" = pr ] && [ "${2:-}" = list ] && [ "${AUTOSPEC_BRIDGE_FAIL_GH_AFTER_CREATE_ALWAYS:-0}" = 1 ] && [ "$(cat "$AUTOSPEC_FOREGROUND_PULL_REQUESTS")" != "[]" ]; then
+  exit 42
+fi
 issue() {
   if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
     if [ "$mode" = claimed ]; then real_labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then real_labels='[]'; else real_labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi
@@ -3486,7 +4301,7 @@ if [ -n "${AUTOSPEC_BRIDGE_HARNESS_LAUNCHES:-}" ]; then
 fi
 if [ -n "${AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER" ]; then
   printf '%s\n' "$$" > "$AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER"
-  sleep 3
+  sleep "${AUTOSPEC_BRIDGE_SLOW_HARNESS_SECONDS:-3}"
 fi
 if [ -n "${AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE" ]; then
   printf '%s\n' '#!/bin/sh' 'exit 42' > tests/smoke/generation.sh
@@ -3520,6 +4335,9 @@ Scoped git status: tests/smoke/generation.sh
 One likely hidden failure: scanner behavior outside this hermetic fixture.
 EOF
 chmod 600 "$artifact"
+if [ -n "${AUTOSPEC_BRIDGE_HARNESS_DONE:-}" ]; then
+  : > "$AUTOSPEC_BRIDGE_HARNESS_DONE"
+fi
 "#,
         );
         for (scanner, output) in [
@@ -3798,7 +4616,11 @@ printf '%s\n' '[]' > "$report"
             state,
             branch,
             "",
-            "claimed",
+            match state {
+                "released" => "retryable_released",
+                "failed" => "needs_human",
+                _ => "claimed",
+            },
             Vec::new(),
             updated_at,
             updated_at,
@@ -3818,8 +4640,12 @@ printf '%s\n' '[]' > "$report"
     }
 
     fn transition_claim_ref(&self, record: &RunStateRecord) {
+        self.transition_claim_ref_to(record, &self.claim_remote);
+    }
+
+    fn transition_claim_ref_to(&self, record: &RunStateRecord, remote: &Path) {
         let reference = format!("refs/autospec/claims/issue-{}", record.issue);
-        let remote = self.claim_remote.to_str().expect("claim remote path");
+        let remote = remote.to_str().expect("claim remote path");
         let current = git_fixture(
             &self.claim_repo,
             &["ls-remote", "--refs", remote, &reference],
@@ -3864,6 +4690,98 @@ printf '%s\n' '[]' > "$report"
         git_fixture(
             &self.claim_repo,
             &["push", remote, &format!("{oid}:{reference}")],
+        );
+    }
+
+    fn prepare_foreign_claim_object_in(&self, remote: &Path) -> String {
+        let timestamp = fresh_iso_timestamp();
+        let record = RunStateRecord::new(
+            "test/repo",
+            42,
+            "foreign-conductor",
+            "claimed",
+            "feat/autonomous-issue-42",
+            "",
+            "claimed",
+            Vec::new(),
+            &timestamp,
+            &timestamp,
+            10_800,
+        )
+        .with_claim_id("foreign-generation");
+        self.transition_claim_ref(&record);
+        let seeded = git_fixture(
+            &self.claim_repo,
+            &[
+                "ls-remote",
+                "--refs",
+                self.claim_remote.to_str().expect("claim remote"),
+                "refs/autospec/claims/issue-42",
+            ],
+        );
+        let oid = seeded
+            .split_whitespace()
+            .next()
+            .expect("foreign claim oid")
+            .to_string();
+        git_fixture(
+            &self.claim_repo,
+            &[
+                "push",
+                remote.to_str().expect("target claim remote"),
+                &format!("{oid}:refs/autospec/test/foreign-claim"),
+            ],
+        );
+        git_fixture(
+            &self.claim_repo,
+            &[
+                "--git-dir",
+                remote.to_str().expect("target claim remote"),
+                "update-ref",
+                "-d",
+                "refs/autospec/test/foreign-claim",
+            ],
+        );
+        oid
+    }
+
+    fn seed_claim_acquisition_receipt(&self, worker_id: &str, branch: &str, claim_id: &str) {
+        let path = self.state_path().with_extension("claim-acquisition.json");
+        fs::set_permissions(
+            path.parent().expect("receipt parent"),
+            fs::Permissions::from_mode(0o700),
+        )
+        .expect("make claim acquisition receipt parent private");
+        fs::write(
+            &path,
+            format!(
+                "{{\"schema\":1,\"repo\":\"test/repo\",\"issue\":42,\"worker_id\":{:?},\"branch\":{:?},\"claim_id\":{:?}}}\n",
+                worker_id, branch, claim_id
+            ),
+        )
+        .expect("seed claim acquisition receipt");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("make claim acquisition receipt private");
+    }
+
+    fn copy_claim_ref_to(&self, remote: &Path) {
+        let seeded = git_fixture(
+            &self.claim_repo,
+            &[
+                "ls-remote",
+                "--refs",
+                self.claim_remote.to_str().expect("claim remote"),
+                "refs/autospec/claims/issue-42",
+            ],
+        );
+        let seeded = seeded.split_whitespace().next().expect("seeded claim oid");
+        git_fixture(
+            &self.claim_repo,
+            &[
+                "push",
+                remote.to_str().expect("target claim remote"),
+                &format!("{seeded}:refs/autospec/claims/issue-42"),
+            ],
         );
     }
 

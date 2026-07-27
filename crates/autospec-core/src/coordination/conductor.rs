@@ -4,6 +4,8 @@ mod persistence;
 
 const CONDUCTOR_SCHEMA: u64 = 1;
 const RETRY_LIMIT_EXHAUSTED: &str = "retry_limit_exhausted";
+const TERMINAL_RETIREMENT: &str = "executor_terminal_retirement";
+const OWNERSHIP_RETIREMENT: &str = "executor_ownership_retirement";
 pub const BLOCKED_BACKLOG_THRESHOLD: u32 = 5;
 const MAX_NO_PROGRESS_REASON_LENGTH: usize = 256;
 
@@ -64,6 +66,10 @@ pub enum ConductorEvent {
     DispatchRecorded {
         outcome: ConductorOutcome,
     },
+    BeginTerminalRetirement {
+        outcome: ConductorOutcome,
+    },
+    BeginOwnershipRetirement,
     Reconciled,
     RetryScheduled,
     Pause {
@@ -71,6 +77,8 @@ pub enum ConductorEvent {
     },
     Resume,
     AbandonExhausted,
+    AbandonTerminal,
+    AbandonOwnership,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +296,22 @@ impl ConductorState {
             {
                 self.record_dispatch(outcome)?
             }
+            ConductorEvent::BeginTerminalRetirement { outcome }
+                if matches!(
+                    self.phase,
+                    ConductorPhase::Dispatch | ConductorPhase::DispatchRecorded
+                ) =>
+            {
+                self.begin_terminal_retirement(outcome)?
+            }
+            ConductorEvent::BeginOwnershipRetirement
+                if matches!(
+                    self.phase,
+                    ConductorPhase::Dispatch | ConductorPhase::DispatchRecorded
+                ) =>
+            {
+                self.begin_ownership_retirement()
+            }
             ConductorEvent::Reconciled if self.phase == ConductorPhase::DispatchRecorded => {
                 self.reconcile_success()?
             }
@@ -301,6 +325,16 @@ impl ConductorState {
             }
             ConductorEvent::Resume if self.phase == ConductorPhase::Paused => self.resume()?,
             ConductorEvent::AbandonExhausted if self.can_abandon_exhausted() => {
+                self.abandon_exhausted()
+            }
+            ConductorEvent::AbandonTerminal if self.can_abandon_terminal() => {
+                self.abandon_exhausted()
+            }
+            ConductorEvent::AbandonOwnership
+                if self.phase == ConductorPhase::Dispatch
+                    || (self.phase == ConductorPhase::Paused
+                        && self.pause_reason.as_deref() == Some(OWNERSHIP_RETIREMENT)) =>
+            {
                 self.abandon_exhausted()
             }
             event => return Err(format!("invalid conductor event: {event:?}")),
@@ -365,6 +399,34 @@ impl ConductorState {
         Ok(())
     }
 
+    fn begin_terminal_retirement(&mut self, outcome: ConductorOutcome) -> Result<(), String> {
+        if self.phase == ConductorPhase::Dispatch {
+            self.record_dispatch(outcome)?;
+        } else if self.phase != ConductorPhase::DispatchRecorded
+            || self.last_outcome.as_ref() != Some(&outcome)
+        {
+            return Err(
+                "terminal retirement does not match the recorded dispatch outcome".to_string(),
+            );
+        }
+        if self.phase == ConductorPhase::Retry {
+            return Ok(());
+        }
+        if self.phase != ConductorPhase::DispatchRecorded && !self.can_abandon_terminal() {
+            return Err("finalized dispatch did not reach a terminal conductor state".to_string());
+        }
+        self.phase = ConductorPhase::Paused;
+        self.pause_reason = Some(TERMINAL_RETIREMENT.to_string());
+        self.resume_phase = None;
+        Ok(())
+    }
+
+    fn begin_ownership_retirement(&mut self) {
+        self.phase = ConductorPhase::Paused;
+        self.pause_reason = Some(OWNERSHIP_RETIREMENT.to_string());
+        self.resume_phase = None;
+    }
+
     fn record_blocked_dispatch(&mut self, reason: String) {
         self.pause_reason = Some(reason);
         self.resume_phase = Some(ConductorPhase::Claim);
@@ -410,6 +472,13 @@ impl ConductorState {
     fn can_abandon_exhausted(&self) -> bool {
         self.phase == ConductorPhase::Paused
             && self.pause_reason.as_deref() == Some(RETRY_LIMIT_EXHAUSTED)
+    }
+
+    fn can_abandon_terminal(&self) -> bool {
+        self.phase == ConductorPhase::Paused
+            && (self.pause_reason.as_deref() == Some(TERMINAL_RETIREMENT)
+                || self.pause_reason.as_deref() == Some(RETRY_LIMIT_EXHAUSTED)
+                || matches!(self.last_outcome, Some(ConductorOutcome::Blocked(_))))
     }
 
     fn clear_selection(&mut self) {
