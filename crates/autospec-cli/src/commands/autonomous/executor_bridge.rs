@@ -88,6 +88,11 @@ static BASE_DRIFT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 static RUNTIME_CLOSE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static METADATA_WIP_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static METADATA_WIP_SYNC_EVENTS: std::sync::Mutex<Vec<&'static str>> =
+    std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+static WORKTREE_REPAIR_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BridgeRunStatus {
@@ -616,6 +621,7 @@ pub(crate) fn run_executor_bridge(
     let canonical_branch = format!("feat/autonomous-issue-{}", request.issue);
     let recovered = load_invocation_for_request(request, &repository_path, &canonical_branch)?;
     if let Some(recovered) = recovered.as_ref() {
+        repair_missing_post_child_worktree(recovered)?;
         if recovered.phase == BridgePhase::Complete {
             return publish_complete_receipt(request, recovered, &terminal_path);
         }
@@ -634,7 +640,6 @@ pub(crate) fn run_executor_bridge(
     let (mut state, mut runtime) = if let Some(recovered) = recovered {
         let state = recover_invocation(&request.state_path, &recovered.identity)?
             .ok_or_else(|| "executor recovery state disappeared".to_string())?;
-        repair_missing_post_child_worktree(&state)?;
         let needs_runtime = matches!(
             state.phase,
             BridgePhase::Pending
@@ -717,19 +722,29 @@ pub(crate) fn run_executor_bridge(
         };
         (state, runtime)
     };
-    let harness_config = HarnessConfig::load(&state.identity.repository_path, &environment)?;
-    let mut resolved_harness = harness_config.resolve(&environment)?;
-    if resolved_harness.kind == HarnessKind::Codex {
-        resolved_harness.codex_sandbox = preflight_codex_sandbox(&resolved_harness.executable)?;
-    }
+    let launch_phase = matches!(
+        state.phase,
+        BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
+    );
+    let resolved_harness = if launch_phase {
+        let harness_config = HarnessConfig::load(&state.identity.repository_path, &environment)?;
+        let mut resolved = harness_config.resolve(&environment)?;
+        configure_codex_sandbox_for_phase(&mut resolved, state.phase, preflight_codex_sandbox)?;
+        if state.harness != resolved.kind && request.state_path.exists() {
+            return Err("executor recovered invocation changed harness kind"
+                .to_string()
+                .into());
+        }
+        Some(resolved)
+    } else {
+        None
+    };
     if !request.state_path.exists() {
-        state.harness = resolved_harness.kind;
+        state.harness = resolved_harness
+            .as_ref()
+            .ok_or_else(|| "new executor invocation has no launch harness".to_string())?
+            .kind;
         write_invocation_atomic(&request.state_path, &state)?;
-    }
-    if state.harness != resolved_harness.kind {
-        return Err("executor recovered invocation changed harness kind"
-            .to_string()
-            .into());
     }
     if state.phase == BridgePhase::CleanupPending {
         finalize_merged_executor(&request.state_path, &mut state, runtime.take())?;
@@ -765,7 +780,9 @@ pub(crate) fn run_executor_bridge(
             &request.event_log,
             &mut state,
             HarnessLaunch {
-                resolved: &resolved_harness,
+                resolved: resolved_harness
+                    .as_ref()
+                    .ok_or_else(|| "executor launch phase has no resolved harness".to_string())?,
                 artifact: &closeout_path,
                 prompt: &prompt,
             },
@@ -6402,6 +6419,22 @@ fn preflight_codex_sandbox(codex: &Path) -> Result<CodexSandboxPolicy, String> {
 #[cfg(not(target_os = "linux"))]
 fn preflight_codex_sandbox(_codex: &Path) -> Result<CodexSandboxPolicy, String> {
     Ok(CodexSandboxPolicy::Default)
+}
+
+fn configure_codex_sandbox_for_phase(
+    harness: &mut ResolvedHarness,
+    phase: BridgePhase,
+    probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,
+) -> Result<(), String> {
+    if harness.kind == HarnessKind::Codex
+        && matches!(
+            phase,
+            BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
+        )
+    {
+        harness.codex_sandbox = probe(&harness.executable)?;
+    }
+    Ok(())
 }
 
 fn safe_executable(path: &Path, env: &BTreeMap<String, OsString>) -> Result<PathBuf, String> {
@@ -14863,31 +14896,13 @@ fn spawn_blocked_harness(
     }
     let worktree = CString::new(harness.current_dir.as_os_str().as_bytes())
         .map_err(|_| "executor worktree contains a NUL byte".to_string())?;
-    let forbidden = [
-        "GH_TOKEN",
-        "GH_ENTERPRISE_TOKEN",
-        "GITHUB_TOKEN",
-        "GITHUB_ENTERPRISE_TOKEN",
-        "GITHUB_PAT",
-        "GLAB_TOKEN",
-        "GIT_ASKPASS",
-        "GIT_SSH",
-        "GIT_SSH_COMMAND",
-        "GIT_CREDENTIAL_HELPER",
-        "SSH_ASKPASS",
-        "SSH_AUTH_SOCK",
-    ];
     let mut environment_values = std::env::vars_os()
         .filter(|(key, _)| {
-            !forbidden.iter().any(|forbidden| key == forbidden)
-                && !key.to_string_lossy().starts_with("GIT_CONFIG_")
-                && key != "COMPOSE_PROJECT_NAME"
+            !sensitive_executor_environment_key(key) && key != "COMPOSE_PROJECT_NAME"
         })
         .collect::<BTreeMap<_, _>>();
     for (key, value) in &harness.environment_overrides {
-        if forbidden.iter().any(|forbidden| key == forbidden)
-            || key.to_string_lossy().starts_with("GIT_CONFIG_")
-        {
+        if sensitive_executor_environment_key(key) {
             return Err(format!(
                 "executor harness override may not restore credential authority: {}",
                 key.to_string_lossy()
@@ -16923,6 +16938,53 @@ fn fetch_and_resolve_base(
     })
 }
 
+fn sensitive_executor_environment_key(key: &std::ffi::OsStr) -> bool {
+    let key = key.to_string_lossy().to_ascii_uppercase();
+    let credential_markers = [
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "API_KEY",
+        "APIKEY",
+        "ACCESS_KEY",
+        "PRIVATE_KEY",
+        "CREDENTIAL",
+    ];
+    let provider_prefixes = [
+        "AWS_",
+        "AZURE_",
+        "GOOGLE_",
+        "GCLOUD_",
+        "NPM_",
+        "YARN_",
+        "DOCKER_",
+        "KUBE",
+        "VAULT_",
+        "TF_TOKEN_",
+        "CARGO_REGISTRIES_",
+        "TWINE_",
+    ];
+    credential_markers.iter().any(|marker| key.contains(marker))
+        || provider_prefixes
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+        || matches!(
+            key.as_str(),
+            "DATABASE_URL"
+                | "PGPASSWORD"
+                | "MYSQL_PWD"
+                | "PIP_INDEX_URL"
+                | "PIP_EXTRA_INDEX_URL"
+                | "GIT_ASKPASS"
+                | "GIT_SSH"
+                | "GIT_SSH_COMMAND"
+                | "SSH_ASKPASS"
+                | "SSH_AUTH_SOCK"
+        )
+        || key.starts_with("GIT_CONFIG_")
+}
+
 fn validate_branch(branch: &str) -> Result<(), String> {
     if branch.trim() != branch || branch.is_empty() || branch.starts_with('-') {
         return Err(format!("invalid executor base branch: {branch}"));
@@ -17021,39 +17083,29 @@ fn provision_issue_worktree_for_claim(
 }
 
 fn repair_missing_post_child_worktree(state: &PersistedInvocation) -> Result<bool, String> {
-    if state.identity.worktree.exists() {
-        return Ok(false);
-    }
-    if state.phase != BridgePhase::ImplementationComplete {
-        return Err(
-            "executor missing worktree is recoverable only after durable child completion"
-                .to_string(),
-        );
-    }
-    let repo = fs::canonicalize(&state.identity.repository_path)
-        .map_err(|error| format!("canonicalize executor recovery repository: {error}"))?;
     let scope_root = state
         .identity
         .worktree
         .parent()
         .ok_or_else(|| "executor missing worktree has no private scope root".to_string())?;
+    let intent_path = scope_root.join(format!("issue-{}.repair-intent.json", state.identity.issue));
+    if state.identity.worktree.exists() && !intent_path.exists() {
+        return Ok(false);
+    }
+    if state.phase != BridgePhase::ImplementationComplete {
+        return if intent_path.exists() {
+            Err(
+                "executor worktree repair intent is incompatible with the durable phase"
+                    .to_string(),
+            )
+        } else {
+            Ok(false)
+        };
+    }
+    let repo = fs::canonicalize(&state.identity.repository_path)
+        .map_err(|error| format!("canonicalize executor recovery repository: {error}"))?;
     validate_executor_ownership(&repo, &[scope_root])?;
     reject_symlink_path(&state.identity.worktree)?;
-    let registry = git_stdout(&repo, &["worktree", "list", "--porcelain"])?;
-    let prunable = registry
-        .split("\n\n")
-        .filter(|block| {
-            block
-                .lines()
-                .any(|line| line == "prunable gitdir file points to non-existent location")
-        })
-        .collect::<Vec<_>>();
-    let expected = format!("worktree {}", state.identity.worktree.display());
-    if prunable.len() != 1 || !prunable[0].lines().any(|line| line == expected) {
-        return Err(
-            "executor missing worktree is not the one exact prunable registration".to_string(),
-        );
-    }
     let branch_ref = format!("refs/heads/{}", state.identity.branch);
     let head = git_stdout(
         &repo,
@@ -17072,7 +17124,77 @@ fn repair_missing_post_child_worktree(state: &PersistedInvocation) -> Result<boo
     {
         return Err("executor missing worktree branch does not descend from its base".to_string());
     }
-    git(&repo, &["worktree", "prune", "--expire", "now"])?;
+    let intent = format!(
+        "{}\n",
+        serde_json::json!({
+            "schema": 1,
+            "repository_path": repo,
+            "worktree": state.identity.worktree,
+            "branch": state.identity.branch,
+            "base_oid": state.identity.base_oid,
+            "head_oid": head,
+        })
+    );
+    if intent_path.exists() {
+        write_private_create_once(
+            &intent_path,
+            intent.as_bytes(),
+            "executor worktree repair intent",
+        )?;
+    }
+    if state.identity.worktree.exists() {
+        validate_repaired_worktree(state, &repo, scope_root)?;
+        clear_worktree_repair_intent(&intent_path, scope_root)?;
+        return Ok(true);
+    }
+
+    let registry = git_stdout(&repo, &["worktree", "list", "--porcelain"])?;
+    let prunable = registry
+        .split("\n\n")
+        .filter(|block| {
+            block
+                .lines()
+                .any(|line| line == "prunable gitdir file points to non-existent location")
+        })
+        .collect::<Vec<_>>();
+    let expected = format!("worktree {}", state.identity.worktree.display());
+    let expected_prunable = prunable
+        .iter()
+        .any(|block| block.lines().any(|line| line == expected));
+    if !intent_path.exists() {
+        if prunable.len() != 1 || !expected_prunable {
+            return Err(
+                "executor missing worktree is not the one exact prunable registration".to_string(),
+            );
+        }
+        write_private_create_once(
+            &intent_path,
+            intent.as_bytes(),
+            "executor worktree repair intent",
+        )?;
+    } else if !expected_prunable {
+        let expected_branch = format!("branch {branch_ref}");
+        if registry.split("\n\n").any(|block| {
+            block.lines().any(|line| line == expected)
+                || block.lines().any(|line| line == expected_branch)
+        }) {
+            return Err(
+                "executor worktree repair intent conflicts with a live registration".to_string(),
+            );
+        }
+    }
+    if expected_prunable {
+        if prunable.len() != 1 {
+            return Err(
+                "executor worktree repair cannot prune ambiguous registrations".to_string(),
+            );
+        }
+        git(&repo, &["worktree", "prune", "--expire", "now"])?;
+    }
+    #[cfg(test)]
+    if WORKTREE_REPAIR_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+        return Err("injected executor worktree repair crash after prune".to_string());
+    }
     git(
         &repo,
         &[
@@ -17087,8 +17209,18 @@ fn repair_missing_post_child_worktree(state: &PersistedInvocation) -> Result<boo
             &state.identity.branch,
         ],
     )?;
+    validate_repaired_worktree(state, &repo, scope_root)?;
+    clear_worktree_repair_intent(&intent_path, scope_root)?;
+    Ok(true)
+}
+
+fn validate_repaired_worktree(
+    state: &PersistedInvocation,
+    repo: &Path,
+    scope_root: &Path,
+) -> Result<(), String> {
     validate_existing_worktree(
-        &repo,
+        repo,
         &state.identity.worktree,
         &state.identity.branch,
         scope_root,
@@ -17106,7 +17238,17 @@ fn repair_missing_post_child_worktree(state: &PersistedInvocation) -> Result<boo
     {
         return Err("repaired executor worktree is not clean".to_string());
     }
-    Ok(true)
+    Ok(())
+}
+
+fn clear_worktree_repair_intent(path: &Path, parent: &Path) -> Result<(), String> {
+    fs::remove_file(path)
+        .map_err(|error| format!("clear executor worktree repair intent: {error}"))?;
+    #[cfg(unix)]
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync cleared executor worktree repair intent: {error}"))?;
+    Ok(())
 }
 
 fn metadata_wip_quarantine_path(scope_root: &Path, issue: u64, claim_id: &str) -> PathBuf {
@@ -17181,6 +17323,59 @@ fn isolate_adopted_metadata_wip(
     resume_metadata_wip_isolation(worktree, &quarantine)
 }
 
+#[cfg(test)]
+fn record_metadata_wip_sync_event(event: &'static str) {
+    METADATA_WIP_SYNC_EVENTS
+        .lock()
+        .expect("metadata WIP event lock")
+        .push(event);
+}
+
+#[cfg(not(test))]
+fn record_metadata_wip_sync_event(_event: &'static str) {}
+
+fn sync_metadata_wip_payload(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect quarantined metadata {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_file() {
+        return File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("sync quarantined metadata {}: {error}", path.display()));
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "quarantined metadata has unsupported type: {}",
+            path.display()
+        ));
+    }
+    for entry in fs::read_dir(path)
+        .map_err(|error| format!("read quarantined metadata {}: {error}", path.display()))?
+    {
+        let entry = entry
+            .map_err(|error| format!("read quarantined metadata {}: {error}", path.display()))?;
+        sync_metadata_wip_payload(&entry.path())?;
+    }
+    sync_metadata_wip_directory(path, "payload directory", None)
+}
+
+fn sync_metadata_wip_directory(
+    path: &Path,
+    label: &str,
+    event: Option<&'static str>,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync executor metadata WIP {label}: {error}"))?;
+    if let Some(event) = event {
+        record_metadata_wip_sync_event(event);
+    }
+    Ok(())
+}
+
 fn resume_metadata_wip_isolation(worktree: &Path, quarantine: &Path) -> Result<(), String> {
     if quarantine.join("complete").exists() {
         validate_private_state_file(&quarantine.join("complete"))?;
@@ -17210,8 +17405,30 @@ fn resume_metadata_wip_isolation(worktree: &Path, quarantine: &Path) -> Result<(
                     relative.display()
                 )
             })?;
+            record_metadata_wip_sync_event(if relative == Path::new(".gitignore") {
+                "rename-gitignore"
+            } else {
+                "rename-omx"
+            });
         }
     }
+    sync_metadata_wip_payload(&saved)?;
+    record_metadata_wip_sync_event("sync-payload");
+    sync_metadata_wip_directory(&saved, "destination directory", Some("sync-destination"))?;
+    sync_metadata_wip_directory(worktree, "source directory", Some("sync-source"))?;
+    let metadata_parent = quarantine
+        .parent()
+        .ok_or_else(|| "executor metadata quarantine has no metadata parent".to_string())?;
+    let scope_root = metadata_parent
+        .parent()
+        .ok_or_else(|| "executor metadata quarantine has no scope root".to_string())?;
+    sync_metadata_wip_directory(quarantine, "quarantine directory", Some("sync-quarantine"))?;
+    sync_metadata_wip_directory(
+        metadata_parent,
+        "metadata parent directory",
+        Some("sync-metadata-parent"),
+    )?;
+    sync_metadata_wip_directory(scope_root, "scope root", Some("sync-scope-root"))?;
 
     #[cfg(test)]
     if METADATA_WIP_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
@@ -17242,6 +17459,39 @@ fn resume_metadata_wip_isolation(worktree: &Path, quarantine: &Path) -> Result<(
             ));
         }
     }
+    record_metadata_wip_sync_event("restore");
+    for relative in [Path::new(".gitignore"), Path::new(".omx")] {
+        let restored = worktree.join(relative);
+        if fs::symlink_metadata(&restored).is_ok() {
+            sync_metadata_wip_payload(&restored)?;
+        }
+    }
+    record_metadata_wip_sync_event("sync-restored-payload");
+    sync_metadata_wip_directory(
+        worktree,
+        "restored source directory",
+        Some("sync-restored-source"),
+    )?;
+    let admin = PathBuf::from(git_stdout(worktree, &["rev-parse", "--absolute-git-dir"])?);
+    let index = admin.join("index");
+    if index.exists() {
+        File::open(&index)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("sync restored executor metadata index: {error}"))?;
+    }
+    record_metadata_wip_sync_event("sync-restored-index");
+    sync_metadata_wip_directory(
+        &admin,
+        "restored worktree admin directory",
+        Some("sync-restored-admin"),
+    )?;
+    if let Some(parent) = admin.parent() {
+        sync_metadata_wip_directory(
+            parent,
+            "restored worktree admin parent",
+            Some("sync-restored-admin-parent"),
+        )?;
+    }
     if !git_bytes(
         worktree,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
@@ -17250,11 +17500,14 @@ fn resume_metadata_wip_isolation(worktree: &Path, quarantine: &Path) -> Result<(
     {
         return Err("executor metadata WIP isolation did not produce a clean worktree".to_string());
     }
+    record_metadata_wip_sync_event("clean");
     write_private_create_once(
         &quarantine.join("complete"),
         b"metadata-wip-isolated\n",
         "executor metadata WIP completion",
-    )
+    )?;
+    record_metadata_wip_sync_event("complete");
+    Ok(())
 }
 
 struct WorktreeLease {
@@ -18464,6 +18717,10 @@ mod tests {
 
     #[test]
     fn autonomous_executor_bridge_codex_sandbox_isolates_adopted_metadata_wip_before_launch() {
+        super::METADATA_WIP_SYNC_EVENTS
+            .lock()
+            .expect("metadata WIP event lock")
+            .clear();
         let fixture = GitFixture::new("metadata-wip-adoption");
         fs::write(fixture.repo.join(".gitignore"), "target/\n").expect("write tracked ignore");
         git(&fixture.repo, &["add", ".gitignore"]);
@@ -18503,8 +18760,48 @@ mod tests {
         super::METADATA_WIP_FAILPOINT.store(1, Ordering::SeqCst);
         let interrupted = adopt().expect_err("interrupt after metadata is durably quarantined");
         assert!(interrupted.contains("injected metadata WIP crash"));
+        assert_eq!(
+            *super::METADATA_WIP_SYNC_EVENTS
+                .lock()
+                .expect("metadata WIP event lock"),
+            [
+                "rename-gitignore",
+                "rename-omx",
+                "sync-payload",
+                "sync-destination",
+                "sync-source",
+                "sync-quarantine",
+                "sync-metadata-parent",
+                "sync-scope-root",
+            ]
+        );
+        super::METADATA_WIP_SYNC_EVENTS
+            .lock()
+            .expect("metadata WIP event lock")
+            .clear();
 
         let adopted = adopt().expect("resume metadata-only WIP isolation");
+        assert_eq!(
+            *super::METADATA_WIP_SYNC_EVENTS
+                .lock()
+                .expect("metadata WIP event lock"),
+            [
+                "sync-payload",
+                "sync-destination",
+                "sync-source",
+                "sync-quarantine",
+                "sync-metadata-parent",
+                "sync-scope-root",
+                "restore",
+                "sync-restored-payload",
+                "sync-restored-source",
+                "sync-restored-index",
+                "sync-restored-admin",
+                "sync-restored-admin-parent",
+                "clean",
+                "complete",
+            ]
+        );
 
         assert_eq!(adopted, worktree);
         assert_eq!(
@@ -18569,8 +18866,24 @@ mod tests {
         state.identity.base_oid = base.base_oid.clone();
         fs::remove_dir_all(&worktree.path).expect("simulate disappeared worktree");
 
+        super::WORKTREE_REPAIR_FAILPOINT.store(1, Ordering::SeqCst);
+        let interrupted = super::repair_missing_post_child_worktree(&state)
+            .expect_err("interrupt repair after durable prune");
+        assert!(interrupted.contains("injected executor worktree repair crash"));
+        let repair_intent = worktree
+            .path
+            .parent()
+            .expect("scope root")
+            .join("issue-42.repair-intent.json");
+        assert!(repair_intent.is_file());
+        assert!(
+            !git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"])
+                .contains(&format!("worktree {}", worktree.path.display()))
+        );
+
         assert!(super::repair_missing_post_child_worktree(&state)
             .expect("repair exact prunable worktree"));
+        assert!(!repair_intent.exists());
         assert!(worktree.path.is_dir());
         assert_eq!(
             git_stdout(&worktree.path, &["status", "--porcelain=v1"]),
@@ -18584,6 +18897,150 @@ mod tests {
         let worktree_path = worktree.path.to_str().expect("worktree path");
         git(&fixture.repo, &["worktree", "remove", worktree_path]);
         let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_entrypoint_retries_pruned_worktree_repair() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("entrypoint-pruned-worktree-repair");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "entrypoint_repair_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &base,
+            Some(("claim-42", "invocation-42")),
+        )
+        .expect("provision issue worktree");
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::ImplementationComplete;
+        state.identity.worktree = worktree.path.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let scope_root = worktree.path.parent().expect("scope root");
+        let state_path = scope_root.join("entrypoint-state.json");
+        super::write_invocation_atomic(&state_path, &state).expect("persist invocation");
+        fs::remove_dir_all(&worktree.path).expect("simulate disappeared worktree");
+        let config = fixture.root.join("empty-config");
+        fs::create_dir_all(&config).expect("empty config");
+        let previous_config = std::env::var_os("AUTOSPEC_CONFIG_DIR");
+        std::env::set_var("AUTOSPEC_CONFIG_DIR", &config);
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: fixture.repo.clone(),
+            issue: state.identity.issue,
+            issue_title: "Repair executor worktree".to_string(),
+            issue_body: "## Goal\n\nRepair the exact executor worktree.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: scope_root.join("events.jsonl"),
+        };
+
+        super::WORKTREE_REPAIR_FAILPOINT.store(1, Ordering::SeqCst);
+        let interrupted =
+            super::run_executor_bridge(&request).expect_err("interrupt entrypoint repair");
+        assert!(interrupted
+            .to_string()
+            .contains("injected executor worktree repair crash"));
+        let retry = super::run_executor_bridge(&request)
+            .expect_err("stop after entrypoint recovery at implementation proof");
+        assert!(
+            retry
+                .to_string()
+                .contains("implementation HEAD is unchanged"),
+            "{retry}"
+        );
+        assert!(worktree.path.is_dir());
+        assert!(!scope_root.join("issue-42.repair-intent.json").exists());
+
+        match previous_config {
+            Some(value) => std::env::set_var("AUTOSPEC_CONFIG_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_CONFIG_DIR"),
+        }
+        let worktree_path = worktree.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        let _ = fs::remove_dir_all(scope_root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_entrypoint_cleanup_ignores_missing_codex() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("entrypoint-cleanup-missing-codex");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "entrypoint_cleanup_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &base,
+            Some(("claim-42", "invocation-42")),
+        )
+        .expect("provision issue worktree");
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::CleanupPending;
+        state.identity.worktree = worktree.path.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        state.pr = Some(17);
+        state.head_oid = Some(git_stdout(&worktree.path, &["rev-parse", "HEAD"]));
+        state.terminal_result = Some("b".repeat(40));
+        let scope_root = worktree.path.parent().expect("scope root");
+        let state_path = scope_root.join("cleanup-state.json");
+        super::write_invocation_atomic(&state_path, &state).expect("persist cleanup invocation");
+        super::ensure_cleanup_record(
+            &super::cleanup_record_path(&state_path, "worktree-intent"),
+            &super::cleanup_binding(&state),
+            "test executor worktree cleanup intent",
+        )
+        .expect("persist worktree cleanup intent");
+        let worktree_path = worktree.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        let aliases = fixture.root.join("missing-codex-aliases.tsv");
+        fs::write(&aliases, "codex\t/definitely/missing/codex\t\tCodex CLI\n")
+            .expect("write missing Codex alias");
+        let previous_aliases = std::env::var_os("AUTOSPEC_HARNESS_RUNTIME_ALIASES");
+        std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &aliases);
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: fixture.repo.clone(),
+            issue: state.identity.issue,
+            issue_title: "Finish executor cleanup".to_string(),
+            issue_body: "## Goal\n\nFinish the durable executor cleanup.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: scope_root.join("cleanup-events.jsonl"),
+        };
+
+        let _ = super::run_executor_bridge(&request);
+        let durable = super::PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("read completed cleanup state"),
+        )
+        .expect("parse completed cleanup state");
+        assert_eq!(durable.phase, BridgePhase::Complete);
+        assert!(!worktree.path.exists());
+
+        match previous_aliases {
+            Some(value) => std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", value),
+            None => std::env::remove_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES"),
+        }
+        let _ = fs::remove_dir_all(scope_root);
     }
 
     #[test]
@@ -19705,6 +20162,24 @@ mod tests {
             "{error}"
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_cleanup_skips_failing_probe() {
+        let mut harness = super::ResolvedHarness {
+            kind: HarnessKind::Codex,
+            executable: PathBuf::from("/missing/codex"),
+            opencode_adapter: None,
+            codex_sandbox: super::CodexSandboxPolicy::Default,
+        };
+        let called = std::cell::Cell::new(false);
+        super::configure_codex_sandbox_for_phase(&mut harness, BridgePhase::CleanupPending, |_| {
+            called.set(true);
+            Err("probe must not run during cleanup".to_string())
+        })
+        .expect("cleanup phase must not depend on Codex sandbox probing");
+        assert!(!called.get());
+        assert_eq!(harness.codex_sandbox, super::CodexSandboxPolicy::Default);
     }
 
     #[test]
@@ -29357,7 +29832,7 @@ exit 19
     }
 
     #[test]
-    fn autonomous_executor_bridge_direct_children_have_no_remote_credentials() {
+    fn autonomous_executor_bridge_codex_sandbox_fallback_children_have_no_sensitive_credentials() {
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let fixture = GitFixture::new("credentialless-direct-child");
         let keys = [
@@ -29367,6 +29842,15 @@ exit 19
             "GITHUB_ENTERPRISE_TOKEN",
             "SSH_AUTH_SOCK",
             "GIT_ASKPASS",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "NPM_TOKEN",
+            "DATABASE_URL",
+            "INTERNAL_API_KEY",
+            "DOCKER_AUTH_CONFIG",
+            "KUBECONFIG",
+            "VAULT_TOKEN",
+            "OPENAI_API_KEY",
         ];
         let previous = keys
             .iter()
