@@ -97,11 +97,28 @@ supervisor remain observers; neither owns conductor restart or waterfall work.
 Executor state and terminal receipts are scoped to the exact claim generation.
 Active and pending phases are non-terminal. A restarted conductor first observes
 an exact live supervisor, then resumes from durable state after it exits; it
-never launches a duplicate harness for the same invocation. Retryable work keeps
-its private committed and uncommitted evidence and starts a new claim generation.
+never launches a duplicate harness for the same invocation. Recovery adopts a
+live claim only when a private local acquisition receipt matches its repository,
+issue, worker, branch, and claim ID exactly. Transient failures after a harness
+has started retry the same claim generation and durable invocation, while
+retryable terminal work keeps its private committed and uncommitted evidence and
+starts a new claim generation.
 Cleanup reuses the persisted runtime environment, session identity, and original
 manifest snapshot rather than deriving ownership from a manifest that may have
-changed. Success is recorded only after Rust observes the exact PR merged and
+changed. Failure finalization records a generation-bound cleanup intent before
+runtime teardown, so a crash resumes teardown instead of trying to reattach a
+released environment. On claim takeover, the old generation closes only its
+exact runtime and publishes worktree evidence under the per-issue lock; the
+successor adopts that evidence without deleting, resetting, or losing local WIP.
+Initial provisioning records the active claim generation under the same lock, so
+a successor cannot start in the interval before the predecessor becomes
+transferable. A failed claim-ref push whose authoritative ref remains unchanged
+is retried as transport failure, not reported as takeover.
+A schema-1 snapshot from an active pre-upgrade session is bound to the
+validated authoritative plan and treated as isolation-bypassed. Terminal results
+and ownership loss enter a durable retirement boundary before the acquisition
+receipt is cleared, so restart cannot replay retired authority. Success is
+recorded only after Rust observes the exact PR merged and
 confirms the terminal claim projection.
 
 The bare Rust `executor-result --repo OWNER/REPO --issue N` command remains the

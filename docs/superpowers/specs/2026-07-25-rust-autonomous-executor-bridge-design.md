@@ -121,7 +121,10 @@ when one exists.
 `pending` and active phases are non-terminal. State and terminal receipts are
 scoped to the exact claim generation. A restarted conductor adopts a
 clean matching worktree and resumes from the last independently proven
-boundary. A live child is observed rather than duplicated only when PID,
+boundary. It may adopt a live claim only when a private local acquisition
+receipt matches the authoritative repository, issue, worker, branch, and claim
+ID exactly; missing, foreign, malformed, symlinked, or non-private receipts fail
+closed. A live child is observed rather than duplicated only when PID,
 process-group, canonical executable, argv digest, and start/boot identity all
 match. Ambiguous or reused process identity is never signaled. A dead child
 returns to the last safe phase. Only an observed merged PR, explicit blocked
@@ -135,11 +138,39 @@ original context from that durable snapshot, so changing or removing the
 repository's current runtime manifest cannot redirect or strand owned
 resources.
 
+Active sessions created with the earlier schema-1 snapshot remain recoverable.
+Their private authoritative plan supplies the missing digest only after its own
+identity and integrity validation, and their missing bypass evidence is
+conservatively recovered as bypassed rather than verified isolation.
+
 During implementation, verification, CI wait, and review, the bridge
 periodically performs a compare-and-set refresh of the exact GitHub claim
 generation. It preserves worker, branch, claim ID, and claimed-at identity
 while advancing the remote updated-at heartbeat. A takeover or stale
 generation makes subsequent work inert and aborts every remote mutation.
+Transient GitHub reads retain a typed retryable classification at every phase.
+Once implementation has started, those retries resume the same durable
+invocation and exact claim generation rather than releasing ownership and
+launching another harness.
+
+Receipt retirement is ordered through the conductor state machine. Terminal
+completion and ownership loss first persist a dedicated retirement boundary,
+then clear and sync the acquisition receipt, and only then return to scanning.
+Restart at either side of the clear therefore resumes retirement instead of
+replaying the completed or superseded generation.
+
+Before failure teardown, the bridge publishes a claim-generation-bound cleanup
+intent. Restart consumes that intent before runtime reattachment. Claim takeover
+closes only the old exact runtime and records the worktree HEAD plus status
+digest while holding the per-issue worktree lock; the successor generation must
+atomically adopt that receipt and preserve the worktree, including uncommitted
+WIP. Initial provisioning records the active generation under the same lock,
+closing the predecessor-finalization race. A failed claim mutation is ownership
+loss only when its authoritative reread shows a different generation; unchanged
+authority remains a typed transient. Terminal observation uses the same rule.
+Pre-receipt dispatch state migrates only from one exact private invocation
+or terminal receipt matching the authoritative lease. With no such proof, the
+conductor enters ownership retirement instead of guessing.
 
 The current fixed `.autospec/executor-result.json` adapter remains available as
 a compatibility ingestion path, but it is no longer the default producer.

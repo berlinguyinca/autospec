@@ -137,12 +137,28 @@ mutation.
 Bridge state is claim-generation scoped. A pending or active invocation remains non-terminal.
 After a conductor restart, exact process identity permits observation of the existing supervisor
 without launching a second harness; after process exit, the next run resumes from the last
-durable phase. Runtime cleanup uses the invocation's persisted environment, session, and original
-manifest snapshot even if the repository manifest later changes. A retry preserves recoverable
-committed or uncommitted work, advances it onto a changed base without force after it becomes
-clean, and starts a fresh claim generation. Only an observed merged pull request, explicit
-blocked result, or exhausted retry can become terminal, and no terminal result may retain
-`in-progress-by-bot`.
+durable phase. A private local acquisition receipt must match the authoritative repository,
+issue, worker, branch, and claim ID before a restarted conductor adopts a live claim. Runtime
+cleanup uses the invocation's persisted environment, session, and original manifest snapshot
+even if the repository manifest later changes. Schema-1 snapshots from a pre-upgrade active
+session reattach against the validated authoritative plan and are conservatively reported as
+isolation-bypassed. Before clearing the acquisition receipt, the conductor persists an explicit
+terminal- or ownership-retirement boundary so a crash cannot replay completed or lost work.
+Transient GitHub reads after implementation retry the same claim generation and durable
+invocation; a retryable terminal result preserves
+recoverable committed or uncommitted work, advances it onto a changed base without force after
+it becomes clean, and starts a fresh claim generation. Only an observed merged pull request,
+explicit blocked result, or exhausted retry can become terminal, and no terminal result may
+retain `in-progress-by-bot`.
+
+Failure cleanup intent is persisted before runtime teardown. Ownership takeover closes only the
+old exact runtime, records the worktree HEAD and status digest under the per-issue lock, and lets
+the successor generation adopt the unchanged worktree. A pre-upgrade dispatch without a local
+acquisition receipt is migrated only when an exact private invocation or terminal receipt proves
+the authoritative claim; otherwise the conductor durably retires the stale ownership.
+Terminal claim/label observation outages retain their transient classification and replay the
+same completed invocation; an unchanged authoritative claim ref after a failed push does not
+retire ownership.
 
 The fixed `.autospec/executor-result.json` ingestion and bare
 `executor-result --repo OWNER/REPO --issue N` deferred receipt remain compatibility inputs, but
