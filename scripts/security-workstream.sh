@@ -96,7 +96,20 @@ def approved_unsafe_boundary(relative_path, source, match):
     """Allow only independently reviewed unsafe boundaries with invariant proof."""
     code = rust_code_only(source)
     function_matches = list(re.finditer(r"\bfn\s+([A-Za-z0-9_]+)\s*\(", source[:match.start()]))
-    function_name = function_matches[-1].group(1) if function_matches else ""
+    function_match = function_matches[-1] if function_matches else None
+    function_name = function_match.group(1) if function_match else ""
+    function_end = None
+    if function_match:
+        function_open = code.find("{", function_match.end())
+        function_depth = 0
+        for index in range(function_open, len(code)):
+            if code[index] == "{":
+                function_depth += 1
+            elif code[index] == "}":
+                function_depth -= 1
+                if function_depth == 0:
+                    function_end = index + 1
+                    break
     open_brace = code.find("{", match.start())
     depth = 0
     end = None
@@ -116,8 +129,12 @@ def approved_unsafe_boundary(relative_path, source, match):
         ("crates/autospec-cli/src/commands/runtime/env/session.rs", "verify_active"): "unsafe { nix::libc::geteuid() }",
     }
     expected_body = reviewed.get((relative_path, function_name))
-    normalized_code = " ".join(code.split())
-    if body == expected_body and normalized_code.count(expected_body) == 1:
+    normalized_function = (
+        " ".join(code[function_match.start():function_end].split())
+        if function_match and function_end and match.start() < function_end
+        else ""
+    )
+    if body == expected_body and normalized_function.count(expected_body) == 1:
         return True
     if relative_path != RUNTIME_SIGNAL_FFI_PATH:
         return False
