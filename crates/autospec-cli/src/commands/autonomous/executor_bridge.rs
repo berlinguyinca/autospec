@@ -86,6 +86,13 @@ static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static BASE_DRIFT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static RUNTIME_CLOSE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static METADATA_WIP_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static METADATA_WIP_SYNC_EVENTS: std::sync::Mutex<Vec<&'static str>> =
+    std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+static WORKTREE_REPAIR_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BridgeRunStatus {
@@ -587,6 +594,13 @@ pub(crate) fn legacy_bridge_proves_claim(
 pub(crate) fn run_executor_bridge(
     request: &ExecutorBridgeRequest,
 ) -> Result<BridgeRunReceipt, BridgeRunFailure> {
+    run_executor_bridge_with_codex_probe(request, preflight_codex_sandbox)
+}
+
+fn run_executor_bridge_with_codex_probe(
+    request: &ExecutorBridgeRequest,
+    codex_probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,
+) -> Result<BridgeRunReceipt, BridgeRunFailure> {
     let terminal_path = request.state_path.with_extension("terminal.json");
     if terminal_path.is_file() {
         validate_private_state_file(&terminal_path)?;
@@ -614,6 +628,7 @@ pub(crate) fn run_executor_bridge(
     let canonical_branch = format!("feat/autonomous-issue-{}", request.issue);
     let recovered = load_invocation_for_request(request, &repository_path, &canonical_branch)?;
     if let Some(recovered) = recovered.as_ref() {
+        repair_missing_post_child_worktree(recovered)?;
         if recovered.phase == BridgePhase::Complete {
             return publish_complete_receipt(request, recovered, &terminal_path);
         }
@@ -714,16 +729,21 @@ pub(crate) fn run_executor_bridge(
         };
         (state, runtime)
     };
-    let harness_config = HarnessConfig::load(&state.identity.repository_path, &environment)?;
-    let resolved_harness = harness_config.resolve(&environment)?;
+    let mut codex_probe = Some(codex_probe);
+    let mut resolved_harness = None;
     if !request.state_path.exists() {
-        state.harness = resolved_harness.kind;
+        let harness_config = HarnessConfig::load(&state.identity.repository_path, &environment)?;
+        let mut resolved = harness_config.resolve(&environment)?;
+        configure_codex_sandbox_for_phase(
+            &mut resolved,
+            state.phase,
+            codex_probe
+                .take()
+                .expect("Codex preflight probe is consumed at most once"),
+        )?;
+        state.harness = resolved.kind;
         write_invocation_atomic(&request.state_path, &state)?;
-    }
-    if state.harness != resolved_harness.kind {
-        return Err("executor recovered invocation changed harness kind"
-            .to_string()
-            .into());
+        resolved_harness = Some(resolved);
     }
     if state.phase == BridgePhase::CleanupPending {
         finalize_merged_executor(&request.state_path, &mut state, runtime.take())?;
@@ -750,6 +770,67 @@ pub(crate) fn run_executor_bridge(
         &request.issue_body,
         &closeout_path,
     )?;
+    let launch_phase = matches!(
+        state.phase,
+        BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
+    );
+    if resolved_harness.is_none()
+        && launch_phase
+        && has_durable_harness_recovery_evidence(&request.state_path, &state)?
+    {
+        match supervise_recovered_harness_in_runtime(
+            &request.state_path,
+            &request.event_log,
+            &mut state,
+            &protected,
+            SupervisionConfig::default(),
+            runtime.as_ref().map(RuntimeSessionAdapter::direct),
+        )? {
+            SupervisionOutcome::AlreadyRunning => return Ok(pending_bridge_receipt(request)?),
+            SupervisionOutcome::Exited { exit_code: 0 } => {}
+            SupervisionOutcome::Exited { exit_code } => {
+                return finalize_bridge_failure(
+                    request,
+                    &mut state,
+                    runtime.take(),
+                    &remote,
+                    &format!("executor_harness_exit_{exit_code}"),
+                )
+            }
+            SupervisionOutcome::Stalled => {
+                return finalize_bridge_failure(
+                    request,
+                    &mut state,
+                    runtime.take(),
+                    &remote,
+                    "executor_harness_stalled",
+                )
+            }
+            SupervisionOutcome::OwnershipLost => {
+                return Err(BridgeRunFailure::ownership_lost(
+                    "executor bridge lost exact claim ownership",
+                ))
+            }
+            SupervisionOutcome::TransientFailure(error) => return Err(error),
+        }
+    }
+    if launch_phase && resolved_harness.is_none() {
+        let harness_config = HarnessConfig::load(&state.identity.repository_path, &environment)?;
+        let mut resolved = harness_config.resolve(&environment)?;
+        configure_codex_sandbox_for_phase(
+            &mut resolved,
+            state.phase,
+            codex_probe
+                .take()
+                .expect("Codex preflight probe is consumed at most once"),
+        )?;
+        if state.harness != resolved.kind && request.state_path.exists() {
+            return Err("executor recovered invocation changed harness kind"
+                .to_string()
+                .into());
+        }
+        resolved_harness = Some(resolved);
+    }
     if matches!(
         state.phase,
         BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
@@ -759,7 +840,9 @@ pub(crate) fn run_executor_bridge(
             &request.event_log,
             &mut state,
             HarnessLaunch {
-                resolved: &resolved_harness,
+                resolved: resolved_harness
+                    .as_ref()
+                    .ok_or_else(|| "executor launch phase has no resolved harness".to_string())?,
                 artifact: &closeout_path,
                 prompt: &prompt,
             },
@@ -6170,6 +6253,121 @@ pub(crate) struct ResolvedHarness {
     pub(crate) kind: HarnessKind,
     pub(crate) executable: PathBuf,
     opencode_adapter: Option<PathBuf>,
+    codex_sandbox: CodexSandboxPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CodexSandboxPolicy {
+    Default,
+    NetworkPermissionProfile,
+}
+
+const CODEX_NETWORK_PERMISSION_PROFILE: &str = "autospec-network-executor";
+
+impl CodexSandboxPolicy {
+    fn invocation_args(self, codex: &Path) -> Result<Vec<String>, String> {
+        match self {
+            Self::Default => Ok(Vec::new()),
+            Self::NetworkPermissionProfile => {
+                let mut args = vec!["--ignore-user-config".into()];
+                args.extend(self.permission_profile_args(codex)?);
+                Ok(args)
+            }
+        }
+    }
+
+    fn permission_profile_args(self, codex: &Path) -> Result<Vec<String>, String> {
+        match self {
+            Self::Default => Ok(Vec::new()),
+            Self::NetworkPermissionProfile => {
+                let codex = codex
+                    .to_str()
+                    .ok_or_else(|| "validated Codex executable path must be UTF-8".to_string())?;
+                let codex = codex.replace('\\', "\\\\").replace('"', "\\\"");
+                let mut filesystem = format!(
+                    "permissions.{CODEX_NETWORK_PERMISSION_PROFILE}.filesystem={{\
+                     \":minimal\"=\"read\",\
+                     \":workspace_roots\"={{\".\"=\"write\"}},\
+                     \"{codex}\"=\"read\",\
+                     \"~/.aws\"=\"deny\",\
+                     \"~/.azure\"=\"deny\",\
+                     \"~/.cargo/credentials\"=\"deny\",\
+                     \"~/.cargo/credentials.toml\"=\"deny\",\
+                     \"~/.codex/archived_sessions\"=\"deny\",\
+                     \"~/.codex/auth.json\"=\"deny\",\
+                     \"~/.codex/config.toml\"=\"deny\",\
+                     \"~/.codex/history.jsonl\"=\"deny\",\
+                     \"~/.codex/sessions\"=\"deny\",\
+                     \"~/.codex/shell_snapshots\"=\"deny\",\
+                     \"~/.config/containers\"=\"deny\",\
+                     \"~/.config/gcloud\"=\"deny\",\
+                     \"~/.config/gh\"=\"deny\",\
+                     \"~/.config/pip\"=\"deny\",\
+                     \"~/.docker\"=\"deny\",\
+                     \"~/.git-credentials\"=\"deny\",\
+                     \"~/.gnupg\"=\"deny\",\
+                     \"~/.gradle\"=\"deny\",\
+                     \"~/.kube\"=\"deny\",\
+                     \"~/.m2\"=\"deny\",\
+                     \"~/.netrc\"=\"deny\",\
+                     \"~/.npmrc\"=\"deny\",\
+                     \"~/.pypirc\"=\"deny\",\
+                     \"~/.ssh\"=\"deny\",\
+                     \"~/.terraform.d\"=\"deny\",\
+                     \"~/.vault-token\"=\"deny\""
+                );
+                if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
+                    let codex_home = PathBuf::from(codex_home);
+                    if !codex_home.is_absolute() {
+                        return Err(
+                            "CODEX_HOME must be absolute for executor credential isolation"
+                                .to_string(),
+                        );
+                    }
+                    let default_codex_home =
+                        std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex"));
+                    if default_codex_home.as_ref() != Some(&codex_home) {
+                        for sensitive_path in [
+                            "archived_sessions",
+                            "auth.json",
+                            "config.toml",
+                            "history.jsonl",
+                            "sessions",
+                            "shell_snapshots",
+                        ] {
+                            let sensitive_path = codex_home.join(sensitive_path);
+                            let sensitive_path = sensitive_path.to_str().ok_or_else(|| {
+                                "CODEX_HOME must be UTF-8 for executor credential isolation"
+                                    .to_string()
+                            })?;
+                            let sensitive_path =
+                                sensitive_path.replace('\\', "\\\\").replace('"', "\\\"");
+                            filesystem.push_str(&format!(",\"{sensitive_path}\"=\"deny\""));
+                        }
+                    }
+                }
+                filesystem.push('}');
+                Ok(vec![
+                    "-c".into(),
+                    format!(
+                        "default_permissions=\"{CODEX_NETWORK_PERMISSION_PROFILE}\""
+                    ),
+                    "-c".into(),
+                    filesystem,
+                    "-c".into(),
+                    format!(
+                        "permissions.{CODEX_NETWORK_PERMISSION_PROFILE}.network.enabled=true"
+                    ),
+                    "-c".into(),
+                    "shell_environment_policy.inherit=\"all\"".into(),
+                    "-c".into(),
+                    "shell_environment_policy.ignore_default_excludes=false".into(),
+                    "-c".into(),
+                    "shell_environment_policy.exclude=[\"AWS_*\",\"AZURE_*\",\"CODEX_API_KEY\",\"DOCKER_*\",\"GH_*\",\"GITHUB_*\",\"GOOGLE_*\",\"KUBE*\",\"NPM_*\",\"OPENAI_API_KEY\",\"SSH_*\",\"VAULT_*\",\"*TOKEN*\",\"*SECRET*\",\"*PASSWORD*\",\"*API_KEY*\",\"*CREDENTIAL*\"]".into(),
+                ])
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6267,6 +6465,7 @@ impl HarnessConfig {
             kind: requested,
             executable: safe_executable(Path::new(&alias.binary), env)?,
             opencode_adapter: self.opencode_adapter.clone(),
+            codex_sandbox: CodexSandboxPolicy::Default,
         })
     }
 }
@@ -6279,21 +6478,21 @@ impl ResolvedHarness {
         prompt: &str,
     ) -> Result<HarnessInvocation, String> {
         let (program, args, requires_mutation_snapshots) = match self.kind {
-            HarnessKind::Codex => (
-                self.executable.clone(),
-                vec![
-                    "exec".into(),
-                    "-C".into(),
-                    worktree.display().to_string(),
-                    "--sandbox".into(),
-                    "workspace-write".into(),
+            HarnessKind::Codex => {
+                let mut args = vec!["exec".into(), "-C".into(), worktree.display().to_string()];
+                if self.codex_sandbox == CodexSandboxPolicy::Default {
+                    args.extend(["--sandbox".into(), "workspace-write".into()]);
+                } else {
+                    args.extend(self.codex_sandbox.invocation_args(&self.executable)?);
+                }
+                args.extend([
                     "--ephemeral".into(),
                     "--output-last-message".into(),
                     artifact.display().to_string(),
                     prompt.into(),
-                ],
-                false,
-            ),
+                ]);
+                (self.executable.clone(), args, false)
+            }
             HarnessKind::Claude => (
                 self.executable.clone(),
                 vec![
@@ -6344,6 +6543,73 @@ impl ResolvedHarness {
             requires_mutation_snapshots,
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+const CODEX_BWRAP_LOOPBACK_FAILURE: &str =
+    "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted";
+
+#[cfg(target_os = "linux")]
+const CODEX_BWRAP_UID_MAP_FAILURES: [&str; 2] = [
+    "bwrap: setting up uid map: Permission denied",
+    "bwrap: setting up uid map: Operation not permitted",
+];
+
+#[cfg(target_os = "linux")]
+fn preflight_codex_sandbox(codex: &Path) -> Result<CodexSandboxPolicy, String> {
+    let policy = CodexSandboxPolicy::NetworkPermissionProfile;
+    let worktree = std::env::current_dir()
+        .map_err(|error| format!("resolve Codex sandbox probe worktree: {error}"))?;
+    let profile_args = policy.permission_profile_args(codex)?;
+    let output = Command::new(codex)
+        .arg("sandbox")
+        .arg("-C")
+        .arg(&worktree)
+        .arg("-P")
+        .arg(CODEX_NETWORK_PERMISSION_PROFILE)
+        .args(profile_args)
+        .args(["--", "/bin/true"])
+        .output()
+        .map_err(|error| {
+            format!("executor_codex_sandbox_unavailable: cannot run Codex sandbox probe: {error}")
+        })?;
+    if output.status.success() {
+        return Ok(policy);
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    let host_setup_failure = stderr.lines().map(str::trim).find(|line| {
+        *line == CODEX_BWRAP_LOOPBACK_FAILURE || CODEX_BWRAP_UID_MAP_FAILURES.contains(line)
+    });
+    if let Some(host_setup_failure) = host_setup_failure {
+        return Err(format!(
+            "executor_codex_sandbox_host_setup_required: {host_setup_failure}; install the supported bwrap AppArmor profile tracked by installer issue #2619 (https://github.com/berlinguyinca/autospec/issues/2619)"
+        ));
+    }
+    Err(format!(
+        "executor_codex_sandbox_unavailable: Codex permission-profile probe failed: {stderr}",
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn preflight_codex_sandbox(_codex: &Path) -> Result<CodexSandboxPolicy, String> {
+    Ok(CodexSandboxPolicy::Default)
+}
+
+fn configure_codex_sandbox_for_phase(
+    harness: &mut ResolvedHarness,
+    phase: BridgePhase,
+    probe: impl FnOnce(&Path) -> Result<CodexSandboxPolicy, String>,
+) -> Result<(), String> {
+    if harness.kind == HarnessKind::Codex
+        && matches!(
+            phase,
+            BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
+        )
+    {
+        harness.codex_sandbox = probe(&harness.executable)?;
+    }
+    Ok(())
 }
 
 fn safe_executable(path: &Path, env: &BTreeMap<String, OsString>) -> Result<PathBuf, String> {
@@ -12891,6 +13157,31 @@ pub(crate) fn supervise_resolved_harness(
     )
 }
 
+fn has_durable_harness_recovery_evidence(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    if state.supervisor.is_some() || state.process.is_some() {
+        return Ok(true);
+    }
+    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    if sinks
+        .supervisor_identity
+        .try_exists()
+        .map_err(|error| format!("inspect executor recovery evidence: {error}"))?
+    {
+        return Ok(true);
+    }
+    if !sinks
+        .exit_status
+        .try_exists()
+        .map_err(|error| format!("inspect executor recovery evidence: {error}"))?
+    {
+        return Ok(false);
+    }
+    Ok(read_executor_exit_status(&sinks.exit_status)?.is_some())
+}
+
 fn supervise_resolved_harness_in_runtime(
     state_path: &Path,
     event_log: &Path,
@@ -12922,7 +13213,38 @@ fn supervise_resolved_harness_in_runtime(
         state_path,
         event_log,
         state,
-        &validated,
+        Some(&validated),
+        snapshot,
+        config,
+        ClaimRenewalSchedule::Pending,
+    )
+}
+
+fn supervise_recovered_harness_in_runtime(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    snapshot: &MutationSnapshot,
+    config: SupervisionConfig,
+    runtime: Option<&DirectRuntimeAdapter>,
+) -> Result<SupervisionOutcome, String> {
+    validate_launch_worktree(state)?;
+    if let Some(runtime) = runtime {
+        let expected_session_id =
+            state
+                .identity
+                .runtime_session_id
+                .as_deref()
+                .ok_or_else(|| {
+                    "executor invocation runtime is not bound to bridge state".to_string()
+                })?;
+        runtime.verify_active(expected_session_id)?;
+    }
+    supervise_validated_harness_with_claim_renewal(
+        state_path,
+        event_log,
+        state,
+        None,
         snapshot,
         config,
         ClaimRenewalSchedule::Pending,
@@ -13022,7 +13344,7 @@ fn supervise_harness(
         state_path,
         event_log,
         state,
-        &validated,
+        Some(&validated),
         snapshot,
         config,
         ClaimRenewalSchedule::Disabled,
@@ -13051,7 +13373,7 @@ fn supervise_harness_with_claim_renewal(
         state_path,
         event_log,
         state,
-        &validated,
+        Some(&validated),
         snapshot,
         config,
         ClaimRenewalSchedule::enabled(interval)?,
@@ -13071,7 +13393,7 @@ fn supervise_validated_harness(
         state_path,
         event_log,
         state,
-        harness,
+        Some(harness),
         snapshot,
         config,
         ClaimRenewalSchedule::Disabled,
@@ -13131,7 +13453,7 @@ fn supervise_validated_harness_with_claim_renewal(
     state_path: &Path,
     event_log: &Path,
     state: &mut PersistedInvocation,
-    harness: &ValidatedInvocation,
+    harness: Option<&ValidatedInvocation>,
     snapshot: &MutationSnapshot,
     config: SupervisionConfig,
     mut renewal: ClaimRenewalSchedule,
@@ -13484,7 +13806,10 @@ fn supervise_validated_harness_with_claim_renewal(
         state_path,
         event_log,
         state,
-        harness,
+        harness.ok_or_else(|| {
+            "executor recovery exhausted durable identities before fresh harness resolution"
+                .to_string()
+        })?,
         snapshot,
         SupervisionPolicy { config, renewal },
     )
@@ -14805,31 +15130,20 @@ fn spawn_blocked_harness(
     }
     let worktree = CString::new(harness.current_dir.as_os_str().as_bytes())
         .map_err(|_| "executor worktree contains a NUL byte".to_string())?;
-    let forbidden = [
-        "GH_TOKEN",
-        "GH_ENTERPRISE_TOKEN",
-        "GITHUB_TOKEN",
-        "GITHUB_ENTERPRISE_TOKEN",
-        "GITHUB_PAT",
-        "GLAB_TOKEN",
-        "GIT_ASKPASS",
-        "GIT_SSH",
-        "GIT_SSH_COMMAND",
-        "GIT_CREDENTIAL_HELPER",
-        "SSH_ASKPASS",
-        "SSH_AUTH_SOCK",
-    ];
+    let preserve_codex_host_auth = harness.args.first().is_some_and(|arg| arg == "exec")
+        && harness
+            .args
+            .iter()
+            .any(|arg| arg == "--output-last-message");
     let mut environment_values = std::env::vars_os()
         .filter(|(key, _)| {
-            !forbidden.iter().any(|forbidden| key == forbidden)
-                && !key.to_string_lossy().starts_with("GIT_CONFIG_")
+            (!sensitive_executor_environment_key(key)
+                || (preserve_codex_host_auth && codex_host_auth_environment_key(key)))
                 && key != "COMPOSE_PROJECT_NAME"
         })
         .collect::<BTreeMap<_, _>>();
     for (key, value) in &harness.environment_overrides {
-        if forbidden.iter().any(|forbidden| key == forbidden)
-            || key.to_string_lossy().starts_with("GIT_CONFIG_")
-        {
+        if sensitive_executor_environment_key(key) {
             return Err(format!(
                 "executor harness override may not restore credential authority: {}",
                 key.to_string_lossy()
@@ -16865,6 +17179,60 @@ fn fetch_and_resolve_base(
     })
 }
 
+fn sensitive_executor_environment_key(key: &std::ffi::OsStr) -> bool {
+    let key = key.to_string_lossy().to_ascii_uppercase();
+    let credential_markers = [
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "API_KEY",
+        "APIKEY",
+        "ACCESS_KEY",
+        "PRIVATE_KEY",
+        "CREDENTIAL",
+    ];
+    let provider_prefixes = [
+        "AWS_",
+        "AZURE_",
+        "GOOGLE_",
+        "GCLOUD_",
+        "NPM_",
+        "YARN_",
+        "DOCKER_",
+        "KUBE",
+        "VAULT_",
+        "TF_TOKEN_",
+        "CARGO_REGISTRIES_",
+        "TWINE_",
+    ];
+    credential_markers.iter().any(|marker| key.contains(marker))
+        || provider_prefixes
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+        || matches!(
+            key.as_str(),
+            "DATABASE_URL"
+                | "PGPASSWORD"
+                | "MYSQL_PWD"
+                | "PIP_INDEX_URL"
+                | "PIP_EXTRA_INDEX_URL"
+                | "GIT_ASKPASS"
+                | "GIT_SSH"
+                | "GIT_SSH_COMMAND"
+                | "SSH_ASKPASS"
+                | "SSH_AUTH_SOCK"
+        )
+        || key.starts_with("GIT_CONFIG_")
+}
+
+fn codex_host_auth_environment_key(key: &std::ffi::OsStr) -> bool {
+    matches!(
+        key.to_string_lossy().to_ascii_uppercase().as_str(),
+        "CODEX_API_KEY" | "OPENAI_API_KEY"
+    )
+}
+
 fn validate_branch(branch: &str) -> Result<(), String> {
     if branch.trim() != branch || branch.is_empty() || branch.starts_with('-') {
         return Err(format!("invalid executor base branch: {branch}"));
@@ -16947,6 +17315,9 @@ fn provision_issue_worktree_for_claim(
             claim_id,
             invocation_id,
         )?;
+        if existing {
+            isolate_adopted_metadata_wip(&path, &scope_root, issue, claim_id, invocation_id)?;
+        }
     }
     if existing {
         reconcile_preserved_worktree_base(&canonical_repo, &path, &branch, &scope_root, base)?;
@@ -16957,6 +17328,434 @@ fn provision_issue_worktree_for_claim(
         base_ref: base.base_ref.clone(),
         base_oid: base.base_oid.clone(),
     })
+}
+
+fn repair_missing_post_child_worktree(state: &PersistedInvocation) -> Result<bool, String> {
+    let scope_root = state
+        .identity
+        .worktree
+        .parent()
+        .ok_or_else(|| "executor missing worktree has no private scope root".to_string())?;
+    let intent_path = scope_root.join(format!("issue-{}.repair-intent.json", state.identity.issue));
+    if state.identity.worktree.exists() && !intent_path.exists() {
+        return Ok(false);
+    }
+    if state.phase != BridgePhase::ImplementationComplete {
+        return if intent_path.exists() {
+            Err(
+                "executor worktree repair intent is incompatible with the durable phase"
+                    .to_string(),
+            )
+        } else {
+            Ok(false)
+        };
+    }
+    let repo = fs::canonicalize(&state.identity.repository_path)
+        .map_err(|error| format!("canonicalize executor recovery repository: {error}"))?;
+    validate_executor_ownership(&repo, &[scope_root])?;
+    reject_symlink_path(&state.identity.worktree)?;
+    let branch_ref = format!("refs/heads/{}", state.identity.branch);
+    let head = git_stdout(
+        &repo,
+        &["rev-parse", "--verify", &format!("{branch_ref}^{{commit}}")],
+    )?;
+    if git(
+        &repo,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &state.identity.base_oid,
+            &head,
+        ],
+    )
+    .is_err()
+    {
+        return Err("executor missing worktree branch does not descend from its base".to_string());
+    }
+    let intent = format!(
+        "{}\n",
+        serde_json::json!({
+            "schema": 1,
+            "repository_path": repo,
+            "worktree": state.identity.worktree,
+            "branch": state.identity.branch,
+            "base_oid": state.identity.base_oid,
+            "head_oid": head,
+        })
+    );
+    if intent_path.exists() {
+        write_private_create_once(
+            &intent_path,
+            intent.as_bytes(),
+            "executor worktree repair intent",
+        )?;
+    }
+    if state.identity.worktree.exists() {
+        validate_repaired_worktree(state, &repo, scope_root)?;
+        clear_worktree_repair_intent(&intent_path, scope_root)?;
+        return Ok(true);
+    }
+
+    let registry = git_stdout(&repo, &["worktree", "list", "--porcelain"])?;
+    let prunable = registry
+        .split("\n\n")
+        .filter(|block| {
+            block
+                .lines()
+                .any(|line| line == "prunable gitdir file points to non-existent location")
+        })
+        .collect::<Vec<_>>();
+    let expected = format!("worktree {}", state.identity.worktree.display());
+    let expected_prunable = prunable
+        .iter()
+        .any(|block| block.lines().any(|line| line == expected));
+    if !intent_path.exists() {
+        if prunable.len() != 1 || !expected_prunable {
+            return Err(
+                "executor missing worktree is not the one exact prunable registration".to_string(),
+            );
+        }
+        write_private_create_once(
+            &intent_path,
+            intent.as_bytes(),
+            "executor worktree repair intent",
+        )?;
+    } else if !expected_prunable {
+        let expected_branch = format!("branch {branch_ref}");
+        if registry.split("\n\n").any(|block| {
+            block.lines().any(|line| line == expected)
+                || block.lines().any(|line| line == expected_branch)
+        }) {
+            return Err(
+                "executor worktree repair intent conflicts with a live registration".to_string(),
+            );
+        }
+    }
+    if expected_prunable {
+        if prunable.len() != 1 {
+            return Err(
+                "executor worktree repair cannot prune ambiguous registrations".to_string(),
+            );
+        }
+        git(&repo, &["worktree", "prune", "--expire", "now"])?;
+    }
+    #[cfg(test)]
+    if WORKTREE_REPAIR_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+        return Err("injected executor worktree repair crash after prune".to_string());
+    }
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            state
+                .identity
+                .worktree
+                .to_str()
+                .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
+            &state.identity.branch,
+        ],
+    )?;
+    validate_repaired_worktree(state, &repo, scope_root)?;
+    clear_worktree_repair_intent(&intent_path, scope_root)?;
+    Ok(true)
+}
+
+fn validate_repaired_worktree(
+    state: &PersistedInvocation,
+    repo: &Path,
+    scope_root: &Path,
+) -> Result<(), String> {
+    validate_existing_worktree(
+        repo,
+        &state.identity.worktree,
+        &state.identity.branch,
+        scope_root,
+        &ResolvedBase {
+            base_ref: state.identity.base_ref.clone(),
+            base_oid: state.identity.base_oid.clone(),
+            explore_mode: false,
+        },
+    )?;
+    if !git_bytes(
+        &state.identity.worktree,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?
+    .is_empty()
+    {
+        return Err("repaired executor worktree is not clean".to_string());
+    }
+    Ok(())
+}
+
+fn clear_worktree_repair_intent(path: &Path, parent: &Path) -> Result<(), String> {
+    fs::remove_file(path)
+        .map_err(|error| format!("clear executor worktree repair intent: {error}"))?;
+    #[cfg(unix)]
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync cleared executor worktree repair intent: {error}"))?;
+    Ok(())
+}
+
+fn metadata_wip_quarantine_path(scope_root: &Path, issue: u64, claim_id: &str) -> PathBuf {
+    scope_root.join("metadata-wip").join(format!(
+        "issue-{issue}-{}",
+        &sha256_hex(claim_id.as_bytes())[..16]
+    ))
+}
+
+fn isolate_adopted_metadata_wip(
+    worktree: &Path,
+    scope_root: &Path,
+    issue: u64,
+    claim_id: &str,
+    invocation_id: &str,
+) -> Result<(), String> {
+    let quarantine = metadata_wip_quarantine_path(scope_root, issue, claim_id);
+    let manifest = serde_json::json!({
+        "schema": 1,
+        "issue": issue,
+        "claim_id": claim_id,
+        "invocation_id": invocation_id,
+    })
+    .to_string();
+    let manifest = format!("{manifest}\n");
+    if quarantine.join("manifest.json").exists() {
+        write_private_create_once(
+            &quarantine.join("manifest.json"),
+            manifest.as_bytes(),
+            "executor metadata WIP manifest",
+        )?;
+        return resume_metadata_wip_isolation(worktree, &quarantine);
+    }
+
+    let status = git_bytes(
+        worktree,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    let dirty = dirty_path_identities(worktree, &status)?;
+    let tracked_metadata = git_stdout(worktree, &["ls-files", "--", ".gitignore", ".omx"])?;
+    let untracked_omx = worktree.join(".omx").exists()
+        && !tracked_metadata
+            .lines()
+            .any(|path| path == ".omx" || path.starts_with(".omx/"));
+    let metadata_only = dirty
+        .keys()
+        .all(|path| path == Path::new(".gitignore") || path.starts_with(Path::new(".omx")));
+    if !metadata_only || (dirty.is_empty() && !untracked_omx) {
+        return Ok(());
+    }
+
+    ensure_private_directory(&quarantine)?;
+    write_private_create_once(
+        &quarantine.join("manifest.json"),
+        manifest.as_bytes(),
+        "executor metadata WIP manifest",
+    )?;
+    write_private_create_once(
+        &quarantine.join("status.porcelain"),
+        &status,
+        "executor metadata WIP status",
+    )?;
+    let patch = git_bytes(
+        worktree,
+        &["diff", "--binary", "HEAD", "--", ".gitignore", ".omx"],
+    )?;
+    write_private_create_once(
+        &quarantine.join("tracked.patch"),
+        &patch,
+        "executor metadata WIP patch",
+    )?;
+    resume_metadata_wip_isolation(worktree, &quarantine)
+}
+
+#[cfg(test)]
+fn record_metadata_wip_sync_event(event: &'static str) {
+    METADATA_WIP_SYNC_EVENTS
+        .lock()
+        .expect("metadata WIP event lock")
+        .push(event);
+}
+
+#[cfg(not(test))]
+fn record_metadata_wip_sync_event(_event: &'static str) {}
+
+fn sync_metadata_wip_payload(path: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|error| format!("inspect quarantined metadata {}: {error}", path.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    if metadata.is_file() {
+        return File::open(path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("sync quarantined metadata {}: {error}", path.display()));
+    }
+    if !metadata.is_dir() {
+        return Err(format!(
+            "quarantined metadata has unsupported type: {}",
+            path.display()
+        ));
+    }
+    for entry in fs::read_dir(path)
+        .map_err(|error| format!("read quarantined metadata {}: {error}", path.display()))?
+    {
+        let entry = entry
+            .map_err(|error| format!("read quarantined metadata {}: {error}", path.display()))?;
+        sync_metadata_wip_payload(&entry.path())?;
+    }
+    sync_metadata_wip_directory(path, "payload directory", None)
+}
+
+fn sync_metadata_wip_directory(
+    path: &Path,
+    label: &str,
+    event: Option<&'static str>,
+) -> Result<(), String> {
+    #[cfg(unix)]
+    File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync executor metadata WIP {label}: {error}"))?;
+    if let Some(event) = event {
+        record_metadata_wip_sync_event(event);
+    }
+    Ok(())
+}
+
+fn resume_metadata_wip_isolation(worktree: &Path, quarantine: &Path) -> Result<(), String> {
+    if quarantine.join("complete").exists() {
+        validate_private_state_file(&quarantine.join("complete"))?;
+        return if git_bytes(
+            worktree,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?
+        .is_empty()
+        {
+            Ok(())
+        } else {
+            Err("completed executor metadata WIP isolation is no longer clean".to_string())
+        };
+    }
+    let saved = quarantine.join("worktree");
+    ensure_private_directory(&saved)?;
+    for relative in [Path::new(".gitignore"), Path::new(".omx")] {
+        let source = worktree.join(relative);
+        let destination = saved.join(relative);
+        if fs::symlink_metadata(&source).is_ok() && fs::symlink_metadata(&destination).is_err() {
+            if let Some(parent) = destination.parent() {
+                ensure_private_directory(parent)?;
+            }
+            fs::rename(&source, &destination).map_err(|error| {
+                format!(
+                    "quarantine executor metadata WIP {}: {error}",
+                    relative.display()
+                )
+            })?;
+            record_metadata_wip_sync_event(if relative == Path::new(".gitignore") {
+                "rename-gitignore"
+            } else {
+                "rename-omx"
+            });
+        }
+    }
+    sync_metadata_wip_payload(&saved)?;
+    record_metadata_wip_sync_event("sync-payload");
+    sync_metadata_wip_directory(&saved, "destination directory", Some("sync-destination"))?;
+    sync_metadata_wip_directory(worktree, "source directory", Some("sync-source"))?;
+    let metadata_parent = quarantine
+        .parent()
+        .ok_or_else(|| "executor metadata quarantine has no metadata parent".to_string())?;
+    let scope_root = metadata_parent
+        .parent()
+        .ok_or_else(|| "executor metadata quarantine has no scope root".to_string())?;
+    sync_metadata_wip_directory(quarantine, "quarantine directory", Some("sync-quarantine"))?;
+    sync_metadata_wip_directory(
+        metadata_parent,
+        "metadata parent directory",
+        Some("sync-metadata-parent"),
+    )?;
+    sync_metadata_wip_directory(scope_root, "scope root", Some("sync-scope-root"))?;
+
+    #[cfg(test)]
+    if METADATA_WIP_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+        return Err("injected metadata WIP crash after quarantine move".to_string());
+    }
+
+    let tracked_metadata = git_stdout(worktree, &["ls-files", "--", ".gitignore", ".omx"])?;
+    if !tracked_metadata.is_empty() {
+        let mut restore = vec!["restore", "--source=HEAD", "--staged", "--worktree", "--"];
+        if tracked_metadata.lines().any(|path| path == ".gitignore") {
+            restore.push(".gitignore");
+        }
+        if tracked_metadata
+            .lines()
+            .any(|path| path == ".omx" || path.starts_with(".omx/"))
+        {
+            restore.push(".omx");
+        }
+        let output = Command::new("git")
+            .args(restore)
+            .current_dir(worktree)
+            .output()
+            .map_err(|error| format!("restore quarantined executor metadata: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "restore quarantined executor metadata failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    record_metadata_wip_sync_event("restore");
+    for relative in [Path::new(".gitignore"), Path::new(".omx")] {
+        let restored = worktree.join(relative);
+        if fs::symlink_metadata(&restored).is_ok() {
+            sync_metadata_wip_payload(&restored)?;
+        }
+    }
+    record_metadata_wip_sync_event("sync-restored-payload");
+    sync_metadata_wip_directory(
+        worktree,
+        "restored source directory",
+        Some("sync-restored-source"),
+    )?;
+    let admin = PathBuf::from(git_stdout(worktree, &["rev-parse", "--absolute-git-dir"])?);
+    let index = admin.join("index");
+    if index.exists() {
+        File::open(&index)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| format!("sync restored executor metadata index: {error}"))?;
+    }
+    record_metadata_wip_sync_event("sync-restored-index");
+    sync_metadata_wip_directory(
+        &admin,
+        "restored worktree admin directory",
+        Some("sync-restored-admin"),
+    )?;
+    if let Some(parent) = admin.parent() {
+        sync_metadata_wip_directory(
+            parent,
+            "restored worktree admin parent",
+            Some("sync-restored-admin-parent"),
+        )?;
+    }
+    if !git_bytes(
+        worktree,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?
+    .is_empty()
+    {
+        return Err("executor metadata WIP isolation did not produce a clean worktree".to_string());
+    }
+    record_metadata_wip_sync_event("clean");
+    write_private_create_once(
+        &quarantine.join("complete"),
+        b"metadata-wip-isolated\n",
+        "executor metadata WIP completion",
+    )?;
+    record_metadata_wip_sync_event("complete");
+    Ok(())
 }
 
 struct WorktreeLease {
@@ -18165,6 +18964,712 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_executor_bridge_codex_sandbox_isolates_adopted_metadata_wip_before_launch() {
+        super::METADATA_WIP_SYNC_EVENTS
+            .lock()
+            .expect("metadata WIP event lock")
+            .clear();
+        let fixture = GitFixture::new("metadata-wip-adoption");
+        fs::write(fixture.repo.join(".gitignore"), "target/\n").expect("write tracked ignore");
+        git(&fixture.repo, &["add", ".gitignore"]);
+        git(
+            &fixture.repo,
+            &["commit", "-m", "test: add metadata baseline"],
+        );
+        git(&fixture.repo, &["push", "origin", "main"]);
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "metadata_wip_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let adopt = || {
+            super::provision_issue_worktree_for_claim(
+                &fixture.repo,
+                &scope,
+                42,
+                &base,
+                Some(("claim-metadata", "invocation-metadata")),
+            )
+        };
+        let worktree = adopt().expect("provision issue worktree");
+        fs::write(
+            worktree.path.join(".gitignore"),
+            "target/\n.omx/\noperator-only/\n",
+        )
+        .expect("write operator ignore WIP");
+        fs::create_dir_all(worktree.path.join(".omx")).expect("create operator metadata");
+        fs::write(
+            worktree.path.join(".omx/session.json"),
+            b"{\"operator\":\"preserve\"}\n",
+        )
+        .expect("write operator metadata");
+
+        super::METADATA_WIP_FAILPOINT.store(1, Ordering::SeqCst);
+        let interrupted = adopt().expect_err("interrupt after metadata is durably quarantined");
+        assert!(interrupted.contains("injected metadata WIP crash"));
+        assert_eq!(
+            *super::METADATA_WIP_SYNC_EVENTS
+                .lock()
+                .expect("metadata WIP event lock"),
+            [
+                "rename-gitignore",
+                "rename-omx",
+                "sync-payload",
+                "sync-destination",
+                "sync-source",
+                "sync-quarantine",
+                "sync-metadata-parent",
+                "sync-scope-root",
+            ]
+        );
+        super::METADATA_WIP_SYNC_EVENTS
+            .lock()
+            .expect("metadata WIP event lock")
+            .clear();
+
+        let adopted = adopt().expect("resume metadata-only WIP isolation");
+        assert_eq!(
+            *super::METADATA_WIP_SYNC_EVENTS
+                .lock()
+                .expect("metadata WIP event lock"),
+            [
+                "sync-payload",
+                "sync-destination",
+                "sync-source",
+                "sync-quarantine",
+                "sync-metadata-parent",
+                "sync-scope-root",
+                "restore",
+                "sync-restored-payload",
+                "sync-restored-source",
+                "sync-restored-index",
+                "sync-restored-admin",
+                "sync-restored-admin-parent",
+                "clean",
+                "complete",
+            ]
+        );
+
+        assert_eq!(adopted, worktree);
+        assert_eq!(
+            git_stdout(
+                &adopted.path,
+                &["status", "--porcelain=v1", "--untracked-files=all"]
+            ),
+            "",
+            "issue-authorized worktree must start clean"
+        );
+        assert_eq!(
+            fs::read_to_string(adopted.path.join(".gitignore")).expect("restored ignore"),
+            "target/\n"
+        );
+        assert!(!adopted.path.join(".omx").exists());
+        let quarantine = super::metadata_wip_quarantine_path(
+            adopted.path.parent().expect("scope root"),
+            42,
+            "claim-metadata",
+        );
+        assert_eq!(
+            fs::read_to_string(quarantine.join("worktree/.gitignore")).expect("quarantined ignore"),
+            "target/\n.omx/\noperator-only/\n"
+        );
+        assert_eq!(
+            fs::read_to_string(quarantine.join("worktree/.omx/session.json"))
+                .expect("quarantined metadata"),
+            "{\"operator\":\"preserve\"}\n"
+        );
+        assert!(quarantine.join("status.porcelain").is_file());
+        assert!(quarantine.join("tracked.patch").is_file());
+        assert!(quarantine.join("complete").is_file());
+
+        let adopted_path = adopted.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", adopted_path]);
+        let _ = fs::remove_dir_all(adopted.path.parent().expect("scope root"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_repairs_prunable_post_child_worktree() {
+        let fixture = GitFixture::new("missing-post-child-worktree");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "missing_post_child_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &base,
+            Some(("claim-repair", "invocation-repair")),
+        )
+        .expect("provision issue worktree");
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::ImplementationComplete;
+        state.identity.repository_path = fs::canonicalize(&fixture.repo).expect("canonical repo");
+        state.identity.worktree = worktree.path.clone();
+        state.identity.branch = worktree.branch.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        fs::remove_dir_all(&worktree.path).expect("simulate disappeared worktree");
+
+        super::WORKTREE_REPAIR_FAILPOINT.store(1, Ordering::SeqCst);
+        let interrupted = super::repair_missing_post_child_worktree(&state)
+            .expect_err("interrupt repair after durable prune");
+        assert!(interrupted.contains("injected executor worktree repair crash"));
+        let repair_intent = worktree
+            .path
+            .parent()
+            .expect("scope root")
+            .join("issue-42.repair-intent.json");
+        assert!(repair_intent.is_file());
+        assert!(
+            !git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"])
+                .contains(&format!("worktree {}", worktree.path.display()))
+        );
+
+        assert!(super::repair_missing_post_child_worktree(&state)
+            .expect("repair exact prunable worktree"));
+        assert!(!repair_intent.exists());
+        assert!(worktree.path.is_dir());
+        assert_eq!(
+            git_stdout(&worktree.path, &["status", "--porcelain=v1"]),
+            ""
+        );
+        assert_eq!(
+            git_stdout(&worktree.path, &["symbolic-ref", "--short", "HEAD"]),
+            worktree.branch
+        );
+
+        let worktree_path = worktree.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_entrypoint_retries_pruned_worktree_repair() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("entrypoint-pruned-worktree-repair");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "entrypoint_repair_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &base,
+            Some(("claim-42", "invocation-42")),
+        )
+        .expect("provision issue worktree");
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::ImplementationComplete;
+        state.identity.worktree = worktree.path.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let scope_root = worktree.path.parent().expect("scope root");
+        let state_path = scope_root.join("entrypoint-state.json");
+        super::write_invocation_atomic(&state_path, &state).expect("persist invocation");
+        fs::remove_dir_all(&worktree.path).expect("simulate disappeared worktree");
+        let config = fixture.root.join("empty-config");
+        fs::create_dir_all(&config).expect("empty config");
+        let previous_config = std::env::var_os("AUTOSPEC_CONFIG_DIR");
+        std::env::set_var("AUTOSPEC_CONFIG_DIR", &config);
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: fixture.repo.clone(),
+            issue: state.identity.issue,
+            issue_title: "Repair executor worktree".to_string(),
+            issue_body: "## Goal\n\nRepair the exact executor worktree.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: scope_root.join("events.jsonl"),
+        };
+
+        super::WORKTREE_REPAIR_FAILPOINT.store(1, Ordering::SeqCst);
+        let interrupted =
+            super::run_executor_bridge(&request).expect_err("interrupt entrypoint repair");
+        assert!(interrupted
+            .to_string()
+            .contains("injected executor worktree repair crash"));
+        let retry = super::run_executor_bridge(&request)
+            .expect_err("stop after entrypoint recovery at implementation proof");
+        assert!(
+            retry
+                .to_string()
+                .contains("implementation HEAD is unchanged"),
+            "{retry}"
+        );
+        assert!(worktree.path.is_dir());
+        assert!(!scope_root.join("issue-42.repair-intent.json").exists());
+
+        match previous_config {
+            Some(value) => std::env::set_var("AUTOSPEC_CONFIG_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_CONFIG_DIR"),
+        }
+        let worktree_path = worktree.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        let _ = fs::remove_dir_all(scope_root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_entrypoint_cleanup_ignores_missing_codex() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("entrypoint-cleanup-missing-codex");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "entrypoint_cleanup_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &base,
+            Some(("claim-42", "invocation-42")),
+        )
+        .expect("provision issue worktree");
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::CleanupPending;
+        state.identity.worktree = worktree.path.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        state.pr = Some(17);
+        state.head_oid = Some(git_stdout(&worktree.path, &["rev-parse", "HEAD"]));
+        state.terminal_result = Some("b".repeat(40));
+        let scope_root = worktree.path.parent().expect("scope root");
+        let state_path = scope_root.join("cleanup-state.json");
+        super::write_invocation_atomic(&state_path, &state).expect("persist cleanup invocation");
+        super::ensure_cleanup_record(
+            &super::cleanup_record_path(&state_path, "worktree-intent"),
+            &super::cleanup_binding(&state),
+            "test executor worktree cleanup intent",
+        )
+        .expect("persist worktree cleanup intent");
+        let worktree_path = worktree.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        let aliases = fixture.root.join("missing-codex-aliases.tsv");
+        fs::write(&aliases, "codex\t/definitely/missing/codex\t\tCodex CLI\n")
+            .expect("write missing Codex alias");
+        let previous_aliases = std::env::var_os("AUTOSPEC_HARNESS_RUNTIME_ALIASES");
+        std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &aliases);
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: fixture.repo.clone(),
+            issue: state.identity.issue,
+            issue_title: "Finish executor cleanup".to_string(),
+            issue_body: "## Goal\n\nFinish the durable executor cleanup.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: scope_root.join("cleanup-events.jsonl"),
+        };
+
+        let _ = super::run_executor_bridge(&request);
+        let durable = super::PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("read completed cleanup state"),
+        )
+        .expect("parse completed cleanup state");
+        assert_eq!(durable.phase, BridgePhase::Complete);
+        assert!(!worktree.path.exists());
+
+        match previous_aliases {
+            Some(value) => std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", value),
+            None => std::env::remove_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES"),
+        }
+        let _ = fs::remove_dir_all(scope_root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_entrypoint_pending_sidecar_cleanup_skips_missing_harness(
+    ) {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("entrypoint-pending-sidecar-recovery");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "entrypoint_pending_sidecar_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &base,
+            Some(("claim-42", "invocation-42")),
+        )
+        .expect("provision issue worktree");
+        let mut state = supervision_state(&fixture);
+        state.identity.worktree = worktree.path.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let scope_root = worktree.path.parent().expect("scope root");
+        let state_path = scope_root.join("pending-sidecar-recovery-state.json");
+        let event_log = scope_root.join("pending-sidecar-recovery-events.jsonl");
+        let _ = detach_harness_for_adoption(
+            &fixture,
+            &state_path,
+            &mut state,
+            "while :; do /usr/bin/sleep 1; done",
+        );
+        let supervisor = state.supervisor.clone().expect("durable supervisor");
+        let harness = state.process.clone().expect("durable harness");
+        let _cleanup = DetachedSupervisorCleanup(supervisor.clone());
+        state.phase = BridgePhase::Pending;
+        state.supervisor = None;
+        state.process = None;
+        state.remote_snapshot_digest = Some("a".repeat(64));
+        super::write_invocation_atomic(&state_path, &state)
+            .expect("persist sidecar-only Pending state");
+        let aliases = fixture.root.join("missing-codex-aliases.tsv");
+        fs::write(&aliases, "codex\t/definitely/missing/codex\t\tCodex CLI\n")
+            .expect("write missing Codex alias");
+        let previous_aliases = std::env::var_os("AUTOSPEC_HARNESS_RUNTIME_ALIASES");
+        std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &aliases);
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: fixture.repo.clone(),
+            issue: state.identity.issue,
+            issue_title: "Clean the pending executor sidecar".to_string(),
+            issue_body: "## Goal\n\nClean the exact pending executor sidecar.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log,
+        };
+
+        let mut probe_calls = 0;
+        let outcome = super::run_executor_bridge_with_codex_probe(&request, |_| {
+            probe_calls += 1;
+            Err("injected failing Codex sandbox probe".to_string())
+        });
+        let supervisor_live =
+            super::cleanup_instance_is_live(&supervisor).expect("inspect pending supervisor");
+        let harness_live =
+            super::cleanup_instance_is_live(&harness).expect("inspect pending harness");
+
+        match previous_aliases {
+            Some(value) => std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", value),
+            None => std::env::remove_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES"),
+        }
+        assert_eq!(probe_calls, 0, "missing harness must not be probed");
+        assert!(
+            outcome.is_err(),
+            "fixture intentionally stops after cleanup"
+        );
+        assert!(
+            !supervisor_live && !harness_live,
+            "sidecar-only Pending executor was stranded before harness resolution"
+        );
+        let worktree_path = worktree.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        let _ = fs::remove_dir_all(scope_root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_entrypoint_interrupted_partial_cleanup_skips_failing_probe(
+    ) {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("entrypoint-interrupted-partial-recovery");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "entrypoint_interrupted_partial_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &base,
+            Some(("claim-42", "invocation-42")),
+        )
+        .expect("provision issue worktree");
+        let mut state = supervision_state(&fixture);
+        state.identity.worktree = worktree.path.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let scope_root = worktree.path.parent().expect("scope root");
+        let state_path = scope_root.join("interrupted-partial-recovery-state.json");
+        let event_log = scope_root.join("interrupted-partial-recovery-events.jsonl");
+        let _ = detach_harness_for_adoption(
+            &fixture,
+            &state_path,
+            &mut state,
+            "while :; do /usr/bin/sleep 1; done",
+        );
+        let supervisor = state.supervisor.clone().expect("durable supervisor");
+        let harness = state.process.clone().expect("durable harness");
+        let _cleanup = DetachedSupervisorCleanup(supervisor.clone());
+        state.phase = BridgePhase::Interrupted;
+        state.process = None;
+        super::write_invocation_atomic(&state_path, &state)
+            .expect("persist partial Interrupted state");
+        let aliases = fixture.root.join("codex-aliases.tsv");
+        fs::write(&aliases, "codex\t/bin/true\t\tCodex CLI\n").expect("write Codex alias");
+        let previous_aliases = std::env::var_os("AUTOSPEC_HARNESS_RUNTIME_ALIASES");
+        let previous_claim = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
+        std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &aliases);
+        std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: fixture.repo.clone(),
+            issue: state.identity.issue,
+            issue_title: "Clean the interrupted executor".to_string(),
+            issue_body: "## Goal\n\nClean the exact interrupted executor.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: event_log.clone(),
+        };
+
+        let mut probe_calls = 0;
+        let outcome = super::run_executor_bridge_with_codex_probe(&request, |_| {
+            probe_calls += 1;
+            Err("injected failing Codex sandbox probe".to_string())
+        });
+        let supervisor_live =
+            super::cleanup_instance_is_live(&supervisor).expect("inspect interrupted supervisor");
+        let harness_live =
+            super::cleanup_instance_is_live(&harness).expect("inspect interrupted harness");
+
+        assert_eq!(
+            probe_calls, 0,
+            "partial recovery must precede a fresh Codex probe"
+        );
+        assert!(
+            outcome.is_err(),
+            "fixture intentionally stops after cleanup"
+        );
+        assert!(
+            !supervisor_live && !harness_live,
+            "partial Interrupted executor was stranded before Codex probing"
+        );
+        let sinks = super::output_sink_paths(&state_path, &state.identity.invocation_id)
+            .expect("executor output sinks");
+        assert_eq!(
+            fs::metadata(&sinks.exit_status)
+                .expect("preallocated exit sink")
+                .len(),
+            16
+        );
+        assert_eq!(
+            super::read_executor_exit_status(&sinks.exit_status).expect("empty exit sink"),
+            None
+        );
+
+        let mut retry_probe_calls = 0;
+        let retry = super::run_executor_bridge_with_codex_probe(&request, |_| {
+            retry_probe_calls += 1;
+            Ok(super::CodexSandboxPolicy::Default)
+        });
+        let events = fs::read_to_string(&event_log).expect("read retry events");
+        assert_eq!(
+            retry_probe_calls, 1,
+            "empty preallocated exit sink must allow fresh Codex resolution"
+        );
+        assert!(retry.is_err(), "unchanged fixture HEAD stops after launch");
+        assert!(
+            events.contains("\"event\":\"child_started\""),
+            "retry never launched the fresh harness: outcome={retry:?} events={events}"
+        );
+        match previous_aliases {
+            Some(value) => std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", value),
+            None => std::env::remove_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES"),
+        }
+        match previous_claim {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM"),
+        }
+        let worktree_path = worktree.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        let _ = fs::remove_dir_all(scope_root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_skips_failing_probe() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("entrypoint-live-recovery");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let scope = format!(
+            "entrypoint_live_recovery_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &base,
+            Some(("claim-42", "invocation-42")),
+        )
+        .expect("provision issue worktree");
+        let mut state = supervision_state(&fixture);
+        state.identity.worktree = worktree.path.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let scope_root = worktree.path.parent().expect("scope root");
+        let state_path = scope_root.join("live-recovery-state.json");
+        let event_log = scope_root.join("live-recovery-events.jsonl");
+        super::write_invocation_atomic(&state_path, &state).expect("persist invocation");
+        let ready = scope_root.join("child-ready");
+        let release = scope_root.join("release-child");
+
+        let mut launcher = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_helper",
+                "--nocapture",
+            ])
+            .env("AUTOSPEC_TEST_RECOVERY_STATE", &state_path)
+            .env("AUTOSPEC_TEST_RECOVERY_EVENTS", &event_log)
+            .env("AUTOSPEC_TEST_RECOVERY_READY", &ready)
+            .env("AUTOSPEC_TEST_RECOVERY_RELEASE", &release)
+            .spawn()
+            .expect("spawn recovery fixture launcher");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let durable = loop {
+            if let Ok(body) = fs::read_to_string(&state_path) {
+                if let Ok(candidate) = super::PersistedInvocation::from_json(&body) {
+                    if candidate.phase == BridgePhase::Implementing
+                        && candidate.supervisor.is_some()
+                        && candidate.process.is_some()
+                        && ready.is_file()
+                    {
+                        break candidate;
+                    }
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fixture did not persist a live implementing identity"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        launcher.kill().expect("crash fixture launcher");
+        launcher.wait().expect("reap fixture launcher");
+
+        let aliases = fixture.root.join("aliases.tsv");
+        fs::write(&aliases, "codex\t/bin/false\t\tCodex CLI\n").expect("write alias table");
+        let previous_aliases = std::env::var_os("AUTOSPEC_HARNESS_RUNTIME_ALIASES");
+        let previous_claim = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
+        std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &aliases);
+        std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
+        let request = super::ExecutorBridgeRequest {
+            repository: durable.identity.repository.clone(),
+            repository_path: fixture.repo.clone(),
+            issue: durable.identity.issue,
+            issue_title: "Adopt the live executor".to_string(),
+            issue_body: "## Goal\n\nAdopt the exact durable executor process.".to_string(),
+            worker_id: durable.identity.worker_id.clone(),
+            claim_id: durable.identity.claim_id.clone(),
+            invocation_id: durable.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: event_log.clone(),
+        };
+        let release_for_thread = release.clone();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(250));
+            fs::write(release_for_thread, b"release\n").expect("release adopted child");
+        });
+        let mut probe_calls = 0;
+        let outcome = super::run_executor_bridge_with_codex_probe(&request, |_| {
+            probe_calls += 1;
+            Err("injected failing Codex sandbox probe".to_string())
+        });
+        releaser.join().expect("release thread");
+
+        assert_eq!(probe_calls, 0, "live recovery must not run a fresh probe");
+        let error = outcome.expect_err("fixture must stop after recovered supervision");
+        assert!(
+            !error
+                .to_string()
+                .contains("injected failing Codex sandbox probe"),
+            "{error}"
+        );
+        let events = fs::read_to_string(&event_log).expect("read recovery events");
+        assert!(events.contains("\"event\":\"child_adopted\""), "{events}");
+        for identity in [
+            durable.supervisor.as_ref().expect("durable supervisor"),
+            durable.process.as_ref().expect("durable child"),
+        ] {
+            assert!(
+                !super::cleanup_instance_is_live(identity).expect("inspect recovered identity"),
+                "recovered executor identity was orphaned: {identity:?}"
+            );
+        }
+
+        match previous_aliases {
+            Some(value) => std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", value),
+            None => std::env::remove_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES"),
+        }
+        match previous_claim {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM"),
+        }
+        let worktree_path = worktree.path.to_str().expect("worktree path");
+        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        let _ = fs::remove_dir_all(scope_root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_helper() {
+        let Some(state_path) = std::env::var_os("AUTOSPEC_TEST_RECOVERY_STATE") else {
+            return;
+        };
+        let state_path = PathBuf::from(state_path);
+        let event_log =
+            PathBuf::from(std::env::var_os("AUTOSPEC_TEST_RECOVERY_EVENTS").expect("event log"));
+        let ready = PathBuf::from(std::env::var_os("AUTOSPEC_TEST_RECOVERY_READY").expect("ready"));
+        let release =
+            PathBuf::from(std::env::var_os("AUTOSPEC_TEST_RECOVERY_RELEASE").expect("release"));
+        let mut state = super::PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("read recovery fixture state"),
+        )
+        .expect("parse recovery fixture state");
+        let snapshot =
+            MutationSnapshot::capture(&state.identity.repository_path, &state.identity.branch)
+                .expect("capture recovery fixture snapshot");
+        let worktree = state.identity.worktree.clone();
+        let command = format!(
+            "printf ready > '{}'; while [ ! -f '{}' ]; do /usr/bin/sleep 0.05; done",
+            ready.display(),
+            release.display()
+        );
+        let _ = super::supervise_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &shell_invocation(&worktree, &command),
+            &snapshot,
+            supervision_config(30_000),
+        );
+    }
+
+    #[test]
     fn autonomous_executor_bridge_transfers_taken_over_worktree_without_losing_wip() {
         let fixture = GitFixture::new("worktree-takeover-transfer");
         let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
@@ -19222,6 +20727,352 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_executor_bridge_codex_sandbox_success_selects_network_permission_profile() {
+        let root = test_root("codex-sandbox-profile");
+        let log = root.join("codex.log");
+        let codex = root.join("codex");
+        write_executable(
+            &codex,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n",
+                log.display()
+            ),
+        );
+
+        let policy =
+            super::preflight_codex_sandbox(&codex).expect("validated network permission profile");
+        let harness = super::ResolvedHarness {
+            kind: HarnessKind::Codex,
+            executable: codex,
+            opencode_adapter: None,
+            codex_sandbox: policy,
+        };
+        let invocation = harness
+            .invocation(
+                Path::new("/safe/worktree"),
+                Path::new("/safe/worktree/result.txt"),
+                "implement issue 42",
+            )
+            .expect("fallback invocation");
+
+        assert!(!invocation
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "workspace-write"]));
+        assert!(invocation
+            .args
+            .windows(2)
+            .any(|pair| { pair == ["-c", "default_permissions=\"autospec-network-executor\"",] }));
+        assert!(invocation.args.windows(2).any(|pair| {
+            pair == [
+                "-c",
+                "permissions.autospec-network-executor.network.enabled=true",
+            ]
+        }));
+        let filesystem = invocation
+            .args
+            .windows(2)
+            .find_map(|pair| {
+                (pair[0] == "-c"
+                    && pair[1].starts_with("permissions.autospec-network-executor.filesystem="))
+                .then_some(pair[1].as_str())
+            })
+            .expect("permission-profile filesystem policy");
+        for denied in [
+            "\"~/.aws\"=\"deny\"",
+            "\"~/.codex/archived_sessions\"=\"deny\"",
+            "\"~/.codex/auth.json\"=\"deny\"",
+            "\"~/.codex/config.toml\"=\"deny\"",
+            "\"~/.codex/history.jsonl\"=\"deny\"",
+            "\"~/.codex/sessions\"=\"deny\"",
+            "\"~/.codex/shell_snapshots\"=\"deny\"",
+            "\"~/.config/containers\"=\"deny\"",
+            "\"~/.config/gh\"=\"deny\"",
+            "\"~/.config/pip\"=\"deny\"",
+            "\"~/.docker\"=\"deny\"",
+            "\"~/.gnupg\"=\"deny\"",
+            "\"~/.gradle\"=\"deny\"",
+            "\"~/.git-credentials\"=\"deny\"",
+            "\"~/.kube\"=\"deny\"",
+            "\"~/.m2\"=\"deny\"",
+            "\"~/.netrc\"=\"deny\"",
+            "\"~/.npmrc\"=\"deny\"",
+            "\"~/.ssh\"=\"deny\"",
+            "\"~/.terraform.d\"=\"deny\"",
+            "\"~/.vault-token\"=\"deny\"",
+        ] {
+            assert!(
+                filesystem.contains(denied),
+                "missing {denied}: {filesystem}"
+            );
+        }
+        assert!(
+            !filesystem.contains("\"~/.codex\"=\"deny\""),
+            "Codex package roots must remain readable: {filesystem}"
+        );
+        assert!(filesystem.contains(&format!("\"{}\"=\"read\"", harness.executable.display())));
+        assert!(invocation
+            .args
+            .windows(2)
+            .any(|pair| { pair == ["-c", "shell_environment_policy.inherit=\"all\""] }));
+        assert!(invocation.args.windows(2).any(|pair| {
+            pair == [
+                "-c",
+                "shell_environment_policy.ignore_default_excludes=false",
+            ]
+        }));
+        assert!(!invocation
+            .args
+            .iter()
+            .any(|argument| argument.contains("danger-full-access")));
+        assert_eq!(
+            fs::read_to_string(log).expect("probe log").lines().count(),
+            1
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_allows_executable_inside_real_codex_home() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let root = test_root("codex-permission-profile-real-home");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let env = std::env::vars_os()
+            .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+            .collect::<BTreeMap<_, _>>();
+        let codex = super::safe_executable(Path::new("codex"), &env)
+            .expect("Codex CLI is required for its permission-profile regression");
+        let home = env.get("HOME").map(PathBuf::from).expect("real HOME");
+        if !codex.starts_with(home.join(".codex")) {
+            let _ = fs::remove_dir_all(root);
+            return;
+        }
+
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        std::env::remove_var("CODEX_HOME");
+        let profile_args = super::CodexSandboxPolicy::NetworkPermissionProfile
+            .permission_profile_args(&codex)
+            .expect("permission profile arguments");
+        let output = Command::new(&codex)
+            .arg("sandbox")
+            .arg("-C")
+            .arg(&workspace)
+            .arg("-P")
+            .arg(super::CODEX_NETWORK_PERMISSION_PROFILE)
+            .args(&profile_args)
+            .args(["--", "/bin/true"])
+            .output()
+            .expect("run Codex permission-profile sandbox from its real installation");
+        match previous_codex_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+
+        assert!(
+            output.status.success(),
+            "permission profile must allow its own executable at {}: stdout={} stderr={}",
+            codex.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential_files() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let root = test_root("codex-permission-profile");
+        let home = root.join("home");
+        let codex_home = root.join("custom-codex-home");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(home.join(".aws")).expect("AWS credential directory");
+        for path in [
+            ".codex/archived_sessions",
+            ".codex/sessions",
+            ".codex/shell_snapshots",
+        ] {
+            fs::create_dir_all(home.join(path)).expect("Codex state directory");
+        }
+        fs::create_dir_all(home.join(".config/gh")).expect("GitHub credential directory");
+        fs::create_dir_all(home.join(".ssh")).expect("SSH credential directory");
+        for path in ["archived_sessions", "sessions", "shell_snapshots"] {
+            fs::create_dir_all(codex_home.join(path)).expect("custom Codex state directory");
+        }
+        fs::create_dir_all(&workspace).expect("workspace");
+        fs::write(home.join(".aws/credentials"), "aws-secret\n").expect("AWS credential");
+        fs::write(home.join(".codex/auth.json"), "codex-secret\n").expect("Codex credential");
+        fs::write(
+            home.join(".codex/config.toml"),
+            "model_reasoning_effort = \"high\"\n",
+        )
+        .expect("Codex config");
+        fs::write(home.join(".codex/history.jsonl"), "history-secret\n").expect("Codex history");
+        fs::write(
+            home.join(".codex/archived_sessions/session.jsonl"),
+            "archive-secret\n",
+        )
+        .expect("Codex archived session");
+        fs::write(
+            home.join(".codex/sessions/session.jsonl"),
+            "session-secret\n",
+        )
+        .expect("Codex session");
+        fs::write(
+            home.join(".codex/shell_snapshots/snapshot.sh"),
+            "snapshot-secret\n",
+        )
+        .expect("Codex shell snapshot");
+        fs::write(home.join(".config/gh/hosts.yml"), "gh-secret\n").expect("GitHub credential");
+        fs::write(home.join(".ssh/id_ed25519"), "ssh-secret\n").expect("SSH credential");
+        fs::write(codex_home.join("auth.json"), "custom-codex-secret\n")
+            .expect("custom Codex credential");
+        fs::write(
+            codex_home.join("config.toml"),
+            "model_reasoning_effort = \"high\"\n",
+        )
+        .expect("custom Codex config");
+        fs::write(codex_home.join("history.jsonl"), "custom-history-secret\n")
+            .expect("custom Codex history");
+        fs::write(
+            codex_home.join("archived_sessions/session.jsonl"),
+            "custom-archive-secret\n",
+        )
+        .expect("custom Codex archived session");
+        fs::write(
+            codex_home.join("sessions/session.jsonl"),
+            "custom-session-secret\n",
+        )
+        .expect("custom Codex session");
+        fs::write(
+            codex_home.join("shell_snapshots/snapshot.sh"),
+            "custom-snapshot-secret\n",
+        )
+        .expect("custom Codex shell snapshot");
+        git(&workspace, &["init"]);
+        let env = std::env::vars_os()
+            .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+            .collect::<BTreeMap<_, _>>();
+        let codex = super::safe_executable(Path::new("codex"), &env)
+            .expect("Codex CLI is required for its permission-profile regression");
+        let policy = super::CodexSandboxPolicy::NetworkPermissionProfile;
+        let previous_codex_home = std::env::var_os("CODEX_HOME");
+        std::env::set_var("CODEX_HOME", &codex_home);
+        let profile_args = policy
+            .permission_profile_args(&codex)
+            .expect("permission profile arguments");
+        let mut command = Command::new(&codex);
+        command
+            .arg("sandbox")
+            .arg("-C")
+            .arg(&workspace)
+            .arg("-P")
+            .arg(super::CODEX_NETWORK_PERMISSION_PROFILE)
+            .args(&profile_args)
+            .args([
+                "--",
+                "/bin/sh",
+                "-c",
+                "set -eu\nprintf written > workspace-proof\nfor path in \"$HOME/.aws/credentials\" \"$HOME/.codex/auth.json\" \"$HOME/.codex/config.toml\" \"$HOME/.codex/history.jsonl\" \"$HOME/.codex/archived_sessions/session.jsonl\" \"$HOME/.codex/sessions/session.jsonl\" \"$HOME/.codex/shell_snapshots/snapshot.sh\" \"$HOME/.config/gh/hosts.yml\" \"$HOME/.ssh/id_ed25519\" \"$CODEX_HOME/auth.json\" \"$CODEX_HOME/config.toml\" \"$CODEX_HOME/history.jsonl\" \"$CODEX_HOME/archived_sessions/session.jsonl\" \"$CODEX_HOME/sessions/session.jsonl\" \"$CODEX_HOME/shell_snapshots/snapshot.sh\"; do if /bin/cat \"$path\" >/dev/null 2>&1; then exit 41; fi; done\ntest -z \"${CODEX_API_KEY:-}\"\ntest -z \"${OPENAI_API_KEY:-}\"",
+            ])
+            .env("HOME", &home)
+            .env("CODEX_HOME", &codex_home)
+            .env("CODEX_API_KEY", "host-only-codex-key")
+            .env("OPENAI_API_KEY", "host-only-openai-key");
+        let output = command
+            .output()
+            .expect("run Codex permission-profile sandbox");
+        match previous_codex_home {
+            Some(value) => std::env::set_var("CODEX_HOME", value),
+            None => std::env::remove_var("CODEX_HOME"),
+        }
+
+        assert!(
+            output.status.success(),
+            "permission profile failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fs::read_to_string(workspace.join("workspace-proof")).expect("workspace write"),
+            "written"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_blocks_bwrap_host_setup_failures() {
+        let root = test_root("codex-sandbox-loopback-blocked");
+        let codex = root.join("codex");
+        for (stderr, expected) in [
+            (
+                "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+                "RTM_NEWADDR",
+            ),
+            (
+                "bwrap: setting up uid map: Permission denied",
+                "setting up uid map",
+            ),
+            (
+                "thread 'main' panicked at sandbox.rs:1\nbwrap: setting up uid map: Operation not permitted\nnote: run with backtrace",
+                "setting up uid map",
+            ),
+        ] {
+            write_executable(
+                &codex,
+                &format!("#!/bin/sh\nprintf '%s\\n' '{}' >&2\nexit 1\n", stderr),
+            );
+
+            let error = super::preflight_codex_sandbox(&codex)
+                .expect_err("bwrap host setup failure must block");
+
+            assert!(error.contains("host_setup_required"), "{error}");
+            assert!(error.contains("#2619"), "{error}");
+            assert!(error.contains(expected), "{error}");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_blocks_non_loopback_probe_failures() {
+        let root = test_root("codex-sandbox-unsupported");
+        let codex = root.join("codex");
+        write_executable(
+            &codex,
+            "#!/bin/sh\nprintf '%s\\n' 'bwrap: creating new namespace failed: Permission denied' >&2\nexit 1\n",
+        );
+
+        let error = super::preflight_codex_sandbox(&codex)
+            .expect_err("unsupported sandbox failures must block");
+
+        assert!(
+            error.contains("executor_codex_sandbox_unavailable"),
+            "{error}"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_cleanup_skips_failing_probe() {
+        let mut harness = super::ResolvedHarness {
+            kind: HarnessKind::Codex,
+            executable: PathBuf::from("/missing/codex"),
+            opencode_adapter: None,
+            codex_sandbox: super::CodexSandboxPolicy::Default,
+        };
+        let called = std::cell::Cell::new(false);
+        super::configure_codex_sandbox_for_phase(&mut harness, BridgePhase::CleanupPending, |_| {
+            called.set(true);
+            Err("probe must not run during cleanup".to_string())
+        })
+        .expect("cleanup phase must not depend on Codex sandbox probing");
+        assert!(!called.get());
+        assert_eq!(harness.codex_sandbox, super::CodexSandboxPolicy::Default);
+    }
+
+    #[test]
     fn autonomous_executor_bridge_builds_exact_claude_arguments() {
         // Break caught: Claude being unable to test/commit locally, or inheriting remote Git
         // permissions from user/project settings.
@@ -20131,12 +21982,12 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     fn detach_harness_for_adoption(
-        fixture: &GitFixture,
+        _fixture: &GitFixture,
         state_path: &Path,
         state: &mut PersistedInvocation,
         script: &str,
     ) -> super::ValidatedInvocation {
-        let invocation = shell_invocation(&fixture.repo, script);
+        let invocation = shell_invocation(&state.identity.worktree, script);
         let validated = super::validate_invocation(
             &HarnessInvocation {
                 program: invocation.program.canonicalize().expect("canonical shell"),
@@ -26543,6 +28394,7 @@ exit 19
                 .canonicalize()
                 .expect("canonical shell"),
             opencode_adapter: None,
+            codex_sandbox: super::CodexSandboxPolicy::Default,
         };
 
         let error = super::supervise_resolved_harness(
@@ -26576,6 +28428,7 @@ exit 19
                 .canonicalize()
                 .expect("canonical shell"),
             opencode_adapter: None,
+            codex_sandbox: super::CodexSandboxPolicy::Default,
         };
 
         let error = super::supervise_resolved_harness(
@@ -26614,6 +28467,7 @@ exit 19
                 .canonicalize()
                 .expect("canonical shell"),
             opencode_adapter: None,
+            codex_sandbox: super::CodexSandboxPolicy::Default,
         };
 
         let error = super::supervise_resolved_harness(
@@ -28868,7 +30722,7 @@ exit 19
     }
 
     #[test]
-    fn autonomous_executor_bridge_direct_children_have_no_remote_credentials() {
+    fn autonomous_executor_bridge_codex_sandbox_fallback_children_have_no_sensitive_credentials() {
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let fixture = GitFixture::new("credentialless-direct-child");
         let keys = [
@@ -28878,6 +30732,15 @@ exit 19
             "GITHUB_ENTERPRISE_TOKEN",
             "SSH_AUTH_SOCK",
             "GIT_ASKPASS",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "NPM_TOKEN",
+            "DATABASE_URL",
+            "INTERNAL_API_KEY",
+            "DOCKER_AUTH_CONFIG",
+            "KUBECONFIG",
+            "VAULT_TOKEN",
+            "OPENAI_API_KEY",
         ];
         let previous = keys
             .iter()
@@ -28929,6 +30792,73 @@ exit 19
                 None => std::env::remove_var(key),
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_codex_sandbox_preserves_host_auth_for_codex_only() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("codex-host-auth");
+        let fake_codex = fixture.root.join("codex");
+        write_executable(
+            &fake_codex,
+            "#!/bin/sh\nprintf 'codex=%s openai=%s\\n' \"${CODEX_API_KEY:-missing}\" \"${OPENAI_API_KEY:-missing}\"\n",
+        );
+        let mut state = supervision_state(&fixture);
+        state.identity.branch = git_stdout(
+            &fixture.repo,
+            &["symbolic-ref", "--quiet", "--short", "HEAD"],
+        );
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let state_path = fixture.root.join("state/codex-host-auth.json");
+        let event_log = fixture.root.join("log/codex-host-auth.jsonl");
+        let artifact = fixture.repo.join(".autospec/executor-closeout.md");
+        let harness = super::ResolvedHarness {
+            kind: HarnessKind::Codex,
+            executable: fake_codex.canonicalize().expect("canonical fake Codex"),
+            opencode_adapter: None,
+            codex_sandbox: super::CodexSandboxPolicy::NetworkPermissionProfile,
+        };
+        let previous_codex = std::env::var_os("CODEX_API_KEY");
+        let previous_openai = std::env::var_os("OPENAI_API_KEY");
+        let previous_claim = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
+        std::env::set_var("CODEX_API_KEY", "codex-host-auth-value");
+        std::env::set_var("OPENAI_API_KEY", "openai-host-auth-value");
+        std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
+
+        let outcome = super::supervise_resolved_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            super::HarnessLaunch {
+                resolved: &harness,
+                artifact: &artifact,
+                prompt: "prove host auth",
+            },
+            &snapshot,
+            supervision_config(5_000),
+        )
+        .expect("supervise fake Codex");
+
+        match previous_codex {
+            Some(value) => std::env::set_var("CODEX_API_KEY", value),
+            None => std::env::remove_var("CODEX_API_KEY"),
+        }
+        match previous_openai {
+            Some(value) => std::env::set_var("OPENAI_API_KEY", value),
+            None => std::env::remove_var("OPENAI_API_KEY"),
+        }
+        match previous_claim {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM"),
+        }
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        let events = fs::read_to_string(&event_log).expect("Codex host output");
+        assert!(
+            events.contains("codex=codex-host-auth-value openai=openai-host-auth-value"),
+            "Codex host auth was stripped: {events}"
+        );
     }
 
     #[test]
