@@ -20,10 +20,25 @@ include <tunables/global>
 }
 ```
 
-The helper validates the profile with `apparmor_parser -Q -K` (compile without
-loading it or writing the parser cache), installs
-`/etc/apparmor.d/usr.bin.bwrap` as `root:root` with mode `0644`, reloads it, and
-re-runs the Codex probe. It never replaces a profile whose content differs.
+The probe mirrors the autonomous executor's credential denies, secret
+environment exclusions, resolved Codex executable grant, and custom
+`CODEX_HOME` denies. Codex versions whose `sandbox` subcommand supports
+`--ignore-user-config` receive that flag. Older versions run the probe with an
+empty temporary `CODEX_HOME`, which provides the same no-user-config property
+without hiding the real Codex paths from the deny policy.
+
+The helper creates a root-owned candidate inside `/etc/apparmor.d`, validates
+that inode with `apparmor_parser -Q -K` (compile without loading it or writing
+the parser cache), atomically links the same inode as
+`/etc/apparmor.d/usr.bin.bwrap` with owner `root:root` and mode `0644`, reloads
+it, and re-runs the Codex probe. Creation through reload happens inside one
+privileged boundary, and trusted ancestors, inode identity, and exact content
+are rechecked after validation. It never replaces a profile whose content
+differs.
+
+If reload or the post-install probe fails, a newly created profile is unloaded
+and removed after another identity/content check. A pre-existing identical
+profile is preserved.
 Set `AUTOSPEC_SKIP_SYSTEM_TOOLS=1` to disable all privileged profile writes;
 installation then stops with `codex_sandbox_host_setup_required` when the host
 still blocks Codex.

@@ -21,7 +21,13 @@ mkdir -p "$FAKE_BIN"
 
 cat > "$FAKE_BIN/codex" <<'SHIM'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$CODEX_LOG"
+if [ "$*" = "sandbox --help" ]; then
+    if [ "${CODEX_SUPPORTS_IGNORE_USER_CONFIG:-1}" = "1" ]; then
+        printf '%s\n' '      --ignore-user-config'
+    fi
+    exit 0
+fi
+printf 'CODEX_HOME=%s %s\n' "${CODEX_HOME:-}" "$*" >> "$CODEX_LOG"
 case "${CODEX_MODE:-blocked}" in
     healthy)
         exit 0
@@ -38,6 +44,14 @@ case "${CODEX_MODE:-blocked}" in
             exit 0
         fi
         printf '%s\n' 'bwrap: setting up uid map: Operation not permitted' >&2
+        exit 1
+        ;;
+    post-fail)
+        if [ -f "$REPAIRED_MARKER" ]; then
+            printf '%s\n' 'codex post-install probe failed' >&2
+            exit 1
+        fi
+        printf '%s\n' 'bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted' >&2
         exit 1
         ;;
     unrelated)
@@ -78,9 +92,18 @@ case "${1:-}" in
         grep -Fqx '/usr/bin/bwrap flags=(unconfined) {' "$3"
         grep -Fqx '  userns,' "$3"
         grep -Fqx '  include if exists <local/usr.bin.bwrap>' "$3"
+        if [ "${APPARMOR_MUTATE_AFTER_VALIDATE:-0}" = "1" ]; then
+            printf '%s\n' '/usr/bin/bwrap flags=(unconfined) { /** rw, }' > "$3"
+        fi
         ;;
     -r)
+        if [ "${APPARMOR_RELOAD_FAIL:-0}" = "1" ]; then
+            exit 1
+        fi
         touch "$REPAIRED_MARKER"
+        ;;
+    -R)
+        rm -f "$REPAIRED_MARKER"
         ;;
     *)
         exit 2
@@ -103,27 +126,6 @@ printf '%s\n' "$*" >> "$PRIVILEGED_LOG"
 exec "$@"
 SHIM
 
-cat > "$FAKE_BIN/install" <<'SHIM'
-#!/usr/bin/env bash
-printf '%s\n' "$*" >> "$INSTALL_LOG"
-owner=
-group=
-mode=
-while [ "$#" -gt 2 ]; do
-    case "$1" in
-        -o) owner=$2; shift 2 ;;
-        -g) group=$2; shift 2 ;;
-        -m) mode=$2; shift 2 ;;
-        *) exit 2 ;;
-    esac
-done
-[ "$owner" = root ]
-[ "$group" = root ]
-[ "$mode" = 0644 ]
-mkdir -p "$(dirname "$2")"
-cp "$1" "$2"
-SHIM
-
 chmod +x "$FAKE_BIN"/*
 
 run_helper() {
@@ -137,18 +139,19 @@ run_helper() {
     : > "$case_dir/sysctl.log"
     : > "$case_dir/parser.log"
     : > "$case_dir/privileged.log"
-    : > "$case_dir/install.log"
+    mkdir -p "$case_dir/codex-home"
 
     set +e
     CASE_OUTPUT=$(env \
         PATH="$FAKE_BIN:$PATH" \
         AUTOSPEC_CODEX_SANDBOX_ROOT="$system_root" \
+        AUTOSPEC_CODEX_SANDBOX_TEST_MODE=1 \
         CODEX_LOG="$case_dir/codex.log" \
         SYSCTL_LOG="$case_dir/sysctl.log" \
         PARSER_LOG="$case_dir/parser.log" \
         PRIVILEGED_LOG="$case_dir/privileged.log" \
-        INSTALL_LOG="$case_dir/install.log" \
         REPAIRED_MARKER="$case_dir/repaired" \
+        CODEX_HOME="$case_dir/codex-home" \
         "$@" \
         bash "$HELPER" 2>&1)
     CASE_STATUS=$?
@@ -170,6 +173,40 @@ else
     fi
     if ! grep -Fq 'permissions.autospec-network-executor.network.enabled=true' "$TMP_DIR/healthy/codex.log"; then
         fail "probe did not exercise network-enabled permission-profile behavior"
+    fi
+    for expected_arg in \
+        '--ignore-user-config' \
+        'shell_environment_policy.inherit="all"' \
+        'shell_environment_policy.ignore_default_excludes=false' \
+        "\"$TMP_DIR/healthy/codex-home/auth.json\"=\"deny\"" \
+        'shell_environment_policy.exclude=["AWS_*","AZURE_*","CODEX_API_KEY","DOCKER_*","GH_*","GITHUB_*","GOOGLE_*","KUBE*","NPM_*","OPENAI_API_KEY","SSH_*","VAULT_*","*TOKEN*","*SECRET*","*PASSWORD*","*API_KEY*","*CREDENTIAL*"]'; do
+        if ! grep -Fq -- "$expected_arg" "$TMP_DIR/healthy/codex.log"; then
+            fail "probe omitted canonical executor policy argument: $expected_arg"
+        fi
+    done
+    # shellcheck disable=SC2088 # Assert literal Codex config paths.
+    for denied_path in \
+        '~/.aws' '~/.azure' '~/.cargo/credentials' '~/.cargo/credentials.toml' \
+        '~/.codex/archived_sessions' '~/.codex/auth.json' '~/.codex/config.toml' \
+        '~/.codex/history.jsonl' '~/.codex/sessions' '~/.codex/shell_snapshots' \
+        '~/.config/containers' '~/.config/gcloud' '~/.config/gh' '~/.config/pip' \
+        '~/.docker' '~/.git-credentials' '~/.gnupg' '~/.gradle' '~/.kube' \
+        '~/.m2' '~/.netrc' '~/.npmrc' '~/.pypirc' '~/.ssh' '~/.terraform.d' \
+        '~/.vault-token'; do
+        if ! grep -Fq -- "\"$denied_path\"=\"deny\"" "$TMP_DIR/healthy/codex.log"; then
+            fail "probe omitted canonical sensitive-path deny: $denied_path"
+        fi
+    done
+
+    run_helper legacy-codex \
+        CODEX_MODE=healthy \
+        CODEX_SUPPORTS_IGNORE_USER_CONFIG=0
+    if [ "$CASE_STATUS" -ne 0 ]; then
+        fail "Codex without sandbox --ignore-user-config support was rejected: $CASE_OUTPUT"
+    fi
+    if grep -Fq -- '--ignore-user-config' "$TMP_DIR/legacy-codex/codex.log" ||
+        ! grep -Eq '^CODEX_HOME=/tmp/.+ sandbox ' "$TMP_DIR/legacy-codex/codex.log"; then
+        fail "legacy Codex probe did not use an isolated temporary CODEX_HOME"
     fi
 
     run_helper package-tree \
@@ -195,16 +232,17 @@ else
         ! grep -Fqx '  include if exists <local/usr.bin.bwrap>' "$repaired_profile"; then
         fail "installed profile does not contain the targeted userns allowance"
     fi
-    if ! grep -Eq '^-o root -g root -m 0644 .+ /.+/etc/apparmor.d/usr.bin.bwrap$' \
-        "$TMP_DIR/repaired/install.log"; then
-        fail "profile was not installed with root:root mode 0644"
+    if [ "$(stat -c '%a' "$repaired_profile")" != "644" ]; then
+        fail "profile was not installed with mode 0644"
     fi
     if ! grep -Eq '^-Q -K .+' "$TMP_DIR/repaired/parser.log"; then
         fail "profile was not validated with apparmor_parser -Q without cache writes"
     fi
-    if ! grep -Fqx "apparmor_parser -r $repaired_profile" \
-        "$TMP_DIR/repaired/privileged.log"; then
-        fail "installed profile was not reloaded through sudo"
+    if ! grep -Fqx -- "-r $repaired_profile" "$TMP_DIR/repaired/parser.log"; then
+        fail "installed profile was not reloaded inside the profile transaction"
+    fi
+    if [ -s "$TMP_DIR/repaired/privileged.log" ]; then
+        fail "test-root injection reached the production sudo path"
     fi
     if [ "$(wc -l < "$TMP_DIR/repaired/codex.log")" -ne 2 ]; then
         fail "repair did not re-probe Codex exactly once"
@@ -215,12 +253,13 @@ else
     second_output=$(env \
         PATH="$FAKE_BIN:$PATH" \
         AUTOSPEC_CODEX_SANDBOX_ROOT="$TMP_DIR/repaired/root" \
+        AUTOSPEC_CODEX_SANDBOX_TEST_MODE=1 \
         CODEX_LOG="$TMP_DIR/repaired/codex.log" \
         SYSCTL_LOG="$TMP_DIR/repaired/sysctl.log" \
         PARSER_LOG="$TMP_DIR/repaired/parser.log" \
         PRIVILEGED_LOG="$TMP_DIR/repaired/privileged.log" \
-        INSTALL_LOG="$TMP_DIR/repaired/install.log" \
         REPAIRED_MARKER="$TMP_DIR/repaired/repaired" \
+        CODEX_HOME="$TMP_DIR/repaired/codex-home" \
         CODEX_MODE=blocked \
         bash "$HELPER" 2>&1)
     second_status=$?
@@ -281,6 +320,103 @@ else
     run_helper unrestricted-kernel CODEX_MODE=blocked APPARMOR_RESTRICTED=0
     if [ "$CASE_STATUS" -eq 0 ] || [ -s "$TMP_DIR/unrestricted-kernel/privileged.log" ]; then
         fail "host without the AppArmor userns restriction triggered the repair"
+    fi
+
+    run_helper tampered-candidate \
+        CODEX_MODE=blocked \
+        APPARMOR_MUTATE_AFTER_VALIDATE=1
+    if [ "$CASE_STATUS" -eq 0 ]; then
+        fail "candidate mutation after validation was accepted"
+    fi
+    if [ -e "$TMP_DIR/tampered-candidate/root/etc/apparmor.d/usr.bin.bwrap" ]; then
+        fail "mutated candidate reached the installed profile path"
+    fi
+    if grep -q '^-r ' "$TMP_DIR/tampered-candidate/parser.log"; then
+        fail "mutated candidate reached AppArmor reload"
+    fi
+
+    run_helper reload-failure CODEX_MODE=blocked APPARMOR_RELOAD_FAIL=1
+    if [ "$CASE_STATUS" -eq 0 ] ||
+        [ -e "$TMP_DIR/reload-failure/root/etc/apparmor.d/usr.bin.bwrap" ]; then
+        fail "reload failure left a newly installed profile behind"
+    fi
+    if ! grep -q '^-R ' "$TMP_DIR/reload-failure/parser.log"; then
+        fail "reload failure did not attempt to unload the newly installed profile"
+    fi
+
+    run_helper post-probe-failure CODEX_MODE=post-fail
+    if [ "$CASE_STATUS" -eq 0 ] ||
+        [ -e "$TMP_DIR/post-probe-failure/root/etc/apparmor.d/usr.bin.bwrap" ]; then
+        fail "post-install probe failure left a newly installed profile behind"
+    fi
+    if ! grep -q '^-R ' "$TMP_DIR/post-probe-failure/parser.log"; then
+        fail "post-install probe failure did not unload the new profile"
+    fi
+
+    preexisting_profile="$TMP_DIR/preexisting-identical/root/etc/apparmor.d/usr.bin.bwrap"
+    mkdir -p "$(dirname "$preexisting_profile")"
+    cp "$repaired_profile" "$preexisting_profile"
+    run_helper preexisting-identical CODEX_MODE=blocked APPARMOR_RELOAD_FAIL=1
+    if [ "$CASE_STATUS" -eq 0 ] || [ ! -f "$preexisting_profile" ]; then
+        fail "reload failure did not preserve a pre-existing identical profile"
+    fi
+    if grep -q '^-R ' "$TMP_DIR/preexisting-identical/parser.log"; then
+        fail "reload failure unloaded a pre-existing identical profile"
+    fi
+
+    symlink_target="$TMP_DIR/operator-profile"
+    printf '%s\n' 'operator policy' > "$symlink_target"
+    symlink_profile="$TMP_DIR/symlink-conflict/root/etc/apparmor.d/usr.bin.bwrap"
+    mkdir -p "$(dirname "$symlink_profile")"
+    ln -s "$symlink_target" "$symlink_profile"
+    run_helper symlink-conflict CODEX_MODE=blocked
+    if [ "$CASE_STATUS" -eq 0 ] || [ "$(cat "$symlink_target")" != "operator policy" ]; then
+        fail "symlink profile target was not rejected and preserved"
+    fi
+    case "$CASE_OUTPUT" in
+        *"codex_sandbox_profile_conflict"*) ;;
+        *) fail "symlink profile conflict did not emit its typed error: $CASE_OUTPUT" ;;
+    esac
+
+    mkdir -p "$TMP_DIR/parent-symlink/root" "$TMP_DIR/parent-symlink/redirect/apparmor.d"
+    ln -s "$TMP_DIR/parent-symlink/redirect" "$TMP_DIR/parent-symlink/root/etc"
+    run_helper parent-symlink CODEX_MODE=blocked
+    if [ "$CASE_STATUS" -eq 0 ] ||
+        [ -e "$TMP_DIR/parent-symlink/redirect/apparmor.d/usr.bin.bwrap" ]; then
+        fail "symlinked AppArmor parent reached profile installation"
+    fi
+    case "$CASE_OUTPUT" in
+        *"codex_sandbox_untrusted_profile_dir"*) ;;
+        *) fail "symlinked AppArmor parent did not emit its typed refusal: $CASE_OUTPUT" ;;
+    esac
+
+    unsafe_root="$TMP_DIR/unsafe-override/root"
+    mkdir -p "$unsafe_root/etc/apparmor.d"
+    printf '%s\n' 'ID=ubuntu' > "$unsafe_root/etc/os-release"
+    : > "$TMP_DIR/unsafe-override.privileged.log"
+    set +e
+    unsafe_output=$(env \
+        PATH="$FAKE_BIN:$PATH" \
+        AUTOSPEC_CODEX_SANDBOX_ROOT="$unsafe_root" \
+        CODEX_LOG="$TMP_DIR/unsafe-override.codex.log" \
+        SYSCTL_LOG="$TMP_DIR/unsafe-override.sysctl.log" \
+        PARSER_LOG="$TMP_DIR/unsafe-override.parser.log" \
+        PRIVILEGED_LOG="$TMP_DIR/unsafe-override.privileged.log" \
+        REPAIRED_MARKER="$TMP_DIR/unsafe-override.repaired" \
+        CODEX_HOME="$TMP_DIR/unsafe-override.codex-home" \
+        CODEX_MODE=blocked \
+        bash "$HELPER" 2>&1)
+    unsafe_status=$?
+    set -e
+    if [ "$unsafe_status" -eq 0 ]; then
+        fail "arbitrary sandbox root was accepted outside explicit test mode"
+    fi
+    case "$unsafe_output" in
+        *"codex_sandbox_test_root_refused"*) ;;
+        *) fail "unsafe root override did not emit its typed refusal: $unsafe_output" ;;
+    esac
+    if [ -s "$TMP_DIR/unsafe-override.privileged.log" ]; then
+        fail "unsafe root override reached sudo"
     fi
 fi
 
