@@ -139,11 +139,15 @@ RS
     : > "$WORK/empty.jsonl"
     cat > "$bridge" <<'EOF'
 fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine() {
-    let mut value = 0_i32;
+    let mut subreaper = 0_i32;
     let _ = unsafe {
             nix::libc::prctl(
                 nix::libc::PR_GET_CHILD_SUBREAPER,
-                std::ptr::addr_of_mut!(value), 0, 0, 0)
+                std::ptr::addr_of_mut!(subreaper),
+                0,
+                0,
+                0,
+            )
     };
 }
 fn wrong_location() {
@@ -151,12 +155,20 @@ fn wrong_location() {
     let _ = unsafe {
             nix::libc::prctl(
                 nix::libc::PR_GET_CHILD_SUBREAPER,
-                std::ptr::addr_of_mut!(value), 0, 0, 0)
+                std::ptr::addr_of_mut!(value),
+                0,
+                0,
+                0,
+            )
     };
 }
 fn autonomous_executor_bridge_clean_supervision_restores_prior_subreaper_state() {
     unsafe { altered_body(); }
-    unsafe { extra_block(); }
+    unsafe {
+            nix::libc::prctl(
+                nix::libc::PR_GET_CHILD_SUBREAPER,
+                std::ptr::null_mut::<i32>(), 1, 2, 3)
+    };
 }
 EOF
     run "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$root" --out "$WORK/boundaries.jsonl"
