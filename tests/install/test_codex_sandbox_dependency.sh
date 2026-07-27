@@ -128,6 +128,14 @@ SHIM
 
 chmod +x "$FAKE_BIN"/*
 
+BOUNDARY_ATTACK_MARKER="$TMP_DIR/boundary-attack-ran"
+cat > "$FAKE_BIN/autospec-boundary-attack" <<SHIM
+#!/usr/bin/env bash
+touch "$BOUNDARY_ATTACK_MARKER"
+SHIM
+chmod +x "$FAKE_BIN/autospec-boundary-attack"
+printf '%s\n' 'export AUTOSPEC_BASH_ENV_LOADED=1' > "$TMP_DIR/attacker-bash-env"
+
 run_helper() {
     case_name=$1
     shift
@@ -161,6 +169,25 @@ run_helper() {
 if [ ! -f "$HELPER" ]; then
     fail "Codex sandbox dependency helper is absent"
 else
+    clean_root="$TMP_DIR/clean-boundary/root"
+    mkdir -p "$clean_root/etc/apparmor.d"
+    set +e
+    clean_output=$(env \
+        PATH="$FAKE_BIN:$PATH" \
+        BASH_ENV="$TMP_DIR/attacker-bash-env" \
+        AUTOSPEC_CODEX_SANDBOX_ROOT="$clean_root" \
+        AUTOSPEC_CODEX_SANDBOX_TEST_MODE=1 \
+        bash "$HELPER" --test-clean-boundary 2>&1)
+    clean_status=$?
+    set -e
+    if [ "$clean_status" -ne 0 ] ||
+        [ "$clean_output" != "codex_sandbox_clean_boundary:verified" ]; then
+        fail "production-equivalent clean boundary was not verified: $clean_output"
+    fi
+    if [ -e "$BOUNDARY_ATTACK_MARKER" ]; then
+        fail "attacker PATH executable ran inside the clean boundary"
+    fi
+
     run_helper healthy CODEX_MODE=healthy
     if [ "$CASE_STATUS" -ne 0 ]; then
         fail "a healthy Codex permission profile was rejected: $CASE_OUTPUT"

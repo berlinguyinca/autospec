@@ -33,7 +33,10 @@ the parser cache), atomically links the same inode as
 `/etc/apparmor.d/usr.bin.bwrap` with owner `root:root` and mode `0644`, reloads
 it, and re-runs the Codex probe. Creation through reload happens inside one
 privileged boundary, and trusted ancestors, inode identity, and exact content
-are rechecked after validation. It never replaces a profile whose content
+are rechecked after validation. The root shell starts through
+`/usr/bin/env -i` with only `PATH=/usr/sbin:/usr/bin:/sbin:/bin`, using
+`/bin/bash --noprofile --norc -p`, so caller `PATH`, `BASH_ENV`, and exported
+functions cannot cross the boundary. It never replaces a profile whose content
 differs.
 
 If reload or the post-install probe fails, a newly created profile is unloaded

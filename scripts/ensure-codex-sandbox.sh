@@ -15,6 +15,7 @@ CODEX_EXECUTABLE_TOML=""
 ORIGINAL_CODEX_HOME="${CODEX_HOME:-}"
 PROBE_CODEX_HOME=""
 IGNORE_USER_CONFIG_SUPPORTED=0
+CLEAN_BOUNDARY_PATH="/usr/sbin:/usr/bin:/sbin:/bin"
 
 error() {
     printf 'error: %s\n' "$*" >&2
@@ -24,6 +25,15 @@ cleanup() {
     [ -z "$PROBE_CODEX_HOME" ] || rm -rf -- "$PROBE_CODEX_HOME"
 }
 trap cleanup EXIT INT TERM
+
+run_clean_shell() {
+    clean_script=$1
+    shift
+    /usr/bin/env -i \
+        "PATH=$CLEAN_BOUNDARY_PATH" \
+        /bin/bash --noprofile --norc -p -c "$clean_script" \
+        autospec-codex-sandbox "$@"
+}
 
 if [ -n "$SYSTEM_ROOT" ]; then
     if [ "$TEST_MODE" != "1" ]; then
@@ -45,6 +55,23 @@ fi
 OS_RELEASE="${SYSTEM_ROOT}/etc/os-release"
 PROFILE_DIR="${SYSTEM_ROOT}/etc/apparmor.d"
 PROFILE_PATH="$PROFILE_DIR/usr.bin.bwrap"
+
+if [ "${1:-}" = "--test-clean-boundary" ]; then
+    if [ "$TEST_MODE" != "1" ]; then
+        error "$TEST_ROOT_ERROR: clean-boundary verification is test-only"
+        exit 1
+    fi
+    # shellcheck disable=SC2016 # Assertions expand only inside the clean shell.
+    run_clean_shell '
+set -eu
+[ "$PATH" = /usr/sbin:/usr/bin:/sbin:/bin ]
+[ -z "${BASH_ENV:-}" ]
+[ -z "${AUTOSPEC_BASH_ENV_LOADED:-}" ]
+! command -v autospec-boundary-attack >/dev/null 2>&1
+printf "codex_sandbox_clean_boundary:verified\n"
+'
+    exit
+fi
 
 is_ubuntu() {
     [ -r "$OS_RELEASE" ] || return 1
@@ -340,10 +367,13 @@ run_boundary() {
     shift
     if [ "$TEST_MODE" = "1" ]; then
         /bin/bash -c "$boundary_script" autospec-codex-sandbox "$PROFILE_DIR" 1 "$@"
-    elif [ "$(id -u 2>/dev/null || printf '1')" = "0" ]; then
-        /bin/bash -c "$boundary_script" autospec-codex-sandbox /etc/apparmor.d 0 "$@"
-    elif command -v sudo >/dev/null 2>&1; then
-        sudo /bin/bash -c "$boundary_script" autospec-codex-sandbox /etc/apparmor.d 0 "$@"
+    elif [ "$(/usr/bin/id -u 2>/dev/null || printf '1')" = "0" ]; then
+        run_clean_shell "$boundary_script" /etc/apparmor.d 0 "$@"
+    elif [ -x /usr/bin/sudo ]; then
+        /usr/bin/sudo /usr/bin/env -i \
+            "PATH=$CLEAN_BOUNDARY_PATH" \
+            /bin/bash --noprofile --norc -p -c "$boundary_script" \
+            autospec-codex-sandbox /etc/apparmor.d 0 "$@"
     else
         error "$HOST_ERROR: root privileges are required, but sudo is unavailable"
         return 1
@@ -366,6 +396,8 @@ if [ -z "$CODEX_EXECUTABLE" ] || [ ! -f "$CODEX_EXECUTABLE" ]; then
     exit 1
 fi
 CODEX_EXECUTABLE_TOML="$(toml_escape "$CODEX_EXECUTABLE")"
+# `codex exec` supports --ignore-user-config on 0.144.4, but `codex sandbox`
+# does not. Probe the exact subcommand capability instead of assuming parity.
 if "$CODEX_EXECUTABLE" sandbox --help 2>/dev/null |
     grep -q -- '--ignore-user-config'; then
     IGNORE_USER_CONFIG_SUPPORTED=1
