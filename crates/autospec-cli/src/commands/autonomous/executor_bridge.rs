@@ -13165,15 +13165,21 @@ fn has_durable_harness_recovery_evidence(
         return Ok(true);
     }
     let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
-    for path in [&sinks.supervisor_identity, &sinks.exit_status] {
-        if path
-            .try_exists()
-            .map_err(|error| format!("inspect executor recovery evidence: {error}"))?
-        {
-            return Ok(true);
-        }
+    if sinks
+        .supervisor_identity
+        .try_exists()
+        .map_err(|error| format!("inspect executor recovery evidence: {error}"))?
+    {
+        return Ok(true);
     }
-    Ok(false)
+    if !sinks
+        .exit_status
+        .try_exists()
+        .map_err(|error| format!("inspect executor recovery evidence: {error}"))?
+    {
+        return Ok(false);
+    }
+    Ok(read_executor_exit_status(&sinks.exit_status)?.is_some())
 }
 
 fn supervise_resolved_harness_in_runtime(
@@ -19418,9 +19424,11 @@ mod tests {
         super::write_invocation_atomic(&state_path, &state)
             .expect("persist partial Interrupted state");
         let aliases = fixture.root.join("codex-aliases.tsv");
-        fs::write(&aliases, "codex\t/bin/false\t\tCodex CLI\n").expect("write Codex alias");
+        fs::write(&aliases, "codex\t/bin/true\t\tCodex CLI\n").expect("write Codex alias");
         let previous_aliases = std::env::var_os("AUTOSPEC_HARNESS_RUNTIME_ALIASES");
+        let previous_claim = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
         std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &aliases);
+        std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
         let request = super::ExecutorBridgeRequest {
             repository: state.identity.repository.clone(),
             repository_path: fixture.repo.clone(),
@@ -19431,7 +19439,7 @@ mod tests {
             claim_id: state.identity.claim_id.clone(),
             invocation_id: state.identity.invocation_id.clone(),
             state_path: state_path.clone(),
-            event_log,
+            event_log: event_log.clone(),
         };
 
         let mut probe_calls = 0;
@@ -19444,10 +19452,6 @@ mod tests {
         let harness_live =
             super::cleanup_instance_is_live(&harness).expect("inspect interrupted harness");
 
-        match previous_aliases {
-            Some(value) => std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", value),
-            None => std::env::remove_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES"),
-        }
         assert_eq!(
             probe_calls, 0,
             "partial recovery must precede a fresh Codex probe"
@@ -19460,6 +19464,42 @@ mod tests {
             !supervisor_live && !harness_live,
             "partial Interrupted executor was stranded before Codex probing"
         );
+        let sinks = super::output_sink_paths(&state_path, &state.identity.invocation_id)
+            .expect("executor output sinks");
+        assert_eq!(
+            fs::metadata(&sinks.exit_status)
+                .expect("preallocated exit sink")
+                .len(),
+            16
+        );
+        assert_eq!(
+            super::read_executor_exit_status(&sinks.exit_status).expect("empty exit sink"),
+            None
+        );
+
+        let mut retry_probe_calls = 0;
+        let retry = super::run_executor_bridge_with_codex_probe(&request, |_| {
+            retry_probe_calls += 1;
+            Ok(super::CodexSandboxPolicy::Default)
+        });
+        let events = fs::read_to_string(&event_log).expect("read retry events");
+        assert_eq!(
+            retry_probe_calls, 1,
+            "empty preallocated exit sink must allow fresh Codex resolution"
+        );
+        assert!(retry.is_err(), "unchanged fixture HEAD stops after launch");
+        assert!(
+            events.contains("\"event\":\"child_started\""),
+            "retry never launched the fresh harness: outcome={retry:?} events={events}"
+        );
+        match previous_aliases {
+            Some(value) => std::env::set_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES", value),
+            None => std::env::remove_var("AUTOSPEC_HARNESS_RUNTIME_ALIASES"),
+        }
+        match previous_claim {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM"),
+        }
         let worktree_path = worktree.path.to_str().expect("worktree path");
         git(&fixture.repo, &["worktree", "remove", worktree_path]);
         let _ = fs::remove_dir_all(scope_root);
