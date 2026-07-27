@@ -194,7 +194,7 @@ EOF
     [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/boundaries.jsonl")" -eq 6 ]
 }
 
-@test "scan pr: reports only unsafe syntax introduced after the merge base" {
+@test "rank pr: compares unsafe syntax against renamed and edited baseline files" {
     run test -x "$SCRIPT"
     [ "$status" -eq 0 ]
     local repo="$WORK/repo"
@@ -202,33 +202,51 @@ EOF
     git -C "$repo" init -q
     git -C "$repo" config user.email test@example.com
     git -C "$repo" config user.name "Security Workstream Test"
+    : > "$WORK/empty.jsonl"
     cat > "$repo/src/lib.rs" <<'RS'
 fn existing(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }
-fn promoted() -> i32 {
-    {
-        42
-    }
-}
 RS
-    git -C "$repo" add src/lib.rs
+    cp "$repo/src/lib.rs" "$repo/src/rename.rs"
+    cp "$repo/src/lib.rs" "$repo/src/deleted.rs"
+    printf '%s\n' 'fn replacement() -> i32 { 42 }' > "$repo/src/replacement.rs"
+    cat > "$repo/src/attribute.rs" <<'RS'
+#[
+cfg(any())
+]
+pub extern "C" fn exported() {}
+RS
+    printf '%s\n' '{}' > "$repo/.security-workstream-added-lines.json"
+    git -C "$repo" add .
     git -C "$repo" commit -qm "base"
     local base
     base="$(git -C "$repo" rev-parse HEAD)"
 
-    printf '%s\n' '# unrelated documentation' > "$repo/README.md"
-    git -C "$repo" add README.md
-    git -C "$repo" commit -qm "docs"
-    run bash "$SCRIPT" scan --mode pr --root "$repo" --base "$base" --out "$WORK/unrelated.jsonl"
-    [ "$status" -eq 0 ]
-    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/unrelated.jsonl")" -eq 0 ]
+    sed -i 's/fn existing/fn renamed/' "$repo/src/lib.rs"
+    sed -i '2s/cfg(any())/unsafe(no_mangle)/' "$repo/src/attribute.rs"
+    printf '%s\n' 'fn replacement(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$repo/src/replacement.rs"
+    git -C "$repo" mv src/rename.rs src/moved.rs
+    git -C "$repo" rm -q src/deleted.rs
+    git -C "$repo" add .
+    git -C "$repo" commit -qm "modify unsafe contexts"
 
-    sed -i '3i\\    unsafe' "$repo/src/lib.rs"
-    git -C "$repo" add src/lib.rs
-    git -C "$repo" commit -qm "add unsafe"
-    run bash "$SCRIPT" scan --mode pr --root "$repo" --base "$base" --out "$WORK/added.jsonl"
+    run bash "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$repo" --base "$base" --out "$WORK/pr.jsonl"
     [ "$status" -eq 0 ]
-    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/added.jsonl")" -eq 1 ]
-    jq -e 'select(.dimension == "unsafe" and .file == "src/lib.rs" and .line == 3)' "$WORK/added.jsonl" >/dev/null
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/pr.jsonl")" -eq 2 ]
+    jq -e 'select(.dimension == "unsafe" and .file == "src/attribute.rs" and .line == 2)' "$WORK/pr.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/replacement.rs" and .line == 1)' "$WORK/pr.jsonl" >/dev/null
+
+    run bash "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$repo" --out "$WORK/tree.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/tree.jsonl")" -eq 4 ]
+
+    printf '%s\n' 'fn new(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$repo/src/untracked.rs"
+    run bash "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$repo" --base "$base" --out "$WORK/untracked.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/untracked.jsonl")" -eq 3 ]
+
+    run bash "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$repo" --base missing-base --out "$WORK/invalid.jsonl"
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"failed closed"* ]]
 }
 
 @test "issue filing: high-severity findings produce lint-clean remediation issues" {

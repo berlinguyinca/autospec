@@ -31,7 +31,6 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 SENSITIVE_DOMAINS = {"auth", "secrets", "secret", "money", "payments", "payment", "migration", "migrations"}
@@ -80,7 +79,6 @@ def title_hash(value):
 RUST_UNSAFE_SYNTAX = re.compile(
     r"\bunsafe\s*(?:\{|fn\b|trait\b|impl\b|extern\b)|#\s*\[\s*unsafe\s*\("
 )
-PR_ADDED_LINES = ".security-workstream-added-lines.json"
 RUNTIME_SIGNAL_FFI_PATH = "crates/autospec-cli/src/commands/runtime/env.rs"
 RUNTIME_SIGNAL_DECLARATION = '''#[cfg(unix)]
 extern "C" {
@@ -218,17 +216,30 @@ def rust_code_only(source):
     return "".join(output)
 
 
+def unsafe_findings_for_source(relative_path, source):
+    findings = []
+    code = rust_code_only(source)
+    for match in RUST_UNSAFE_SYNTAX.finditer(code):
+        unsafe_offset = code.find("unsafe", match.start(), match.end())
+        line = code.count("\n", 0, unsafe_offset) + 1
+        if approved_unsafe_boundary(relative_path, source, match):
+            continue
+        findings.append({
+            "gap_id": f"U{len(findings)+1}",
+            "dimension": "unsafe",
+            "severity": "must-fix",
+            "file": relative_path,
+            "line": line,
+            "title": "Unsafe code requires security review",
+            "body": "Unsafe code was detected. Replace it with a safe primitive or document an independent security review and invariant proof.",
+            "dedupe_key": title_hash(f"unsafe:{relative_path}:{line}"),
+            "_unsafe_syntax": " ".join(match.group(0).split()),
+        })
+    return findings
+
+
 def unsafe_findings(root):
     root_path = Path(root or ".")
-    added_lines_path = root_path / PR_ADDED_LINES
-    added_lines = (
-        {
-            path: set(lines)
-            for path, lines in json.loads(added_lines_path.read_text()).items()
-        }
-        if added_lines_path.is_file()
-        else None
-    )
     findings = []
     for path in root_path.rglob("*"):
         if not path.is_file() or ".git" in path.parts:
@@ -240,24 +251,10 @@ def unsafe_findings(root):
         except OSError:
             continue
         source = "\n".join(lines)
-        code = rust_code_only(source)
-        for match in RUST_UNSAFE_SYNTAX.finditer(code):
-            line = code.count("\n", 0, match.start()) + 1
-            rel = str(path.relative_to(root_path)) if path.is_relative_to(root_path) else str(path)
-            if added_lines is not None and line not in added_lines.get(rel, set()):
-                continue
-            if approved_unsafe_boundary(rel, source, match):
-                continue
-            findings.append({
-                "gap_id": f"U{len(findings)+1}",
-                "dimension": "unsafe",
-                "severity": "must-fix",
-                "file": rel,
-                "line": line,
-                "title": "Unsafe code requires security review",
-                "body": "Unsafe code was detected. Replace it with a safe primitive or document an independent security review and invariant proof.",
-                "dedupe_key": title_hash(f"unsafe:{rel}:{line}"),
-            })
+        rel = str(path.relative_to(root_path)) if path.is_relative_to(root_path) else str(path)
+        findings.extend(unsafe_findings_for_source(rel, source))
+    for index, finding in enumerate(findings, start=1):
+        finding["gap_id"] = f"U{index}"
     return findings
 
 
@@ -305,6 +302,7 @@ def score(row):
 
 def normalize(row, idx):
     out = dict(row)
+    out.pop("_unsafe_syntax", None)
     out.setdefault("gap_id", f"G{idx}")
     out.setdefault("dimension", "vuln")
     out.setdefault("severity", "nice-to-have")
@@ -337,57 +335,159 @@ def remediation(row):
     return "Triage exploitability and exposure, apply the smallest remediation, then re-run the security workstream."
 
 
-def cmd_rank(args):
-    rows = read_jsonl(args.findings)
-    rows.extend(unsafe_findings(args.root))
+def write_ranked(rows, out):
     ranked = [normalize(row, i + 1) for i, row in enumerate(rows)]
     ranked.sort(key=lambda r: (-int(r.get("severity_rank", 0)), r.get("file", ""), int(r.get("line") or 0)))
-    write_jsonl(args.out, ranked)
+    write_jsonl(out, ranked)
     p0 = sum(1 for r in ranked if r.get("priority") == "P0")
     p1 = sum(1 for r in ranked if r.get("priority") == "P1")
     print(f"security rank complete findings={len(ranked)} p0={p0} p1={p1}")
     return 0
 
 
-def changed_file_root(root, base):
-    tmpdir = Path(tempfile.mkdtemp(prefix="security-workstream-diff-"))
-    added_line_map = {}
-    try:
-        merge_base = subprocess.run(["git", "-C", root, "merge-base", base, "HEAD"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.strip() or base
-        names = subprocess.run(["git", "-C", root, "diff", "--name-only", merge_base, "HEAD", "--", "*.rs"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.splitlines()
-        untracked = set(subprocess.run(["git", "-C", root, "ls-files", "--others", "--exclude-standard", "--", "*.rs"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.splitlines())
-        names += sorted(untracked)
-    except Exception:
-        return tmpdir
-    for rel in sorted(set(n for n in names if n)):
-        src = Path(root) / rel
-        if src.is_file():
-            lines = src.read_text(errors="ignore").splitlines()
-            if rel in untracked:
-                added_lines = set(range(1, len(lines) + 1))
-            else:
-                diff = subprocess.run(
-                    ["git", "-C", root, "diff", "--unified=0", "--no-color", "--no-ext-diff", merge_base, "HEAD", "--", rel],
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                ).stdout
-                added_lines = set()
-                for start, count in re.findall(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", diff, re.MULTILINE):
-                    start = int(start)
-                    count = int(count or "1")
-                    added_lines.update(range(start, start + count))
-            if not added_lines:
-                continue
-            dst = tmpdir / rel
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-            added_line_map[rel] = sorted(added_lines)
-    (tmpdir / PR_ADDED_LINES).write_text(
-        json.dumps(added_line_map, sort_keys=True),
-        encoding="utf-8",
+def cmd_rank(args):
+    rows = read_jsonl(args.findings)
+    if args.base:
+        unsafe_rows, error = unsafe_findings_pr(args.root, args.base)
+        if error:
+            eprint(error)
+            return 2
+        rows.extend(unsafe_rows)
+    else:
+        rows.extend(unsafe_findings(args.root))
+    return write_ranked(rows, args.out)
+
+
+def run_git(root, args):
+    result = subprocess.run(
+        ["git", "-C", root, *args],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
-    return tmpdir
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "git command failed"
+        raise RuntimeError(f"git {' '.join(args)}: {detail}")
+    return result.stdout
+
+
+def changed_rust_paths(root, merge_base):
+    fields = run_git(
+        root,
+        ["diff", "--name-status", "-z", "--find-renames", merge_base, "HEAD", "--", "*.rs"],
+    ).split("\0")
+    paths = []
+    index = 0
+    while index < len(fields) and fields[index]:
+        status = fields[index]
+        index += 1
+        if status.startswith(("R", "C")):
+            old_path, current_path = fields[index:index + 2]
+            index += 2
+        else:
+            old_path = current_path = fields[index]
+            index += 1
+        paths.append((status[0], old_path, current_path))
+    untracked = run_git(
+        root,
+        ["ls-files", "-z", "--others", "--exclude-standard", "--", "*.rs"],
+    ).split("\0")
+    paths.extend(("A", "", path) for path in untracked if path)
+    return paths
+
+
+def added_unsafe_token_lines(root, merge_base, old_path, current_path):
+    pathspec = list(dict.fromkeys(path for path in (old_path, current_path) if path))
+    diff = run_git(
+        root,
+        [
+            "diff",
+            "--word-diff=porcelain",
+            "--word-diff-regex=[A-Za-z_][A-Za-z0-9_]*|[^[:space:]]",
+            "--find-renames",
+            "--unified=0",
+            merge_base,
+            "HEAD",
+            "--",
+            *pathspec,
+        ],
+    )
+    counts = {}
+    current_line = None
+    for line in diff.splitlines():
+        hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)", line)
+        if hunk:
+            current_line = int(hunk.group(1))
+        elif current_line is not None and line == "~":
+            current_line += 1
+        elif current_line is not None and line.startswith("+") and not line.startswith("+++"):
+            added = len(re.findall(r"\bunsafe\b", line[1:]))
+            if added:
+                counts[current_line] = counts.get(current_line, 0) + added
+    return counts
+
+
+def unsafe_findings_pr(root, base):
+    try:
+        merge_base = run_git(root, ["merge-base", base, "HEAD"]).strip()
+        if not merge_base:
+            raise RuntimeError("git merge-base returned no commit")
+        findings = []
+        for status, old_path, current_path in changed_rust_paths(root, merge_base):
+            current_file = Path(root) / current_path
+            if status == "D" or not current_file.is_file():
+                continue
+            current = unsafe_findings_for_source(
+                current_path,
+                current_file.read_text(errors="ignore"),
+            )
+            baseline = []
+            if status != "A":
+                baseline_source = run_git(root, ["show", f"{merge_base}:{old_path}"])
+                baseline = unsafe_findings_for_source(current_path, baseline_source)
+            added_lines = (
+                {}
+                if status == "A"
+                else added_unsafe_token_lines(root, merge_base, old_path, current_path)
+            )
+            baseline_counts = {}
+            for finding in baseline:
+                syntax = finding["_unsafe_syntax"]
+                baseline_counts[syntax] = baseline_counts.get(syntax, 0) + 1
+            current_counts = {}
+            for finding in current:
+                syntax = finding["_unsafe_syntax"]
+                current_counts[syntax] = current_counts.get(syntax, 0) + 1
+            reported_counts = {}
+            unreported = []
+            for finding in current:
+                line = finding["line"]
+                if added_lines.get(line, 0):
+                    added_lines[line] -= 1
+                    findings.append(finding)
+                    syntax = finding["_unsafe_syntax"]
+                    reported_counts[syntax] = reported_counts.get(syntax, 0) + 1
+                else:
+                    unreported.append(finding)
+            additional = {
+                syntax: max(
+                    count
+                    - baseline_counts.get(syntax, 0)
+                    - reported_counts.get(syntax, 0),
+                    0,
+                )
+                for syntax, count in current_counts.items()
+            }
+            for finding in unreported:
+                syntax = finding["_unsafe_syntax"]
+                if additional.get(syntax, 0):
+                    findings.append(finding)
+                    additional[syntax] -= 1
+        for index, finding in enumerate(findings, start=1):
+            finding["gap_id"] = f"U{index}"
+        return findings, None
+    except (OSError, RuntimeError) as error:
+        return [], f"unsafe PR scan failed closed: {error}"
 
 
 def cmd_scan(args):
@@ -409,8 +509,16 @@ def cmd_scan(args):
         return 2
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(result.stdout, encoding="utf-8")
-    unsafe_root = str(changed_file_root(root, args.base)) if args.mode == "pr" else root
-    return cmd_rank(argparse.Namespace(findings=str(tmp), root=unsafe_root, out=args.out))
+    rows = read_jsonl(tmp)
+    if args.mode == "pr":
+        unsafe_rows, error = unsafe_findings_pr(root, args.base)
+        if error:
+            eprint(error)
+            return 2
+        rows.extend(unsafe_rows)
+    else:
+        rows.extend(unsafe_findings(root))
+    return write_ranked(rows, args.out)
 
 
 def issue_body(row):
@@ -527,6 +635,7 @@ def main():
     if cmd == "rank":
         parser.add_argument("--findings", required=True)
         parser.add_argument("--root", default=".")
+        parser.add_argument("--base")
         parser.add_argument("--out", required=True)
         return cmd_rank(parser.parse_args(sys.argv[2:]))
     if cmd == "scan":

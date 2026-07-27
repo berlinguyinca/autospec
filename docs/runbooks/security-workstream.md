@@ -13,6 +13,22 @@ weekly schedule. The PR path scans the diff against `origin/main`; the scheduled
 path scans the tree. Both write ranked JSONL under `.autospec/security/` so the
 same evidence can feed issue creation or merge gates.
 
+To isolate the deterministic Rust `unsafe` comparison from external scanners,
+pass the merge base to `rank`:
+
+```bash
+: > /tmp/security-findings.jsonl
+bash scripts/security-workstream.sh rank \
+  --findings /tmp/security-findings.jsonl \
+  --root . \
+  --base origin/main \
+  --out /tmp/security-ranked.jsonl
+```
+
+The command fails closed when Git cannot resolve or read the baseline. PR mode
+compares syntax across renames and reports only net-new unsafe constructs;
+scheduled tree mode continues to inspect every Rust file.
+
 ## High-severity issue proposals
 
 ```bash
