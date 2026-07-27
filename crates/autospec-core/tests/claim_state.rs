@@ -32,6 +32,7 @@ fn recovery_claim() -> RunStateRecord {
         "2026-07-14T00:00:00Z",
         10_800,
     )
+    .with_claim_id("claim-a")
 }
 
 fn recovery_evidence() -> ExecutorResultEvidence {
@@ -56,6 +57,8 @@ fn recovery_pull_request() -> OpenPullRequest {
         body: "Closes #42\n\n## Closeout report\n\nshipped".to_string(),
         head_ref_name: "feat/test".to_string(),
         head_ref_oid: "7575757575757575757575757575757575757575".to_string(),
+        is_draft: false,
+        base_ref_name: "main".to_string(),
     }
 }
 
@@ -154,9 +157,9 @@ fn parses_the_projected_github_comment_shape_without_accepting_unknown_fields() 
 fn selects_the_lowest_linked_open_pr_with_exactly_one_closeout_report() {
     let pull_requests = parse_open_pull_requests_json(
         r#"[
-          {"number":77,"body":"Fixes #42\n\n## Closeout report\n\n## Closeout report","headRefName":"feat/77","headRefOid":"7777777777777777777777777777777777777777"},
-          {"number":75,"body":"Closes #42\n\n## Closeout report\n\nshipped","headRefName":"feat/75","headRefOid":"7575757575757575757575757575757575757575"},
-          {"number":74,"body":"Fixes #420\n\n## Closeout report","headRefName":"feat/74","headRefOid":"7474747474747474747474747474747474747474"}
+          {"number":77,"body":"Fixes #42\n\n## Closeout report\n\n## Closeout report","headRefName":"feat/77","headRefOid":"7777777777777777777777777777777777777777","isDraft":false,"baseRefName":"main"},
+          {"number":75,"body":"Closes #42\n\n## Closeout report\n\nshipped","headRefName":"feat/75","headRefOid":"7575757575757575757575757575757575757575","isDraft":false,"baseRefName":"main"},
+          {"number":74,"body":"Fixes #420\n\n## Closeout report","headRefName":"feat/74","headRefOid":"7474747474747474747474747474747474747474","isDraft":false,"baseRefName":"main"}
         ]"#,
     )
     .expect("projected pull request list parses");
@@ -208,7 +211,7 @@ fn recovers_an_expired_merge_ready_claim_with_exact_identity() {
 
 #[test]
 fn blocks_recovery_when_any_claim_identity_field_differs() {
-    let claim = recovery_claim();
+    let claim = recovery_claim().with_claim_id("claim-a");
     let pull_request = recovery_pull_request();
     let checks = [RequiredCheck::new("CI", "SUCCESS")];
 
@@ -235,6 +238,23 @@ fn blocks_recovery_when_any_claim_identity_field_differs() {
             ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::IdentityMismatch)
         );
     }
+}
+
+#[test]
+fn merge_ready_recovery_rejects_mismatched_claim_id() {
+    let claim = recovery_claim().with_claim_id("claim-b");
+    let evidence = recovery_evidence();
+
+    assert_eq!(
+        evaluate_merge_ready_claim_recovery(
+            &claim,
+            &evidence,
+            &recovery_pull_request(),
+            &[RequiredCheck::new("CI", "SUCCESS")],
+            false,
+        ),
+        ClaimRecoveryDecision::Blocked(ClaimRecoveryBlock::IdentityMismatch)
+    );
 }
 
 #[test]

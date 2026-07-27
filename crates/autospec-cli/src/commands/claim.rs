@@ -1,7 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,14 +10,13 @@ use autospec_core::autonomous_lifecycle::{
     WorkerId, ABANDONED_LEASE_SECS, STALE_LEASE_SECS,
 };
 use autospec_core::claim::{
-    claim_losing_worker_comment_id, evaluate_merge_ready_claim_recovery,
-    executor_result_evidence_exists, executor_wait_failure_relinquishes_claim,
+    evaluate_merge_ready_claim_recovery, executor_result_evidence_exists,
     find_reconcilable_pull_request, is_executor_result_pull_request, is_reconcilable_pull_request,
-    lowest_marked_comment, parse_claim_issue_json, parse_open_pull_requests_json,
-    parse_paths_argument, parse_remote_comments_json, parse_required_checks_json, select_run_state,
-    successful_executor_result_for_pull_request, terminal_merged_comment_exists,
-    ClaimRecoveryDecision, ExecutorResultEvidence, RunStateRecord, RUN_TERMINAL_BEGIN_MARKER,
-    RUN_TERMINAL_END_MARKER,
+    parse_claim_issue_json, parse_open_pull_requests_json, parse_paths_argument,
+    parse_remote_comments_json, parse_required_checks_json, parse_run_state_comment,
+    successful_executor_result_for_pull_request, ClaimRecoveryDecision, ExecutorResultEvidence,
+    RemoteComment, RunStateRecord, SelectedRunState, RUN_STATE_BEGIN_MARKER, RUN_STATE_END_MARKER,
+    RUN_TERMINAL_BEGIN_MARKER, RUN_TERMINAL_END_MARKER,
 };
 use autospec_core::coordination::ConductorOutcome;
 use autospec_core::safety::redact_secrets;
@@ -27,6 +26,538 @@ use super::CommandFailure;
 
 static UNIQUE_ID_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 const WAIT_FAILURE_MARKER: &str = "<!-- autospec-implementer-wait-failed -->";
+const RUN_STATE_LINK_PREFIX: &str = "<!-- autospec-run-state-link parent=";
+const RUN_STATE_LINK_SUFFIX: &str = " -->";
+const CLAIM_REF_MESSAGE_HEADER: &str = "autospec-claim-ledger-v1";
+const BRIDGE_TERMINAL_PREPARED_PREFIX: &str = "terminal_prepared:";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClaimRefHead {
+    oid: String,
+    generation: String,
+    record: RunStateRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaimRefAdvance {
+    Won(Box<ClaimRefHead>),
+    Lost,
+}
+
+fn claim_ref_name(issue: u64) -> String {
+    format!("refs/autospec/claims/issue-{issue}")
+}
+
+fn run_git_in(
+    git_program: &Path,
+    workdir: &Path,
+    arguments: &[&str],
+    action: &str,
+) -> Result<std::process::Output, CommandFailure> {
+    Command::new(git_program)
+        .args(arguments)
+        .current_dir(workdir)
+        .output()
+        .map_err(|error| CommandFailure::diagnostic(format!("{action}: {error}")))
+}
+
+fn claim_remote_arguments(remote_url: &str, command_arguments: &[&str]) -> Vec<String> {
+    let mut arguments = Vec::new();
+    if remote_url.starts_with("https://") || remote_url.starts_with("http://") {
+        arguments.extend([
+            "-c".to_string(),
+            "credential.helper=!gh auth git-credential".to_string(),
+            "-c".to_string(),
+            "credential.useHttpPath=true".to_string(),
+        ]);
+    }
+    arguments.extend(
+        command_arguments
+            .iter()
+            .map(|argument| (*argument).to_string()),
+    );
+    arguments
+}
+
+fn resolve_remote_url_in(
+    git_program: &Path,
+    workdir: &Path,
+    remote: &str,
+) -> Result<String, CommandFailure> {
+    if remote.contains("://")
+        || remote.contains(':')
+        || Path::new(remote).is_absolute()
+        || Path::new(remote).exists()
+    {
+        return Ok(remote.to_string());
+    }
+    let output = run_git_in(
+        git_program,
+        workdir,
+        &["remote", "get-url", remote],
+        "resolve claim remote URL",
+    )?;
+    if !output.status.success() {
+        return Err(CommandFailure::diagnostic(format!(
+            "resolve claim remote URL: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn push_claim_ref_in(
+    git_program: &Path,
+    workdir: &Path,
+    remote: &str,
+    refspec: &str,
+) -> Result<std::process::Output, CommandFailure> {
+    let remote_url = resolve_remote_url_in(git_program, workdir, remote)?;
+    let arguments = claim_remote_arguments(&remote_url, &["push", remote, refspec]);
+    let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    run_git_in(git_program, workdir, &arguments, "advance claim ref")
+        .map_err(CommandFailure::into_transient)
+}
+
+fn parse_claim_ref_message(
+    oid: String,
+    message: &str,
+    repo: &str,
+    issue: u64,
+) -> Result<ClaimRefHead, CommandFailure> {
+    let mut lines = message.lines();
+    if lines.next() != Some(CLAIM_REF_MESSAGE_HEADER) {
+        return Err(CommandFailure::diagnostic(
+            "claim ref commit has an unsupported message header",
+        ));
+    }
+    let generation = lines
+        .next()
+        .and_then(|line| line.strip_prefix("generation="))
+        .filter(|generation| !generation.trim().is_empty())
+        .ok_or_else(|| CommandFailure::diagnostic("claim ref commit has no generation"))?
+        .to_string();
+    let record = parse_run_state_comment(message).map_err(|error| {
+        CommandFailure::diagnostic(format!("invalid claim ref record: {error}"))
+    })?;
+    if record.repo != repo || record.issue != issue {
+        return Err(CommandFailure::diagnostic(
+            "claim ref record does not match the requested repository and issue",
+        ));
+    }
+    Ok(ClaimRefHead {
+        oid,
+        generation,
+        record,
+    })
+}
+
+fn read_claim_ref_in(
+    git_program: &Path,
+    workdir: &Path,
+    remote: &str,
+    repo: &str,
+    issue: u64,
+) -> Result<Option<ClaimRefHead>, CommandFailure> {
+    let reference = claim_ref_name(issue);
+    let remote_url = resolve_remote_url_in(git_program, workdir, remote)?;
+    let arguments =
+        claim_remote_arguments(&remote_url, &["ls-remote", "--refs", remote, &reference]);
+    let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_git_in(git_program, workdir, &arguments, "read claim ref")
+        .map_err(CommandFailure::into_transient)?;
+    if !output.status.success() {
+        return Err(CommandFailure::transient(format!(
+            "read claim ref: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let Some(oid) = stdout.split_whitespace().next() else {
+        return Ok(None);
+    };
+    if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CommandFailure::diagnostic(
+            "read claim ref returned an invalid object ID",
+        ));
+    }
+    let arguments =
+        claim_remote_arguments(&remote_url, &["fetch", "--no-tags", remote, &reference]);
+    let arguments = arguments.iter().map(String::as_str).collect::<Vec<_>>();
+    let fetch = run_git_in(git_program, workdir, &arguments, "fetch claim ref")
+        .map_err(CommandFailure::into_transient)?;
+    if !fetch.status.success() {
+        return Err(CommandFailure::transient(format!(
+            "fetch claim ref: {}",
+            String::from_utf8_lossy(&fetch.stderr).trim()
+        )));
+    }
+    let message = run_git_in(
+        git_program,
+        workdir,
+        &["show", "-s", "--format=%B", oid],
+        "read claim ref commit",
+    )?;
+    if !message.status.success() {
+        return Err(CommandFailure::diagnostic(format!(
+            "read claim ref commit: {}",
+            String::from_utf8_lossy(&message.stderr).trim()
+        )));
+    }
+    parse_claim_ref_message(
+        oid.to_string(),
+        &String::from_utf8_lossy(&message.stdout),
+        repo,
+        issue,
+    )
+    .map(Some)
+}
+
+fn claim_transition_identity_is_valid(
+    parent: Option<&ClaimRefHead>,
+    record: &RunStateRecord,
+) -> bool {
+    let Some(parent) = parent else {
+        return record.state == "claimed";
+    };
+    if !matches!(
+        record.state.as_str(),
+        "merged" | "released" | "failed" | "available"
+    ) {
+        return true;
+    }
+    parent.record.worker_id == record.worker_id
+        && parent.record.branch == record.branch
+        && parent.record.claim_id == record.claim_id
+}
+
+fn create_claim_ref_commit(
+    git_program: &Path,
+    workdir: &Path,
+    parent: Option<&ClaimRefHead>,
+    generation: &str,
+    record: &RunStateRecord,
+) -> Result<String, CommandFailure> {
+    let tree = run_git_in(git_program, workdir, &["mktree"], "create claim ref tree")?;
+    if !tree.status.success() {
+        return Err(CommandFailure::diagnostic(format!(
+            "create claim ref tree: {}",
+            String::from_utf8_lossy(&tree.stderr).trim()
+        )));
+    }
+    let tree = String::from_utf8_lossy(&tree.stdout).trim().to_string();
+    let mut command = Command::new(git_program);
+    command
+        .arg("commit-tree")
+        .arg(&tree)
+        .current_dir(workdir)
+        .env("GIT_AUTHOR_NAME", "Autospec Claim Ledger")
+        .env("GIT_AUTHOR_EMAIL", "autospec-claim@localhost")
+        .env("GIT_COMMITTER_NAME", "Autospec Claim Ledger")
+        .env("GIT_COMMITTER_EMAIL", "autospec-claim@localhost")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(parent) = parent {
+        command.args(["-p", &parent.oid]);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| CommandFailure::diagnostic(format!("create claim ref commit: {error}")))?;
+    let message = format!(
+        "{CLAIM_REF_MESSAGE_HEADER}\ngeneration={generation}\n\n{}\n",
+        record.to_marked_comment()
+    );
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| CommandFailure::diagnostic("claim ref commit stdin was unavailable"))?
+        .write_all(message.as_bytes())
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("write claim ref commit message: {error}"))
+        })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| CommandFailure::diagnostic(format!("finish claim ref commit: {error}")))?;
+    if !output.status.success() {
+        return Err(CommandFailure::diagnostic(format!(
+            "create claim ref commit: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn advance_claim_ref_in(
+    git_program: &Path,
+    workdir: &Path,
+    remote: &str,
+    repo: &str,
+    issue: u64,
+    expected: Option<&ClaimRefHead>,
+    record: &RunStateRecord,
+) -> Result<ClaimRefAdvance, CommandFailure> {
+    if record.repo != repo || record.issue != issue {
+        return Err(CommandFailure::diagnostic(
+            "claim transition record does not match its repository and issue",
+        ));
+    }
+    if !claim_transition_identity_is_valid(expected, record) {
+        return Err(CommandFailure::diagnostic(
+            "terminal claim transition does not match worker, branch, and claim ID",
+        ));
+    }
+    let observed = read_claim_ref_in(git_program, workdir, remote, repo, issue)?;
+    if observed.as_ref().map(|head| &head.oid) != expected.map(|head| &head.oid) {
+        return Ok(ClaimRefAdvance::Lost);
+    }
+    let generation = unique_operation_id("claim-ref")?;
+    let oid = create_claim_ref_commit(git_program, workdir, expected, &generation, record)?;
+    let reference = claim_ref_name(issue);
+    let refspec = format!("{oid}:{reference}");
+    let push = push_claim_ref_in(git_program, workdir, remote, &refspec)?;
+    if push.status.success() {
+        return Ok(ClaimRefAdvance::Won(Box::new(ClaimRefHead {
+            oid,
+            generation,
+            record: record.clone(),
+        })));
+    }
+    // A transport failure is ambiguous. Re-read once: if receive-pack committed
+    // our exact object, this operation won. Never retry the mutation.
+    let reread = read_claim_ref_in(git_program, workdir, remote, repo, issue)?;
+    if reread.as_ref().is_some_and(|head| head.oid == oid) {
+        Ok(ClaimRefAdvance::Won(Box::new(
+            reread.expect("checked claim ref"),
+        )))
+    } else if reread.as_ref().map(|head| &head.oid) != expected.map(|head| &head.oid) {
+        Ok(ClaimRefAdvance::Lost)
+    } else {
+        Err(CommandFailure::transient(format!(
+            "advance claim ref failed without changing authoritative ownership: {}",
+            String::from_utf8_lossy(&push.stderr).trim()
+        )))
+    }
+}
+
+fn claim_git_program() -> std::path::PathBuf {
+    std::env::var_os("AUTOSPEC_CLAIM_GIT_BIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("git"))
+}
+
+fn resolve_claim_remote(repo: &str) -> Result<String, CommandFailure> {
+    if let Ok(remote) = std::env::var("AUTOSPEC_CLAIM_GIT_REMOTE") {
+        if !remote.trim().is_empty() {
+            if remote.starts_with("https://") {
+                return validated_claim_remote(repo, &remote);
+            }
+            if Path::new(&remote).exists() {
+                return Ok(remote);
+            }
+            return Err(CommandFailure::diagnostic(
+                "AUTOSPEC_CLAIM_GIT_REMOTE must be a matching HTTPS clone URL or an existing local test remote",
+            ));
+        }
+    }
+    let output = Command::new("gh")
+        .args(["repo", "view", repo, "--json", "url", "--jq", ".url"])
+        .output()
+        .map_err(|error| {
+            CommandFailure::transient(format!("resolve authenticated claim repository: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(CommandFailure::transient(format!(
+            "resolve authenticated claim repository {repo}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    validated_claim_remote(repo, String::from_utf8_lossy(&output.stdout).trim())
+}
+
+fn validated_claim_remote(repo: &str, url: &str) -> Result<String, CommandFailure> {
+    let invalid = || {
+        CommandFailure::diagnostic(
+            "authenticated claim repository URL does not match the requested owner/repo",
+        )
+    };
+    let (expected_owner, expected_repo) = repo.split_once('/').ok_or_else(invalid)?;
+    if expected_owner.is_empty()
+        || expected_repo.is_empty()
+        || expected_repo.contains('/')
+        || !safe_repository_segment(expected_owner)
+        || !safe_repository_segment(expected_repo)
+    {
+        return Err(invalid());
+    }
+    let remainder = url.strip_prefix("https://").ok_or_else(invalid)?;
+    let (authority, path) = remainder.split_once('/').ok_or_else(invalid)?;
+    if authority.is_empty()
+        || authority.contains(['@', '?', '#'])
+        || authority.chars().any(char::is_whitespace)
+        || path.contains(['?', '#'])
+    {
+        return Err(invalid());
+    }
+    let mut segments = path.split('/');
+    let owner = segments.next().ok_or_else(invalid)?;
+    let repository = segments.next().ok_or_else(invalid)?;
+    if segments.next().is_some() {
+        return Err(invalid());
+    }
+    let repository = repository.strip_suffix(".git").unwrap_or(repository);
+    if owner != expected_owner
+        || repository != expected_repo
+        || !safe_repository_segment(owner)
+        || !safe_repository_segment(repository)
+    {
+        return Err(invalid());
+    }
+    Ok(format!("https://{authority}/{owner}/{repository}.git"))
+}
+
+fn safe_repository_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && !matches!(segment, "." | "..")
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
+struct PrivateClaimGitDir {
+    path: std::path::PathBuf,
+}
+
+impl Drop for PrivateClaimGitDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn private_claim_git_dir(repo: &str) -> Result<PrivateClaimGitDir, CommandFailure> {
+    let root = if let Ok(root) = std::env::var("AUTOSPEC_CLAIM_GIT_STATE_DIR") {
+        std::path::PathBuf::from(root)
+    } else {
+        let home = std::env::var("HOME").map_err(|_| {
+            CommandFailure::diagnostic("HOME is required for private claim Git state")
+        })?;
+        std::path::PathBuf::from(home).join(".autospec/state/claim-git")
+    };
+    private_claim_git_dir_in(&root, repo)
+}
+
+fn private_claim_git_dir_in(root: &Path, repo: &str) -> Result<PrivateClaimGitDir, CommandFailure> {
+    fs::create_dir_all(root).map_err(|error| {
+        CommandFailure::diagnostic(format!("create private claim Git state: {error}"))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(root, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            CommandFailure::diagnostic(format!("protect private claim Git state: {error}"))
+        })?;
+    }
+    let repo_key = repo.replace('/', "__");
+    let path = root.join(format!("{repo_key}-{}", unique_operation_id("git")?));
+    fs::create_dir(&path).map_err(|error| {
+        CommandFailure::diagnostic(format!("create private claim Git operation: {error}"))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            CommandFailure::diagnostic(format!("protect private claim Git operation: {error}"))
+        })?;
+    }
+    let init = run_git_in(
+        &claim_git_program(),
+        &path,
+        &["init", "--bare", "."],
+        "initialize private claim Git operation",
+    )?;
+    if !init.status.success() {
+        return Err(CommandFailure::diagnostic(format!(
+            "initialize private claim Git operation: {}",
+            String::from_utf8_lossy(&init.stderr).trim()
+        )));
+    }
+    Ok(PrivateClaimGitDir { path })
+}
+
+fn read_claim_ref(repo: &str, issue: u64) -> Result<Option<ClaimRefHead>, CommandFailure> {
+    let private = private_claim_git_dir(repo)?;
+    read_claim_ref_in(
+        &claim_git_program(),
+        &private.path,
+        &resolve_claim_remote(repo)?,
+        repo,
+        issue,
+    )
+}
+
+fn advance_claim_ref(
+    repo: &str,
+    issue: u64,
+    expected: Option<&ClaimRefHead>,
+    record: &RunStateRecord,
+) -> Result<ClaimRefAdvance, CommandFailure> {
+    let private = private_claim_git_dir(repo)?;
+    advance_claim_ref_in(
+        &claim_git_program(),
+        &private.path,
+        &resolve_claim_remote(repo)?,
+        repo,
+        issue,
+        expected,
+        record,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn advance_claim_ref_for_test(
+    workdir: &Path,
+    record: &RunStateRecord,
+) -> Result<bool, CommandFailure> {
+    let expected = read_claim_ref_in(
+        &claim_git_program(),
+        workdir,
+        "origin",
+        &record.repo,
+        record.issue,
+    )?;
+    advance_claim_ref_in(
+        &claim_git_program(),
+        workdir,
+        "origin",
+        &record.repo,
+        record.issue,
+        expected.as_ref(),
+        record,
+    )
+    .map(|result| matches!(result, ClaimRefAdvance::Won(_)))
+}
+
+fn project_claim_ref_to_comments(repo: &str, head: &ClaimRefHead) {
+    let result = list_comments(repo, head.record.issue).and_then(|comments| {
+        if comments.iter().any(|comment| {
+            parse_run_state_comment(&comment.body).is_ok_and(|record| record == head.record)
+        }) {
+            return Ok(());
+        }
+        let parent = authoritative_run_state_comment(&comments);
+        create_comment(
+            repo,
+            head.record.issue,
+            &linked_run_state_comment(&head.record, parent, &head.generation),
+        )
+    });
+    if let Err(error) = result {
+        eprintln!(
+            "WARN: claim ref advanced but GitHub audit projection failed: {}",
+            error.message.trim()
+        );
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WaitFailureRecovery {
@@ -87,6 +618,7 @@ fn run_state(args: &[String]) -> Result<(), CommandFailure> {
         }
         [command, rest @ ..] if command == "read" => read(rest),
         [command, rest @ ..] if command == "upsert" => upsert(rest),
+        [command, rest @ ..] if command == "refresh" => refresh(rest),
         [command, rest @ ..] if command == "clear" => clear(rest),
         [command, rest @ ..] if command == "reconcile-linked-pr" => reconcile_linked_pr(rest),
         [command, rest @ ..] if command == "recover-stale-startup" => recover_stale_startup(rest),
@@ -103,14 +635,25 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
         None => infer_repo()?,
     };
     let worker_id = options.worker_id.unwrap_or_else(default_worker_id);
-    let comments = list_comments(&repo, options.issue)?;
+    let Some(selected) = read_claim_ref(&repo, options.issue)? else {
+        return Err(CommandFailure::status(
+            "claim release lost ownership: no authoritative claim ref",
+            2,
+        ));
+    };
+    if !has_exact_claim_generation(
+        &selected.record,
+        &worker_id,
+        &options.claim_id,
+        &options.branch,
+    ) {
+        return Err(CommandFailure::status(
+            "claim release lost ownership: worker, branch, or claim ID changed",
+            2,
+        ));
+    }
     let now = utc_now_iso()?;
-    let selected = select_run_state(&comments, &repo, options.issue);
-    let claimed_at = selected
-        .as_ref()
-        .map(|state| state.record.claimed_at.clone())
-        .unwrap_or_else(|| now.clone());
-    let mut record = RunStateRecord::new(
+    let record = RunStateRecord::new(
         &repo,
         options.issue,
         &worker_id,
@@ -119,12 +662,22 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
         &options.pr,
         &options.state,
         Vec::new(),
-        claimed_at,
+        &selected.record.claimed_at,
         &now,
-        10_800,
-    );
-    record.claim_id = selected.and_then(|state| state.record.claim_id);
-    if options.state == "merged" && !terminal_merged_exists(&comments) {
+        selected.record.ttl_seconds,
+    )
+    .with_claim_id(&options.claim_id);
+    let head = match advance_claim_ref(&repo, options.issue, Some(&selected), &record)? {
+        ClaimRefAdvance::Won(head) => head,
+        ClaimRefAdvance::Lost => {
+            return Err(CommandFailure::status(
+                "claim release lost ownership during terminal transition",
+                2,
+            ))
+        }
+    };
+    project_claim_ref_to_comments(&repo, &head);
+    if options.state == "merged" {
         let body = format!(
             "{RUN_TERMINAL_BEGIN_MARKER}\n{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"state\":\"merged\",\"branch\":\"{}\",\"pr\":\"{}\",\"finalized_at\":\"{}\"}}\n{RUN_TERMINAL_END_MARKER}",
             json_escape(&repo),
@@ -136,7 +689,6 @@ fn release(args: &[String]) -> Result<(), CommandFailure> {
         );
         create_comment(&repo, options.issue, &body)?;
     }
-    upsert_record(&repo, &comments, &record)?;
     let mut arguments = vec![
         "issue".to_string(),
         "edit".to_string(),
@@ -194,6 +746,120 @@ pub(crate) fn acquire_for_conductor(
     })
 }
 
+pub(crate) fn recover_for_conductor(
+    repo: &str,
+    issue: u64,
+    expected: &ClaimLease,
+) -> Result<Option<ClaimLease>, CommandFailure> {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
+        return Ok(None);
+    };
+    let record = selected.record;
+    if record.repo != repo
+        || record.issue != issue
+        || !matches!(
+            record.state.as_str(),
+            "claimed" | "merged" | "released" | "failed" | "retryable" | "needs-human"
+        )
+    {
+        return Err(CommandFailure::diagnostic(
+            "foreground recovery claim is not authoritative for the selected issue",
+        ));
+    }
+    if record.state != "claimed" {
+        return Ok(None);
+    }
+    let claim_id = record.claim_id.ok_or_else(|| {
+        CommandFailure::diagnostic("foreground recovery claim has no generation identity")
+    })?;
+    if expected.repo != repo
+        || expected.issue != issue
+        || record.worker_id != expected.worker_id
+        || record.branch != expected.branch
+        || claim_id != expected.claim_id
+    {
+        return Err(CommandFailure::diagnostic(
+            "foreground recovery claim does not match the durable local acquisition",
+        ));
+    }
+    Ok(Some(ClaimLease {
+        issue,
+        repo: repo.to_string(),
+        worker_id: record.worker_id,
+        branch: record.branch,
+        claim_id,
+        session_id: None,
+    }))
+}
+
+pub(crate) fn recover_terminal_for_conductor(
+    repo: &str,
+    issue: u64,
+) -> Result<Option<ClaimLease>, CommandFailure> {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
+        return Ok(None);
+    };
+    let record = selected.record;
+    if record.repo != repo || record.issue != issue {
+        return Err(CommandFailure::diagnostic(
+            "foreground terminal recovery claim is not authoritative for the selected issue",
+        ));
+    }
+    if !matches!(
+        record.state.as_str(),
+        "merged" | "released" | "failed" | "retryable" | "needs-human"
+    ) {
+        return Ok(None);
+    }
+    let claim_id = record.claim_id.ok_or_else(|| {
+        CommandFailure::diagnostic("foreground terminal recovery claim has no generation identity")
+    })?;
+    Ok(Some(ClaimLease {
+        issue,
+        repo: repo.to_string(),
+        worker_id: record.worker_id,
+        branch: record.branch,
+        claim_id,
+        session_id: None,
+    }))
+}
+
+pub(crate) fn authoritative_lease_for_legacy_migration(
+    repo: &str,
+    issue: u64,
+) -> Result<Option<ClaimLease>, CommandFailure> {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
+        return Ok(None);
+    };
+    let record = selected.record;
+    if record.repo != repo
+        || record.issue != issue
+        || !matches!(
+            record.state.as_str(),
+            "claimed" | "merged" | "released" | "failed" | "retryable" | "needs-human"
+        )
+    {
+        return Err(CommandFailure::diagnostic(
+            "legacy migration claim is not authoritative for the selected issue",
+        ));
+    }
+    let claim_id = record.claim_id.ok_or_else(|| {
+        CommandFailure::diagnostic("legacy migration claim has no generation identity")
+    })?;
+    Ok(Some(ClaimLease {
+        issue,
+        repo: repo.to_string(),
+        worker_id: record.worker_id,
+        branch: record.branch,
+        claim_id,
+        session_id: None,
+    }))
+}
+
+pub(crate) fn conductor_claim_is_terminal(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
+    recover_terminal_for_conductor(repo, issue).map(|lease| lease.is_some())
+}
+
 /// Read the claim linearization point before the autonomous conductor mutates
 /// labels, heartbeats, or comments. The lifecycle policy receives the observed
 /// owner rather than a synthetic claim request, so it can reject terminal,
@@ -214,27 +880,14 @@ pub(crate) fn lifecycle_claim_evidence(
     let requested_branch = ClaimBranch::try_from(requested_branch).map_err(|reason| {
         CommandFailure::diagnostic(format!("invalid requested branch: {reason}"))
     })?;
-    let comments = list_comments(repo, issue.get())?;
-    if terminal_merged_exists(&comments) {
-        return Ok(ClaimEvidence::Observed(ClaimContext::terminal(
+    let Some(selected) = read_claim_ref(repo, issue.get())? else {
+        return Ok(ClaimEvidence::Observed(ClaimContext::active(
             scope,
             issue,
             requested_worker,
             requested_branch,
+            LeaseFreshness::Fresh,
         )));
-    }
-    let Some(selected) = select_run_state(&comments, repo, issue.get()) else {
-        return if lowest_marked_comment(&comments).is_some() {
-            Ok(ClaimEvidence::Malformed)
-        } else {
-            Ok(ClaimEvidence::Observed(ClaimContext::active(
-                scope,
-                issue,
-                requested_worker,
-                requested_branch,
-                LeaseFreshness::Fresh,
-            )))
-        };
     };
     let worker = WorkerId::try_from(selected.record.worker_id.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("invalid recorded claim worker: {reason}"))
@@ -252,7 +905,7 @@ pub(crate) fn lifecycle_claim_evidence(
         issue,
         worker,
         branch,
-        lifecycle_lease_freshness(&selected.server_updated_at),
+        lifecycle_lease_freshness(&selected.record.updated_at),
     )))
 }
 
@@ -266,11 +919,7 @@ pub(crate) fn active_claim_generation_matches(
     claim_id: &str,
     branch: &str,
 ) -> Result<bool, CommandFailure> {
-    let comments = list_comments(repo, issue)?;
-    if terminal_merged_exists(&comments) {
-        return Ok(false);
-    }
-    let Some(selected) = select_run_state(&comments, repo, issue) else {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
         return Ok(false);
     };
     Ok(selected.record.repo == repo
@@ -279,7 +928,7 @@ pub(crate) fn active_claim_generation_matches(
         && selected.record.claim_id.as_deref() == Some(claim_id)
         && selected.record.branch == branch
         && selected.record.state == "claimed"
-        && server_lease_is_fresh(&selected.server_updated_at, claim_ttl_seconds()))
+        && server_lease_is_fresh(&selected.record.updated_at, selected.record.ttl_seconds))
 }
 
 fn lifecycle_lease_freshness(server_timestamp: &str) -> LeaseFreshness {
@@ -313,6 +962,23 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     if !safety.allowed {
         return unavailable_safety_claim(options.issue, &repo, &worker_id, safety.reason);
     }
+    let prior = read_claim_ref(&repo, options.issue)?;
+    if prior
+        .as_ref()
+        .is_some_and(|head| head.record.state == "merged")
+    {
+        return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
+    }
+    if let Some(owner) = prior.as_ref().and_then(|head| {
+        (!matches!(
+            head.record.state.as_str(),
+            "available" | "released" | "retryable"
+        ) && !server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds))
+        .then_some(head.record.worker_id.as_str())
+    }) {
+        return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
+    }
+
     let claim_id = claim_generation_id()?;
     if write_startup_heartbeat(
         &repo,
@@ -331,6 +997,34 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             "heartbeat_write_failed",
         );
     }
+    let ttl_seconds = claim_ttl_seconds();
+    let now = utc_now_iso()?;
+    let record = RunStateRecord::new(
+        &repo,
+        options.issue,
+        &worker_id,
+        "claimed",
+        &options.branch,
+        "",
+        "claimed",
+        Vec::new(),
+        &now,
+        &now,
+        ttl_seconds,
+    )
+    .with_claim_id(claim_id.clone());
+    let head = match advance_claim_ref(&repo, options.issue, prior.as_ref(), &record)? {
+        ClaimRefAdvance::Won(head) => head,
+        ClaimRefAdvance::Lost => {
+            cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
+            let owner = read_claim_ref(&repo, options.issue)?
+                .map(|head| head.record.worker_id)
+                .unwrap_or_default();
+            return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, &owner);
+        }
+    };
+    project_claim_ref_to_comments(&repo, &head);
+
     let label_create = [
         "label".to_string(),
         "create".to_string(),
@@ -354,6 +1048,15 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         "in-progress-by-bot".to_string(),
     ];
     if run_gh_with_retry(&label_move, "mark issue in progress").is_err() {
+        let mut released = head.record.clone();
+        released.state = "available".to_string();
+        released.step = "label_mutation_failed".to_string();
+        released.updated_at = utc_now_iso()?;
+        if let Ok(ClaimRefAdvance::Won(released)) =
+            advance_claim_ref(&repo, options.issue, Some(&head), &released)
+        {
+            project_claim_ref_to_comments(&repo, &released);
+        }
         cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
         return unavailable_claim(
             options.issue,
@@ -363,102 +1066,23 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         );
     }
 
-    let ttl_seconds = claim_ttl_seconds();
-    let comments = list_comments(&repo, options.issue)?;
-    if terminal_merged_exists(&comments) {
-        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
-        let remove_active = [
-            "issue".to_string(),
-            "edit".to_string(),
-            options.issue.to_string(),
-            "--repo".to_string(),
-            repo.clone(),
-            "--remove-label".to_string(),
-            "in-progress-by-bot".to_string(),
-        ];
-        let _ = run_gh_with_retry(&remove_active, "remove stale active label");
-        return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
-    }
-    let selected = select_run_state(&comments, &repo, options.issue);
-    let wait_failure_relinquished = selected.as_ref().is_some_and(|selected| {
-        executor_wait_failure_relinquishes_claim(&comments, &selected.record)
-    });
-    let foreign_fresh_owner = selected.as_ref().and_then(|selected| {
-        (selected.record.worker_id != worker_id
-            && !wait_failure_relinquished
-            && !server_lease_is_stale(&selected.server_updated_at, ttl_seconds))
-        .then_some(selected.record.worker_id.as_str())
-    });
-    if let Some(owner) = foreign_fresh_owner {
-        cleanup_own_marked_comments(&repo, options.issue, &worker_id, &comments);
-        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
-        return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
-    }
-
-    let now = utc_now_iso()?;
-    let claimed_at = selected
-        .as_ref()
-        .filter(|_| !wait_failure_relinquished)
-        .map(|state| state.record.claimed_at.clone())
-        .unwrap_or_else(|| now.clone());
-    let record = RunStateRecord::new(
-        &repo,
-        options.issue,
-        &worker_id,
-        "claimed",
-        &options.branch,
-        "",
-        "claimed",
-        Vec::new(),
-        claimed_at,
-        now,
-        ttl_seconds,
-    )
-    .with_claim_id(claim_id.clone());
-    if upsert_record(&repo, &comments, &record).is_err() {
-        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
-        let restore = [
-            "issue".to_string(),
-            "edit".to_string(),
-            options.issue.to_string(),
-            "--repo".to_string(),
-            repo.clone(),
-            "--remove-label".to_string(),
-            "in-progress-by-bot".to_string(),
-            "--add-label".to_string(),
-            "auto-implement".to_string(),
-        ];
-        let _ = run_gh_with_retry(&restore, "restore claim label after state failure");
-        let reason = if lowest_marked_comment(&comments).is_some() {
-            "run_state_upsert_failed"
-        } else {
-            "run_state_create_failed"
-        };
-        return unavailable_claim(options.issue, &repo, Some(&worker_id), reason);
-    }
-
     for confirmation in 0..claim_confirm_reads() {
         if confirmation > 0 {
             sleep_claim_settle_interval();
         }
-        let observed_comments = list_comments(&repo, options.issue)?;
-        if terminal_merged_exists(&observed_comments) {
-            cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
-            return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
-        }
-        let observed = select_run_state(&observed_comments, &repo, options.issue);
+        let observed = read_claim_ref(&repo, options.issue)?;
         let labels = load_claim_issue(&repo, options.issue)?.labels;
-        if observed.as_ref().is_none_or(|state| {
-            state.record.worker_id != worker_id
-                || state.record.state != "claimed"
-                || state.record.claim_id.as_deref() != Some(claim_id.as_str())
+        if observed.as_ref().is_none_or(|head| {
+            head.record.worker_id != worker_id
+                || head.record.state != "claimed"
+                || head.record.claim_id.as_deref() != Some(claim_id.as_str())
+                || head.record.branch != options.branch
         }) || !labels.iter().any(|label| label == "in-progress-by-bot")
         {
-            cleanup_own_marked_comments(&repo, options.issue, &worker_id, &observed_comments);
             cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
             let owner = observed
                 .as_ref()
-                .map(|state| state.record.worker_id.as_str())
+                .map(|head| head.record.worker_id.as_str())
                 .unwrap_or_default();
             return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
         }
@@ -479,8 +1103,7 @@ fn read(args: &[String]) -> Result<(), CommandFailure> {
         Some(repo) => repo,
         None => infer_repo()?,
     };
-    let comments = list_comments(&repo, options.issue)?;
-    if let Some(selected) = select_run_state(&comments, &repo, options.issue) {
+    if let Some(selected) = read_claim_ref(&repo, options.issue)? {
         println!("{}", selected.record.to_json());
     }
     Ok(())
@@ -492,13 +1115,21 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
         Some(repo) => repo,
         None => infer_repo()?,
     };
-    let comments = list_comments(&repo, options.issue)?;
     let now = utc_now_iso()?;
-    let selected = select_run_state(&comments, &repo, options.issue);
-    let claimed_at = selected
-        .as_ref()
-        .map(|state| state.record.claimed_at.clone())
-        .unwrap_or_else(|| now.clone());
+    let selected = read_claim_ref(&repo, options.issue)?.ok_or_else(|| {
+        CommandFailure::diagnostic("claim state upsert requires an active claim ref")
+    })?;
+    if !has_exact_claim_generation(
+        &selected.record,
+        &options.worker_id,
+        &options.claim_id,
+        &options.branch,
+    ) {
+        return Err(CommandFailure::diagnostic(
+            "claim state upsert lost exact worker, branch, or claim ID ownership",
+        ));
+    }
+    let claimed_at = selected.record.claimed_at.clone();
     let mut record = RunStateRecord::new(
         &repo,
         options.issue,
@@ -512,55 +1143,301 @@ fn upsert(args: &[String]) -> Result<(), CommandFailure> {
         now,
         options.ttl_seconds,
     );
-    record.claim_id = selected.and_then(|state| state.record.claim_id);
-    upsert_record(&repo, &comments, &record)?;
-    emit_claim_telemetry(
-        if lowest_marked_comment(&comments).is_some() {
-            "session.step"
-        } else {
-            "session.started"
-        },
-        &repo,
-        options.issue,
-        &record.step,
-    );
+    record.claim_id = Some(options.claim_id.clone());
+    upsert_record(&repo, &[], &options.claim_id, &record)?;
+    emit_claim_telemetry("session.step", &repo, options.issue, &record.step);
     println!("{}", record.to_json());
     Ok(())
 }
 
-fn upsert_record(
-    repo: &str,
-    comments: &[autospec_core::claim::RemoteComment],
-    record: &RunStateRecord,
-) -> Result<(), CommandFailure> {
-    let body = record.to_marked_comment();
-    if let Some(comment) = lowest_marked_comment(comments) {
-        patch_comment(repo, comment.id, &body)?;
-        for duplicate in comments.iter().filter(|candidate| {
-            candidate.id != comment.id
-                && candidate
-                    .body
-                    .contains(autospec_core::claim::RUN_STATE_BEGIN_MARKER)
-                && candidate
-                    .body
-                    .contains(autospec_core::claim::RUN_STATE_END_MARKER)
-        }) {
-            let _ = delete_comment(repo, duplicate.id);
-        }
-    } else {
-        create_comment(repo, record.issue, &body)?;
-    }
-    Ok(())
-}
-
-fn clear(args: &[String]) -> Result<(), CommandFailure> {
-    let options = parse_read_options(args)?;
+fn refresh(args: &[String]) -> Result<(), CommandFailure> {
+    let options = parse_refresh_options(args)?;
     let repo = match options.repo {
         Some(repo) => repo,
         None => infer_repo()?,
     };
-    let comments = list_comments(&repo, options.issue)?;
-    clear_marked_state(&repo, &comments)?;
+    match refresh_claim_generation(
+        &repo,
+        options.issue,
+        &options.worker_id,
+        &options.claim_id,
+        &options.branch,
+        &options.step,
+        options.pr.as_deref(),
+    )? {
+        ClaimRefreshResult::Refreshed(record) => {
+            println!("{}", record.to_json());
+            Ok(())
+        }
+        ClaimRefreshResult::OwnershipLost => {
+            println!(
+                "{{\"refreshed\":false,\"repo\":\"{}\",\"issue\":{},\"reason\":\"ownership_lost\"}}",
+                json_escape(&repo),
+                options.issue
+            );
+            Err(CommandFailure::status(String::new(), 2))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ClaimRefreshResult {
+    Refreshed(Box<RunStateRecord>),
+    OwnershipLost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunStateLink {
+    parent: Option<u64>,
+    parent_generation: Option<String>,
+    generation: String,
+}
+
+fn run_state_link(body: &str) -> Option<RunStateLink> {
+    let line = body
+        .lines()
+        .find(|line| line.starts_with(RUN_STATE_LINK_PREFIX))?;
+    let fields = line
+        .strip_prefix(RUN_STATE_LINK_PREFIX)?
+        .strip_suffix(RUN_STATE_LINK_SUFFIX)?;
+    let mut fields = fields.split_whitespace();
+    let parent = match fields.next()? {
+        "none" => None,
+        value => Some(value.parse().ok()?),
+    };
+    let mut parent_generation = None;
+    let mut generation = None;
+    for field in fields {
+        let (name, value) = field.split_once('=')?;
+        match name {
+            "parent_generation" => parent_generation = Some(value.to_string()),
+            "generation" => generation = Some(value.to_string()),
+            _ => return None,
+        }
+    }
+    let generation = generation?;
+    let valid_token = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    };
+    if !valid_token(&generation)
+        || parent_generation
+            .as_deref()
+            .is_some_and(|value| !valid_token(value))
+        || parent.is_none()
+            && parent_generation
+                .as_deref()
+                .is_some_and(|value| value != "none")
+    {
+        return None;
+    }
+    if parent.is_some() && parent_generation.is_none() {
+        parent_generation = Some("legacy".to_string());
+    }
+    Some(RunStateLink {
+        parent,
+        parent_generation,
+        generation,
+    })
+}
+
+fn run_state_parent(body: &str) -> Option<Option<u64>> {
+    let line = body
+        .lines()
+        .find(|line| line.starts_with(RUN_STATE_LINK_PREFIX))?;
+    let parent = line
+        .strip_prefix(RUN_STATE_LINK_PREFIX)?
+        .split_once(' ')
+        .map(|(parent, _)| parent)?;
+    match parent {
+        "none" => Some(None),
+        value => value.parse().ok().map(Some),
+    }
+}
+
+fn marked_run_state(comment: &RemoteComment) -> bool {
+    comment.body.contains(RUN_STATE_BEGIN_MARKER) && comment.body.contains(RUN_STATE_END_MARKER)
+}
+
+fn authoritative_run_state_comment(comments: &[RemoteComment]) -> Option<&RemoteComment> {
+    let mut current = comments
+        .iter()
+        .filter(|comment| {
+            marked_run_state(comment)
+                && run_state_parent(&comment.body).is_none_or(|parent| parent.is_none())
+        })
+        .min_by_key(|comment| comment.id)?;
+    loop {
+        let child = comments
+            .iter()
+            .filter(|comment| {
+                comment.id > current.id
+                    && marked_run_state(comment)
+                    && run_state_parent(&comment.body)
+                        .is_some_and(|parent| parent == Some(current.id))
+            })
+            .min_by_key(|comment| comment.id);
+        match child {
+            Some(child) => current = child,
+            None => return Some(current),
+        }
+    }
+}
+
+fn select_run_state(
+    comments: &[RemoteComment],
+    repo: &str,
+    issue: u64,
+) -> Option<SelectedRunState> {
+    let comment = authoritative_run_state_comment(comments)?;
+    if comment.body.contains(RUN_STATE_LINK_PREFIX) && run_state_link(&comment.body).is_none() {
+        return None;
+    }
+    let record = parse_run_state_comment(&comment.body).ok()?;
+    if record.repo != repo || record.issue != issue {
+        return None;
+    }
+    Some(SelectedRunState {
+        comment_id: comment.id,
+        server_updated_at: comment.updated_at.clone(),
+        record,
+    })
+}
+
+fn linked_run_state_comment(
+    record: &RunStateRecord,
+    parent: Option<&RemoteComment>,
+    generation: &str,
+) -> String {
+    let (parent, parent_generation) = parent.map_or_else(
+        || ("none".to_string(), "none".to_string()),
+        |comment| {
+            (
+                comment.id.to_string(),
+                run_state_link(&comment.body)
+                    .map(|link| link.generation)
+                    .unwrap_or_else(|| "legacy".to_string()),
+            )
+        },
+    );
+    format!(
+        "{RUN_STATE_LINK_PREFIX}{parent} parent_generation={parent_generation} generation={generation}{RUN_STATE_LINK_SUFFIX}\n{}",
+        record.to_marked_comment()
+    )
+}
+
+/// Renew one exact claim generation without changing its immutable identity.
+///
+/// The dedicated Git claim ref is the linearization point. An expired
+/// heartbeat may still be renewed when that exact commit remains authoritative;
+/// any changed owner, branch, claim ID, or post-write takeover makes the caller
+/// inert.
+pub(crate) fn refresh_claim_generation(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    claim_id: &str,
+    branch: &str,
+    step: &str,
+    pull_request: Option<&str>,
+) -> Result<ClaimRefreshResult, CommandFailure> {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
+        return Ok(ClaimRefreshResult::OwnershipLost);
+    };
+    if !has_exact_claim_generation(&selected.record, worker_id, claim_id, branch) {
+        return Ok(ClaimRefreshResult::OwnershipLost);
+    }
+
+    let mut refreshed = selected.record.clone();
+    refreshed.updated_at = utc_now_iso()?;
+    refreshed.step = step.to_string();
+    if let Some(pull_request) = pull_request {
+        refreshed.pr = pull_request.to_string();
+    }
+    match advance_claim_ref(repo, issue, Some(&selected), &refreshed)? {
+        ClaimRefAdvance::Won(head) => {
+            project_claim_ref_to_comments(repo, &head);
+            Ok(ClaimRefreshResult::Refreshed(Box::new(head.record)))
+        }
+        ClaimRefAdvance::Lost => Ok(ClaimRefreshResult::OwnershipLost),
+    }
+}
+
+fn has_exact_claim_generation(
+    record: &RunStateRecord,
+    worker_id: &str,
+    claim_id: &str,
+    branch: &str,
+) -> bool {
+    record.state == "claimed"
+        && record.worker_id == worker_id
+        && record.claim_id.as_deref() == Some(claim_id)
+        && record.branch == branch
+}
+
+fn upsert_record(
+    repo: &str,
+    _comments: &[autospec_core::claim::RemoteComment],
+    expected_claim_id: &str,
+    record: &RunStateRecord,
+) -> Result<(), CommandFailure> {
+    let parent = read_claim_ref(repo, record.issue)?
+        .ok_or_else(|| CommandFailure::diagnostic("run-state mutation requires a claim ref"))?;
+    if parent.record.worker_id != record.worker_id
+        || parent.record.branch != record.branch
+        || parent.record.claim_id.as_deref() != Some(expected_claim_id)
+        || record.claim_id.as_deref() != Some(expected_claim_id)
+    {
+        return Err(CommandFailure::diagnostic(
+            "run-state mutation lost exact worker, branch, or claim ID ownership",
+        ));
+    }
+    match advance_claim_ref(repo, record.issue, Some(&parent), record)? {
+        ClaimRefAdvance::Won(head) => {
+            project_claim_ref_to_comments(repo, &head);
+            Ok(())
+        }
+        ClaimRefAdvance::Lost => Err(CommandFailure::diagnostic(
+            "run-state mutation lost the authoritative ref race",
+        )),
+    }
+}
+
+fn clear(args: &[String]) -> Result<(), CommandFailure> {
+    let options = parse_clear_options(args)?;
+    let repo = match options.repo {
+        Some(repo) => repo,
+        None => infer_repo()?,
+    };
+    let Some(selected) = read_claim_ref(&repo, options.issue)? else {
+        return Err(CommandFailure::diagnostic(
+            "claim state clear requires an authoritative claim ref",
+        ));
+    };
+    if !has_exact_claim_generation(
+        &selected.record,
+        &options.worker_id,
+        &options.claim_id,
+        &options.branch,
+    ) {
+        return Err(CommandFailure::diagnostic(
+            "claim state clear lost exact worker, branch, or claim ID ownership",
+        ));
+    }
+    let mut released = selected.record.clone();
+    released.state = "released".to_string();
+    released.step = "cleared".to_string();
+    released.updated_at = utc_now_iso()?;
+    match advance_claim_ref(&repo, options.issue, Some(&selected), &released)? {
+        ClaimRefAdvance::Won(head) => project_claim_ref_to_comments(&repo, &head),
+        ClaimRefAdvance::Lost => {
+            return Err(CommandFailure::diagnostic(
+                "claim state clear lost the authoritative ref race",
+            ))
+        }
+    }
     emit_claim_telemetry("session.terminal", &repo, options.issue, "");
     Ok(())
 }
@@ -576,40 +1453,6 @@ fn recover_stale_startup(args: &[String]) -> Result<(), CommandFailure> {
     Ok(())
 }
 
-pub(crate) fn recover_active_issue(
-    repo: &str,
-    issue: u64,
-    timeout_seconds: u64,
-) -> Result<bool, CommandFailure> {
-    recover_stale_startup_record(repo, issue, timeout_seconds).map(|outcome| outcome.recovered)
-}
-
-/// A newly-created claim without a heartbeat, branch, or PR is kept during its
-/// startup grace period but must not consume a worker slot yet. Read failures
-/// and malformed records remain counted so the queue fails closed.
-pub(crate) fn active_issue_counts_toward_worker_capacity(
-    repo: &str,
-    issue: u64,
-    timeout_seconds: u64,
-) -> Result<bool, CommandFailure> {
-    let comments = list_comments(repo, issue)?;
-    let Some(selected) = select_run_state(&comments, repo, issue) else {
-        return Ok(true);
-    };
-    if !selected.record.pr.is_empty()
-        || startup_heartbeat_exists(repo, issue)
-        || branch_ref_exists(&selected.record.branch)
-    {
-        return Ok(true);
-    }
-    let Some(updated_at) = parse_iso_timestamp(&selected.record.updated_at) else {
-        return Ok(true);
-    };
-    Ok(unix_now()
-        .map(|now| now.saturating_sub(updated_at) > timeout_seconds)
-        .unwrap_or(true))
-}
-
 struct RecoveryOutcome {
     recovered: bool,
     reason: String,
@@ -620,6 +1463,50 @@ fn recover_stale_startup_record(
     issue: u64,
     timeout_seconds: u64,
 ) -> Result<RecoveryOutcome, CommandFailure> {
+    if let Some(selected) = read_claim_ref(repo, issue)? {
+        if selected.record.state != "claimed"
+            || !selected.record.pr.is_empty()
+            || startup_heartbeat_exists(repo, issue)
+            || branch_ref_exists(&selected.record.branch)
+            || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
+        {
+            return Ok(RecoveryOutcome {
+                recovered: false,
+                reason: "claim_evidence_or_fresh_state".to_string(),
+            });
+        }
+        let mut available = selected.record.clone();
+        available.state = "available".to_string();
+        available.step = "stale_startup_recovered".to_string();
+        available.updated_at = utc_now_iso()?;
+        let head = match advance_claim_ref(repo, issue, Some(&selected), &available)? {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => {
+                return Ok(RecoveryOutcome {
+                    recovered: false,
+                    reason: "ownership_lost".to_string(),
+                })
+            }
+        };
+        project_claim_ref_to_comments(repo, &head);
+        let release_labels = [
+            "issue".to_string(),
+            "edit".to_string(),
+            issue.to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--remove-label".to_string(),
+            "in-progress-by-bot".to_string(),
+            "--add-label".to_string(),
+            "auto-implement".to_string(),
+        ];
+        run_gh_with_retry(&release_labels, "release stale startup claim labels")?;
+        emit_claim_telemetry("session.terminal", repo, issue, "stale_startup_recovered");
+        return Ok(RecoveryOutcome {
+            recovered: true,
+            reason: "released_stale_startup_claim".to_string(),
+        });
+    }
     let comments = list_comments(repo, issue)?;
     let Some(selected) = select_run_state(&comments, repo, issue) else {
         return Ok(RecoveryOutcome {
@@ -703,7 +1590,13 @@ fn reconcile_linked_pr(args: &[String]) -> Result<(), CommandFailure> {
         Some(repo) => repo,
         None => infer_repo()?,
     };
-    let outcome = reconcile_linked_pr_record(&repo, options.issue, options.worker_id.as_deref())?;
+    let outcome = reconcile_linked_pr_record(
+        &repo,
+        options.issue,
+        &options.worker_id,
+        &options.branch,
+        &options.claim_id,
+    )?;
     print_reconcile_result(
         outcome.reconciled,
         options.issue,
@@ -714,8 +1607,14 @@ fn reconcile_linked_pr(args: &[String]) -> Result<(), CommandFailure> {
     Ok(())
 }
 
-pub(crate) fn reconcile_active_issue(repo: &str, issue: u64) -> Result<(), CommandFailure> {
-    let _ = reconcile_linked_pr_record(repo, issue, None)?;
+pub(crate) fn reconcile_active_issue(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+    expected_claim_id: &str,
+) -> Result<(), CommandFailure> {
+    let _ = reconcile_linked_pr_record(repo, issue, worker_id, branch, expected_claim_id)?;
     Ok(())
 }
 
@@ -732,30 +1631,272 @@ pub(crate) struct ExecutorSuccessBinding<'a> {
     pub(crate) premerge_receipt: &'a str,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct ExecutorResultAuthorityBinding<'a> {
+    pub(crate) pull_request: u64,
+    pub(crate) commit: &'a str,
+    pub(crate) premerge_receipt: &'a str,
+    pub(crate) receipt_id: &'a str,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BridgeClaimDisposition {
+    Merged,
+    Retryable,
+    NeedsHuman,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BridgeClaimTransition {
+    Transitioned,
+    OwnershipLost,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BridgeTerminalMode {
+    Fresh,
+    Prepared,
+    Complete,
+    Lost,
+}
+
+fn bridge_terminal_mode(
+    record: &RunStateRecord,
+    identity: ClaimMutationIdentity<'_>,
+    desired_state: &str,
+    desired_step: &str,
+    desired_pr: &str,
+    prepared_step: &str,
+) -> BridgeTerminalMode {
+    if record.worker_id != identity.worker_id
+        || record.claim_id.as_deref() != Some(identity.claim_id)
+        || record.branch != identity.branch
+    {
+        return BridgeTerminalMode::Lost;
+    }
+    if record.state == desired_state && record.step == desired_step && record.pr == desired_pr {
+        BridgeTerminalMode::Complete
+    } else if record.state == "claimed" && record.step == prepared_step && record.pr == desired_pr {
+        BridgeTerminalMode::Prepared
+    } else if record.state == "claimed" && !record.step.starts_with(BRIDGE_TERMINAL_PREPARED_PREFIX)
+    {
+        BridgeTerminalMode::Fresh
+    } else {
+        BridgeTerminalMode::Lost
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ClaimMutationIdentity<'a> {
+    pub(crate) repo: &'a str,
+    pub(crate) issue: u64,
+    pub(crate) worker_id: &'a str,
+    pub(crate) branch: &'a str,
+    pub(crate) claim_id: &'a str,
+}
+
+pub(crate) fn transition_bridge_claim(
+    identity: ClaimMutationIdentity<'_>,
+    pull_request: Option<u64>,
+    disposition: BridgeClaimDisposition,
+) -> Result<BridgeClaimTransition, CommandFailure> {
+    let Some(selected) = read_claim_ref(identity.repo, identity.issue)? else {
+        return Ok(BridgeClaimTransition::OwnershipLost);
+    };
+    if disposition == BridgeClaimDisposition::Merged && pull_request.is_none() {
+        return Err(CommandFailure::diagnostic(
+            "merged bridge claim transition requires a pull request",
+        ));
+    }
+    let desired_state = match disposition {
+        BridgeClaimDisposition::Merged => "merged",
+        BridgeClaimDisposition::Retryable => "released",
+        BridgeClaimDisposition::NeedsHuman => "failed",
+    };
+    let desired_step = match disposition {
+        BridgeClaimDisposition::Merged => "merged",
+        BridgeClaimDisposition::Retryable => "retryable_released",
+        BridgeClaimDisposition::NeedsHuman => "needs_human",
+    };
+    let prepared_step = format!("{BRIDGE_TERMINAL_PREPARED_PREFIX}{desired_step}");
+    let desired_pr = pull_request.map_or_else(String::new, |number| number.to_string());
+    let mode = bridge_terminal_mode(
+        &selected.record,
+        identity,
+        desired_state,
+        desired_step,
+        &desired_pr,
+        &prepared_step,
+    );
+    if mode == BridgeTerminalMode::Lost {
+        return Ok(BridgeClaimTransition::OwnershipLost);
+    }
+    if mode == BridgeTerminalMode::Complete {
+        project_bridge_terminal_audit(
+            identity,
+            pull_request,
+            disposition,
+            &selected.record,
+            &selected,
+        )?;
+        emit_claim_telemetry(
+            "session.terminal",
+            identity.repo,
+            identity.issue,
+            selected.record.step.as_str(),
+        );
+        return Ok(BridgeClaimTransition::Transitioned);
+    }
+    let prepared = if mode == BridgeTerminalMode::Prepared {
+        Box::new(selected)
+    } else {
+        let mut record = selected.record.clone();
+        record.state = "claimed".to_string();
+        record.step = prepared_step;
+        record.pr = desired_pr;
+        record.updated_at = utc_now_iso()?;
+        match advance_claim_ref(identity.repo, identity.issue, Some(&selected), &record)? {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => return Ok(BridgeClaimTransition::OwnershipLost),
+        }
+    };
+
+    let mut arguments = vec![
+        "issue".to_string(),
+        "edit".to_string(),
+        identity.issue.to_string(),
+        "--repo".to_string(),
+        identity.repo.to_string(),
+        "--remove-label".to_string(),
+        "in-progress-by-bot".to_string(),
+    ];
+    match disposition {
+        BridgeClaimDisposition::Merged => {}
+        BridgeClaimDisposition::Retryable => {
+            arguments.extend([
+                "--remove-label".to_string(),
+                "autospec:needs-human".to_string(),
+                "--add-label".to_string(),
+                "auto-implement".to_string(),
+            ]);
+        }
+        BridgeClaimDisposition::NeedsHuman => {
+            arguments.extend([
+                "--remove-label".to_string(),
+                "auto-implement".to_string(),
+                "--add-label".to_string(),
+                "autospec:needs-human".to_string(),
+            ]);
+        }
+    }
+    run_gh_with_retry(&arguments, "transition autonomous bridge claim labels")?;
+    let mut record = prepared.record.clone();
+    record.state = desired_state.to_string();
+    record.step = desired_step.to_string();
+    record.updated_at = utc_now_iso()?;
+    let head = match advance_claim_ref(identity.repo, identity.issue, Some(&prepared), &record)? {
+        ClaimRefAdvance::Won(head) => head,
+        ClaimRefAdvance::Lost => return Ok(BridgeClaimTransition::OwnershipLost),
+    };
+    project_bridge_terminal_audit(identity, pull_request, disposition, &record, &head)?;
+    emit_claim_telemetry(
+        "session.terminal",
+        identity.repo,
+        identity.issue,
+        record.step.as_str(),
+    );
+    Ok(BridgeClaimTransition::Transitioned)
+}
+
+pub(crate) fn observe_terminal_bridge_claim(
+    identity: ClaimMutationIdentity<'_>,
+    pull_request: Option<u64>,
+    disposition: BridgeClaimDisposition,
+) -> Result<bool, CommandFailure> {
+    let Some(selected) = read_claim_ref(identity.repo, identity.issue)? else {
+        return Ok(false);
+    };
+    let expected_state = match disposition {
+        BridgeClaimDisposition::Merged => "merged",
+        BridgeClaimDisposition::Retryable => "released",
+        BridgeClaimDisposition::NeedsHuman => "failed",
+    };
+    let expected_step = match disposition {
+        BridgeClaimDisposition::Merged => "merged",
+        BridgeClaimDisposition::Retryable => "retryable_released",
+        BridgeClaimDisposition::NeedsHuman => "needs_human",
+    };
+    let expected_pr = pull_request.map_or_else(String::new, |number| number.to_string());
+    Ok(selected.record.worker_id == identity.worker_id
+        && selected.record.claim_id.as_deref() == Some(identity.claim_id)
+        && selected.record.branch == identity.branch
+        && selected.record.state == expected_state
+        && selected.record.step == expected_step
+        && selected.record.pr == expected_pr)
+}
+
+fn project_bridge_terminal_audit(
+    identity: ClaimMutationIdentity<'_>,
+    pull_request: Option<u64>,
+    disposition: BridgeClaimDisposition,
+    record: &RunStateRecord,
+    head: &ClaimRefHead,
+) -> Result<(), CommandFailure> {
+    project_claim_ref_to_comments(identity.repo, head);
+    if disposition != BridgeClaimDisposition::Merged {
+        return Ok(());
+    }
+    let body = format!(
+        "{RUN_TERMINAL_BEGIN_MARKER}\n{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"state\":\"merged\",\"branch\":\"{}\",\"pr\":\"{}\",\"finalized_at\":\"{}\"}}\n{RUN_TERMINAL_END_MARKER}",
+        json_escape(identity.repo),
+        identity.issue,
+        json_escape(identity.worker_id),
+        json_escape(identity.branch),
+        pull_request.expect("validated merged pull request"),
+        json_escape(&record.updated_at),
+    );
+    if !list_comments(identity.repo, identity.issue)?
+        .iter()
+        .any(|comment| comment.body == body)
+    {
+        create_comment(identity.repo, identity.issue, &body)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn record_executor_result(
-    repo: &str,
-    issue: u64,
-    worker_id: &str,
-    branch: &str,
+    identity: ClaimMutationIdentity<'_>,
     outcome: &ConductorOutcome,
     pull_request: Option<u64>,
     success: Option<ExecutorSuccessBinding<'_>>,
 ) -> Result<ExecutorResultRecord, CommandFailure> {
-    let comments = list_comments(repo, issue)?;
-    let Some(selected) = select_run_state(&comments, repo, issue) else {
-        return Ok(ExecutorResultRecord::OwnershipLost);
-    };
-    if !has_active_executor_claim(
-        &comments,
-        &selected.record,
-        &selected.server_updated_at,
+    record_executor_result_with_receipt(identity, outcome, pull_request, success, None)
+}
+
+pub(crate) fn record_executor_result_with_receipt(
+    identity: ClaimMutationIdentity<'_>,
+    outcome: &ConductorOutcome,
+    pull_request: Option<u64>,
+    success: Option<ExecutorSuccessBinding<'_>>,
+    stable_receipt_id: Option<&str>,
+) -> Result<ExecutorResultRecord, CommandFailure> {
+    let ClaimMutationIdentity {
+        repo,
+        issue,
         worker_id,
         branch,
-    ) {
+        claim_id: expected_claim_id,
+    } = identity;
+    let Some(selected) = read_claim_ref(repo, issue)? else {
+        return Ok(ExecutorResultRecord::OwnershipLost);
+    };
+    if !has_active_executor_claim(&selected.record, worker_id, branch)
+        || selected.record.claim_id.as_deref() != Some(expected_claim_id)
+    {
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
     if matches!(outcome, ConductorOutcome::Succeeded)
-        && selected.record.claim_id.as_deref() != success.as_ref().map(|binding| binding.claim_id)
+        && success.as_ref().map(|binding| binding.claim_id) != Some(expected_claim_id)
     {
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
@@ -791,7 +1932,15 @@ pub(crate) fn record_executor_result(
         }
     };
 
-    let receipt_id = executor_result_receipt_id()?;
+    let receipt_id = match stable_receipt_id {
+        Some(receipt_id) if !receipt_id.trim().is_empty() => receipt_id.to_string(),
+        Some(_) => {
+            return Err(CommandFailure::diagnostic(
+                "executor result stable receipt ID must not be empty",
+            ))
+        }
+        None => executor_result_receipt_id()?,
+    };
     let evidence = ExecutorResultEvidence::new(
         repo,
         issue,
@@ -801,13 +1950,23 @@ pub(crate) fn record_executor_result(
         pull_request,
         executor_result_step(outcome),
         receipt_id,
-        success.as_ref().map(|binding| binding.claim_id.to_string()),
+        Some(expected_claim_id.to_string()),
         success.as_ref().map(|binding| binding.commit.to_string()),
         success
             .as_ref()
             .map(|binding| binding.premerge_receipt.to_string()),
     );
-    create_comment(repo, issue, &evidence.to_marked_comment())?;
+    let existing_comments = list_comments(repo, issue)?;
+    let mut renewed = selected.record.clone();
+    renewed.updated_at = utc_now_iso()?;
+    renewed.step = executor_result_step(outcome).to_string();
+    match advance_claim_ref(repo, issue, Some(&selected), &renewed)? {
+        ClaimRefAdvance::Won(_) => {}
+        ClaimRefAdvance::Lost => return Ok(ExecutorResultRecord::OwnershipLost),
+    }
+    if !executor_result_evidence_exists(&existing_comments, &evidence) {
+        create_comment(repo, issue, &evidence.to_marked_comment())?;
+    }
 
     let confirmed_comments = list_comments(repo, issue)?;
     if !executor_result_evidence_exists(&confirmed_comments, &evidence) {
@@ -815,16 +1974,12 @@ pub(crate) fn record_executor_result(
             "executor result evidence was not persisted",
         ));
     }
-    let Some(confirmed) = select_run_state(&confirmed_comments, repo, issue) else {
+    let Some(confirmed) = read_claim_ref(repo, issue)? else {
         return Ok(ExecutorResultRecord::OwnershipLost);
     };
-    if !has_active_executor_claim(
-        &confirmed_comments,
-        &confirmed.record,
-        &confirmed.server_updated_at,
-        worker_id,
-        branch,
-    ) {
+    if !has_active_executor_claim(&confirmed.record, worker_id, branch)
+        || confirmed.record.claim_id.as_deref() != Some(expected_claim_id)
+    {
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
     if matches!(outcome, ConductorOutcome::Succeeded)
@@ -835,11 +1990,64 @@ pub(crate) fn record_executor_result(
     Ok(ExecutorResultRecord::Recorded)
 }
 
+pub(crate) fn authoritative_executor_result(
+    identity: ClaimMutationIdentity<'_>,
+    binding: ExecutorResultAuthorityBinding<'_>,
+) -> Result<Option<ExecutorResultEvidence>, CommandFailure> {
+    let Some(selected) = read_claim_ref(identity.repo, identity.issue)? else {
+        return Ok(None);
+    };
+    if !has_exact_claim_generation(
+        &selected.record,
+        identity.worker_id,
+        identity.claim_id,
+        identity.branch,
+    ) {
+        return Ok(None);
+    }
+    Ok(exact_successful_executor_result(
+        &list_comments(identity.repo, identity.issue)?,
+        identity,
+        binding,
+    ))
+}
+
+fn exact_successful_executor_result(
+    comments: &[RemoteComment],
+    identity: ClaimMutationIdentity<'_>,
+    binding: ExecutorResultAuthorityBinding<'_>,
+) -> Option<ExecutorResultEvidence> {
+    let mut matching = comments
+        .iter()
+        .filter_map(|comment| {
+            successful_executor_result_for_pull_request(
+                std::slice::from_ref(comment),
+                binding.pull_request,
+            )
+        })
+        .filter(|evidence| {
+            evidence.repo == identity.repo
+                && evidence.issue == identity.issue
+                && evidence.worker_id == identity.worker_id
+                && evidence.branch == identity.branch
+                && evidence.step == "executor_succeeded"
+                && evidence.claim_id.as_deref() == Some(identity.claim_id)
+                && evidence.commit.as_deref() == Some(binding.commit)
+                && evidence.premerge_receipt.as_deref() == Some(binding.premerge_receipt)
+                && evidence.receipt_id == binding.receipt_id
+        })
+        .collect::<Vec<_>>();
+    matching.dedup();
+    if matching.len() == 1 {
+        matching.pop()
+    } else {
+        None
+    }
+}
+
+#[allow(dead_code)]
 pub(crate) fn record_executor_outcome(
-    repo: &str,
-    issue: u64,
-    worker_id: &str,
-    branch: &str,
+    identity: ClaimMutationIdentity<'_>,
     outcome: &str,
 ) -> Result<(), CommandFailure> {
     if outcome.trim().is_empty() {
@@ -848,10 +2056,7 @@ pub(crate) fn record_executor_outcome(
         ));
     }
     match record_executor_result_with_step(
-        repo,
-        issue,
-        worker_id,
-        branch,
+        identity,
         &ConductorOutcome::Blocked(outcome.to_string()),
         None,
         outcome,
@@ -875,23 +2080,40 @@ pub(crate) fn recover_implementer_wait_failure(
     session_id: &str,
     diagnostic: &str,
 ) -> Result<WaitFailureRecovery, CommandFailure> {
-    let comments = list_comments(repo, issue)?;
-    let Some(selected) = select_run_state(&comments, repo, issue) else {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
         return Ok(WaitFailureRecovery::OwnershipLost);
     };
+    let already_transitioned = selected.record.worker_id == worker_id
+        && selected.record.branch == branch
+        && selected.record.claim_id.as_deref() == Some(expected_claim_id)
+        && selected.record.state == "available"
+        && selected.record.step == "implementer_wait_failed";
     if selected.record.claim_id.as_deref() != Some(expected_claim_id) {
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
-    if !has_active_executor_claim(
-        &comments,
-        &selected.record,
-        &selected.server_updated_at,
-        worker_id,
-        branch,
-    ) {
+    if !already_transitioned && !has_active_executor_claim(&selected.record, worker_id, branch) {
         return Ok(WaitFailureRecovery::OwnershipLost);
     }
 
+    let head = if already_transitioned {
+        selected
+    } else {
+        let mut available = selected.record.clone();
+        available.state = "available".to_string();
+        available.step = "implementer_wait_failed".to_string();
+        available.updated_at = utc_now_iso()?;
+        match advance_claim_ref(repo, issue, Some(&selected), &available)? {
+            ClaimRefAdvance::Won(head) => {
+                wait_recovery_failpoint("after_claim_cas")?;
+                *head
+            }
+            ClaimRefAdvance::Lost => return Ok(WaitFailureRecovery::OwnershipLost),
+        }
+    };
+    ensure_claim_ref_projection(repo, &head)?;
+    wait_recovery_failpoint("after_ref_projection")?;
+
+    let comments = list_comments(repo, issue)?;
     let evidence = wait_failure_evidence(
         repo,
         issue,
@@ -910,27 +2132,41 @@ pub(crate) fn recover_implementer_wait_failure(
             "implementer wait-failure evidence was not persisted",
         ));
     }
-    let Some(confirmed) = select_run_state(&confirmed_comments, repo, issue) else {
-        return Ok(WaitFailureRecovery::OwnershipLost);
-    };
-    if !has_active_executor_claim(
-        &confirmed_comments,
-        &confirmed.record,
-        &confirmed.server_updated_at,
-        worker_id,
-        branch,
-    ) || confirmed.record.claim_id.as_deref() != Some(expected_claim_id)
-    {
-        return Ok(WaitFailureRecovery::OwnershipLost);
-    }
+    wait_recovery_failpoint("after_evidence_projection")?;
 
     requeue_wait_failure(repo, issue)?;
+    wait_recovery_failpoint("after_label_requeue")?;
     upsert_wait_failure_comment(repo, issue, worker_id, branch, session_id, diagnostic)?;
-    Ok(if already {
+    Ok(if already_transitioned || already {
         WaitFailureRecovery::AlreadyRecovered
     } else {
         WaitFailureRecovery::Requeued
     })
+}
+
+fn ensure_claim_ref_projection(repo: &str, head: &ClaimRefHead) -> Result<(), CommandFailure> {
+    let comments = list_comments(repo, head.record.issue)?;
+    if comments.iter().any(|comment| {
+        run_state_link(&comment.body).is_some_and(|link| link.generation == head.generation)
+            && parse_run_state_comment(&comment.body).is_ok_and(|record| record == head.record)
+    }) {
+        return Ok(());
+    }
+    let parent = authoritative_run_state_comment(&comments);
+    create_comment(
+        repo,
+        head.record.issue,
+        &linked_run_state_comment(&head.record, parent, &head.generation),
+    )
+}
+
+fn wait_recovery_failpoint(point: &str) -> Result<(), CommandFailure> {
+    if std::env::var("AUTOSPEC_WAIT_RECOVERY_FAILPOINT").as_deref() == Ok(point) {
+        return Err(CommandFailure::diagnostic(format!(
+            "implementer wait-failure recovery stopped at failpoint {point}"
+        )));
+    }
+    Ok(())
 }
 
 fn wait_failure_evidence(
@@ -950,7 +2186,7 @@ fn wait_failure_evidence(
         None,
         "implementer_wait_failed",
         format!("implementer-wait-failed:{claim_id}:{session_id}"),
-        None,
+        Some(claim_id.to_string()),
         None,
         None,
     )
@@ -1002,20 +2238,25 @@ fn safe_wait_diagnostic(value: &str) -> String {
     redact_secrets(value).chars().take(512).collect()
 }
 
+#[allow(dead_code)]
 fn record_executor_result_with_step(
-    repo: &str,
-    issue: u64,
-    worker_id: &str,
-    branch: &str,
+    identity: ClaimMutationIdentity<'_>,
     outcome: &ConductorOutcome,
     pull_request: Option<u64>,
     step: &str,
 ) -> Result<ExecutorResultRecord, CommandFailure> {
+    let ClaimMutationIdentity {
+        repo,
+        issue,
+        worker_id,
+        branch,
+        claim_id: expected_claim_id,
+    } = identity;
     let comments = list_comments(repo, issue)?;
-    let Some(selected) = select_run_state(&comments, repo, issue) else {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
         return Ok(ExecutorResultRecord::OwnershipLost);
     };
-    if !has_executor_claim_owner(&selected.record, worker_id, branch) {
+    if !has_exact_claim_generation(&selected.record, worker_id, expected_claim_id, branch) {
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
 
@@ -1050,12 +2291,11 @@ fn record_executor_result_with_step(
     record.step = step.to_string();
     record.pr = verified_pr.clone();
     record.updated_at = utc_now_iso()?;
-    upsert_record(repo, &comments, &record)?;
-    let confirmed_comments = list_comments(repo, issue)?;
-    let Some(confirmed) = select_run_state(&confirmed_comments, repo, issue) else {
+    upsert_record(repo, &comments, expected_claim_id, &record)?;
+    let Some(confirmed) = read_claim_ref(repo, issue)? else {
         return Ok(ExecutorResultRecord::OwnershipLost);
     };
-    if !has_executor_claim_owner(&confirmed.record, worker_id, branch)
+    if !has_exact_claim_generation(&confirmed.record, worker_id, expected_claim_id, branch)
         || confirmed.record.step != step
         || confirmed.record.pr != verified_pr
     {
@@ -1068,16 +2308,9 @@ fn has_executor_claim_owner(record: &RunStateRecord, worker_id: &str, branch: &s
     record.worker_id == worker_id && record.branch == branch && record.state == "claimed"
 }
 
-fn has_active_executor_claim(
-    comments: &[autospec_core::claim::RemoteComment],
-    record: &RunStateRecord,
-    server_updated_at: &str,
-    worker_id: &str,
-    branch: &str,
-) -> bool {
-    !terminal_merged_exists(comments)
-        && has_executor_claim_owner(record, worker_id, branch)
-        && server_lease_is_fresh(server_updated_at, claim_ttl_seconds())
+fn has_active_executor_claim(record: &RunStateRecord, worker_id: &str, branch: &str) -> bool {
+    has_executor_claim_owner(record, worker_id, branch)
+        && server_lease_is_fresh(&record.updated_at, record.ttl_seconds)
 }
 
 fn server_lease_is_fresh(server_timestamp: &str, ttl_seconds: u64) -> bool {
@@ -1144,16 +2377,25 @@ struct ReconcileOutcome {
 fn reconcile_linked_pr_record(
     repo: &str,
     issue: u64,
-    worker_id: Option<&str>,
+    worker_id: &str,
+    branch: &str,
+    expected_claim_id: &str,
 ) -> Result<ReconcileOutcome, CommandFailure> {
     let comments = list_comments(repo, issue)?;
-    let Some(selected) = select_run_state(&comments, repo, issue) else {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
         return Ok(ReconcileOutcome {
             reconciled: false,
             pr: None,
             reason: "missing_run_state".to_string(),
         });
     };
+    if !has_exact_claim_generation(&selected.record, worker_id, expected_claim_id, branch) {
+        return Ok(ReconcileOutcome {
+            reconciled: false,
+            pr: None,
+            reason: "identity_mismatch".to_string(),
+        });
+    }
     if !selected.record.pr.is_empty() {
         return Ok(ReconcileOutcome {
             reconciled: false,
@@ -1169,13 +2411,6 @@ fn reconcile_linked_pr_record(
             reason: "no_linked_pr_with_one_closeout".to_string(),
         });
     };
-    if worker_id.is_some_and(|worker_id| worker_id != selected.record.worker_id) {
-        return Ok(ReconcileOutcome {
-            reconciled: false,
-            pr: Some(pull_request.number.to_string()),
-            reason: "identity_mismatch".to_string(),
-        });
-    }
     let Some(evidence) =
         successful_executor_result_for_pull_request(&comments, pull_request.number)
     else {
@@ -1187,7 +2422,7 @@ fn reconcile_linked_pr_record(
     };
     let required_checks = list_required_checks(repo, pull_request.number)?;
     let lease_is_live =
-        server_lease_is_fresh(&selected.server_updated_at, selected.record.ttl_seconds);
+        server_lease_is_fresh(&selected.record.updated_at, selected.record.ttl_seconds);
     match evaluate_merge_ready_claim_recovery(
         &selected.record,
         &evidence,
@@ -1209,7 +2444,7 @@ fn reconcile_linked_pr_record(
     record.step = "post_pr_handoff_failed".to_string();
     record.pr = pull_request.number.to_string();
     record.updated_at = utc_now_iso()?;
-    upsert_record(repo, &comments, &record)?;
+    upsert_record(repo, &comments, expected_claim_id, &record)?;
 
     let marker = format!(
         "<!-- autospec-linked-pr-run-state-reconcile:pr:{} -->",
@@ -1239,10 +2474,20 @@ struct ReadOptions {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct ClearOptions {
+    issue: u64,
+    repo: Option<String>,
+    worker_id: String,
+    claim_id: String,
+    branch: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct UpsertOptions {
     issue: u64,
     repo: Option<String>,
     worker_id: String,
+    claim_id: String,
     state: String,
     step: Option<String>,
     branch: String,
@@ -1252,10 +2497,23 @@ struct UpsertOptions {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+struct RefreshOptions {
+    issue: u64,
+    repo: Option<String>,
+    worker_id: String,
+    claim_id: String,
+    branch: String,
+    step: String,
+    pr: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 struct ReconcileOptions {
     issue: u64,
     repo: Option<String>,
-    worker_id: Option<String>,
+    worker_id: String,
+    claim_id: String,
+    branch: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1270,6 +2528,7 @@ struct ReleaseOptions {
     issue: u64,
     repo: Option<String>,
     worker_id: Option<String>,
+    claim_id: String,
     state: String,
     branch: String,
     pr: String,
@@ -1333,6 +2592,71 @@ fn parse_read_options(args: &[String]) -> Result<ReadOptions, CommandFailure> {
     }
     let issue = issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?;
     Ok(ReadOptions { issue, repo })
+}
+
+fn parse_clear_options(args: &[String]) -> Result<ClearOptions, CommandFailure> {
+    let mut issue = None;
+    let mut repo = None;
+    let mut worker_id = None;
+    let mut claim_id = None;
+    let mut branch = None;
+    let mut index = 0;
+    while index < args.len() {
+        let option = args[index].as_str();
+        let value = match option {
+            "--issue" | "--repo" | "--worker-id" | "--claim-id" | "--branch" => {
+                argument_value(args, &mut index, option)?
+            }
+            _ => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autospec claim state clear option: {option}"
+                )))
+            }
+        };
+        match option {
+            "--issue" => {
+                let parsed = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        CommandFailure::diagnostic("--issue must be a positive integer")
+                    })?;
+                set_once(
+                    &mut issue,
+                    parsed,
+                    "--issue accepts exactly one issue number",
+                )?;
+            }
+            "--repo" => set_once(&mut repo, value, "--repo accepts exactly one repository")?,
+            "--worker-id" => set_once(
+                &mut worker_id,
+                value,
+                "--worker-id accepts exactly one worker identifier",
+            )?,
+            "--claim-id" => set_once(
+                &mut claim_id,
+                value,
+                "--claim-id accepts exactly one claim generation",
+            )?,
+            "--branch" => set_once(&mut branch, value, "--branch accepts exactly one branch")?,
+            _ => unreachable!("options were matched before parsing"),
+        }
+        index += 1;
+    }
+    Ok(ClearOptions {
+        issue: issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?,
+        repo,
+        worker_id: worker_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--worker-id is required"))?,
+        claim_id: claim_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
+        branch: branch
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--branch is required"))?,
+    })
 }
 
 fn parse_recover_options(args: &[String]) -> Result<RecoverOptions, CommandFailure> {
@@ -1402,6 +2726,7 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
     let mut issue = None;
     let mut repo = None;
     let mut worker_id = None;
+    let mut claim_id = None;
     let mut state = None;
     let mut step = None;
     let mut branch = String::new();
@@ -1415,8 +2740,10 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
     while index < args.len() {
         let option = args[index].as_str();
         let value = match option {
-            "--issue" | "--repo" | "--worker-id" | "--state" | "--step" | "--branch" | "--pr"
-            | "--paths" | "--ttl-seconds" => argument_value(args, &mut index, option)?,
+            "--issue" | "--repo" | "--worker-id" | "--claim-id" | "--state" | "--step"
+            | "--branch" | "--pr" | "--paths" | "--ttl-seconds" => {
+                argument_value(args, &mut index, option)?
+            }
             _ => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown autospec claim state upsert option: {option}"
@@ -1443,6 +2770,11 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
                 &mut worker_id,
                 value,
                 "--worker-id accepts exactly one worker identifier",
+            )?,
+            "--claim-id" => set_once(
+                &mut claim_id,
+                value,
+                "--claim-id accepts exactly one claim generation",
             )?,
             "--state" => set_once(&mut state, value, "--state accepts exactly one state")?,
             "--step" => set_once(&mut step, value, "--step accepts exactly one step")?,
@@ -1488,13 +2820,91 @@ fn parse_upsert_options(args: &[String]) -> Result<UpsertOptions, CommandFailure
         issue: issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?,
         repo,
         worker_id: worker_id
+            .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| CommandFailure::diagnostic("--worker-id is required"))?,
+        claim_id: claim_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
         state: state.ok_or_else(|| CommandFailure::diagnostic("--state is required"))?,
         step,
-        branch,
+        branch: (!branch.trim().is_empty())
+            .then_some(branch)
+            .ok_or_else(|| CommandFailure::diagnostic("--branch is required"))?,
         pr,
         paths,
         ttl_seconds,
+    })
+}
+
+fn parse_refresh_options(args: &[String]) -> Result<RefreshOptions, CommandFailure> {
+    let mut issue = None;
+    let mut repo = None;
+    let mut worker_id = None;
+    let mut claim_id = None;
+    let mut branch = None;
+    let mut step = None;
+    let mut pr = None;
+    let mut index = 0;
+    while index < args.len() {
+        let option = args[index].as_str();
+        let value = match option {
+            "--issue" | "--repo" | "--worker-id" | "--claim-id" | "--branch" | "--step"
+            | "--pr" => argument_value(args, &mut index, option)?,
+            _ => {
+                return Err(CommandFailure::diagnostic(format!(
+                    "unknown autospec claim state refresh option: {option}"
+                )))
+            }
+        };
+        match option {
+            "--issue" => {
+                let parsed = value
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+                    .ok_or_else(|| {
+                        CommandFailure::diagnostic("--issue must be a positive integer")
+                    })?;
+                set_once(
+                    &mut issue,
+                    parsed,
+                    "--issue accepts exactly one issue number",
+                )?;
+            }
+            "--repo" => set_once(&mut repo, value, "--repo accepts exactly one repository")?,
+            "--worker-id" => set_once(
+                &mut worker_id,
+                value,
+                "--worker-id accepts exactly one worker identifier",
+            )?,
+            "--claim-id" => set_once(
+                &mut claim_id,
+                value,
+                "--claim-id accepts exactly one claim generation",
+            )?,
+            "--branch" => set_once(&mut branch, value, "--branch accepts exactly one branch")?,
+            "--step" => set_once(&mut step, value, "--step accepts exactly one step")?,
+            "--pr" => set_once(&mut pr, value, "--pr accepts exactly one pull request")?,
+            _ => unreachable!("options were matched before parsing"),
+        }
+        index += 1;
+    }
+    Ok(RefreshOptions {
+        issue: issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?,
+        repo,
+        worker_id: worker_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--worker-id is required"))?,
+        claim_id: claim_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
+        branch: branch
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--branch is required"))?,
+        step: step
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--step is required"))?,
+        pr,
     })
 }
 
@@ -1502,11 +2912,15 @@ fn parse_reconcile_options(args: &[String]) -> Result<ReconcileOptions, CommandF
     let mut issue = None;
     let mut repo = None;
     let mut worker_id = None;
+    let mut claim_id = None;
+    let mut branch = None;
     let mut index = 0;
     while index < args.len() {
         let option = args[index].as_str();
         let value = match option {
-            "--issue" | "--repo" | "--worker-id" => argument_value(args, &mut index, option)?,
+            "--issue" | "--repo" | "--worker-id" | "--claim-id" | "--branch" => {
+                argument_value(args, &mut index, option)?
+            }
             _ => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown autospec claim state reconcile-linked-pr option: {option}"
@@ -1534,6 +2948,12 @@ fn parse_reconcile_options(args: &[String]) -> Result<ReconcileOptions, CommandF
                 value,
                 "--worker-id accepts exactly one worker identifier",
             )?,
+            "--claim-id" => set_once(
+                &mut claim_id,
+                value,
+                "--claim-id accepts exactly one claim generation",
+            )?,
+            "--branch" => set_once(&mut branch, value, "--branch accepts exactly one branch")?,
             _ => unreachable!("options were matched before parsing"),
         }
         index += 1;
@@ -1541,7 +2961,15 @@ fn parse_reconcile_options(args: &[String]) -> Result<ReconcileOptions, CommandF
     Ok(ReconcileOptions {
         issue: issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?,
         repo,
-        worker_id,
+        worker_id: worker_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--worker-id is required"))?,
+        claim_id: claim_id
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
+        branch: branch
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| CommandFailure::diagnostic("--branch is required"))?,
     })
 }
 
@@ -1549,6 +2977,7 @@ fn parse_release_options(args: &[String]) -> Result<ReleaseOptions, CommandFailu
     let mut issue = None;
     let mut repo = None;
     let mut worker_id = None;
+    let mut claim_id = None;
     let mut state = "released".to_string();
     let mut state_seen = false;
     let mut branch = String::new();
@@ -1559,9 +2988,8 @@ fn parse_release_options(args: &[String]) -> Result<ReleaseOptions, CommandFailu
     while index < args.len() {
         let option = args[index].as_str();
         let value = match option {
-            "--issue" | "--repo" | "--worker-id" | "--state" | "--branch" | "--pr" => {
-                argument_value(args, &mut index, option)?
-            }
+            "--issue" | "--repo" | "--worker-id" | "--claim-id" | "--state" | "--branch"
+            | "--pr" => argument_value(args, &mut index, option)?,
             _ => {
                 return Err(CommandFailure::diagnostic(format!(
                     "unknown autospec claim release option: {option}"
@@ -1588,6 +3016,11 @@ fn parse_release_options(args: &[String]) -> Result<ReleaseOptions, CommandFailu
                 &mut worker_id,
                 value,
                 "--worker-id accepts exactly one worker identifier",
+            )?,
+            "--claim-id" => set_once(
+                &mut claim_id,
+                value,
+                "--claim-id accepts exactly one claim generation",
             )?,
             "--state" => {
                 if state_seen {
@@ -1629,6 +3062,7 @@ fn parse_release_options(args: &[String]) -> Result<ReleaseOptions, CommandFailu
         issue: issue.ok_or_else(|| CommandFailure::diagnostic("--issue is required"))?,
         repo,
         worker_id,
+        claim_id: claim_id.ok_or_else(|| CommandFailure::diagnostic("--claim-id is required"))?,
         state,
         branch,
         pr,
@@ -1767,15 +3201,17 @@ fn list_comments(
         .args([
             "api",
             endpoint.as_str(),
+            "--paginate",
+            "--slurp",
             "--jq",
-            "[.[] | {id,body,updated_at}]",
+            "add | [.[] | {id,body,updated_at}]",
         ])
         .output()
         .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not run gh api issue comments: {error}"))
+            CommandFailure::transient(format!("could not run gh api issue comments: {error}"))
         })?;
     if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "gh api issue comments failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -1802,9 +3238,9 @@ fn load_claim_issue(
             "{labels:[.labels[].name],body:(.body // \"\"),title:(.title // \"\"),author:(.author.login // \"\")}",
         ])
         .output()
-        .map_err(|error| CommandFailure::diagnostic(format!("could not run gh issue view: {error}")))?;
+        .map_err(|error| CommandFailure::transient(format!("could not run gh issue view: {error}")))?;
     if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "gh issue view failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -1828,14 +3264,12 @@ fn list_open_pull_requests(
             "--limit",
             "100",
             "--json",
-            "number,body,headRefName,headRefOid",
+            "number,body,headRefName,headRefOid,isDraft,baseRefName",
         ])
         .output()
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not run gh pr list: {error}"))
-        })?;
+        .map_err(|error| CommandFailure::transient(format!("could not run gh pr list: {error}")))?;
     if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "gh pr list failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -1864,10 +3298,10 @@ fn list_required_checks(
         ])
         .output()
         .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not run gh pr checks: {error}"))
+            CommandFailure::transient(format!("could not run gh pr checks: {error}"))
         })?;
     if output.stdout.is_empty() {
-        return Err(CommandFailure::diagnostic(format!(
+        return Err(CommandFailure::transient(format!(
             "gh pr checks returned no required-check evidence: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         )));
@@ -1932,7 +3366,7 @@ fn run_gh_with_retry(arguments: &[String], action: &str) -> Result<(), CommandFa
         let output = Command::new("gh")
             .args(arguments)
             .output()
-            .map_err(|error| CommandFailure::diagnostic(format!("could not {action}: {error}")))?;
+            .map_err(|error| CommandFailure::transient(format!("could not {action}: {error}")))?;
         if output.status.success() {
             return Ok(());
         }
@@ -1941,7 +3375,7 @@ fn run_gh_with_retry(arguments: &[String], action: &str) -> Result<(), CommandFa
             continue;
         }
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(CommandFailure::diagnostic(if detail.is_empty() {
+        return Err(CommandFailure::transient(if detail.is_empty() {
             format!("could not {action}: gh exited with {}", output.status)
         } else {
             format!("could not {action}: {detail}")
@@ -1981,10 +3415,6 @@ fn default_worker_id() -> String {
         .map(|duration| duration.as_secs())
         .unwrap_or(0);
     format!("{host}:{user}:rust:{}:{timestamp}", std::process::id())
-}
-
-fn terminal_merged_exists(comments: &[autospec_core::claim::RemoteComment]) -> bool {
-    terminal_merged_comment_exists(comments)
 }
 
 fn write_startup_heartbeat(
@@ -2205,17 +3635,6 @@ fn branch_ref_exists(branch: &str) -> bool {
     {
         Ok(output) if output.status.success() => !output.stdout.is_empty(),
         Ok(_) | Err(_) => true,
-    }
-}
-
-fn cleanup_own_marked_comments(
-    repo: &str,
-    _issue: u64,
-    worker_id: &str,
-    comments: &[autospec_core::claim::RemoteComment],
-) {
-    if let Some(comment_id) = claim_losing_worker_comment_id(comments, worker_id) {
-        let _ = delete_comment(repo, comment_id);
     }
 }
 
@@ -2516,20 +3935,31 @@ fn unavailable_claim_with_observed_owner<T>(
 
 fn print_help() {
     println!(
-        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
+        "autospec claim\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim acquire --issue <N> [--repo OWNER/REPO] [--worker-id ID] [--branch NAME] [--session-id ID]\n    autospec claim release --issue <N> --claim-id <ID> [--repo OWNER/REPO] [--state released|failed|merged]\n\nCOMMANDS:\n    state          Read and update GitHub-backed claim state\n    acquire        Validate issue eligibility before acquiring an issue lease\n    release        Release, fail, or terminally merge an issue lease"
     );
 }
 
 fn print_state_help() {
     println!(
-        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --state <STATE> [OPTIONS]\n    autospec claim state clear --issue <N> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> [--repo OWNER/REPO] [--worker-id ID]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the lowest-ID authoritative run-state comment\n    upsert                 Patch or create the lowest-ID authoritative run-state comment\n    clear                  Delete marked run-state comments\n    reconcile-linked-pr    Record a linked PR before post-PR handoff recovery\n    recover-stale-startup  Release only an evidenceless stale startup claim"
+        "autospec claim state\n\nUSAGE:\n    autospec claim state read --issue <N> [--repo OWNER/REPO]\n    autospec claim state upsert --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --state <STATE> [OPTIONS]\n    autospec claim state refresh --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> --step <STEP> [OPTIONS]\n    autospec claim state clear --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state reconcile-linked-pr --issue <N> --worker-id <ID> --claim-id <ID> --branch <NAME> [--repo OWNER/REPO]\n    autospec claim state recover-stale-startup --issue <N> [--repo OWNER/REPO] [--timeout-seconds 300]\n\nCOMMANDS:\n    read                   Read the authoritative parent-linked run-state generation\n    upsert                 Append one exact-owner successor generation\n    refresh                Renew one exact claim generation and confirm ownership\n    clear                  CAS the exact claim generation to released\n    reconcile-linked-pr    Record a linked PR for one exact claim generation\n    recover-stale-startup  CAS an evidenceless stale startup claim to available"
     );
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{claim_settle_millis, publish_session_binding, SessionBindingIdentity};
-    use std::sync::{Arc, Barrier};
+    use super::{
+        advance_claim_ref_in, claim_settle_millis, create_claim_ref_commit,
+        private_claim_git_dir_in, publish_session_binding, read_claim_ref_in,
+        validated_claim_remote, ClaimRefAdvance, SessionBindingIdentity,
+    };
+    use autospec_core::claim::{ExecutorResultEvidence, RemoteComment, RunStateRecord};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::{Arc, Barrier, Mutex};
+
+    static BRIDGE_TRANSITION_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn claim_settle_millis_preserves_decimal_second_configuration() {
@@ -2612,5 +4042,1221 @@ mod tests {
         let stored = std::fs::read_to_string(&*path).expect("winning session binding");
         assert!(stored.contains("claim-a") || stored.contains("claim-b"));
         std::fs::remove_dir_all(directory).expect("remove session binding fixture");
+    }
+
+    struct ClaimRefFixture {
+        root: PathBuf,
+        remote: PathBuf,
+        clients: [PathBuf; 2],
+    }
+
+    impl ClaimRefFixture {
+        fn new(label: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "autospec-claim-ref-{label}-{}-{}",
+                std::process::id(),
+                super::UNIQUE_ID_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            let remote = root.join("remote.git");
+            std::fs::create_dir_all(&root).expect("claim ref fixture root");
+            git(&root, &["init", "--bare", remote.to_str().unwrap()]);
+            let clients = [root.join("client-a"), root.join("client-b")];
+            for client in &clients {
+                git(&root, &["init", client.to_str().unwrap()]);
+            }
+            Self {
+                root,
+                remote,
+                clients,
+            }
+        }
+    }
+
+    impl Drop for ClaimRefFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn git(directory: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(directory: &Path, args: &[&str]) -> Vec<u8> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output.stdout
+    }
+
+    fn source_function<'a>(source: &'a str, name: &str) -> &'a str {
+        let marker = format!("fn {name}(");
+        let start = source.find(&marker).expect("source function");
+        let tail = &source[start..];
+        let end = tail[marker.len()..]
+            .find("\nfn ")
+            .map(|end| marker.len() + end)
+            .unwrap_or(tail.len());
+        &tail[..end]
+    }
+
+    fn claim_record(worker: &str, claim_id: &str, state: &str) -> RunStateRecord {
+        RunStateRecord::new(
+            "owner/repo",
+            42,
+            worker,
+            state,
+            format!("feat/{worker}"),
+            "",
+            state,
+            Vec::new(),
+            "2026-07-25T00:00:00Z",
+            "2026-07-25T00:00:00Z",
+            1,
+        )
+        .with_claim_id(claim_id)
+    }
+
+    #[test]
+    fn bridge_terminal_projection_resumes_only_the_exact_terminal_generation() {
+        let identity = super::ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker-a",
+            claim_id: "claim-a",
+        };
+        let mut terminal = claim_record("worker-a", "claim-a", "merged");
+        terminal.step = "merged".into();
+        terminal.pr = "17".into();
+        assert_eq!(
+            super::bridge_terminal_mode(
+                &terminal,
+                identity,
+                "merged",
+                "merged",
+                "17",
+                "terminal_prepared:merged",
+            ),
+            super::BridgeTerminalMode::Complete
+        );
+
+        terminal.claim_id = Some("claim-takeover".into());
+        assert_eq!(
+            super::bridge_terminal_mode(
+                &terminal,
+                identity,
+                "merged",
+                "merged",
+                "17",
+                "terminal_prepared:merged",
+            ),
+            super::BridgeTerminalMode::Lost
+        );
+    }
+
+    #[test]
+    fn bridge_result_recovery_collapses_only_identical_publication_retries() {
+        let evidence = ExecutorResultEvidence::new(
+            "owner/repo",
+            42,
+            "worker-a",
+            "feat/worker-a",
+            "succeeded",
+            Some(17),
+            "executor_succeeded",
+            "stable-receipt",
+            Some("claim-a".into()),
+            Some("a".repeat(40)),
+            Some("b".repeat(64)),
+        );
+        let body = evidence.to_marked_comment();
+        let comments = vec![
+            RemoteComment::new(1, body.clone(), "2026-07-26T00:00:00Z"),
+            RemoteComment::new(2, body, "2026-07-26T00:00:01Z"),
+        ];
+        assert_eq!(
+            super::exact_successful_executor_result(
+                &comments,
+                super::ClaimMutationIdentity {
+                    repo: "owner/repo",
+                    issue: 42,
+                    worker_id: "worker-a",
+                    branch: "feat/worker-a",
+                    claim_id: "claim-a",
+                },
+                super::ExecutorResultAuthorityBinding {
+                    pull_request: 17,
+                    commit: &"a".repeat(40),
+                    premerge_receipt: &"b".repeat(64),
+                    receipt_id: "stable-receipt",
+                },
+            ),
+            Some(evidence)
+        );
+    }
+
+    #[test]
+    fn bridge_result_authority_filters_exact_generation_before_uniqueness() {
+        let old = ExecutorResultEvidence::new(
+            "owner/repo",
+            42,
+            "worker-a",
+            "feat/worker-a",
+            "succeeded",
+            Some(17),
+            "executor_succeeded",
+            "bridge-old",
+            Some("claim-old".into()),
+            Some("a".repeat(40)),
+            Some("b".repeat(64)),
+        );
+        let successor = ExecutorResultEvidence::new(
+            "owner/repo",
+            42,
+            "worker-a",
+            "feat/worker-a",
+            "succeeded",
+            Some(17),
+            "executor_succeeded",
+            "bridge-successor",
+            Some("claim-successor".into()),
+            Some("a".repeat(40)),
+            Some("b".repeat(64)),
+        );
+        let comments = vec![
+            RemoteComment::new(1, old.to_marked_comment(), "2026-07-26T00:00:00Z"),
+            RemoteComment::new(2, successor.to_marked_comment(), "2026-07-26T00:00:01Z"),
+            RemoteComment::new(3, successor.to_marked_comment(), "2026-07-26T00:00:02Z"),
+        ];
+
+        assert_eq!(
+            super::exact_successful_executor_result(
+                &comments,
+                super::ClaimMutationIdentity {
+                    repo: "owner/repo",
+                    issue: 42,
+                    worker_id: "worker-a",
+                    branch: "feat/worker-a",
+                    claim_id: "claim-successor",
+                },
+                super::ExecutorResultAuthorityBinding {
+                    pull_request: 17,
+                    commit: &"a".repeat(40),
+                    premerge_receipt: &"b".repeat(64),
+                    receipt_id: "bridge-successor",
+                },
+            ),
+            Some(successor)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn executor_result_takeover_after_renewal_is_inert_for_successor_authority() {
+        let _guard = BRIDGE_TRANSITION_ENV.lock().expect("transition env");
+        let fixture = ClaimRefFixture::new("executor-result-takeover");
+        let bin = fixture.root.join("bin");
+        let gh = bin.join("gh");
+        let comments = fixture.root.join("comments.json");
+        let observed_renewal = fixture.root.join("observed-renewal.txt");
+        std::fs::create_dir(&bin).expect("bin");
+        std::fs::write(&comments, "[]").expect("comments");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\n\
+             set -eu\n\
+             if [ \"$1\" = api ]; then cat \"$GH_COMMENTS\"; exit 0; fi\n\
+             if [ \"$1 $2\" = 'pr list' ]; then cat <<'EOF'\n\
+             [{\"number\":17,\"body\":\"Closes #42\\n\\n## Closeout report\\nResult\",\"headRefName\":\"feat/worker-a\",\"headRefOid\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"isDraft\":false,\"baseRefName\":\"main\"}]\n\
+             EOF\n\
+             exit 0; fi\n\
+             if [ \"$1 $2\" = 'issue comment' ]; then\n\
+               body=''; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --body ]; then shift; body=$1; fi; shift || true; done\n\
+               jq --arg body \"$body\" '. + [{id:(length + 1),body:$body,updated_at:\"2026-07-26T00:00:00Z\"}]' \"$GH_COMMENTS\" > \"$GH_COMMENTS.tmp\"\n\
+               mv \"$GH_COMMENTS.tmp\" \"$GH_COMMENTS\"\n\
+               current=$(git --git-dir=\"$GH_REMOTE\" rev-parse refs/autospec/claims/issue-42)\n\
+               git --git-dir=\"$GH_REMOTE\" show -s --format=%B \"$current\" > \"$GH_OBSERVED_RENEWAL\"\n\
+               git --git-dir=\"$GH_REMOTE\" update-ref refs/autospec/claims/issue-42 \"$GH_TAKEOVER_OID\"\n\
+               exit 0\n\
+             fi\n\
+             exit 64\n",
+        )
+        .expect("gh");
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("gh mode");
+
+        let mut original = claim_record("worker-a", "claim-old", "claimed");
+        original.ttl_seconds = u64::MAX;
+        let initial = match advance_claim_ref_in(
+            Path::new("git"),
+            &fixture.clients[0],
+            fixture.remote.to_str().unwrap(),
+            "owner/repo",
+            42,
+            None,
+            &original,
+        )
+        .expect("seed claim")
+        {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => panic!("initial claim must win"),
+        };
+        git(
+            &fixture.clients[1],
+            &[
+                "fetch",
+                fixture.remote.to_str().unwrap(),
+                "refs/autospec/claims/issue-42",
+            ],
+        );
+        let mut successor = claim_record("worker-a", "claim-successor", "claimed");
+        successor.ttl_seconds = u64::MAX;
+        let successor_oid = create_claim_ref_commit(
+            Path::new("git"),
+            &fixture.clients[1],
+            Some(&initial),
+            "successor-generation",
+            &successor,
+        )
+        .expect("create successor claim");
+        git(
+            &fixture.clients[1],
+            &[
+                "push",
+                fixture.remote.to_str().unwrap(),
+                &format!("{successor_oid}:refs/autospec/test/successor"),
+            ],
+        );
+
+        let old_path = std::env::var_os("PATH");
+        let old_remote = std::env::var_os("AUTOSPEC_CLAIM_GIT_REMOTE");
+        let old_state = std::env::var_os("AUTOSPEC_CLAIM_GIT_STATE_DIR");
+        let old_comments = std::env::var_os("GH_COMMENTS");
+        let old_gh_remote = std::env::var_os("GH_REMOTE");
+        let old_takeover = std::env::var_os("GH_TAKEOVER_OID");
+        let old_observed = std::env::var_os("GH_OBSERVED_RENEWAL");
+        let old_retries = std::env::var_os("AUTOSPEC_GH_API_RETRIES");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                old_path.as_deref().unwrap_or_default().to_string_lossy()
+            ),
+        );
+        std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", &fixture.remote);
+        std::env::set_var(
+            "AUTOSPEC_CLAIM_GIT_STATE_DIR",
+            fixture.root.join("claim-state"),
+        );
+        std::env::set_var("GH_COMMENTS", &comments);
+        std::env::set_var("GH_REMOTE", &fixture.remote);
+        std::env::set_var("GH_TAKEOVER_OID", &successor_oid);
+        std::env::set_var("GH_OBSERVED_RENEWAL", &observed_renewal);
+        std::env::set_var("AUTOSPEC_GH_API_RETRIES", "1");
+
+        let old_identity = super::ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker-a",
+            claim_id: "claim-old",
+        };
+        assert_eq!(
+            super::record_executor_result_with_receipt(
+                old_identity,
+                &autospec_core::coordination::ConductorOutcome::Succeeded,
+                Some(17),
+                Some(super::ExecutorSuccessBinding {
+                    claim_id: "claim-old",
+                    commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    premerge_receipt:
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                }),
+                Some("bridge-old"),
+            )
+            .expect("publish stale result"),
+            super::ExecutorResultRecord::OwnershipLost
+        );
+        let renewal = std::fs::read_to_string(&observed_renewal).expect("renewal observation");
+        assert!(
+            renewal.contains("\"step\":\"executor_succeeded\""),
+            "{renewal}"
+        );
+        assert!(!renewal.contains("\"updated_at\":\"2026-07-25T00:00:00Z\""));
+
+        let successor_evidence = ExecutorResultEvidence::new(
+            "owner/repo",
+            42,
+            "worker-a",
+            "feat/worker-a",
+            "succeeded",
+            Some(17),
+            "executor_succeeded",
+            "bridge-successor",
+            Some("claim-successor".into()),
+            Some("a".repeat(40)),
+            Some("b".repeat(64)),
+        );
+        let mut published: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&comments).expect("comments"))
+                .expect("comments JSON");
+        published
+            .as_array_mut()
+            .expect("comment array")
+            .push(serde_json::json!({
+                "id": 2,
+                "body": successor_evidence.to_marked_comment(),
+                "updated_at": "2026-07-26T00:00:01Z"
+            }));
+        std::fs::write(
+            &comments,
+            serde_json::to_vec(&published).expect("serialize comments"),
+        )
+        .expect("publish successor evidence");
+
+        assert_eq!(
+            super::authoritative_executor_result(
+                super::ClaimMutationIdentity {
+                    repo: "owner/repo",
+                    issue: 42,
+                    worker_id: "worker-a",
+                    branch: "feat/worker-a",
+                    claim_id: "claim-successor",
+                },
+                super::ExecutorResultAuthorityBinding {
+                    pull_request: 17,
+                    commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    premerge_receipt:
+                        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    receipt_id: "bridge-successor",
+                },
+            )
+            .expect("read successor authority"),
+            Some(successor_evidence)
+        );
+
+        for (key, value) in [
+            ("PATH", old_path),
+            ("AUTOSPEC_CLAIM_GIT_REMOTE", old_remote),
+            ("AUTOSPEC_CLAIM_GIT_STATE_DIR", old_state),
+            ("GH_COMMENTS", old_comments),
+            ("GH_REMOTE", old_gh_remote),
+            ("GH_TAKEOVER_OID", old_takeover),
+            ("GH_OBSERVED_RENEWAL", old_observed),
+            ("AUTOSPEC_GH_API_RETRIES", old_retries),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn assert_bridge_transition_projection(
+        label: &str,
+        disposition: super::BridgeClaimDisposition,
+        expected_state: &str,
+        expected_prepared_step: &str,
+        expected_edit: &str,
+        expected_comments: usize,
+        interrupt_after_preparation: bool,
+    ) {
+        let fixture = ClaimRefFixture::new(label);
+        let bin = fixture.root.join("bin");
+        let gh = bin.join("gh");
+        let calls = fixture.root.join("gh-calls");
+        let comments = fixture.root.join("comments.json");
+        let label_claims = fixture.root.join("label-claims");
+        let first_label_failed = fixture.root.join("first-label-failed");
+        std::fs::create_dir(&bin).expect("bin");
+        std::fs::write(&comments, "[]").expect("comments");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\n\
+             set -eu\n\
+             printf '%s\\n' \"$*\" >> \"$GH_CALLS\"\n\
+             if [ \"$1\" = api ]; then cat \"$GH_COMMENTS\"; exit 0; fi\n\
+             if [ \"$1 $2\" = 'issue comment' ]; then\n\
+               body=''; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --body ]; then shift; body=$1; fi; shift || true; done\n\
+               jq --arg body \"$body\" '. + [{id:(length + 1),body:$body,updated_at:\"2026-07-26T00:00:00Z\"}]' \"$GH_COMMENTS\" > \"$GH_COMMENTS.tmp\"\n\
+               mv \"$GH_COMMENTS.tmp\" \"$GH_COMMENTS\"; exit 0\n\
+             fi\n\
+             if [ \"$1 $2\" = 'issue edit' ]; then\n\
+               current=$(git -C \"$GH_REMOTE\" rev-parse refs/autospec/claims/issue-42)\n\
+               printf '%s\\n' \"$current\" >> \"$GH_LABEL_CLAIMS\"\n\
+               if [ \"${GH_FAIL_FIRST_LABEL:-0}\" = 1 ] && [ ! -e \"$GH_FIRST_LABEL_FAILED\" ]; then\n\
+                 : > \"$GH_FIRST_LABEL_FAILED\"\n\
+                 exit 23\n\
+               fi\n\
+               exit 0\n\
+             fi\n\
+             exit 64\n",
+        )
+        .expect("gh");
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("gh mode");
+        let old_path = std::env::var_os("PATH");
+        let old_remote = std::env::var_os("AUTOSPEC_CLAIM_GIT_REMOTE");
+        let old_state = std::env::var_os("AUTOSPEC_CLAIM_GIT_STATE_DIR");
+        let old_calls = std::env::var_os("GH_CALLS");
+        let old_comments = std::env::var_os("GH_COMMENTS");
+        let old_gh_remote = std::env::var_os("GH_REMOTE");
+        let old_label_claims = std::env::var_os("GH_LABEL_CLAIMS");
+        let old_fail_first_label = std::env::var_os("GH_FAIL_FIRST_LABEL");
+        let old_first_label_failed = std::env::var_os("GH_FIRST_LABEL_FAILED");
+        let old_retries = std::env::var_os("AUTOSPEC_GH_API_RETRIES");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                old_path.as_deref().unwrap_or_default().to_string_lossy()
+            ),
+        );
+        std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", &fixture.remote);
+        std::env::set_var(
+            "AUTOSPEC_CLAIM_GIT_STATE_DIR",
+            fixture.root.join("claim-state"),
+        );
+        std::env::set_var("GH_CALLS", &calls);
+        std::env::set_var("GH_COMMENTS", &comments);
+        std::env::set_var("GH_REMOTE", &fixture.remote);
+        std::env::set_var("GH_LABEL_CLAIMS", &label_claims);
+        std::env::set_var(
+            "GH_FAIL_FIRST_LABEL",
+            if interrupt_after_preparation {
+                "1"
+            } else {
+                "0"
+            },
+        );
+        std::env::set_var("GH_FIRST_LABEL_FAILED", &first_label_failed);
+        std::env::set_var("AUTOSPEC_GH_API_RETRIES", "1");
+
+        let claimed = claim_record("worker-a", "claim-a", "claimed");
+        assert!(matches!(
+            advance_claim_ref_in(
+                Path::new("git"),
+                &fixture.clients[0],
+                fixture.remote.to_str().unwrap(),
+                "owner/repo",
+                42,
+                None,
+                &claimed,
+            )
+            .expect("seed authoritative claim"),
+            ClaimRefAdvance::Won(_)
+        ));
+        let identity = super::ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker-a",
+            claim_id: "claim-a",
+        };
+        let pr = (disposition == super::BridgeClaimDisposition::Merged).then_some(17);
+        if interrupt_after_preparation {
+            super::transition_bridge_claim(identity, pr, disposition)
+                .expect_err("first label projection must interrupt after preparation");
+            let prepared = super::read_claim_ref("owner/repo", 42)
+                .expect("read prepared claim")
+                .expect("prepared claim head");
+            assert_eq!(prepared.record.state, "claimed");
+            assert_eq!(prepared.record.step, expected_prepared_step);
+        }
+        assert_eq!(
+            super::transition_bridge_claim(identity, pr, disposition)
+                .expect("transition or prepared restart"),
+            super::BridgeClaimTransition::Transitioned
+        );
+        assert_eq!(
+            super::transition_bridge_claim(identity, pr, disposition).expect("resume projection"),
+            super::BridgeClaimTransition::Transitioned
+        );
+        let head = super::read_claim_ref("owner/repo", 42)
+            .expect("read claim")
+            .expect("claim head");
+        assert_eq!(head.record.state, expected_state);
+        assert_ne!(head.record.state, "claimed");
+        let call_log = std::fs::read_to_string(calls).expect("calls");
+        assert!(call_log.contains(expected_edit), "{call_log}");
+        assert_eq!(
+            call_log.matches(expected_edit).count(),
+            if interrupt_after_preparation { 2 } else { 1 },
+            "terminal restart must not reapply labels: {call_log}"
+        );
+        let label_claim_oid =
+            std::fs::read_to_string(&label_claims).expect("claim observed during label projection");
+        let label_claim_oid = label_claim_oid.lines().next().expect("label claim oid");
+        let label_claim = String::from_utf8(git_stdout(
+            &fixture.root,
+            &[
+                "-C",
+                fixture.remote.to_str().expect("remote path"),
+                "cat-file",
+                "commit",
+                label_claim_oid,
+            ],
+        ))
+        .expect("claim commit utf8");
+        let (_, label_claim) = label_claim
+            .split_once("\n\n")
+            .expect("claim commit message");
+        let prepared =
+            super::parse_claim_ref_message("a".repeat(40), label_claim, "owner/repo", 42)
+                .expect("prepared terminal claim");
+        assert_eq!(prepared.record.state, "claimed");
+        assert_eq!(prepared.record.step, expected_prepared_step);
+        let comment_value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(comments).expect("comments JSON"))
+                .expect("comments");
+        assert_eq!(
+            comment_value.as_array().expect("comment array").len(),
+            expected_comments,
+            "restart duplicated a projection"
+        );
+
+        for (key, value) in [
+            ("PATH", old_path),
+            ("AUTOSPEC_CLAIM_GIT_REMOTE", old_remote),
+            ("AUTOSPEC_CLAIM_GIT_STATE_DIR", old_state),
+            ("GH_CALLS", old_calls),
+            ("GH_COMMENTS", old_comments),
+            ("GH_REMOTE", old_gh_remote),
+            ("GH_LABEL_CLAIMS", old_label_claims),
+            ("GH_FAIL_FIRST_LABEL", old_fail_first_label),
+            ("GH_FIRST_LABEL_FAILED", old_first_label_failed),
+            ("AUTOSPEC_GH_API_RETRIES", old_retries),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_terminal_transitions_prepare_before_labels_and_restarts_do_not_relabel() {
+        let _guard = BRIDGE_TRANSITION_ENV.lock().expect("transition env");
+        let retryable_edit = [
+            "issue edit 42 ",
+            "repo owner/repo ",
+            "remove-label in-progress-by-bot ",
+            "remove-label autospec:needs-human ",
+            "add-label auto-implement",
+        ]
+        .join("--");
+        assert_bridge_transition_projection(
+            "bridge-retryable",
+            super::BridgeClaimDisposition::Retryable,
+            "released",
+            "terminal_prepared:retryable_released",
+            &retryable_edit,
+            1,
+            false,
+        );
+        assert_bridge_transition_projection(
+            "bridge-needs-human",
+            super::BridgeClaimDisposition::NeedsHuman,
+            "failed",
+            "terminal_prepared:needs_human",
+            "issue edit 42 --repo owner/repo --remove-label in-progress-by-bot --remove-label auto-implement --add-label autospec:needs-human",
+            1,
+            false,
+        );
+        assert_bridge_transition_projection(
+            "bridge-merged",
+            super::BridgeClaimDisposition::Merged,
+            "merged",
+            "terminal_prepared:merged",
+            "issue edit 42 --repo owner/repo --remove-label in-progress-by-bot",
+            2,
+            false,
+        );
+        assert_bridge_transition_projection(
+            "bridge-retryable-prepared-restart",
+            super::BridgeClaimDisposition::Retryable,
+            "released",
+            "terminal_prepared:retryable_released",
+            &retryable_edit,
+            1,
+            true,
+        );
+    }
+
+    #[test]
+    fn claim_ref_initial_creation_has_exactly_one_receive_pack_winner() {
+        // Break caught: two absent-ref acquisitions both succeeding on eventually-consistent comments.
+        let fixture = ClaimRefFixture::new("initial-race");
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = fixture
+            .clients
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, client)| {
+                let barrier = Arc::clone(&barrier);
+                let remote = fixture.remote.clone();
+                std::thread::spawn(move || {
+                    let worker = format!("worker-{index}");
+                    let record = claim_record(&worker, &format!("claim-{index}"), "claimed");
+                    barrier.wait();
+                    advance_claim_ref_in(
+                        Path::new("git"),
+                        &client,
+                        remote.to_str().unwrap(),
+                        "owner/repo",
+                        42,
+                        None,
+                        &record,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("claim publisher")
+                    .expect("claim result")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, ClaimRefAdvance::Won(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, ClaimRefAdvance::Lost))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn claim_ref_rejects_a_stale_terminal_transition_after_takeover() {
+        // Break caught: stale release publishing an absorbing terminal comment before ownership CAS.
+        let fixture = ClaimRefFixture::new("stale-terminal");
+        let original = claim_record("worker-a", "claim-a", "claimed");
+        let initial = advance_claim_ref_in(
+            Path::new("git"),
+            &fixture.clients[0],
+            fixture.remote.to_str().unwrap(),
+            "owner/repo",
+            42,
+            None,
+            &original,
+        )
+        .expect("initial claim");
+        let ClaimRefAdvance::Won(parent) = initial else {
+            panic!("initial claim must win");
+        };
+        let takeover = claim_record("worker-b", "claim-b", "claimed");
+        assert!(matches!(
+            advance_claim_ref_in(
+                Path::new("git"),
+                &fixture.clients[1],
+                fixture.remote.to_str().unwrap(),
+                "owner/repo",
+                42,
+                Some(&parent),
+                &takeover,
+            )
+            .expect("takeover"),
+            ClaimRefAdvance::Won(_)
+        ));
+        let terminal = claim_record("worker-a", "claim-a", "merged");
+        assert_eq!(
+            advance_claim_ref_in(
+                Path::new("git"),
+                &fixture.clients[0],
+                fixture.remote.to_str().unwrap(),
+                "owner/repo",
+                42,
+                Some(&parent),
+                &terminal,
+            )
+            .expect("stale terminal"),
+            ClaimRefAdvance::Lost
+        );
+
+        let head = read_claim_ref_in(
+            Path::new("git"),
+            &fixture.clients[0],
+            fixture.remote.to_str().unwrap(),
+            "owner/repo",
+            42,
+        )
+        .expect("read winner")
+        .expect("claim ref");
+        assert_eq!(head.record.worker_id, "worker-b");
+        assert_eq!(head.record.state, "claimed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claim_ref_keeps_an_unchanged_failed_push_transient() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = ClaimRefFixture::new("unchanged-push-failure");
+        let original = claim_record("worker-a", "claim-a", "claimed");
+        let ClaimRefAdvance::Won(parent) = advance_claim_ref_in(
+            Path::new("git"),
+            &fixture.clients[0],
+            fixture.remote.to_str().unwrap(),
+            "owner/repo",
+            42,
+            None,
+            &original,
+        )
+        .expect("seed claim") else {
+            panic!("seed claim must win");
+        };
+        let wrapper = fixture.root.join("git-fail-push");
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\nfor arg in \"$@\"; do if [ \"$arg\" = push ]; then echo outage >&2; exit 75; fi; done\nexec git \"$@\"\n",
+        )
+        .expect("git wrapper");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("git wrapper mode");
+        let refreshed = claim_record("worker-a", "claim-a", "claimed");
+
+        let error = advance_claim_ref_in(
+            &wrapper,
+            &fixture.clients[0],
+            fixture.remote.to_str().unwrap(),
+            "owner/repo",
+            42,
+            Some(&parent),
+            &refreshed,
+        )
+        .expect_err("unchanged failed push must remain retryable");
+
+        assert_eq!(error.kind, crate::commands::CommandFailureKind::Transient);
+        assert!(
+            error.message.contains("without changing"),
+            "{}",
+            error.message
+        );
+    }
+
+    fn seed_claim(fixture: &ClaimRefFixture) -> super::ClaimRefHead {
+        let initial = claim_record("worker-a", "claim-a", "claimed");
+        match advance_claim_ref_in(
+            Path::new("git"),
+            &fixture.clients[0],
+            fixture.remote.to_str().unwrap(),
+            "owner/repo",
+            42,
+            None,
+            &initial,
+        )
+        .expect("seed claim")
+        {
+            ClaimRefAdvance::Won(head) => *head,
+            ClaimRefAdvance::Lost => panic!("seed claim lost"),
+        }
+    }
+
+    fn race_claim_ref_transitions(
+        fixture: &ClaimRefFixture,
+        parent: &super::ClaimRefHead,
+        records: [RunStateRecord; 2],
+    ) -> Vec<ClaimRefAdvance> {
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = fixture
+            .clients
+            .clone()
+            .into_iter()
+            .zip(records)
+            .map(|(client, record)| {
+                let barrier = Arc::clone(&barrier);
+                let remote = fixture.remote.clone();
+                let parent = parent.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    advance_claim_ref_in(
+                        Path::new("git"),
+                        &client,
+                        remote.to_str().unwrap(),
+                        "owner/repo",
+                        42,
+                        Some(&parent),
+                        &record,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("claim publisher")
+                    .expect("claim result")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn claim_ref_renewal_race_has_one_exact_parent_winner() {
+        // Break caught: two renewals both extending the same generation.
+        let fixture = ClaimRefFixture::new("renewal-race");
+        let parent = seed_claim(&fixture);
+        let mut renewal_a = parent.record.clone();
+        renewal_a.updated_at = "2026-07-25T00:00:01Z".to_string();
+        let mut renewal_b = parent.record.clone();
+        renewal_b.updated_at = "2026-07-25T00:00:02Z".to_string();
+        let results = race_claim_ref_transitions(&fixture, &parent, [renewal_a, renewal_b]);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, ClaimRefAdvance::Won(_)))
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, ClaimRefAdvance::Lost))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn claim_ref_takeover_and_renewal_each_win_when_received_first() {
+        // Break caught: eventual comment ordering allowing both a takeover and renewal.
+        for takeover_first in [false, true] {
+            let fixture = ClaimRefFixture::new(if takeover_first {
+                "takeover-first"
+            } else {
+                "renewal-first"
+            });
+            let parent = seed_claim(&fixture);
+            let mut renewal = parent.record.clone();
+            renewal.updated_at = "2026-07-25T00:00:01Z".to_string();
+            let takeover = claim_record("worker-b", "claim-b", "claimed");
+            let ordered = if takeover_first {
+                [takeover, renewal]
+            } else {
+                [renewal, takeover]
+            };
+            let first = advance_claim_ref_in(
+                Path::new("git"),
+                &fixture.clients[0],
+                fixture.remote.to_str().unwrap(),
+                "owner/repo",
+                42,
+                Some(&parent),
+                &ordered[0],
+            )
+            .expect("first transition");
+            assert!(matches!(first, ClaimRefAdvance::Won(_)));
+            let second = advance_claim_ref_in(
+                Path::new("git"),
+                &fixture.clients[1],
+                fixture.remote.to_str().unwrap(),
+                "owner/repo",
+                42,
+                Some(&parent),
+                &ordered[1],
+            )
+            .expect("second transition");
+            assert_eq!(second, ClaimRefAdvance::Lost);
+            let head = read_claim_ref_in(
+                Path::new("git"),
+                &fixture.clients[0],
+                fixture.remote.to_str().unwrap(),
+                "owner/repo",
+                42,
+            )
+            .expect("read winner")
+            .expect("claim ref");
+            assert_eq!(head.record.worker_id, ordered[0].worker_id);
+            assert_eq!(head.record.claim_id, ordered[0].claim_id);
+        }
+    }
+
+    #[test]
+    fn claim_ref_ambiguous_push_rereads_without_a_second_mutation() {
+        // Break caught: retrying a POST/push after receive-pack committed but the response vanished.
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = ClaimRefFixture::new("ambiguous-push");
+        let wrapper = fixture.root.join("ambiguous-git");
+        let push_log = fixture.root.join("push.log");
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = push ]; then\n  /usr/bin/git \"$@\"\n  status=$?\n  printf 'push\\n' >> '{}'\n  [ \"$status\" -eq 0 ] && exit 73\n  exit \"$status\"\nfi\nexec /usr/bin/git \"$@\"\n",
+            push_log.display()
+        );
+        std::fs::write(&wrapper, script).expect("write git wrapper");
+        let mut permissions = std::fs::metadata(&wrapper)
+            .expect("git wrapper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&wrapper, permissions).expect("make git wrapper executable");
+
+        let record = claim_record("worker-a", "claim-a", "claimed");
+        assert!(matches!(
+            advance_claim_ref_in(
+                &wrapper,
+                &fixture.clients[0],
+                fixture.remote.to_str().unwrap(),
+                "owner/repo",
+                42,
+                None,
+                &record,
+            )
+            .expect("ambiguous transition"),
+            ClaimRefAdvance::Won(_)
+        ));
+        assert_eq!(
+            std::fs::read_to_string(push_log)
+                .expect("push invocation log")
+                .lines()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn claim_ref_terminal_transition_rejects_foreign_identity() {
+        // Break caught: foreign worker, branch, or claim ID publishing a terminal state.
+        let fixture = ClaimRefFixture::new("foreign-release");
+        let parent = seed_claim(&fixture);
+        for (worker, branch, claim_id) in [
+            ("worker-b", "feat/worker-a", "claim-a"),
+            ("worker-a", "feat/worker-b", "claim-a"),
+            ("worker-a", "feat/worker-a", "claim-b"),
+        ] {
+            let mut terminal = parent.record.clone();
+            terminal.state = "merged".to_string();
+            terminal.step = "merged".to_string();
+            terminal.worker_id = worker.to_string();
+            terminal.branch = branch.to_string();
+            terminal.claim_id = Some(claim_id.to_string());
+            assert!(advance_claim_ref_in(
+                Path::new("git"),
+                &fixture.clients[0],
+                fixture.remote.to_str().unwrap(),
+                "owner/repo",
+                42,
+                Some(&parent),
+                &terminal,
+            )
+            .is_err());
+        }
+        let head = read_claim_ref_in(
+            Path::new("git"),
+            &fixture.clients[0],
+            fixture.remote.to_str().unwrap(),
+            "owner/repo",
+            42,
+        )
+        .expect("read claim")
+        .expect("claim ref");
+        assert_eq!(head, parent);
+    }
+
+    #[test]
+    fn claim_ref_https_push_uses_gh_credential_helper_without_a_token_argument() {
+        // Break caught: relying on global `gh auth setup-git` or exposing a token in argv.
+        let arguments = super::claim_remote_arguments(
+            "https://github.enterprise.example/owner/repo.git",
+            &["push", "origin", "abc123:refs/autospec/claims/issue-42"],
+        );
+        assert_eq!(
+            arguments,
+            [
+                "-c",
+                "credential.helper=!gh auth git-credential",
+                "-c",
+                "credential.useHttpPath=true",
+                "push",
+                "origin",
+                "abc123:refs/autospec/claims/issue-42",
+            ]
+        );
+        assert!(!arguments.iter().any(|argument| {
+            argument.contains("token")
+                || argument.contains("Authorization")
+                || argument.starts_with("https://")
+        }));
+        for remote_command in [
+            vec!["ls-remote", "--refs", "origin"],
+            vec!["fetch", "--no-tags", "origin"],
+        ] {
+            let arguments = super::claim_remote_arguments(
+                "https://github.enterprise.example/owner/repo.git",
+                &remote_command,
+            );
+            assert_eq!(
+                &arguments[..4],
+                [
+                    "-c",
+                    "credential.helper=!gh auth git-credential",
+                    "-c",
+                    "credential.useHttpPath=true",
+                ]
+            );
+            assert!(!arguments.iter().any(|argument| argument.contains("token")));
+        }
+        assert_eq!(
+            super::claim_remote_arguments("/tmp/remote.git", &["fetch", "/tmp/remote.git"]),
+            ["fetch", "/tmp/remote.git"]
+        );
+        assert_eq!(
+            validated_claim_remote("owner/repo", "https://github.enterprise.example/owner/repo")
+                .expect("enterprise clone URL"),
+            "https://github.enterprise.example/owner/repo.git"
+        );
+        assert!(validated_claim_remote(
+            "owner/repo",
+            "https://github.enterprise.example/other/repo"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn validated_claim_remote_rejects_unsafe_https_shapes() {
+        for url in [
+            "https://github.example/prefix/owner/repo",
+            "https://github.example/owner/repo?token=secret",
+            "https://github.example/owner/repo#fragment",
+            "https://attacker@example.com/owner/repo",
+            "https://github.example/not-owner/repo",
+            "https://github.example/owner/repo/extra",
+        ] {
+            assert!(
+                validated_claim_remote("owner/repo", url).is_err(),
+                "accepted unsafe claim remote {url}"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_ref_private_git_dirs_are_distinct_and_leave_target_git_metadata_unchanged() {
+        // Break caught: claim fetches mutating FETCH_HEAD/objects in a shared target worktree.
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = ClaimRefFixture::new("private-git");
+        let state_root = fixture.root.join("private-state");
+        let first = private_claim_git_dir_in(&state_root, "owner/repo")
+            .expect("first private claim Git dir");
+        let second = private_claim_git_dir_in(&state_root, "owner/repo")
+            .expect("second private claim Git dir");
+        assert_ne!(first.path, second.path);
+        assert_eq!(
+            std::fs::metadata(&first.path)
+                .expect("private claim dir")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        let target = &fixture.clients[0];
+        let status_before = git_stdout(target, &["status", "--porcelain=v1"]);
+        let refs_before = git_stdout(
+            target,
+            &["for-each-ref", "--format=%(refname) %(objectname)"],
+        );
+        let fetch_head = target.join(".git/FETCH_HEAD");
+        let fetch_head_before = std::fs::read(&fetch_head).ok();
+        let record = claim_record("worker-a", "claim-a", "claimed");
+        assert!(matches!(
+            advance_claim_ref_in(
+                Path::new("git"),
+                &first.path,
+                fixture.remote.to_str().unwrap(),
+                "owner/repo",
+                42,
+                None,
+                &record,
+            )
+            .expect("private claim transition"),
+            ClaimRefAdvance::Won(_)
+        ));
+        assert_eq!(
+            git_stdout(target, &["status", "--porcelain=v1"]),
+            status_before
+        );
+        assert_eq!(
+            git_stdout(
+                target,
+                &["for-each-ref", "--format=%(refname) %(objectname)"]
+            ),
+            refs_before
+        );
+        assert_eq!(std::fs::read(&fetch_head).ok(), fetch_head_before);
+    }
+
+    #[test]
+    fn claim_mutation_paths_use_the_ref_ledger_or_fail_closed() {
+        // Break caught: legacy state subcommands mutating comments/labels around the CAS ledger.
+        let source = include_str!("claim.rs");
+        for function in [
+            "release",
+            "acquire_record",
+            "refresh_claim_generation",
+            "upsert_record",
+            "clear",
+            "recover_stale_startup_record",
+            "record_executor_result",
+        ] {
+            assert!(
+                source_function(source, function).contains("advance_claim_ref"),
+                "{function} must advance the claim ref before audit projection"
+            );
+        }
+        assert!(source_function(source, "clear").contains("has_exact_claim_generation"));
+        let recovery = source_function(source, "recover_stale_startup_record");
+        assert!(recovery.contains("\"available\""));
+        assert!(recovery.contains("\"stale_startup_recovered\""));
+        for function in [
+            "record_executor_result_with_step",
+            "reconcile_linked_pr_record",
+        ] {
+            let body = source_function(source, function);
+            assert!(
+                body.contains("read_claim_ref") && body.contains("upsert_record"),
+                "{function} must route through the exact-ref mutation helper"
+            );
+            assert!(
+                !body.contains("select_run_state"),
+                "{function} must not derive a transition from stale audit projection"
+            );
+        }
+        let lease = source_function(source, "has_active_executor_claim");
+        assert!(lease.contains("record.updated_at"));
+        assert!(lease.contains("record.ttl_seconds"));
     }
 }

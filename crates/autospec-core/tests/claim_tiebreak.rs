@@ -1,6 +1,6 @@
 use autospec_core::claim::{
     claim_losing_worker_comment_id, executor_result_evidence_exists,
-    executor_wait_failure_relinquishes_claim, lowest_marked_comment, parse_open_pull_requests_json,
+    is_executor_result_pull_request, lowest_marked_comment, parse_open_pull_requests_json,
     select_run_state, ExecutorResultEvidence, RemoteComment, RunStateRecord,
 };
 
@@ -73,78 +73,9 @@ fn dotted_worker_id_cleanup_uses_literal_equality_not_regex_matching() {
 }
 
 #[test]
-fn wait_failure_evidence_relinquishes_only_the_exact_claim_generation() {
-    let legacy_claim = RunStateRecord::new(
-        "testorg/testrepo",
-        42,
-        "worker-a",
-        "claimed",
-        "feat/test",
-        "",
-        "claimed",
-        Vec::new(),
-        "2026-01-01T00:00:00Z",
-        "2026-01-01T00:00:00Z",
-        10_800,
-    );
-    let claim = legacy_claim.clone().with_claim_id("claim-generation-a");
-    let exact = ExecutorResultEvidence::new(
-        "testorg/testrepo",
-        42,
-        "worker-a",
-        "feat/test",
-        "failed",
-        None,
-        "implementer_wait_failed",
-        "implementer-wait-failed:claim-generation-a:session-7",
-        None,
-        None,
-        None,
-    );
-    let prior_generation = ExecutorResultEvidence::new(
-        "testorg/testrepo",
-        42,
-        "worker-a",
-        "feat/test",
-        "failed",
-        None,
-        "implementer_wait_failed",
-        "implementer-wait-failed:claim-generation-prior:session-6",
-        None,
-        None,
-        None,
-    );
-
-    assert!(executor_wait_failure_relinquishes_claim(
-        &[RemoteComment::new(
-            101,
-            exact.to_marked_comment(),
-            "2026-01-01T00:00:01Z",
-        )],
-        &claim,
-    ));
-    assert!(!executor_wait_failure_relinquishes_claim(
-        &[RemoteComment::new(
-            101,
-            prior_generation.to_marked_comment(),
-            "2026-01-01T00:00:01Z",
-        )],
-        &claim,
-    ));
-    assert!(!executor_wait_failure_relinquishes_claim(
-        &[RemoteComment::new(
-            101,
-            exact.to_marked_comment(),
-            "2026-01-01T00:00:01Z",
-        )],
-        &legacy_claim,
-    ));
-}
-
-#[test]
 fn executor_result_pull_request_requires_the_head_commit_oid() {
     let pull_requests = parse_open_pull_requests_json(
-        r#"[{"number":17,"body":"Closes #42","headRefName":"feat/claim","headRefOid":"0123456789abcdef0123456789abcdef01234567"}]"#,
+        r#"[{"number":17,"body":"Closes #42","headRefName":"feat/claim","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":true,"baseRefName":"main"}]"#,
     )
     .expect("parse exact open pull request evidence");
 
@@ -152,6 +83,17 @@ fn executor_result_pull_request_requires_the_head_commit_oid() {
         pull_requests[0].head_ref_oid,
         "0123456789abcdef0123456789abcdef01234567"
     );
+    assert!(pull_requests[0].is_draft);
+    assert_eq!(pull_requests[0].base_ref_name, "main");
+    assert!(
+        !is_executor_result_pull_request(&pull_requests[0], 42, "feat/claim"),
+        "a draft PR cannot be terminal success evidence"
+    );
+    let ready = parse_open_pull_requests_json(
+        r#"[{"number":17,"body":"Closes #42\n\n## Closeout report","headRefName":"feat/claim","headRefOid":"0123456789abcdef0123456789abcdef01234567","isDraft":false,"baseRefName":"main"}]"#,
+    )
+    .expect("parse ready pull request");
+    assert!(is_executor_result_pull_request(&ready[0], 42, "feat/claim"));
     assert!(parse_open_pull_requests_json(
         r#"[{"number":17,"body":"Closes #42","headRefName":"feat/claim"}]"#
     )

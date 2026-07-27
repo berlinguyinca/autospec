@@ -1094,6 +1094,8 @@ pub struct OpenPullRequest {
     pub body: String,
     pub head_ref_name: String,
     pub head_ref_oid: String,
+    pub is_draft: bool,
+    pub base_ref_name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1174,6 +1176,9 @@ pub fn evaluate_merge_ready_claim_recovery(
         && claim.issue == evidence.issue
         && claim.worker_id == evidence.worker_id
         && claim.branch == evidence.branch
+        && claim.claim_id.as_deref().is_some_and(|claim_id| {
+            !claim_id.is_empty() && evidence.claim_id.as_deref() == Some(claim_id)
+        })
         && evidence.outcome == "succeeded"
         && evidence.pr == Some(pull_request.number)
         && (claim.pr.is_empty() || claim.pr == pull_request.number.to_string())
@@ -1214,7 +1219,17 @@ pub fn parse_open_pull_requests_json(input: &str) -> Result<Vec<OpenPullRequest>
         .map(|(index, value)| {
             let context = format!("GitHub open pull requests[{index}]");
             let mut object = value.into_object(&context)?;
-            require_only_keys(&object, &["number", "body", "headRefName", "headRefOid"])?;
+            require_only_keys(
+                &object,
+                &[
+                    "number",
+                    "body",
+                    "headRefName",
+                    "headRefOid",
+                    "isDraft",
+                    "baseRefName",
+                ],
+            )?;
             Ok(OpenPullRequest {
                 number: take_required(&mut object, "number")?
                     .into_number(&format!("{context} number"))?,
@@ -1223,6 +1238,10 @@ pub fn parse_open_pull_requests_json(input: &str) -> Result<Vec<OpenPullRequest>
                     .unwrap_or_default(),
                 head_ref_oid: take_required(&mut object, "headRefOid")?
                     .into_string(&format!("{context} headRefOid"))?,
+                is_draft: take_required(&mut object, "isDraft")?
+                    .into_bool(&format!("{context} isDraft"))?,
+                base_ref_name: take_required(&mut object, "baseRefName")?
+                    .into_string(&format!("{context} baseRefName"))?,
             })
         })
         .collect()
@@ -1239,7 +1258,9 @@ pub fn find_reconcilable_pull_request(
 }
 
 pub fn is_reconcilable_pull_request(pull_request: &OpenPullRequest, issue: u64) -> bool {
-    closes_issue(&pull_request.body, issue) && closeout_count(&pull_request.body) == 1
+    !pull_request.is_draft
+        && closes_issue(&pull_request.body, issue)
+        && closeout_count(&pull_request.body) == 1
 }
 
 pub fn is_executor_result_pull_request(
@@ -1397,16 +1418,22 @@ impl ExecutorResultEvidence {
             self.commit.as_deref(),
             self.premerge_receipt.as_deref(),
         ];
+        if self.claim_id.is_none() {
+            return Err("executor result requires claim_id".to_string());
+        }
         if self.outcome == "succeeded" && success_binding.iter().any(Option::is_none) {
             return Err(
                 "succeeded executor result requires claim_id, commit, and premerge_receipt"
                     .to_string(),
             );
         }
-        if self.outcome != "succeeded" && success_binding.iter().any(Option::is_some) {
+        if self.outcome != "succeeded"
+            && [self.commit.as_deref(), self.premerge_receipt.as_deref()]
+                .iter()
+                .any(Option::is_some)
+        {
             return Err(
-                "non-succeeded executor result rejects claim_id, commit, and premerge_receipt"
-                    .to_string(),
+                "non-succeeded executor result rejects commit and premerge_receipt".to_string(),
             );
         }
         for (name, value) in [
@@ -1455,29 +1482,6 @@ pub fn successful_executor_result_for_pull_request(
         return None;
     }
     Some(evidence)
-}
-
-pub fn executor_wait_failure_relinquishes_claim(
-    comments: &[RemoteComment],
-    claim: &RunStateRecord,
-) -> bool {
-    let Some(claim_id) = claim.claim_id.as_deref() else {
-        return false;
-    };
-    let receipt_prefix = format!("implementer-wait-failed:{claim_id}:");
-    comments.iter().any(|comment| {
-        parse_executor_result_evidence_comment(&comment.body).is_ok_and(|evidence| {
-            evidence.repo == claim.repo
-                && evidence.issue == claim.issue
-                && evidence.worker_id == claim.worker_id
-                && evidence.branch == claim.branch
-                && evidence.outcome == "failed"
-                && evidence.pr.is_none()
-                && evidence.step == "implementer_wait_failed"
-                && evidence.receipt_id.starts_with(&receipt_prefix)
-                && evidence.receipt_id.len() > receipt_prefix.len()
-        })
-    })
 }
 
 fn parse_executor_result_evidence_comment(body: &str) -> Result<ExecutorResultEvidence, String> {

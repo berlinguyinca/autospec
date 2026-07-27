@@ -115,21 +115,59 @@ gate. Ambiguous issues receive `autospec:needs-human`; blocking issues receive
 `security:quarantined`; neither becomes reviewed-eligible. Conflicting or malformed remote
 evidence is fail-closed and counted as `conflicted`.
 
-`autospec autonomous run-foreground` is a typed Rust control-plane entrypoint. One cycle performs
-bounded mainline-health admission and queue safety review, selects and claims at most one ready
-issue, and persists strict conductor state as
-`.autospec/autonomous-operator/<scope>/foreground-conductor-<scope-key>.json`, where the
-scope key distinguishes repository runs from each explicit issue slice. Its internal
-`executor-result` child uses the current Rust executable with an explicit argument vector. That
-bare child invocation, `executor-result --repo OWNER/REPO --issue N`, returns only the exact
-successful deferred `awaiting_typed_implementation_executor` receipt. It performs no claim
-mutation. Explicit executor-result ingestion is described below. Neither form launches an
-implementation agent, invokes a shell, script, `omx`, or `/autospec-run`, releases a claim, or
-merges a PR. Direct `run-foreground` remains one-cycle for bounded control-plane use. Detached
-`autonomous start` and `restart` launch it as a direct Rust child with inherited lifecycle
-ownership; that child repeats cycles, emits each completed cycle to its scoped log, re-checks
-stop and budget admission before the next cycle, and exits only for a named terminal condition
-or `--max-cycles`. Monitor and supervisor remain separate compatibility companions.
+`autospec autonomous run-foreground` is the typed Rust control-plane and executor entrypoint.
+One cycle performs bounded mainline-health admission and queue safety review, selects and claims
+at most one ready issue, and persists strict conductor state as
+`.autospec/autonomous-operator/<scope>/foreground-conductor-<scope-key>.json`, where the scope
+key distinguishes repository runs from each explicit issue slice. For a selected issue it calls
+the native executor bridge directly. The bridge resolves the configured Codex, Claude, or
+OpenCode harness from the installed runtime-alias table, creates or adopts the exact private
+issue worktree and runtime session, and launches the harness with an explicit local-only argument
+vector. It never delegates implementation to a shell, `omx`, `/autospec-run`, or a second queue
+owner.
+
+Harness output and phase changes are appended to the repository-scoped autonomous log consumed
+by `--follow`. Rust independently proves the resulting commit, Closeout report, runtime smoke,
+full resolved suite, implementation and security scans, immutable premerge decision, required
+CI, and LGTM review before it marks the draft ready or admin-merges. The harness cannot push,
+create or edit a pull request, mutate claim state, or merge; those remote actions remain inside
+the bridge and are rebound to the exact claim generation and head commit immediately before
+mutation.
+
+Bridge state is claim-generation scoped. A pending or active invocation remains non-terminal.
+After a conductor restart, exact process identity permits observation of the existing supervisor
+without launching a second harness; after process exit, the next run resumes from the last
+durable phase. A private local acquisition receipt must match the authoritative repository,
+issue, worker, branch, and claim ID before a restarted conductor adopts a live claim. Runtime
+cleanup uses the invocation's persisted environment, session, and original manifest snapshot
+even if the repository manifest later changes. Schema-1 snapshots from a pre-upgrade active
+session reattach against the validated authoritative plan and are conservatively reported as
+isolation-bypassed. Before clearing the acquisition receipt, the conductor persists an explicit
+terminal- or ownership-retirement boundary so a crash cannot replay completed or lost work.
+Transient GitHub reads after implementation retry the same claim generation and durable
+invocation; a retryable terminal result preserves
+recoverable committed or uncommitted work, advances it onto a changed base without force after
+it becomes clean, and starts a fresh claim generation. Only an observed merged pull request,
+explicit blocked result, or exhausted retry can become terminal, and no terminal result may
+retain `in-progress-by-bot`.
+
+Failure cleanup intent is persisted before runtime teardown. Ownership takeover closes only the
+old exact runtime, records the worktree HEAD and status digest under the per-issue lock, and lets
+the successor generation adopt the unchanged worktree. A pre-upgrade dispatch without a local
+acquisition receipt is migrated only when an exact private invocation or terminal receipt proves
+the authoritative claim; otherwise the conductor durably retires the stale ownership.
+Terminal claim/label observation outages retain their transient classification and replay the
+same completed invocation; an unchanged authoritative claim ref after a failed push does not
+retire ownership.
+
+The fixed `.autospec/executor-result.json` ingestion and bare
+`executor-result --repo OWNER/REPO --issue N` deferred receipt remain compatibility inputs, but
+they are no longer the default producer or a terminal conductor result. Explicit executor-result
+ingestion is described below. Direct `run-foreground` remains one-cycle for bounded use.
+Detached `autonomous start` and `restart` launch it as a direct Rust child with inherited
+lifecycle ownership; that child repeats cycles, emits each completed cycle to its scoped log,
+re-checks stop and budget admission before the next cycle, and exits only for a named terminal
+condition or `--max-cycles`. Monitor and supervisor remain separate compatibility observers.
 
 `autospec autonomous main-health` and `run-foreground` read the strict
 repository-local Rust health policy at `<repo-dir>/.autospec/autonomous.yml`.

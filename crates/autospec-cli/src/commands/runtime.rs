@@ -3,7 +3,7 @@ use autospec_core::runtime_policy::classify_path;
 use crate::commands::CommandFailure;
 
 mod audit;
-mod env;
+pub(crate) mod env;
 
 pub fn run(args: &[String]) -> Result<(), CommandFailure> {
     match args {

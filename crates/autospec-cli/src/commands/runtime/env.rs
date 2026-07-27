@@ -1,10 +1,12 @@
-use std::fs;
+use std::ffi::OsString;
+use std::fs::{self, OpenOptions};
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
-
 #[cfg(unix)]
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::Duration;
 
 use autospec_core::runtime_env::{
     ComposeNormalizer, EnvironmentLifecycle, ResourcePlan, RuntimeContext, RuntimeManifest,
@@ -36,7 +38,8 @@ use options::{parse_normalize_options, NormalizeMode, NormalizeOptions};
 use session::{live_sessions, run_session_command, SessionLease};
 use state::{
     claim_ports, layout_for_context, read_authoritative_state, read_runtime_state,
-    write_runtime_state, EnvironmentLease, PortReservations, StateLayout,
+    validate_private_regular_file, write_runtime_state, EnvironmentLease, PortReservations,
+    StateLayout,
 };
 
 #[cfg(unix)]
@@ -83,6 +86,596 @@ struct SessionOptions {
     options: Options,
     command: Vec<String>,
     keep_alive: bool,
+}
+
+pub(crate) struct PreparedRuntimeSession {
+    inner: Option<PreparedRuntimeSessionInner>,
+}
+
+struct PreparedRuntimeSessionInner {
+    context: RuntimeContext,
+    state: RuntimeState,
+    plan: ResourcePlan,
+    session_lease: SessionLease,
+    bypassed: bool,
+}
+
+impl PreparedRuntimeSession {
+    pub(crate) fn session_id(&self) -> &str {
+        self.inner
+            .as_ref()
+            .expect("prepared runtime session is available before consumption")
+            .session_lease
+            .session_id()
+    }
+
+    pub(crate) fn environment_dir(&self) -> &Path {
+        &self
+            .inner
+            .as_ref()
+            .expect("prepared runtime session is available before consumption")
+            .context
+            .environment_dir
+    }
+
+    pub(crate) fn verify_active_session(
+        &self,
+        expected_session_id: &str,
+    ) -> Result<(), CommandFailure> {
+        self.inner
+            .as_ref()
+            .ok_or_else(|| {
+                CommandFailure::diagnostic("prepared runtime session is already closed")
+            })?
+            .session_lease
+            .verify_active(expected_session_id)
+    }
+
+    pub(crate) fn observed_environment(&self) -> Result<Vec<(OsString, OsString)>, CommandFailure> {
+        let inner = self.inner.as_ref().ok_or_else(|| {
+            CommandFailure::diagnostic("prepared runtime session is already closed")
+        })?;
+        inner
+            .state
+            .validate_child_environment(&inner.context)
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+        let mut values = inner
+            .state
+            .values()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect::<Vec<_>>();
+        if inner.bypassed {
+            values.push((
+                OsString::from("AUTOSPEC_ISOLATION_BYPASSED"),
+                OsString::from("1"),
+            ));
+        }
+        Ok(values)
+    }
+
+    pub(crate) fn run(mut self, command: &[String]) -> Result<(), CommandFailure> {
+        let inner = self
+            .inner
+            .take()
+            .expect("prepared runtime session can only run once");
+        run_session_command(
+            command,
+            &inner.context,
+            &inner.state,
+            &inner.plan,
+            inner.session_lease,
+            false,
+            inner.bypassed,
+        )
+    }
+
+    pub(crate) fn abort(mut self) -> Result<(), CommandFailure> {
+        let inner = self
+            .inner
+            .take()
+            .expect("prepared runtime session can only be closed once");
+        cleanup_prepared_session_verified(inner)
+    }
+
+    pub(crate) fn close_verified(self) -> Result<(), CommandFailure> {
+        self.abort()
+    }
+
+    /// Release this process's lease without tearing down the durable
+    /// environment so an exact persisted executor binding can reattach.
+    pub(crate) fn relinquish(mut self) {
+        let _ = self.inner.take();
+    }
+}
+
+impl Drop for PreparedRuntimeSession {
+    fn drop(&mut self) {
+        let Some(inner) = self.inner.take() else {
+            return;
+        };
+        let session_id = inner.session_lease.session_id().to_string();
+        if let Err(error) = cleanup_prepared_session_verified(inner) {
+            eprintln!(
+                "RUNTIME_PREPARED_SESSION_CLEANUP_FAILED session_id={session_id} exit_code={} message={}",
+                error.exit_code, error.message
+            );
+        }
+    }
+}
+
+fn cleanup_prepared_session_verified(
+    inner: PreparedRuntimeSessionInner,
+) -> Result<(), CommandFailure> {
+    let environment_dir = inner.context.environment_dir.clone();
+    let session_id = inner.session_lease.session_id().to_string();
+    let cleanup = cleanup_prepared_session(inner);
+    let release = session::verify_session_released(&environment_dir, &session_id);
+    let resources = session::verify_environment_released(&environment_dir);
+    match (cleanup, release, resources) {
+        (Ok(()), Ok(()), resources) => resources,
+        (Err(primary), Ok(()), Ok(())) => Err(primary),
+        (primary, release, resources) => {
+            let mut error = primary.err();
+            if let Err(release) = release {
+                error = Some(session::add_secondary_failure(
+                    error,
+                    "runtime session release verification also failed",
+                    release,
+                ));
+            }
+            if let Err(resources) = resources {
+                error = Some(session::add_secondary_failure(
+                    error,
+                    "runtime resource release verification also failed",
+                    resources,
+                ));
+            }
+            Err(error.expect("at least one runtime cleanup verification failed"))
+        }
+    }
+}
+
+fn cleanup_prepared_session(inner: PreparedRuntimeSessionInner) -> Result<(), CommandFailure> {
+    session::cleanup_session(
+        &inner.context,
+        &inner.state,
+        &inner.plan,
+        inner.session_lease,
+        true,
+    )
+}
+
+#[cfg(test)]
+type CleanupFailureTestHook = (
+    std::sync::Arc<std::sync::Barrier>,
+    std::sync::Arc<std::sync::Barrier>,
+);
+
+#[cfg(test)]
+static CLEANUP_FAILURE_TEST_HOOK: std::sync::OnceLock<
+    std::sync::Mutex<Option<CleanupFailureTestHook>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+pub(crate) fn install_cleanup_failure_test_hook() -> CleanupFailureTestHook {
+    let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+    *CLEANUP_FAILURE_TEST_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("cleanup failure test hook lock") = Some((entered.clone(), release.clone()));
+    (entered, release)
+}
+
+#[cfg(test)]
+fn wait_for_cleanup_failure_test_hook() {
+    let hook = CLEANUP_FAILURE_TEST_HOOK
+        .get_or_init(|| std::sync::Mutex::new(None))
+        .lock()
+        .expect("cleanup failure test hook lock")
+        .take();
+    if let Some((entered, release)) = hook {
+        entered.wait();
+        release.wait();
+    }
+}
+
+#[cfg(not(test))]
+fn wait_for_cleanup_failure_test_hook() {}
+
+#[cfg(test)]
+pub(crate) fn try_transition_environment_lifecycle_for_test(
+    environment_dir: &Path,
+    lifecycle: EnvironmentLifecycle,
+) -> Result<bool, CommandFailure> {
+    let Some(_lease) = EnvironmentLease::try_acquire(environment_dir)? else {
+        return Ok(false);
+    };
+    transition_environment_lifecycle_locked_for_test(environment_dir, lifecycle)?;
+    Ok(true)
+}
+
+#[cfg(test)]
+pub(crate) fn transition_environment_lifecycle_for_test(
+    environment_dir: &Path,
+    lifecycle: EnvironmentLifecycle,
+) -> Result<(), CommandFailure> {
+    let _lease = EnvironmentLease::acquire(environment_dir)?;
+    transition_environment_lifecycle_locked_for_test(environment_dir, lifecycle)
+}
+
+#[cfg(test)]
+fn transition_environment_lifecycle_locked_for_test(
+    environment_dir: &Path,
+    lifecycle: EnvironmentLifecycle,
+) -> Result<(), CommandFailure> {
+    let layout = StateLayout::new(
+        environment_dir
+            .parent()
+            .expect("test environment directory has a state root"),
+        environment_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .expect("test environment ID is UTF-8"),
+    );
+    let Some(mut authoritative) = read_authoritative_state(&layout)? else {
+        return Err(CommandFailure::diagnostic(
+            "test lifecycle transition requires authoritative state",
+        ));
+    };
+    state::write_lifecycle(&layout, &mut authoritative.owner, lifecycle)
+}
+
+pub(crate) fn prepare_runtime_session(
+    repo: &Path,
+    mode: &str,
+    harness: &str,
+) -> Result<PreparedRuntimeSession, CommandFailure> {
+    let repo = canonical_repo(repo)?;
+    if selected_manifest(&repo).is_none() {
+        return Err(CommandFailure::diagnostic(
+            "runtime session preparation requires a runtime manifest",
+        ));
+    }
+    if whole_environment_disabled()? {
+        return Err(CommandFailure::diagnostic(
+            "runtime session preparation refuses disabled isolation",
+        ));
+    }
+    let invocation = invocation_isolation(&repo, mode)?;
+    let plan = invocation
+        .plan
+        .expect("enabled runtime invocation has a plan");
+    let context = context_from_plan(&repo, mode, &plan)?;
+    let environment_lease = EnvironmentLease::acquire(&context.environment_dir)?;
+    persist_runtime_manifest_snapshot(&context, invocation.bypassed, &plan.digest)?;
+    let state = provision_locked(&context, &plan, invocation.bypassed)?;
+    session::reconcile_for_exclusive_session(&context.environment_dir)?;
+    reset_session_signal_handlers();
+    let session_lease = SessionLease::register(&context.environment_dir, harness)?;
+    drop(environment_lease);
+    Ok(PreparedRuntimeSession {
+        inner: Some(PreparedRuntimeSessionInner {
+            context,
+            state,
+            plan,
+            session_lease,
+            bypassed: invocation.bypassed,
+        }),
+    })
+}
+
+pub(crate) fn reattach_runtime_session(
+    repo: &Path,
+    mode: &str,
+    expected_environment_dir: &Path,
+    session_id: &str,
+    harness: &str,
+) -> Result<PreparedRuntimeSession, CommandFailure> {
+    let repo = canonical_repo(repo)?;
+    let environment_id = expected_environment_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| CommandFailure::diagnostic("RUNTIME_OWNER_MISMATCH: invalid environment"))?;
+    let valid_environment_id = environment_id
+        .rsplit_once('-')
+        .is_some_and(|(name, digest)| {
+            !name.is_empty()
+                && digest.len() == 16
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        });
+    if !valid_environment_id {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_OWNER_MISMATCH: invalid environment identity",
+        ));
+    }
+    let root = expected_environment_dir
+        .parent()
+        .ok_or_else(|| CommandFailure::diagnostic("RUNTIME_OWNER_MISMATCH: invalid state root"))?;
+    let layout = StateLayout::new(root, environment_id);
+    if layout.environment_dir != expected_environment_dir {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_OWNER_MISMATCH: reattached environment changed",
+        ));
+    }
+    let environment_lease = EnvironmentLease::acquire(expected_environment_dir)?;
+    let authoritative = read_authoritative_state(&layout)?.ok_or_else(|| {
+        CommandFailure::diagnostic("RUNTIME_PARTIAL_STATE: reattached environment is absent")
+    })?;
+    if authoritative.plan.identity.canonical_repo != repo
+        || (mode != "auto" && authoritative.plan.identity.mode != mode)
+        || authoritative.plan.identity.environment_id != environment_id
+    {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_OWNER_MISMATCH: reattached runtime identity changed",
+        ));
+    }
+    validate_authoritative(&authoritative, &authoritative.plan)?;
+    let snapshot = read_runtime_manifest_snapshot(expected_environment_dir, &authoritative.plan)?;
+    if snapshot.plan_digest != authoritative.plan.digest {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_PLAN_MISMATCH: manifest snapshot does not match persisted plan",
+        ));
+    }
+    let manifest = RuntimeManifest::parse_at(&snapshot.source, snapshot.path)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    let context = RuntimeContext::new_with_identity(
+        manifest,
+        &repo,
+        mode,
+        root,
+        &authoritative.plan.identity,
+    )
+    .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    if context.environment_dir != expected_environment_dir {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_OWNER_MISMATCH: reattached environment changed",
+        ));
+    }
+    if authoritative.owner.lifecycle != EnvironmentLifecycle::Active {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_LIFECYCLE_MISMATCH: reattached environment is not active",
+        ));
+    }
+    let cached = read_runtime_state(&context)?;
+    let state = validate_cached_state(
+        &context,
+        &authoritative.plan,
+        &authoritative.inventory,
+        &cached,
+    )?;
+    reset_session_signal_handlers();
+    let session_lease = SessionLease::reattach(expected_environment_dir, session_id, harness)?;
+    drop(environment_lease);
+    Ok(PreparedRuntimeSession {
+        inner: Some(PreparedRuntimeSessionInner {
+            context,
+            state,
+            plan: authoritative.plan,
+            session_lease,
+            bypassed: snapshot.bypassed,
+        }),
+    })
+}
+
+pub(crate) fn verify_runtime_session_released(
+    environment_dir: &Path,
+    session_id: &str,
+) -> Result<(), CommandFailure> {
+    session::verify_session_released(environment_dir, session_id)?;
+    session::verify_environment_released(environment_dir)
+}
+
+pub(crate) fn retry_runtime_session_cleanup(
+    repo: &Path,
+    mode: &str,
+    environment_dir: &Path,
+    session_id: &str,
+) -> Result<(), CommandFailure> {
+    if verify_runtime_session_released(environment_dir, session_id).is_ok() {
+        return Ok(());
+    }
+    let repo = canonical_repo(repo)?;
+    let environment_id = environment_dir
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| CommandFailure::diagnostic("RUNTIME_OWNER_MISMATCH: invalid environment"))?;
+    let root = environment_dir
+        .parent()
+        .ok_or_else(|| CommandFailure::diagnostic("RUNTIME_OWNER_MISMATCH: invalid state root"))?;
+    let layout = StateLayout::new(root, environment_id);
+    if layout.environment_dir != environment_dir {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_OWNER_MISMATCH: cleanup environment path changed",
+        ));
+    }
+    let environment_lease = EnvironmentLease::acquire(environment_dir)?;
+    let authoritative = read_authoritative_state(&layout)?
+        .ok_or_else(|| CommandFailure::diagnostic("RUNTIME_PARTIAL_STATE: cleanup state absent"))?;
+    if authoritative.plan.identity.canonical_repo != repo
+        || (mode != "auto" && authoritative.plan.identity.mode != mode)
+        || authoritative.plan.identity.environment_id != environment_id
+    {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_OWNER_MISMATCH: cleanup identity changed",
+        ));
+    }
+    validate_authoritative(&authoritative, &authoritative.plan)?;
+    let snapshot = read_runtime_manifest_snapshot(environment_dir, &authoritative.plan)?;
+    if snapshot.plan_digest != authoritative.plan.digest {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_PLAN_MISMATCH: manifest snapshot does not match persisted plan",
+        ));
+    }
+    let manifest = RuntimeManifest::parse_at(&snapshot.source, snapshot.path)
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    let context = RuntimeContext::new_with_identity(
+        manifest,
+        &repo,
+        mode,
+        root,
+        &authoritative.plan.identity,
+    )
+    .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    if context.environment_dir != environment_dir {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_OWNER_MISMATCH: cleanup recovery environment changed",
+        ));
+    }
+    session::reconcile_for_exclusive_session(environment_dir)?;
+    session::verify_session_released(environment_dir, session_id)?;
+    validate_teardown_lifecycle(&authoritative.owner.lifecycle)?;
+    let state = if context.env_file.is_file() {
+        let cached = read_state(&context)?;
+        Some(validate_cached_state(
+            &context,
+            &authoritative.plan,
+            &authoritative.inventory,
+            &cached,
+        )?)
+    } else {
+        None
+    };
+    teardown_locked(&context, state.as_ref(), &authoritative.plan)?;
+    drop(environment_lease);
+    verify_runtime_session_released(environment_dir, session_id)
+}
+
+fn runtime_manifest_snapshot_path(environment_dir: &Path) -> PathBuf {
+    environment_dir.join("manifest.snapshot.json")
+}
+
+fn persist_runtime_manifest_snapshot(
+    context: &RuntimeContext,
+    bypassed: bool,
+    plan_digest: &str,
+) -> Result<(), CommandFailure> {
+    let path = runtime_manifest_snapshot_path(&context.environment_dir);
+    let source = fs::read_to_string(context.manifest.path()).map_err(|error| {
+        CommandFailure::diagnostic(format!("read runtime manifest snapshot source: {error}"))
+    })?;
+    let body = serde_json::json!({
+        "schema": 2,
+        "path": context.manifest.path(),
+        "source": source,
+        "plan_digest": plan_digest,
+        "bypassed": bypassed,
+    })
+    .to_string();
+    match fs::read_to_string(&path) {
+        Ok(existing) if existing.trim() == body => return Ok(()),
+        Ok(_) => {
+            return Err(CommandFailure::diagnostic(
+                "RUNTIME_OWNER_MISMATCH: persisted manifest snapshot changed",
+            ))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "read runtime manifest snapshot: {error}"
+            )))
+        }
+    }
+    if read_authoritative_state(&layout_for_context(context))?.is_some() {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_PARTIAL_STATE: active environment has no original manifest snapshot",
+        ));
+    }
+    let mut options = OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(&path).map_err(|error| {
+        CommandFailure::diagnostic(format!("create runtime manifest snapshot: {error}"))
+    })?;
+    use std::io::Write as _;
+    file.write_all(format!("{body}\n").as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("write runtime manifest snapshot: {error}"))
+        })?;
+    Ok(())
+}
+
+struct RuntimeManifestSnapshot {
+    path: PathBuf,
+    source: String,
+    plan_digest: String,
+    bypassed: bool,
+}
+
+fn read_runtime_manifest_snapshot(
+    environment_dir: &Path,
+    authoritative_plan: &ResourcePlan,
+) -> Result<RuntimeManifestSnapshot, CommandFailure> {
+    let path = runtime_manifest_snapshot_path(environment_dir);
+    validate_private_regular_file(&path)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).map_err(|error| {
+            CommandFailure::diagnostic(format!("read runtime manifest snapshot: {error}"))
+        })?)
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("parse runtime manifest snapshot: {error}"))
+        })?;
+    let object = value.as_object().ok_or_else(|| {
+        CommandFailure::diagnostic("RUNTIME_PARTIAL_STATE: manifest snapshot is not an object")
+    })?;
+    let schema = object
+        .get("schema")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            CommandFailure::diagnostic("RUNTIME_PARTIAL_STATE: manifest snapshot schema is invalid")
+        })?;
+    if !matches!((schema, object.len()), (1, 3) | (2, 5)) {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_PARTIAL_STATE: manifest snapshot schema is invalid",
+        ));
+    }
+    let manifest_path = object
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            CommandFailure::diagnostic("RUNTIME_PARTIAL_STATE: manifest snapshot path is invalid")
+        })?;
+    let source = object
+        .get("source")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            CommandFailure::diagnostic("RUNTIME_PARTIAL_STATE: manifest snapshot source is invalid")
+        })?;
+    let (plan_digest, bypassed) = if schema == 1 {
+        (authoritative_plan.digest.clone(), true)
+    } else {
+        let plan_digest = object
+            .get("plan_digest")
+            .and_then(serde_json::Value::as_str)
+            .filter(|digest| {
+                digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .ok_or_else(|| {
+                CommandFailure::diagnostic(
+                    "RUNTIME_PARTIAL_STATE: manifest snapshot plan digest is invalid",
+                )
+            })?;
+        let bypassed = object
+            .get("bypassed")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or_else(|| {
+                CommandFailure::diagnostic(
+                    "RUNTIME_PARTIAL_STATE: manifest snapshot bypass evidence is invalid",
+                )
+            })?;
+        (plan_digest.to_string(), bypassed)
+    };
+    Ok(RuntimeManifestSnapshot {
+        path: manifest_path,
+        source: source.to_string(),
+        plan_digest,
+        bypassed,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -715,6 +1308,10 @@ fn slugify(value: &str) -> String {
 }
 
 fn state_root() -> Result<PathBuf, CommandFailure> {
+    #[cfg(test)]
+    if let Some(root) = TEST_STATE_ROOT.with(|root| root.borrow().clone()) {
+        return Ok(root);
+    }
     if let Some(root) = std::env::var_os("AGENT_ENV_STATE_ROOT").filter(|root| !root.is_empty()) {
         return Ok(PathBuf::from(root));
     }
@@ -722,6 +1319,17 @@ fn state_root() -> Result<PathBuf, CommandFailure> {
         CommandFailure::diagnostic("HOME is required for runtime environment state")
     })?;
     Ok(PathBuf::from(home).join(".autospec/envs"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_STATE_ROOT: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_test_state_root(root: Option<PathBuf>) {
+    TEST_STATE_ROOT.with(|current| *current.borrow_mut() = root);
 }
 
 fn state_from_context(
@@ -943,4 +1551,200 @@ fn print_help() {
     println!(
         "autospec runtime env\n\nUSAGE:\n    autospec runtime env init [--repo PATH] [--manifest agent|autospec] [--force]\n    autospec runtime env up [--repo PATH] [--mode MODE]\n    autospec runtime env status [--repo PATH] [--mode MODE]\n    autospec runtime env down [--repo PATH] [--mode MODE] [--purge-maven]\n    autospec runtime env gc [--repo PATH]\n    autospec runtime env exec [--repo PATH] [--mode MODE] -- COMMAND [ARGS...]\n    autospec runtime env session [--repo PATH] [--mode MODE] [--keep-alive] -- COMMAND [ARGS...]\n    autospec runtime env normalize-compose --repo PATH --check|--apply --fingerprint SHA256"
     );
+}
+
+#[cfg(test)]
+mod runtime_session_tests {
+    use super::{
+        prepare_runtime_session, reattach_runtime_session, runtime_manifest_snapshot_path,
+    };
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static ENVIRONMENT: Mutex<()> = Mutex::new(());
+
+    struct RuntimeFixture {
+        root: PathBuf,
+        repo: PathBuf,
+        state_root: PathBuf,
+    }
+
+    impl RuntimeFixture {
+        fn new(name: &str, failing_down: bool) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "autospec-observed-runtime-{name}-{}-{nanos}",
+                std::process::id()
+            ));
+            let repo = root.join("repo");
+            let state_root = root.join("state");
+            fs::create_dir_all(repo.join(".autospec")).expect("runtime fixture directory");
+            git(&repo, &["init", "-b", "main"]);
+            git(&repo, &["config", "user.name", "Autospec Test"]);
+            git(&repo, &["config", "user.email", "autospec@example.invalid"]);
+            fs::write(
+                repo.join("runtime-up.py"),
+                "import http.server, os\npid=os.fork()\nif pid == 0:\n http.server.HTTPServer(('127.0.0.1', int(os.environ['AGENT_FRONTEND_PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()\nelse:\n open('runtime.pid','w').write(str(pid))\n",
+            )
+            .expect("runtime up fixture");
+            let down = if failing_down {
+                "import os, signal, sys\npid=int(open('runtime.pid').read())\nos.kill(pid, signal.SIGTERM)\nos.remove('runtime.pid')\nsys.exit (42)\n"
+            } else {
+                "import os, signal\npid=int(open('runtime.pid').read())\nos.kill(pid, signal.SIGTERM)\nos.remove('runtime.pid')\n"
+            };
+            fs::write(repo.join("runtime-down.py"), down).expect("runtime down fixture");
+            fs::write(
+                repo.join(".autospec/runtime.yml"),
+                "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: python3 runtime-up.py\n    down: python3 runtime-down.py\n",
+            )
+            .expect("runtime manifest");
+            fs::write(repo.join("tracked.txt"), "fixture\n").expect("tracked fixture");
+            git(&repo, &["add", "."]);
+            git(&repo, &["commit", "-m", "runtime fixture"]);
+            super::set_test_state_root(Some(state_root.clone()));
+            Self {
+                root,
+                repo,
+                state_root,
+            }
+        }
+
+        fn session_record_exists(&self, session_id: &str) -> bool {
+            contains_named_file(&self.state_root, &format!("{session_id}.json"))
+        }
+    }
+
+    impl Drop for RuntimeFixture {
+        fn drop(&mut self) {
+            super::set_test_state_root(None);
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn git(repo: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("git starts");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn contains_named_file(root: &Path, name: &str) -> bool {
+        let Ok(entries) = fs::read_dir(root) else {
+            return false;
+        };
+        entries.filter_map(Result::ok).any(|entry| {
+            let path = entry.path();
+            path.file_name().and_then(|value| value.to_str()) == Some(name)
+                || (path.is_dir() && contains_named_file(&path, name))
+        })
+    }
+
+    #[test]
+    fn prepared_runtime_cleanup_failure_is_reported_after_session_release() {
+        let _environment = ENVIRONMENT.lock().expect("runtime test environment");
+        let fixture = RuntimeFixture::new("cleanup-failure", true);
+        let session =
+            prepare_runtime_session(&fixture.repo, "auto", "observed-test").expect("session");
+        let session_id = session.session_id().to_string();
+
+        let error = session
+            .close_verified()
+            .expect_err("failing broker down must fail close");
+        assert_eq!(error.exit_code, 42);
+        assert!(!fixture.session_record_exists(&session_id));
+    }
+
+    #[test]
+    fn active_runtime_reattach_uses_original_snapshot_after_manifest_changes_or_disappears() {
+        let _environment = ENVIRONMENT.lock().expect("runtime test environment");
+        for mutation in ["changed", "removed"] {
+            let fixture = RuntimeFixture::new(&format!("reattach-{mutation}"), false);
+            let session =
+                prepare_runtime_session(&fixture.repo, "auto", "observed-test").expect("session");
+            let session_id = session.session_id().to_string();
+            let environment_dir = session.environment_dir().to_path_buf();
+            session.relinquish();
+            let manifest = fixture.repo.join(".autospec/runtime.yml");
+            if mutation == "changed" {
+                fs::write(
+                    &manifest,
+                    "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: /bin/false\n    down: /bin/false\n",
+                )
+                .expect("replace live manifest");
+            } else {
+                fs::remove_file(&manifest).expect("remove live manifest");
+            }
+
+            let reattached = reattach_runtime_session(
+                &fixture.repo,
+                "auto",
+                &environment_dir,
+                &session_id,
+                "observed-test",
+            )
+            .unwrap_or_else(|error| panic!("{mutation}: {}", error.message));
+            reattached
+                .verify_active_session(&session_id)
+                .expect("exact reattached session remains active");
+            reattached.abort().expect("close reattached runtime");
+        }
+    }
+
+    #[test]
+    fn active_runtime_reattach_migrates_private_schema_one_snapshot_conservatively() {
+        let _environment = ENVIRONMENT.lock().expect("runtime test environment");
+        let fixture = RuntimeFixture::new("reattach-schema-one", false);
+        let session =
+            prepare_runtime_session(&fixture.repo, "auto", "observed-test").expect("session");
+        let session_id = session.session_id().to_string();
+        let environment_dir = session.environment_dir().to_path_buf();
+        session.relinquish();
+        let snapshot_path = runtime_manifest_snapshot_path(&environment_dir);
+        let current: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&snapshot_path).expect("read schema-two snapshot"),
+        )
+        .expect("parse schema-two snapshot");
+        let legacy = serde_json::json!({
+            "schema": 1,
+            "path": current["path"],
+            "source": current["source"],
+        });
+        fs::write(&snapshot_path, format!("{legacy}\n")).expect("seed private schema-one snapshot");
+        fs::remove_file(fixture.repo.join(".autospec/runtime.yml"))
+            .expect("remove current manifest after legacy snapshot");
+
+        let reattached = reattach_runtime_session(
+            &fixture.repo,
+            "auto",
+            &environment_dir,
+            &session_id,
+            "observed-test",
+        )
+        .unwrap_or_else(|error| panic!("schema-one upgrade: {}", error.message));
+        assert!(
+            reattached
+                .inner
+                .as_ref()
+                .expect("reattached runtime")
+                .bypassed,
+            "legacy snapshots must conservatively retain bypass evidence"
+        );
+        reattached
+            .verify_active_session(&session_id)
+            .expect("schema-one reattached session remains active");
+        reattached.abort().expect("close reattached runtime");
+    }
 }

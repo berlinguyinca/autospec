@@ -49,7 +49,26 @@ SUPERPOWERS_REMOTE="${SUPERPOWERS_REMOTE:-https://github.com/obra/superpowers.gi
 SUPERPOWERS_CODEX_SKILLS_DIR="${SUPERPOWERS_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
 SUPERPOWERS_OPENCODE_PLUGIN="${SUPERPOWERS_OPENCODE_PLUGIN:-superpowers@git+https://github.com/obra/superpowers.git}"
 OPENCODE_CONFIG_ROOT="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
-AUTOSPEC_REQUIRED_SYSTEM_TOOLS="${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-git bash curl cargo python3 gh jq}"
+if [ -z "${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-}" ]; then
+    AUTOSPEC_REQUIRED_SYSTEM_TOOLS="git bash curl cargo python3 gh jq npm"
+fi
+AUTOSPEC_EXECUTOR_SCANNERS="gitleaks semgrep trivy license-checker"
+readonly AUTOSPEC_EXECUTOR_SCANNERS
+
+required_system_tools() {
+    local required_tools=""
+    local tool=""
+    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS $AUTOSPEC_EXECUTOR_SCANNERS; do
+        case " $required_tools " in
+            *" $tool "*) ;;
+            *) required_tools="${required_tools:+$required_tools }$tool" ;;
+        esac
+    done
+    printf '%s\n' "$required_tools"
+}
+
+AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS="$(required_system_tools)"
+readonly AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS
 AUTOSPEC_HARNESS_TOOLS="${AUTOSPEC_HARNESS_TOOLS:-codex claude opencode}"
 AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-yq node npm bun bats omx omc oh-my-opencode mempalace ajv}"
 OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"
@@ -680,7 +699,7 @@ report_dependency_install_context() {
 
 verify_required_system_tools() {
     missing_required=""
-    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
+    for tool in $AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS; do
         if ! command_present "$tool"; then
             missing_required="${missing_required:+$missing_required }$tool"
         fi
@@ -703,10 +722,10 @@ verify_required_system_tools() {
 
 ensure_required_system_tools() {
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] ensure_required_system_tools: would ensure and verify $AUTOSPEC_REQUIRED_SYSTEM_TOOLS"
+        info "[dry-run] ensure_required_system_tools: would ensure and verify $AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS"
         return 0
     fi
-    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
+    for tool in $AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS; do
         attempt_tool_install "$tool" ""
     done
     verify_required_system_tools

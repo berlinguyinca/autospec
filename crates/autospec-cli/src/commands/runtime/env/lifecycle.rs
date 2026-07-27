@@ -586,7 +586,13 @@ fn cleanup_failed<T>(
     error: CommandFailure,
 ) -> Result<T, CommandFailure> {
     if let Some(owner) = owner {
-        write_lifecycle(layout, owner, EnvironmentLifecycle::CleanupFailed)?;
+        if let Err(evidence) = write_lifecycle(layout, owner, EnvironmentLifecycle::CleanupFailed) {
+            return Err(super::session::add_secondary_failure(
+                Some(error),
+                "persist cleanup-failure evidence also failed",
+                evidence,
+            ));
+        }
     }
     Err(error)
 }
@@ -610,5 +616,54 @@ fn remove_directory_if_present(path: &Path) -> Result<(), CommandFailure> {
             "could not remove runtime state {}: {error}",
             path.display()
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use autospec_core::runtime_env::EnvironmentIdentity;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn cleanup_failure_preserves_primary_error_when_evidence_write_fails() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "autospec-cleanup-evidence-{}-{unique}",
+            std::process::id()
+        ));
+        let layout = StateLayout::new(&root, "environment");
+        fs::create_dir_all(&layout.owner).expect("block owner file with directory");
+        let mut owner = EnvironmentOwner {
+            schema_version: 1,
+            identity: EnvironmentIdentity {
+                canonical_repo: root.clone(),
+                mode: "test".to_string(),
+                generation: None,
+                environment_id: "environment".to_string(),
+                owner_key: "owner".to_string(),
+            },
+            host: "test".to_string(),
+            created_at_unix_ms: 0,
+            manifest_digest: "digest".to_string(),
+            lifecycle: EnvironmentLifecycle::TearingDown,
+        };
+
+        let failure = cleanup_failed::<()>(
+            &layout,
+            Some(&mut owner),
+            CommandFailure::status("down command failed", 42),
+        )
+        .expect_err("cleanup evidence write must fail");
+
+        assert_eq!(failure.exit_code, 42);
+        assert!(failure.message.contains("down command failed"));
+        assert!(failure
+            .message
+            .contains("persist cleanup-failure evidence also failed"));
+        fs::remove_dir_all(root).expect("remove cleanup evidence fixture");
     }
 }

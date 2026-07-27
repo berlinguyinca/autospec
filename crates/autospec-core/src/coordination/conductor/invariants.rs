@@ -1,6 +1,7 @@
 use super::{
     ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
-    MAX_NO_PROGRESS_REASON_LENGTH, RETRY_LIMIT_EXHAUSTED,
+    MAX_NO_PROGRESS_REASON_LENGTH, OWNERSHIP_RETIREMENT, RETRY_LIMIT_EXHAUSTED,
+    TERMINAL_RETIREMENT,
 };
 
 impl ConductorState {
@@ -163,6 +164,32 @@ impl ConductorState {
             .pause_reason
             .as_deref()
             .ok_or_else(|| "paused conductor state requires pause reason".to_string())?;
+        if reason == TERMINAL_RETIREMENT {
+            if self.resume_phase.is_some()
+                || self.selected_issue.is_none()
+                || !matches!(
+                    self.last_outcome,
+                    Some(
+                        ConductorOutcome::Succeeded
+                            | ConductorOutcome::Retryable(_)
+                            | ConductorOutcome::Blocked(_)
+                    )
+                )
+            {
+                return Err(
+                    "terminal retirement pause has incompatible recovery metadata".to_string(),
+                );
+            }
+            return Ok(());
+        }
+        if reason == OWNERSHIP_RETIREMENT {
+            if self.resume_phase.is_some() || self.selected_issue.is_none() {
+                return Err(
+                    "ownership retirement pause has incompatible recovery metadata".to_string(),
+                );
+            }
+            return Ok(());
+        }
         if reason == RETRY_LIMIT_EXHAUSTED {
             if self.resume_phase.is_some()
                 || self.selected_issue.is_none()

@@ -72,6 +72,125 @@ fn retry_limit_pauses_before_another_dispatch() {
 }
 
 #[test]
+fn finalized_success_enters_explicit_terminal_retirement() {
+    let retiring = selected_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("claim is recorded")
+        .transition(ConductorEvent::BeginTerminalRetirement {
+            outcome: ConductorOutcome::Succeeded,
+        })
+        .expect("finalized success begins retirement");
+
+    assert_eq!(retiring.phase(), ConductorPhase::Paused);
+    assert_eq!(
+        retiring.pause_reason(),
+        Some("executor_terminal_retirement")
+    );
+    assert_eq!(retiring.selected_issue(), Some(42));
+    let abandoned = retiring
+        .transition(ConductorEvent::AbandonTerminal)
+        .expect("retirement can be completed after receipt deletion");
+    assert_eq!(abandoned.phase(), ConductorPhase::Scan);
+    assert_eq!(abandoned.selected_issue(), None);
+}
+
+#[test]
+fn recorded_success_can_resume_into_explicit_terminal_retirement() {
+    let recorded = selected_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("claim is recorded")
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Succeeded,
+        })
+        .expect("success is recorded");
+    let retiring = recorded
+        .transition(ConductorEvent::BeginTerminalRetirement {
+            outcome: ConductorOutcome::Succeeded,
+        })
+        .expect("recorded success begins retirement");
+
+    assert_eq!(retiring.phase(), ConductorPhase::Paused);
+    assert_eq!(
+        retiring.pause_reason(),
+        Some("executor_terminal_retirement")
+    );
+    assert_eq!(retiring.selected_issue(), Some(42));
+}
+
+#[test]
+fn ownership_loss_enters_explicit_retirement_before_abandonment() {
+    let retiring = selected_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("claim is recorded")
+        .transition(ConductorEvent::BeginOwnershipRetirement)
+        .expect("ownership retirement is durable");
+
+    assert_eq!(retiring.phase(), ConductorPhase::Paused);
+    assert_eq!(
+        retiring.pause_reason(),
+        Some("executor_ownership_retirement")
+    );
+    assert_eq!(retiring.selected_issue(), Some(42));
+    let abandoned = retiring
+        .transition(ConductorEvent::AbandonOwnership)
+        .expect("ownership retirement completes after receipt deletion");
+    assert_eq!(abandoned.phase(), ConductorPhase::Scan);
+    assert_eq!(abandoned.selected_issue(), None);
+}
+
+#[test]
+fn ownership_loss_after_a_recorded_dispatch_enters_explicit_retirement() {
+    let retiring = selected_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("claim is recorded")
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Succeeded,
+        })
+        .expect("dispatch result is recorded")
+        .transition(ConductorEvent::BeginOwnershipRetirement)
+        .expect("post-dispatch ownership retirement is durable");
+
+    assert_eq!(retiring.phase(), ConductorPhase::Paused);
+    assert_eq!(
+        retiring.pause_reason(),
+        Some("executor_ownership_retirement")
+    );
+    assert_eq!(retiring.selected_issue(), Some(42));
+}
+
+#[test]
+fn finalized_exhausted_retry_enters_explicit_terminal_retirement() {
+    let retiring = conductor_with_retry_limit(ConductorScope::Repository, 0)
+        .transition(ConductorEvent::ScanFoundWork)
+        .expect("scan finds work")
+        .transition(ConductorEvent::SafetyReviewed)
+        .expect("review passes")
+        .transition(ConductorEvent::Selected {
+            issue: 42,
+            serialization_reasons: Vec::new(),
+        })
+        .expect("selection is valid")
+        .transition(ConductorEvent::Claimed)
+        .expect("claim is recorded")
+        .transition(ConductorEvent::BeginTerminalRetirement {
+            outcome: ConductorOutcome::Retryable("validation failed".to_string()),
+        })
+        .expect("finalized exhaustion begins retirement");
+
+    assert_eq!(retiring.phase(), ConductorPhase::Paused);
+    assert_eq!(
+        retiring.pause_reason(),
+        Some("executor_terminal_retirement")
+    );
+    assert_eq!(retiring.retry_count(), 1);
+    let abandoned = retiring
+        .transition(ConductorEvent::AbandonTerminal)
+        .expect("exhausted retirement can be completed after receipt deletion");
+    assert_eq!(abandoned.phase(), ConductorPhase::Scan);
+    assert_eq!(abandoned.selected_issue(), None);
+}
+
+#[test]
 fn exhausted_retry_requires_explicit_abandonment_before_a_new_scan() {
     let exhausted = exhausted_retry_state();
 

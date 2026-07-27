@@ -60,12 +60,13 @@ the Rust `autospec` binary through `AUTOSPEC_BIN` or `PATH`.
 
 ## Rust Autonomous Conductor
 
-The Rust conductor is a pure persisted control-plane state machine. Its phases
+The Rust conductor is a persisted control-plane state machine. Its phases
 are `scan`, `review`, `select`, `claim`, `dispatch`, `dispatch_recorded`,
 `retry`, `paused`, `slice_complete`, and `all_done`. It retains its repository,
 queue scope, selected issue, serialization reasons, retry count, recorded
 outcome, pause reason, and terminal reason in a schema-versioned state value.
-It launches no process, mutates no GitHub state, and chooses no shell backend.
+The foreground adapter owns the GitHub and process effects selected by that
+state machine; no shell backend chooses or repeats those decisions.
 
 `SLICE_COMPLETE` means a constrained (`slice`) scan found no remaining work. It
 does not establish repository completion, so the caller must discard that
@@ -76,7 +77,15 @@ authorizes autonomous discovery to stop permanently.
 
 The foreground CLI adapter persists this state under its repository-scoped
 autonomous directory in separate repository and exact-slice files, and does not
-delegate selection or dispatch to a script.
+delegate selection or dispatch to a script. For selected work it calls the
+native executor bridge, which creates or adopts one repository-scoped issue
+worktree and runtime session, directly launches the configured local Codex,
+Claude, or OpenCode harness, and streams structured progress to the scoped log.
+The harness can edit and commit only inside that worktree. Rust alone refreshes
+the exact claim, pushes, creates the draft PR, runs deterministic QA and
+security gates, marks ready, waits for required CI, obtains LGTM, merges,
+releases the claim, and cleans up.
+
 Direct `autospec autonomous run-foreground` executes one bounded native cycle.
 `autospec autonomous start` and `restart` pass a fenced lifecycle lease to that
 Rust child, which retains the lease and repeats native cycles until a stop, park,
@@ -84,10 +93,39 @@ failure, or optional `--max-cycles` boundary. It emits each completed cycle befo
 waiting `--poll-interval-sec`, re-checks the scoped stop record during that wait,
 and re-runs spend/failure admission before dispatching the next cycle. Monitor and
 supervisor remain observers; neither owns conductor restart or waterfall work.
-Its bare Rust `executor-result --repo OWNER/REPO --issue N` child remains the
-exact successful deferred receipt: it makes no claim mutation and leaves the
-selected issue paused and claimed. It must not requeue or mark the issue complete
-merely because that receipt process exited successfully.
+
+Executor state and terminal receipts are scoped to the exact claim generation.
+Active and pending phases are non-terminal. A restarted conductor first observes
+an exact live supervisor, then resumes from durable state after it exits; it
+never launches a duplicate harness for the same invocation. Recovery adopts a
+live claim only when a private local acquisition receipt matches its repository,
+issue, worker, branch, and claim ID exactly. Transient failures after a harness
+has started retry the same claim generation and durable invocation, while
+retryable terminal work keeps its private committed and uncommitted evidence and
+starts a new claim generation.
+Cleanup reuses the persisted runtime environment, session identity, and original
+manifest snapshot rather than deriving ownership from a manifest that may have
+changed. Failure finalization records a generation-bound cleanup intent before
+runtime teardown, so a crash resumes teardown instead of trying to reattach a
+released environment. On claim takeover, the old generation closes only its
+exact runtime and publishes worktree evidence under the per-issue lock; the
+successor adopts that evidence without deleting, resetting, or losing local WIP.
+Initial provisioning records the active claim generation under the same lock, so
+a successor cannot start in the interval before the predecessor becomes
+transferable. A failed claim-ref push whose authoritative ref remains unchanged
+is retried as transport failure, not reported as takeover.
+A schema-1 snapshot from an active pre-upgrade session is bound to the
+validated authoritative plan and treated as isolation-bypassed. Terminal results
+and ownership loss enter a durable retirement boundary before the acquisition
+receipt is cleared, so restart cannot replay retired authority. Success is
+recorded only after Rust observes the exact PR merged and
+confirms the terminal claim projection.
+
+The bare Rust `executor-result --repo OWNER/REPO --issue N` command remains the
+exact successful deferred compatibility receipt: it makes no claim mutation and
+is not a terminal conductor result. The fixed executor-result artifact remains
+an ingestion compatibility path; neither compatibility form is the default
+implementation producer.
 
 An explicit `executor-result` is strict Rust input: it requires repository,
 positive issue, worker ID, branch, and outcome. `succeeded` also requires a
