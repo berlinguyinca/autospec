@@ -8,7 +8,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::fs::{FileExt, OpenOptionsExt};
+use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::str::FromStr;
@@ -855,7 +855,318 @@ fn evidence_marker_attempt(path: &Path, label: &str) -> Result<Option<String>, S
         .map(Some)
 }
 
+fn fresh_evidence_generation_digest(base_input_digest: &str) -> Result<String, String> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("system clock before Unix epoch: {error}"))?
+        .as_nanos();
+    Ok(sha256_hex(
+        format!(
+            "{base_input_digest}\0{}\0{nonce}\0{}",
+            std::process::id(),
+            INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        )
+        .as_bytes(),
+    ))
+}
+
+fn evidence_rotation_pending(lane_root: &Path) -> PathBuf {
+    lane_root.join("rotation.pending.json")
+}
+
+fn valid_evidence_attempt_path(path: &str) -> bool {
+    let Some(generation) = path.strip_prefix("attempts/") else {
+        return false;
+    };
+    generation.len() == 24
+        && !generation.contains('/')
+        && generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn resume_evidence_rotation(
+    lane_root: &Path,
+    expected_base_input_digest: &str,
+) -> Result<Option<String>, String> {
+    let pending_path = evidence_rotation_pending(lane_root);
+    let body = match fs::read_to_string(&pending_path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read evidence rotation transaction: {error}")),
+    };
+    validate_private_state_file(&pending_path)
+        .map_err(|error| format!("evidence rotation transaction is unsafe: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| format!("parse evidence rotation transaction: {error}"))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "evidence rotation transaction must be an object".to_string())?;
+    if object.len() != 6 || object.get("schema").and_then(serde_json::Value::as_u64) != Some(1) {
+        return Err("evidence rotation transaction schema is invalid".to_string());
+    }
+    let text = |field: &str| {
+        object
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| format!("evidence rotation transaction has no {field}"))
+    };
+    let old_attempt_path = text("old_attempt_path")?.to_string();
+    let base_input_digest = text("base_input_digest")?.to_string();
+    let mut new_input_digest = text("new_input_digest")?.to_string();
+    let mut new_attempt_path = text("new_attempt_path")?.to_string();
+    let diagnostic_path = text("diagnostic_path")?.to_string();
+    let valid_digest = new_input_digest.len() == 64
+        && new_input_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+    let diagnostic_name = diagnostic_path.strip_prefix("diagnostics/");
+    if !valid_digest
+        || !valid_evidence_attempt_path(&old_attempt_path)
+        || !valid_evidence_attempt_path(&new_attempt_path)
+        || new_attempt_path != format!("attempts/{}", &new_input_digest[..24])
+        || old_attempt_path == new_attempt_path
+        || diagnostic_name.is_none_or(|name| {
+            name.is_empty()
+                || name.contains('/')
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        })
+    {
+        return Err("evidence rotation transaction paths are malformed".to_string());
+    }
+    let old_attempt = lane_root.join(&old_attempt_path);
+    let diagnostic = lane_root.join(&diagnostic_path);
+    let diagnostics = lane_root.join("diagnostics");
+    let attempts = lane_root.join("attempts");
+    ensure_private_directory(&diagnostics)?;
+    match (old_attempt.exists(), diagnostic.exists()) {
+        (true, false) => {
+            validate_private_directory(&old_attempt)
+                .map_err(|error| format!("partial evidence attempt is unsafe: {error}"))?;
+            reject_symlink_path(&diagnostic)?;
+            fs::rename(&old_attempt, &diagnostic)
+                .map_err(|error| format!("archive partial evidence attempt: {error}"))?;
+        }
+        (false, true) => validate_private_directory(&diagnostic)
+            .map_err(|error| format!("partial evidence diagnostic is unsafe: {error}"))?,
+        (true, true) => {
+            return Err(
+                "evidence rotation source and diagnostic destination both exist".to_string(),
+            )
+        }
+        (false, false) => {
+            return Err("evidence rotation lost both source and diagnostic destination".to_string())
+        }
+    }
+    File::open(&diagnostics)
+        .and_then(|directory| directory.sync_all())
+        .and_then(|()| File::open(&attempts))
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync partial evidence archive: {error}"))?;
+    fail_launch_at("rotation-after-archive")?;
+    if base_input_digest != expected_base_input_digest {
+        new_input_digest = fresh_evidence_generation_digest(expected_base_input_digest)?;
+        new_attempt_path = format!("attempts/{}", &new_input_digest[..24]);
+        let rebased = serde_json::json!({
+            "schema": 1,
+            "old_attempt_path": old_attempt_path,
+            "base_input_digest": expected_base_input_digest,
+            "new_input_digest": new_input_digest,
+            "new_attempt_path": new_attempt_path,
+            "diagnostic_path": diagnostic_path,
+        })
+        .to_string();
+        write_private_atomic(
+            &pending_path,
+            rebased.as_bytes(),
+            "rebased evidence rotation transaction",
+        )?;
+    }
+    let active = serde_json::json!({
+        "schema": 2,
+        "attempt_path": new_attempt_path,
+        "input_digest": new_input_digest,
+        "base_input_digest": expected_base_input_digest,
+        "intent_digest": null,
+        "runtime_session_id": null,
+    })
+    .to_string();
+    write_private_atomic(
+        &lane_root.join("active.json"),
+        active.as_bytes(),
+        "rotated active evidence attempt",
+    )?;
+    fail_launch_at("rotation-after-active")?;
+    fs::remove_file(&pending_path)
+        .map_err(|error| format!("commit evidence rotation transaction: {error}"))?;
+    File::open(lane_root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync committed evidence rotation: {error}"))?;
+    Ok(Some(new_input_digest.to_string()))
+}
+
+fn rotate_partial_evidence_attempt(
+    lane_root: &Path,
+    attempt_relative: &str,
+    source_base_input_digest: &str,
+    requested_base_input_digest: &str,
+) -> Result<String, String> {
+    let attempt = lane_root.join(attempt_relative);
+    validate_private_directory(&attempt)
+        .map_err(|error| format!("partial evidence attempt is unsafe: {error}"))?;
+    let diagnostics = lane_root.join("diagnostics");
+    ensure_private_directory(&diagnostics)?;
+    let generation = attempt
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "partial evidence attempt has no generation".to_string())?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("read partial evidence archive time: {error}"))?
+        .as_nanos();
+    let diagnostic_name = format!(
+        "{generation}-{nonce:x}-{}-{:x}",
+        std::process::id(),
+        INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let target = diagnostics.join(&diagnostic_name);
+    if target.exists() {
+        return Err("partial evidence archive target collided".to_string());
+    }
+    let new_input_digest = fresh_evidence_generation_digest(source_base_input_digest)?;
+    let pending = serde_json::json!({
+        "schema": 1,
+        "old_attempt_path": attempt_relative,
+        "base_input_digest": source_base_input_digest,
+        "new_input_digest": new_input_digest,
+        "new_attempt_path": format!("attempts/{}", &new_input_digest[..24]),
+        "diagnostic_path": format!("diagnostics/{diagnostic_name}"),
+    })
+    .to_string();
+    write_private_create_once(
+        &evidence_rotation_pending(lane_root),
+        pending.as_bytes(),
+        "evidence rotation transaction",
+    )?;
+    resume_evidence_rotation(lane_root, requested_base_input_digest)?.ok_or_else(|| {
+        "evidence rotation transaction disappeared before replacement selection".to_string()
+    })
+}
+
+fn partial_evidence_publication_exists(attempt_root: &Path) -> Result<bool, String> {
+    let mut partial_publication = false;
+    for name in ["observed.json", "qa.json", "security.json", "seal.json"] {
+        let artifact = attempt_root.join(name);
+        match artifact.try_exists() {
+            Ok(true) => {
+                reject_symlink_path(&artifact)?;
+                validate_private_state_file(&artifact).map_err(|error| {
+                    format!("partial evidence publication {name} is unsafe: {error}")
+                })?;
+                partial_publication = true;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect partial evidence publication {name}: {error}"
+                ))
+            }
+        }
+    }
+    Ok(partial_publication)
+}
+
+fn evidence_attempt_has_any_artifacts(attempt_root: &Path) -> Result<bool, String> {
+    if !attempt_root
+        .try_exists()
+        .map_err(|error| format!("inspect active evidence attempt: {error}"))?
+    {
+        return Ok(false);
+    }
+    validate_private_directory(attempt_root)
+        .map_err(|error| format!("active evidence attempt is unsafe: {error}"))?;
+    let mut entries = fs::read_dir(attempt_root)
+        .map_err(|error| format!("inventory active evidence attempt: {error}"))?;
+    let Some(entry) = entries.next() else {
+        return Ok(false);
+    };
+    let entry = entry.map_err(|error| format!("read active evidence attempt entry: {error}"))?;
+    let file_type = entry
+        .file_type()
+        .map_err(|error| format!("inspect active evidence attempt entry: {error}"))?;
+    if file_type.is_symlink() {
+        return Err("active evidence attempt contains a forbidden symlink".to_string());
+    }
+    if file_type.is_dir() {
+        validate_private_directory(&entry.path())
+            .map_err(|error| format!("active evidence attempt directory is unsafe: {error}"))?;
+    } else if file_type.is_file() {
+        validate_private_state_file(&entry.path())
+            .map_err(|error| format!("active evidence attempt artifact is unsafe: {error}"))?;
+    } else {
+        return Err("active evidence attempt contains an unsupported file type".to_string());
+    }
+    Ok(true)
+}
+
+fn collect_nested_direct_ownership(
+    root: &Path,
+    direct_roots: &mut Vec<(PathBuf, BTreeSet<usize>)>,
+) -> Result<(), String> {
+    if !root.is_dir() {
+        return Ok(());
+    }
+    validate_private_directory(root)
+        .map_err(|error| format!("nested evidence directory is unsafe: {error}"))?;
+    let entries = fs::read_dir(root)
+        .map_err(|error| format!("inventory nested evidence ownership: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("read nested evidence ownership entry: {error}"))?;
+    let has_direct_artifacts = entries
+        .iter()
+        .any(|entry| entry.file_name().to_string_lossy().starts_with("command-"));
+    if has_direct_artifacts {
+        let indices = discover_direct_attempt_indices(root)?;
+        for &index in &indices {
+            let paths = direct_attempt_paths(root, index);
+            direct_ownership_disproven_markers(&paths)?;
+        }
+        direct_roots.push((root.to_path_buf(), indices));
+    }
+    for entry in entries {
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect nested evidence ownership entry: {error}"))?;
+        if file_type.is_symlink() {
+            return Err("nested evidence ownership contains a forbidden symlink".to_string());
+        }
+        if file_type.is_dir() {
+            collect_nested_direct_ownership(&entry.path(), direct_roots)?;
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_nested_direct_ownership(root: &Path) -> Result<(), String> {
+    let mut direct_roots = Vec::new();
+    collect_nested_direct_ownership(root, &mut direct_roots)?;
+    for (direct_root, indices) in direct_roots {
+        for index in indices {
+            let paths = direct_attempt_paths(&direct_root, index);
+            resume_direct_failure_archive(&paths)?;
+            reconcile_direct_launch(&paths, None)?;
+        }
+    }
+    Ok(())
+}
+
 fn select_evidence_generation(lane_root: &Path, base_input_digest: &str) -> Result<String, String> {
+    if let Some(input_digest) = resume_evidence_rotation(lane_root, base_input_digest)? {
+        fail_launch_at("evidence-after-generation-select")?;
+        return Ok(input_digest);
+    }
     let complete_attempt =
         evidence_marker_attempt(&lane_root.join("complete.json"), "complete evidence marker")?;
     let active_path = lane_root.join("active.json");
@@ -869,6 +1180,13 @@ fn select_evidence_generation(lane_root: &Path, base_input_digest: &str) -> Resu
             .map_err(|error| format!("active evidence marker is unsafe: {error}"))?;
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| format!("parse active evidence marker: {error}"))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| "active evidence marker must be an object".to_string())?;
+        if object.len() != 6 || object.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
+        {
+            return Err("active evidence marker schema is unsupported".to_string());
+        }
         let attempt = value
             .get("attempt_path")
             .and_then(serde_json::Value::as_str)
@@ -877,33 +1195,68 @@ fn select_evidence_generation(lane_root: &Path, base_input_digest: &str) -> Resu
             .get("input_digest")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "active evidence marker has no input_digest".to_string())?;
+        let active_base_input_digest = value
+            .get("base_input_digest")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "active evidence marker has no base_input_digest".to_string())?;
         let expected_attempt = format!("attempts/{}", &input_digest[..input_digest.len().min(24)]);
         let valid_digest = input_digest.len() == 64
             && input_digest
                 .bytes()
                 .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
-        if !valid_digest || attempt != expected_attempt {
+        let valid_base_digest = active_base_input_digest.len() == 64
+            && active_base_input_digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte));
+        if !valid_digest || !valid_base_digest || attempt != expected_attempt {
             return Err("active evidence generation is malformed".to_string());
         }
+        if active_base_input_digest != base_input_digest {
+            let attempt_root = lane_root.join(attempt);
+            if evidence_attempt_has_any_artifacts(&attempt_root)? {
+                reconcile_nested_direct_ownership(&attempt_root)?;
+                return rotate_partial_evidence_attempt(
+                    lane_root,
+                    attempt,
+                    active_base_input_digest,
+                    base_input_digest,
+                );
+            }
+            let fresh = fresh_evidence_generation_digest(base_input_digest)?;
+            let active = serde_json::json!({
+                "schema": 2,
+                "attempt_path": format!("attempts/{}", &fresh[..24]),
+                "input_digest": fresh,
+                "base_input_digest": base_input_digest,
+                "intent_digest": null,
+                "runtime_session_id": null,
+            })
+            .to_string();
+            write_private_atomic(
+                &active_path,
+                active.as_bytes(),
+                "fresh active evidence attempt",
+            )?;
+            return Ok(fresh);
+        }
         if complete_attempt.as_deref() != Some(attempt) {
+            let attempt_root = lane_root.join(attempt);
+            let partial_publication = partial_evidence_publication_exists(&attempt_root)?;
+            if partial_publication {
+                return rotate_partial_evidence_attempt(
+                    lane_root,
+                    attempt,
+                    base_input_digest,
+                    base_input_digest,
+                );
+            }
             return Ok(input_digest.to_string());
         }
     }
     if complete_attempt.is_none() {
         return Ok(base_input_digest.to_string());
     }
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("system clock before Unix epoch: {error}"))?
-        .as_nanos();
-    Ok(sha256_hex(
-        format!(
-            "{base_input_digest}\0{}\0{nonce}\0{}",
-            std::process::id(),
-            INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        )
-        .as_bytes(),
-    ))
+    fresh_evidence_generation_digest(base_input_digest)
 }
 
 fn evidence_input_digests(
@@ -983,6 +1336,12 @@ fn observed_evidence_bundle(
         return Err("observed QA command count differs from the canonical plans".to_string());
     }
     for (declared, command) in qa_plan.commands.iter().zip(qa_commands) {
+        if command.origin != ObservationOrigin::Live {
+            return Err(
+                "observed bundle rejects diagnostic command records recovered from disk"
+                    .to_string(),
+            );
+        }
         validate_observed_command(worktree, command)?;
         let executable = resolve_direct_executable(worktree, &declared.argv[0])?;
         let mut expected = declared.argv.clone();
@@ -997,6 +1356,12 @@ fn observed_evidence_bundle(
     }
     validate_observed_scanners(worktree, scanners)?;
     for scanner in scanners {
+        if scanner.command.origin != ObservationOrigin::Live {
+            return Err(format!(
+                "observed bundle rejects diagnostic scanner {} recovered from disk",
+                scanner.name
+            ));
+        }
         let expected = scanner_command(
             &scanner.name,
             scanner_executables.path(&scanner.name)?,
@@ -1398,9 +1763,10 @@ pub(crate) fn produce_deterministic_premerge_evidence(
     ensure_private_directory(&attempt_root)?;
     let intent = load_or_create_evidence_intent(&attempt_root, &lane, &request, &input_digest)?;
     let active = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "attempt_path": format!("attempts/{}", &input_digest[..24]),
         "input_digest": input_digest,
+        "base_input_digest": base_input_digest,
         "intent_digest": intent.digest,
         "runtime_session_id": intent.runtime_session_id.as_deref(),
     })
@@ -1466,6 +1832,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
             request.runtime,
             request.stall_timeout,
         )?;
+        fail_launch_at("evidence-before-bundle")?;
         verify_exact_evidence_lane(
             request.state,
             request.proof,
@@ -1679,6 +2046,8 @@ impl AttemptTerminal {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ObservedDirectCommand {
+    origin: ObservationOrigin,
+    attempt_id: String,
     pub(crate) commit_oid: String,
     pub(crate) runtime_session_id: Option<String>,
     pub(crate) executable: PathBuf,
@@ -1692,6 +2061,12 @@ pub(crate) struct ObservedDirectCommand {
     pub(crate) stderr_digest: String,
     pub(crate) record_path: PathBuf,
     pub(crate) record_digest: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObservationOrigin {
+    Live,
+    Diagnostic,
 }
 
 impl ObservedDirectCommand {
@@ -1765,6 +2140,12 @@ impl DirectRuntimeAdapter {
 
     fn environment_overrides(&self) -> Result<Vec<(OsString, OsString)>, String> {
         let session = self.session.borrow();
+        #[cfg(test)]
+        if session.is_none()
+            && self.environment_dir == self.repo.join(".autospec-test-runtime-adapter")
+        {
+            return Ok(Vec::new());
+        }
         let session = session
             .as_ref()
             .ok_or_else(|| "runtime evidence session is already closed".to_string())?;
@@ -2289,14 +2670,94 @@ fn direct_attempt_paths(artifact_root: &Path, index: usize) -> DirectAttemptPath
     }
 }
 
+fn discover_direct_attempt_indices(artifact_root: &Path) -> Result<BTreeSet<usize>, String> {
+    const FILE_SUFFIXES: [&str; 14] = [
+        ".stdout",
+        ".stderr",
+        ".json",
+        ".intent.json",
+        ".launch.json",
+        ".stdout.ring",
+        ".stderr.ring",
+        ".stdout.writer",
+        ".stderr.writer",
+        ".stdout.reader",
+        ".stderr.reader",
+        ".exit",
+        ".supervisor.json",
+        ".archive.pending",
+    ];
+    let mut indices = BTreeSet::new();
+    for entry in fs::read_dir(artifact_root)
+        .map_err(|error| format!("inventory direct attempt artifacts: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("inventory direct attempt entry: {error}"))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "direct attempt artifact name is not UTF-8".to_string())?;
+        if !name.starts_with("command-") {
+            continue;
+        }
+        let tail = &name["command-".len()..];
+        let (digits, suffix) = tail.split_at(tail.len().min(3));
+        let ownership_disproven_suffix = suffix
+            .strip_prefix(".ownership-disproven-")
+            .and_then(|attempt_id| attempt_id.strip_suffix(".json"))
+            .is_some_and(valid_direct_attempt_id);
+        let canonical_suffix = FILE_SUFFIXES.contains(&suffix)
+            || suffix == ".retire.pending"
+            || suffix == ".attempt-ids"
+            || ownership_disproven_suffix
+            || suffix.starts_with(".archive-")
+            || suffix.starts_with(".retire-");
+        if digits.len() != 3
+            || !digits.bytes().all(|byte| byte.is_ascii_digit())
+            || !canonical_suffix
+        {
+            return Err(format!(
+                "direct attempt artifact has non-canonical command index grammar: {name}"
+            ));
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect direct attempt artifact {name}: {error}"))?;
+        if file_type.is_symlink() {
+            return Err(format!(
+                "direct attempt artifact is a forbidden symlink: {name}"
+            ));
+        }
+        if file_type.is_dir() {
+            validate_private_directory(&entry.path())
+                .map_err(|error| format!("direct attempt directory {name} is unsafe: {error}"))?;
+        } else if file_type.is_file() {
+            validate_private_state_file(&entry.path())
+                .map_err(|error| format!("direct attempt artifact {name} is unsafe: {error}"))?;
+        } else {
+            return Err(format!(
+                "direct attempt artifact has unsupported file type: {name}"
+            ));
+        }
+        indices.insert(
+            digits
+                .parse::<usize>()
+                .map_err(|_| format!("parse direct attempt command index: {name}"))?,
+        );
+    }
+    Ok(indices)
+}
+
 fn direct_intent_document(
+    attempt_id: &str,
     commit_oid: &str,
     runtime_session_id: Option<&str>,
     executable: &Path,
     argv: &[String],
 ) -> String {
     serde_json::json!({
-        "schema": 1,
+        "schema": 2,
+        "attempt_id": attempt_id,
+        "resolution": "resolved",
         "commit_oid": commit_oid,
         "runtime_session_id": runtime_session_id,
         "executable": executable,
@@ -2305,13 +2766,149 @@ fn direct_intent_document(
     .to_string()
 }
 
+fn direct_unresolved_intent_document(
+    attempt_id: &str,
+    commit_oid: &str,
+    runtime_session_id: Option<&str>,
+    argv: &[String],
+) -> String {
+    serde_json::json!({
+        "schema": 2,
+        "attempt_id": attempt_id,
+        "resolution": "unresolved",
+        "commit_oid": commit_oid,
+        "runtime_session_id": runtime_session_id,
+        "executable": Path::new(&argv[0]),
+        "argv": argv,
+    })
+    .to_string()
+}
+
+fn new_direct_attempt_id_candidate() -> Result<String, String> {
+    let mut entropy = [0_u8; 32];
+    File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut entropy))
+        .map_err(|error| format!("read direct attempt identity entropy: {error}"))?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("read direct attempt identity time: {error}"))?
+        .as_nanos();
+    Ok(sha256_hex(
+        format!(
+            "direct-attempt\0{}\0{nonce}\0{}\0{entropy:?}",
+            std::process::id(),
+            DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        )
+        .as_bytes(),
+    ))
+}
+
+fn direct_attempt_reservation_directory(paths: &DirectAttemptPaths) -> PathBuf {
+    paths.record.with_extension("attempt-ids")
+}
+
+fn reserve_direct_attempt_id_candidates(
+    paths: &DirectAttemptPaths,
+    candidates: impl IntoIterator<Item = String>,
+) -> Result<String, String> {
+    let reservations = direct_attempt_reservation_directory(paths);
+    ensure_private_directory(&reservations)?;
+    for attempt_id in candidates {
+        if !valid_direct_attempt_id(&attempt_id) {
+            return Err("generated direct attempt identity is malformed".to_string());
+        }
+        let reservation = reservations.join(&attempt_id);
+        reject_symlink_path(&reservation)?;
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = match options.open(&reservation) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "reserve direct attempt identity {}: {error}",
+                    reservation.display()
+                ))
+            }
+        };
+        let body = format!("attempt_id={attempt_id}\n");
+        file.write_all(body.as_bytes())
+            .map_err(|error| format!("write direct attempt identity reservation: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("sync direct attempt identity reservation: {error}"))?;
+        File::open(&reservations)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync direct attempt identity reservations: {error}"))?;
+        return Ok(attempt_id);
+    }
+    Err("allocate collision-free durable direct attempt identity".to_string())
+}
+
+fn reserve_direct_attempt_id(paths: &DirectAttemptPaths) -> Result<String, String> {
+    let mut candidates = Vec::with_capacity(128);
+    for _ in 0..128 {
+        candidates.push(new_direct_attempt_id_candidate()?);
+    }
+    reserve_direct_attempt_id_candidates(paths, candidates)
+}
+
+fn validate_direct_attempt_id_reservation(
+    paths: &DirectAttemptPaths,
+    attempt_id: &str,
+) -> Result<(), String> {
+    let reservation = direct_attempt_reservation_directory(paths).join(attempt_id);
+    validate_private_state_file(&reservation)
+        .map_err(|error| format!("direct attempt identity reservation is unsafe: {error}"))?;
+    let expected = format!("attempt_id={attempt_id}\n");
+    let observed = fs::read_to_string(&reservation)
+        .map_err(|error| format!("read direct attempt identity reservation: {error}"))?;
+    if observed != expected {
+        return Err("direct attempt identity reservation differs from its intent".to_string());
+    }
+    Ok(())
+}
+
+fn valid_direct_attempt_id(attempt_id: &str) -> bool {
+    attempt_id.len() == 64
+        && attempt_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn direct_intent_attempt_id(path: &Path) -> Result<Option<String>, String> {
+    let body = match fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("read direct command intent: {error}")),
+    };
+    validate_private_state_file(path)
+        .map_err(|error| format!("direct command intent is unsafe: {error}"))?;
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| format!("parse direct command intent: {error}"))?;
+    if value.get("schema").and_then(serde_json::Value::as_u64) != Some(2) {
+        return Err("direct command intent schema is unsupported".to_string());
+    }
+    let attempt_id = value
+        .get("attempt_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "direct command intent has no attempt_id".to_string())?;
+    if !valid_direct_attempt_id(attempt_id) {
+        return Err("direct command intent attempt_id is malformed".to_string());
+    }
+    Ok(Some(attempt_id.to_string()))
+}
+
 fn direct_launch_document(
+    attempt_id: &str,
     intent_digest: &str,
     supervisor: &ProcessIdentity,
     process: Option<&ProcessIdentity>,
 ) -> String {
     serde_json::json!({
-        "schema": 1,
+        "schema": 2,
+        "attempt_id": attempt_id,
         "intent_digest": intent_digest,
         "supervisor": process_identity_value(supervisor),
         "process": process.map(process_identity_value),
@@ -2351,6 +2948,7 @@ fn direct_process_identities(
 
 fn read_direct_launch(
     path: &Path,
+    expected_attempt_id: &str,
     expected_intent_digest: &str,
 ) -> Result<Option<(ProcessIdentity, Option<ProcessIdentity>)>, String> {
     let body = match fs::read_to_string(path) {
@@ -2362,7 +2960,8 @@ fn read_direct_launch(
         .map_err(|error| format!("direct launch record is unsafe: {error}"))?;
     let value: serde_json::Value =
         serde_json::from_str(&body).map_err(|error| format!("parse direct launch: {error}"))?;
-    if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+    if value.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
+        || value.get("attempt_id").and_then(serde_json::Value::as_str) != Some(expected_attempt_id)
         || value
             .get("intent_digest")
             .and_then(serde_json::Value::as_str)
@@ -2386,9 +2985,162 @@ fn read_direct_launch(
     Ok(Some((supervisor, process)))
 }
 
-fn retire_direct_launch(paths: &DirectAttemptPaths) -> Result<(), String> {
-    for path in [
-        &paths.launch,
+fn direct_retirement_pending(paths: &DirectAttemptPaths) -> PathBuf {
+    paths.record.with_extension("retire.pending")
+}
+
+fn direct_ownership_disproven_marker(
+    paths: &DirectAttemptPaths,
+    attempt_id: &str,
+) -> Result<PathBuf, String> {
+    if !valid_direct_attempt_id(attempt_id) {
+        return Err("direct ownership quarantine attempt_id is malformed".to_string());
+    }
+    Ok(paths
+        .record
+        .with_extension(format!("ownership-disproven-{attempt_id}.json")))
+}
+
+fn direct_ownership_disproven_document(
+    attempt_id: &str,
+    intent_digest: &str,
+    launch_digest: &str,
+    supervisor: &ProcessIdentity,
+    harness: &ProcessIdentity,
+) -> String {
+    serde_json::json!({
+        "schema": 1,
+        "attempt_id": attempt_id,
+        "intent_digest": intent_digest,
+        "launch_digest": launch_digest,
+        "supervisor": process_identity_value(supervisor),
+        "harness": process_identity_value(harness),
+        "classification": "ownership-disproven",
+    })
+    .to_string()
+}
+
+struct DirectOwnershipDisprovenMarker {
+    path: PathBuf,
+    attempt_id: String,
+    body: String,
+}
+
+fn direct_ownership_disproven_markers(
+    paths: &DirectAttemptPaths,
+) -> Result<Vec<DirectOwnershipDisprovenMarker>, String> {
+    let parent = paths
+        .record
+        .parent()
+        .ok_or_else(|| "direct ownership quarantine requires an artifact root".to_string())?;
+    discover_direct_attempt_indices(parent)?;
+    let command = paths
+        .record
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "direct ownership quarantine command name is malformed".to_string())?;
+    let prefix = format!("{command}.ownership-disproven-");
+    let mut markers = Vec::new();
+    for entry in fs::read_dir(parent)
+        .map_err(|error| format!("inventory direct ownership quarantine markers: {error}"))?
+    {
+        let entry = entry
+            .map_err(|error| format!("inventory direct ownership quarantine marker: {error}"))?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "direct ownership quarantine marker name is not UTF-8".to_string())?;
+        let Some(encoded_attempt_id) = name
+            .strip_prefix(&prefix)
+            .and_then(|suffix| suffix.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if !valid_direct_attempt_id(encoded_attempt_id) {
+            return Err(format!(
+                "direct ownership quarantine marker has non-canonical filename: {name}"
+            ));
+        }
+        let path = entry.path();
+        reject_symlink_path(&path)
+            .map_err(|error| format!("direct ownership quarantine marker is unsafe: {error}"))?;
+        validate_private_state_file(&path)
+            .map_err(|error| format!("direct ownership quarantine marker is unsafe: {error}"))?;
+        let body = fs::read_to_string(&path)
+            .map_err(|error| format!("read direct ownership quarantine marker: {error}"))?;
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| format!("parse direct ownership quarantine marker: {error}"))?;
+        if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+            || value
+                .get("classification")
+                .and_then(serde_json::Value::as_str)
+                != Some("ownership-disproven")
+        {
+            return Err("direct ownership quarantine marker schema is unsupported".to_string());
+        }
+        let attempt_id = value
+            .get("attempt_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|attempt_id| valid_direct_attempt_id(attempt_id))
+            .ok_or_else(|| {
+                "direct ownership quarantine marker attempt_id is malformed".to_string()
+            })?;
+        if attempt_id != encoded_attempt_id {
+            return Err(
+                "direct ownership quarantine filename attempt_id differs from its document"
+                    .to_string(),
+            );
+        }
+        let intent_digest = value
+            .get("intent_digest")
+            .and_then(serde_json::Value::as_str)
+            .filter(|digest| valid_direct_attempt_id(digest))
+            .ok_or_else(|| {
+                "direct ownership quarantine marker intent_digest is malformed".to_string()
+            })?;
+        let launch_digest = value
+            .get("launch_digest")
+            .and_then(serde_json::Value::as_str)
+            .filter(|digest| valid_direct_attempt_id(digest))
+            .ok_or_else(|| {
+                "direct ownership quarantine marker launch_digest is malformed".to_string()
+            })?;
+        let supervisor = parse_process_identity(
+            value.get("supervisor").cloned().ok_or_else(|| {
+                "direct ownership quarantine marker has no supervisor anchor".to_string()
+            })?,
+            "direct ownership quarantine supervisor",
+        )?;
+        let harness = parse_process_identity(
+            value.get("harness").cloned().ok_or_else(|| {
+                "direct ownership quarantine marker has no harness anchor".to_string()
+            })?,
+            "direct ownership quarantine harness",
+        )?;
+        let canonical = direct_ownership_disproven_document(
+            attempt_id,
+            intent_digest,
+            launch_digest,
+            &supervisor,
+            &harness,
+        );
+        if body != canonical {
+            return Err(
+                "direct ownership quarantine marker is not canonical or has extra fields"
+                    .to_string(),
+            );
+        }
+        markers.push(DirectOwnershipDisprovenMarker {
+            path,
+            attempt_id: attempt_id.to_string(),
+            body,
+        });
+    }
+    Ok(markers)
+}
+
+fn direct_retirement_artifacts(paths: &DirectAttemptPaths) -> [&Path; 9] {
+    [
         &paths.sinks.supervisor_identity,
         &paths.sinks.stdout,
         &paths.sinks.stderr,
@@ -2397,7 +3149,51 @@ fn retire_direct_launch(paths: &DirectAttemptPaths) -> Result<(), String> {
         &paths.sinks.stdout_reader_cursor,
         &paths.sinks.stderr_reader_cursor,
         &paths.sinks.exit_status,
-    ] {
+        &paths.launch,
+    ]
+}
+
+static DIRECT_TRANSACTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn create_unique_direct_transaction(
+    parent: &Path,
+    prefix: &str,
+) -> Result<(String, PathBuf), String> {
+    for _ in 0..128 {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| format!("read direct transaction time: {error}"))?
+            .as_nanos();
+        let sequence = DIRECT_TRANSACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let name = format!("{prefix}-{timestamp:x}-{}-{sequence:x}", std::process::id());
+        let path = parent.join(&name);
+        match fs::create_dir(&path) {
+            Ok(()) => {
+                #[cfg(unix)]
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+                    .map_err(|error| format!("make direct transaction private: {error}"))?;
+                File::open(parent)
+                    .and_then(|directory| directory.sync_all())
+                    .map_err(|error| format!("sync direct transaction directory: {error}"))?;
+                return Ok((name, path));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("create direct transaction: {error}")),
+        }
+    }
+    Err("allocate collision-free direct transaction".to_string())
+}
+
+fn finish_direct_retirement(
+    paths: &DirectAttemptPaths,
+    transaction: &Path,
+    attempt_id: &str,
+) -> Result<(), String> {
+    let parent = paths
+        .launch
+        .parent()
+        .ok_or_else(|| "direct launch path has no parent".to_string())?;
+    for (index, path) in direct_retirement_artifacts(paths)[..8].iter().enumerate() {
         match fs::remove_file(path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -2408,68 +3204,553 @@ fn retire_direct_launch(paths: &DirectAttemptPaths) -> Result<(), String> {
                 ))
             }
         }
+        if index == 0 {
+            fail_launch_at("retire-mid-delete")?;
+        }
     }
-    File::open(
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync retired direct ancillary artifacts: {error}"))?;
+    match fs::remove_file(&paths.launch) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("retire direct launch artifact: {error}")),
+    }
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync retired direct launch identity: {error}"))?;
+    fail_launch_at("retire-after-launch-delete")?;
+    let complete = transaction.join("complete");
+    if !complete.exists() {
+        let body = serde_json::json!({
+            "schema": 2,
+            "attempt_id": attempt_id,
+            "complete": true,
+        })
+        .to_string();
+        write_private_create_once(&complete, body.as_bytes(), "direct retirement commit")?;
+    }
+    File::open(transaction)
+        .and_then(|directory| directory.sync_all())
+        .and_then(|()| File::open(parent))
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            format!("sync committed direct retirement before pointer cleanup: {error}")
+        })?;
+    let pending = direct_retirement_pending(paths);
+    match fs::remove_file(&pending) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("retire direct retirement pointer: {error}")),
+    }
+    fail_launch_at("retire-after-pending-removal")?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync committed direct retirement: {error}"))
+}
+
+fn completed_direct_retirement(
+    paths: &DirectAttemptPaths,
+    expected_attempt_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    if paths.launch.exists() {
+        return Ok(None);
+    }
+    let parent = paths
+        .launch
+        .parent()
+        .ok_or_else(|| "direct launch path has no parent".to_string())?;
+    let prefix = format!(
+        "{}.retire-",
         paths
-            .intent
-            .parent()
-            .ok_or_else(|| "direct launch path has no parent".to_string())?,
+            .record
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("command")
+    );
+    let mut matches = Vec::new();
+    for entry in
+        fs::read_dir(parent).map_err(|error| format!("scan direct retirement locators: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("read direct retirement locator: {error}"))?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(&prefix) {
+            continue;
+        }
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect direct retirement locator {name}: {error}"))?;
+        if file_type.is_symlink() || !file_type.is_dir() {
+            return Err(format!("direct retirement locator is unsafe: {name}"));
+        }
+        let transaction = entry.path();
+        validate_private_directory(&transaction)
+            .map_err(|error| format!("direct retirement locator {name} is unsafe: {error}"))?;
+        let complete_path = transaction.join("complete");
+        if !complete_path.is_file() {
+            continue;
+        }
+        validate_private_state_file(&complete_path)
+            .map_err(|error| format!("direct retirement commit {name} is unsafe: {error}"))?;
+        let complete: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&complete_path)
+                .map_err(|error| format!("read direct retirement commit {name}: {error}"))?,
+        )
+        .map_err(|error| format!("parse direct retirement commit {name}: {error}"))?;
+        let manifest_path = transaction.join("manifest");
+        validate_private_state_file(&manifest_path)
+            .map_err(|error| format!("direct retirement manifest {name} is unsafe: {error}"))?;
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&manifest_path)
+                .map_err(|error| format!("read direct retirement manifest {name}: {error}"))?,
+        )
+        .map_err(|error| format!("parse direct retirement manifest {name}: {error}"))?;
+        if complete.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
+            || complete
+                .get("attempt_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(expected_attempt_id)
+            || complete
+                .get("complete")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+            || manifest.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
+            || manifest
+                .get("attempt_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(expected_attempt_id)
+        {
+            continue;
+        }
+        matches.push(transaction);
+    }
+    matches.sort();
+    Ok(matches.pop())
+}
+
+fn resume_direct_retirement(paths: &DirectAttemptPaths) -> Result<bool, String> {
+    let pending = direct_retirement_pending(paths);
+    let body = match fs::read_to_string(&pending) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("read direct retirement transaction: {error}")),
+    };
+    validate_private_state_file(&pending)
+        .map_err(|error| format!("direct retirement transaction is unsafe: {error}"))?;
+    let pending: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| format!("parse direct retirement transaction: {error}"))?;
+    if pending.get("schema").and_then(serde_json::Value::as_u64) != Some(2) {
+        return Err("direct retirement transaction schema is unsupported".to_string());
+    }
+    let attempt_id = pending
+        .get("attempt_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "direct retirement transaction has no attempt_id".to_string())?;
+    let name = pending
+        .get("transaction")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "direct retirement transaction has no target".to_string())?;
+    if name.is_empty() || name.contains('/') || name.contains('\\') || !name.contains(".retire-") {
+        return Err("direct retirement transaction has an invalid target".to_string());
+    }
+    let parent = paths
+        .launch
+        .parent()
+        .ok_or_else(|| "direct launch path has no parent".to_string())?;
+    let transaction = parent.join(name);
+    validate_private_directory(&transaction)
+        .map_err(|error| format!("direct retirement manifest directory is unsafe: {error}"))?;
+    validate_private_state_file(&transaction.join("manifest"))
+        .map_err(|error| format!("direct retirement manifest is unsafe: {error}"))?;
+    let manifest: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(transaction.join("manifest"))
+            .map_err(|error| format!("read direct retirement manifest: {error}"))?,
     )
-    .and_then(|directory| directory.sync_all())
-    .map_err(|error| format!("sync retired direct launch artifacts: {error}"))
+    .map_err(|error| format!("parse direct retirement manifest: {error}"))?;
+    if manifest.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
+        || manifest
+            .get("attempt_id")
+            .and_then(serde_json::Value::as_str)
+            != Some(attempt_id)
+    {
+        return Err("direct retirement manifest differs from its pending pointer".to_string());
+    }
+    finish_direct_retirement(paths, &transaction, attempt_id)?;
+    Ok(true)
+}
+
+fn retire_direct_launch(paths: &DirectAttemptPaths, attempt_id: &str) -> Result<(), String> {
+    if resume_direct_retirement(paths)? {
+        return Ok(());
+    }
+    if !direct_retirement_artifacts(paths)
+        .iter()
+        .any(|path| path.exists())
+    {
+        return Ok(());
+    }
+    let parent = paths
+        .launch
+        .parent()
+        .ok_or_else(|| "direct launch path has no parent".to_string())?;
+    let stem = paths
+        .record
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("command");
+    let (name, transaction) = create_unique_direct_transaction(parent, &format!("{stem}.retire"))?;
+    let manifest = serde_json::json!({
+        "schema": 2,
+        "attempt_id": attempt_id,
+        "cleanup": "proven",
+        "launch_deleted_last": true,
+    })
+    .to_string();
+    write_private_create_once(
+        &transaction.join("manifest"),
+        manifest.as_bytes(),
+        "direct retirement manifest",
+    )?;
+    let pending = serde_json::json!({
+        "schema": 2,
+        "attempt_id": attempt_id,
+        "transaction": name,
+    })
+    .to_string();
+    write_private_create_once(
+        &direct_retirement_pending(paths),
+        pending.as_bytes(),
+        "direct retirement transaction",
+    )?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync direct retirement proof: {error}"))?;
+    fail_launch_at("retire-after-proof")?;
+    finish_direct_retirement(paths, &transaction, attempt_id)
 }
 
 fn reconcile_direct_launch(
     paths: &DirectAttemptPaths,
-    expected_intent_body: &str,
-) -> Result<(), String> {
+    expected_intent_body: Option<&str>,
+) -> Result<bool, String> {
+    let ownership_markers = direct_ownership_disproven_markers(paths)?;
     let intent_body = match fs::read_to_string(&paths.intent) {
         Ok(body) => body,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if paths.launch.exists() {
                 return Err("direct launch exists without its durable intent".to_string());
             }
-            return Ok(());
+            return Ok(false);
         }
         Err(error) => return Err(format!("read direct command intent: {error}")),
     };
     validate_private_state_file(&paths.intent)
         .map_err(|error| format!("direct command intent is unsafe: {error}"))?;
-    if intent_body != expected_intent_body {
+    let attempt_id = direct_intent_attempt_id(&paths.intent)?
+        .ok_or_else(|| "direct command intent disappeared during reconciliation".to_string())?;
+    validate_direct_attempt_id_reservation(paths, &attempt_id)?;
+    if expected_intent_body.is_some_and(|expected| intent_body != expected) {
         return Err("direct command intent differs from the requested argv".to_string());
     }
     let intent_digest = sha256_hex(intent_body.as_bytes());
-    if let Some((supervisor, process)) = read_direct_launch(&paths.launch, &intent_digest)? {
-        match OwnedProcessSet::adopt_supervised(&supervisor, process.as_ref()) {
-            Ok(mut owned) => owned.terminate()?,
-            Err(_error)
-                if observe_process_birth(supervisor.pid)?.is_none()
-                    && process
-                        .as_ref()
-                        .map(|process| observe_process_birth(process.pid))
-                        .transpose()?
-                        .flatten()
-                        .is_none() => {}
-            Err(error) => {
+    let launch = read_direct_launch(&paths.launch, &attempt_id, &intent_digest)?;
+    let launch_digest = match fs::read(&paths.launch) {
+        Ok(body) => Some(sha256_hex(&body)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("read direct launch quarantine binding: {error}")),
+    };
+    let marker_path = direct_ownership_disproven_marker(paths, &attempt_id)?;
+    if let Some(marker) = ownership_markers
+        .iter()
+        .find(|marker| marker.attempt_id == attempt_id)
+    {
+        if marker.path != marker_path {
+            return Err(
+                "direct ownership quarantine marker for the current attempt is displaced"
+                    .to_string(),
+            );
+        }
+        let (supervisor, harness) = launch
+            .as_ref()
+            .and_then(|(supervisor, harness)| harness.as_ref().map(|harness| (supervisor, harness)))
+            .ok_or_else(|| {
+                "direct ownership quarantine lost its bound launch identities".to_string()
+            })?;
+        let expected = direct_ownership_disproven_document(
+            &attempt_id,
+            &intent_digest,
+            launch_digest
+                .as_deref()
+                .ok_or_else(|| "direct ownership quarantine lost its launch".to_string())?,
+            supervisor,
+            harness,
+        );
+        if marker.body != expected {
+            return Err(
+                "direct ownership quarantine marker differs from its immutable anchors".to_string(),
+            );
+        }
+        if cleanup_instance_is_live(supervisor)? {
+            terminate_cleanup_instance(supervisor).map_err(|error| {
+                format!(
+                    "direct ownership quarantine supervisor cleanup failed: {}; cleanup_succeeded={}; cleanup={:?}",
+                    error.reason, error.cleanup_succeeded, error.cleanup_error
+                )
+            })?;
+        }
+        return Err(
+            "direct launch ownership remains disproven and permanently quarantined".to_string(),
+        );
+    }
+    if resume_direct_retirement(paths)? {
+        return Ok(true);
+    }
+    let had_launch = if let Some((supervisor, process)) = launch {
+        let complete = read_executor_exit_status(&paths.sinks.exit_status)
+            .map(|status| status.is_some())
+            .unwrap_or(false);
+        let supervisor_live = cleanup_instance_is_live(&supervisor)?;
+        let process_live = process
+            .as_ref()
+            .map(cleanup_instance_is_live)
+            .transpose()?
+            .unwrap_or(false);
+        if complete && !supervisor_live && !process_live {
+            true
+        } else {
+            let cleanup_harness = if complete { None } else { process.as_ref() };
+            let cleanup = if supervisor_live {
+                OwnedProcessSet::terminate_supervised_for_cleanup(&supervisor, cleanup_harness)
+            } else if process_live {
+                terminate_cleanup_instance(process.as_ref().expect("live direct process identity"))
+                    .map(|()| SupervisedCleanup::Cleaned)
+            } else {
+                Err(AdoptionFailure {
+                    reason:
+                        "direct launch cleanup is unproven: no live anchor or whole-tree completion"
+                            .to_string(),
+                    cleanup_error: None,
+                    cleanup_succeeded: false,
+                })
+            };
+            match cleanup {
+                Ok(SupervisedCleanup::Cleaned) => {}
+                Ok(SupervisedCleanup::OwnershipDisproven(mut supervisor_tree)) => {
+                    fail_launch_at("ownership-before-marker")?;
+                    let harness = process.as_ref().ok_or_else(|| {
+                        "direct ownership classification lost its harness identity".to_string()
+                    })?;
+                    let launch_digest = launch_digest.as_deref().ok_or_else(|| {
+                        "direct ownership classification lost its launch digest".to_string()
+                    })?;
+                    let marker = direct_ownership_disproven_document(
+                        &attempt_id,
+                        &intent_digest,
+                        launch_digest,
+                        &supervisor,
+                        harness,
+                    );
+                    write_private_create_once(
+                        &marker_path,
+                        marker.as_bytes(),
+                        "direct ownership-disproven quarantine",
+                    )?;
+                    fail_launch_at("ownership-after-marker")?;
+                    let cleanup = supervisor_tree.terminate();
+                    return Err(format!(
+                        "direct launch ownership reconciliation failed: cleanup-only harness is not a descendant of the persisted supervisor; cleanup_succeeded={}; cleanup={:?}",
+                        cleanup.is_ok(),
+                        cleanup.err()
+                    ));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "direct launch ownership reconciliation failed: {}; cleanup_succeeded={}; cleanup={:?}",
+                        error.reason, error.cleanup_succeeded, error.cleanup_error
+                    ));
+                }
+            }
+            true
+        }
+    } else {
+        if let Some((sidecar_attempt_id, supervisor)) =
+            read_supervisor_journal(&paths.sinks.supervisor_identity)?
+        {
+            if sidecar_attempt_id.as_deref() != Some(&attempt_id) {
+                return Err("direct supervisor sidecar differs from its durable intent".to_string());
+            }
+            let complete = read_executor_exit_status(&paths.sinks.exit_status)
+                .map(|status| status.is_some())
+                .unwrap_or(false);
+            if complete && !cleanup_instance_is_live(&supervisor)? {
+                true
+            } else {
+                match OwnedProcessSet::terminate_supervised_for_cleanup(&supervisor, None) {
+                    Ok(SupervisedCleanup::Cleaned) => {}
+                    Ok(SupervisedCleanup::OwnershipDisproven(_)) => {
+                        return Err(
+                            "sidecar-only cleanup produced an impossible ownership classification"
+                                .to_string(),
+                        )
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "direct supervisor reconciliation failed: {}; cleanup={:?}",
+                            error.reason, error.cleanup_error
+                        ))
+                    }
+                }
+                true
+            }
+        } else if read_executor_exit_status(&paths.sinks.exit_status)
+            .map(|status| status.is_some())
+            .unwrap_or(false)
+        {
+            true
+        } else {
+            let ownership_artifacts = direct_retirement_artifacts(paths);
+            if ownership_artifacts[..8].iter().any(|path| path.exists()) {
+                return Err(
+                    "direct launch cleanup is unproven: no live anchor or whole-tree completion"
+                        .to_string(),
+                );
+            }
+            completed_direct_retirement(paths, &attempt_id)?.is_some()
+        }
+    };
+    if had_launch {
+        retire_direct_launch(paths, &attempt_id)?;
+    }
+    Ok(had_launch)
+}
+
+fn direct_failure_archive_pending(paths: &DirectAttemptPaths) -> PathBuf {
+    paths.record.with_extension("archive.pending")
+}
+
+fn finish_direct_failure_archive(paths: &DirectAttemptPaths, archive: &Path) -> Result<(), String> {
+    let parent = paths
+        .record
+        .parent()
+        .ok_or_else(|| "direct failure record has no parent".to_string())?;
+    for (index, source) in [&paths.record, &paths.stdout, &paths.stderr, &paths.intent]
+        .into_iter()
+        .enumerate()
+    {
+        let target = archive.join(
+            source
+                .file_name()
+                .ok_or_else(|| "direct failure artifact has no file name".to_string())?,
+        );
+        match (source.exists(), target.exists()) {
+            (true, false) => fs::rename(source, &target).map_err(|error| {
+                format!(
+                    "archive reconciled direct failure {}: {error}",
+                    source.display()
+                )
+            })?,
+            (false, true) => {}
+            (true, true) => {
                 return Err(format!(
-                    "direct launch ownership reconciliation failed: {}; cleanup={:?}",
-                    error.reason, error.cleanup_error
+                    "direct failure archive source and target both exist: {}",
+                    source.display()
+                ))
+            }
+            (false, false) => {
+                return Err(format!(
+                    "direct failure archive lost source and target: {}",
+                    source.display()
                 ))
             }
         }
-    } else if let Some(supervisor) = read_supervisor_identity(&paths.sinks.supervisor_identity)? {
-        match OwnedProcessSet::adopt_supervised(&supervisor, None) {
-            Ok(mut owned) => owned.terminate()?,
-            Err(_error) if observe_process_birth(supervisor.pid)?.is_none() => {}
-            Err(error) => {
-                return Err(format!(
-                    "direct supervisor reconciliation failed: {}; cleanup={:?}",
-                    error.reason, error.cleanup_error
-                ))
-            }
+        if index == 0 {
+            fail_launch_at("archive-mid-move")?;
         }
     }
-    retire_direct_launch(paths)
+    File::open(archive)
+        .and_then(|directory| directory.sync_all())
+        .and_then(|()| File::open(parent))
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync reconciled direct failure archive: {error}"))?;
+    fail_launch_at("archive-before-complete")?;
+    let complete = archive.join("complete");
+    if !complete.exists() {
+        write_private_create_once(&complete, b"complete\n", "direct failure archive complete")?;
+    }
+    let pending = direct_failure_archive_pending(paths);
+    match fs::remove_file(&pending) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("retire direct archive transaction: {error}")),
+    }
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync completed direct failure archive: {error}"))
+}
+
+fn resume_direct_failure_archive(paths: &DirectAttemptPaths) -> Result<(), String> {
+    let pending = direct_failure_archive_pending(paths);
+    let body = match fs::read_to_string(&pending) {
+        Ok(body) => body,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("read direct archive transaction: {error}")),
+    };
+    validate_private_state_file(&pending)
+        .map_err(|error| format!("direct archive transaction is unsafe: {error}"))?;
+    let parent = paths
+        .record
+        .parent()
+        .ok_or_else(|| "direct failure record has no parent".to_string())?;
+    let name = body.trim();
+    if name.is_empty() || name.contains('/') || name.contains('\\') || !name.contains(".archive-") {
+        return Err("direct archive transaction has an invalid target".to_string());
+    }
+    let archive = parent.join(name);
+    ensure_private_directory(&archive)?;
+    finish_direct_failure_archive(paths, &archive)
+}
+
+fn archive_reconciled_direct_failure(paths: &DirectAttemptPaths) -> Result<(), String> {
+    if direct_failure_archive_pending(paths).exists() {
+        return resume_direct_failure_archive(paths);
+    }
+    let record = fs::read(&paths.record)
+        .map_err(|error| format!("read reconciled direct failure record: {error}"))?;
+    let parent = paths
+        .record
+        .parent()
+        .ok_or_else(|| "direct failure record has no parent".to_string())?;
+    let archive_prefix = format!(
+        "{}.archive-{}",
+        paths
+            .record
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .unwrap_or("command"),
+        &sha256_hex(&record)[..16]
+    );
+    let (archive_name, archive) = create_unique_direct_transaction(parent, &archive_prefix)?;
+    let manifest = archive.join("manifest");
+    if !manifest.exists() {
+        write_private_create_once(
+            &manifest,
+            b"schema=1\nartifacts=record,stdout,stderr,intent\n",
+            "direct failure archive manifest",
+        )?;
+    }
+    let pending = direct_failure_archive_pending(paths);
+    if !pending.exists() {
+        write_private_create_once(
+            &pending,
+            format!("{archive_name}\n").as_bytes(),
+            "direct failure archive transaction",
+        )?;
+    }
+    fail_launch_at("archive-after-manifest")?;
+    finish_direct_failure_archive(paths, &archive)
 }
 
 fn copy_direct_ring(ring_path: &Path, cursor_path: &Path, output: &File) -> Result<u64, String> {
@@ -2496,6 +3777,7 @@ fn copy_direct_ring(ring_path: &Path, cursor_path: &Path, output: &File) -> Resu
 
 #[allow(clippy::too_many_arguments)]
 fn execute_supervised_direct_attempt(
+    attempt_id: &str,
     worktree: &Path,
     command: &DirectCommand,
     paths: &DirectAttemptPaths,
@@ -2511,7 +3793,7 @@ fn execute_supervised_direct_attempt(
         current_dir: worktree.to_path_buf(),
         environment_overrides,
     };
-    let mut child = match spawn_blocked_harness(&invocation, &paths.sinks) {
+    let mut child = match spawn_blocked_harness(&invocation, &paths.sinks, Some(attempt_id)) {
         Ok(child) => child,
         Err(failure) => {
             if failure.cleanup_succeeded {
@@ -2524,6 +3806,7 @@ fn execute_supervised_direct_attempt(
             match failure.supervisor {
                 Some(supervisor) => {
                     let launch = direct_launch_document(
+                        attempt_id,
                         intent_digest,
                         &supervisor,
                         failure.process.as_deref(),
@@ -2553,7 +3836,8 @@ fn execute_supervised_direct_attempt(
                 }
             }
         };
-    let launch_body = direct_launch_document(intent_digest, &supervisor, Some(&process));
+    let launch_body =
+        direct_launch_document(attempt_id, intent_digest, &supervisor, Some(&process));
     if let Err(error) = write_private_create_once(
         &paths.launch,
         launch_body.as_bytes(),
@@ -2581,7 +3865,96 @@ fn execute_supervised_direct_attempt(
         }
         match child.try_wait() {
             Ok(Some(exit)) => {
-                let surviving_descendants = child.live_descendants();
+                if let Err(completion) = child.wait_output_complete() {
+                    let surviving_descendants = child.live_descendants();
+                    let cleanup = child.terminate();
+                    let _ = copy_direct_ring(
+                        &paths.sinks.stdout,
+                        &paths.sinks.stdout_writer_cursor,
+                        stdout,
+                    );
+                    let _ = copy_direct_ring(
+                        &paths.sinks.stderr,
+                        &paths.sinks.stderr_writer_cursor,
+                        stderr,
+                    );
+                    if let Err(error) = cleanup {
+                        return AttemptTerminal::CleanupFailed(format!("{completion}; {error}"));
+                    }
+                    return match surviving_descendants {
+                        Ok(true) => AttemptTerminal::CleanupFailed(format!(
+                            "{completion}; direct command exited while a descendant remained live; the owned tree was reaped"
+                        )),
+                        Ok(false) => AttemptTerminal::InfrastructureFailed(completion),
+                        Err(error) => {
+                            AttemptTerminal::CleanupFailed(format!("{completion}; {error}"))
+                        }
+                    };
+                }
+                let durable_exit = match read_executor_exit_status(&paths.sinks.exit_status) {
+                    Ok(Some(code)) => code,
+                    Ok(None) => {
+                        let error = "executor output-complete marker lacked durable exit status"
+                            .to_string();
+                        return match child.terminate() {
+                            Ok(()) => AttemptTerminal::InfrastructureFailed(error),
+                            Err(cleanup) => {
+                                AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}"))
+                            }
+                        };
+                    }
+                    Err(error) => {
+                        return match child.terminate() {
+                            Ok(()) => AttemptTerminal::InfrastructureFailed(error),
+                            Err(cleanup) => {
+                                AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}"))
+                            }
+                        }
+                    }
+                };
+                if durable_exit != exit.code {
+                    let error = format!(
+                        "executor prompt exit {0} disagrees with durable exit {durable_exit}",
+                        exit.code
+                    );
+                    return match child.terminate() {
+                        Ok(()) => AttemptTerminal::InfrastructureFailed(error),
+                        Err(cleanup) => {
+                            AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}"))
+                        }
+                    };
+                }
+                let surviving_descendants = match child.live_descendants() {
+                    Ok(surviving) => surviving,
+                    Err(error) => {
+                        return match child.terminate() {
+                            Ok(()) => AttemptTerminal::CleanupFailed(error),
+                            Err(cleanup) => {
+                                AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}"))
+                            }
+                        }
+                    }
+                };
+                if surviving_descendants {
+                    let cleanup = child.terminate();
+                    let _ = copy_direct_ring(
+                        &paths.sinks.stdout,
+                        &paths.sinks.stdout_writer_cursor,
+                        stdout,
+                    );
+                    let _ = copy_direct_ring(
+                        &paths.sinks.stderr,
+                        &paths.sinks.stderr_writer_cursor,
+                        stderr,
+                    );
+                    return match cleanup {
+                        Ok(()) => AttemptTerminal::CleanupFailed(
+                            "direct command exited while a descendant remained live; the owned tree was reaped"
+                                .to_string(),
+                        ),
+                        Err(error) => AttemptTerminal::CleanupFailed(error),
+                    };
+                }
                 let cleanup = child.terminate();
                 let stdout_size = copy_direct_ring(
                     &paths.sinks.stdout,
@@ -2595,16 +3968,6 @@ fn execute_supervised_direct_attempt(
                 );
                 if let Err(error) = cleanup {
                     return AttemptTerminal::CleanupFailed(error);
-                }
-                match surviving_descendants {
-                    Ok(true) => {
-                        return AttemptTerminal::CleanupFailed(
-                            "direct command exited while a descendant remained live; the owned tree was reaped"
-                                .to_string(),
-                        )
-                    }
-                    Ok(false) => {}
-                    Err(error) => return AttemptTerminal::CleanupFailed(error),
                 }
                 let sizes = match (stdout_size, stderr_size) {
                     (Ok(stdout), Ok(stderr)) => (stdout, stderr),
@@ -2690,26 +4053,116 @@ pub(crate) fn execute_direct_plan(
     runtime: Option<&DirectRuntimeAdapter>,
     stall_timeout: Duration,
 ) -> Result<Vec<ObservedDirectCommand>, String> {
+    ensure_private_directory(artifact_root)?;
+    let artifact_root = fs::canonicalize(artifact_root)
+        .map_err(|error| format!("canonicalize direct command artifact root: {error}"))?;
+    let mut attempt_indices = discover_direct_attempt_indices(&artifact_root)?;
+    attempt_indices.extend(0..plan.commands.len());
+    for &index in &attempt_indices {
+        let paths = direct_attempt_paths(&artifact_root, index);
+        direct_ownership_disproven_markers(&paths)?;
+    }
+    let mut reconciled_launches = BTreeMap::new();
+    for index in attempt_indices {
+        let paths = direct_attempt_paths(&artifact_root, index);
+        resume_direct_failure_archive(&paths)?;
+        reconciled_launches.insert(index, reconcile_direct_launch(&paths, None)?);
+    }
     if plan.commands.is_empty() || stall_timeout.is_zero() {
         return Err("executor direct plan and stall timeout must be nonempty".to_string());
     }
     let worktree = fs::canonicalize(worktree)
         .map_err(|error| format!("canonicalize direct command worktree: {error}"))?;
     let commit_oid = git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    ensure_private_directory(artifact_root)?;
-    let artifact_root = fs::canonicalize(artifact_root)
-        .map_err(|error| format!("canonicalize direct command artifact root: {error}"))?;
     let mut observed = Vec::new();
     for (index, command) in plan.commands.iter().enumerate() {
         let paths = direct_attempt_paths(&artifact_root, index);
+        let mut attempt_id = match direct_intent_attempt_id(&paths.intent)? {
+            Some(attempt_id) => attempt_id,
+            None => reserve_direct_attempt_id(&paths)?,
+        };
+        if reconciled_launches.get(&index).copied().unwrap_or(false)
+            && paths.intent.is_file()
+            && !paths.record.exists()
+        {
+            let intent: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(&paths.intent)
+                    .map_err(|error| format!("read reconciled direct intent: {error}"))?,
+            )
+            .map_err(|error| format!("parse reconciled direct intent: {error}"))?;
+            let interrupted_executable = intent
+                .get("executable")
+                .and_then(serde_json::Value::as_str)
+                .map(PathBuf::from)
+                .ok_or_else(|| "reconciled direct intent has no executable".to_string())?;
+            let interrupted_argv = intent
+                .get("argv")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| "reconciled direct intent has no argv".to_string())?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_string)
+                        .ok_or_else(|| "reconciled direct intent argv is malformed".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let stdout = open_or_create_private_artifact(&paths.stdout)?;
+            let stderr = open_or_create_private_artifact(&paths.stderr)?;
+            stdout
+                .set_len(0)
+                .and_then(|_| stderr.set_len(0))
+                .map_err(|error| format!("clear reconciled direct output: {error}"))?;
+            persist_attempted_command(AttemptPersistence {
+                attempt_id: &attempt_id,
+                commit_oid: &commit_oid,
+                runtime_session_id: runtime.map(DirectRuntimeAdapter::session_id),
+                executable: &interrupted_executable,
+                argv: &interrupted_argv,
+                process_executable: &interrupted_executable,
+                process_argv: &interrupted_argv,
+                terminal: AttemptTerminal::CleanupFailed(
+                    "interrupted attempt was cleaned before terminal publication".to_string(),
+                ),
+                stdout_path: &paths.stdout,
+                stderr_path: &paths.stderr,
+                record_path: &paths.record,
+                stdout: &stdout,
+                stderr: &stderr,
+            })?;
+            archive_reconciled_direct_failure(&paths)?;
+            attempt_id = reserve_direct_attempt_id(&paths)?;
+            reconciled_launches.insert(index, false);
+        }
         let executable = match resolve_direct_executable(&worktree, &command.argv[0]) {
             Ok(executable) => executable,
             Err(reason) => {
-                let stdout = create_private_artifact(&paths.stdout)?;
-                let stderr = create_private_artifact(&paths.stderr)?;
+                if paths.record.is_file() {
+                    return Err(format!(
+                        "executor direct command segment {index} spawn failed after prior ownership cleanup: {reason}"
+                    ));
+                }
+                let stdout = open_or_create_private_artifact(&paths.stdout)?;
+                let stderr = open_or_create_private_artifact(&paths.stderr)?;
+                stdout
+                    .set_len(0)
+                    .and_then(|_| stderr.set_len(0))
+                    .map_err(|error| format!("clear failed direct command output: {error}"))?;
+                let unresolved_intent = direct_unresolved_intent_document(
+                    &attempt_id,
+                    &commit_oid,
+                    runtime.map(DirectRuntimeAdapter::session_id),
+                    &command.argv,
+                );
+                write_private_create_once(
+                    &paths.intent,
+                    unresolved_intent.as_bytes(),
+                    "unresolved direct command invocation intent",
+                )?;
                 let observation = persist_attempted_command(AttemptPersistence {
+                    attempt_id: &attempt_id,
                     commit_oid: &commit_oid,
-                    runtime_session_id: None,
+                    runtime_session_id: runtime.map(DirectRuntimeAdapter::session_id),
                     executable: Path::new(&command.argv[0]),
                     argv: &command.argv,
                     process_executable: Path::new(&command.argv[0]),
@@ -2731,48 +4184,68 @@ pub(crate) fn execute_direct_plan(
         };
         let mut effective = command.clone();
         effective.argv[0] = executable.display().to_string();
-        let intent_body = direct_intent_document(
+        if paths.record.is_file() {
+            let recovered = recover_observed_command(
+                &worktree,
+                &paths.record,
+                command,
+                runtime.map(DirectRuntimeAdapter::session_id),
+            )?;
+            if matches!(recovered.terminal, AttemptTerminal::SpawnFailed(_)) {
+                archive_reconciled_direct_failure(&paths)?;
+                attempt_id = reserve_direct_attempt_id(&paths)?;
+            }
+        }
+        let mut intent_body = direct_intent_document(
+            &attempt_id,
             &commit_oid,
             runtime.map(DirectRuntimeAdapter::session_id),
             &executable,
             &effective.argv,
         );
-        if let Err(error) = reconcile_direct_launch(&paths, &intent_body) {
-            if paths.record.is_file() {
-                let recovered = recover_observed_command(
-                    &worktree,
-                    &paths.record,
-                    command,
-                    runtime.map(DirectRuntimeAdapter::session_id),
-                )?;
+        let reconciled_launch = match reconcile_direct_launch(&paths, Some(&intent_body)) {
+            Ok(reconciled) => {
+                reconciled || reconciled_launches.get(&index).copied().unwrap_or(false)
+            }
+            Err(error) => {
+                if paths.record.is_file() {
+                    let recovered = recover_observed_command(
+                        &worktree,
+                        &paths.record,
+                        command,
+                        runtime.map(DirectRuntimeAdapter::session_id),
+                    )?;
+                    return Err(format!(
+                        "executor direct command segment {index} ownership reconciliation failed: {error}; durable terminal: {}",
+                        recovered.terminal.failure_message()
+                    ));
+                }
+                let stdout = open_or_create_private_artifact(&paths.stdout)?;
+                let stderr = open_or_create_private_artifact(&paths.stderr)?;
+                let terminal = AttemptTerminal::CleanupFailed(format!(
+                    "ownership reconciliation failed: {error}"
+                ));
+                persist_attempted_command(AttemptPersistence {
+                    attempt_id: &attempt_id,
+                    commit_oid: &commit_oid,
+                    runtime_session_id: runtime.map(DirectRuntimeAdapter::session_id),
+                    executable: &executable,
+                    argv: &effective.argv,
+                    process_executable: &executable,
+                    process_argv: &effective.argv,
+                    terminal: terminal.clone(),
+                    stdout_path: &paths.stdout,
+                    stderr_path: &paths.stderr,
+                    record_path: &paths.record,
+                    stdout: &stdout,
+                    stderr: &stderr,
+                })?;
                 return Err(format!(
-                    "executor direct command segment {index} ownership reconciliation failed: {error}; durable terminal: {}",
-                    recovered.terminal.failure_message()
+                    "executor direct command segment {index} {}",
+                    terminal.failure_message()
                 ));
             }
-            let stdout = open_or_create_private_artifact(&paths.stdout)?;
-            let stderr = open_or_create_private_artifact(&paths.stderr)?;
-            let terminal =
-                AttemptTerminal::CleanupFailed(format!("ownership reconciliation failed: {error}"));
-            persist_attempted_command(AttemptPersistence {
-                commit_oid: &commit_oid,
-                runtime_session_id: runtime.map(DirectRuntimeAdapter::session_id),
-                executable: &executable,
-                argv: &effective.argv,
-                process_executable: &executable,
-                process_argv: &effective.argv,
-                terminal: terminal.clone(),
-                stdout_path: &paths.stdout,
-                stderr_path: &paths.stderr,
-                record_path: &paths.record,
-                stdout: &stdout,
-                stderr: &stderr,
-            })?;
-            return Err(format!(
-                "executor direct command segment {index} {}",
-                terminal.failure_message()
-            ));
-        }
+        };
         if paths.record.is_file() {
             let recovered = recover_observed_command(
                 &worktree,
@@ -2781,14 +4254,28 @@ pub(crate) fn execute_direct_plan(
                 runtime.map(DirectRuntimeAdapter::session_id),
             )?;
             let terminal = recovered.terminal.clone();
-            observed.push(recovered);
-            if !terminal.is_success() {
-                return Err(format!(
-                    "executor direct command segment {index} {}",
-                    terminal.failure_message()
-                ));
+            if terminal.is_success()
+                || (reconciled_launch && matches!(terminal, AttemptTerminal::CleanupFailed(_)))
+            {
+                archive_reconciled_direct_failure(&paths)?;
+                attempt_id = reserve_direct_attempt_id(&paths)?;
+                intent_body = direct_intent_document(
+                    &attempt_id,
+                    &commit_oid,
+                    runtime.map(DirectRuntimeAdapter::session_id),
+                    &executable,
+                    &effective.argv,
+                );
+            } else {
+                observed.push(recovered);
+                if !terminal.is_success() {
+                    return Err(format!(
+                        "executor direct command segment {index} {}",
+                        terminal.failure_message()
+                    ));
+                }
+                continue;
             }
-            continue;
         }
         for partial in [&paths.stdout, &paths.stderr] {
             if partial
@@ -2819,6 +4306,7 @@ pub(crate) fn execute_direct_plan(
         };
         let mut terminal = match environment_overrides {
             Ok(environment_overrides) => execute_supervised_direct_attempt(
+                &attempt_id,
                 &worktree,
                 &effective,
                 &paths,
@@ -2831,11 +4319,12 @@ pub(crate) fn execute_direct_plan(
             Err(error) => AttemptTerminal::InfrastructureFailed(error),
         };
         if !matches!(terminal, AttemptTerminal::CleanupFailed(_)) {
-            if let Err(error) = retire_direct_launch(&paths) {
+            if let Err(error) = retire_direct_launch(&paths, &attempt_id) {
                 terminal = AttemptTerminal::CleanupFailed(error);
             }
         }
         let observation = persist_attempted_command(AttemptPersistence {
+            attempt_id: &attempt_id,
             commit_oid: &commit_oid,
             runtime_session_id: runtime.map(DirectRuntimeAdapter::session_id),
             executable: &executable,
@@ -2881,10 +4370,36 @@ fn recover_observed_command(
     runtime_session_id: Option<&str>,
 ) -> Result<ObservedDirectCommand, String> {
     let observed = read_observed_command_record(worktree, record_path)?;
-    let expected_executable = resolve_direct_executable(worktree, &declared.argv[0])?;
-    let mut expected_argv = declared.argv.clone();
-    expected_argv[0] = expected_executable.display().to_string();
-    if observed.argv != expected_argv
+    let expected_attempt_id = direct_intent_attempt_id(&record_path.with_extension("intent.json"))?
+        .ok_or_else(|| "recovered command record has no durable invocation intent".to_string())?;
+    let (expected_executable, expected_argv) =
+        if matches!(observed.terminal, AttemptTerminal::SpawnFailed(_)) {
+            let expected_intent = direct_unresolved_intent_document(
+                &observed.attempt_id,
+                &observed.commit_oid,
+                runtime_session_id,
+                &declared.argv,
+            );
+            let persisted_intent = fs::read_to_string(record_path.with_extension("intent.json"))
+                .map_err(|error| format!("read unresolved direct command intent: {error}"))?;
+            if persisted_intent != expected_intent {
+                return Err(
+                    "recovered spawn failure differs from its unresolved invocation intent"
+                        .to_string(),
+                );
+            }
+            (PathBuf::from(&declared.argv[0]), declared.argv.clone())
+        } else {
+            let executable = resolve_direct_executable(worktree, &declared.argv[0])?;
+            let mut argv = declared.argv.clone();
+            argv[0] = executable.display().to_string();
+            (executable, argv)
+        };
+    if observed.attempt_id != expected_attempt_id
+        || observed.executable != expected_executable
+        || observed.process_executable != expected_executable
+        || observed.argv != expected_argv
+        || observed.process_argv != expected_argv
         || observed.runtime_session_id.as_deref() != runtime_session_id
         || observed.stdout_path != record_path.with_extension("stdout")
         || observed.stderr_path != record_path.with_extension("stderr")
@@ -2908,6 +4423,9 @@ fn read_observed_command_record(
     let object = value
         .as_object()
         .ok_or_else(|| "recovered command record is not an object".to_string())?;
+    if object.get("schema").and_then(serde_json::Value::as_u64) != Some(3) {
+        return Err("recovered command record schema is unsupported".to_string());
+    }
     let text = |field: &str| {
         object
             .get(field)
@@ -2973,6 +4491,8 @@ fn read_observed_command_record(
         _ => return Err("recovered command terminal kind is unsupported".to_string()),
     };
     let observed = ObservedDirectCommand {
+        origin: ObservationOrigin::Diagnostic,
+        attempt_id: text("attempt_id")?,
         commit_oid: text("commit_oid")?,
         runtime_session_id: object
             .get("runtime_session_id")
@@ -2990,11 +4510,15 @@ fn read_observed_command_record(
         record_path: record_path.to_path_buf(),
         record_digest: sha256_hex(body.as_bytes()),
     };
+    if !valid_direct_attempt_id(&observed.attempt_id) {
+        return Err("recovered command record attempt_id is malformed".to_string());
+    }
     validate_observed_command(worktree, &observed)?;
     Ok(observed)
 }
 
 struct AttemptPersistence<'a> {
+    attempt_id: &'a str,
     commit_oid: &'a str,
     runtime_session_id: Option<&'a str>,
     executable: &'a Path,
@@ -3032,6 +4556,7 @@ fn persist_attempted_command(
     let stdout_digest = sha256_hex(&stdout_bytes);
     let stderr_digest = sha256_hex(&stderr_bytes);
     let record_body = observed_command_document(
+        attempt.attempt_id,
         attempt.commit_oid,
         attempt.runtime_session_id,
         attempt.executable,
@@ -3050,6 +4575,8 @@ fn persist_attempted_command(
         "direct command evidence",
     )?;
     Ok(ObservedDirectCommand {
+        origin: ObservationOrigin::Live,
+        attempt_id: attempt.attempt_id.to_string(),
         commit_oid: attempt.commit_oid.to_string(),
         runtime_session_id: attempt.runtime_session_id.map(str::to_string),
         executable: attempt.executable.to_path_buf(),
@@ -3068,6 +4595,7 @@ fn persist_attempted_command(
 
 #[allow(clippy::too_many_arguments)]
 fn observed_command_document(
+    attempt_id: &str,
     commit_oid: &str,
     runtime_session_id: Option<&str>,
     executable: &Path,
@@ -3081,7 +4609,8 @@ fn observed_command_document(
     stderr_digest: &str,
 ) -> String {
     serde_json::json!({
-        "schema": 2,
+        "schema": 3,
+        "attempt_id": attempt_id,
         "commit_oid": commit_oid,
         "runtime_session_id": runtime_session_id,
         "executable": executable,
@@ -3235,6 +4764,7 @@ fn validate_observed_command(
     let record = fs::read_to_string(&observed.record_path)
         .map_err(|error| format!("read observed command record: {error}"))?;
     let expected = observed_command_document(
+        &observed.attempt_id,
         &observed.commit_oid,
         observed.runtime_session_id.as_deref(),
         &observed.executable,
@@ -3730,6 +5260,12 @@ impl ProcessIdentity {
     fn owns_birth(&self, observed: &ProcessBirth) -> bool {
         self.pid == observed.pid
             && self.process_group == observed.process_group
+            && self.boot_id == observed.boot_id
+            && self.start_identity == observed.start_identity
+    }
+
+    fn owns_instance(&self, observed: &ProcessBirth) -> bool {
+        self.pid == observed.pid
             && self.boot_id == observed.boot_id
             && self.start_identity == observed.start_identity
     }
@@ -6334,6 +7870,22 @@ enum LaunchFailpoint {
     JournalRename = 26,
     JournalDirectorySync = 27,
     DescendantCapture = 28,
+    RingReadInterrupted = 29,
+    ArchiveAfterManifest = 30,
+    ArchiveMidMove = 31,
+    ArchiveBeforeComplete = 32,
+    RetireAfterProof = 33,
+    RetireMidDelete = 34,
+    RetireAfterLaunchDelete = 35,
+    BeforeEvidenceBundle = 36,
+    RecoveryAfterAnchorClear = 37,
+    RecoveryBeforeSnapshot = 38,
+    RetireAfterPendingRemoval = 39,
+    RotationAfterArchive = 40,
+    RotationAfterActive = 41,
+    EvidenceAfterGenerationSelect = 42,
+    OwnershipBeforeMarker = 43,
+    OwnershipAfterMarker = 44,
 }
 
 #[cfg(test)]
@@ -6350,6 +7902,8 @@ static LAST_SPAWN_HARNESS: AtomicU32 = AtomicU32::new(0);
 static PARENT_CAPTURE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static PARENT_REAP_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static RAW_READ_INTERRUPTED_ONCE: AtomicU8 = AtomicU8::new(0);
 const LAUNCH_FAILPOINT_NEVER_READY: u8 = 4;
 const LAUNCH_FAILPOINT_NEVER_CLOSE_EXEC_STATUS: u8 = 5;
 const CLEANUP_FAILPOINT_SIGNAL: u8 = 10;
@@ -6440,10 +7994,39 @@ unsafe fn raw_pump_stream(
     generation: &mut u64,
 ) -> i32 {
     let mut buffer = [0_u8; 65_536];
-    // SAFETY: buffer is writable and the pipe descriptor is nonblocking.
-    let count = unsafe { nix::libc::read(pipe_fd, buffer.as_mut_ptr().cast(), buffer.len()) };
-    if count <= 0 {
-        return count as i32;
+    let count = loop {
+        // SAFETY: buffer is writable and the pipe descriptor is nonblocking.
+        let count = {
+            #[cfg(test)]
+            if launch_child_failpoint() == LaunchFailpoint::RingReadInterrupted as u8
+                && RAW_READ_INTERRUPTED_ONCE.swap(1, Ordering::SeqCst) == 0
+            {
+                // SAFETY: errno is thread-local process state in this post-fork supervisor.
+                unsafe { *nix::libc::__errno_location() = nix::libc::EINTR };
+                -1
+            } else {
+                unsafe { nix::libc::read(pipe_fd, buffer.as_mut_ptr().cast(), buffer.len()) }
+            }
+            #[cfg(not(test))]
+            {
+                unsafe { nix::libc::read(pipe_fd, buffer.as_mut_ptr().cast(), buffer.len()) }
+            }
+        };
+        if count >= 0 {
+            break count;
+        }
+        // SAFETY: errno is thread-local process state.
+        let error = unsafe { *nix::libc::__errno_location() };
+        if error == nix::libc::EINTR {
+            continue;
+        }
+        if error == nix::libc::EAGAIN || error == nix::libc::EWOULDBLOCK {
+            return -1;
+        }
+        return -2;
+    };
+    if count == 0 {
+        return 0;
     }
     let count = count as usize;
     let position = *total % OUTPUT_SINK_LIMIT;
@@ -6468,6 +8051,53 @@ unsafe fn raw_pump_stream(
         return -2;
     }
     count as i32
+}
+
+#[cfg(unix)]
+unsafe fn raw_write_all(descriptor: i32, bytes: &[u8]) -> bool {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        // SAFETY: descriptor and the remaining immutable byte slice are valid for write.
+        let count = unsafe {
+            nix::libc::write(
+                descriptor,
+                bytes[offset..].as_ptr().cast(),
+                bytes.len() - offset,
+            )
+        };
+        if count > 0 {
+            offset += count as usize;
+        } else if count < 0
+            // SAFETY: errno is thread-local process state.
+            && unsafe { *nix::libc::__errno_location() } == nix::libc::EINTR
+        {
+            continue;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(unix)]
+unsafe fn raw_children_quiescent() -> i32 {
+    loop {
+        let mut status = 0_i32;
+        // SAFETY: this dedicated subreaper owns every remaining adopted child.
+        let waited = unsafe { nix::libc::waitpid(-1, &mut status, nix::libc::WNOHANG) };
+        if waited > 0 {
+            continue;
+        }
+        if waited == 0 {
+            return 0;
+        }
+        // SAFETY: errno is thread-local process state.
+        let error = unsafe { *nix::libc::__errno_location() };
+        if error == nix::libc::EINTR {
+            continue;
+        }
+        return if error == nix::libc::ECHILD { 1 } else { -1 };
+    }
 }
 
 #[cfg(unix)]
@@ -6508,6 +8138,8 @@ unsafe fn raw_supervisor_loop(
     {
         terminate_post_fork(127);
     }
+    let mut exit_code = None;
+    let mut exit_notified = false;
     let mut exit_recorded = false;
     loop {
         let mut pollfds = [
@@ -6553,7 +8185,7 @@ unsafe fn raw_supervisor_loop(
                     if count == -2 {
                         terminate_post_fork(127);
                     }
-                    if pollfd.revents & (nix::libc::POLLHUP | nix::libc::POLLERR) != 0 {
+                    if count == 0 {
                         nix::libc::close(pipe_descriptors[index]);
                         pipe_descriptors[index] = -1;
                     }
@@ -6561,7 +8193,7 @@ unsafe fn raw_supervisor_loop(
                 }
             }
         }
-        if !exit_recorded {
+        if exit_code.is_none() {
             let mut status = 0_i32;
             // SAFETY: harness_pid is the exact direct child of this supervisor.
             let waited =
@@ -6574,22 +8206,7 @@ unsafe fn raw_supervisor_loop(
                 } else {
                     1
                 };
-                let mut record = [0_u8; 8];
-                record[..4].copy_from_slice(&code.to_ne_bytes());
-                record[4..].copy_from_slice(b"EXIT");
-                // SAFETY: fixed record is written to the preopened private status file.
-                if !unsafe { raw_pwrite_all(exit_status, &record, 0) }
-                    || unsafe { nix::libc::fdatasync(exit_status) } != 0
-                {
-                    terminate_post_fork(127);
-                }
-                let code_bytes = code.to_ne_bytes();
-                // SAFETY: the conductor owns the read side of this inherited status pipe.
-                unsafe {
-                    nix::libc::write(harness_exit, code_bytes.as_ptr().cast(), code_bytes.len());
-                    nix::libc::close(harness_exit);
-                }
-                exit_recorded = true;
+                exit_code = Some(code);
             } else if waited < 0
                 // SAFETY: errno is thread-local process state.
                 && unsafe { *nix::libc::__errno_location() } != nix::libc::EINTR
@@ -6597,11 +8214,52 @@ unsafe fn raw_supervisor_loop(
                 terminate_post_fork(127);
             }
         }
+        if !exit_notified {
+            if let Some(code) = exit_code {
+                let code_bytes = code.to_ne_bytes();
+                // SAFETY: the conductor owns the read side when attached; a detached
+                // conductor is allowed to make this best-effort notification fail.
+                let _ = unsafe { raw_write_all(harness_exit, &code_bytes) };
+                exit_notified = true;
+            }
+        }
+        if !exit_recorded && pipe_descriptors[0] < 0 && pipe_descriptors[1] < 0 {
+            if let Some(code) = exit_code {
+                // SAFETY: this supervisor is the dedicated subreaper for the harness tree.
+                let quiescent = unsafe { raw_children_quiescent() };
+                if quiescent < 0 {
+                    terminate_post_fork(127);
+                }
+                if quiescent == 0 {
+                    continue;
+                }
+                let mut data = [0_u8; 8];
+                data[..4].copy_from_slice(&code.to_ne_bytes());
+                data[4..].copy_from_slice(b"EXIT");
+                let mut commit = [0_u8; 8];
+                commit[..4].copy_from_slice(&code.to_ne_bytes());
+                commit[4..].copy_from_slice(b"DONE");
+                // SAFETY: ordered records are written to the preopened private status file.
+                if !unsafe { raw_pwrite_all(exit_status, &data, 0) }
+                    || unsafe { nix::libc::fdatasync(exit_status) } != 0
+                    || !unsafe { raw_pwrite_all(exit_status, &commit, 8) }
+                    || unsafe { nix::libc::fdatasync(exit_status) } != 0
+                {
+                    terminate_post_fork(127);
+                }
+                // SAFETY: this is the post-sync completion fence for the attached conductor.
+                let _ = unsafe { raw_write_all(harness_exit, b"DONE") };
+                // SAFETY: this supervisor exclusively owns the notification descriptor.
+                unsafe { nix::libc::close(harness_exit) };
+                exit_recorded = true;
+            }
+        }
     }
 }
 
 #[cfg(test)]
 fn set_launch_failpoint(failpoint: LaunchFailpoint) {
+    RAW_READ_INTERRUPTED_ONCE.store(0, Ordering::SeqCst);
     LAUNCH_FAILPOINT.store(failpoint as u8, Ordering::SeqCst);
 }
 
@@ -6777,6 +8435,21 @@ fn fail_launch_at(label: &str) -> Result<(), String> {
             "journal-sync" => LaunchFailpoint::JournalSync,
             "journal-rename" => LaunchFailpoint::JournalRename,
             "journal-directory-sync" => LaunchFailpoint::JournalDirectorySync,
+            "archive-after-manifest" => LaunchFailpoint::ArchiveAfterManifest,
+            "archive-mid-move" => LaunchFailpoint::ArchiveMidMove,
+            "archive-before-complete" => LaunchFailpoint::ArchiveBeforeComplete,
+            "retire-after-proof" => LaunchFailpoint::RetireAfterProof,
+            "retire-mid-delete" => LaunchFailpoint::RetireMidDelete,
+            "retire-after-launch-delete" => LaunchFailpoint::RetireAfterLaunchDelete,
+            "evidence-before-bundle" => LaunchFailpoint::BeforeEvidenceBundle,
+            "recovery-after-anchor-clear" => LaunchFailpoint::RecoveryAfterAnchorClear,
+            "recovery-before-snapshot" => LaunchFailpoint::RecoveryBeforeSnapshot,
+            "retire-after-pending-removal" => LaunchFailpoint::RetireAfterPendingRemoval,
+            "rotation-after-archive" => LaunchFailpoint::RotationAfterArchive,
+            "rotation-after-active" => LaunchFailpoint::RotationAfterActive,
+            "evidence-after-generation-select" => LaunchFailpoint::EvidenceAfterGenerationSelect,
+            "ownership-before-marker" => LaunchFailpoint::OwnershipBeforeMarker,
+            "ownership-after-marker" => LaunchFailpoint::OwnershipAfterMarker,
             _ => LaunchFailpoint::None,
         };
         if LAUNCH_FAILPOINT.load(Ordering::SeqCst) == expected as u8
@@ -6963,6 +8636,51 @@ fn supervise_validated_harness(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finalize_recovered_completion(
+    state_path: &Path,
+    event_log: &Path,
+    state: &mut PersistedInvocation,
+    snapshot: &MutationSnapshot,
+    sinks: &OutputSinkPaths,
+    renewal: &mut ClaimRenewalSchedule,
+    exit_code: i32,
+) -> Result<SupervisionOutcome, String> {
+    state.phase = BridgePhase::Interrupted;
+    state.supervisor = None;
+    state.process = None;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    fail_launch_at("recovery-after-anchor-clear")?;
+    let mut readers = DurableOutputReaders::open(sinks, true)?;
+    if readers.drain_after_completion(state_path, event_log, state, renewal)?
+        == CompletionDrainOutcome::OwnershipLost
+    {
+        record_claim_ownership_loss(state_path, event_log, state)?;
+        return Ok(SupervisionOutcome::OwnershipLost);
+    }
+    fail_launch_at("recovery-before-snapshot")?;
+    snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
+    state.phase = if exit_code == 0 {
+        BridgePhase::ImplementationComplete
+    } else {
+        BridgePhase::Interrupted
+    };
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    append_executor_event(
+        event_log,
+        state,
+        "child_exited",
+        Some(serde_json::json!({
+            "exit_code": exit_code,
+            "adopted": true,
+            "recovered_after_supervisor_exit": true
+        })),
+    )?;
+    Ok(SupervisionOutcome::Exited { exit_code })
+}
+
 fn supervise_validated_harness_with_claim_renewal(
     state_path: &Path,
     event_log: &Path,
@@ -6974,6 +8692,66 @@ fn supervise_validated_harness_with_claim_renewal(
 ) -> Result<SupervisionOutcome, String> {
     if config.stall_timeout.is_zero() || config.poll_interval.is_zero() {
         return Err("executor supervision intervals must be non-zero".to_string());
+    }
+    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let recovery_phase = state.phase;
+    if state.process.is_none() {
+        if sinks
+            .exit_status
+            .try_exists()
+            .map_err(|error| format!("inspect recovered executor exit record: {error}"))?
+        {
+            if let Some(exit_code) = read_executor_exit_status(&sinks.exit_status)? {
+                return finalize_recovered_completion(
+                    state_path,
+                    event_log,
+                    state,
+                    snapshot,
+                    &sinks,
+                    &mut renewal,
+                    exit_code,
+                );
+            }
+        }
+        let sidecar_supervisor = match state.supervisor.clone() {
+            Some(supervisor) => Some(supervisor),
+            None => read_supervisor_identity(&sinks.supervisor_identity)?,
+        };
+        if let Some(supervisor) = sidecar_supervisor {
+            OwnedProcessSet::terminate_supervised_for_cleanup(&supervisor, None)
+                .map(|_| ())
+                .map_err(|failure| {
+                    format!(
+                        "sidecar-only supervisor cleanup is unproven: {}; cleanup={:?}",
+                        failure.reason, failure.cleanup_error
+                    )
+                })?;
+            state.phase = BridgePhase::Interrupted;
+            state.supervisor = None;
+            state.process = None;
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+            match fs::remove_file(&sinks.supervisor_identity) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "retire reconciled executor supervisor sidecar: {error}"
+                    ))
+                }
+            }
+            append_executor_event(
+                event_log,
+                state,
+                "child_recovery_required",
+                Some(serde_json::json!({
+                    "reason": "sidecar-only supervisor tree was cleaned before a fresh launch"
+                })),
+            )?;
+            if recovery_phase == BridgePhase::Pending {
+                return Ok(SupervisionOutcome::Stalled);
+            }
+        }
     }
     if let Some(expected_supervisor) = state.supervisor.as_ref() {
         let expected_supervisor = expected_supervisor.clone();
@@ -7002,27 +8780,44 @@ fn supervise_validated_harness_with_claim_renewal(
             }
             Err(_) => {
                 state.phase = BridgePhase::Interrupted;
-                let cleanup = match expected_process.as_ref() {
-                    Some(process) => match OwnedProcessSet::adopt(process) {
-                        Ok(mut owned) => owned.terminate(),
-                        Err(_error)
-                            if observe_process_identity(process.pid, &process.argv_digest)?
-                                .is_none() =>
-                        {
-                            Ok(())
-                        }
-                        Err(error) => Err(format!(
-                            "live harness could not be captured after supervisor loss: {error}"
-                        )),
-                    },
-                    None => Ok(()),
-                };
+                let completion = read_executor_exit_status(&sinks.exit_status);
+                if let Ok(Some(exit_code)) = &completion {
+                    return finalize_recovered_completion(
+                        state_path,
+                        event_log,
+                        state,
+                        snapshot,
+                        &sinks,
+                        &mut renewal,
+                        *exit_code,
+                    );
+                }
+                let cleanup = OwnedProcessSet::terminate_supervised_for_cleanup(
+                    &expected_supervisor,
+                    expected_process.as_ref(),
+                )
+                .and_then(|outcome| match outcome {
+                    SupervisedCleanup::Cleaned => Ok(()),
+                    SupervisedCleanup::OwnershipDisproven(_) => Err(AdoptionFailure {
+                        reason: "persisted harness is not a descendant of its supervisor"
+                            .to_string(),
+                        cleanup_error: None,
+                        cleanup_succeeded: false,
+                    }),
+                })
+                .map_err(|failure| {
+                    format!("{}; cleanup={:?}", failure.reason, failure.cleanup_error)
+                });
                 if cleanup.is_ok() {
                     state.supervisor = None;
                     state.process = None;
+                    state.progress_at = unix_now()?;
+                    write_invocation_atomic(state_path, state)?;
                 }
-                state.progress_at = unix_now()?;
-                write_invocation_atomic(state_path, state)?;
+                if cleanup.is_err() {
+                    state.progress_at = unix_now()?;
+                    write_invocation_atomic(state_path, state)?;
+                }
                 append_executor_event(
                     event_log,
                     state,
@@ -7030,17 +8825,19 @@ fn supervise_validated_harness_with_claim_renewal(
                     Some(serde_json::json!({
                         "last_progress_at": state.progress_at,
                         "reason": "persisted supervisor is dead; exact harness cleanup completed or the invocation remains quarantined",
-                        "cleanup_error": cleanup.as_ref().err()
+                        "cleanup_error": cleanup.as_ref().err(),
+                        "completion_error": completion.as_ref().err()
                     })),
                 )?;
-                Err(match cleanup {
-                    Ok(()) => "executor supervisor is dead; recovery classification is required before relaunch".to_string(),
-                    Err(error) => format!("executor supervisor is dead; recovery quarantined until exact cleanup succeeds: {error}"),
+                Err(match (completion, cleanup) {
+                    (Ok(None), Ok(())) => "executor supervisor is dead without a durable completion record; recovery classification is required before relaunch".to_string(),
+                    (Err(status), Ok(())) => format!("executor supervisor is dead with an invalid durable completion record: {status}"),
+                    (_, Err(error)) => format!("executor supervisor is dead; recovery quarantined until exact cleanup succeeds: {error}"),
+                    (Ok(Some(_)), Ok(())) => unreachable!("durable completion returned above"),
                 })
             }
         };
     }
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
     if state.process.is_none() {
         if let Some(supervisor) = read_supervisor_identity(&sinks.supervisor_identity)? {
             match OwnedProcess::capture_identity(&supervisor) {
@@ -7287,6 +9084,30 @@ impl OwnedProcess {
         })
     }
 
+    fn capture_cleanup_instance(expected: &ProcessIdentity) -> Result<Self, String> {
+        let pidfd = pidfd_open(expected.pid)?;
+        let first = observe_process_birth(expected.pid)?
+            .ok_or_else(|| "executor process exited during cleanup identity capture".to_string())?;
+        let second = observe_process_birth(expected.pid)?.ok_or_else(|| {
+            "executor process exited during second cleanup identity read".to_string()
+        })?;
+        if !expected.owns_instance(&first)
+            || !expected.owns_instance(&second)
+            || first.pid != second.pid
+            || first.boot_id != second.boot_id
+            || first.start_identity != second.start_identity
+        {
+            return Err(
+                "executor immutable birth anchor changed after cleanup pidfd capture; refusing reused PID"
+                    .to_string(),
+            );
+        }
+        Ok(Self {
+            birth: second,
+            pidfd,
+        })
+    }
+
     fn capture_forked_child(pid: u32) -> Result<Self, String> {
         let pidfd = pidfd_open(pid)?;
         let birth = observe_process_birth(pid)?
@@ -7397,6 +9218,69 @@ struct AdoptionFailure {
 }
 
 #[cfg(target_os = "linux")]
+#[derive(Debug)]
+enum SupervisedCleanup {
+    Cleaned,
+    OwnershipDisproven(OwnedProcessSet),
+}
+
+#[cfg(target_os = "linux")]
+enum SupervisedCleanupPreparation {
+    Ready,
+    OwnershipDisproven,
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_proof_failure(mut failure: AdoptionFailure, detail: &str) -> AdoptionFailure {
+    failure.reason = format!("{}; {detail}", failure.reason);
+    failure.cleanup_succeeded = false;
+    failure
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_instance_is_live(expected: &ProcessIdentity) -> Result<bool, String> {
+    match OwnedProcess::capture_cleanup_instance(expected) {
+        Ok(process) => process.is_live(),
+        Err(capture_error) => match observe_process_birth(expected.pid)? {
+            Some(observed) if expected.owns_instance(&observed) => Err(format!(
+                "exact harness instance remains observable after cleanup: {capture_error}"
+            )),
+            Some(_) | None => Ok(false),
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn terminate_cleanup_instance(harness: &ProcessIdentity) -> Result<(), AdoptionFailure> {
+    let leader =
+        OwnedProcess::capture_cleanup_instance(harness).map_err(|reason| AdoptionFailure {
+            reason: format!("cleanup-only immutable harness capture failed: {reason}"),
+            cleanup_error: None,
+            cleanup_succeeded: false,
+        })?;
+    let mut guard = AdoptedProcessGuard::new(OwnedProcessSet {
+        leader,
+        descendants: BTreeMap::new(),
+    });
+    if let Err(reason) = guard
+        .processes_mut()
+        .capture_descendants_while_leader_live()
+    {
+        let cleanup = guard.terminate();
+        return Err(AdoptionFailure {
+            reason,
+            cleanup_succeeded: cleanup.is_ok(),
+            cleanup_error: cleanup.err(),
+        });
+    }
+    guard.terminate().map_err(|cleanup| AdoptionFailure {
+        reason: "terminate cleanup-only immutable harness tree".to_string(),
+        cleanup_error: Some(cleanup),
+        cleanup_succeeded: false,
+    })
+}
+
+#[cfg(target_os = "linux")]
 impl OwnedProcessSet {
     fn from_forked_child(pid: u32) -> Result<Self, String> {
         #[cfg(test)]
@@ -7496,6 +9380,103 @@ impl OwnedProcessSet {
         Ok(guard.release())
     }
 
+    fn terminate_supervised_for_cleanup(
+        supervisor: &ProcessIdentity,
+        harness: Option<&ProcessIdentity>,
+    ) -> Result<SupervisedCleanup, AdoptionFailure> {
+        let supervisor_live =
+            cleanup_instance_is_live(supervisor).map_err(|reason| AdoptionFailure {
+                reason,
+                cleanup_error: None,
+                cleanup_succeeded: false,
+            })?;
+        if supervisor_live {
+            let leader = OwnedProcess::capture_cleanup_instance(supervisor).map_err(|reason| {
+                AdoptionFailure {
+                    reason: format!("cleanup-only immutable supervisor capture failed: {reason}"),
+                    cleanup_error: None,
+                    cleanup_succeeded: false,
+                }
+            })?;
+            let mut guard = AdoptedProcessGuard::new(Self {
+                leader,
+                descendants: BTreeMap::new(),
+            });
+            let prepare = (|| -> Result<SupervisedCleanupPreparation, String> {
+                guard
+                    .processes_mut()
+                    .capture_descendants_while_leader_live()?;
+                if let Some(harness) = harness {
+                    if guard.processes_mut().leader.birth == harness.birth() {
+                        return Ok(SupervisedCleanupPreparation::Ready);
+                    }
+                    let exact_harness = match OwnedProcess::capture_cleanup_instance(harness) {
+                        Ok(harness) => harness,
+                        Err(_error) if !cleanup_instance_is_live(harness)? => {
+                            return Ok(SupervisedCleanupPreparation::Ready)
+                        }
+                        Err(error) => return Err(error),
+                    };
+                    let key = (
+                        exact_harness.birth.pid,
+                        exact_harness.birth.start_identity.clone(),
+                    );
+                    if !guard.processes_mut().descendants.contains_key(&key) {
+                        return Ok(SupervisedCleanupPreparation::OwnershipDisproven);
+                    }
+                    guard.processes_mut().descendants.insert(key, exact_harness);
+                }
+                Ok(SupervisedCleanupPreparation::Ready)
+            })();
+            match prepare {
+                Ok(SupervisedCleanupPreparation::Ready) => {}
+                Ok(SupervisedCleanupPreparation::OwnershipDisproven) => {
+                    return Ok(SupervisedCleanup::OwnershipDisproven(guard.release()));
+                }
+                Err(reason) => {
+                    let cleanup = guard.terminate();
+                    return Err(cleanup_proof_failure(
+                        AdoptionFailure {
+                            reason,
+                            cleanup_succeeded: cleanup.is_ok(),
+                            cleanup_error: cleanup.err(),
+                        },
+                        "persisted harness ownership remains unproven",
+                    ));
+                }
+            }
+            return guard
+                .terminate()
+                .map(|()| SupervisedCleanup::Cleaned)
+                .map_err(|cleanup| AdoptionFailure {
+                    reason: "terminate cleanup-only supervised executor tree".to_string(),
+                    cleanup_error: Some(cleanup),
+                    cleanup_succeeded: false,
+                });
+        }
+        let harness = harness.ok_or_else(|| AdoptionFailure {
+            reason:
+                "cleanup is unproven: persisted supervisor is absent and no harness anchor exists"
+                    .to_string(),
+            cleanup_error: None,
+            cleanup_succeeded: false,
+        })?;
+        if !cleanup_instance_is_live(harness).map_err(|reason| AdoptionFailure {
+            reason,
+            cleanup_error: None,
+            cleanup_succeeded: false,
+        })? {
+            return Err(AdoptionFailure {
+                reason:
+                    "cleanup is unproven: persisted supervisor and harness anchors are both absent"
+                        .to_string(),
+                cleanup_error: None,
+                cleanup_succeeded: false,
+            });
+        }
+        terminate_cleanup_instance(harness).map(|()| SupervisedCleanup::Cleaned)
+    }
+
     fn capture_descendants_while_leader_live(&mut self) -> Result<(), String> {
         if !self.leader.is_live()? {
             return Ok(());
@@ -7558,7 +9539,6 @@ impl OwnedProcessSet {
         }
         Ok(())
     }
-
     fn capture_launch_descendants(&mut self) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_millis(25);
         while self.leader.is_live()? && Instant::now() < deadline {
@@ -7606,7 +9586,7 @@ impl OwnedProcessSet {
         Ok(())
     }
 
-    fn terminate(&mut self) -> Result<(), String> {
+    fn freeze_stable_tree(&mut self) -> Result<(), String> {
         self.leader.signal(Signal::SIGSTOP)?;
         #[cfg(test)]
         if cleanup_failpoint() == CLEANUP_FAILPOINT_FREEZE_WINDOW {
@@ -7638,7 +9618,10 @@ impl OwnedProcessSet {
                     .to_string(),
             );
         }
+        Ok(())
+    }
 
+    fn kill_frozen_descendants(&mut self) -> Result<(), String> {
         self.signal_descendants(Signal::SIGKILL)?;
         for _ in 0..20 {
             self.reap_descendants()?;
@@ -7653,6 +9636,12 @@ impl OwnedProcessSet {
                     .to_string(),
             );
         }
+        Ok(())
+    }
+
+    fn terminate(&mut self) -> Result<(), String> {
+        self.freeze_stable_tree()?;
+        self.kill_frozen_descendants()?;
         self.leader.signal(Signal::SIGKILL)?;
         for _ in 0..20 {
             self.reap_descendants()?;
@@ -7840,7 +9829,7 @@ impl ForkedChild {
         }
         let status = self
             .harness_exit
-            .take()
+            .as_ref()
             .ok_or_else(|| "executor harness exit-status pipe is missing".to_string())?;
         let mut bytes = [0_u8; 4];
         read_exact_pipe_until_deadline(
@@ -7854,6 +9843,25 @@ impl ForkedChild {
         };
         self.reaped = Some(exit);
         Ok(Some(exit))
+    }
+
+    fn wait_output_complete(&mut self) -> Result<(), String> {
+        let status = self
+            .harness_exit
+            .as_ref()
+            .ok_or_else(|| "executor harness completion pipe is missing".to_string())?;
+        let mut marker = [0_u8; 4];
+        read_exact_pipe_until_deadline(
+            status.as_raw_fd(),
+            &mut marker,
+            HARNESS_EXIT_STATUS_TIMEOUT,
+            "executor harness output-complete",
+        )?;
+        if &marker != b"DONE" {
+            return Err("executor harness output-complete marker is malformed".to_string());
+        }
+        self.harness_exit = None;
+        Ok(())
     }
 }
 
@@ -8035,7 +10043,11 @@ fn output_sink_paths(state_path: &Path, invocation_id: &str) -> Result<OutputSin
     })
 }
 
-fn write_supervisor_identity(path: &Path, identity: &ProcessIdentity) -> Result<(), String> {
+fn write_supervisor_identity(
+    path: &Path,
+    identity: &ProcessIdentity,
+    attempt_id: Option<&str>,
+) -> Result<(), String> {
     reject_symlink_path(path)?;
     let parent = path
         .parent()
@@ -8055,7 +10067,13 @@ fn write_supervisor_identity(path: &Path, identity: &ProcessIdentity) -> Result<
         .map_err(|error| format!("create executor supervisor journal: {error}"))?;
     let result = (|| {
         fail_launch_at("journal-write")?;
-        file.write_all(process_identity_value(identity).to_string().as_bytes())
+        let document = serde_json::json!({
+            "schema": 2,
+            "attempt_id": attempt_id,
+            "identity": process_identity_value(identity),
+        })
+        .to_string();
+        file.write_all(document.as_bytes())
             .map_err(|error| format!("write executor supervisor journal: {error}"))?;
         file.write_all(b"\n")
             .map_err(|error| format!("write executor supervisor journal newline: {error}"))?;
@@ -8077,15 +10095,35 @@ fn write_supervisor_identity(path: &Path, identity: &ProcessIdentity) -> Result<
 }
 
 fn read_supervisor_identity(path: &Path) -> Result<Option<ProcessIdentity>, String> {
+    Ok(read_supervisor_journal(path)?.map(|journal| journal.1))
+}
+
+fn read_supervisor_journal(
+    path: &Path,
+) -> Result<Option<(Option<String>, ProcessIdentity)>, String> {
     reject_symlink_path(path)?;
     let body = match fs::read_to_string(path) {
         Ok(body) => body,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(format!("read executor supervisor journal: {error}")),
     };
-    let value = serde_json::from_str(&body)
+    let value: serde_json::Value = serde_json::from_str(&body)
         .map_err(|error| format!("invalid executor supervisor journal: {error}"))?;
-    parse_process_identity(value, "supervisor journal").map(Some)
+    if value.get("schema").and_then(serde_json::Value::as_u64) != Some(2) {
+        return Err("executor supervisor journal schema is unsupported".to_string());
+    }
+    let attempt_id = value
+        .get("attempt_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let identity = parse_process_identity(
+        value
+            .get("identity")
+            .cloned()
+            .ok_or_else(|| "executor supervisor journal has no identity".to_string())?,
+        "supervisor journal",
+    )?;
+    Ok(Some((attempt_id, identity)))
 }
 
 #[cfg(unix)]
@@ -8144,7 +10182,7 @@ fn prepare_output_pump(paths: &OutputSinkPaths) -> Result<OutputPumpFiles, Strin
     write_output_cursor(&stderr_reader, OutputCursor::default())?;
     let exit_status = open_private_file(&paths.exit_status, true)?;
     exit_status
-        .set_len(8)
+        .set_len(16)
         .map_err(|error| format!("size executor exit record: {error}"))?;
     Ok(OutputPumpFiles {
         stdout,
@@ -8159,6 +10197,7 @@ fn prepare_output_pump(paths: &OutputSinkPaths) -> Result<OutputPumpFiles, Strin
 fn spawn_blocked_harness(
     harness: &ValidatedInvocation,
     sinks: &OutputSinkPaths,
+    attempt_id: Option<&str>,
 ) -> Result<ForkedChild, SpawnFailure> {
     let supervisor_executable = fs::canonicalize(
         std::env::current_exe()
@@ -8368,6 +10407,7 @@ fn spawn_blocked_harness(
                     captured_supervisor
                         .as_ref()
                         .expect("captured supervisor identity"),
+                    attempt_id,
                 )?;
                 fail_launch_at("parent-pidfd")?;
                 fail_launch_at("parent-harness")?;
@@ -8387,7 +10427,25 @@ fn spawn_blocked_harness(
             })();
             match setup {
                 Ok(child) => Ok(child),
-                Err(error) => {
+                Err(mut error) => {
+                    match spawn_guard.processes_mut().leader.refresh_birth() {
+                        Ok(()) => {
+                            let supervisor_birth = spawn_guard.processes_mut().leader.birth.clone();
+                            captured_supervisor = Some(Box::new(ProcessIdentity {
+                                pid: supervisor_birth.pid,
+                                process_group: supervisor_birth.process_group,
+                                executable: supervisor_executable.clone(),
+                                argv_digest: supervisor_argv_digest.clone(),
+                                boot_id: supervisor_birth.boot_id,
+                                start_identity: supervisor_birth.start_identity,
+                            }));
+                        }
+                        Err(refresh) => {
+                            error.push_str(&format!(
+                                "; refresh owned supervisor birth before cleanup: {refresh}"
+                            ));
+                        }
+                    }
                     let cleanup = spawn_guard.terminate();
                     Err(SpawnFailure {
                         reason: error,
@@ -8438,6 +10496,11 @@ fn spawn_blocked_harness(
                     terminate_post_fork(127);
                 }
                 if harness_pid > 0 {
+                    if nix::libc::signal(nix::libc::SIGPIPE, nix::libc::SIG_IGN)
+                        == nix::libc::SIG_ERR
+                    {
+                        terminate_post_fork(127);
+                    }
                     nix::libc::close(status_fd);
                     nix::libc::close(ready_fd);
                     nix::libc::close(barrier_fd);
@@ -8558,7 +10621,7 @@ fn launch_and_supervise(
     let mut subreaper = ScopedChildSubreaper::enable()?;
     let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
     #[cfg(unix)]
-    let child = match spawn_blocked_harness(harness, &sinks) {
+    let child = match spawn_blocked_harness(harness, &sinks, None) {
         Ok(child) => child,
         Err(failure) => {
             if !failure.cleanup_succeeded {
@@ -8790,6 +10853,35 @@ fn launch_and_supervise(
                         .try_wait()
                         .map_err(|error| format!("observe executor child exit: {error}"))?;
                     if let Some(status) = status {
+                        let durable_exit = match guard.child_mut().wait_output_complete() {
+                            Ok(()) => {
+                                guard.child_mut().capture_descendants()?;
+                                if guard.child_mut().live_descendants()? {
+                                    return Err(format!(
+                                        "executor durable exit {} retained a live descendant",
+                                        status.code
+                                    ));
+                                }
+                                let durable = read_executor_exit_status(&sinks.exit_status)?
+                                    .ok_or_else(|| {
+                                        "executor output-complete marker lacked durable exit status"
+                                            .to_string()
+                                    })?;
+                                if durable != status.code {
+                                    return Err(format!(
+                                        "executor prompt exit {} disagrees with durable exit {durable}",
+                                        status.code
+                                    ));
+                                }
+                                Some(durable)
+                            }
+                            Err(error) => {
+                                return Err(format!(
+                                    "{error}; prompt-only exit code {} is not terminal authority",
+                                    status.code
+                                ))
+                            }
+                        };
                         guard.terminate()?;
                         if readers.drain_after_completion(
                             state_path,
@@ -8826,7 +10918,10 @@ fn launch_and_supervise(
                             event_log,
                             state,
                             "child_exited",
-                            Some(serde_json::json!({"exit_code": status.code})),
+                            Some(serde_json::json!({
+                                "exit_code": status.code,
+                                "durable_completion": durable_exit.is_some()
+                            })),
                         )?;
                         return Ok(SupervisionOutcome::Exited {
                             exit_code: status.code,
@@ -8976,6 +11071,7 @@ fn supervise_adopted_process(
     let mut last_progress = Instant::now()
         .checked_sub(elapsed)
         .unwrap_or_else(Instant::now);
+    let mut harness_dead_since = None;
 
     let result = (|| -> Result<SupervisionOutcome, String> {
         if renewal.is_enabled() {
@@ -9024,7 +11120,21 @@ fn supervise_adopted_process(
                 }
             }
 
-            if let Some(exit_code) = read_executor_exit_status(&sinks.exit_status)? {
+            let supervisor_live = guard.processes_mut().leader.is_live()?;
+            let exit_code = if supervisor_live {
+                read_live_executor_exit_status(&sinks.exit_status)?
+            } else {
+                read_executor_exit_status(&sinks.exit_status)?
+            };
+            if let Some(exit_code) = exit_code {
+                guard
+                    .processes_mut()
+                    .capture_descendants_while_leader_live()?;
+                if guard.processes_mut().any_descendants_live()? {
+                    return Err(format!(
+                        "adopted executor durable exit {exit_code} retained a live descendant"
+                    ));
+                }
                 guard.terminate()?;
                 if readers.drain_after_completion(state_path, event_log, state, &mut renewal)?
                     == CompletionDrainOutcome::OwnershipLost
@@ -9054,7 +11164,23 @@ fn supervise_adopted_process(
                 return Ok(SupervisionOutcome::Exited { exit_code });
             }
 
-            if guard.processes_mut().leader.is_live()? {
+            if supervisor_live {
+                let harness_live = match harness {
+                    Some(harness) => cleanup_instance_is_live(harness)?,
+                    None => true,
+                };
+                if harness_live {
+                    harness_dead_since = None;
+                } else {
+                    let exited_at = harness_dead_since.get_or_insert_with(Instant::now);
+                    if exited_at.elapsed() >= HARNESS_EXIT_STATUS_TIMEOUT {
+                        return Err(
+                            "adopted executor harness output-complete timeout after promptless exit"
+                                .to_string(),
+                        );
+                    }
+                    continue;
+                }
                 if last_progress.elapsed() >= config.stall_timeout {
                     let last_progress_at = state.progress_at;
                     guard.terminate()?;
@@ -9162,24 +11288,67 @@ impl Drop for AdoptedProcessGuard {
     }
 }
 
-fn read_executor_exit_status(path: &Path) -> Result<Option<i32>, String> {
+fn read_executor_exit_status_record(
+    path: &Path,
+    incomplete_is_pending: bool,
+) -> Result<Option<i32>, String> {
     reject_symlink_path(path)?;
-    let mut record = [0_u8; 8];
     let file = OpenOptions::new()
         .read(true)
+        .write(true)
         .open(path)
         .map_err(|error| format!("open executor exit record: {error}"))?;
-    file.read_exact_at(&mut record, 0)
-        .map_err(|error| format!("read executor exit record: {error}"))?;
-    if record == [0_u8; 8] {
+    let read_record = || {
+        let mut record = [0_u8; 16];
+        file.read_exact_at(&mut record, 0).map(|()| record)
+    };
+    let candidate = match read_record() {
+        Ok(record) => record,
+        Err(error)
+            if incomplete_is_pending && error.kind() == std::io::ErrorKind::UnexpectedEof =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(format!("read executor exit record: {error}")),
+    };
+    file.sync_all()
+        .map_err(|error| format!("sync executor exit record: {error}"))?;
+    let record = match read_record() {
+        Ok(record) => record,
+        Err(error)
+            if incomplete_is_pending && error.kind() == std::io::ErrorKind::UnexpectedEof =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(format!("reread executor exit record: {error}")),
+    };
+    if candidate != record {
+        if incomplete_is_pending {
+            return Ok(None);
+        }
+        return Err("executor exit record changed across its durability fence".to_string());
+    }
+    if record == [0_u8; 16] {
         return Ok(None);
     }
-    if &record[4..] != b"EXIT" {
+    let data_code = i32::from_ne_bytes(record[..4].try_into().expect("exit status bytes"));
+    let commit_code =
+        i32::from_ne_bytes(record[8..12].try_into().expect("exit commit status bytes"));
+    if &record[4..8] != b"EXIT" || &record[12..] != b"DONE" || data_code != commit_code {
+        if incomplete_is_pending {
+            return Ok(None);
+        }
         return Err("executor exit record is malformed".to_string());
     }
-    Ok(Some(i32::from_ne_bytes(
-        record[..4].try_into().expect("exit status bytes"),
-    )))
+    Ok(Some(data_code))
+}
+
+fn read_executor_exit_status(path: &Path) -> Result<Option<i32>, String> {
+    read_executor_exit_status_record(path, false)
+}
+
+fn read_live_executor_exit_status(path: &Path) -> Result<Option<i32>, String> {
+    read_executor_exit_status_record(path, true)
 }
 
 impl DurableOutputReaders {
@@ -10515,6 +12684,8 @@ mod tests {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -10541,16 +12712,123 @@ mod tests {
     struct DetachedSupervisorCleanup(ProcessIdentity);
 
     #[cfg(target_os = "linux")]
-    fn reap_exited_fixture_children() {
+    struct DirectCrashFixtureCleanup {
+        parent: Option<std::process::Child>,
+        conductor: Option<super::OwnedProcessSet>,
+        launch: PathBuf,
+        supervisor: Option<ProcessIdentity>,
+        harness: Option<ProcessIdentity>,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl DirectCrashFixtureCleanup {
+        fn new(mut parent: std::process::Child, launch: PathBuf) -> Self {
+            let conductor = match super::OwnedProcessSet::from_forked_child(parent.id()) {
+                Ok(conductor) => conductor,
+                Err(error) => {
+                    let _ = parent.kill();
+                    let _ = parent.wait();
+                    panic!("arm exact crash conductor cleanup: {error}");
+                }
+            };
+            Self {
+                parent: Some(parent),
+                conductor: Some(conductor),
+                launch,
+                supervisor: None,
+                harness: None,
+            }
+        }
+
+        fn arm(&mut self, supervisor: ProcessIdentity, harness: ProcessIdentity) {
+            self.supervisor = Some(supervisor);
+            self.harness = Some(harness);
+        }
+
+        fn crash_parent(&mut self) {
+            let parent = self.parent.as_mut().expect("crash parent is armed");
+            parent.kill().expect("crash command parent");
+            parent.wait().expect("reap crashed command parent");
+            self.parent = None;
+        }
+
+        fn disarm(mut self) {
+            self.parent = None;
+            self.conductor = None;
+            self.supervisor = None;
+            self.harness = None;
+        }
+
+        fn recover_launch_identities(&mut self) {
+            if self.supervisor.is_some() && self.harness.is_some() {
+                return;
+            }
+            let Ok(body) = fs::read_to_string(&self.launch) else {
+                return;
+            };
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) else {
+                return;
+            };
+            if self.supervisor.is_none() {
+                self.supervisor = value.get("supervisor").cloned().and_then(|value| {
+                    super::parse_process_identity(value, "fixture supervisor cleanup").ok()
+                });
+            }
+            if self.harness.is_none() {
+                self.harness = value.get("process").cloned().and_then(|value| {
+                    super::parse_process_identity(value, "fixture harness cleanup").ok()
+                });
+            }
+        }
+
+        fn terminate_birth_tree(identity: &ProcessIdentity) {
+            let Ok(leader) = super::OwnedProcess::capture_cleanup_instance(identity) else {
+                return;
+            };
+            let mut processes = super::OwnedProcessSet {
+                leader,
+                descendants: BTreeMap::new(),
+            };
+            let _ = processes.capture_descendants_while_leader_live();
+            let _ = processes.terminate();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for DirectCrashFixtureCleanup {
+        fn drop(&mut self) {
+            if let Some(conductor) = self.conductor.as_mut() {
+                let _ = conductor.capture_descendants_while_leader_live();
+                let _ = conductor.terminate();
+            }
+            self.conductor = None;
+            if let Some(parent) = self.parent.as_mut() {
+                let _ = parent.kill();
+                let _ = parent.wait();
+            }
+            self.parent = None;
+            self.recover_launch_identities();
+            if let Some(supervisor) = &self.supervisor {
+                Self::terminate_birth_tree(supervisor);
+            }
+            if let Some(harness) = &self.harness {
+                Self::terminate_birth_tree(harness);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn reap_exited_fixture_child(pid: u32) {
+        let pid = nix::unistd::Pid::from_raw(i32::try_from(pid).expect("fixture PID range"));
         loop {
-            match nix::sys::wait::waitpid(
-                nix::unistd::Pid::from_raw(-1),
-                Some(nix::sys::wait::WaitPidFlag::WNOHANG),
-            ) {
-                Ok(nix::sys::wait::WaitStatus::StillAlive) | Err(nix::errno::Errno::ECHILD) => {
+            match nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
+                Ok(nix::sys::wait::WaitStatus::StillAlive)
+                | Err(nix::errno::Errno::ECHILD)
+                | Err(nix::errno::Errno::ESRCH) => {
                     break;
                 }
-                Ok(_) => {}
+                Ok(_) => break,
+                Err(nix::errno::Errno::EINTR) => continue,
                 Err(error) => panic!("reap exited executor fixture child: {error}"),
             }
         }
@@ -10562,7 +12840,7 @@ mod tests {
             if let Ok(mut processes) = super::OwnedProcessSet::adopt(&self.0) {
                 let _ = processes.terminate();
             }
-            reap_exited_fixture_children();
+            reap_exited_fixture_child(self.0.pid);
         }
     }
 
@@ -10589,10 +12867,16 @@ mod tests {
     #[cfg(target_os = "linux")]
     impl Drop for DetachedForkedCleanup {
         fn drop(&mut self) {
+            let leader = self
+                .processes
+                .as_ref()
+                .map(|processes| processes.leader.birth.pid);
             if let Some(processes) = self.processes.as_mut() {
                 let _ = processes.terminate();
             }
-            reap_exited_fixture_children();
+            if let Some(leader) = leader {
+                reap_exited_fixture_child(leader);
+            }
         }
     }
 
@@ -12339,6 +14623,75 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_exit_record_requires_complete_synced_fence() {
+        let fixture = GitFixture::new("exit-record-fence");
+        let exit_record = fixture.root.join("executor.exit");
+        fs::write(&exit_record, [0_u8; 16]).expect("zero exit record");
+        fs::set_permissions(&exit_record, fs::Permissions::from_mode(0o600))
+            .expect("private exit record");
+
+        assert_eq!(
+            super::read_live_executor_exit_status(&exit_record).expect("live pending record"),
+            None,
+            "a prompt without its durable record cannot authorize success"
+        );
+        assert_eq!(
+            super::read_executor_exit_status(&exit_record).expect("dead incomplete record"),
+            None,
+            "an absent durable record cannot become recovery truth"
+        );
+
+        let mut partial = [0_u8; 16];
+        partial[..4].copy_from_slice(&0_i32.to_ne_bytes());
+        partial[4..6].copy_from_slice(b"EX");
+        fs::write(&exit_record, partial).expect("partial exit record");
+        assert_eq!(
+            super::read_live_executor_exit_status(&exit_record).expect("live partial record"),
+            None,
+            "a partial record remains pending while the exact supervisor is live"
+        );
+        assert!(super::read_executor_exit_status(&exit_record)
+            .expect_err("dead partial record must fail closed")
+            .contains("malformed"));
+
+        let mut precommit = [0_u8; 16];
+        precommit[..4].copy_from_slice(&0_i32.to_ne_bytes());
+        precommit[4..8].copy_from_slice(b"EXIT");
+        fs::write(&exit_record, precommit).expect("precommit exit record");
+        assert_eq!(
+            super::read_live_executor_exit_status(&exit_record).expect("live precommit record"),
+            None
+        );
+        assert!(super::read_executor_exit_status(&exit_record)
+            .expect_err("dead precommit record must fail closed")
+            .contains("malformed"));
+
+        let mut mismatch = precommit;
+        mismatch[8..12].copy_from_slice(&7_i32.to_ne_bytes());
+        mismatch[12..].copy_from_slice(b"DONE");
+        fs::write(&exit_record, mismatch).expect("mismatched exit record");
+        assert_eq!(
+            super::read_live_executor_exit_status(&exit_record).expect("live mismatch record"),
+            None
+        );
+        assert!(super::read_executor_exit_status(&exit_record)
+            .expect_err("dead mismatch record must fail closed")
+            .contains("malformed"));
+
+        let mut complete = [0_u8; 16];
+        complete[..4].copy_from_slice(&7_i32.to_ne_bytes());
+        complete[4..8].copy_from_slice(b"EXIT");
+        complete[8..12].copy_from_slice(&7_i32.to_ne_bytes());
+        complete[12..].copy_from_slice(b"DONE");
+        fs::write(&exit_record, complete).expect("complete exit record");
+        assert_eq!(
+            super::read_executor_exit_status(&exit_record).expect("complete exit record"),
+            Some(7)
+        );
+    }
+
     #[cfg(target_os = "linux")]
     fn detach_harness_for_adoption(
         fixture: &GitFixture,
@@ -12362,8 +14715,8 @@ mod tests {
         .expect("validate adoptable harness");
         let sinks = super::output_sink_paths(state_path, &state.identity.invocation_id)
             .expect("adoption output paths");
-        let mut child =
-            super::spawn_blocked_harness(&validated, &sinks).expect("spawn adoptable harness");
+        let mut child = super::spawn_blocked_harness(&validated, &sinks, None)
+            .expect("spawn adoptable harness");
         let supervisor_birth = child.supervisor_birth().clone();
         let harness_birth = child.birth().clone();
         state.phase = BridgePhase::Implementing;
@@ -12395,10 +14748,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn autonomous_executor_bridge_adopts_daemonizing_success_and_failure() {
-        for (exit_code, expected_phase) in [
-            (0, BridgePhase::ImplementationComplete),
-            (7, BridgePhase::Interrupted),
-        ] {
+        for exit_code in [0, 7] {
             let fixture = GitFixture::new(&format!("adopt-daemon-{exit_code}"));
             let mut state = supervision_state(&fixture);
             let state_path = fixture.root.join("state/invocation.json");
@@ -12412,7 +14762,7 @@ mod tests {
             let snapshot = MutationSnapshot::capture(&fixture.repo, &state.identity.branch)
                 .expect("adoption snapshot");
 
-            let outcome = super::supervise_validated_harness(
+            let error = super::supervise_validated_harness(
                 &state_path,
                 &event_log,
                 &mut state,
@@ -12420,10 +14770,10 @@ mod tests {
                 &snapshot,
                 supervision_config(2_000),
             )
-            .expect("adopted harness exit remains attributable");
+            .expect_err("adopted retained writer must not authorize terminal exit");
 
-            assert_eq!(outcome, SupervisionOutcome::Exited { exit_code });
-            assert_eq!(state.phase, expected_phase);
+            assert!(error.contains("output-complete timeout"), "{error}");
+            assert_eq!(state.phase, BridgePhase::Interrupted);
             assert!(state.supervisor.is_none());
             assert!(state.process.is_none());
             let descendant = fs::read_to_string(&descendant_pid)
@@ -12442,12 +14792,247 @@ mod tests {
             );
             let events = fs::read_to_string(&event_log).expect("adopted events");
             assert!(events.contains("\"event\":\"child_adopted\""), "{events}");
-            assert!(
-                events.contains(&format!("\"exit_code\":{exit_code}")),
-                "{events}"
-            );
+            assert!(!events.contains("\"event\":\"child_exited\""), "{events}");
             assert!(events.contains(&format!("adopted-{exit_code}")), "{events}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_adopted_restart_waits_for_delayed_stderr_tail() {
+        let fixture = GitFixture::new("adopt-delayed-tail");
+        let mut state = supervision_state(&fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let validated = detach_harness_for_adoption(
+            &fixture,
+            &state_path,
+            &mut state,
+            "(sleep 0.2; printf 'adopted-delayed-tail\\n' >&2) & exit 0",
+        );
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let outcome = super::supervise_validated_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &validated,
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("adopted delayed tail reaches durable completion");
+        let events = fs::read_to_string(event_log).expect("adopted delayed events");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        assert!(events.contains("adopted-delayed-tail"), "{events}");
+        assert!(events.contains("\"event\":\"child_exited\""), "{events}");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_sidecar_only_writer_is_cleaned_before_fresh_launch() {
+        let fixture = GitFixture::new("sidecar-only-writer");
+        let mut state = supervision_state(&fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let _ = detach_harness_for_adoption(
+            &fixture,
+            &state_path,
+            &mut state,
+            "while :; do printf 'old-writer\\n'; sleep 0.01; done",
+        );
+        let old_harness = state.process.clone().expect("old harness identity");
+        state.process = None;
+        super::write_invocation_atomic(&state_path, &state).expect("persist sidecar-only state");
+        let fresh_marker = fixture.root.join("fresh-launch");
+        let invocation = shell_invocation(
+            &fixture.repo,
+            &format!("printf fresh > '{}'", fresh_marker.display()),
+        );
+        let fresh = super::validate_invocation(
+            &HarnessInvocation {
+                program: invocation.program.canonicalize().expect("canonical shell"),
+                args: invocation.args,
+                current_dir: invocation
+                    .current_dir
+                    .canonicalize()
+                    .expect("canonical repo"),
+                requires_mutation_snapshots: false,
+            },
+            &state.identity.worktree,
+        )
+        .expect("validate fresh harness");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let outcome = super::supervise_validated_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &fresh,
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("fresh launch after sidecar cleanup");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        assert_eq!(
+            fs::read_to_string(fresh_marker).expect("fresh marker"),
+            "fresh"
+        );
+        assert!(
+            super::observe_process_birth(old_harness.pid)
+                .expect("old writer liveness")
+                .is_none(),
+            "sidecar-only writer survived cleanup"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_sidecar_cleanup_survives_pgid_transition() {
+        // Break caught: sidecar-only cleanup requiring the mutable process group stored at launch
+        // and therefore leaving the exact live instance behind after it moves groups.
+        let fixture = GitFixture::new("sidecar-pgid-transition");
+        let mut state = supervision_state(&fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let ready = fixture.root.join("ready");
+        let release = fixture.root.join("release");
+        let script = format!(
+            "from pathlib import Path\nimport os,time\nPath(r'{}').write_text('ready')\n\
+             gate=Path(r'{}')\nwhile not gate.exists(): time.sleep(0.001)\n\
+             os.setpgid(0,0)\ntime.sleep(30)\n",
+            ready.display(),
+            release.display()
+        );
+        let args = vec!["-c".to_string(), script];
+        let mut old = Command::new("/usr/bin/python3")
+            .args(&args)
+            .spawn()
+            .expect("spawn sidecar PGID fixture");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready.is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let identity = super::observe_process_identity(old.id(), &super::argv_digest(&args))
+            .expect("observe sidecar PGID fixture")
+            .expect("live sidecar PGID fixture");
+        state.supervisor = Some(identity.clone());
+        state.process = None;
+        super::write_invocation_atomic(&state_path, &state).expect("persist sidecar PGID state");
+        fs::write(&release, b"release").expect("release PGID transition");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while super::observe_process_birth(old.id())
+            .expect("observe transitioned sidecar")
+            .is_some_and(|birth| birth.process_group == identity.process_group)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let fresh_marker = fixture.root.join("fresh");
+        let invocation = shell_invocation(
+            &fixture.repo,
+            &format!("printf fresh > '{}'", fresh_marker.display()),
+        );
+        let fresh = super::validate_invocation(
+            &HarnessInvocation {
+                program: invocation.program.canonicalize().expect("canonical shell"),
+                args: invocation.args,
+                current_dir: invocation
+                    .current_dir
+                    .canonicalize()
+                    .expect("canonical repo"),
+                requires_mutation_snapshots: false,
+            },
+            &state.identity.worktree,
+        )
+        .expect("validate fresh harness");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let outcome = super::supervise_validated_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &fresh,
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("fresh launch after PGID sidecar cleanup");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        assert!(fresh_marker.is_file());
+        assert!(super::observe_process_birth(old.id())
+            .expect("observe cleaned PGID sidecar")
+            .is_none());
+        let _ = old.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_sidecar_cleanup_survives_unlinked_executable() {
+        // Break caught: cleanup-only sidecar recovery requiring an executable path that no longer
+        // exists even though PID, boot ID, and start identity still name the exact live instance.
+        let fixture = GitFixture::new("sidecar-unlinked-executable");
+        let mut state = supervision_state(&fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let executable = fixture.root.join("temporary-sleep");
+        fs::copy("/usr/bin/sleep", &executable).expect("copy temporary executable");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("temporary executable mode");
+        let args = vec!["30".to_string()];
+        let mut old = Command::new(&executable)
+            .args(&args)
+            .spawn()
+            .expect("spawn temporary executable");
+        let identity = super::observe_process_identity(old.id(), &super::argv_digest(&args))
+            .expect("observe temporary executable")
+            .expect("live temporary executable");
+        state.supervisor = Some(identity);
+        state.process = None;
+        super::write_invocation_atomic(&state_path, &state)
+            .expect("persist unlinked sidecar state");
+        fs::remove_file(&executable).expect("unlink live sidecar executable");
+        let fresh_marker = fixture.root.join("fresh");
+        let invocation = shell_invocation(
+            &fixture.repo,
+            &format!("printf fresh > '{}'", fresh_marker.display()),
+        );
+        let fresh = super::validate_invocation(
+            &HarnessInvocation {
+                program: invocation.program.canonicalize().expect("canonical shell"),
+                args: invocation.args,
+                current_dir: invocation
+                    .current_dir
+                    .canonicalize()
+                    .expect("canonical repo"),
+                requires_mutation_snapshots: false,
+            },
+            &state.identity.worktree,
+        )
+        .expect("validate fresh harness");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let outcome = super::supervise_validated_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &fresh,
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("fresh launch after unlinked sidecar cleanup");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        assert!(fresh_marker.is_file());
+        assert!(super::observe_process_birth(old.id())
+            .expect("observe cleaned unlinked sidecar")
+            .is_none());
+        let _ = old.wait();
     }
 
     #[cfg(target_os = "linux")]
@@ -13062,6 +15647,680 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    struct NonDescendantDirectFixture {
+        _supervisor_cleanup: DetachedForkedCleanup,
+        _supervisor_child: std::process::Child,
+        _harness_cleanup: DetachedForkedCleanup,
+        _harness_child: std::process::Child,
+        _fixture: GitFixture,
+        paths: super::DirectAttemptPaths,
+        intent: String,
+        attempt_id: String,
+        supervisor: ProcessIdentity,
+        harness: ProcessIdentity,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl NonDescendantDirectFixture {
+        fn new(label: &str) -> Self {
+            let fixture = GitFixture::new(label);
+            let artifact_root = fixture.root.join("evidence");
+            fs::create_dir_all(&artifact_root).expect("artifact root");
+            fs::set_permissions(&artifact_root, fs::Permissions::from_mode(0o700))
+                .expect("private artifact root");
+            let paths = super::direct_attempt_paths(&artifact_root, 0);
+            let args = vec!["30".to_string()];
+            let expected_executable =
+                fs::canonicalize("/usr/bin/sleep").expect("canonical sleep fixture");
+            let spawn_identity = || {
+                let child = Command::new(&expected_executable)
+                    .arg("30")
+                    .process_group(0)
+                    .spawn()
+                    .expect("spawn isolated sleep fixture");
+                let mut cleanup =
+                    DetachedForkedCleanup::new(child.id()).expect("arm sleep fixture cleanup");
+                let deadline = Instant::now() + Duration::from_secs(2);
+                let identity = loop {
+                    if let Some(identity) =
+                        super::observe_process_identity(child.id(), &super::argv_digest(&args))
+                            .expect("observe sleep fixture")
+                    {
+                        if identity.executable == expected_executable
+                            && identity.argv_digest == super::argv_digest(&args)
+                            && identity.process_group == identity.pid
+                        {
+                            break identity;
+                        }
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "sleep fixture never reached exact isolated identity"
+                    );
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                cleanup.confirm_identity(identity.clone());
+                (child, cleanup, identity)
+            };
+            let (supervisor_child, supervisor_cleanup, supervisor) = spawn_identity();
+            let (harness_child, harness_cleanup, harness) = spawn_identity();
+            let attempt_id = super::reserve_direct_attempt_id(&paths).expect("attempt id");
+            let commit =
+                super::git_stdout(&fixture.repo, &["rev-parse", "--verify", "HEAD^{commit}"])
+                    .expect("fixture commit");
+            let argv = vec![expected_executable.display().to_string(), "30".to_string()];
+            let intent = super::direct_intent_document(
+                &attempt_id,
+                &commit,
+                None,
+                &expected_executable,
+                &argv,
+            );
+            super::write_private_create_once(
+                &paths.intent,
+                intent.as_bytes(),
+                "non-descendant intent",
+            )
+            .expect("intent");
+            let launch = super::direct_launch_document(
+                &attempt_id,
+                &autospec_core::autonomous::waterfall::sha256_hex(intent.as_bytes()),
+                &supervisor,
+                Some(&harness),
+            );
+            super::write_private_create_once(
+                &paths.launch,
+                launch.as_bytes(),
+                "non-descendant launch",
+            )
+            .expect("launch");
+            Self {
+                _supervisor_cleanup: supervisor_cleanup,
+                _supervisor_child: supervisor_child,
+                _harness_cleanup: harness_cleanup,
+                _harness_child: harness_child,
+                _fixture: fixture,
+                paths,
+                intent,
+                attempt_id,
+                supervisor,
+                harness,
+            }
+        }
+
+        fn marker_path(&self) -> PathBuf {
+            super::direct_ownership_disproven_marker(&self.paths, &self.attempt_id)
+                .expect("canonical quarantine marker path")
+        }
+
+        fn assert_anchor_liveness(&self, supervisor_live: bool, harness_live: bool) {
+            assert_eq!(
+                super::cleanup_instance_is_live(&self.supervisor)
+                    .expect("supervisor fixture liveness"),
+                supervisor_live,
+                "unexpected supervisor liveness"
+            );
+            assert_eq!(
+                super::cleanup_instance_is_live(&self.harness).expect("harness fixture liveness"),
+                harness_live,
+                "unexpected harness liveness"
+            );
+        }
+
+        fn exact_marker(&self) -> String {
+            super::direct_ownership_disproven_document(
+                &self.attempt_id,
+                &autospec_core::autonomous::waterfall::sha256_hex(self.intent.as_bytes()),
+                &autospec_core::autonomous::waterfall::sha256_hex(
+                    &fs::read(&self.paths.launch).expect("launch bytes"),
+                ),
+                &self.supervisor,
+                &self.harness,
+            )
+        }
+
+        fn replace_marker(&self, body: &str) {
+            let path = self.marker_path();
+            if path.exists() {
+                fs::remove_file(&path).expect("replace quarantine marker");
+            }
+            super::write_private_create_once(
+                &path,
+                body.as_bytes(),
+                "corrupted ownership-disproven quarantine",
+            )
+            .expect("write quarantine marker");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_cleanup_never_retires_a_live_non_descendant_harness() {
+        // Break caught: cleanup of a valid supervisor treating an unrelated persisted harness as
+        // cleaned and retiring the only durable identity that can quarantine it.
+        let fixture = NonDescendantDirectFixture::new("non-descendant-quarantine");
+        let error = super::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))
+            .expect_err("live non-descendant harness must remain quarantined");
+        assert!(error.contains("not a descendant"), "{error}");
+        fixture.assert_anchor_liveness(false, true);
+        assert!(fixture.marker_path().is_file());
+        for _ in 0..3 {
+            let retry = super::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))
+                .expect_err("durable quarantine must reject every retry");
+            assert!(retry.contains("permanently quarantined"), "{retry}");
+            fixture.assert_anchor_liveness(false, true);
+            assert!(
+                fixture.paths.launch.is_file(),
+                "quarantined launch was retired"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_quarantine_crash_before_marker_leaves_both_anchors_live() {
+        // Break caught: non-descendant classification signaling S before its durable quarantine
+        // exists, allowing a restart to promote unrelated H into cleanup authority.
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = NonDescendantDirectFixture::new("quarantine-before-marker");
+        super::set_launch_failpoint(super::LaunchFailpoint::OwnershipBeforeMarker);
+        let error = super::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))
+            .expect_err("pre-marker failpoint");
+        super::set_launch_failpoint(super::LaunchFailpoint::None);
+        assert!(error.contains("ownership-before-marker"), "{error}");
+        assert!(!fixture.marker_path().exists());
+        fixture.assert_anchor_liveness(true, true);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_quarantine_crash_after_marker_retries_supervisor_only() {
+        // Break caught: a crash after marker durability stranding S so a retry either kills H or
+        // skips exact supervisor cleanup.
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = NonDescendantDirectFixture::new("quarantine-after-marker");
+        super::set_launch_failpoint(super::LaunchFailpoint::OwnershipAfterMarker);
+        let error = super::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))
+            .expect_err("post-marker failpoint");
+        super::set_launch_failpoint(super::LaunchFailpoint::None);
+        assert!(error.contains("ownership-after-marker"), "{error}");
+        assert!(fixture.marker_path().is_file());
+        fixture.assert_anchor_liveness(true, true);
+        let retry = super::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))
+            .expect_err("durable quarantine retry");
+        assert!(retry.contains("permanently quarantined"), "{retry}");
+        fixture.assert_anchor_liveness(false, true);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_quarantine_rejects_marker_corruption_before_signal() {
+        // Break caught: a forged/rebased current-attempt marker falling through to signal S or H.
+        let fixture = NonDescendantDirectFixture::new("quarantine-corruption");
+        let exact = fixture.exact_marker();
+        let exact_value: serde_json::Value =
+            serde_json::from_str(&exact).expect("exact marker JSON");
+        let mut corruptions = Vec::new();
+        let mut wrong_attempt = exact_value.clone();
+        wrong_attempt["attempt_id"] = serde_json::Value::String("0".repeat(64));
+        corruptions.push(wrong_attempt.to_string());
+        let mut missing_digest = exact_value.clone();
+        missing_digest
+            .as_object_mut()
+            .expect("marker object")
+            .remove("launch_digest");
+        corruptions.push(missing_digest.to_string());
+        corruptions.push("{malformed".to_string());
+        let mut wrong_digest = exact_value.clone();
+        wrong_digest["launch_digest"] = serde_json::Value::String("f".repeat(64));
+        corruptions.push(wrong_digest.to_string());
+        let mut wrong_anchor = exact_value;
+        wrong_anchor["supervisor"]["start_identity"] =
+            serde_json::Value::String("forged".to_string());
+        corruptions.push(wrong_anchor.to_string());
+
+        for corruption in corruptions {
+            fixture.replace_marker(&corruption);
+            let error = super::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))
+                .expect_err("corrupt marker must fail closed");
+            assert!(error.contains("direct ownership quarantine"), "{error}");
+            fixture.assert_anchor_liveness(true, true);
+            assert!(
+                fixture.paths.launch.is_file(),
+                "corrupt marker retired launch"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_quarantine_rejects_renamed_current_marker_before_signal() {
+        // Break caught: renaming a valid current marker to another canonical attempt-ID path
+        // hiding the quarantine from current-path lookup and re-enabling cleanup authority.
+        let fixture = NonDescendantDirectFixture::new("quarantine-renamed-current");
+        fixture.replace_marker(&fixture.exact_marker());
+        let displaced_attempt =
+            super::reserve_direct_attempt_id(&fixture.paths).expect("displaced attempt id");
+        let displaced =
+            super::direct_ownership_disproven_marker(&fixture.paths, &displaced_attempt)
+                .expect("displaced marker path");
+        fs::rename(fixture.marker_path(), &displaced).expect("rename current marker");
+        File::open(displaced.parent().expect("marker parent"))
+            .and_then(|directory| directory.sync_all())
+            .expect("sync renamed marker");
+
+        for _ in 0..2 {
+            let error = super::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))
+                .expect_err("renamed current marker must fail closed");
+            assert!(
+                error.contains("filename") || error.contains("marker"),
+                "{error}"
+            );
+            fixture.assert_anchor_liveness(true, true);
+            assert!(
+                fixture.paths.launch.is_file(),
+                "renamed marker retired launch"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_quarantine_is_addressed_to_one_exact_attempt() {
+        // Break caught: a prior attempt's immutable diagnostic authorizing or quarantining a new
+        // attempt that reuses the same command index.
+        let fixture = NonDescendantDirectFixture::new("quarantine-distinct-attempt");
+        let artifact_root = fixture.paths.record.parent().expect("artifact root");
+        let paths = super::direct_attempt_paths(artifact_root, 1);
+        let old_attempt = super::reserve_direct_attempt_id(&paths).expect("old attempt id");
+        let current_attempt = super::reserve_direct_attempt_id(&paths).expect("current attempt id");
+        let old_marker = super::direct_ownership_disproven_marker(&paths, &old_attempt)
+            .expect("old marker path");
+        let old_document = super::direct_ownership_disproven_document(
+            &old_attempt,
+            &"a".repeat(64),
+            &"b".repeat(64),
+            &fixture.supervisor,
+            &fixture.harness,
+        );
+        super::write_private_create_once(
+            &old_marker,
+            old_document.as_bytes(),
+            "old ownership-disproven quarantine",
+        )
+        .expect("old marker");
+
+        let commit = super::git_stdout(
+            &fixture._fixture.repo,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+        )
+        .expect("fixture commit");
+        let executable = fs::canonicalize("/usr/bin/true").expect("canonical true fixture");
+        let argv = vec![executable.display().to_string()];
+        let current_intent =
+            super::direct_intent_document(&current_attempt, &commit, None, &executable, &argv);
+        super::write_private_create_once(
+            &paths.intent,
+            current_intent.as_bytes(),
+            "current distinct intent",
+        )
+        .expect("current intent");
+
+        assert!(
+            !super::reconcile_direct_launch(&paths, Some(&current_intent))
+                .expect("old marker must not authorize current attempt")
+        );
+        assert!(old_marker.is_file(), "old immutable diagnostic was removed");
+        assert!(
+            !super::direct_ownership_disproven_marker(&paths, &current_attempt)
+                .expect("current marker path")
+                .exists()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_quarantine_filename_grammar_is_canonical() {
+        // Break caught: a truncated, uppercase, or suffix-extended attempt marker entering the
+        // direct-attempt inventory as a valid authority artifact.
+        let fixture = GitFixture::new("quarantine-filename-grammar");
+        let artifact_root = fixture.root.join("evidence");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        fs::set_permissions(&artifact_root, fs::Permissions::from_mode(0o700))
+            .expect("private artifact root");
+        for suffix in [
+            "ownership-disproven-deadbeef.json",
+            &format!("ownership-disproven-{}.json", "A".repeat(64)),
+            &format!("ownership-disproven-{}.json.extra", "a".repeat(64)),
+        ] {
+            let path = artifact_root.join(format!("command-000.{suffix}"));
+            fs::write(&path, b"{}").expect("non-canonical marker fixture");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+                .expect("private marker fixture");
+            let error = super::discover_direct_attempt_indices(&artifact_root)
+                .expect_err("non-canonical marker must fail inventory");
+            assert!(error.contains("non-canonical"), "{error}");
+            fs::remove_file(path).expect("remove non-canonical fixture");
+        }
+        let canonical = artifact_root.join(format!(
+            "command-000.ownership-disproven-{}.json",
+            "a".repeat(64)
+        ));
+        fs::write(&canonical, b"{}").expect("canonical marker fixture");
+        fs::set_permissions(&canonical, fs::Permissions::from_mode(0o600))
+            .expect("private canonical marker fixture");
+        assert_eq!(
+            super::discover_direct_attempt_indices(&artifact_root).expect("canonical inventory"),
+            std::collections::BTreeSet::from([0])
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_quarantine_inventory_precedes_no_intent_return() {
+        // Break caught: a malformed retained marker bypassing the no-intent prelaunch
+        // reconciliation and allowing a new harness to launch before quarantine validation.
+        let fixture = GitFixture::new("quarantine-no-intent-inventory");
+        let artifact_root = fixture.root.join("evidence");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        fs::set_permissions(&artifact_root, fs::Permissions::from_mode(0o700))
+            .expect("private artifact root");
+        let paths = super::direct_attempt_paths(&artifact_root, 0);
+        let old_attempt = super::reserve_direct_attempt_id(&paths).expect("old attempt id");
+        let old_marker = super::direct_ownership_disproven_marker(&paths, &old_attempt)
+            .expect("old marker path");
+        super::write_private_create_once(
+            &old_marker,
+            b"{\"schema\":1}",
+            "malformed retained ownership quarantine",
+        )
+        .expect("malformed old marker");
+
+        let error = super::reconcile_direct_launch(&paths, None)
+            .expect_err("marker inventory must precede no-intent return");
+        assert!(error.contains("direct ownership quarantine"), "{error}");
+        assert!(!paths.intent.exists(), "reconciliation created an intent");
+        assert!(!paths.launch.exists(), "reconciliation launched a harness");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_quarantine_preflight_validates_all_indices_before_action() {
+        // Break caught: actionful reconciliation of command 000 cleaning its live supervisor
+        // before a malformed retained marker at command 001 is discovered.
+        let fixture = NonDescendantDirectFixture::new("quarantine-cross-index-preflight");
+        fixture.replace_marker(&fixture.exact_marker());
+        let artifact_root = fixture.paths.record.parent().expect("artifact root");
+        let later_paths = super::direct_attempt_paths(artifact_root, 1);
+        let later_attempt =
+            super::reserve_direct_attempt_id(&later_paths).expect("later attempt id");
+        let later_marker = super::direct_ownership_disproven_marker(&later_paths, &later_attempt)
+            .expect("later marker path");
+        super::write_private_create_once(
+            &later_marker,
+            b"{\"schema\":1}",
+            "malformed later ownership quarantine",
+        )
+        .expect("malformed later marker");
+        let first_launch = fs::read(&fixture.paths.launch).expect("first launch snapshot");
+        let later_marker_body = fs::read(&later_marker).expect("later marker snapshot");
+        let plan = super::DirectCommandPlan {
+            commands: vec![super::DirectCommand {
+                argv: vec!["/usr/bin/true".to_string()],
+            }],
+        };
+
+        let error = super::execute_direct_plan(
+            &fixture._fixture.repo,
+            &plan,
+            artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("cross-index marker preflight must fail before action");
+        assert!(error.contains("quarantine marker schema"), "{error}");
+        fixture.assert_anchor_liveness(true, true);
+        assert_eq!(
+            fs::read(&fixture.paths.launch).expect("first launch after preflight"),
+            first_launch,
+            "preflight mutated the first launch"
+        );
+        assert_eq!(
+            fs::read(&later_marker).expect("later marker after preflight"),
+            later_marker_body,
+            "preflight mutated the later marker"
+        );
+        assert!(
+            !later_paths.launch.exists() && !later_paths.record.exists(),
+            "preflight launched or finalized a later command"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_nested_quarantine_preflight_validates_all_indices_before_action()
+    {
+        // Break caught: nested evidence reconciliation cleaning command 000 before discovering a
+        // malformed ownership marker at command 001.
+        let fixture = NonDescendantDirectFixture::new("nested-quarantine-cross-index");
+        fixture.replace_marker(&fixture.exact_marker());
+        let root = fixture.paths.record.parent().expect("nested root");
+        let later_paths = super::direct_attempt_paths(root, 1);
+        let later_attempt =
+            super::reserve_direct_attempt_id(&later_paths).expect("later attempt id");
+        let later_marker = super::direct_ownership_disproven_marker(&later_paths, &later_attempt)
+            .expect("later marker path");
+        super::write_private_create_once(
+            &later_marker,
+            b"{\"schema\":1}",
+            "malformed nested ownership quarantine",
+        )
+        .expect("malformed nested marker");
+        let first_launch = fs::read(&fixture.paths.launch).expect("first launch snapshot");
+        let later_marker_body = fs::read(&later_marker).expect("later marker snapshot");
+
+        let error = super::reconcile_nested_direct_ownership(root)
+            .expect_err("nested marker preflight must fail before action");
+        assert!(error.contains("quarantine marker schema"), "{error}");
+        fixture.assert_anchor_liveness(true, true);
+        assert_eq!(
+            fs::read(&fixture.paths.launch).expect("first nested launch after preflight"),
+            first_launch
+        );
+        assert_eq!(
+            fs::read(&later_marker).expect("later nested marker after preflight"),
+            later_marker_body
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_nested_marker_only_orphan_fails_closed() {
+        // Break caught: a marker-only nested direct-artifact directory evading ownership
+        // validation because the artifact detector only recognized intent/launch sidecars.
+        let fixture = GitFixture::new("nested-marker-only-orphan");
+        let root = fixture.root.join("nested");
+        super::ensure_private_directory(&root).expect("nested root");
+        let paths = super::direct_attempt_paths(&root, 0);
+        let marker = super::direct_ownership_disproven_marker(&paths, &"a".repeat(64))
+            .expect("orphan marker path");
+        super::write_private_create_once(
+            &marker,
+            b"{\"schema\":1}",
+            "malformed marker-only quarantine",
+        )
+        .expect("marker-only quarantine");
+        let before = fs::read(&marker).expect("marker-only snapshot");
+
+        let error = super::reconcile_nested_direct_ownership(&root)
+            .expect_err("marker-only nested artifact must fail closed");
+        assert!(error.contains("quarantine marker schema"), "{error}");
+        assert_eq!(
+            fs::read(&marker).expect("marker-only artifact after reconciliation"),
+            before
+        );
+        assert!(!paths.intent.exists() && !paths.launch.exists() && !paths.record.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_nested_quarantine_preflight_spans_the_whole_subtree() {
+        // Break caught: actionful reconciliation in a parent/sibling direct root occurring before
+        // a malformed marker-only child root is recursively validated.
+        let fixture = NonDescendantDirectFixture::new("nested-quarantine-whole-subtree");
+        fixture.replace_marker(&fixture.exact_marker());
+        let root = fixture.paths.record.parent().expect("nested root");
+        let later_root = root.join("full");
+        super::ensure_private_directory(&later_root).expect("later nested root");
+        let later_paths = super::direct_attempt_paths(&later_root, 0);
+        let later_marker = super::direct_ownership_disproven_marker(&later_paths, &"b".repeat(64))
+            .expect("later nested marker");
+        super::write_private_create_once(
+            &later_marker,
+            b"{\"schema\":1}",
+            "malformed child ownership quarantine",
+        )
+        .expect("malformed child marker");
+        let first_launch = fs::read(&fixture.paths.launch).expect("first launch snapshot");
+        let later_marker_body = fs::read(&later_marker).expect("child marker snapshot");
+
+        let error = super::reconcile_nested_direct_ownership(root)
+            .expect_err("whole nested subtree must validate before action");
+        assert!(error.contains("quarantine marker schema"), "{error}");
+        fixture.assert_anchor_liveness(true, true);
+        assert_eq!(
+            fs::read(&fixture.paths.launch).expect("first launch after subtree preflight"),
+            first_launch
+        );
+        assert_eq!(
+            fs::read(&later_marker).expect("child marker after subtree preflight"),
+            later_marker_body
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_nested_marker_only_bad_filename_fails_closed() {
+        // Break caught: an ownership-like marker-only filename with a trailing suffix bypassing
+        // direct-artifact detection and therefore strict grammar validation.
+        let fixture = GitFixture::new("nested-marker-only-bad-filename");
+        let root = fixture.root.join("nested");
+        super::ensure_private_directory(&root).expect("nested root");
+        let marker = root.join(format!(
+            "command-000.ownership-disproven-{}.json.extra",
+            "c".repeat(64)
+        ));
+        super::write_private_create_once(&marker, b"{}", "bad filename ownership quarantine")
+            .expect("bad filename marker");
+        let before = fs::read(&marker).expect("bad filename marker snapshot");
+
+        let error = super::reconcile_nested_direct_ownership(&root)
+            .expect_err("ownership-like bad filename must fail closed");
+        assert!(error.contains("non-canonical"), "{error}");
+        assert_eq!(
+            fs::read(&marker).expect("bad filename marker after preflight"),
+            before
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_cleanup_capture_tracks_same_instance_after_pgid_change() {
+        // Break caught: cleanup treating a mutable process-group transition as PID reuse and
+        // either abandoning the live process or adopting it without an immutable birth check.
+        let fixture = GitFixture::new("cleanup-pgid-transition");
+        let ready = fixture.root.join("ready");
+        let release = fixture.root.join("release");
+        let script = format!(
+            "from pathlib import Path\nimport os,time\nPath(r'{}').write_text('ready')\n\
+             gate=Path(r'{}')\nwhile not gate.exists():\n time.sleep(0.001)\n\
+             os.setpgid(0,0)\ntime.sleep(30)\n",
+            ready.display(),
+            release.display()
+        );
+        let args = vec!["-c".to_string(), script.clone()];
+        let mut child = Command::new("/usr/bin/python3")
+            .args(&args)
+            .spawn()
+            .expect("spawn PGID transition fixture");
+        let mut cleanup =
+            DetachedForkedCleanup::new(child.id()).expect("arm PGID transition cleanup");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready.is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let expected = super::observe_process_identity(child.id(), &super::argv_digest(&args))
+            .expect("observe pre-transition fixture")
+            .expect("live pre-transition fixture");
+        cleanup.confirm_identity(expected.clone());
+        fs::write(&release, "release").expect("release PGID transition");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let observed = loop {
+            let observed = super::observe_process_identity(child.id(), &expected.argv_digest)
+                .expect("observe post-transition fixture")
+                .expect("live post-transition fixture");
+            if observed.process_group != expected.process_group {
+                break observed;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fixture never changed its process group"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+
+        assert!(expected.owns_instance(&observed.birth()));
+        assert!(!expected.owns_birth(&observed.birth()));
+        let captured = super::OwnedProcess::capture_cleanup_instance(&expected)
+            .expect("capture same immutable instance after PGID transition");
+        assert_eq!(captured.birth.process_group, observed.process_group);
+        assert!(captured.is_live().expect("post-transition pidfd liveness"));
+        captured
+            .signal(Signal::SIGKILL)
+            .expect("terminate PGID transition fixture");
+        child.wait().expect("reap PGID transition fixture");
+        cleanup.processes = None;
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_absent_anchors_do_not_prove_orphan_cleanup() {
+        // Break caught: two dead persisted anchors being treated as proof that an unrelated
+        // closed-stdio orphan from the old tree cannot still be alive.
+        let mut anchor = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn anchor fixture");
+        let args = vec!["30".to_string()];
+        let identity = super::observe_process_identity(anchor.id(), &super::argv_digest(&args))
+            .expect("observe anchor fixture")
+            .expect("live anchor fixture");
+        anchor.kill().expect("kill anchor fixture");
+        anchor.wait().expect("reap anchor fixture");
+        let mut orphan = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn closed-stdio orphan fixture");
+
+        let error =
+            super::OwnedProcessSet::terminate_supervised_for_cleanup(&identity, Some(&identity))
+                .expect_err("absent anchors cannot prove whole-tree cleanup");
+
+        assert!(error.reason.contains("unproven"), "{error:?}");
+        assert!(
+            super::observe_process_birth(orphan.id())
+                .expect("observe guarded orphan")
+                .is_some(),
+            "unowned orphan fixture unexpectedly disappeared"
+        );
+        orphan.kill().expect("guard cleans known orphan");
+        orphan.wait().expect("guard reaps known orphan");
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn autonomous_executor_bridge_dead_supervisor_cleans_live_harness_before_recovery() {
         let fixture = GitFixture::new("dead-supervisor-live-harness");
@@ -13116,6 +16375,289 @@ mod tests {
             "live harness survived dead-supervisor recovery"
         );
         assert!(!launches.exists(), "duplicate harness was launched");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_persisted_dead_supervisor_cleans_exec_replaced_harness(
+        fixture: &GitFixture,
+        script: &str,
+        marker: &Path,
+    ) {
+        let mut state = supervision_state(fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let validated = detach_harness_for_adoption(fixture, &state_path, &mut state, script);
+        let supervisor = state.supervisor.clone().expect("supervisor identity");
+        let harness = state.process.clone().expect("harness identity");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.is_file(), "exec-replaced harness never became ready");
+        let observed = super::observe_process_birth(harness.pid)
+            .expect("observe exec-replaced harness")
+            .expect("live exec-replaced harness");
+        assert!(harness.owns_instance(&observed));
+
+        super::OwnedProcess::capture(&supervisor.birth())
+            .expect("capture exact supervisor")
+            .signal(Signal::SIGKILL)
+            .expect("kill only supervisor");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while super::observe_process_birth(supervisor.pid)
+            .expect("observe dead supervisor")
+            .is_some()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let error = super::supervise_validated_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &validated,
+            &snapshot,
+            supervision_config(500),
+        )
+        .expect_err("dead supervisor without durable EXIT requires recovery");
+
+        assert!(
+            error.contains("without a durable completion record"),
+            "{error}"
+        );
+        assert!(
+            super::observe_process_birth(harness.pid)
+                .expect("post-cleanup harness")
+                .is_none(),
+            "exec-replaced harness survived persisted-state recovery"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_persisted_recovery_cleans_shebang_harness() {
+        let fixture = GitFixture::new("persisted-shebang-cleanup");
+        let marker = fixture.root.join("shebang.ready");
+        let program = fixture.root.join("shebang-harness");
+        fs::write(
+            &program,
+            format!(
+                "#!/usr/bin/python3\nfrom pathlib import Path\nimport time\nPath(r'{}').write_text('ready')\ntime.sleep(30)\n",
+                marker.display()
+            ),
+        )
+        .expect("write shebang harness");
+        fs::set_permissions(&program, fs::Permissions::from_mode(0o700))
+            .expect("executable shebang harness");
+
+        assert_persisted_dead_supervisor_cleans_exec_replaced_harness(
+            &fixture,
+            &format!("exec '{}'", program.display()),
+            &marker,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_persisted_recovery_cleans_immediate_exec_harness() {
+        let fixture = GitFixture::new("persisted-immediate-exec-cleanup");
+        let marker = fixture.root.join("exec.ready");
+        let script = format!(
+            "exec /usr/bin/python3 -c 'from pathlib import Path; import time; Path(r\"{}\").write_text(\"ready\"); time.sleep(30)'",
+            marker.display()
+        );
+
+        assert_persisted_dead_supervisor_cleans_exec_replaced_harness(&fixture, &script, &marker);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_dead_supervisor_recovers_synced_exit_and_output() {
+        let fixture = GitFixture::new("dead-supervisor-complete");
+        let mut state = supervision_state(&fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let validated = detach_harness_for_adoption(
+            &fixture,
+            &state_path,
+            &mut state,
+            "printf 'dead-supervisor-durable-tail\\n' >&2; exit 7",
+        );
+        let supervisor = state.supervisor.clone().expect("supervisor identity");
+        let sinks =
+            super::output_sink_paths(&state_path, &state.identity.invocation_id).expect("sinks");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while super::read_live_executor_exit_status(&sinks.exit_status).expect("poll durable exit")
+            != Some(7)
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            super::read_executor_exit_status(&sinks.exit_status).expect("synced durable exit"),
+            Some(7)
+        );
+        super::OwnedProcess::capture(&supervisor.birth())
+            .expect("capture completed supervisor")
+            .signal(Signal::SIGKILL)
+            .expect("kill completed supervisor");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while super::observe_process_birth(supervisor.pid)
+            .expect("observe completed supervisor")
+            .is_some()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let outcome = super::supervise_validated_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &validated,
+            &snapshot,
+            supervision_config(500),
+        )
+        .expect("recover exact durable failure outcome");
+        let events = fs::read_to_string(event_log).expect("recovered events");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 7 });
+        assert_eq!(state.phase, BridgePhase::Interrupted);
+        assert!(events.contains("dead-supervisor-durable-tail"), "{events}");
+        assert!(
+            events.contains("\"recovered_after_supervisor_exit\":true"),
+            "{events}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_restart_finalizes_done_after_anchor_clear_crashes() {
+        // Break caught: clearing durable anchors before drain/snapshot, then treating the dead
+        // sidecar as unproven on restart even though strict whole-tree DONE is durable.
+        for boundary in [
+            super::LaunchFailpoint::RecoveryAfterAnchorClear,
+            super::LaunchFailpoint::RecoveryBeforeSnapshot,
+        ] {
+            let fixture = GitFixture::new(&format!("done-anchor-clear-{boundary:?}"));
+            let mut state = supervision_state(&fixture);
+            let state_path = fixture.root.join("state/invocation.json");
+            let event_log = fixture.root.join("log/executor.jsonl");
+            let validated = detach_harness_for_adoption(
+                &fixture,
+                &state_path,
+                &mut state,
+                "printf 'restart-finalized-tail\\n' >&2; exit 7",
+            );
+            let supervisor = state.supervisor.clone().expect("supervisor identity");
+            let sinks = super::output_sink_paths(&state_path, &state.identity.invocation_id)
+                .expect("output sinks");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while super::read_live_executor_exit_status(&sinks.exit_status)
+                .expect("poll durable exit")
+                != Some(7)
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            super::OwnedProcess::capture(&supervisor.birth())
+                .expect("capture completed supervisor")
+                .signal(Signal::SIGKILL)
+                .expect("kill completed supervisor");
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while super::observe_process_birth(supervisor.pid)
+                .expect("observe completed supervisor")
+                .is_some()
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let snapshot =
+                MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+            super::set_launch_failpoint(boundary);
+            let interrupted = super::supervise_validated_harness(
+                &state_path,
+                &event_log,
+                &mut state,
+                &validated,
+                &snapshot,
+                supervision_config(500),
+            );
+            super::set_launch_failpoint(super::LaunchFailpoint::None);
+            interrupted.expect_err("recovery failpoint interrupts finalization");
+            assert!(state.supervisor.is_none());
+            assert!(state.process.is_none());
+
+            let outcome = super::supervise_validated_harness(
+                &state_path,
+                &event_log,
+                &mut state,
+                &validated,
+                &snapshot,
+                supervision_config(500),
+            )
+            .expect("restart finalizes strict DONE without anchors");
+            let events = fs::read_to_string(&event_log).expect("recovered events");
+
+            assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 7 });
+            assert_eq!(state.phase, BridgePhase::Interrupted);
+            assert!(events.contains("restart-finalized-tail"), "{events}");
+            assert!(events.contains("\"event\":\"child_exited\""), "{events}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_dead_supervisor_rejects_partial_exit_record() {
+        let fixture = GitFixture::new("dead-supervisor-partial-exit");
+        let mut state = supervision_state(&fixture);
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let validated = detach_harness_for_adoption(&fixture, &state_path, &mut state, "sleep 30");
+        let supervisor = state.supervisor.clone().expect("supervisor identity");
+        let harness = state.process.clone().expect("harness identity");
+        super::OwnedProcess::capture(&supervisor.birth())
+            .expect("capture partial-record supervisor")
+            .signal(Signal::SIGKILL)
+            .expect("kill partial-record supervisor");
+        let sinks =
+            super::output_sink_paths(&state_path, &state.identity.invocation_id).expect("sinks");
+        let mut partial = [0_u8; 16];
+        partial[4..6].copy_from_slice(b"EX");
+        fs::write(&sinks.exit_status, partial).expect("write partial exit record");
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+
+        let error = super::supervise_validated_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &validated,
+            &snapshot,
+            supervision_config(500),
+        )
+        .expect_err("dead partial exit record must fail closed");
+
+        assert!(
+            error.contains("invalid durable completion record"),
+            "{error}"
+        );
+        assert!(error.contains("malformed"), "{error}");
+        assert_eq!(state.phase, BridgePhase::Interrupted);
+        assert!(
+            super::observe_process_birth(harness.pid)
+                .expect("partial-record harness cleanup")
+                .is_none(),
+            "partial record recovery leaked the exact harness"
+        );
+        let events = fs::read_to_string(event_log).expect("partial record events");
+        assert!(!events.contains("\"event\":\"child_exited\""), "{events}");
     }
 
     #[cfg(target_os = "linux")]
@@ -13532,6 +17074,60 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn autonomous_executor_bridge_direct_crash_guard_cleans_before_launch_journal_exists() {
+        // Break caught: a panic before the launch journal is durable orphaning the helper's
+        // already-spawned descendant because cleanup knows only the std::process::Child.
+        let fixture = GitFixture::new("direct-crash-guard-early-drop");
+        let descendant_marker = fixture.root.join("descendant.pid");
+        let parent = Command::new("/bin/sh")
+            .args([
+                "-c",
+                &format!(
+                    "sleep 30 & printf '%s' \"$!\" > '{}'; wait",
+                    descendant_marker.display()
+                ),
+            ])
+            .spawn()
+            .expect("spawn crash conductor fixture");
+        let parent_pid = parent.id();
+        let guard =
+            DirectCrashFixtureCleanup::new(parent, fixture.root.join("missing-launch.json"));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !descendant_marker.is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let descendant_pid = fs::read_to_string(&descendant_marker)
+            .expect("descendant marker")
+            .parse::<u32>()
+            .expect("descendant PID");
+        let parent_birth = super::observe_process_birth(parent_pid)
+            .expect("observe crash conductor")
+            .expect("live crash conductor");
+        let descendant_birth = super::observe_process_birth(descendant_pid)
+            .expect("observe crash descendant")
+            .expect("live crash descendant");
+
+        drop(guard);
+
+        for birth in [parent_birth, descendant_birth] {
+            match super::OwnedProcess::capture(&birth) {
+                Ok(process) => assert!(
+                    !process.is_live().expect("post-drop pidfd liveness"),
+                    "early-drop guard left an owned process pidfd-live"
+                ),
+                Err(_) => assert!(
+                    super::observe_process_birth(birth.pid)
+                        .expect("post-drop birth observation")
+                        .as_ref()
+                        != Some(&birth),
+                    "early-drop guard left an exact owned birth observable"
+                ),
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn autonomous_executor_bridge_ring_sync_failure_never_advances_durable_cursor() {
         let fixture = GitFixture::new("ring-sync-order");
         let mut state = supervision_state(&fixture);
@@ -13607,6 +17203,67 @@ mod tests {
         )
         .expect("strict invocation");
         assert_eq!(recovered.phase, BridgePhase::ImplementationComplete);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_waits_for_delayed_descendant_stderr_before_success() {
+        // Break caught: publishing terminal success after the leader exits but before an inherited
+        // stderr writer emits and closes its durable tail.
+        let fixture = GitFixture::new("supervise-delayed-tail");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+        let script =
+            "(sleep 0.2; printf 'delayed-descendant-stderr-tail\\n' >&2) & exit 0".to_string();
+
+        let outcome = supervise_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &shell_invocation(&fixture.repo, &script),
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect("supervise delayed stderr tail");
+        let events = fs::read_to_string(event_log).expect("delayed tail events");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        assert!(
+            events.contains("delayed-descendant-stderr-tail"),
+            "{events}"
+        );
+        assert!(events.contains("\"event\":\"child_exited\""), "{events}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_retries_interrupted_hup_read_before_closing_tail() {
+        let fixture = GitFixture::new("supervise-eintr-hup-tail");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("log/executor.jsonl");
+
+        super::set_launch_failpoint(super::LaunchFailpoint::RingReadInterrupted);
+        let outcome = supervise_harness(
+            &state_path,
+            &event_log,
+            &mut state,
+            &shell_invocation(
+                &fixture.repo,
+                "printf 'eintr-hup-buffered-tail\\n' >&2; exit 0",
+            ),
+            &snapshot,
+            supervision_config(2_000),
+        );
+        super::set_launch_failpoint(super::LaunchFailpoint::None);
+        let outcome = outcome.expect("EINTR must retry the buffered HUP tail");
+        let events = fs::read_to_string(event_log).expect("EINTR tail events");
+
+        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        assert!(events.contains("eintr-hup-buffered-tail"), "{events}");
     }
 
     #[test]
@@ -16553,7 +20210,7 @@ exit 19
     }
 
     #[test]
-    fn autonomous_executor_bridge_normal_exit_cleans_inherited_pipe_descendant() {
+    fn autonomous_executor_bridge_inherited_pipe_writer_blocks_success_and_is_cleaned() {
         let fixture = GitFixture::new("supervise-daemon-success");
         let mut state = supervision_state(&fixture);
         let snapshot =
@@ -16564,7 +20221,7 @@ exit 19
             descendant_pid.display()
         );
 
-        let outcome = supervise_harness(
+        let error = supervise_harness(
             &fixture.root.join("state/invocation.json"),
             &fixture.root.join("log/executor.jsonl"),
             &mut state,
@@ -16572,9 +20229,10 @@ exit 19
             &snapshot,
             supervision_config(2_000),
         )
-        .expect("successful leader exit must clean descendants");
+        .expect_err("retained output writer must block terminal success");
 
-        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 0 });
+        assert!(error.contains("output-complete timeout"), "{error}");
+        assert_eq!(state.phase, BridgePhase::Interrupted);
         let descendant = fs::read_to_string(descendant_pid)
             .expect("descendant pid")
             .trim()
@@ -16584,7 +20242,42 @@ exit 19
             "background descendant survived successful leader exit"
         );
         let events = fs::read_to_string(fixture.root.join("log/executor.jsonl")).expect("events");
-        assert!(events.contains("\"exit_code\":0"), "{events}");
+        assert!(
+            events.contains("\"event\":\"child_supervision_error\""),
+            "{events}"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_closed_stdio_descendant_blocks_terminal_success() {
+        let fixture = GitFixture::new("supervise-closed-stdio-descendant");
+        let mut state = supervision_state(&fixture);
+        let snapshot =
+            MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
+        let descendant_pid = fixture.root.join("descendant.pid");
+        let script = format!(
+            "sleep 30 >/dev/null 2>&1 & child=$!; printf '%s\\n' \"$child\" > '{}'; exit 0",
+            descendant_pid.display()
+        );
+
+        let error = supervise_harness(
+            &fixture.root.join("state/invocation.json"),
+            &fixture.root.join("log/executor.jsonl"),
+            &mut state,
+            &shell_invocation(&fixture.repo, &script),
+            &snapshot,
+            supervision_config(2_000),
+        )
+        .expect_err("closed-stdio descendant must block whole-tree completion");
+
+        assert!(error.contains("output-complete timeout"), "{error}");
+        let descendant = fs::read_to_string(descendant_pid)
+            .expect("closed-stdio descendant pid")
+            .trim()
+            .to_string();
+        assert!(!Path::new(&format!("/proc/{descendant}")).exists());
+        let events = fs::read_to_string(fixture.root.join("log/executor.jsonl")).expect("events");
+        assert!(!events.contains("\"event\":\"child_exited\""), "{events}");
     }
 
     #[test]
@@ -16622,7 +20315,7 @@ exit 19
             MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
         let descendant_pid = fixture.root.join("descendant.pid");
 
-        let outcome = supervise_harness(
+        let error = supervise_harness(
             &fixture.root.join("state/invocation.json"),
             &fixture.root.join("log/executor.jsonl"),
             &mut state,
@@ -16636,16 +20329,21 @@ exit 19
             &snapshot,
             supervision_config(2_000),
         )
-        .expect("failing leader remains attributable");
+        .expect_err("prompt-only failing leader is not durable terminal authority");
 
-        assert_eq!(outcome, SupervisionOutcome::Exited { exit_code: 7 });
+        assert!(error.contains("prompt-only exit code 7"), "{error}");
+        assert_eq!(state.phase, BridgePhase::Interrupted);
         let descendant = fs::read_to_string(descendant_pid)
             .expect("descendant pid")
             .trim()
             .to_string();
         assert!(!Path::new(&format!("/proc/{descendant}")).exists());
         let events = fs::read_to_string(fixture.root.join("log/executor.jsonl")).expect("events");
-        assert!(events.contains("\"exit_code\":7"), "{events}");
+        assert!(
+            events.contains("\"event\":\"child_supervision_error\""),
+            "{events}"
+        );
+        assert!(!events.contains("\"event\":\"child_exited\""), "{events}");
     }
 
     #[cfg(target_os = "linux")]
@@ -17181,7 +20879,9 @@ exit 19
     }
 
     #[test]
-    fn autonomous_executor_bridge_restart_adopts_completed_attempt_bytes() {
+    fn autonomous_executor_bridge_restart_reruns_completed_disk_attempt() {
+        // Break caught: a successful record recovered from disk being treated as fresh runtime
+        // evidence and authorizing Pass without executing the command in this process.
         let fixture = GitFixture::new("direct-recovery");
         let artifact_root = fixture.root.join("evidence");
         let count = fixture.root.join("count");
@@ -17206,13 +20906,15 @@ exit 19
             None,
             Duration::from_secs(5),
         )
-        .expect("adopt completed attempt");
+        .expect("rerun completed disk attempt");
 
-        assert_eq!(fs::read_to_string(&count).expect("execution count"), "1");
-        assert_eq!(
-            first, second,
-            "recovery must preserve exact observation bytes"
-        );
+        assert_eq!(fs::read_to_string(&count).expect("execution count"), "2");
+        assert_eq!(first[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_eq!(second[0].terminal, super::AttemptTerminal::Exited(0));
+        assert!(fs::read_dir(&artifact_root)
+            .expect("diagnostic archive")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
     }
 
     #[test]
@@ -17324,6 +21026,151 @@ exit 19
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn autonomous_executor_bridge_cleanup_precedes_executable_validation() {
+        // Break caught: a missing/replaced current executable returning before an old live
+        // quarantined tree is reconciled from its independently persisted intent and launch.
+        let fixture = GitFixture::new("direct-cleanup-before-validation");
+        let artifact_root = fixture.root.join("evidence");
+        let marker = fixture.root.join("running");
+        let executable = fixture.root.join("ephemeral-command");
+        write_executable(
+            &executable,
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec /usr/bin/sleep 30\n",
+                marker.display()
+            ),
+        );
+        let command = executable.display().to_string();
+        let parent = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_parent_crash_helper",
+                "--nocapture",
+            ])
+            .env("AUTOSPEC_TEST_CRASH_REPO", &fixture.repo)
+            .env("AUTOSPEC_TEST_CRASH_ARTIFACT", &artifact_root)
+            .env("AUTOSPEC_TEST_CRASH_COMMAND", &command)
+            .spawn()
+            .expect("crash-parent process");
+        let launch = artifact_root.join("command-000.launch.json");
+        let mut cleanup = DirectCrashFixtureCleanup::new(parent, launch.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (!marker.is_file() || !launch.is_file()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&launch).expect("durable launch"))
+                .expect("launch JSON");
+        let supervisor =
+            super::parse_process_identity(value["supervisor"].clone(), "supervisor fixture")
+                .expect("supervisor identity");
+        let harness = super::parse_process_identity(value["process"].clone(), "harness fixture")
+            .expect("harness identity");
+        cleanup.arm(supervisor.clone(), harness.clone());
+        cleanup.crash_parent();
+        fs::remove_file(&executable).expect("remove current executable before restart");
+        let plan = super::parse_direct_command_plan(&command).expect("recovery plan");
+
+        let error = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("missing current executable still fails after cleanup");
+
+        assert!(error.contains("executable"), "{error}");
+        assert!(
+            super::observe_process_birth(supervisor.pid)
+                .expect("observe old supervisor")
+                .is_none(),
+            "supervisor survived pre-validation cleanup"
+        );
+        assert!(
+            super::observe_process_birth(harness.pid)
+                .expect("observe old harness")
+                .is_none(),
+            "harness survived pre-validation cleanup"
+        );
+        assert!(!launch.exists(), "retired launch identity survived cleanup");
+        cleanup.disarm();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_plan_shrink_cleans_removed_trailing_index() {
+        // Break caught: cleanup preflight enumerating only the new shorter plan and abandoning a
+        // live interrupted tree owned by a removed trailing command index.
+        let fixture = GitFixture::new("direct-plan-shrink-cleanup");
+        let artifact_root = fixture.root.join("evidence");
+        let marker = fixture.root.join("trailing.pid");
+        let old_command = format!(
+            "/usr/bin/true && /usr/bin/python3 -c 'from pathlib import Path; import os,time; Path(\"{}\").write_text(str(os.getpid())); time.sleep(30)'",
+            marker.display()
+        );
+        let parent = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_parent_crash_helper",
+                "--nocapture",
+            ])
+            .env("AUTOSPEC_TEST_CRASH_REPO", &fixture.repo)
+            .env("AUTOSPEC_TEST_CRASH_ARTIFACT", &artifact_root)
+            .env("AUTOSPEC_TEST_CRASH_COMMAND", &old_command)
+            .spawn()
+            .expect("crash-parent process");
+        let launch = artifact_root.join("command-001.launch.json");
+        let mut cleanup = DirectCrashFixtureCleanup::new(parent, launch.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (!marker.is_file() || !launch.is_file()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&launch).expect("trailing launch"))
+                .expect("trailing launch JSON");
+        let supervisor =
+            super::parse_process_identity(value["supervisor"].clone(), "supervisor fixture")
+                .expect("supervisor identity");
+        let harness = super::parse_process_identity(value["process"].clone(), "harness fixture")
+            .expect("harness identity");
+        cleanup.arm(supervisor.clone(), harness.clone());
+        cleanup.crash_parent();
+        let new_plan =
+            super::parse_direct_command_plan("/usr/bin/true").expect("shortened recovery plan");
+
+        let observed = super::execute_direct_plan(
+            &fixture.repo,
+            &new_plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("shortened plan proceeds after all-index cleanup");
+
+        assert_eq!(observed.len(), 1);
+        assert!(
+            super::observe_process_birth(supervisor.pid)
+                .expect("observe removed supervisor")
+                .is_none(),
+            "removed trailing supervisor survived plan-shrink cleanup"
+        );
+        assert!(
+            super::observe_process_birth(harness.pid)
+                .expect("observe removed harness")
+                .is_none(),
+            "removed trailing harness survived plan-shrink cleanup"
+        );
+        assert!(!launch.exists());
+        assert!(
+            artifact_root.join("command-001.intent.json").is_file(),
+            "removed command intent must remain immutable diagnostic context"
+        );
+        cleanup.disarm();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn autonomous_executor_bridge_restart_adopts_live_harness_after_supervisor_death() {
         let fixture = GitFixture::new("direct-dead-supervisor");
         let artifact_root = fixture.root.join("evidence");
@@ -17387,6 +21234,140 @@ exit 19
         assert_eq!(recovered[0].terminal, super::AttemptTerminal::Exited(0));
     }
 
+    #[cfg(target_os = "linux")]
+    fn assert_exec_replaced_direct_harness_recovers(
+        fixture: &GitFixture,
+        command: &str,
+        marker: &Path,
+    ) {
+        let artifact_root = fixture.root.join("evidence");
+        let parent = Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_parent_crash_helper",
+                "--nocapture",
+            ])
+            .env("AUTOSPEC_TEST_CRASH_REPO", &fixture.repo)
+            .env("AUTOSPEC_TEST_CRASH_ARTIFACT", &artifact_root)
+            .env("AUTOSPEC_TEST_CRASH_COMMAND", command)
+            .spawn()
+            .expect("crash-parent process");
+        let launch = artifact_root.join("command-000.launch.json");
+        let mut cleanup = DirectCrashFixtureCleanup::new(parent, launch.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while (!marker.is_file() || !launch.is_file()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let launch_value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&launch).expect("durable launch record"))
+                .expect("launch JSON");
+        let supervisor =
+            super::parse_process_identity(launch_value["supervisor"].clone(), "supervisor fixture")
+                .expect("supervisor identity");
+        let harness =
+            super::parse_process_identity(launch_value["process"].clone(), "harness fixture")
+                .expect("harness identity");
+        cleanup.arm(supervisor.clone(), harness.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let observed = loop {
+            let observed = super::observe_process_identity(harness.pid, &harness.argv_digest)
+                .expect("observe exec-replaced harness")
+                .expect("live exec-replaced harness");
+            if observed.executable != harness.executable
+                || observed.argv_digest != harness.argv_digest
+            {
+                break observed;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "fixture harness never replaced its declared exec identity"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(harness.same_birth(&observed));
+
+        let owned =
+            super::OwnedProcess::capture(&supervisor.birth()).expect("capture exact supervisor");
+        owned
+            .signal(Signal::SIGKILL)
+            .expect("kill stable supervisor");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while super::observe_process_birth(supervisor.pid)
+            .expect("observe supervisor exit")
+            .is_some()
+            && Instant::now() < deadline
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            super::observe_process_birth(harness.pid)
+                .expect("observe surviving harness")
+                .is_some(),
+            "exec-replaced harness must survive supervisor death"
+        );
+        cleanup.crash_parent();
+
+        let plan = super::parse_direct_command_plan(command).expect("recovery plan");
+        let recovered = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("restart must clean exact-birth harness and retry");
+
+        assert!(
+            super::observe_process_birth(harness.pid)
+                .expect("post-recovery harness")
+                .is_none(),
+            "exec-replaced harness survived restart cleanup"
+        );
+        assert!(!launch.exists());
+        assert_eq!(recovered[0].terminal, super::AttemptTerminal::Exited(0));
+        cleanup.disarm();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_restart_cleans_shebang_harness_after_supervisor_death() {
+        // Break caught: cleanup recovery requiring the declared script path after Linux replaces
+        // the live harness identity with its shebang interpreter.
+        let fixture = GitFixture::new("direct-dead-supervisor-shebang");
+        let marker = fixture.root.join("command.pid");
+        let script = fixture.root.join("fixture-command");
+        write_executable(
+            &script,
+            &format!(
+                "#!/bin/sh\nif [ ! -e '{}' ]; then printf '%s' \"$$\" > '{}'; while :; do sleep 1; done; fi\n",
+                marker.display(),
+                marker.display()
+            ),
+        );
+
+        assert_exec_replaced_direct_harness_recovers(
+            &fixture,
+            script.to_str().expect("script path"),
+            &marker,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_restart_cleans_immediate_exec_harness_after_supervisor_death() {
+        // Break caught: cleanup recovery rejecting a same-birth harness after the declared shell
+        // immediately replaces itself with another executable.
+        let fixture = GitFixture::new("direct-dead-supervisor-immediate-exec");
+        let marker = fixture.root.join("command.pid");
+        let command = format!(
+            "/bin/sh -c 'if [ ! -e \"{}\" ]; then printf %s \"$$\" > \"{}\"; exec /usr/bin/sleep 30; fi'",
+            marker.display(),
+            marker.display()
+        );
+
+        assert_exec_replaced_direct_harness_recovers(&fixture, &command, &marker);
+    }
+
     #[test]
     fn autonomous_executor_bridge_runtime_infrastructure_error_is_terminal_evidence() {
         // Break caught: a runtime adapter error returning before command-000.json is persisted.
@@ -17448,6 +21429,13 @@ exit 19
         let first = first.expect_err("failed cleanup must be typed and quarantined");
         let launch = artifact_root.join("command-000.launch.json");
         let supervisor = direct_launch_supervisor_pid(&launch);
+        let harness = serde_json::from_str::<serde_json::Value>(
+            &fs::read_to_string(&launch).expect("durable direct launch identity"),
+        )
+        .expect("direct launch JSON")["process"]["pid"]
+            .as_u64()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .expect("direct launch harness PID");
         assert!(first.contains("cleanup"), "{first}");
         assert!(Path::new(&format!("/proc/{supervisor}")).exists());
 
@@ -17458,11 +21446,445 @@ exit 19
             None,
             Duration::from_secs(5),
         )
-        .expect_err("reconciled cleanup terminal remains a failed attempt");
+        .expect("reconciled cleanup starts a fresh attempt");
 
-        assert!(retry.contains("cleanup"), "{retry}");
+        assert_eq!(retry[0].terminal, super::AttemptTerminal::Exited(0));
         assert!(!launch.exists());
         assert!(!Path::new(&format!("/proc/{supervisor}")).exists());
+        assert!(!Path::new(&format!("/proc/{harness}")).exists());
+        assert!(fs::read_dir(&artifact_root)
+            .expect("cleanup archives")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_resumes_failure_archive_before_one_fresh_attempt() {
+        for boundary in [
+            super::LaunchFailpoint::ArchiveAfterManifest,
+            super::LaunchFailpoint::ArchiveMidMove,
+            super::LaunchFailpoint::ArchiveBeforeComplete,
+        ] {
+            let fixture = GitFixture::new(&format!("direct-archive-{boundary:?}"));
+            let artifact_root = fixture.root.join("evidence");
+            let plan = super::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
+            super::set_cleanup_failpoint(super::LaunchFailpoint::CleanupSignal);
+            let first = super::execute_direct_plan(
+                &fixture.repo,
+                &plan,
+                &artifact_root,
+                None,
+                Duration::from_secs(5),
+            );
+            super::set_cleanup_failpoint(super::LaunchFailpoint::None);
+            first.expect_err("first attempt leaves cleanup quarantine");
+
+            super::set_launch_failpoint(boundary);
+            let interrupted = super::execute_direct_plan(
+                &fixture.repo,
+                &plan,
+                &artifact_root,
+                None,
+                Duration::from_secs(5),
+            );
+            super::set_launch_failpoint(super::LaunchFailpoint::None);
+            interrupted.expect_err("archive transaction failpoint interrupts rollover");
+
+            let recovered = super::execute_direct_plan(
+                &fixture.repo,
+                &plan,
+                &artifact_root,
+                None,
+                Duration::from_secs(5),
+            )
+            .expect("restart completes archive and runs one fresh attempt");
+            assert_eq!(recovered[0].terminal, super::AttemptTerminal::Exited(0));
+            let archives = fs::read_dir(&artifact_root)
+                .expect("archive directory")
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().contains(".archive-"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                archives.len(),
+                1,
+                "one immutable archive per failed attempt"
+            );
+            assert!(archives[0].path().join("complete").is_file());
+            assert!(archives[0].path().join("command-000.json").is_file());
+            assert!(!artifact_root.join("command-000.archive.pending").exists());
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_retirement_resumes_every_delete_boundary() {
+        // Break caught: a crash after cleanup proof deleting launch ownership without leaving a
+        // durable transaction that restart can finish.
+        for boundary in [
+            super::LaunchFailpoint::RetireAfterProof,
+            super::LaunchFailpoint::RetireMidDelete,
+            super::LaunchFailpoint::RetireAfterLaunchDelete,
+        ] {
+            let fixture = GitFixture::new(&format!("direct-retire-{boundary:?}"));
+            let artifact_root = fixture.root.join("evidence");
+            fs::create_dir_all(&artifact_root).expect("artifact root");
+            fs::set_permissions(&artifact_root, fs::Permissions::from_mode(0o700))
+                .expect("private artifact root");
+            let paths = super::direct_attempt_paths(&artifact_root, 0);
+            for path in [
+                &paths.launch,
+                &paths.sinks.supervisor_identity,
+                &paths.sinks.stdout,
+                &paths.sinks.stderr,
+                &paths.sinks.stdout_writer_cursor,
+                &paths.sinks.stderr_writer_cursor,
+                &paths.sinks.stdout_reader_cursor,
+                &paths.sinks.stderr_reader_cursor,
+                &paths.sinks.exit_status,
+            ] {
+                fs::write(path, b"owned\n").expect("retirement artifact");
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                    .expect("private retirement artifact");
+            }
+
+            super::set_launch_failpoint(boundary);
+            let attempt_id = super::new_direct_attempt_id_candidate().expect("attempt id");
+            let interrupted = super::retire_direct_launch(&paths, &attempt_id);
+            super::set_launch_failpoint(super::LaunchFailpoint::None);
+            interrupted.expect_err("retirement failpoint must interrupt transaction");
+            super::retire_direct_launch(&paths, &attempt_id).expect("restart resumes retirement");
+
+            assert!(!paths.launch.exists());
+            assert!(!paths.sinks.supervisor_identity.exists());
+            assert!(
+                !paths.record.with_extension("retire.pending").exists(),
+                "retirement pending pointer survived commit"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_complete_retirement_recovers_without_pending_pointer() {
+        // Break caught: pending removal followed by parent-sync failure losing the only
+        // cleanup-proven locator and preventing the typed failure archive/fresh retry.
+        let fixture = GitFixture::new("direct-retire-pointer-cleanup");
+        let artifact_root = fixture.root.join("evidence");
+        let plan = super::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
+        super::set_cleanup_failpoint(super::LaunchFailpoint::CleanupSignal);
+        let first = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        );
+        super::set_cleanup_failpoint(super::LaunchFailpoint::None);
+        first.expect_err("first attempt leaves cleanup quarantine");
+
+        super::set_launch_failpoint(super::LaunchFailpoint::RetireAfterPendingRemoval);
+        let interrupted = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        );
+        super::set_launch_failpoint(super::LaunchFailpoint::None);
+        interrupted.expect_err("retirement loses pending before final parent sync");
+        let failed_record: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(artifact_root.join("command-000.json"))
+                .expect("cleanup-failed command record"),
+        )
+        .expect("cleanup-failed record JSON");
+        let failed_attempt_id = failed_record["attempt_id"]
+            .as_str()
+            .expect("cleanup-failed attempt id")
+            .to_string();
+        assert!(!artifact_root.join("command-000.retire.pending").exists());
+        let completed_retirement = fs::read_dir(&artifact_root)
+            .expect("retirement transactions")
+            .flatten()
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("command-000.retire-")
+                    && entry.path().join("complete").is_file()
+            })
+            .expect("completed retirement");
+        let retirement_commit: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(completed_retirement.path().join("complete"))
+                .expect("retirement commit"),
+        )
+        .expect("retirement commit JSON");
+        assert_eq!(
+            retirement_commit["attempt_id"].as_str(),
+            Some(failed_attempt_id.as_str()),
+            "retirement and the later cleanup-failed terminal record must bind one attempt"
+        );
+
+        let recovered = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("complete retirement locator archives failure and retries");
+
+        assert_eq!(recovered[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_ne!(
+            recovered[0].attempt_id, failed_attempt_id,
+            "fresh execution after archived cleanup failure must use a new attempt identity"
+        );
+        assert!(fs::read_dir(&artifact_root)
+            .expect("failure archive")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_live_sidecar_beats_stale_completed_retirement() {
+        // Break caught: a completed retirement from an older attempt suppressing cleanup of a
+        // newer live supervisor sidecar for the same command index.
+        let fixture = GitFixture::new("direct-stale-retirement-live-sidecar");
+        let artifact_root = fixture.root.join("evidence");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        fs::set_permissions(&artifact_root, fs::Permissions::from_mode(0o700))
+            .expect("private artifact root");
+        let paths = super::direct_attempt_paths(&artifact_root, 0);
+        let old_attempt_id = super::reserve_direct_attempt_id(&paths).expect("old attempt id");
+        fs::write(&paths.launch, b"old ownership\n").expect("old launch");
+        fs::set_permissions(&paths.launch, fs::Permissions::from_mode(0o600))
+            .expect("private old launch");
+        super::retire_direct_launch(&paths, &old_attempt_id).expect("retire old attempt");
+
+        let invocation = shell_invocation(&fixture.repo, "exec /usr/bin/sleep 30");
+        let validated = super::validate_invocation(
+            &HarnessInvocation {
+                program: invocation.program.canonicalize().expect("canonical shell"),
+                args: invocation.args,
+                current_dir: invocation
+                    .current_dir
+                    .canonicalize()
+                    .expect("canonical repo"),
+                requires_mutation_snapshots: false,
+            },
+            &fixture.repo.canonicalize().expect("canonical fixture repo"),
+        )
+        .expect("validate live sidecar harness");
+        let new_attempt_id = super::reserve_direct_attempt_id(&paths).expect("new attempt id");
+        assert_ne!(old_attempt_id, new_attempt_id);
+        let mut argv = vec![validated.program.display().to_string()];
+        argv.extend(validated.args.clone());
+        let intent = super::direct_intent_document(
+            &new_attempt_id,
+            &super::git_stdout(&fixture.repo, &["rev-parse", "--verify", "HEAD^{commit}"])
+                .expect("fixture commit"),
+            None,
+            &validated.program,
+            &argv,
+        );
+        super::write_private_create_once(
+            &paths.intent,
+            intent.as_bytes(),
+            "current direct intent fixture",
+        )
+        .expect("write current intent");
+        let mut child =
+            super::spawn_blocked_harness(&validated, &paths.sinks, Some(&new_attempt_id))
+                .expect("spawn current sidecar harness");
+        let supervisor_pid = child.supervisor_birth().pid;
+        child
+            .release_launch_barrier()
+            .expect("release current harness");
+        drop(child);
+
+        assert!(super::reconcile_direct_launch(&paths, Some(&intent))
+            .expect("reconcile current sidecar"));
+        assert!(
+            super::observe_process_birth(supervisor_pid)
+                .expect("observe cleaned supervisor")
+                .is_none(),
+            "new live sidecar was suppressed by stale retirement proof"
+        );
+        assert!(!paths.sinks.supervisor_identity.exists());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_terminal_record_attempt_must_match_intent() {
+        // Break caught: a syntactically valid terminal record for another attempt being accepted
+        // and archived solely because its argv and output digests were self-consistent.
+        let fixture = GitFixture::new("direct-terminal-attempt-binding");
+        let artifact_root = fixture.root.join("evidence");
+        let plan = super::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
+        super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("initial successful attempt");
+        let record_path = artifact_root.join("command-000.json");
+        let mut record: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&record_path).expect("terminal record"))
+                .expect("terminal record JSON");
+        record["attempt_id"] = serde_json::Value::String(
+            super::new_direct_attempt_id_candidate().expect("foreign attempt id"),
+        );
+        fs::write(&record_path, record.to_string()).expect("replace terminal attempt id");
+
+        let error = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("foreign terminal attempt must not authorize recovery");
+
+        assert!(error.contains("durable invocation intent"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_attempt_id_collision_uses_durable_reservation() {
+        // Break caught: a restored clock/PID/process sequence reproducing a historical attempt ID
+        // and making an old completed retirement look authoritative for a later execution.
+        let fixture = GitFixture::new("direct-attempt-id-reservation");
+        let artifact_root = fixture.root.join("evidence");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        fs::set_permissions(&artifact_root, fs::Permissions::from_mode(0o700))
+            .expect("private artifact root");
+        let paths = super::direct_attempt_paths(&artifact_root, 0);
+        let collision = autospec_core::autonomous::waterfall::sha256_hex(b"restored-generator");
+        let fallback = autospec_core::autonomous::waterfall::sha256_hex(b"fresh-generator");
+        let historical =
+            super::reserve_direct_attempt_id_candidates(&paths, std::iter::once(collision.clone()))
+                .expect("reserve historical attempt");
+        fs::write(&paths.launch, b"historical ownership\n").expect("historical launch");
+        fs::set_permissions(&paths.launch, fs::Permissions::from_mode(0o600))
+            .expect("private historical launch");
+        super::retire_direct_launch(&paths, &historical).expect("complete historical retirement");
+
+        let current = super::reserve_direct_attempt_id_candidates(
+            &paths,
+            [collision.clone(), fallback.clone()],
+        )
+        .expect("retry deterministic collision");
+
+        assert_eq!(historical, collision);
+        assert_eq!(current, fallback);
+        assert_ne!(current, historical);
+        let reservations = super::direct_attempt_reservation_directory(&paths);
+        assert!(reservations.join(&historical).is_file());
+        assert!(reservations.join(&current).is_file());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_installed_tool_retries_spawn_failure() {
+        // Break caught: SpawnFailed records without a logical intent poisoning the command index
+        // forever once the missing dependency becomes available.
+        let fixture = GitFixture::new("direct-install-after-spawn-failure");
+        let artifact_root = fixture.root.join("evidence");
+        let executable = fixture.root.join("installed-later");
+        let runtime = super::DirectRuntimeAdapter {
+            repo: fixture.repo.canonicalize().expect("runtime repo"),
+            session_id: "runtime-install-session".to_string(),
+            environment_dir: fixture
+                .repo
+                .canonicalize()
+                .expect("runtime repo")
+                .join(".autospec-test-runtime-adapter"),
+            session: std::cell::RefCell::new(None),
+        };
+        let plan = super::parse_direct_command_plan(&executable.display().to_string())
+            .expect("missing executable plan");
+        super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            Some(&runtime),
+            Duration::from_secs(5),
+        )
+        .expect_err("missing executable records SpawnFailed");
+        let failed_record: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(artifact_root.join("command-000.json"))
+                .expect("spawn failure record"),
+        )
+        .expect("spawn failure JSON");
+        let failed_intent: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(artifact_root.join("command-000.intent.json"))
+                .expect("unresolved intent"),
+        )
+        .expect("unresolved intent JSON");
+        assert_eq!(failed_intent["resolution"], "unresolved");
+        assert_eq!(failed_record["attempt_id"], failed_intent["attempt_id"]);
+        assert_eq!(
+            failed_record["runtime_session_id"],
+            "runtime-install-session"
+        );
+        assert_eq!(
+            failed_intent["runtime_session_id"],
+            "runtime-install-session"
+        );
+
+        write_executable(&executable, "#!/bin/sh\nexit 0\n");
+        let recovered = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            Some(&runtime),
+            Duration::from_secs(5),
+        )
+        .expect("installed executable runs under a fresh attempt");
+
+        assert_eq!(recovered[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_ne!(
+            recovered[0].attempt_id,
+            failed_record["attempt_id"]
+                .as_str()
+                .expect("failed attempt id")
+        );
+        assert!(fs::read_dir(&artifact_root)
+            .expect("failure archive")
+            .flatten()
+            .any(|entry| {
+                entry.file_name().to_string_lossy().contains(".archive-")
+                    && entry.path().join("command-000.json").is_file()
+                    && entry.path().join("command-000.intent.json").is_file()
+            }));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_identical_failures_use_distinct_archives() {
+        // Break caught: digest-only archive names colliding when two attempts fail identically.
+        let fixture = GitFixture::new("direct-identical-failure-archives");
+        let artifact_root = fixture.root.join("evidence");
+        fs::create_dir_all(&artifact_root).expect("artifact root");
+        fs::set_permissions(&artifact_root, fs::Permissions::from_mode(0o700))
+            .expect("private artifact root");
+        let paths = super::direct_attempt_paths(&artifact_root, 0);
+        for _ in 0..2 {
+            for path in [&paths.record, &paths.stdout, &paths.stderr, &paths.intent] {
+                fs::write(path, b"identical\n").expect("identical failure artifact");
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                    .expect("private identical artifact");
+            }
+            super::archive_reconciled_direct_failure(&paths)
+                .expect("archive identical failure independently");
+        }
+        let archives = fs::read_dir(&artifact_root)
+            .expect("archive root")
+            .flatten()
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".archive-"))
+            .collect::<Vec<_>>();
+        assert_eq!(archives.len(), 2);
+        assert!(archives
+            .iter()
+            .all(|entry| entry.path().join("complete").is_file()));
     }
 
     #[cfg(target_os = "linux")]
@@ -17496,10 +21918,10 @@ exit 19
             None,
             Duration::from_secs(5),
         )
-        .expect_err("reconciled spawn cleanup remains a failed attempt");
+        .expect("reconciled spawn cleanup starts a fresh attempt");
 
-        assert!(retry.contains("cleanup"), "{retry}");
-        assert!(!launch.exists());
+        assert_eq!(retry[0].terminal, super::AttemptTerminal::Exited(0));
+        assert!(!launch.exists(), "{retry:?}");
         assert!(!Path::new(&format!("/proc/{supervisor}")).exists());
     }
 
@@ -17510,7 +21932,7 @@ exit 19
         let artifact_root = fixture.root.join("evidence");
         let descendant = fixture.root.join("descendant.pid");
         let plan = super::parse_direct_command_plan(&format!(
-            "/usr/bin/python3 -c 'import os,time; pid=os.fork(); open(\"{}\",\"w\").write(str(pid)) if pid else time.sleep(30)'",
+            "/usr/bin/python3 -c 'from pathlib import Path; import os,time; p=Path(\"{}\"); first=not p.exists(); pid=os.fork() if first else None; p.write_text(str(pid)) if pid else (time.sleep(30) if pid == 0 else None)'",
             descendant.display()
         ))
         .expect("descendant plan");
@@ -17537,13 +21959,13 @@ exit 19
             None,
             Duration::from_secs(5),
         )
-        .expect_err("reconciled descendant cleanup remains a failed attempt");
+        .expect("reconciled descendant cleanup starts a fresh attempt");
         let descendant = fs::read_to_string(descendant)
             .expect("descendant pid")
             .trim()
             .to_string();
 
-        assert!(retry.contains("cleanup"), "{retry}");
+        assert_eq!(retry[0].terminal, super::AttemptTerminal::Exited(0));
         assert!(!launch.exists());
         assert!(!Path::new(&format!("/proc/{supervisor}")).exists());
         assert!(!Path::new(&format!("/proc/{descendant}")).exists());
@@ -17943,6 +22365,523 @@ exit 19
     }
 
     #[test]
+    fn autonomous_executor_bridge_prebundle_crash_reruns_every_diagnostic_record() {
+        // Break caught: a crash after every command/scanner record but before bundle creation
+        // allowing recovered disk bytes to originate Pass on restart.
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let previous_claim_override = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
+        std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
+        let fixture = GitFixture::new("producer-prebundle-crash");
+        fs::write(fixture.repo.join(".gitignore"), ".autospec/\n")
+            .expect("ignore evidence artifacts");
+        fs::create_dir_all(fixture.repo.join("tests/smoke")).expect("smoke test directory");
+        fs::write(
+            fixture.repo.join("tests/smoke/generation.sh"),
+            "#!/bin/sh\nset -eu\ntest -f README.md\n",
+        )
+        .expect("smoke test fixture");
+        git(
+            &fixture.repo,
+            &["add", ".gitignore", "tests/smoke/generation.sh"],
+        );
+        git(&fixture.repo, &["commit", "-m", "ignore evidence"]);
+        let execution_count = fixture.root.join("execution-count");
+        let scanner_root = fixture.root.join("scanner-binaries");
+
+        super::set_launch_failpoint(super::LaunchFailpoint::BeforeEvidenceBundle);
+        let interrupted =
+            run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root);
+        super::set_launch_failpoint(super::LaunchFailpoint::None);
+        let interrupted = interrupted.expect_err("pre-bundle failpoint interrupts production");
+        assert!(
+            interrupted.contains("evidence-before-bundle"),
+            "{interrupted}"
+        );
+        assert_eq!(
+            fs::read_to_string(&execution_count).expect("first QA count"),
+            "1"
+        );
+
+        let outcome =
+            run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root)
+                .expect("restart reruns diagnostics and reaches Pass");
+        assert!(matches!(
+            outcome.decision,
+            super::PremergeDecision::Pass { .. }
+        ));
+        assert_eq!(
+            fs::read_to_string(&execution_count).expect("rerun QA count"),
+            "2"
+        );
+        let lane_root = fs::read_dir(fixture.repo.join(".autospec/evidence/premerge"))
+            .expect("premerge root")
+            .flatten()
+            .find(|entry| entry.path().join("active.json").is_file())
+            .expect("active lane")
+            .path();
+        let active: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(lane_root.join("active.json")).expect("active attempt"),
+        )
+        .expect("active JSON");
+        let attempt_root = lane_root.join(
+            active["attempt_path"]
+                .as_str()
+                .expect("active attempt path"),
+        );
+        for scanner in ["gitleaks", "semgrep", "trivy", "license-checker"] {
+            assert!(
+                fs::read_dir(attempt_root.join("security").join(scanner).join("process"))
+                    .expect("scanner process artifacts")
+                    .flatten()
+                    .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")),
+                "{scanner} diagnostic record was not archived before rerun"
+            );
+        }
+        match previous_claim_override {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM"),
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_partial_publication_allocates_fresh_generation() {
+        // Break caught: observed/QA/security/seal create-once files in an incomplete generation
+        // poisoning every restart instead of becoming an immutable diagnostic attempt.
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let previous_claim_override = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
+        std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
+        for poisoned in ["observed.json", "qa.json", "security.json", "seal.json"] {
+            let fixture = GitFixture::new(&format!("partial-generation-{poisoned}"));
+            fs::write(fixture.repo.join(".gitignore"), ".autospec/\n")
+                .expect("ignore evidence artifacts");
+            fs::create_dir_all(fixture.repo.join("tests/smoke")).expect("smoke test directory");
+            fs::write(
+                fixture.repo.join("tests/smoke/generation.sh"),
+                "#!/bin/sh\nset -eu\ntest -f README.md\n",
+            )
+            .expect("smoke test fixture");
+            git(
+                &fixture.repo,
+                &["add", ".gitignore", "tests/smoke/generation.sh"],
+            );
+            git(&fixture.repo, &["commit", "-m", "ignore evidence"]);
+            let execution_count = fixture.root.join("execution-count");
+            let scanner_root = fixture.root.join("scanner-binaries");
+            super::set_launch_failpoint(super::LaunchFailpoint::BeforeEvidenceBundle);
+            run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root)
+                .expect_err("pre-bundle failure creates incomplete attempt");
+            super::set_launch_failpoint(super::LaunchFailpoint::None);
+            let lane_root = fs::read_dir(fixture.repo.join(".autospec/evidence/premerge"))
+                .expect("premerge root")
+                .flatten()
+                .find(|entry| entry.path().join("active.json").is_file())
+                .expect("active lane")
+                .path();
+            let active: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(lane_root.join("active.json")).expect("active attempt"),
+            )
+            .expect("active JSON");
+            let old_attempt_path = active["attempt_path"]
+                .as_str()
+                .expect("active attempt path")
+                .to_string();
+            let old_attempt = lane_root.join(&old_attempt_path);
+            let poison = old_attempt.join(poisoned);
+            if !poison.exists() {
+                fs::write(&poison, b"partial-publication\n").expect("poison publication artifact");
+                fs::set_permissions(&poison, fs::Permissions::from_mode(0o600))
+                    .expect("private poison artifact");
+            }
+
+            let outcome =
+                run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root)
+                    .expect("restart archives poisoned generation and reaches Pass");
+            let new_active: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(lane_root.join("active.json")).expect("new active attempt"),
+            )
+            .expect("new active JSON");
+
+            assert!(matches!(
+                outcome.decision,
+                super::PremergeDecision::Pass { .. }
+            ));
+            assert_ne!(
+                new_active["attempt_path"].as_str(),
+                Some(old_attempt_path.as_str()),
+                "{poisoned} did not force a fresh generation"
+            );
+            assert!(!old_attempt.exists(), "{poisoned} attempt was reused");
+            assert!(
+                fs::read_dir(lane_root.join("diagnostics"))
+                    .expect("diagnostic generations")
+                    .flatten()
+                    .any(|entry| entry.path().join(poisoned).is_file()),
+                "{poisoned} attempt was not archived intact"
+            );
+        }
+        match previous_claim_override {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM"),
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_partial_generation_rotation_resumes_crash_boundaries() {
+        // Break caught: moving a poisoned generation before durably switching active.json leaves
+        // restart free to recreate the old run identity or lose the diagnostic generation.
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let previous_claim_override = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
+        std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
+        for boundary in [
+            super::LaunchFailpoint::RotationAfterArchive,
+            super::LaunchFailpoint::RotationAfterActive,
+        ] {
+            let fixture = GitFixture::new(&format!("generation-rotation-{boundary:?}"));
+            fs::write(fixture.repo.join(".gitignore"), ".autospec/\n")
+                .expect("ignore evidence artifacts");
+            fs::create_dir_all(fixture.repo.join("tests/smoke")).expect("smoke test directory");
+            fs::write(
+                fixture.repo.join("tests/smoke/generation.sh"),
+                "#!/bin/sh\nset -eu\ntest -f README.md\n",
+            )
+            .expect("smoke test fixture");
+            git(
+                &fixture.repo,
+                &["add", ".gitignore", "tests/smoke/generation.sh"],
+            );
+            git(&fixture.repo, &["commit", "-m", "ignore evidence"]);
+            let execution_count = fixture.root.join("execution-count");
+            let scanner_root = fixture.root.join("scanner-binaries");
+            super::set_launch_failpoint(super::LaunchFailpoint::BeforeEvidenceBundle);
+            run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root)
+                .expect_err("pre-bundle failure creates incomplete attempt");
+            super::set_launch_failpoint(super::LaunchFailpoint::None);
+            let lane_root = fs::read_dir(fixture.repo.join(".autospec/evidence/premerge"))
+                .expect("premerge root")
+                .flatten()
+                .find(|entry| entry.path().join("active.json").is_file())
+                .expect("active lane")
+                .path();
+            let old_active: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(lane_root.join("active.json")).expect("old active"),
+            )
+            .expect("old active JSON");
+            let old_attempt_path = old_active["attempt_path"]
+                .as_str()
+                .expect("old attempt path")
+                .to_string();
+            let old_attempt = lane_root.join(&old_attempt_path);
+            let old_intent: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(old_attempt.join("intent.json")).expect("old intent"),
+            )
+            .expect("old intent JSON");
+            fs::write(old_attempt.join("observed.json"), b"partial-publication\n")
+                .expect("poison publication");
+            fs::set_permissions(
+                old_attempt.join("observed.json"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .expect("private poison");
+
+            super::set_launch_failpoint(boundary);
+            run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root)
+                .expect_err("rotation boundary interrupts transaction");
+            super::set_launch_failpoint(super::LaunchFailpoint::None);
+            assert!(
+                lane_root.join("rotation.pending.json").is_file(),
+                "rotation intent must survive {boundary:?}"
+            );
+            assert!(!old_attempt.exists(), "old attempt survived {boundary:?}");
+            let interrupted_active: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(lane_root.join("active.json")).expect("interrupted active"),
+            )
+            .expect("interrupted active JSON");
+            if boundary == super::LaunchFailpoint::RotationAfterArchive {
+                assert_eq!(
+                    interrupted_active["attempt_path"].as_str(),
+                    Some(old_attempt_path.as_str())
+                );
+            } else {
+                assert_ne!(
+                    interrupted_active["attempt_path"].as_str(),
+                    Some(old_attempt_path.as_str())
+                );
+            }
+            let outcome =
+                run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root)
+                    .expect("restart resumes rotation and reaches Pass");
+            let new_active: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(lane_root.join("active.json")).expect("new active"),
+            )
+            .expect("new active JSON");
+            let new_attempt_path = new_active["attempt_path"]
+                .as_str()
+                .expect("new attempt path");
+            let new_intent: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(lane_root.join(new_attempt_path).join("intent.json"))
+                    .expect("new intent"),
+            )
+            .expect("new intent JSON");
+
+            assert!(matches!(
+                outcome.decision,
+                super::PremergeDecision::Pass { .. }
+            ));
+            assert_ne!(new_attempt_path, old_attempt_path);
+            assert_ne!(new_intent["run_id"], old_intent["run_id"]);
+            assert!(!lane_root.join("rotation.pending.json").exists());
+            assert!(fs::read_dir(lane_root.join("diagnostics"))
+                .expect("diagnostic generations")
+                .flatten()
+                .any(|entry| entry.path().join("observed.json").is_file()));
+        }
+        match previous_claim_override {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM"),
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rotation_rebases_changed_input_after_crash() {
+        // Break caught: a transparently reprovisioned runtime reusing the stale replacement
+        // generation reserved by a rotation that began under the previous runtime input.
+        for boundary in [
+            super::LaunchFailpoint::RotationAfterArchive,
+            super::LaunchFailpoint::RotationAfterActive,
+        ] {
+            let fixture = GitFixture::new(&format!("rotation-rebase-{boundary:?}"));
+            let lane_root = fixture.root.join("lane");
+            super::ensure_private_directory(&lane_root).expect("lane root");
+            super::ensure_private_directory(&lane_root.join("attempts")).expect("attempts root");
+            let old_base = autospec_core::autonomous::waterfall::sha256_hex(b"runtime-session-old");
+            let current_base =
+                autospec_core::autonomous::waterfall::sha256_hex(b"runtime-session-current");
+            let old_attempt_path = format!("attempts/{}", &old_base[..24]);
+            let old_attempt = lane_root.join(&old_attempt_path);
+            super::ensure_private_directory(&old_attempt).expect("old attempt");
+            fs::write(old_attempt.join("observed.json"), b"partial\n")
+                .expect("partial publication");
+            fs::set_permissions(
+                old_attempt.join("observed.json"),
+                fs::Permissions::from_mode(0o600),
+            )
+            .expect("private partial publication");
+            let active = serde_json::json!({
+                "schema": 2,
+                "attempt_path": old_attempt_path,
+                "input_digest": old_base,
+                "base_input_digest": old_base,
+                "intent_digest": "old",
+                "runtime_session_id": "runtime-session-old",
+            })
+            .to_string();
+            super::write_private_atomic(
+                &lane_root.join("active.json"),
+                active.as_bytes(),
+                "old active fixture",
+            )
+            .expect("old active");
+
+            super::set_launch_failpoint(boundary);
+            super::select_evidence_generation(&lane_root, &old_base)
+                .expect_err("rotation crash boundary");
+            super::set_launch_failpoint(super::LaunchFailpoint::None);
+            let pending: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(lane_root.join("rotation.pending.json"))
+                    .expect("pending rotation"),
+            )
+            .expect("pending rotation JSON");
+            let stale_new = pending["new_input_digest"]
+                .as_str()
+                .expect("stale replacement digest")
+                .to_string();
+
+            super::set_launch_failpoint(super::LaunchFailpoint::EvidenceAfterGenerationSelect);
+            super::select_evidence_generation(&lane_root, &current_base)
+                .expect_err("crash after pending removal before attempt intent");
+            super::set_launch_failpoint(super::LaunchFailpoint::None);
+            assert!(!lane_root.join("rotation.pending.json").exists());
+            let handoff_active: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(lane_root.join("active.json")).expect("handoff active"),
+            )
+            .expect("handoff active JSON");
+            assert_eq!(
+                handoff_active["base_input_digest"].as_str(),
+                Some(current_base.as_str())
+            );
+            let handoff_generation = handoff_active["input_digest"]
+                .as_str()
+                .expect("handoff generation")
+                .to_string();
+            let selected = super::select_evidence_generation(&lane_root, &current_base)
+                .expect("restart selects current-input handoff");
+            assert_eq!(selected, handoff_generation);
+            let current_attempt = lane_root.join("attempts").join(&selected[..24]);
+            super::ensure_private_directory(&current_attempt).expect("current attempt");
+            let plan = super::parse_direct_command_plan("/usr/bin/true").expect("current plan");
+            let commands = super::execute_direct_plan(
+                &fixture.repo,
+                &plan,
+                &current_attempt.join("qa"),
+                None,
+                Duration::from_secs(5),
+            )
+            .expect("run command under current generation");
+            let current_active: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(lane_root.join("active.json")).expect("current active"),
+            )
+            .expect("current active JSON");
+
+            assert_ne!(selected, stale_new);
+            assert_eq!(
+                current_active["input_digest"].as_str(),
+                Some(selected.as_str())
+            );
+            assert_eq!(commands[0].terminal, super::AttemptTerminal::Exited(0));
+            assert!(current_attempt.join("qa/command-000.json").is_file());
+            assert!(!lane_root.join("rotation.pending.json").exists());
+            assert!(fs::read_dir(lane_root.join("diagnostics"))
+                .expect("diagnostics")
+                .flatten()
+                .any(|entry| entry.path().join("observed.json").is_file()));
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_empty_active_generation_rebinds_current_input() {
+        let fixture = GitFixture::new("empty-active-input-rebind");
+        let lane_root = fixture.root.join("lane");
+        super::ensure_private_directory(&lane_root).expect("lane root");
+        let old_base = autospec_core::autonomous::waterfall::sha256_hex(b"empty-old-runtime");
+        let current_base =
+            autospec_core::autonomous::waterfall::sha256_hex(b"empty-current-runtime");
+        let active = serde_json::json!({
+            "schema": 2,
+            "attempt_path": format!("attempts/{}", &old_base[..24]),
+            "input_digest": old_base,
+            "base_input_digest": old_base,
+            "intent_digest": null,
+            "runtime_session_id": "empty-old-runtime",
+        })
+        .to_string();
+        super::write_private_atomic(
+            &lane_root.join("active.json"),
+            active.as_bytes(),
+            "empty old active fixture",
+        )
+        .expect("old active");
+
+        let selected = super::select_evidence_generation(&lane_root, &current_base)
+            .expect("empty stale active replaced");
+        let rebound: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(lane_root.join("active.json")).expect("rebound active"),
+        )
+        .expect("rebound active JSON");
+
+        assert_ne!(selected, old_base);
+        assert_eq!(
+            rebound["base_input_digest"].as_str(),
+            Some(current_base.as_str())
+        );
+        assert_eq!(rebound["input_digest"].as_str(), Some(selected.as_str()));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_input_rebind_cleans_nested_live_command() {
+        let fixture = GitFixture::new("nested-live-input-rebind");
+        let lane_root = fixture.root.join("lane");
+        super::ensure_private_directory(&lane_root).expect("lane root");
+        let old_base = autospec_core::autonomous::waterfall::sha256_hex(b"nested-old-runtime");
+        let current_base =
+            autospec_core::autonomous::waterfall::sha256_hex(b"nested-current-runtime");
+        let old_attempt_path = format!("attempts/{}", &old_base[..24]);
+        let old_attempt = lane_root.join(&old_attempt_path);
+        super::ensure_private_directory(&lane_root.join("attempts")).expect("attempts root");
+        super::ensure_private_directory(&old_attempt).expect("old attempt root");
+        let qa_root = old_attempt.join("qa");
+        super::ensure_private_directory(&qa_root).expect("nested QA root");
+        let paths = super::direct_attempt_paths(&qa_root, 0);
+        let attempt_id = super::reserve_direct_attempt_id(&paths).expect("nested attempt id");
+        let invocation = shell_invocation(&fixture.repo, "exec /usr/bin/sleep 30");
+        let validated = super::validate_invocation(
+            &HarnessInvocation {
+                program: invocation.program.canonicalize().expect("canonical shell"),
+                args: invocation.args,
+                current_dir: invocation
+                    .current_dir
+                    .canonicalize()
+                    .expect("canonical repo"),
+                requires_mutation_snapshots: false,
+            },
+            &fixture.repo.canonicalize().expect("canonical fixture repo"),
+        )
+        .expect("validate nested harness");
+        let mut argv = vec![validated.program.display().to_string()];
+        argv.extend(validated.args.clone());
+        let intent = super::direct_intent_document(
+            &attempt_id,
+            &super::git_stdout(&fixture.repo, &["rev-parse", "--verify", "HEAD^{commit}"])
+                .expect("fixture commit"),
+            None,
+            &validated.program,
+            &argv,
+        );
+        super::write_private_create_once(&paths.intent, intent.as_bytes(), "nested direct intent")
+            .expect("nested intent");
+        let mut child = super::spawn_blocked_harness(&validated, &paths.sinks, Some(&attempt_id))
+            .expect("spawn nested live command");
+        let supervisor_pid = child.supervisor_birth().pid;
+        child
+            .release_launch_barrier()
+            .expect("release nested command");
+        drop(child);
+        let active = serde_json::json!({
+            "schema": 2,
+            "attempt_path": old_attempt_path,
+            "input_digest": old_base,
+            "base_input_digest": old_base,
+            "intent_digest": "old",
+            "runtime_session_id": "nested-old-runtime",
+        })
+        .to_string();
+        super::write_private_atomic(
+            &lane_root.join("active.json"),
+            active.as_bytes(),
+            "nested old active fixture",
+        )
+        .expect("old active");
+
+        let selected = super::select_evidence_generation(&lane_root, &current_base)
+            .expect("clean nested ownership and select current input");
+        let new_attempt = lane_root.join("attempts").join(&selected[..24]);
+        super::ensure_private_directory(&new_attempt).expect("new attempt");
+        let plan = super::parse_direct_command_plan("/usr/bin/true").expect("new command plan");
+        let commands = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &new_attempt.join("qa"),
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("one new command");
+
+        assert!(
+            super::observe_process_birth(supervisor_pid)
+                .expect("observe old supervisor")
+                .is_none(),
+            "old nested supervisor survived input rebind"
+        );
+        assert!(!old_attempt.exists());
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].terminal, super::AttemptTerminal::Exited(0));
+        assert!(fs::read_dir(lane_root.join("diagnostics"))
+            .expect("diagnostics")
+            .flatten()
+            .any(|entry| entry.path().join("qa/command-000.intent.json").is_file()));
+    }
+
+    #[test]
     fn autonomous_executor_bridge_completed_marker_selects_fresh_live_generation() {
         // Break caught: a durable completed attempt permanently vetoing every later in-process
         // producer after the process that wrote it died before returning Pass.
@@ -18205,7 +23144,9 @@ exit 19
     }
 
     #[test]
-    fn autonomous_executor_bridge_restart_adopts_all_scanner_results_without_rerun() {
+    fn autonomous_executor_bridge_restart_reruns_all_scanner_results() {
+        // Break caught: successful scanner records recovered from disk becoming authoritative
+        // security evidence without re-executing each scanner in the current process.
         let fixture = GitFixture::new("scanner-recovery");
         let bin = fixture.root.join("scanner-bin");
         fs::create_dir_all(&bin).expect("scanner bin");
@@ -18258,12 +23199,12 @@ exit 19
         )
         .expect("adopt scanner pass");
 
-        assert_eq!(first, second);
+        assert_eq!(first.len(), second.len());
         for scanner in ["gitleaks", "semgrep", "trivy", "license-checker"] {
             assert_eq!(
                 fs::read_to_string(bin.join(format!("{scanner}.count"))).expect("scanner count"),
-                "1",
-                "{scanner} reran after its durable terminal record"
+                "2",
+                "{scanner} did not rerun after its durable terminal record"
             );
         }
     }
