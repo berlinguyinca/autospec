@@ -2532,6 +2532,14 @@ fn run_foreground_with_lease(
                         .map_err(CommandFailure::diagnostic)?;
                     return Ok(ForegroundCompletion::State(Box::new(state)));
                 }
+            } else if state.pause_reason() == Some("executor_receipt_failed") {
+                if executor_receipt_failure_is_recoverable(layout, &state_path, issue)? {
+                    state = state
+                        .transition(ConductorEvent::Resume)
+                        .map_err(CommandFailure::diagnostic)?;
+                    persist_foreground_state(&state_path, &state)
+                        .map_err(CommandFailure::diagnostic)?;
+                }
             } else if claim_terminal || state.pause_reason() == Some("executor_bridge_nonterminal")
             {
                 state = state
@@ -2695,6 +2703,32 @@ fn run_foreground_with_lease(
     }
 }
 
+fn executor_receipt_failure_is_recoverable(
+    layout: &RunLayout,
+    state_path: &Path,
+    issue: u64,
+) -> Result<bool, CommandFailure> {
+    let Some(acquisition) = load_claim_acquisition_receipt(state_path, &layout.repo, issue)
+        .map_err(CommandFailure::diagnostic)?
+    else {
+        return Ok(false);
+    };
+    if recover_completed_bridge_lease(layout, issue, &acquisition)
+        .map_err(CommandFailure::diagnostic)?
+        .is_some()
+    {
+        return Ok(true);
+    }
+    if claim::recover_for_conductor(&layout.repo, issue, &acquisition)?.is_none() {
+        return Ok(false);
+    }
+    executor_bridge::recoverable_zero_effect_completion(
+        &layout.state_dir.join("executor"),
+        &acquisition,
+    )
+    .map_err(CommandFailure::diagnostic)
+}
+
 fn recover_completed_bridge_lease(
     layout: &RunLayout,
     issue: u64,
@@ -2749,6 +2783,9 @@ fn recover_completed_bridge_lease(
                 "completed executor invocation does not match the terminal claim owner".to_string(),
             );
         }
+        return Ok(Some(terminal_lease));
+    }
+    if executor_bridge::recover_terminal_failure_identity(&state_dir, &terminal_lease)?.is_some() {
         return Ok(Some(terminal_lease));
     }
     Ok(None)
