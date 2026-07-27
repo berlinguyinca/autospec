@@ -14572,11 +14572,118 @@ fn validate_existing_worktree(
             "executor worktree branch mismatch: expected {branch}, observed {observed_branch}"
         ));
     }
-    validate_worktree_creation_identity(repo, path, branch, base)?;
     if !git_stdout(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
         return Err("executor worktree is dirty and cannot be adopted".to_string());
     }
+    reconcile_preserved_worktree_base(repo, path, branch, scope_root, base)?;
+    validate_worktree_creation_identity(repo, path, branch, base)?;
     Ok(())
+}
+
+fn reconcile_preserved_worktree_base(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    scope_root: &Path,
+    base: &ResolvedBase,
+) -> Result<(), String> {
+    let configured_base = git_stdout(
+        repo,
+        &[
+            "config",
+            "--get",
+            &format!("branch.{branch}.autospecBaseOid"),
+        ],
+    )
+    .map_err(|_| "executor worktree base identity is missing".to_string())?;
+    let mut recorded_base = base.clone();
+    recorded_base.base_oid = configured_base.clone();
+    validate_worktree_creation_identity(repo, path, branch, &recorded_base)?;
+    if configured_base == base.base_oid {
+        return Ok(());
+    }
+    if git(
+        repo,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &configured_base,
+            &base.base_oid,
+        ],
+    )
+    .is_err()
+    {
+        return Err("executor retry base is not a descendant of the recorded base".to_string());
+    }
+
+    let current_head = git_stdout(path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let state_anchor = scope_root.join(format!(
+        "{}.provision",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| "executor worktree name is not UTF-8".to_string())?
+    ));
+    let parents = git_stdout(path, &["show", "-s", "--format=%P", &current_head])?;
+    let parents = parents.split_whitespace().collect::<Vec<_>>();
+    let recovery_intent = (parents.len() == 2 && parents[1] == base.base_oid)
+        .then(|| BaseDriftIntent {
+            old_base: configured_base.clone(),
+            old_head: parents[0].to_string(),
+            new_base: base.base_oid.clone(),
+        })
+        .filter(|intent| base_drift_intent_path(&state_anchor, intent).exists());
+    let intent = recovery_intent.unwrap_or_else(|| BaseDriftIntent {
+        old_base: configured_base,
+        old_head: current_head.clone(),
+        new_base: base.base_oid.clone(),
+    });
+    if git(
+        path,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &intent.old_base,
+            &intent.old_head,
+        ],
+    )
+    .is_err()
+    {
+        return Err("executor preserved WIP does not descend from the recorded base".to_string());
+    }
+
+    let reference = format!("refs/heads/{branch}");
+    let refs = remote_head_refs(repo)?;
+    let remote_head = refs
+        .get(&reference)
+        .ok_or_else(|| "executor preserved WIP branch is missing from origin".to_string())?;
+    if remote_head != &intent.old_head && remote_head != &current_head {
+        return Err("executor preserved WIP branch changed before base reconciliation".to_string());
+    }
+
+    ensure_base_drift_intent(&state_anchor, &intent)?;
+    let merged_head = verify_or_create_base_merge(path, &intent)?;
+    if remote_head != &merged_head {
+        let output = Command::new("git")
+            .args([
+                "push",
+                "--porcelain",
+                "origin",
+                &format!("{merged_head}:{reference}"),
+            ])
+            .current_dir(path)
+            .output()
+            .map_err(|error| format!("push reconciled executor WIP: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "push reconciled executor WIP failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    if remote_head_refs(repo)?.get(&reference) != Some(&merged_head) {
+        return Err("executor reconciled WIP is not the exact remote branch head".to_string());
+    }
+    record_worktree_creation_identity(repo, branch, base)
 }
 
 fn record_worktree_creation_identity(
@@ -15490,6 +15597,102 @@ mod tests {
                 .and_then(Path::parent)
                 .expect("scope root"),
         );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_retry_reconciles_preserved_wip_to_advanced_base() {
+        // Break caught: validating current-base metadata before adopting exact retry WIP.
+        let fixture = GitFixture::new("retry-base-adoption");
+        let original =
+            resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve original base");
+        let scope = format!(
+            "retry_base_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = provision_issue_worktree(&fixture.repo, &scope, 44, &original)
+            .expect("provision original worktree");
+        fs::write(worktree.path.join("implementation.txt"), "preserved WIP\n")
+            .expect("write preserved implementation");
+        git(&worktree.path, &["add", "implementation.txt"]);
+        git(
+            &worktree.path,
+            &["commit", "-m", "feat: preserve retry WIP"],
+        );
+        let preserved_head = git_stdout(&worktree.path, &["rev-parse", "HEAD"]);
+        git(
+            &worktree.path,
+            &[
+                "push",
+                "origin",
+                &format!("{preserved_head}:refs/heads/{}", worktree.branch),
+            ],
+        );
+
+        fs::write(fixture.repo.join("base-advance.txt"), "advanced\n").expect("write base advance");
+        git(&fixture.repo, &["add", "base-advance.txt"]);
+        git(&fixture.repo, &["commit", "-m", "feat: advance base"]);
+        git(&fixture.repo, &["push", "origin", "main"]);
+        let advanced =
+            resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve advanced base");
+        assert_ne!(advanced.base_oid, original.base_oid);
+
+        let adopted = provision_issue_worktree(&fixture.repo, &scope, 44, &advanced)
+            .expect("reconcile exact preserved WIP");
+        let reconciled_head = git_stdout(&adopted.path, &["rev-parse", "HEAD"]);
+        let restarted = provision_issue_worktree(&fixture.repo, &scope, 44, &advanced)
+            .expect("adopt reconciled WIP after restart");
+
+        assert_eq!(adopted.base_oid, advanced.base_oid);
+        assert_eq!(restarted, adopted);
+        assert_eq!(
+            git_stdout(&restarted.path, &["rev-parse", "HEAD"]),
+            reconciled_head
+        );
+        assert_eq!(
+            git_stdout(
+                &fixture.repo,
+                &[
+                    "config",
+                    "--get",
+                    &format!("branch.{}.autospecBaseOid", adopted.branch),
+                ],
+            ),
+            advanced.base_oid
+        );
+        assert_eq!(
+            git_stdout(&adopted.path, &["show", "-s", "--format=%P", "HEAD"]),
+            format!("{preserved_head} {}", advanced.base_oid)
+        );
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "rev-parse",
+                    &format!("refs/heads/{}", adopted.branch),
+                ],
+            ),
+            reconciled_head
+        );
+        assert!(
+            fs::read_dir(adopted.path.parent().expect("scope root"))
+                .expect("read scope root")
+                .filter_map(Result::ok)
+                .any(|entry| entry.file_name().to_string_lossy().contains("base-drift-")),
+            "base transition must have a durable intent before metadata advances"
+        );
+
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "remove",
+                adopted.path.to_str().expect("worktree path"),
+            ],
+        );
+        let _ = fs::remove_dir_all(adopted.path.parent().expect("scope root"));
     }
 
     #[test]
