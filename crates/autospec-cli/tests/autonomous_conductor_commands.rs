@@ -2,7 +2,9 @@ use autospec_core::autonomous::no_work::NoWorkTier;
 use autospec_core::autonomous::premerge::PremergeLaneIdentity;
 use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus, WaterfallState};
 use autospec_core::claim::{parse_remote_comments_json, parse_run_state_comment, RunStateRecord};
-use autospec_core::coordination::{ConductorOutcome, ConductorPhase, ConductorState};
+use autospec_core::coordination::{
+    ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
+};
 use std::fs::{self, File};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -10,11 +12,13 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const EXECUTOR_CLAIM_ID: &str = "claim-generation-42";
 const EXECUTOR_COMMIT: &str = "0123456789abcdef0123456789abcdef01234567";
 const PREMERGE_RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+static REAL_BRIDGE_E2E: Mutex<()> = Mutex::new(());
 
 fn workspace_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -542,6 +546,7 @@ fn foreground_records_a_typed_deferred_receipt_and_keeps_the_selected_issue() {
 
 #[test]
 fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
     let mut command = fixture.command();
@@ -574,7 +579,14 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
                     name.starts_with("issue-42-") && name.ends_with(".terminal.json")
                 })
         })
-        .expect("generation-scoped terminal receipt");
+        .unwrap_or_else(|| {
+            panic!(
+                "generation-scoped terminal receipt missing; stderr={} state={:?} calls={}",
+                String::from_utf8_lossy(&first.stderr),
+                fixture.read_state(),
+                fs::read_to_string(&fixture.calls).unwrap_or_default()
+            )
+        });
     assert!(
         terminal.is_file(),
         "bridge did not reach a terminal receipt; stderr={} state={:?} calls={}",
@@ -609,6 +621,39 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
         "verified completion removes only the owned issue worktree"
     );
 
+    let invocation = fs::read_dir(fixture.scoped_dir().join("executor"))
+        .expect("executor state directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with("issue-42-")
+                        && name.ends_with(".json")
+                        && !name.ends_with(".terminal.json")
+                })
+        })
+        .expect("generation-scoped invocation");
+    let mut cleanup_window: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&invocation).unwrap()).unwrap();
+    cleanup_window["phase"] = serde_json::json!("cleanup_pending");
+    fs::write(&invocation, format!("{cleanup_window}\n")).expect("rewind to cleanup window");
+    fs::remove_file(&terminal).expect("remove terminal publication after cleanup window");
+    let dispatch = ConductorState::new("test/repo", ConductorScope::Repository, 3)
+        .unwrap()
+        .transition(ConductorEvent::ScanFoundWork)
+        .unwrap()
+        .transition(ConductorEvent::SafetyReviewed)
+        .unwrap()
+        .transition(ConductorEvent::Selected {
+            issue: 42,
+            serialization_reasons: Vec::new(),
+        })
+        .unwrap()
+        .transition(ConductorEvent::Claimed)
+        .unwrap();
+    fs::write(fixture.state_path(), dispatch.to_json()).expect("seed interrupted dispatch");
     let before = fs::read_to_string(&fixture.calls).expect("calls before replay");
     let second = fixture
         .command()
@@ -636,6 +681,299 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
         after.matches("\npr\nmerge\n").count(),
         before.matches("\npr\nmerge\n").count()
     );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+}
+
+#[test]
+fn foreground_recovers_complete_bridge_after_transient_terminal_observation_failure() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let fail_once = fixture.root.join("terminal-observation.failed");
+    let configure = |command: &mut Command| {
+        command
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env("AUTOSPEC_FOREGROUND_FAIL_TERMINAL_ONCE", &fail_once);
+    };
+    let mut first_command = fixture.command();
+    configure(&mut first_command);
+    let first = first_command
+        .output()
+        .expect("run through terminal failpoint");
+    assert!(
+        first.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(fail_once.exists());
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Paused);
+
+    let mut replay_command = fixture.command();
+    configure(&mut replay_command);
+    let replay = replay_command
+        .output()
+        .expect("replay Complete bridge state");
+    assert!(
+        replay.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&replay.stderr)
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
+    assert!(fs::read_dir(fixture.scoped_dir().join("executor"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .any(|entry| entry.path().to_string_lossy().ends_with(".terminal.json")));
+}
+
+#[test]
+fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    for (name, state, active_claim) in [
+        (
+            "claim-before-acquire",
+            ConductorState::new("test/repo", ConductorScope::Repository, 3)
+                .unwrap()
+                .transition(ConductorEvent::ScanFoundWork)
+                .unwrap()
+                .transition(ConductorEvent::SafetyReviewed)
+                .unwrap()
+                .transition(ConductorEvent::Selected {
+                    issue: 42,
+                    serialization_reasons: Vec::new(),
+                })
+                .unwrap(),
+            false,
+        ),
+        (
+            "claim-after-acquire",
+            ConductorState::new("test/repo", ConductorScope::Repository, 3)
+                .unwrap()
+                .transition(ConductorEvent::ScanFoundWork)
+                .unwrap()
+                .transition(ConductorEvent::SafetyReviewed)
+                .unwrap()
+                .transition(ConductorEvent::Selected {
+                    issue: 42,
+                    serialization_reasons: Vec::new(),
+                })
+                .unwrap(),
+            true,
+        ),
+        (
+            "retry-before-schedule",
+            ConductorState::new("test/repo", ConductorScope::Repository, 3)
+                .unwrap()
+                .transition(ConductorEvent::ScanFoundWork)
+                .unwrap()
+                .transition(ConductorEvent::SafetyReviewed)
+                .unwrap()
+                .transition(ConductorEvent::Selected {
+                    issue: 42,
+                    serialization_reasons: Vec::new(),
+                })
+                .unwrap()
+                .transition(ConductorEvent::Claimed)
+                .unwrap()
+                .transition(ConductorEvent::DispatchRecorded {
+                    outcome: ConductorOutcome::Retryable("transient".to_string()),
+                })
+                .unwrap(),
+            false,
+        ),
+    ] {
+        let fixture = ForegroundFixture::new();
+        let bridge = fixture.configure_real_bridge();
+        fs::create_dir_all(fixture.state_path().parent().unwrap())
+            .expect("create crash-window state directory");
+        fs::write(fixture.state_path(), state.to_json()).expect("seed crash-window state");
+        if active_claim {
+            fixture.seed_claim(
+                "rust-foreground-conductor-recovered",
+                "feat/autonomous-issue-42",
+            );
+            let seeded = git_fixture(
+                &fixture.claim_repo,
+                &[
+                    "ls-remote",
+                    "--refs",
+                    fixture.claim_remote.to_str().expect("claim remote"),
+                    "refs/autospec/claims/issue-42",
+                ],
+            );
+            let seeded = seeded.split_whitespace().next().expect("seeded claim oid");
+            git_fixture(
+                &fixture.claim_repo,
+                &[
+                    "push",
+                    bridge.remote.to_str().expect("bridge remote"),
+                    &format!("{seeded}:refs/autospec/claims/issue-42"),
+                ],
+            );
+            fs::write(&fixture.mode, "claimed\n").expect("seed claimed label projection");
+        }
+        let output = fixture
+            .command()
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .output()
+            .unwrap_or_else(|error| panic!("{name}: run recovered foreground: {error}"));
+        assert!(
+            output.status.success(),
+            "{name}: stdout={} stderr={} calls={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+            fs::read_to_string(&fixture.calls).unwrap_or_default()
+        );
+        assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan, "{name}");
+        let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
+        assert_eq!(calls.matches("\npr\ncreate\n").count(), 1, "{name}");
+        assert_eq!(calls.matches("\npr\nmerge\n").count(), 1, "{name}");
+        drop(bridge);
+    }
+}
+
+#[test]
+fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let started = fixture.root.join("slow-harness.started");
+    let launches = fixture.root.join("harness-launches");
+    let configure = |command: &mut Command| {
+        command
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env("AUTOSPEC_HOST", "bridge-e2e-host")
+            .env("AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER", &started)
+            .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &launches);
+    };
+
+    let mut first_command = fixture.command();
+    configure(&mut first_command);
+    let mut first = first_command.spawn().expect("spawn first conductor");
+    let first_pid = first.id();
+    wait_for_file_contents(&started, "");
+    first.kill().expect("kill conductor in live-harness window");
+    let _ = first.wait();
+
+    let mut live_restart = fixture.command();
+    configure(&mut live_restart);
+    let pending = live_restart
+        .output()
+        .expect("restart while harness is live");
+    assert!(
+        pending.status.success(),
+        "pending restart status={:?} stdout={} stderr={} state={}",
+        pending.status.code(),
+        String::from_utf8_lossy(&pending.stdout),
+        String::from_utf8_lossy(&pending.stderr),
+        // Keep the persisted owner visible if dead-owner reclamation regresses.
+        fs::read_to_string(fixture.resilience_state_path()).unwrap_or_else(|_| {
+            format!("missing resilience state for killed conductor {first_pid}")
+        })
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Dispatch);
+    assert_eq!(
+        fs::read_to_string(&launches)
+            .expect("harness launches")
+            .lines()
+            .count(),
+        1
+    );
+
+    std::thread::sleep(std::time::Duration::from_secs(4));
+    let mut completed_restart = fixture.command();
+    configure(&mut completed_restart);
+    let completed = completed_restart
+        .output()
+        .expect("restart after harness completion");
+    assert!(
+        completed.status.success(),
+        "completed restart stderr={} calls={}",
+        String::from_utf8_lossy(&completed.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    assert_eq!(
+        fs::read_to_string(&launches)
+            .expect("harness launches")
+            .lines()
+            .count(),
+        1,
+        "restarts must adopt the one persisted harness"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
+}
+
+#[test]
+fn foreground_retry_preserves_dirty_wip_and_merges_on_a_fresh_claim_generation() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let fail_once = fixture.root.join("harness.failed");
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env("AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE", &fail_once)
+        .env("AUTOSPEC_BRIDGE_ADVANCE_MAIN_ON_FAIL", "1")
+        .output()
+        .expect("retry dirty executor WIP");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert!(fail_once.exists());
+    assert_eq!(
+        fixture.read_state().phase(),
+        ConductorPhase::Scan,
+        "state={:?} stderr={} calls={}",
+        fixture.read_state(),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
+    let receipts = fs::read_dir(fixture.scoped_dir().join("executor"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().to_string_lossy().ends_with(".terminal.json"))
+        .count();
+    assert_eq!(receipts, 2, "retry and merged generations are both durable");
 }
 
 #[test]
@@ -2771,6 +3109,38 @@ struct RealBridgeEnvironment {
     aliases: PathBuf,
     remote: PathBuf,
     merged: PathBuf,
+    safe_root: PathBuf,
+    executor_fixture: PathBuf,
+    executor_state_dir: PathBuf,
+    _cross_process_lock: File,
+}
+
+impl Drop for RealBridgeEnvironment {
+    fn drop(&mut self) {
+        if let Ok(entries) = fs::read_dir(&self.executor_state_dir) {
+            for entry in entries.filter_map(Result::ok) {
+                let Ok(value) = fs::read_to_string(entry.path())
+                    .ok()
+                    .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+                    .ok_or(())
+                else {
+                    continue;
+                };
+                for identity in ["supervisor", "process"] {
+                    if let Some(process_group) = value
+                        .get(identity)
+                        .and_then(|value| value.get("process_group"))
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|value| u32::try_from(value).ok())
+                    {
+                        terminate_process_group(process_group);
+                    }
+                }
+            }
+        }
+        let _ = fs::remove_dir_all(&self.executor_fixture);
+        let _ = fs::remove_dir_all(&self.safe_root);
+    }
 }
 
 impl ForegroundFixture {
@@ -2811,7 +3181,8 @@ fi
 mode="$(cat "$AUTOSPEC_FOREGROUND_MODE")"
 issue() {
   if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
-    printf '%s\n' '{"number":42,"title":"Ship the bridge fixture","body":"## Goal\n\nAdd `tests/smoke/generation.sh` proving the native executor bridge runs.\n\n## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Implementation outline\n\n- `tests/smoke/generation.sh`\n\n## Tests required\n\n- smoke\n\n### Primary smoke test (inner loop)\n\n```bash\n/usr/bin/test -s tests/smoke/generation.sh\n```\n\n### Operator/full verification\n\n```bash\n/usr/bin/test -s tests/smoke/generation.sh\n```","labels":[{"name":"auto-implement"},{"name":"safety:reviewed"}],"author":{"login":"agent"}}'
+    if [ "$mode" = claimed ]; then real_labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then real_labels='[]'; else real_labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi
+    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n/usr/bin/test -s tests/smoke/generation.sh\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n/usr/bin/test -s tests/smoke/generation.sh\\n\`\`\`\",\"labels\":$real_labels,\"author\":{\"login\":\"agent\"}}"
   elif [ "$mode" = unreviewed ]; then
     printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Goal\n\nAdd the foreground adapter.","labels":[{"name":"auto-implement"}],"author":{"login":"agent"}}'
   else
@@ -2821,8 +3192,15 @@ issue() {
 claim_issue() {
   if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
     case " $* " in
-      *" --json labels "*) printf '%s\n' '{"labels":[]}'; return ;;
+      *" --jq "*) if [ "$mode" = claimed ]; then labels='["in-progress-by-bot","safety:reviewed"]'; elif [ "$mode" = terminal ]; then labels='[]'; else labels='["auto-implement","safety:reviewed"]'; fi ;;
+      *) if [ "$mode" = claimed ]; then labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then labels='[]'; else labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi ;;
     esac
+    if [ "$mode" = terminal ] && [ -n "${AUTOSPEC_FOREGROUND_FAIL_TERMINAL_ONCE:-}" ] && [ ! -e "$AUTOSPEC_FOREGROUND_FAIL_TERMINAL_ONCE" ]; then
+      : > "$AUTOSPEC_FOREGROUND_FAIL_TERMINAL_ONCE"
+      exit 1
+    fi
+    printf '%s\n' "{\"labels\":$labels}"
+    return
   fi
   if [ "$mode" = claimed ]; then labels='["in-progress-by-bot","safety:reviewed"]'; else labels='["auto-implement","safety:reviewed"]'; fi
   printf '%s\n' "{\"labels\":$labels,\"title\":\"Add Rust foreground\",\"body\":\"## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\",\"author\":\"agent\"}"
@@ -2927,7 +3305,18 @@ if [ "$1" = api ]; then
 fi
 if [ "$1" = issue ] && [ "$2" = view ]; then claim_issue "$@"; exit 0; fi
 if [ "$1" = label ] && [ "$2" = create ]; then exit 0; fi
-if [ "$1" = issue ] && [ "$2" = edit ]; then printf 'claimed\n' > "$AUTOSPEC_FOREGROUND_MODE"; exit 0; fi
+if [ "$1" = issue ] && [ "$2" = edit ]; then
+  if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
+    case " $* " in
+      *" --remove-label in-progress-by-bot "*" --add-label auto-implement "*) printf 'reviewed\n' > "$AUTOSPEC_FOREGROUND_MODE" ;;
+      *" --remove-label in-progress-by-bot "*) printf 'terminal\n' > "$AUTOSPEC_FOREGROUND_MODE" ;;
+      *" --add-label in-progress-by-bot "*) printf 'claimed\n' > "$AUTOSPEC_FOREGROUND_MODE" ;;
+    esac
+  else
+    printf 'claimed\n' > "$AUTOSPEC_FOREGROUND_MODE"
+  fi
+  exit 0
+fi
 if [ "$1" = issue ] && [ "$2" = comment ]; then
   body=""; shift 2
   while [ "$#" -gt 0 ]; do case "$1" in --body) body="$2"; shift 2 ;; *) shift ;; esac; done
@@ -3025,6 +3414,19 @@ exit 1
     }
 
     fn configure_real_bridge(&self) -> RealBridgeEnvironment {
+        let fixture_root = PathBuf::from(std::env::var_os("HOME").expect("HOME for bridge tools"))
+            .join(".autospec-test-fixtures");
+        fs::create_dir_all(&fixture_root).expect("create bridge fixture root");
+        let cross_process_lock = File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(fixture_root.join("bridge-e2e.lock"))
+            .expect("open bridge E2E lock");
+        cross_process_lock
+            .lock()
+            .expect("acquire cross-process bridge E2E lock");
         let executor_fixture = Path::new("/tmp/autospec-executor")
             .join(format!("test_repo-{}", &sha256_hex(b"test/repo")[..12]));
         if executor_fixture.exists() {
@@ -3055,15 +3457,13 @@ exit 1
         git_fixture(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
         git_fixture(&self.repo_dir, &["remote", "set-head", "origin", "main"]);
 
-        let safe_root = PathBuf::from(std::env::var_os("HOME").expect("HOME for bridge tools"))
-            .join(".autospec-test-fixtures")
-            .join(format!(
-                "bridge-e2e-{}",
-                self.root
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .expect("fixture name")
-            ));
+        let safe_root = fixture_root.join(format!(
+            "bridge-e2e-{}",
+            self.root
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("fixture name")
+        ));
         let bin = safe_root.join("bin");
         fs::create_dir_all(&bin).expect("create bridge tools");
         fs::copy(self.bin.join("gh"), bin.join("gh")).expect("copy bridge gh fixture");
@@ -3081,6 +3481,29 @@ for value in "$@"; do
 done
 test -n "$artifact"
 mkdir -p tests/smoke "$(dirname "$artifact")"
+if [ -n "${AUTOSPEC_BRIDGE_HARNESS_LAUNCHES:-}" ]; then
+  printf '%s\n' "$$" >> "$AUTOSPEC_BRIDGE_HARNESS_LAUNCHES"
+fi
+if [ -n "${AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER" ]; then
+  printf '%s\n' "$$" > "$AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER"
+  sleep 3
+fi
+if [ -n "${AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE:-}" ] && [ ! -e "$AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE" ]; then
+  printf '%s\n' '#!/bin/sh' 'exit 42' > tests/smoke/generation.sh
+  : > "$AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE"
+  if [ "${AUTOSPEC_BRIDGE_ADVANCE_MAIN_ON_FAIL:-0}" = 1 ]; then
+    base=$(git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" rev-parse refs/heads/main)
+    tree=$(git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" rev-parse "$base^{tree}")
+    advanced=$(printf '%s\n' 'advance main during dirty retry' | \
+      GIT_AUTHOR_NAME='Autospec Bridge Test' \
+      GIT_AUTHOR_EMAIL='bridge-test@example.invalid' \
+      GIT_COMMITTER_NAME='Autospec Bridge Test' \
+      GIT_COMMITTER_EMAIL='bridge-test@example.invalid' \
+      git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" commit-tree "$tree" -p "$base")
+    git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" update-ref refs/heads/main "$advanced" "$base"
+  fi
+  exit 42
+fi
 printf '%s\n' '#!/bin/sh' 'exit 0' > tests/smoke/generation.sh
 chmod 755 tests/smoke/generation.sh
 git add tests/smoke/generation.sh
@@ -3136,6 +3559,10 @@ printf '%s\n' '[]' > "$report"
             aliases,
             remote,
             merged: self.root.join("bridge-merged"),
+            safe_root,
+            executor_fixture,
+            executor_state_dir: self.scoped_dir().join("executor"),
+            _cross_process_lock: cross_process_lock,
         }
     }
 

@@ -192,7 +192,12 @@ fn bounded_child_kills_a_timed_out_process_group() {
 fn process_state(pid: i32) -> Option<char> {
     let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
         Ok(stat) => stat,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error)
+            if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(nix::libc::ESRCH) =>
+        {
+            return None
+        }
         Err(error) => panic!("read process state for PID {pid}: {error}"),
     };
     let close = stat.rfind(')').expect("process stat command terminator");

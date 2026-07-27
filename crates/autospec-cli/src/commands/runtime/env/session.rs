@@ -62,6 +62,64 @@ impl SessionLease {
         })
     }
 
+    pub(super) fn reattach(
+        environment_dir: &Path,
+        expected_session_id: &str,
+        harness: &str,
+    ) -> Result<Self, CommandFailure> {
+        let sessions = environment_dir.join("sessions");
+        let lock_path = sessions.join(format!("{expected_session_id}.lock"));
+        let record_path = sessions.join(format!("{expected_session_id}.json"));
+        if !record_path.is_file() || !lock_path.is_file() {
+            return Err(diagnostic(format!(
+                "RUNTIME_PARTIAL_SESSION: {expected_session_id} requires both record and lock"
+            )));
+        }
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|error| diagnostic(format!("open runtime session lock: {error}")))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                return Err(diagnostic(format!(
+                    "RUNTIME_SESSION_LIVE: exact evidence session blocked by {expected_session_id}"
+                )))
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(diagnostic(format!(
+                    "could not reattach runtime session {expected_session_id}: {error}"
+                )))
+            }
+        }
+        let previous: SessionRecord = read_json(&record_path)
+            .map_err(|error| diagnostic(format!("read runtime session record: {error}")))?;
+        if previous.session_id != expected_session_id {
+            return Err(diagnostic(
+                "RUNTIME_SESSION_ID_MISMATCH: reattached record does not match filename",
+            ));
+        }
+        let timestamp = unix_time_ms()?;
+        let record = SessionRecord {
+            schema_version: previous.schema_version,
+            session_id: previous.session_id,
+            pid: std::process::id(),
+            process_start: token()?,
+            harness: harness.to_string(),
+            host: host(),
+            started_at_unix_ms: previous.started_at_unix_ms,
+            heartbeat_at_unix_ms: timestamp,
+        };
+        write_record(&record_path, &record)?;
+        Ok(Self {
+            _lock: lock,
+            lock_path,
+            record_path,
+            record,
+        })
+    }
+
     pub(super) fn heartbeat(&mut self) -> Result<(), CommandFailure> {
         self.record.heartbeat_at_unix_ms = unix_time_ms()?;
         write_record(&self.record_path, &self.record)
@@ -587,6 +645,51 @@ mod tests {
 
         assert!(error.message.contains("RUNTIME_SESSION_LIVE"));
         drop(lock);
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn exact_stale_session_is_reattached_without_rotating_its_identity() {
+        let root = fixture("reattach");
+        let sessions = root.join("sessions");
+        write_record(&sessions.join("durable.json"), &record("durable")).expect("record");
+        File::create(sessions.join("durable.lock")).expect("lock");
+        #[cfg(unix)]
+        for path in [sessions.join("durable.json"), sessions.join("durable.lock")] {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("private session artifact");
+        }
+
+        let lease =
+            SessionLease::reattach(&root, "durable", "recovered-harness").expect("reattach");
+
+        assert_eq!(lease.session_id(), "durable");
+        lease
+            .verify_active("durable")
+            .expect("active exact session");
+        let observed: SessionRecord =
+            read_json(&sessions.join("durable.json")).expect("recovered record");
+        assert_eq!(observed.session_id, "durable");
+        assert_eq!(observed.harness, "recovered-harness");
+        assert_eq!(observed.pid, std::process::id());
+        lease.release().expect("release");
+        std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn exact_live_session_cannot_be_stolen_by_reattachment() {
+        let root = fixture("reattach-live");
+        let original = SessionLease::register(&root, "original").expect("register");
+        let session_id = original.session_id().to_string();
+
+        let error = match SessionLease::reattach(&root, &session_id, "replacement") {
+            Ok(_) => panic!("live session must remain exclusive"),
+            Err(error) => error,
+        };
+
+        assert!(error.message.contains("RUNTIME_SESSION_LIVE"));
+        original.release().expect("release");
         std::fs::remove_dir_all(root).expect("cleanup");
     }
 }

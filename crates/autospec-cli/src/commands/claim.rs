@@ -738,6 +738,49 @@ pub(crate) fn acquire_for_conductor(
     })
 }
 
+pub(crate) fn recover_for_conductor(
+    repo: &str,
+    issue: u64,
+) -> Result<Option<ClaimLease>, CommandFailure> {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
+        return Ok(None);
+    };
+    let record = selected.record;
+    if record.repo != repo
+        || record.issue != issue
+        || !matches!(
+            record.state.as_str(),
+            "claimed" | "merged" | "retryable" | "needs-human"
+        )
+    {
+        return Err(CommandFailure::diagnostic(
+            "foreground recovery claim is not authoritative for the selected issue",
+        ));
+    }
+    let claim_id = record.claim_id.ok_or_else(|| {
+        CommandFailure::diagnostic("foreground recovery claim has no generation identity")
+    })?;
+    Ok(Some(ClaimLease {
+        issue,
+        repo: repo.to_string(),
+        worker_id: record.worker_id,
+        branch: record.branch,
+        claim_id,
+        session_id: None,
+    }))
+}
+
+pub(crate) fn conductor_claim_is_terminal(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
+    Ok(read_claim_ref(repo, issue)?.is_some_and(|selected| {
+        selected.record.repo == repo
+            && selected.record.issue == issue
+            && matches!(
+                selected.record.state.as_str(),
+                "merged" | "retryable" | "needs-human"
+            )
+    }))
+}
+
 /// Read the claim linearization point before the autonomous conductor mutates
 /// labels, heartbeats, or comments. The lifecycle policy receives the observed
 /// owner rather than a synthetic claim request, so it can reject terminal,
