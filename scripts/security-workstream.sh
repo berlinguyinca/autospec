@@ -29,7 +29,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -81,6 +80,7 @@ def title_hash(value):
 RUST_UNSAFE_SYNTAX = re.compile(
     r"\bunsafe\s*(?:\{|fn\b|trait\b|impl\b|extern\b)|#\s*\[\s*unsafe\s*\("
 )
+PR_ADDED_LINES = ".security-workstream-added-lines.json"
 RUNTIME_SIGNAL_FFI_PATH = "crates/autospec-cli/src/commands/runtime/env.rs"
 RUNTIME_SIGNAL_DECLARATION = '''#[cfg(unix)]
 extern "C" {
@@ -220,6 +220,15 @@ def rust_code_only(source):
 
 def unsafe_findings(root):
     root_path = Path(root or ".")
+    added_lines_path = root_path / PR_ADDED_LINES
+    added_lines = (
+        {
+            path: set(lines)
+            for path, lines in json.loads(added_lines_path.read_text()).items()
+        }
+        if added_lines_path.is_file()
+        else None
+    )
     findings = []
     for path in root_path.rglob("*"):
         if not path.is_file() or ".git" in path.parts:
@@ -235,6 +244,8 @@ def unsafe_findings(root):
         for match in RUST_UNSAFE_SYNTAX.finditer(code):
             line = code.count("\n", 0, match.start()) + 1
             rel = str(path.relative_to(root_path)) if path.is_relative_to(root_path) else str(path)
+            if added_lines is not None and line not in added_lines.get(rel, set()):
+                continue
             if approved_unsafe_boundary(rel, source, match):
                 continue
             findings.append({
@@ -340,18 +351,42 @@ def cmd_rank(args):
 
 def changed_file_root(root, base):
     tmpdir = Path(tempfile.mkdtemp(prefix="security-workstream-diff-"))
+    added_line_map = {}
     try:
         merge_base = subprocess.run(["git", "-C", root, "merge-base", base, "HEAD"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.strip() or base
-        names = subprocess.run(["git", "-C", root, "diff", "--name-only", merge_base, "HEAD"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.splitlines()
-        names += subprocess.run(["git", "-C", root, "ls-files", "--others", "--exclude-standard"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.splitlines()
+        names = subprocess.run(["git", "-C", root, "diff", "--name-only", merge_base, "HEAD", "--", "*.rs"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.splitlines()
+        untracked = set(subprocess.run(["git", "-C", root, "ls-files", "--others", "--exclude-standard", "--", "*.rs"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.splitlines())
+        names += sorted(untracked)
     except Exception:
         return tmpdir
     for rel in sorted(set(n for n in names if n)):
         src = Path(root) / rel
         if src.is_file():
+            lines = src.read_text(errors="ignore").splitlines()
+            if rel in untracked:
+                added_lines = set(range(1, len(lines) + 1))
+            else:
+                diff = subprocess.run(
+                    ["git", "-C", root, "diff", "--unified=0", "--no-color", "--no-ext-diff", merge_base, "HEAD", "--", rel],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                ).stdout
+                added_lines = set()
+                for start, count in re.findall(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", diff, re.MULTILINE):
+                    start = int(start)
+                    count = int(count or "1")
+                    added_lines.update(range(start, start + count))
+            if not added_lines:
+                continue
             dst = tmpdir / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
+            dst.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+            added_line_map[rel] = sorted(added_lines)
+    (tmpdir / PR_ADDED_LINES).write_text(
+        json.dumps(added_line_map, sort_keys=True),
+        encoding="utf-8",
+    )
     return tmpdir
 
 

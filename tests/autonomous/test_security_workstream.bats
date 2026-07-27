@@ -194,6 +194,43 @@ EOF
     [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/boundaries.jsonl")" -eq 6 ]
 }
 
+@test "scan pr: reports only unsafe syntax introduced after the merge base" {
+    run test -x "$SCRIPT"
+    [ "$status" -eq 0 ]
+    local repo="$WORK/repo"
+    mkdir -p "$repo/src"
+    git -C "$repo" init -q
+    git -C "$repo" config user.email test@example.com
+    git -C "$repo" config user.name "Security Workstream Test"
+    cat > "$repo/src/lib.rs" <<'RS'
+fn existing(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }
+fn promoted() -> i32 {
+    {
+        42
+    }
+}
+RS
+    git -C "$repo" add src/lib.rs
+    git -C "$repo" commit -qm "base"
+    local base
+    base="$(git -C "$repo" rev-parse HEAD)"
+
+    printf '%s\n' '# unrelated documentation' > "$repo/README.md"
+    git -C "$repo" add README.md
+    git -C "$repo" commit -qm "docs"
+    run bash "$SCRIPT" scan --mode pr --root "$repo" --base "$base" --out "$WORK/unrelated.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/unrelated.jsonl")" -eq 0 ]
+
+    sed -i '3i\\    unsafe' "$repo/src/lib.rs"
+    git -C "$repo" add src/lib.rs
+    git -C "$repo" commit -qm "add unsafe"
+    run bash "$SCRIPT" scan --mode pr --root "$repo" --base "$base" --out "$WORK/added.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/added.jsonl")" -eq 1 ]
+    jq -e 'select(.dimension == "unsafe" and .file == "src/lib.rs" and .line == 3)' "$WORK/added.jsonl" >/dev/null
+}
+
 @test "issue filing: high-severity findings produce lint-clean remediation issues" {
     cat > "$WORK/ranked.jsonl" <<'JSONL'
 {"gap_id":"G1","dimension":"secrets","severity":"must-fix","priority":"P0","severity_rank":100,"exploitability":5,"exposure":5,"file":"app/config.env","line":3,"title":"Hardcoded API token","body":"Remove the token and rotate the credential.","dedupe_key":"sec-secret","remediation":"Remove the committed token, rotate it, and add a regression scan."}
