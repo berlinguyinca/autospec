@@ -2503,6 +2503,23 @@ fn run_foreground_with_lease(
                 persist_foreground_state(&state_path, &state)
                     .map_err(CommandFailure::diagnostic)?;
                 return Ok(ForegroundCompletion::State(Box::new(state)));
+            } else if state.pause_reason() == Some(EXECUTOR_PENDING_REASON) {
+                let acquisition = load_claim_acquisition_receipt(&state_path, &layout.repo, issue)
+                    .map_err(CommandFailure::diagnostic)?;
+                if acquisition.is_some() {
+                    state = state
+                        .transition(ConductorEvent::Resume)
+                        .map_err(CommandFailure::diagnostic)?;
+                    persist_foreground_state(&state_path, &state)
+                        .map_err(CommandFailure::diagnostic)?;
+                } else {
+                    state = state
+                        .transition(ConductorEvent::AbandonTerminal)
+                        .map_err(CommandFailure::diagnostic)?;
+                    persist_foreground_state(&state_path, &state)
+                        .map_err(CommandFailure::diagnostic)?;
+                    return Ok(ForegroundCompletion::State(Box::new(state)));
+                }
             } else if claim_terminal || state.pause_reason() == Some("executor_bridge_nonterminal")
             {
                 state = state
