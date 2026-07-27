@@ -10,7 +10,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 #[cfg(test)]
 use std::sync::atomic::{AtomicU32, AtomicU8};
@@ -18,12 +18,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::commands::claim::{refresh_claim_generation, ClaimRefreshResult};
+use crate::commands::claim::{
+    authoritative_executor_result, record_executor_result_with_receipt, refresh_claim_generation,
+    transition_bridge_claim, BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity,
+    ClaimRefreshResult, ExecutorResultAuthorityBinding, ExecutorResultRecord,
+    ExecutorSuccessBinding,
+};
 use autospec_core::autonomous::premerge::{
     EvidenceVerdict, PremergeDecision, PremergeLaneIdentity, QaEvidence, SecurityAuditEvidence,
 };
 use autospec_core::autonomous::waterfall::sha256_hex;
-use autospec_core::claim::{parse_open_pull_requests_json, OpenPullRequest};
+use autospec_core::claim::{
+    is_executor_result_pull_request, parse_open_pull_requests_json, parse_remote_comments_json,
+    parse_required_checks_json, successful_executor_result_for_pull_request,
+    ExecutorResultEvidence, OpenPullRequest, RemoteComment,
+};
+use autospec_core::coordination::ConductorOutcome;
 use autospec_core::lint::{
     lint_implementation, parse_unified_diff, ImplementationLintContext, ImplementationLintOptions,
     RepositoryIndex,
@@ -71,6 +81,10 @@ const MAX_DIRECT_COMMAND_ARGS: usize = 128;
 const MAX_DIRECT_ARGUMENT_LENGTH: usize = 1_024;
 const MAX_DIRECT_OUTPUT_BYTES: u64 = 1024 * 1024;
 static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static BASE_DRIFT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static RUNTIME_CLOSE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DirectCommand {
@@ -4677,6 +4691,38 @@ fn resolve_direct_executable(worktree: &Path, executable: &str) -> Result<PathBu
     Ok(canonical)
 }
 
+fn independent_reviewer_plan(
+    state: &PersistedInvocation,
+    plan: &DirectCommandPlan,
+) -> Result<DirectCommandPlan, String> {
+    let command = plan
+        .commands
+        .first()
+        .filter(|_| plan.commands.len() == 1)
+        .ok_or_else(|| "executor independent review requires one bounded command".to_string())?;
+    let executable = command
+        .argv
+        .first()
+        .ok_or_else(|| "executor independent reviewer command is empty".to_string())?;
+    let executable = resolve_direct_executable(&state.identity.worktree, executable)?;
+    let source_repo = fs::canonicalize(&state.identity.repository_path)
+        .map_err(|error| format!("canonicalize reviewer source repository: {error}"))?;
+    let worktree = fs::canonicalize(&state.identity.worktree)
+        .map_err(|error| format!("canonicalize reviewer worktree: {error}"))?;
+    if executable.starts_with(&source_repo) || executable.starts_with(&worktree) {
+        return Err(
+            "executor independent reviewer executable must be external to reviewed code"
+                .to_string(),
+        );
+    }
+    let mut trusted = plan.clone();
+    trusted.commands[0].argv[0] = executable
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "executor independent reviewer path is not UTF-8".to_string())?;
+    Ok(trusted)
+}
+
 fn create_private_artifact(path: &Path) -> Result<File, String> {
     reject_symlink_path(path)?;
     let mut options = OpenOptions::new();
@@ -5151,6 +5197,14 @@ pub(crate) enum BridgePhase {
     DraftCreating,
     DraftCleanupPending,
     DraftCreated,
+    Ready,
+    CiPassed,
+    ReviewPassed,
+    ResultAccepted,
+    MergeRequested,
+    Merged,
+    CleanupPending,
+    Complete,
     Interrupted,
 }
 
@@ -5177,6 +5231,464 @@ impl ClaimRenewalPhase {
 pub(crate) enum BridgeClaimOwnership {
     Refreshed { ttl_seconds: u64 },
     Lost,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReadyAdmission {
+    pub(crate) pull_request: u64,
+    pub(crate) head_oid: String,
+    pub(crate) evidence_digest: String,
+    pub(crate) lane: PremergeLaneIdentity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RequiredChecksDecision {
+    Pass,
+    Pending,
+    Failed { checks: Vec<String> },
+}
+
+pub(crate) fn evaluate_required_checks(
+    document: &str,
+    advisory: &BTreeSet<String>,
+) -> Result<RequiredChecksDecision, String> {
+    let checks = parse_required_checks_json(document)?;
+    if checks.is_empty() {
+        return Err("executor CI admission found no required-check evidence".to_string());
+    }
+    let enforced = checks
+        .into_iter()
+        .map(|check| {
+            let is_advisory = advisory
+                .iter()
+                .map(|pattern| advisory_check_matches(pattern, &check.name))
+                .collect::<Result<Vec<_>, _>>()?
+                .into_iter()
+                .any(|matched| matched);
+            Ok((check, is_advisory))
+        })
+        .collect::<Result<Vec<_>, String>>()?
+        .into_iter()
+        .filter_map(|(check, is_advisory)| (!is_advisory).then_some(check))
+        .collect::<Vec<_>>();
+    if enforced.is_empty() {
+        return Ok(RequiredChecksDecision::Pass);
+    }
+    let mut failed = Vec::new();
+    let mut pending = false;
+    for check in enforced {
+        match check.state.as_str() {
+            "SUCCESS" => {}
+            "PENDING" | "IN_PROGRESS" | "QUEUED" | "EXPECTED" => pending = true,
+            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STALE"
+            | "SKIPPED" => failed.push(check.name),
+            state => {
+                return Err(format!(
+                    "executor CI admission found unsupported state {state} for {}",
+                    check.name
+                ))
+            }
+        }
+    }
+    if !failed.is_empty() {
+        Ok(RequiredChecksDecision::Failed { checks: failed })
+    } else if pending {
+        Ok(RequiredChecksDecision::Pending)
+    } else {
+        Ok(RequiredChecksDecision::Pass)
+    }
+}
+
+fn advisory_check_matches(pattern: &str, check: &str) -> Result<bool, String> {
+    if pattern.is_empty() {
+        return Err("executor advisory-check regex must not be empty".to_string());
+    }
+    let mut child = Command::new("grep")
+        .args(["-E", "-q", "--", pattern])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("launch advisory-check regex matcher: {error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| "advisory-check regex matcher has no stdin".to_string())?
+        .write_all(format!("{check}\n").as_bytes())
+        .map_err(|error| format!("write advisory-check name: {error}"))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("wait for advisory-check regex matcher: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "invalid advisory-check regex {pattern:?}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+pub(crate) fn wait_for_required_ci<Fetch, Refresh>(
+    state: &PersistedInvocation,
+    max_polls: usize,
+    advisory: &BTreeSet<String>,
+    fetch: Fetch,
+    refresh: Refresh,
+) -> Result<(), String>
+where
+    Fetch: FnMut() -> Result<String, String>,
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+{
+    wait_for_required_ci_with_delay(
+        state,
+        max_polls,
+        advisory,
+        fetch,
+        refresh,
+        Duration::from_secs(15),
+        std::thread::sleep,
+    )
+}
+
+fn wait_for_required_ci_with_delay<Fetch, Refresh, Delay>(
+    state: &PersistedInvocation,
+    max_polls: usize,
+    advisory: &BTreeSet<String>,
+    mut fetch: Fetch,
+    mut refresh: Refresh,
+    poll_interval: Duration,
+    mut delay: Delay,
+) -> Result<(), String>
+where
+    Fetch: FnMut() -> Result<String, String>,
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+    Delay: FnMut(Duration),
+{
+    if state.phase != BridgePhase::Ready || state.pr.is_none() {
+        return Err("executor CI wait requires the exact ready pull request".to_string());
+    }
+    if max_polls == 0 {
+        return Err("executor CI wait requires a positive poll bound".to_string());
+    }
+    for poll in 0..max_polls {
+        if refresh()? == BridgeClaimOwnership::Lost {
+            return Err("executor CI wait lost exact claim ownership".to_string());
+        }
+        match evaluate_required_checks(&fetch()?, advisory)? {
+            RequiredChecksDecision::Pass => return Ok(()),
+            RequiredChecksDecision::Pending if poll + 1 < max_polls => delay(poll_interval),
+            RequiredChecksDecision::Pending => {}
+            RequiredChecksDecision::Failed { checks } => {
+                return Err(format!(
+                    "executor required CI failed: {}",
+                    checks.join(", ")
+                ))
+            }
+        }
+    }
+    Err("executor required CI remained pending after the bounded poll window".to_string())
+}
+
+pub(crate) fn strict_lgtm(output: &str) -> Result<(), String> {
+    if output.trim() == "LGTM" {
+        Ok(())
+    } else {
+        Err("executor independent reviewer did not return strict LGTM".to_string())
+    }
+}
+
+fn strict_lgtm_artifacts(stdout_path: &Path, stderr_path: &Path) -> Result<(), String> {
+    let output = fs::read_to_string(stdout_path)
+        .map_err(|error| format!("read executor independent review: {error}"))?;
+    let stderr = fs::read(stderr_path)
+        .map_err(|error| format!("read executor independent review stderr: {error}"))?;
+    if !stderr.is_empty() {
+        return Err("executor independent reviewer emitted stderr findings".to_string());
+    }
+    strict_lgtm(&output)
+}
+
+pub(crate) fn accept_executor_result(
+    state: &PersistedInvocation,
+    premerge_receipt: &str,
+    comments: &[RemoteComment],
+    pull_requests: &[OpenPullRequest],
+) -> Result<ExecutorResultEvidence, String> {
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "executor result admission requires a pull request".to_string())?;
+    let mut matching = comments
+        .iter()
+        .filter_map(|comment| {
+            successful_executor_result_for_pull_request(std::slice::from_ref(comment), pull_request)
+        })
+        .filter(|evidence| {
+            evidence.repo == state.identity.repository
+                && evidence.issue == state.identity.issue
+                && evidence.worker_id == state.identity.worker_id
+                && evidence.branch == state.identity.branch
+                && evidence.claim_id.as_deref() == Some(state.identity.claim_id.as_str())
+                && evidence.commit.as_deref() == state.head_oid.as_deref()
+                && evidence.premerge_receipt.as_deref() == Some(premerge_receipt)
+        });
+    let evidence = matching
+        .next()
+        .filter(|_| matching.next().is_none())
+        .ok_or_else(|| {
+            "executor result admission requires one exact-generation successful result".to_string()
+        })?;
+    accept_executor_result_evidence(state, premerge_receipt, evidence, pull_requests)
+}
+
+fn accept_executor_result_evidence(
+    state: &PersistedInvocation,
+    premerge_receipt: &str,
+    evidence: ExecutorResultEvidence,
+    pull_requests: &[OpenPullRequest],
+) -> Result<ExecutorResultEvidence, String> {
+    if state.phase != BridgePhase::ReviewPassed {
+        return Err("executor result admission requires strict LGTM".to_string());
+    }
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "executor result admission requires a pull request".to_string())?;
+    let head_oid = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor result admission requires a stable head OID".to_string())?;
+    let exact = pull_requests.iter().filter(|candidate| {
+        candidate.number == pull_request
+            && !candidate.is_draft
+            && candidate.head_ref_oid == head_oid
+            && candidate.base_ref_name
+                == state
+                    .identity
+                    .base_ref
+                    .strip_prefix("origin/")
+                    .unwrap_or_default()
+            && is_executor_result_pull_request(
+                candidate,
+                state.identity.issue,
+                &state.identity.branch,
+            )
+    });
+    if exact.count() != 1 {
+        return Err(
+            "executor result admission requires the one exact open pull request".to_string(),
+        );
+    }
+    if evidence.repo != state.identity.repository
+        || evidence.issue != state.identity.issue
+        || evidence.worker_id != state.identity.worker_id
+        || evidence.branch != state.identity.branch
+        || evidence.claim_id.as_deref() != Some(state.identity.claim_id.as_str())
+        || evidence.commit.as_deref() != Some(head_oid)
+        || evidence.premerge_receipt.as_deref() != Some(premerge_receipt)
+    {
+        return Err("executor result admission evidence identity mismatch".to_string());
+    }
+    Ok(evidence)
+}
+
+pub(crate) fn originate_and_accept_executor_result(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    premerge_receipt: &str,
+    adapter: &DraftPrAdapter,
+) -> Result<ExecutorResultEvidence, String> {
+    if refresh_bridge_claim(state, ClaimRenewalPhase::Review)? == BridgeClaimOwnership::Lost {
+        return Err("executor result publication lost exact claim ownership".to_string());
+    }
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "executor result publication requires a pull request".to_string())?;
+    let head_oid = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor result publication requires a stable head".to_string())?;
+    let binding = sha256_hex(
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            state.identity.repository,
+            state.identity.issue,
+            state.identity.worker_id,
+            state.identity.claim_id,
+            state.identity.branch,
+            head_oid,
+            premerge_receipt
+        )
+        .as_bytes(),
+    );
+    let receipt_id = format!("bridge-{binding}");
+    let authority = ExecutorResultAuthorityBinding {
+        pull_request,
+        commit: head_oid,
+        premerge_receipt,
+        receipt_id: &receipt_id,
+    };
+    let intent_path = result_publication_record_path(state_path, &binding, "intent")?;
+    let complete_path = result_publication_record_path(state_path, &binding, "complete")?;
+    ensure_cleanup_record(&intent_path, &binding, "executor result publication intent")?;
+    if let Some(evidence) = authoritative_executor_result(bridge_claim_identity(state), authority)
+        .map_err(|error| error.message)?
+    {
+        let pull_requests = list_bridge_pull_requests(&state.identity.repository, adapter)?;
+        let evidence =
+            accept_executor_result_evidence(state, premerge_receipt, evidence, &pull_requests)?;
+        ensure_cleanup_record(
+            &complete_path,
+            &binding,
+            "executor result publication receipt",
+        )?;
+        persist_accepted_executor_result(state_path, state, &evidence)?;
+        return Ok(evidence);
+    }
+    let success = ExecutorSuccessBinding {
+        claim_id: &state.identity.claim_id,
+        commit: head_oid,
+        premerge_receipt,
+    };
+    match record_executor_result_with_receipt(
+        bridge_claim_identity(state),
+        &ConductorOutcome::Succeeded,
+        Some(pull_request),
+        Some(success),
+        Some(&receipt_id),
+    )
+    .map_err(|error| error.message)?
+    {
+        ExecutorResultRecord::Recorded => {}
+        ExecutorResultRecord::EvidenceUnavailable => {
+            return Err("executor result publication evidence unavailable".to_string())
+        }
+        ExecutorResultRecord::OwnershipLost => {
+            return Err("executor result publication lost exact claim ownership".to_string())
+        }
+    }
+    let evidence = authoritative_executor_result(bridge_claim_identity(state), authority)
+        .map_err(|error| error.message)?
+        .ok_or_else(|| "executor result authoritative reread failed".to_string())?;
+    let pull_requests = list_bridge_pull_requests(&state.identity.repository, adapter)?;
+    let evidence =
+        accept_executor_result_evidence(state, premerge_receipt, evidence, &pull_requests)?;
+    ensure_cleanup_record(
+        &complete_path,
+        &binding,
+        "executor result publication receipt",
+    )?;
+    persist_accepted_executor_result(state_path, state, &evidence)?;
+    Ok(evidence)
+}
+
+pub(crate) fn parse_observed_merge(
+    document: &str,
+    expected_pull_request: u64,
+    expected_head_oid: &str,
+    expected_base: &str,
+) -> Result<String, String> {
+    let value: serde_json::Value = serde_json::from_str(document)
+        .map_err(|error| format!("invalid observed merge JSON: {error}"))?;
+    let object = strict_object(
+        value,
+        &[
+            "number",
+            "state",
+            "isDraft",
+            "headRefOid",
+            "baseRefName",
+            "mergeCommit",
+        ],
+        "observed merge",
+    )?;
+    if number(&object, "number")? != expected_pull_request
+        || text(&object, "state")? != "MERGED"
+        || required(&object, "isDraft")?.as_bool() != Some(false)
+        || text(&object, "headRefOid")? != expected_head_oid
+        || text(&object, "baseRefName")? != expected_base
+    {
+        return Err("executor merged pull request identity mismatch".to_string());
+    }
+    let merge = strict_object(
+        required(&object, "mergeCommit")?.clone(),
+        &["oid"],
+        "observed merge commit",
+    )?;
+    let oid = text(&merge, "oid")?;
+    if oid.len() != 40 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("executor observed merge commit OID is invalid".to_string());
+    }
+    Ok(oid)
+}
+
+fn parse_observed_open(
+    document: &str,
+    expected_pull_request: u64,
+    expected_head_oid: &str,
+    expected_base: &str,
+) -> Result<(), String> {
+    let value: serde_json::Value = serde_json::from_str(document)
+        .map_err(|error| format!("invalid observed open PR JSON: {error}"))?;
+    let object = strict_object(
+        value,
+        &[
+            "number",
+            "state",
+            "isDraft",
+            "headRefOid",
+            "baseRefName",
+            "mergeCommit",
+        ],
+        "observed open PR",
+    )?;
+    if number(&object, "number")? != expected_pull_request
+        || text(&object, "state")? != "OPEN"
+        || required(&object, "isDraft")?.as_bool() != Some(false)
+        || text(&object, "headRefOid")? != expected_head_oid
+        || text(&object, "baseRefName")? != expected_base
+        || !required(&object, "mergeCommit")?.is_null()
+    {
+        return Err("executor open pull request identity mismatch".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn ready_admission(
+    state: &PersistedInvocation,
+    decision: &PremergeDecision,
+) -> Result<ReadyAdmission, String> {
+    if state.phase != BridgePhase::DraftCreated {
+        return Err("executor ready admission requires an exact created draft".to_string());
+    }
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "executor ready admission requires a pull request".to_string())?;
+    let head_oid = state
+        .head_oid
+        .clone()
+        .ok_or_else(|| "executor ready admission requires a stable head OID".to_string())?;
+    let PremergeDecision::Pass {
+        lane,
+        evidence_digest,
+    } = decision
+    else {
+        return Err("executor ready admission requires premerge Pass".to_string());
+    };
+    if lane.repo != state.identity.repository
+        || lane.issue != state.identity.issue
+        || lane.worker_id != state.identity.worker_id
+        || lane.claim_id != state.identity.claim_id
+        || lane.branch != state.identity.branch
+        || lane.commit != head_oid
+    {
+        return Err("executor ready admission Pass belongs to a different lane".to_string());
+    }
+    Ok(ReadyAdmission {
+        pull_request,
+        head_oid,
+        evidence_digest: evidence_digest.clone(),
+        lane: lane.clone(),
+    })
 }
 
 pub(crate) fn refresh_bridge_claim(
@@ -5214,6 +5726,14 @@ impl BridgePhase {
             Self::DraftCreating => "draft_creating",
             Self::DraftCleanupPending => "draft_cleanup_pending",
             Self::DraftCreated => "draft_created",
+            Self::Ready => "ready",
+            Self::CiPassed => "ci_passed",
+            Self::ReviewPassed => "review_passed",
+            Self::ResultAccepted => "result_accepted",
+            Self::MergeRequested => "merge_requested",
+            Self::Merged => "merged",
+            Self::CleanupPending => "cleanup_pending",
+            Self::Complete => "complete",
             Self::Interrupted => "interrupted",
         }
     }
@@ -5229,6 +5749,14 @@ impl BridgePhase {
             "draft_creating" => Ok(Self::DraftCreating),
             "draft_cleanup_pending" => Ok(Self::DraftCleanupPending),
             "draft_created" => Ok(Self::DraftCreated),
+            "ready" => Ok(Self::Ready),
+            "ci_passed" => Ok(Self::CiPassed),
+            "review_passed" => Ok(Self::ReviewPassed),
+            "result_accepted" => Ok(Self::ResultAccepted),
+            "merge_requested" => Ok(Self::MergeRequested),
+            "merged" => Ok(Self::Merged),
+            "cleanup_pending" => Ok(Self::CleanupPending),
+            "complete" => Ok(Self::Complete),
             "interrupted" => Ok(Self::Interrupted),
             other => Err(format!("unsupported bridge phase: {other}")),
         }
@@ -6053,8 +6581,16 @@ impl RemoteMutationSnapshot {
             &state.identity.worktree,
             &["rev-parse", "--verify", "HEAD^{commit}"],
         )?;
-        if local_head != state.identity.base_oid {
-            return Err("executor prelaunch local HEAD must equal the validated base".to_string());
+        if local_head != state.identity.base_oid
+            && snapshot
+                .refs
+                .get(&format!("refs/heads/{}", state.identity.branch))
+                != Some(&local_head)
+        {
+            return Err(
+                "executor prelaunch local HEAD must equal the base or exact preserved remote WIP"
+                    .to_string(),
+            );
         }
         let body = serde_json::json!({
             "schema": 1,
@@ -6122,6 +6658,25 @@ impl RemoteMutationSnapshot {
         {
             return Err("executor prelaunch remote snapshot schema is invalid".to_string());
         }
+        let persisted_local_head = object
+            .get("identity")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|identity| identity.get("local_head"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|head| head.len() == 40 && head.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .ok_or_else(|| "executor prelaunch local HEAD is invalid".to_string())?;
+        let preserved_ref = object
+            .get("refs")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|refs| refs.get(&format!("refs/heads/{}", state.identity.branch)))
+            .and_then(serde_json::Value::as_str);
+        if persisted_local_head != state.identity.base_oid
+            && preserved_ref != Some(persisted_local_head)
+        {
+            return Err(
+                "executor prelaunch local HEAD is not the base or exact preserved WIP".to_string(),
+            );
+        }
         let expected_identity = serde_json::json!({
             "repository": state.identity.repository,
             "repository_path": fs::canonicalize(&state.identity.repository_path)
@@ -6135,7 +6690,7 @@ impl RemoteMutationSnapshot {
             "base_oid": state.identity.base_oid,
             "worktree": fs::canonicalize(&state.identity.worktree)
                 .map_err(|error| format!("canonicalize worktree: {error}"))?,
-            "local_head": state.identity.base_oid,
+            "local_head": persisted_local_head,
         });
         if object.get("identity") != Some(&expected_identity) {
             return Err(
@@ -6167,6 +6722,142 @@ impl RemoteMutationSnapshot {
             refs,
             pull_requests,
         })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReviewerAuthoritySnapshot {
+    remote: RemoteMutationSnapshot,
+    claim_ref_oid: String,
+    github_digest: String,
+}
+
+impl ReviewerAuthoritySnapshot {
+    fn capture(state: &PersistedInvocation, adapter: &DraftPrAdapter) -> Result<Self, String> {
+        let pull_request = state
+            .pr
+            .ok_or_else(|| "executor reviewer authority requires a pull request".to_string())?;
+        Ok(Self {
+            remote: RemoteMutationSnapshot::capture(state, adapter)?,
+            claim_ref_oid: remote_claim_ref_oid(
+                &state.identity.repository_path,
+                state.identity.issue,
+            )?,
+            github_digest: github_authority_digest(
+                &state.identity.repository,
+                state.identity.issue,
+                pull_request,
+                adapter,
+            )?,
+        })
+    }
+}
+
+fn remote_claim_ref_oid(repo: &Path, issue: u64) -> Result<String, String> {
+    let reference = format!("refs/autospec/claims/issue-{issue}");
+    let output = git_stdout(repo, &["ls-remote", "--refs", "origin", &reference])?;
+    let mut lines = output.lines();
+    let line = lines
+        .next()
+        .ok_or_else(|| "executor reviewer found no exact claim ref".to_string())?;
+    if lines.next().is_some() {
+        return Err("executor reviewer found ambiguous claim refs".to_string());
+    }
+    let (oid, observed_ref) = line
+        .split_once('\t')
+        .ok_or_else(|| "executor reviewer claim-ref evidence is malformed".to_string())?;
+    if observed_ref != reference
+        || !matches!(oid.len(), 40 | 64)
+        || !oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("executor reviewer claim-ref identity is malformed".to_string());
+    }
+    Ok(oid.to_string())
+}
+
+fn github_authority_digest(
+    repository: &str,
+    issue: u64,
+    pull_request: u64,
+    adapter: &DraftPrAdapter,
+) -> Result<String, String> {
+    let mut segments = repository.split('/');
+    let owner = segments.next().unwrap_or_default();
+    let name = segments.next().unwrap_or_default();
+    if segments.next().is_some()
+        || [owner, name].iter().any(|segment| {
+            segment.is_empty()
+                || !segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        })
+    {
+        return Err("executor reviewer repository identity is invalid".to_string());
+    }
+    let root = format!("repos/{owner}/{name}");
+    let requests = [
+        (format!("{root}/issues/{issue}"), false),
+        (format!("{root}/issues/{issue}/comments?per_page=100"), true),
+        (format!("{root}/pulls/{pull_request}"), false),
+        (
+            format!("{root}/issues/{pull_request}/comments?per_page=100"),
+            true,
+        ),
+        (
+            format!("{root}/pulls/{pull_request}/reviews?per_page=100"),
+            true,
+        ),
+        (
+            format!("{root}/pulls/{pull_request}/comments?per_page=100"),
+            true,
+        ),
+    ];
+    let mut inventory = Vec::with_capacity(requests.len());
+    for (endpoint, paginated) in requests {
+        let mut command = Command::new(&adapter.gh);
+        command
+            .args(["api", "--method", "GET"])
+            .arg(&endpoint)
+            .envs(&adapter.environment);
+        if paginated {
+            command.args(["--paginate", "--slurp"]);
+        }
+        let output = command
+            .output()
+            .map_err(|error| format!("capture executor reviewer GitHub authority: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "capture executor reviewer GitHub authority failed for {endpoint}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        if output.stdout.len() > 16 * 1024 * 1024 {
+            return Err(format!(
+                "executor reviewer GitHub authority exceeded 16 MiB for {endpoint}"
+            ));
+        }
+        let mut value: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .map_err(|error| format!("parse executor reviewer authority {endpoint}: {error}"))?;
+        canonicalize_json(&mut value);
+        inventory.push(serde_json::json!({"endpoint": endpoint, "value": value}));
+    }
+    Ok(sha256_hex(
+        serde_json::to_string(&inventory)
+            .map_err(|error| format!("serialize executor reviewer authority: {error}"))?
+            .as_bytes(),
+    ))
+}
+
+fn canonicalize_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(values) => {
+            values.iter_mut().for_each(canonicalize_json);
+            values.sort_by_key(serde_json::Value::to_string);
+        }
+        serde_json::Value::Object(object) => {
+            object.values_mut().for_each(canonicalize_json);
+        }
+        _ => {}
     }
 }
 
@@ -6572,8 +7263,27 @@ pub(crate) fn push_and_create_draft(
     let prelaunch = RemoteMutationSnapshot::load(state_path, state)?;
     let observed = RemoteMutationSnapshot::capture(state, adapter)?;
     let issue_ref = format!("refs/heads/{}", state.identity.branch);
-    if prelaunch.refs.contains_key(&issue_ref) {
-        return Err("executor issue remote ref existed before Rust push authority".into());
+    if let Some(prior_head) = prelaunch.refs.get(&issue_ref) {
+        if prelaunch
+            .pull_requests
+            .iter()
+            .any(|pull_request| pull_request.head_ref_name == state.identity.branch)
+        {
+            return Err(
+                "executor retry branch still has an open pull request; close it before adoption"
+                    .into(),
+            );
+        }
+        let ancestry = Command::new("git")
+            .args(["merge-base", "--is-ancestor", prior_head, &proof.head_oid])
+            .current_dir(&state.identity.worktree)
+            .status()
+            .map_err(|error| format!("inspect preserved executor branch ancestry: {error}"))?;
+        if !ancestry.success() {
+            return Err(
+                "executor preserved remote branch is not an ancestor of the proven WIP".into(),
+            );
+        }
     }
     let mut pushed_refs = prelaunch.refs.clone();
     pushed_refs.insert(issue_ref.clone(), proof.head_oid.clone());
@@ -6776,6 +7486,1419 @@ pub(crate) fn push_and_create_draft(
     state.progress_at = unix_now()?;
     write_invocation_atomic(state_path, state)?;
     Ok(number)
+}
+
+fn exact_ready_merge_pull_request<'a>(
+    pull_requests: &'a [OpenPullRequest],
+    state: &PersistedInvocation,
+    admission: &ReadyAdmission,
+) -> Result<&'a OpenPullRequest, String> {
+    let base = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor ready base must name origin".to_string())?;
+    let mut exact = pull_requests.iter().filter(|pull_request| {
+        pull_request.number == admission.pull_request
+            && pull_request.head_ref_name == state.identity.branch
+            && pull_request.head_ref_oid == admission.head_oid
+            && pull_request.base_ref_name == base
+            && pull_request.body.to_ascii_lowercase().contains(
+                format!("closes #{}", state.identity.issue)
+                    .to_ascii_lowercase()
+                    .as_str(),
+            )
+    });
+    let pull_request = exact
+        .next()
+        .ok_or_else(|| "executor ready transition lost the exact open draft".to_string())?;
+    if exact.next().is_some() {
+        return Err("executor ready transition observed duplicate exact pull requests".to_string());
+    }
+    Ok(pull_request)
+}
+
+pub(crate) fn mark_exact_draft_ready(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    decision: &PremergeDecision,
+    adapter: &DraftPrAdapter,
+) -> Result<ReadyAdmission, String> {
+    let snapshot = state.clone();
+    mark_exact_draft_ready_with_refresh(state_path, state, decision, adapter, || {
+        refresh_bridge_claim(&snapshot, ClaimRenewalPhase::Verification)
+    })
+}
+
+fn mark_exact_draft_ready_with_refresh<Refresh>(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    decision: &PremergeDecision,
+    adapter: &DraftPrAdapter,
+    mut refresh: Refresh,
+) -> Result<ReadyAdmission, String>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+{
+    let admission = ready_admission(state, decision)?;
+    let before = list_bridge_pull_requests(&state.identity.repository, adapter)?;
+    let pull_request = exact_ready_merge_pull_request(&before, state, &admission)?;
+    if pull_request.is_draft {
+        if refresh()? == BridgeClaimOwnership::Lost {
+            return Err("executor ready transition lost exact claim ownership".to_string());
+        }
+        let output = Command::new(&adapter.gh)
+            .args([
+                "pr",
+                "ready",
+                &admission.pull_request.to_string(),
+                "--repo",
+                &state.identity.repository,
+            ])
+            .envs(&adapter.environment)
+            .output()
+            .map_err(|error| format!("mark executor draft ready: {error}"))?;
+        let after = list_bridge_pull_requests(&state.identity.repository, adapter)?;
+        let observed = exact_ready_merge_pull_request(&after, state, &admission)?;
+        if observed.is_draft {
+            return Err(format!(
+                "mark executor draft ready failed or was not observed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+    }
+    state.phase = BridgePhase::Ready;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    Ok(admission)
+}
+
+fn fetch_required_checks(
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<String, String> {
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "executor CI fetch requires a pull request".to_string())?;
+    let output = Command::new(&adapter.gh)
+        .args([
+            "pr",
+            "view",
+            &pull_request.to_string(),
+            "--repo",
+            &state.identity.repository,
+            "--json",
+            "headRefOid,statusCheckRollup",
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| format!("fetch executor exact-head checks: {error}"))?;
+    if output.stdout.is_empty() {
+        return Err(format!(
+            "fetch executor exact-head checks returned no evidence: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("parse executor exact-head checks: {error}"))?;
+    let object = strict_object(
+        value,
+        &["headRefOid", "statusCheckRollup"],
+        "executor exact-head checks",
+    )?;
+    let expected_head = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor exact-head checks require a stable head".to_string())?;
+    if text(&object, "headRefOid")? != expected_head {
+        return Err("executor CI evidence is for a stale pull-request head".to_string());
+    }
+    let rollup = object
+        .get("statusCheckRollup")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "executor exact-head statusCheckRollup is not an array".to_string())?;
+    let checks = rollup
+        .iter()
+        .enumerate()
+        .map(|(index, check)| {
+            let check = check
+                .as_object()
+                .ok_or_else(|| format!("executor exact-head check[{index}] is not an object"))?;
+            let name = check
+                .get("name")
+                .or_else(|| check.get("context"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| format!("executor exact-head check[{index}] has no name"))?;
+            let state = if let Some(state) = check.get("state").and_then(serde_json::Value::as_str)
+            {
+                state.to_ascii_uppercase()
+            } else {
+                let status = check
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        format!("executor exact-head check[{index}] has no status or state")
+                    })?
+                    .to_ascii_uppercase();
+                if status == "COMPLETED" {
+                    check
+                        .get("conclusion")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| {
+                            format!("executor exact-head check[{index}] has no conclusion")
+                        })?
+                        .replace('-', "_")
+                        .to_ascii_uppercase()
+                } else {
+                    status
+                }
+            };
+            Ok(serde_json::json!({"name": name, "state": state}))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    serde_json::to_string(&checks)
+        .map_err(|error| format!("serialize executor exact-head checks: {error}"))
+}
+
+fn list_bridge_comments(
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<Vec<RemoteComment>, String> {
+    let endpoint = format!(
+        "repos/{}/issues/{}/comments",
+        state.identity.repository, state.identity.issue
+    );
+    let output = Command::new(&adapter.gh)
+        .args([
+            "api",
+            &endpoint,
+            "--paginate",
+            "--slurp",
+            "--jq",
+            "add | [.[] | {id,body,updated_at}]",
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| format!("list executor issue comments: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "list executor issue comments failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    parse_remote_comments_json(&String::from_utf8_lossy(&output.stdout))
+        .map_err(|error| format!("parse executor issue comments: {error}"))
+}
+
+fn configured_advisory_checks(adapter: &DraftPrAdapter) -> Result<BTreeSet<String>, String> {
+    let value = adapter
+        .environment
+        .get(&OsString::from("AUTOSPEC_PR_ADVISORY_CHECKS"))
+        .cloned()
+        .or_else(|| std::env::var_os("AUTOSPEC_PR_ADVISORY_CHECKS"))
+        .or_else(|| {
+            adapter
+                .environment
+                .get(&OsString::from("AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS"))
+                .cloned()
+        })
+        .or_else(|| std::env::var_os("AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS"))
+        .unwrap_or_else(|| OsString::from("^$"));
+    let pattern = value
+        .into_string()
+        .map_err(|_| "executor advisory-check regex is not UTF-8".to_string())?;
+    advisory_check_matches(&pattern, "")?;
+    Ok(BTreeSet::from([pattern]))
+}
+
+pub(crate) fn poll_exact_required_ci(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    adapter: &DraftPrAdapter,
+    advisory: &BTreeSet<String>,
+    max_polls: usize,
+) -> Result<(), String> {
+    wait_for_required_ci(
+        state,
+        max_polls,
+        advisory,
+        || fetch_required_checks(state, adapter),
+        || refresh_bridge_claim(state, ClaimRenewalPhase::CiWait),
+    )?;
+    state.phase = BridgePhase::CiPassed;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)
+}
+
+pub(crate) fn persist_accepted_executor_result(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    evidence: &ExecutorResultEvidence,
+) -> Result<(), String> {
+    if state.phase != BridgePhase::ReviewPassed
+        || evidence.repo != state.identity.repository
+        || evidence.issue != state.identity.issue
+        || evidence.worker_id != state.identity.worker_id
+        || evidence.branch != state.identity.branch
+        || evidence.claim_id.as_deref() != Some(state.identity.claim_id.as_str())
+        || evidence.pr != state.pr
+        || evidence.commit.as_deref() != state.head_oid.as_deref()
+    {
+        return Err("executor accepted-result persistence identity mismatch".to_string());
+    }
+    state.terminal_result = Some(format!(
+        "accepted:{}",
+        sha256_hex(evidence.to_marked_comment().as_bytes())
+    ));
+    state.phase = BridgePhase::ResultAccepted;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)
+}
+
+fn observe_pull_request(
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<String, String> {
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "executor merge observation requires a pull request".to_string())?;
+    let output = Command::new(&adapter.gh)
+        .args([
+            "pr",
+            "view",
+            &pull_request.to_string(),
+            "--repo",
+            &state.identity.repository,
+            "--json",
+            "number,state,isDraft,headRefOid,baseRefName,mergeCommit",
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| format!("observe executor pull request: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "observe executor pull request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("executor pull request observation was not UTF-8: {error}"))
+}
+
+fn revalidate_merge_admission(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<(), String> {
+    let expected_result = state
+        .terminal_result
+        .as_deref()
+        .and_then(|result| result.strip_prefix("accepted:"))
+        .filter(|digest| {
+            digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .ok_or_else(|| "executor merge has no exact accepted-result digest".to_string())?;
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "executor merge admission requires a pull request".to_string())?;
+    let head = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor merge admission requires a stable head".to_string())?;
+    let current_prs = list_bridge_pull_requests(&state.identity.repository, adapter)?;
+    let exact_prs = current_prs
+        .iter()
+        .filter(|candidate| {
+            candidate.number == pull_request
+                && !candidate.is_draft
+                && candidate.head_ref_name == state.identity.branch
+                && candidate.head_ref_oid == head
+                && candidate.base_ref_name
+                    == state
+                        .identity
+                        .base_ref
+                        .strip_prefix("origin/")
+                        .unwrap_or_default()
+                && is_executor_result_pull_request(
+                    candidate,
+                    state.identity.issue,
+                    &state.identity.branch,
+                )
+        })
+        .collect::<Vec<_>>();
+    if exact_prs.len() != 1 {
+        return Err("executor merge admission lost the exact open PR body/head/base".to_string());
+    }
+    let comments = list_bridge_comments(state, adapter)?;
+    let mut exact_results = comments
+        .iter()
+        .filter_map(|comment| {
+            successful_executor_result_for_pull_request(std::slice::from_ref(comment), pull_request)
+        })
+        .filter(|evidence| {
+            evidence.repo == state.identity.repository
+                && evidence.issue == state.identity.issue
+                && evidence.worker_id == state.identity.worker_id
+                && evidence.claim_id.as_deref() == Some(state.identity.claim_id.as_str())
+                && evidence.branch == state.identity.branch
+                && evidence.commit.as_deref() == Some(head)
+                && sha256_hex(evidence.to_marked_comment().as_bytes()) == expected_result
+        });
+    if exact_results.next().is_none() || exact_results.next().is_some() {
+        return Err("executor merge admission result evidence changed".to_string());
+    }
+    if evaluate_required_checks(
+        &fetch_required_checks(state, adapter)?,
+        &configured_advisory_checks(adapter)?,
+    )? != RequiredChecksDecision::Pass
+    {
+        return Err("executor merge admission required CI is no longer passing".to_string());
+    }
+    validate_review_receipt(state_path, state)
+}
+
+pub(crate) fn admin_squash_merge_exact(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<String, String> {
+    let snapshot = state.clone();
+    admin_squash_merge_exact_with_refresh(state_path, state, adapter, || {
+        refresh_bridge_claim(&snapshot, ClaimRenewalPhase::Review)
+    })
+}
+
+fn admin_squash_merge_exact_with_refresh<Refresh>(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    adapter: &DraftPrAdapter,
+    refresh: Refresh,
+) -> Result<String, String>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+{
+    let snapshot = state.clone();
+    admin_squash_merge_exact_with_refresh_and_admission(state_path, state, adapter, refresh, || {
+        revalidate_merge_admission(state_path, &snapshot, adapter)
+    })
+}
+
+fn admin_squash_merge_exact_with_refresh_and_admission<Refresh, Admit>(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    adapter: &DraftPrAdapter,
+    mut refresh: Refresh,
+    mut admit: Admit,
+) -> Result<String, String>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+    Admit: FnMut() -> Result<(), String>,
+{
+    if !matches!(
+        state.phase,
+        BridgePhase::ResultAccepted | BridgePhase::MergeRequested
+    ) {
+        return Err("executor merge requires accepted exact evidence".to_string());
+    }
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "executor merge requires a pull request".to_string())?;
+    let head_oid = state
+        .head_oid
+        .clone()
+        .ok_or_else(|| "executor merge requires a stable head OID".to_string())?;
+    let base = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor merge base must name origin".to_string())?
+        .to_string();
+    let before = observe_pull_request(state, adapter)?;
+    if state.phase == BridgePhase::MergeRequested {
+        if let Ok(merge_oid) = parse_observed_merge(&before, pull_request, &head_oid, &base) {
+            state.phase = BridgePhase::Merged;
+            state.terminal_result = Some(merge_oid.clone());
+            state.progress_at = unix_now()?;
+            write_invocation_atomic(state_path, state)?;
+            return Ok(merge_oid);
+        }
+    }
+    parse_observed_open(&before, pull_request, &head_oid, &base)?;
+    admit()?;
+    let refs = remote_head_refs(&state.identity.repository_path)?;
+    if refs.get(&format!("refs/heads/{base}")) != Some(&state.identity.base_oid)
+        || refs.get(&format!("refs/heads/{}", state.identity.branch)) != Some(&head_oid)
+    {
+        return Err(
+            "executor merge detected base or head drift; regenerate commit-bound gates".to_string(),
+        );
+    }
+    if state.phase == BridgePhase::ResultAccepted {
+        state.phase = BridgePhase::MergeRequested;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+    }
+    if refresh()? == BridgeClaimOwnership::Lost {
+        return Err("executor merge lost exact claim ownership".to_string());
+    }
+    let output = Command::new(&adapter.gh)
+        .args([
+            "pr",
+            "merge",
+            &pull_request.to_string(),
+            "--repo",
+            &state.identity.repository,
+            "--admin",
+            "--squash",
+            "--delete-branch",
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| format!("admin squash merge executor pull request: {error}"))?;
+    let after = observe_pull_request(state, adapter)?;
+    let merge_oid =
+        parse_observed_merge(&after, pull_request, &head_oid, &base).map_err(|error| {
+            format!(
+                "executor merge was not observed ({error}); command: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })?;
+    state.phase = BridgePhase::Merged;
+    state.terminal_result = Some(merge_oid.clone());
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    Ok(merge_oid)
+}
+
+fn push_exact_issue_head<Refresh>(
+    state: &PersistedInvocation,
+    refresh: &mut Refresh,
+) -> Result<(), String>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+{
+    let head = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor issue push requires a head OID".to_string())?;
+    let reference = format!("refs/heads/{}", state.identity.branch);
+    if remote_head_refs(&state.identity.repository_path)?
+        .get(&reference)
+        .is_some_and(|observed| observed == head)
+    {
+        return Ok(());
+    }
+    if refresh()? == BridgeClaimOwnership::Lost {
+        return Err("executor branch update lost exact claim ownership".to_string());
+    }
+    let output = Command::new("git")
+        .args([
+            "push",
+            "--porcelain",
+            "origin",
+            &format!("{head}:{reference}"),
+        ])
+        .current_dir(&state.identity.worktree)
+        .output()
+        .map_err(|error| format!("push updated executor issue head: {error}"))?;
+    if !output.status.success()
+        || remote_head_refs(&state.identity.repository_path)?
+            .get(&reference)
+            .is_none_or(|observed| observed != head)
+    {
+        return Err(format!(
+            "non-force executor issue update failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BaseDriftIntent {
+    old_base: String,
+    old_head: String,
+    new_base: String,
+}
+
+fn base_drift_intent_path(state_path: &Path, intent: &BaseDriftIntent) -> PathBuf {
+    let digest = sha256_hex(
+        format!(
+            "{}\0{}\0{}",
+            intent.old_base, intent.old_head, intent.new_base
+        )
+        .as_bytes(),
+    );
+    state_path.with_extension(format!("base-drift-{}.intent", &digest[..24]))
+}
+
+fn ensure_base_drift_intent(state_path: &Path, intent: &BaseDriftIntent) -> Result<(), String> {
+    let path = base_drift_intent_path(state_path, intent);
+    let body = serde_json::json!({
+        "schema": 1,
+        "old_base": intent.old_base,
+        "old_head": intent.old_head,
+        "new_base": intent.new_base,
+    })
+    .to_string();
+    if path.exists() {
+        validate_private_state_file(&path)?;
+        if fs::read_to_string(&path)
+            .map_err(|error| format!("read executor base-drift intent: {error}"))?
+            .trim()
+            != body
+        {
+            return Err("executor base-drift intent identity mismatch".to_string());
+        }
+        return Ok(());
+    }
+    write_private_create_once(
+        &path,
+        format!("{body}\n").as_bytes(),
+        "executor base-drift intent",
+    )
+}
+
+fn verify_or_create_base_merge(
+    worktree: &Path,
+    intent: &BaseDriftIntent,
+) -> Result<String, String> {
+    let current = git_stdout(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    if current == intent.old_head {
+        let merge = Command::new("git")
+            .args(["merge", "--no-edit", &intent.new_base])
+            .current_dir(worktree)
+            .output()
+            .map_err(|error| format!("merge updated executor base: {error}"))?;
+        if !merge.status.success() {
+            let _ = Command::new("git")
+                .args(["merge", "--abort"])
+                .current_dir(worktree)
+                .output();
+            return Err(format!(
+                "merge updated executor base failed: {}",
+                String::from_utf8_lossy(&merge.stderr).trim()
+            ));
+        }
+    }
+    let merged = git_stdout(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let parents = git_stdout(worktree, &["show", "-s", "--format=%P", &merged])?;
+    let parents = parents.split_whitespace().collect::<Vec<_>>();
+    if parents != [intent.old_head.as_str(), intent.new_base.as_str()]
+        || !git_bytes(
+            worktree,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?
+        .is_empty()
+    {
+        return Err("executor base-drift recovery found an unowned merge HEAD".to_string());
+    }
+    Ok(merged)
+}
+
+#[cfg(test)]
+fn fail_base_drift_after_merge() -> Result<(), String> {
+    if BASE_DRIFT_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+        Err("injected crash after base merge".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(test))]
+fn fail_base_drift_after_merge() -> Result<(), String> {
+    Ok(())
+}
+
+pub(crate) fn reconcile_base_drift(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+) -> Result<bool, String> {
+    let snapshot = state.clone();
+    reconcile_base_drift_with_refresh(state_path, state, || {
+        refresh_bridge_claim(&snapshot, ClaimRenewalPhase::Verification)
+    })
+}
+
+fn reconcile_base_drift_with_refresh<Refresh>(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    mut refresh: Refresh,
+) -> Result<bool, String>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+{
+    if !matches!(
+        state.phase,
+        BridgePhase::DraftCreated
+            | BridgePhase::Ready
+            | BridgePhase::CiPassed
+            | BridgePhase::ReviewPassed
+            | BridgePhase::ResultAccepted
+            | BridgePhase::MergeRequested
+    ) {
+        return Err("executor base reconciliation is illegal in this phase".to_string());
+    }
+    if refresh()? == BridgeClaimOwnership::Lost {
+        return Err("executor base reconciliation lost exact claim ownership".to_string());
+    }
+    let base = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor base reconciliation requires origin/<branch>".to_string())?;
+    let output = Command::new("git")
+        .args(["fetch", "--no-tags", "origin", base])
+        .current_dir(&state.identity.worktree)
+        .output()
+        .map_err(|error| format!("fetch executor merge base: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "fetch executor merge base failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let observed_base = git_stdout(
+        &state.identity.worktree,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("origin/{base}^{{commit}}"),
+        ],
+    )?;
+    let head = git_stdout(
+        &state.identity.worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    if observed_base == state.identity.base_oid {
+        if state.head_oid.as_deref() != Some(head.as_str()) {
+            return Err("executor base reconciliation found an unbound local HEAD".to_string());
+        }
+        push_exact_issue_head(state, &mut refresh)?;
+        return Ok(false);
+    }
+    if !git_bytes(
+        &state.identity.worktree,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?
+    .is_empty()
+    {
+        return Err("executor base reconciliation requires a clean worktree".to_string());
+    }
+    let old_head = state
+        .head_oid
+        .clone()
+        .ok_or_else(|| "executor base reconciliation requires the old head".to_string())?;
+    if head != old_head {
+        let ancestry = Command::new("git")
+            .args(["merge-base", "--is-ancestor", &old_head, &head])
+            .current_dir(&state.identity.worktree)
+            .status()
+            .map_err(|error| format!("inspect base-drift recovery ancestry: {error}"))?;
+        if !ancestry.success() {
+            return Err("executor base reconciliation found an unbound local HEAD".to_string());
+        }
+    }
+    let intent = BaseDriftIntent {
+        old_base: state.identity.base_oid.clone(),
+        old_head,
+        new_base: observed_base.clone(),
+    };
+    ensure_base_drift_intent(state_path, &intent)?;
+    let updated_head = verify_or_create_base_merge(&state.identity.worktree, &intent)?;
+    fail_base_drift_after_merge()?;
+    state.identity.base_oid = observed_base;
+    state.head_oid = Some(updated_head);
+    state.phase = BridgePhase::DraftCreated;
+    state.terminal_result = None;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    record_worktree_creation_identity(
+        &state.identity.repository_path,
+        &state.identity.branch,
+        &ResolvedBase {
+            base_ref: state.identity.base_ref.clone(),
+            base_oid: state.identity.base_oid.clone(),
+            explore_mode: false,
+        },
+    )?;
+    push_exact_issue_head(state, &mut refresh)?;
+    Ok(true)
+}
+
+fn bridge_claim_identity(state: &PersistedInvocation) -> ClaimMutationIdentity<'_> {
+    ClaimMutationIdentity {
+        repo: &state.identity.repository,
+        issue: state.identity.issue,
+        worker_id: &state.identity.worker_id,
+        branch: &state.identity.branch,
+        claim_id: &state.identity.claim_id,
+    }
+}
+
+fn cleanup_binding(state: &PersistedInvocation) -> String {
+    sha256_hex(
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}",
+            state.identity.repository,
+            state.identity.issue,
+            state.identity.worker_id,
+            state.identity.claim_id,
+            state.identity.invocation_id,
+            state.identity.worktree.display()
+        )
+        .as_bytes(),
+    )
+}
+
+fn cleanup_record_path(state_path: &Path, suffix: &str) -> PathBuf {
+    state_path.with_extension(format!("cleanup-{suffix}"))
+}
+
+fn result_publication_record_path(
+    state_path: &Path,
+    binding: &str,
+    stage: &str,
+) -> Result<PathBuf, String> {
+    if binding.len() != 64
+        || !binding
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err("executor result publication binding is not canonical SHA-256".to_string());
+    }
+    if !matches!(stage, "intent" | "complete") {
+        return Err("executor result publication stage is invalid".to_string());
+    }
+    Ok(state_path.with_extension(format!("result-publication-{binding}-{stage}")))
+}
+
+fn ensure_cleanup_record(path: &Path, binding: &str, label: &str) -> Result<(), String> {
+    if path.exists() {
+        validate_private_state_file(path)?;
+        if fs::read_to_string(path)
+            .map_err(|error| format!("read {label}: {error}"))?
+            .trim()
+            != binding
+        {
+            return Err(format!("{label} identity mismatch"));
+        }
+        return Ok(());
+    }
+    write_private_create_once(path, format!("{binding}\n").as_bytes(), label)
+}
+
+pub(crate) fn record_runtime_session_closed(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    session_id: &str,
+) -> Result<(), String> {
+    if state.identity.runtime_session_id.as_deref() != Some(session_id) {
+        return Err("executor closed runtime session identity mismatch".to_string());
+    }
+    ensure_cleanup_record(
+        &cleanup_record_path(state_path, "runtime-complete"),
+        &cleanup_binding(state),
+        "executor runtime cleanup receipt",
+    )
+}
+
+fn remove_exact_owned_worktree(
+    state: &PersistedInvocation,
+    removal_intent: &Path,
+) -> Result<(), String> {
+    let intent_preexisted = removal_intent.exists();
+    ensure_cleanup_record(
+        removal_intent,
+        &cleanup_binding(state),
+        "executor worktree removal intent",
+    )?;
+    let registry = git_stdout(
+        &state.identity.repository_path,
+        &["worktree", "list", "--porcelain"],
+    )?;
+    if !state.identity.worktree.exists() {
+        if !intent_preexisted {
+            return Err(
+                "executor worktree disappeared before a durable removal intent".to_string(),
+            );
+        }
+        if registry
+            .lines()
+            .any(|line| line == format!("worktree {}", state.identity.worktree.display()))
+        {
+            return Err("executor worktree is missing but remains registered".to_string());
+        }
+        return Ok(());
+    }
+    let canonical = fs::canonicalize(&state.identity.worktree)
+        .map_err(|error| format!("canonicalize completed executor worktree: {error}"))?;
+    if canonical != state.identity.worktree {
+        return Err("executor cleanup worktree identity changed".to_string());
+    }
+    let expected_branch = format!("branch refs/heads/{}", state.identity.branch);
+    let matches = registry
+        .split("\n\n")
+        .filter(|block| {
+            block
+                .lines()
+                .any(|line| line == format!("worktree {}", canonical.display()))
+                && block.lines().any(|line| line == expected_branch)
+        })
+        .count();
+    if matches != 1 {
+        return Err("executor cleanup requires one exact owned worktree".to_string());
+    }
+    let output = Command::new("git")
+        .args(["worktree", "remove", canonical.to_string_lossy().as_ref()])
+        .current_dir(&state.identity.repository_path)
+        .output()
+        .map_err(|error| format!("remove completed executor worktree: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "remove completed executor worktree failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn finalize_merged_executor(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    mut runtime: Option<RuntimeSessionAdapter>,
+) -> Result<(), String> {
+    if state.phase == BridgePhase::Complete {
+        return Ok(());
+    }
+    if !matches!(
+        state.phase,
+        BridgePhase::Merged | BridgePhase::CleanupPending
+    ) {
+        return Err("executor success finalization requires observed merged state".to_string());
+    }
+    if state_path.starts_with(&state.identity.worktree) {
+        return Err("executor durable state must be outside the removable worktree".to_string());
+    }
+    let binding = cleanup_binding(state);
+    let finalization_intent = cleanup_record_path(state_path, "intent");
+    ensure_cleanup_record(
+        &finalization_intent,
+        &binding,
+        "executor finalization intent",
+    )?;
+    if state.phase == BridgePhase::Merged {
+        match transition_bridge_claim(
+            bridge_claim_identity(state),
+            state.pr,
+            BridgeClaimDisposition::Merged,
+        )
+        .map_err(|error| error.message)?
+        {
+            BridgeClaimTransition::Transitioned => {}
+            BridgeClaimTransition::OwnershipLost => {
+                return Err("executor merged finalization lost exact claim ownership".to_string())
+            }
+        }
+        state.phase = BridgePhase::CleanupPending;
+        state.progress_at = unix_now()?;
+        write_invocation_atomic(state_path, state)?;
+    }
+    close_owned_runtime(state_path, state, runtime.take())?;
+    let removal_intent = cleanup_record_path(state_path, "worktree-intent");
+    remove_exact_owned_worktree(state, &removal_intent)?;
+    ensure_cleanup_record(
+        &cleanup_record_path(state_path, "worktree-complete"),
+        &binding,
+        "executor worktree cleanup receipt",
+    )?;
+    state.phase = BridgePhase::Complete;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)
+}
+
+pub(crate) fn finalize_failed_executor(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    runtime: Option<RuntimeSessionAdapter>,
+    adapter: Option<&DraftPrAdapter>,
+    retryable: bool,
+    exhausted: bool,
+    reason: &str,
+) -> Result<(), String> {
+    close_owned_runtime(state_path, state, runtime)?;
+    let disposition = failure_disposition(retryable, exhausted);
+    if disposition == BridgeClaimDisposition::Retryable && state.pr.is_some() {
+        close_retryable_pull_request_with_refresh(
+            state_path,
+            state,
+            adapter.ok_or_else(|| {
+                "executor retryable failure with a PR requires GitHub authority".to_string()
+            })?,
+            || refresh_bridge_claim(state, ClaimRenewalPhase::Verification),
+        )?;
+    }
+    match transition_bridge_claim(bridge_claim_identity(state), state.pr, disposition)
+        .map_err(|error| error.message)?
+    {
+        BridgeClaimTransition::Transitioned => {}
+        BridgeClaimTransition::OwnershipLost => {
+            return Err("executor failure finalization lost exact claim ownership".to_string())
+        }
+    }
+    state.phase = BridgePhase::Complete;
+    state.terminal_result = Some(match disposition {
+        BridgeClaimDisposition::Retryable => format!("retryable:{reason}"),
+        BridgeClaimDisposition::NeedsHuman => format!("needs-human:{reason}"),
+        BridgeClaimDisposition::Merged => unreachable!("failure disposition"),
+    });
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)
+}
+
+fn close_retryable_pull_request(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<(), String> {
+    close_retryable_pull_request_with_refresh(state_path, state, adapter, || {
+        Ok(BridgeClaimOwnership::Refreshed { ttl_seconds: 60 })
+    })
+}
+
+fn close_retryable_pull_request_with_refresh<Refresh>(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+    mut refresh: Refresh,
+) -> Result<(), String>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+{
+    let Some(pull_request) = state.pr else {
+        return Ok(());
+    };
+    let head = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor retryable PR cleanup requires a stable head".to_string())?;
+    let binding =
+        sha256_hex(format!("{}\0{}\0{}", cleanup_binding(state), pull_request, head).as_bytes());
+    let intent = cleanup_record_path(state_path, "retry-pr-close-intent");
+    let complete = cleanup_record_path(state_path, "retry-pr-close-complete");
+    let open = list_bridge_pull_requests(&state.identity.repository, adapter)?;
+    let exact = open
+        .iter()
+        .filter(|candidate| {
+            candidate.number == pull_request
+                && candidate.head_ref_name == state.identity.branch
+                && candidate.head_ref_oid == head
+                && candidate.base_ref_name
+                    == state
+                        .identity
+                        .base_ref
+                        .strip_prefix("origin/")
+                        .unwrap_or_default()
+                && candidate
+                    .body
+                    .contains(&format!("Closes #{}", state.identity.issue))
+        })
+        .count();
+    if exact == 0 {
+        if !intent.exists() {
+            return Err("executor retryable PR disappeared without a close intent".to_string());
+        }
+        ensure_cleanup_record(&intent, &binding, "executor retryable PR close intent")?;
+        observe_exact_closed_retryable_pull_request(state, adapter, pull_request, head)?;
+        ensure_cleanup_record(&complete, &binding, "executor retryable PR close receipt")?;
+        return Ok(());
+    }
+    if exact != 1 {
+        return Err("executor retryable PR cleanup found ambiguous authority".to_string());
+    }
+    ensure_cleanup_record(&intent, &binding, "executor retryable PR close intent")?;
+    if refresh()? == BridgeClaimOwnership::Lost {
+        return Err("executor retryable PR cleanup lost exact claim ownership".to_string());
+    }
+    let output = Command::new(&adapter.gh)
+        .args([
+            "pr",
+            "close",
+            &pull_request.to_string(),
+            "--repo",
+            &state.identity.repository,
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| format!("close retryable executor pull request: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "close retryable executor pull request failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    observe_exact_closed_retryable_pull_request(state, adapter, pull_request, head)?;
+    ensure_cleanup_record(&complete, &binding, "executor retryable PR close receipt")
+}
+
+fn observe_exact_closed_retryable_pull_request(
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+    pull_request: u64,
+    head: &str,
+) -> Result<(), String> {
+    let output = Command::new(&adapter.gh)
+        .args([
+            "pr",
+            "view",
+            &pull_request.to_string(),
+            "--repo",
+            &state.identity.repository,
+            "--json",
+            "number,state,mergedAt,headRefName,headRefOid,baseRefName",
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| format!("observe retryable executor pull request closure: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "observe retryable executor pull request closure failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("parse retryable executor pull request closure: {error}"))?;
+    let object = strict_object(
+        value,
+        &[
+            "number",
+            "state",
+            "mergedAt",
+            "headRefName",
+            "headRefOid",
+            "baseRefName",
+        ],
+        "retryable executor pull request closure",
+    )?;
+    if object.get("number").and_then(serde_json::Value::as_u64) != Some(pull_request)
+        || text(&object, "state")? != "CLOSED"
+        || !object
+            .get("mergedAt")
+            .is_some_and(serde_json::Value::is_null)
+        || text(&object, "headRefName")? != state.identity.branch
+        || text(&object, "headRefOid")? != head
+        || text(&object, "baseRefName")?
+            != state
+                .identity
+                .base_ref
+                .strip_prefix("origin/")
+                .unwrap_or_default()
+    {
+        return Err(
+            "executor retryable PR cleanup did not observe exact CLOSED non-merged state"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn close_owned_runtime(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    runtime: Option<RuntimeSessionAdapter>,
+) -> Result<(), String> {
+    let Some(expected_session) = state.identity.runtime_session_id.as_deref() else {
+        return if runtime.is_none() {
+            Ok(())
+        } else {
+            Err("executor cleanup received an unbound runtime session".to_string())
+        };
+    };
+    let binding = cleanup_binding(state);
+    let intent_path = cleanup_record_path(state_path, "runtime-intent.json");
+    let receipt_path = cleanup_record_path(state_path, "runtime-complete");
+    if receipt_path.exists() {
+        if runtime.is_some() {
+            return Err(
+                "executor runtime cleanup receipt conflicts with a live adapter".to_string(),
+            );
+        }
+        return ensure_cleanup_record(&receipt_path, &binding, "executor runtime cleanup receipt");
+    }
+    let (environment_dir, runtime) = if let Some(runtime) = runtime {
+        if runtime.session_id != expected_session || runtime.repo != state.identity.worktree {
+            return Err("executor cleanup runtime session identity mismatch".to_string());
+        }
+        (runtime.environment_dir().to_path_buf(), Some(runtime))
+    } else {
+        let body = fs::read_to_string(&intent_path).map_err(|error| {
+            format!("executor runtime session cleanup requires durable recovery intent: {error}")
+        })?;
+        validate_private_state_file(&intent_path)?;
+        let value: serde_json::Value = serde_json::from_str(&body)
+            .map_err(|error| format!("parse executor runtime cleanup intent: {error}"))?;
+        let object = strict_object(
+            value,
+            &["schema", "binding", "session_id", "environment_dir"],
+            "executor runtime cleanup intent",
+        )?;
+        if checked_u32(&object, "schema")? != 1
+            || text(&object, "binding")? != binding
+            || text(&object, "session_id")? != expected_session
+        {
+            return Err("executor runtime cleanup intent identity mismatch".to_string());
+        }
+        (PathBuf::from(text(&object, "environment_dir")?), None)
+    };
+    if !environment_dir.is_absolute() {
+        return Err("executor runtime cleanup environment path is not absolute".to_string());
+    }
+    let intent = serde_json::json!({
+        "schema": 1,
+        "binding": binding,
+        "session_id": expected_session,
+        "environment_dir": environment_dir,
+    })
+    .to_string();
+    if intent_path.exists() {
+        validate_private_state_file(&intent_path)?;
+        if fs::read_to_string(&intent_path)
+            .map_err(|error| format!("read executor runtime cleanup intent: {error}"))?
+            .trim()
+            != intent
+        {
+            return Err("executor runtime cleanup intent identity mismatch".to_string());
+        }
+    } else {
+        write_private_create_once(
+            &intent_path,
+            format!("{intent}\n").as_bytes(),
+            "executor runtime cleanup intent",
+        )?;
+    }
+    if let Some(runtime) = runtime {
+        runtime.abort().map_err(|error| error.message)?;
+    } else {
+        crate::commands::runtime::env::retry_runtime_session_cleanup(
+            &state.identity.worktree,
+            "auto",
+            &environment_dir,
+            expected_session,
+        )
+        .map_err(|error| error.message)?;
+    }
+    #[cfg(test)]
+    if RUNTIME_CLOSE_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+        return Err("injected crash after runtime close".to_string());
+    }
+    crate::commands::runtime::env::verify_runtime_session_released(
+        &environment_dir,
+        expected_session,
+    )
+    .map_err(|error| error.message)?;
+    ensure_cleanup_record(&receipt_path, &binding, "executor runtime cleanup receipt")
+}
+
+fn failure_disposition(retryable: bool, exhausted: bool) -> BridgeClaimDisposition {
+    if retryable && !exhausted {
+        BridgeClaimDisposition::Retryable
+    } else {
+        BridgeClaimDisposition::NeedsHuman
+    }
+}
+
+pub(crate) fn run_strict_independent_reviewer(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    plan: &DirectCommandPlan,
+    artifact_root: &Path,
+    stall_timeout: Duration,
+    remote: &DraftPrAdapter,
+) -> Result<(), String> {
+    let snapshot = state.clone();
+    run_strict_independent_reviewer_with_refresh(
+        state_path,
+        state,
+        plan,
+        artifact_root,
+        stall_timeout,
+        remote,
+        || refresh_bridge_claim(&snapshot, ClaimRenewalPhase::Review),
+    )
+}
+
+fn run_strict_independent_reviewer_with_refresh<Refresh>(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    plan: &DirectCommandPlan,
+    artifact_root: &Path,
+    stall_timeout: Duration,
+    remote: &DraftPrAdapter,
+    mut refresh: Refresh,
+) -> Result<(), String>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, String>,
+{
+    if state.phase != BridgePhase::CiPassed || plan.commands.len() != 1 {
+        return Err(
+            "executor independent review requires one bounded command after CI".to_string(),
+        );
+    }
+    if refresh()? == BridgeClaimOwnership::Lost {
+        return Err("executor independent review lost exact claim ownership".to_string());
+    }
+    if review_receipt_path(state_path, state)?.exists() {
+        validate_review_receipt(state_path, state)?;
+        state.phase = BridgePhase::ReviewPassed;
+        state.progress_at = unix_now()?;
+        return write_invocation_atomic(state_path, state);
+    }
+    let protected =
+        MutationSnapshot::capture(&state.identity.repository_path, &state.identity.branch)?;
+    let remote_before = ReviewerAuthoritySnapshot::capture(state, remote)?;
+    let head_before = git_stdout(
+        &state.identity.worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    let status_before = git_bytes(
+        &state.identity.worktree,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    )?;
+    let reviewer_plan = independent_reviewer_plan(state, plan)?;
+    let observations = execute_direct_plan(
+        &state.identity.worktree,
+        &reviewer_plan,
+        artifact_root,
+        None,
+        stall_timeout,
+    )?;
+    protected.verify(&state.identity.repository_path, &state.identity.branch)?;
+    if ReviewerAuthoritySnapshot::capture(state, remote)? != remote_before
+        || git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+        )? != head_before
+        || git_bytes(
+            &state.identity.worktree,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )? != status_before
+    {
+        return Err(
+            "executor independent reviewer mutated local or remote authority state".to_string(),
+        );
+    }
+    let observation = observations
+        .first()
+        .ok_or_else(|| "executor independent review produced no observation".to_string())?;
+    if observations.len() != 1
+        || observation.origin != ObservationOrigin::Live
+        || observation.exit_code() != Some(0)
+    {
+        return Err("executor independent reviewer did not exit successfully".to_string());
+    }
+    strict_lgtm_artifacts(&observation.stdout_path, &observation.stderr_path)?;
+    write_review_receipt(state_path, state, observation)?;
+    if refresh()? == BridgeClaimOwnership::Lost {
+        return Err("executor independent review lost claim after verdict".to_string());
+    }
+    state.phase = BridgePhase::ReviewPassed;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)
+}
+
+fn review_binding(state: &PersistedInvocation) -> Result<String, String> {
+    let head = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor review binding requires a stable head".to_string())?;
+    Ok(sha256_hex(
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}",
+            state.identity.repository,
+            state.identity.issue,
+            state.identity.worker_id,
+            state.identity.claim_id,
+            state.identity.branch,
+            head
+        )
+        .as_bytes(),
+    ))
+}
+
+fn review_receipt_path(state_path: &Path, state: &PersistedInvocation) -> Result<PathBuf, String> {
+    let head = state
+        .head_oid
+        .as_deref()
+        .filter(|head| head.len() == 40 && head.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or_else(|| "executor review receipt requires a canonical head".to_string())?;
+    Ok(state_path.with_extension(format!("review-{head}.json")))
+}
+
+fn write_review_receipt(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    observation: &ObservedDirectCommand,
+) -> Result<(), String> {
+    let body = serde_json::json!({
+        "schema": 2,
+        "binding": review_binding(state)?,
+        "stdout_path": observation.stdout_path,
+        "stdout_digest": observation.stdout_digest,
+        "stderr_path": observation.stderr_path,
+        "stderr_digest": observation.stderr_digest,
+    })
+    .to_string();
+    write_private_create_once(
+        &review_receipt_path(state_path, state)?,
+        format!("{body}\n").as_bytes(),
+        "executor independent review receipt",
+    )
+}
+
+fn validate_review_receipt(state_path: &Path, state: &PersistedInvocation) -> Result<(), String> {
+    let path = review_receipt_path(state_path, state)?;
+    validate_private_state_file(&path)?;
+    let value: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&path)
+            .map_err(|error| format!("read executor independent review receipt: {error}"))?,
+    )
+    .map_err(|error| format!("parse executor independent review receipt: {error}"))?;
+    let object = strict_object(
+        value,
+        &[
+            "schema",
+            "binding",
+            "stdout_path",
+            "stdout_digest",
+            "stderr_path",
+            "stderr_digest",
+        ],
+        "executor independent review receipt",
+    )?;
+    if checked_u32(&object, "schema")? != 2 || text(&object, "binding")? != review_binding(state)? {
+        return Err("executor independent review receipt identity mismatch".to_string());
+    }
+    let stdout_path = PathBuf::from(text(&object, "stdout_path")?);
+    reject_symlink_path(&stdout_path)?;
+    validate_private_state_file(&stdout_path)?;
+    let output = fs::read_to_string(&stdout_path)
+        .map_err(|error| format!("read executor independent review artifact: {error}"))?;
+    if sha256_hex(output.as_bytes()) != text(&object, "stdout_digest")? {
+        return Err("executor independent review artifact digest mismatch".to_string());
+    }
+    let stderr_path = PathBuf::from(text(&object, "stderr_path")?);
+    reject_symlink_path(&stderr_path)?;
+    validate_private_state_file(&stderr_path)?;
+    let stderr = fs::read(&stderr_path)
+        .map_err(|error| format!("read executor independent review stderr artifact: {error}"))?;
+    if !stderr.is_empty() || sha256_hex(&stderr) != text(&object, "stderr_digest")? {
+        return Err("executor independent review stderr artifact is not empty".to_string());
+    }
+    strict_lgtm(&output)
 }
 
 fn run_implementation_lint(
@@ -7453,13 +9576,25 @@ fn list_bridge_pull_requests(
 
 fn remote_head_refs(repo: &Path) -> Result<BTreeMap<String, String>, String> {
     let output = git_stdout(repo, &["ls-remote", "--refs", "origin"])?;
+    parse_bridge_remote_refs(&output)
+}
+
+fn parse_bridge_remote_refs(output: &str) -> Result<BTreeMap<String, String>, String> {
     let mut refs = BTreeMap::new();
     for line in output.lines() {
         let (oid, reference) = line
             .split_once('\t')
             .ok_or_else(|| "executor remote ref evidence is malformed".to_string())?;
+        if oid.len() != 40 || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("executor remote ref object ID is malformed".to_string());
+        }
         if reference.starts_with("refs/pull/") {
             continue;
+        }
+        if let Some(issue) = reference.strip_prefix("refs/autospec/claims/issue-") {
+            if !issue.is_empty() && issue.bytes().all(|byte| byte.is_ascii_digit()) {
+                continue;
+            }
         }
         if !["refs/heads/", "refs/tags/", "refs/notes/"]
             .iter()
@@ -10219,20 +12354,54 @@ fn spawn_blocked_harness(
         .map_err(|_| "executor worktree contains a NUL byte".to_string())?;
     let forbidden = [
         "GH_TOKEN",
+        "GH_ENTERPRISE_TOKEN",
         "GITHUB_TOKEN",
+        "GITHUB_ENTERPRISE_TOKEN",
         "GITHUB_PAT",
         "GLAB_TOKEN",
         "GIT_ASKPASS",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_CREDENTIAL_HELPER",
         "SSH_ASKPASS",
+        "SSH_AUTH_SOCK",
     ];
     let mut environment_values = std::env::vars_os()
         .filter(|(key, _)| {
-            !forbidden.iter().any(|forbidden| key == forbidden) && key != "COMPOSE_PROJECT_NAME"
+            !forbidden.iter().any(|forbidden| key == forbidden)
+                && !key.to_string_lossy().starts_with("GIT_CONFIG_")
+                && key != "COMPOSE_PROJECT_NAME"
         })
         .collect::<BTreeMap<_, _>>();
     for (key, value) in &harness.environment_overrides {
+        if forbidden.iter().any(|forbidden| key == forbidden)
+            || key.to_string_lossy().starts_with("GIT_CONFIG_")
+        {
+            return Err(format!(
+                "executor harness override may not restore credential authority: {}",
+                key.to_string_lossy()
+            )
+            .into());
+        }
         environment_values.insert(key.clone(), value.clone());
     }
+    let credentialless_config = sinks
+        .stdout
+        .parent()
+        .ok_or_else(|| "executor output sink has no parent".to_string())?
+        .join("credentialless-config");
+    ensure_private_directory(&credentialless_config)?;
+    environment_values.insert(
+        "GH_CONFIG_DIR".into(),
+        credentialless_config.into_os_string(),
+    );
+    environment_values.insert("GIT_CONFIG_NOSYSTEM".into(), "1".into());
+    environment_values.insert("GIT_CONFIG_GLOBAL".into(), "/dev/null".into());
+    environment_values.insert("GIT_TERMINAL_PROMPT".into(), "0".into());
+    environment_values.insert(
+        "GIT_SSH_COMMAND".into(),
+        "/usr/bin/ssh -F /dev/null -o IdentityAgent=none -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes".into(),
+    );
     let environment = environment_values
         .into_iter()
         .map(|(key, value)| {
@@ -12054,6 +14223,10 @@ impl std::fmt::Debug for RuntimeSessionAdapter {
 }
 
 impl RuntimeSessionAdapter {
+    pub(crate) fn environment_dir(&self) -> &Path {
+        self.session.environment_dir()
+    }
+
     pub(crate) fn run(self, command: &[String]) -> Result<(), crate::commands::CommandFailure> {
         self.session.run(command)
     }
@@ -12566,11 +14739,26 @@ pub(crate) fn recover_invocation(
     let invocation = PersistedInvocation::from_json(
         &fs::read_to_string(path).map_err(|error| format!("read invocation state: {error}"))?,
     )?;
-    if &invocation.identity != expected {
+    let mut normalized_identity = invocation.identity.clone();
+    normalized_identity.base_oid = expected.base_oid.clone();
+    if &normalized_identity != expected {
         return Err("persisted invocation identity does not match the current claim".to_string());
     }
-    if invocation.terminal_result.is_some() {
-        return Err("terminal invocation is not recoverable as active work".to_string());
+    let valid_terminal = match invocation.phase {
+        BridgePhase::ResultAccepted | BridgePhase::MergeRequested => invocation
+            .terminal_result
+            .as_deref()
+            .and_then(|result| result.strip_prefix("accepted:"))
+            .is_some_and(canonical_sha256),
+        BridgePhase::Merged | BridgePhase::CleanupPending => invocation
+            .terminal_result
+            .as_deref()
+            .is_some_and(canonical_git_oid),
+        BridgePhase::Complete => false,
+        _ => invocation.terminal_result.is_none(),
+    };
+    if !valid_terminal {
+        return Err("persisted invocation phase/result contract is invalid".to_string());
     }
     let source_repo = fs::canonicalize(&invocation.identity.repository_path)
         .map_err(|error| format!("canonicalize persisted repository: {error}"))?;
@@ -12582,29 +14770,48 @@ pub(crate) fn recover_invocation(
         .worktree
         .parent()
         .ok_or_else(|| "persisted worktree has no private root".to_string())?;
+    if !invocation.identity.worktree.exists() {
+        if invocation.phase != BridgePhase::CleanupPending {
+            return Err("recovery worktree is missing before cleanup".to_string());
+        }
+        let intent = cleanup_record_path(path, "worktree-intent");
+        if !intent.exists() {
+            return Err("recovery worktree is missing without cleanup intent".to_string());
+        }
+        ensure_cleanup_record(
+            &intent,
+            &cleanup_binding(&invocation),
+            "executor worktree cleanup intent",
+        )?;
+        return Ok(Some(invocation));
+    }
     validate_recovery_worktree(
         &source_repo,
         &invocation.identity.worktree,
         &invocation.identity.branch,
         scope_root,
+        path,
         &ResolvedBase {
             base_ref: invocation.identity.base_ref.clone(),
             base_oid: invocation.identity.base_oid.clone(),
             explore_mode: false,
         },
     )?;
-    let observed_base = git_stdout(
-        &invocation.identity.worktree,
-        &[
-            "rev-parse",
-            "--verify",
-            &format!("{}^{{commit}}", invocation.identity.base_ref),
-        ],
-    )?;
-    if observed_base != invocation.identity.base_oid {
-        return Err("persisted invocation base identity no longer matches".to_string());
-    }
     Ok(Some(invocation))
+}
+
+fn canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn canonical_git_oid(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn validate_recovery_worktree(
@@ -12612,6 +14819,7 @@ fn validate_recovery_worktree(
     path: &Path,
     branch: &str,
     scope_root: &Path,
+    state_path: &Path,
     base: &ResolvedBase,
 ) -> Result<(), String> {
     reject_symlink_path(path)?;
@@ -12634,8 +14842,48 @@ fn validate_recovery_worktree(
     if !git_stdout(path, &["status", "--porcelain", "--untracked-files=all"])?.is_empty() {
         return Err("recovery worktree is not clean".to_string());
     }
-    validate_worktree_creation_identity(repo, path, branch, base)?;
+    validate_recovery_creation_identity(repo, path, branch, state_path, base)?;
     Ok(())
+}
+
+fn validate_recovery_creation_identity(
+    repo: &Path,
+    path: &Path,
+    branch: &str,
+    state_path: &Path,
+    base: &ResolvedBase,
+) -> Result<(), String> {
+    let configured_base = git_stdout(
+        repo,
+        &[
+            "config",
+            "--get",
+            &format!("branch.{branch}.autospecBaseOid"),
+        ],
+    )
+    .map_err(|_| "executor recovery worktree base identity is missing".to_string())?;
+    let mut metadata_base = base.clone();
+    metadata_base.base_oid = configured_base.clone();
+    validate_worktree_creation_identity(repo, path, branch, &metadata_base)?;
+    if configured_base == base.base_oid {
+        return Ok(());
+    }
+    let head = git_stdout(path, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let parents = git_stdout(path, &["show", "-s", "--format=%P", &head])?;
+    let old_head = parents
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "executor recovery base transition has no old HEAD".to_string())?;
+    let intent = BaseDriftIntent {
+        old_base: configured_base,
+        old_head: old_head.to_string(),
+        new_base: base.base_oid.clone(),
+    };
+    let intent_path = base_drift_intent_path(state_path, &intent);
+    if !intent_path.exists() {
+        return Err("executor recovery base identity changed without durable intent".to_string());
+    }
+    ensure_base_drift_intent(state_path, &intent)
 }
 
 fn git(repo: &Path, args: &[&str]) -> Result<(), String> {
@@ -13589,6 +15837,118 @@ mod tests {
                 .and_then(Path::parent)
                 .expect("scope root"),
         );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_recovers_every_merge_completion_phase() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("recovery-completion-phases");
+        commit_implementation(&state);
+        super::record_worktree_creation_identity(
+            &state.identity.repository_path,
+            &state.identity.branch,
+            &super::ResolvedBase {
+                base_ref: state.identity.base_ref.clone(),
+                base_oid: state.identity.base_oid.clone(),
+                explore_mode: false,
+            },
+        )
+        .expect("recovery metadata");
+        state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
+        state.pr = Some(17);
+        let state_path = fixture.root.join("state/completion.json");
+
+        for phase in [BridgePhase::ResultAccepted, BridgePhase::MergeRequested] {
+            state.phase = phase;
+            state.terminal_result = Some(format!("accepted:{}", "a".repeat(64)));
+            write_invocation_atomic(&state_path, &state).expect("persist accepted phase");
+            assert_eq!(
+                recover_invocation(&state_path, &state.identity)
+                    .expect("recover accepted phase")
+                    .expect("active recovery")
+                    .phase,
+                phase
+            );
+        }
+        for phase in [BridgePhase::Merged, BridgePhase::CleanupPending] {
+            state.phase = phase;
+            state.terminal_result = Some("b".repeat(40));
+            write_invocation_atomic(&state_path, &state).expect("persist merge phase");
+            assert_eq!(
+                recover_invocation(&state_path, &state.identity)
+                    .expect("recover merge phase")
+                    .expect("active recovery")
+                    .phase,
+                phase
+            );
+        }
+
+        super::ensure_cleanup_record(
+            &super::cleanup_record_path(&state_path, "worktree-intent"),
+            &super::cleanup_binding(&state),
+            "test worktree intent",
+        )
+        .expect("removal intent");
+        git(
+            &state.identity.repository_path,
+            &[
+                "worktree",
+                "remove",
+                state.identity.worktree.to_str().expect("worktree"),
+            ],
+        );
+        assert_eq!(
+            recover_invocation(&state_path, &state.identity)
+                .expect("recover after removal")
+                .expect("cleanup recovery")
+                .phase,
+            BridgePhase::CleanupPending
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_recovers_before_and_after_base_regeneration() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("recovery-base-regeneration");
+        commit_implementation(&state);
+        super::record_worktree_creation_identity(
+            &state.identity.repository_path,
+            &state.identity.branch,
+            &super::ResolvedBase {
+                base_ref: state.identity.base_ref.clone(),
+                base_oid: state.identity.base_oid.clone(),
+                explore_mode: false,
+            },
+        )
+        .expect("recovery metadata");
+        state.phase = BridgePhase::ReviewPassed;
+        state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
+        let state_path = fixture.root.join("state/base-regeneration.json");
+        write_invocation_atomic(&state_path, &state).expect("persist pre-drift state");
+
+        fs::write(fixture.root.join("seed/recovery-drift.txt"), "drift\n").expect("base drift");
+        git(&fixture.root.join("seed"), &["add", "recovery-drift.txt"]);
+        git(
+            &fixture.root.join("seed"),
+            &["commit", "-m", "test: advance recovery base"],
+        );
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+        let new_base = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD"]);
+        let mut current_identity = state.identity.clone();
+        current_identity.base_oid = new_base;
+        assert!(recover_invocation(&state_path, &current_identity)
+            .expect("recover before reconciliation")
+            .is_some());
+
+        assert!(
+            super::reconcile_base_drift_with_refresh(&state_path, &mut state, || {
+                Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 })
+            })
+            .expect("regenerate current base")
+        );
+        assert!(recover_invocation(&state_path, &state.identity)
+            .expect("recover after reconciliation")
+            .is_some());
     }
 
     #[cfg(unix)]
@@ -15379,7 +17739,7 @@ mod tests {
         // The supervisor fdatasyncs every 64 KiB ring write. On a loaded CI disk, the
         // 2 MiB overwrite fixture can legitimately need longer than ten seconds.
         for _ in 0..3_000 {
-            if super::read_executor_exit_status(&sinks.exit_status)
+            if super::read_live_executor_exit_status(&sinks.exit_status)
                 .expect("exit record")
                 .is_some()
             {
@@ -17943,15 +20303,34 @@ mod tests {
         let gh = fixture.root.join("gh");
         let pull_requests = fixture.root.join("pull-requests.json");
         let created = fixture.root.join("created-pull-request.json");
+        let closed = fixture.root.join("closed-pull-request.json");
         let calls = fixture.root.join("gh-calls");
         fs::write(&pull_requests, "[]").expect("empty PR snapshot");
         fs::write(&created, created_pull_request).expect("created PR fixture");
+        let closed_document = serde_json::from_str::<serde_json::Value>(created_pull_request)
+            .ok()
+            .and_then(|value| value.as_array().and_then(|items| items.first()).cloned())
+            .map(|pull_request| {
+                serde_json::json!({
+                    "number": pull_request["number"],
+                    "state": "CLOSED",
+                    "mergedAt": null,
+                    "headRefName": pull_request["headRefName"],
+                    "headRefOid": pull_request["headRefOid"],
+                    "baseRefName": pull_request["baseRefName"],
+                })
+            })
+            .unwrap_or_else(|| serde_json::json!({}));
+        fs::write(&closed, closed_document.to_string()).expect("closed PR fixture");
         fs::write(
             &gh,
             "#!/bin/sh\n\
              set -eu\n\
              printf '%s\\n' \"$*\" >> \"$GH_CALLS\"\n\
              if [ \"$1 $2\" = \"pr list\" ]; then cat \"$GH_PR_STATE\"; exit 0; fi\n\
+             if [ \"$1 $2\" = \"pr view\" ]; then cat \"$GH_CLOSED_PR\"; exit 0; fi\n\
+             if [ \"$1 $2\" = \"pr ready\" ]; then cp \"$GH_READY_PR\" \"$GH_PR_STATE\"; exit 0; fi\n\
+             if [ \"$1 $2\" = \"pr close\" ]; then printf '%s\\n' '[]' > \"$GH_PR_STATE\"; exit 0; fi\n\
              if [ \"$1 $2\" = \"pr create\" ]; then\n\
                grep -q '\"phase\":\"draft_creating\"' \"$BRIDGE_STATE\"\n\
                if [ -n \"${GH_REQUIRE_DURABLE_RELEASE:-}\" ]; then\n\
@@ -17980,6 +20359,7 @@ mod tests {
                 ("GH_CALLS".into(), calls.into_os_string()),
                 ("GH_PR_STATE".into(), pull_requests.into_os_string()),
                 ("GH_CREATED_PR".into(), created.into_os_string()),
+                ("GH_CLOSED_PR".into(), closed.into_os_string()),
                 ("BRIDGE_STATE".into(), state_path.as_os_str().to_os_string()),
                 (
                     "GH_REMOTE".into(),
@@ -18126,6 +20506,168 @@ mod tests {
         assert_eq!(recovered, pull_request);
         let calls = fs::read_to_string(prepared.fixture.root.join("gh-calls")).expect("gh calls");
         assert_eq!(calls.matches("pr create").count(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_retry_adopts_preserved_remote_wip_branch() {
+        let (fixture, mut state, _snapshot, closeout) =
+            implementation_proof_fixture("retry-preserved-branch");
+        let state_path = fixture.root.join("state/invocation.json");
+        commit_implementation(&state);
+        let preserved_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{preserved_head}:refs/heads/{}", state.identity.branch),
+            ],
+        );
+        let snapshot = super::MutationSnapshot::capture(&fixture.repo, &state.identity.branch)
+            .expect("retry local snapshot");
+        let empty_adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
+        state.phase = BridgePhase::Pending;
+        super::write_invocation_atomic(&state_path, &state).expect("retry pending");
+        super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &empty_adapter)
+            .expect("retry prelaunch remote");
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "implemented\ncontinued\n",
+        )
+        .expect("continued WIP");
+        git(&state.identity.worktree, &["add", "implementation.txt"]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "feat: continue preserved WIP"],
+        );
+        state.phase = BridgePhase::ImplementationComplete;
+        let proof = super::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
+            .expect("prove continued WIP");
+        let body = format!("Closes #42\n\n{}", proof.closeout_body);
+        let created = format!(
+            "[{{\"number\":17,\"body\":{},\"headRefName\":\"{}\",\"headRefOid\":\"{}\",\"isDraft\":true,\"baseRefName\":\"main\"}}]",
+            serde_json::to_string(&body).unwrap(),
+            state.identity.branch,
+            proof.head_oid,
+        );
+        let adapter = draft_pr_adapter_fixture(&fixture, &state_path, &created);
+
+        assert_eq!(
+            super::push_and_create_draft(
+                &state_path,
+                &mut state,
+                &proof,
+                "Retry issue",
+                DRAFT_ISSUE_BODY,
+                &adapter,
+            )
+            .expect("fast-forward preserved branch and create draft"),
+            17
+        );
+        assert_eq!(state.phase, BridgePhase::DraftCreated);
+        assert_ne!(proof.head_oid, preserved_head);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_retry_closes_pr_but_preserves_remote_wip() {
+        let mut prepared = prepared_draft_transaction("retry-close-preserve");
+        prepared.publish().expect("published draft");
+        let branch = prepared.state.identity.branch.clone();
+        let head = prepared.proof.head_oid.clone();
+
+        super::close_retryable_pull_request(
+            &prepared.state_path,
+            &prepared.state,
+            &prepared.adapter,
+        )
+        .expect("close retryable PR");
+        super::close_retryable_pull_request(
+            &prepared.state_path,
+            &prepared.state,
+            &prepared.adapter,
+        )
+        .expect("restart adopts durable close");
+
+        assert_eq!(
+            fs::read_to_string(adapter_path(&prepared.adapter, "GH_PR_STATE"))
+                .expect("closed PR inventory")
+                .trim(),
+            "[]"
+        );
+        assert_eq!(
+            git_stdout(
+                &prepared.fixture.root,
+                &[
+                    "--git-dir",
+                    prepared.fixture.root.join("remote.git").to_str().unwrap(),
+                    "rev-parse",
+                    &format!("refs/heads/{branch}"),
+                ],
+            ),
+            head,
+            "retry cleanup must retain committed WIP"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_retry_close_requires_live_claim_and_exact_closed_state() {
+        let mut takeover = prepared_draft_transaction("retry-close-takeover");
+        takeover.publish().expect("published draft");
+        let error = super::close_retryable_pull_request_with_refresh(
+            &takeover.state_path,
+            &takeover.state,
+            &takeover.adapter,
+            || Ok(super::BridgeClaimOwnership::Lost),
+        )
+        .expect_err("takeover must block PR close");
+        assert!(error.contains("ownership"), "{error}");
+        assert!(
+            !fs::read_to_string(takeover.fixture.root.join("gh-calls"))
+                .expect("gh calls")
+                .lines()
+                .any(|call| call.starts_with("pr close")),
+            "stale worker issued a PR close"
+        );
+
+        let mut merged = prepared_draft_transaction("retry-close-merged");
+        merged.publish().expect("published draft");
+        let binding = autospec_core::autonomous::waterfall::sha256_hex(
+            format!(
+                "{}\0{}\0{}",
+                super::cleanup_binding(&merged.state),
+                merged.state.pr.expect("PR"),
+                merged.state.head_oid.as_deref().expect("head")
+            )
+            .as_bytes(),
+        );
+        super::ensure_cleanup_record(
+            &super::cleanup_record_path(&merged.state_path, "retry-pr-close-intent"),
+            &binding,
+            "test retry close intent",
+        )
+        .expect("close intent");
+        fs::write(adapter_path(&merged.adapter, "GH_PR_STATE"), "[]")
+            .expect("stale empty open PR inventory");
+        fs::write(
+            adapter_path(&merged.adapter, "GH_CLOSED_PR"),
+            serde_json::json!({
+                "number": merged.state.pr,
+                "state": "MERGED",
+                "mergedAt": "2026-07-25T20:00:00Z",
+                "headRefName": merged.state.identity.branch,
+                "headRefOid": merged.state.head_oid,
+                "baseRefName": "main",
+            })
+            .to_string(),
+        )
+        .expect("merged observation");
+        let error =
+            super::close_retryable_pull_request(&merged.state_path, &merged.state, &merged.adapter)
+                .expect_err("merged PR must not be treated as safely closed");
+        assert!(error.contains("CLOSED non-merged"), "{error}");
     }
 
     #[cfg(unix)]
@@ -21270,9 +23812,16 @@ exit 19
         cleanup.arm(supervisor.clone(), harness.clone());
         let deadline = Instant::now() + Duration::from_secs(5);
         let observed = loop {
-            let observed = super::observe_process_identity(harness.pid, &harness.argv_digest)
+            let Some(observed) = super::observe_process_identity(harness.pid, &harness.argv_digest)
                 .expect("observe exec-replaced harness")
-                .expect("live exec-replaced harness");
+            else {
+                assert!(
+                    Instant::now() < deadline,
+                    "exec-replaced harness disappeared during identity transition"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            };
             if observed.executable != harness.executable
                 || observed.argv_digest != harness.argv_digest
             {
@@ -22931,7 +25480,7 @@ exit 19
         fs::create_dir_all(fixture.repo.join(".autospec")).expect("runtime manifest directory");
         fs::write(
             fixture.repo.join("runtime-up.py"),
-            "import http.server, os\npid=os.fork()\nif pid == 0:\n http.server.HTTPServer(('127.0.0.1', int(os.environ['AGENT_FRONTEND_PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()\nelse:\n open('runtime.pid','w').write(str(pid))\n",
+            "import http.server, os\npid=os.fork()\nif not pid:\n http.server.HTTPServer(('127.0.0.1', int(os.environ['AGENT_FRONTEND_PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()\nelse:\n open('runtime.pid','w').write(str(pid))\n",
         )
         .expect("runtime up executable");
         fs::write(
@@ -22978,6 +25527,70 @@ exit 19
         match previous {
             Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),
             None => std::env::remove_var("AGENT_ENV_STATE_ROOT"),
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_direct_children_have_no_remote_credentials() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("credentialless-direct-child");
+        let keys = [
+            "GH_TOKEN",
+            "GH_ENTERPRISE_TOKEN",
+            "GITHUB_TOKEN",
+            "GITHUB_ENTERPRISE_TOKEN",
+            "SSH_AUTH_SOCK",
+            "GIT_ASKPASS",
+        ];
+        let previous = keys
+            .iter()
+            .map(|key| ((*key).to_string(), std::env::var_os(key)))
+            .collect::<Vec<_>>();
+        for key in keys {
+            std::env::set_var(key, format!("forbidden-{key}"));
+        }
+        let plan = super::parse_direct_command_plan("/usr/bin/env").expect("environment command");
+        let observed = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &fixture.root.join("credential-evidence"),
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("credentialless child");
+        let environment =
+            fs::read_to_string(&observed[0].stdout_path).expect("captured environment");
+
+        for key in keys {
+            assert!(
+                !environment
+                    .lines()
+                    .any(|line| line.starts_with(&format!("{key}="))),
+                "{key} leaked to direct child"
+            );
+        }
+        for expected in [
+            "GIT_CONFIG_NOSYSTEM=1",
+            "GIT_CONFIG_GLOBAL=/dev/null",
+            "GIT_TERMINAL_PROMPT=0",
+        ] {
+            assert!(
+                environment.lines().any(|line| line == expected),
+                "{expected}"
+            );
+        }
+        assert!(environment
+            .lines()
+            .any(|line| line.starts_with("GH_CONFIG_DIR=")
+                && line.ends_with("/credentialless-config")));
+        assert!(environment
+            .lines()
+            .any(|line| line.starts_with("GIT_SSH_COMMAND=/usr/bin/ssh -F /dev/null")));
+        for (key, value) in previous {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
         }
     }
 
@@ -23546,7 +26159,7 @@ exit 19
         fs::create_dir_all(fixture.repo.join(".autospec")).expect("runtime manifest directory");
         fs::write(
             fixture.repo.join("runtime-up.py"),
-            "import http.server, os\npid=os.fork()\nif pid == 0:\n http.server.HTTPServer(('127.0.0.1', int(os.environ['AGENT_FRONTEND_PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()\nelse:\n open('runtime.pid','w').write(str(pid))\n",
+            "import http.server, os\npid=os.fork()\nif not pid:\n http.server.HTTPServer(('127.0.0.1', int(os.environ['AGENT_FRONTEND_PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()\nelse:\n open('runtime.pid','w').write(str(pid))\n",
         )
         .expect("runtime up executable");
         fs::write(
@@ -23762,5 +26375,1167 @@ exit 19
             .expect("full suite");
         assert_eq!(smoke.commands[0].argv, vec!["/usr/bin/false"]);
         assert_eq!(full.plan.commands[0].argv, vec!["/usr/bin/true"]);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_marks_only_exact_passed_draft_ready() {
+        let (_fixture, mut state, _snapshot, _) = implementation_proof_fixture("ready-pass-only");
+        commit_implementation(&state);
+        let head_oid = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        state.phase = super::BridgePhase::DraftCreated;
+        state.pr = Some(17);
+        state.head_oid = Some(head_oid.clone());
+        let lane = super::PremergeLaneIdentity::new(
+            state.identity.repository.clone(),
+            state.identity.issue,
+            state.identity.worker_id.clone(),
+            state.identity.claim_id.clone(),
+            state.identity.branch.clone(),
+            head_oid.clone(),
+        )
+        .expect("lane");
+        let pass = super::PremergeDecision::Pass {
+            lane,
+            evidence_digest: "evidence".into(),
+        };
+
+        let admission = super::ready_admission(&state, &pass).expect("exact Pass admits ready");
+        assert_eq!(admission.pull_request, 17);
+        assert_eq!(admission.head_oid, head_oid);
+        assert_eq!(admission.evidence_digest, "evidence");
+
+        let blocked = super::PremergeDecision::Blocked {
+            lane: admission.lane.clone(),
+            reason: "scanner".into(),
+            evidence_digest: "blocked".into(),
+            quarantine: autospec_core::autonomous::premerge::LaneQuarantine {
+                lane: admission.lane,
+                evidence_digest: "blocked".into(),
+                finding_codes: vec!["scanner".into()],
+            },
+        };
+        assert!(super::ready_admission(&state, &blocked).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_observes_exact_draft_becoming_ready() {
+        let mut prepared = prepared_draft_transaction("ready-success");
+        prepared.publish().expect("draft");
+        let current_path = adapter_path(&prepared.adapter, "GH_PR_STATE");
+        let ready_path = prepared.fixture.root.join("ready-success.json");
+        fs::write(
+            &ready_path,
+            fs::read_to_string(&current_path)
+                .expect("draft JSON")
+                .replace("\"isDraft\":true", "\"isDraft\":false"),
+        )
+        .expect("ready JSON");
+        prepared
+            .adapter
+            .environment
+            .insert("GH_READY_PR".into(), ready_path.into_os_string());
+        let lane = super::PremergeLaneIdentity::new(
+            prepared.state.identity.repository.clone(),
+            prepared.state.identity.issue,
+            prepared.state.identity.worker_id.clone(),
+            prepared.state.identity.claim_id.clone(),
+            prepared.state.identity.branch.clone(),
+            prepared.proof.head_oid.clone(),
+        )
+        .expect("lane");
+        let pass = super::PremergeDecision::Pass {
+            lane,
+            evidence_digest: "evidence".into(),
+        };
+
+        super::mark_exact_draft_ready_with_refresh(
+            &prepared.state_path,
+            &mut prepared.state,
+            &pass,
+            &prepared.adapter,
+            || Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }),
+        )
+        .expect("ready transition");
+
+        assert_eq!(prepared.state.phase, super::BridgePhase::Ready);
+        assert!(fs::read_to_string(current_path)
+            .expect("observed ready")
+            .contains("\"isDraft\":false"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_claim_takeover_blocks_ready_mutation() {
+        let mut prepared = prepared_draft_transaction("ready-takeover");
+        prepared.publish().expect("draft");
+        let current_path = PathBuf::from(
+            prepared
+                .adapter
+                .environment
+                .get(&OsString::from("GH_PR_STATE"))
+                .expect("PR state"),
+        );
+        let ready_path = prepared.fixture.root.join("ready-pr.json");
+        let current = fs::read_to_string(&current_path).expect("draft JSON");
+        fs::write(
+            &ready_path,
+            current.replace("\"isDraft\":true", "\"isDraft\":false"),
+        )
+        .expect("ready JSON");
+        prepared
+            .adapter
+            .environment
+            .insert("GH_READY_PR".into(), ready_path.into_os_string());
+        let lane = super::PremergeLaneIdentity::new(
+            prepared.state.identity.repository.clone(),
+            prepared.state.identity.issue,
+            prepared.state.identity.worker_id.clone(),
+            prepared.state.identity.claim_id.clone(),
+            prepared.state.identity.branch.clone(),
+            prepared.proof.head_oid.clone(),
+        )
+        .expect("lane");
+        let pass = super::PremergeDecision::Pass {
+            lane,
+            evidence_digest: "evidence".into(),
+        };
+
+        let error = super::mark_exact_draft_ready_with_refresh(
+            &prepared.state_path,
+            &mut prepared.state,
+            &pass,
+            &prepared.adapter,
+            || Ok(super::BridgeClaimOwnership::Lost),
+        )
+        .expect_err("takeover blocks ready");
+        assert!(error.contains("ownership"), "{error}");
+        assert!(fs::read_to_string(current_path)
+            .expect("preserved draft")
+            .contains("\"isDraft\":true"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_waits_for_every_non_advisory_required_check() {
+        let checks = r#"[
+            {"name":"unit","state":"SUCCESS"},
+            {"name":"teamcity","state":"FAILURE"}
+        ]"#;
+        let advisory = super::BTreeSet::from(["^teamcity( .*)?$".to_string()]);
+        assert_eq!(
+            super::evaluate_required_checks(checks, &advisory).expect("checks"),
+            super::RequiredChecksDecision::Pass
+        );
+        assert_eq!(
+            super::evaluate_required_checks(
+                r#"[{"name":"teamcity","state":"PENDING"}]"#,
+                &advisory,
+            )
+            .expect("all required checks are explicitly advisory"),
+            super::RequiredChecksDecision::Pass
+        );
+        assert!(
+            super::evaluate_required_checks("[]", &super::BTreeSet::new()).is_err(),
+            "truly missing required-check evidence must fail closed"
+        );
+
+        let pending = r#"[{"name":"unit","state":"PENDING"}]"#;
+        assert_eq!(
+            super::evaluate_required_checks(pending, &super::BTreeSet::new()).expect("pending"),
+            super::RequiredChecksDecision::Pending
+        );
+
+        let failing = r#"[{"name":"unit","state":"FAILURE"}]"#;
+        assert!(matches!(
+            super::evaluate_required_checks(failing, &super::BTreeSet::new()).expect("failing"),
+            super::RequiredChecksDecision::Failed { .. }
+        ));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_refreshes_exact_claim_during_ci_polling() {
+        let (_fixture, mut state, _snapshot, _) = implementation_proof_fixture("ci-refresh");
+        state.phase = super::BridgePhase::Ready;
+        state.pr = Some(17);
+        let mut polls = vec![
+            r#"[{"name":"unit","state":"PENDING"}]"#.to_string(),
+            r#"[{"name":"unit","state":"SUCCESS"}]"#.to_string(),
+        ]
+        .into_iter();
+        let mut refreshes = 0;
+        let mut delays = Vec::new();
+        super::wait_for_required_ci_with_delay(
+            &state,
+            2,
+            &super::BTreeSet::new(),
+            || Ok(polls.next().expect("bounded poll")),
+            || {
+                refreshes += 1;
+                Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 })
+            },
+            Duration::from_secs(7),
+            |duration| delays.push(duration),
+        )
+        .expect("pending check eventually succeeds");
+        assert_eq!(refreshes, 2);
+        assert_eq!(delays, vec![Duration::from_secs(7)]);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_reviewer_accepts_only_bare_lgtm() {
+        assert!(super::strict_lgtm("LGTM\n").is_ok());
+        for rejected in [
+            "",
+            "looks good",
+            "LGTM\nfinding: race",
+            "LGTM with reservations",
+            "```text\nLGTM\n```",
+        ] {
+            assert!(
+                super::strict_lgtm(rejected).is_err(),
+                "accepted non-strict review: {rejected:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_reviewer_rejects_worktree_executable_and_stderr() {
+        let (_fixture, state, _snapshot, _) =
+            implementation_proof_fixture("reviewer-external-authority");
+        let local = state.identity.worktree.join("reviewer");
+        fs::write(&local, "#!/bin/sh\nprintf 'LGTM\\n'\n").expect("local reviewer");
+        fs::set_permissions(&local, fs::Permissions::from_mode(0o755)).expect("reviewer mode");
+        let local_plan = super::DirectCommandPlan {
+            commands: vec![super::DirectCommand {
+                argv: vec![local.to_string_lossy().into_owned()],
+            }],
+        };
+        assert!(
+            super::independent_reviewer_plan(&state, &local_plan).is_err(),
+            "reviewed code must not provide its own reviewer"
+        );
+
+        let stdout = state.identity.repository_path.join("review-stdout");
+        let stderr = state.identity.repository_path.join("review-stderr");
+        fs::write(&stdout, "LGTM\n").expect("review stdout");
+        fs::write(&stderr, "finding: unsafe mutation\n").expect("review stderr");
+        assert!(
+            super::strict_lgtm_artifacts(&stdout, &stderr).is_err(),
+            "stderr findings must override LGTM stdout"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_reviewer_rejects_forged_github_comment() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("reviewer-comment-mutation");
+        commit_implementation(&state);
+        let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{head}:refs/heads/{}", state.identity.branch),
+            ],
+        );
+        let claim_oid = git_stdout(&fixture.repo, &["rev-parse", "origin/main"]);
+        git(
+            &fixture.repo,
+            &[
+                "push",
+                "origin",
+                &format!(
+                    "{claim_oid}:refs/autospec/claims/issue-{}",
+                    state.identity.issue
+                ),
+            ],
+        );
+        state.phase = super::BridgePhase::CiPassed;
+        state.pr = Some(17);
+        state.head_oid = Some(head.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("CI state");
+        let gh = fixture.root.join("gh-review-authority");
+        let api_calls = fixture.root.join("api-calls");
+        fs::write(&api_calls, "0\n").expect("API counter");
+        fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nset -eu\n\
+                 if [ \"$1 $2\" = 'pr list' ]; then\n\
+                   printf '%s\\n' '[{{\"number\":17,\"body\":\"Closes #42\\n\\n## Closeout report\\n\",\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"{head}\",\"isDraft\":false,\"baseRefName\":\"main\"}}]'\n\
+                   exit 0\n\
+                 fi\n\
+                 if [ \"$1\" = 'api' ]; then\n\
+                   n=$(cat \"$API_CALLS\"); n=$((n + 1)); printf '%s\\n' \"$n\" > \"$API_CALLS\"\n\
+                   case \"$4\" in\n\
+                     *comments*) if [ \"$n\" -gt 6 ]; then printf '%s\\n' '[{{\"id\":1,\"body\":\"forged executor result\"}}]'; else printf '%s\\n' '[]'; fi ;;\n\
+                     *) printf '%s\\n' '{{}}' ;;\n\
+                   esac\n\
+                   exit 0\n\
+                 fi\n\
+                 exit 64\n"
+            ),
+        )
+        .expect("gh");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
+        let adapter = super::DraftPrAdapter {
+            gh,
+            environment: BTreeMap::from([("API_CALLS".into(), api_calls.clone().into_os_string())]),
+        };
+        let plan = super::parse_direct_command_plan("/usr/bin/printf LGTM").expect("review plan");
+
+        let error = super::run_strict_independent_reviewer_with_refresh(
+            &state_path,
+            &mut state,
+            &plan,
+            &fixture.root.join("review-artifacts"),
+            Duration::from_secs(5),
+            &adapter,
+            || Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }),
+        )
+        .expect_err("GitHub mutation during review must block");
+
+        assert!(error.contains("mutated"), "{error}");
+        assert_eq!(state.phase, super::BridgePhase::CiPassed);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_ingests_only_exact_open_executor_result() {
+        let (_fixture, mut state, _snapshot, _) = implementation_proof_fixture("result-binding");
+        let head = "a".repeat(40);
+        let receipt = "b".repeat(64);
+        state.phase = super::BridgePhase::ReviewPassed;
+        state.pr = Some(17);
+        state.head_oid = Some(head.clone());
+        let pull_request = autospec_core::claim::OpenPullRequest {
+            number: 17,
+            body: "Closes #42\n\n## Closeout report\n".into(),
+            head_ref_name: state.identity.branch.clone(),
+            head_ref_oid: head.clone(),
+            is_draft: false,
+            base_ref_name: "main".into(),
+        };
+        let evidence = autospec_core::claim::ExecutorResultEvidence::new(
+            state.identity.repository.clone(),
+            state.identity.issue,
+            state.identity.worker_id.clone(),
+            state.identity.branch.clone(),
+            "succeeded",
+            Some(17),
+            "premerge_passed",
+            "receipt-17",
+            Some(state.identity.claim_id.clone()),
+            Some(head),
+            Some(receipt.clone()),
+        );
+        let comments = vec![autospec_core::claim::RemoteComment::new(
+            1,
+            evidence.to_marked_comment(),
+            "2026-07-26T00:00:00Z",
+        )];
+
+        let accepted = super::accept_executor_result(&state, &receipt, &comments, &[pull_request])
+            .expect("exact result");
+        assert_eq!(accepted, evidence);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_merge_revalidates_result_ci_and_review() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("merge-revalidate-gates");
+        commit_implementation(&state);
+        let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        state.phase = super::BridgePhase::ReviewPassed;
+        state.pr = Some(17);
+        state.head_oid = Some(head.clone());
+        let receipt = "b".repeat(64);
+        let evidence = autospec_core::claim::ExecutorResultEvidence::new(
+            state.identity.repository.clone(),
+            state.identity.issue,
+            state.identity.worker_id.clone(),
+            state.identity.branch.clone(),
+            "succeeded",
+            Some(17),
+            "premerge_passed",
+            "receipt-17",
+            Some(state.identity.claim_id.clone()),
+            Some(head.clone()),
+            Some(receipt),
+        );
+        let state_path = fixture.root.join("state/invocation.json");
+        super::persist_accepted_executor_result(&state_path, &mut state, &evidence)
+            .expect("accepted result");
+        let review_artifact = fixture.root.join("review-LGTM");
+        let review_stderr = fixture.root.join("review-stderr");
+        fs::write(&review_artifact, "LGTM\n").expect("review artifact");
+        fs::write(&review_stderr, "").expect("review stderr");
+        fs::set_permissions(&review_artifact, fs::Permissions::from_mode(0o600))
+            .expect("private review");
+        fs::set_permissions(&review_stderr, fs::Permissions::from_mode(0o600))
+            .expect("private review stderr");
+        let review = serde_json::json!({
+            "schema": 2,
+            "binding": super::review_binding(&state).expect("review binding"),
+            "stdout_path": review_artifact,
+            "stdout_digest": autospec_core::autonomous::waterfall::sha256_hex(b"LGTM\n"),
+            "stderr_path": review_stderr,
+            "stderr_digest": autospec_core::autonomous::waterfall::sha256_hex(b""),
+        })
+        .to_string();
+        let review_path = super::review_receipt_path(&state_path, &state).expect("review path");
+        super::write_private_create_once(
+            &review_path,
+            format!("{review}\n").as_bytes(),
+            "test review receipt",
+        )
+        .expect("review receipt");
+        let pr_state = fixture.root.join("merge-pr.json");
+        let comments = fixture.root.join("merge-comments.json");
+        let checks = fixture.root.join("merge-checks.json");
+        fs::write(
+            &pr_state,
+            format!(
+                "[{{\"number\":17,\"body\":\"Closes #42\\n\\n## Closeout report\\n\",\"headRefName\":\"{}\",\"headRefOid\":\"{head}\",\"isDraft\":false,\"baseRefName\":\"main\"}}]",
+                state.identity.branch
+            ),
+        )
+        .expect("PR state");
+        fs::write(
+            &comments,
+            serde_json::json!([
+                {
+                    "id": 1,
+                    "body": autospec_core::claim::ExecutorResultEvidence::new(
+                        state.identity.repository.clone(),
+                        state.identity.issue,
+                        state.identity.worker_id.clone(),
+                        state.identity.branch.clone(),
+                        "succeeded",
+                        Some(17),
+                        "premerge_passed",
+                        "receipt-old",
+                        Some(state.identity.claim_id.clone()),
+                        Some("0".repeat(40)),
+                        Some("1".repeat(64)),
+                    ).to_marked_comment(),
+                    "updated_at": "2026-07-25T23:00:00Z",
+                },
+                {
+                    "id": 2,
+                    "body": evidence.to_marked_comment(),
+                    "updated_at": "2026-07-26T00:00:00Z",
+                }
+            ])
+            .to_string(),
+        )
+        .expect("comments");
+        fs::write(
+            &checks,
+            serde_json::json!({
+                "headRefOid": head,
+                "statusCheckRollup": [{"name":"unit","state":"SUCCESS"}],
+            })
+            .to_string(),
+        )
+        .expect("checks");
+        let gh = fixture.root.join("gh-merge-gates");
+        fs::write(
+            &gh,
+            "#!/bin/sh\nset -eu\n\
+             if [ \"$1 $2\" = 'pr list' ]; then cat \"$PR_STATE\"; exit 0; fi\n\
+             if [ \"$1 $2\" = 'pr view' ]; then cat \"$CHECKS\"; exit 0; fi\n\
+             if [ \"$1\" = 'api' ]; then cat \"$COMMENTS\"; exit 0; fi\n\
+             exit 64\n",
+        )
+        .expect("gh");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
+        let adapter = super::DraftPrAdapter {
+            gh,
+            environment: BTreeMap::from([
+                ("PR_STATE".into(), pr_state.into_os_string()),
+                ("COMMENTS".into(), comments.clone().into_os_string()),
+                ("CHECKS".into(), checks.clone().into_os_string()),
+            ]),
+        };
+
+        super::revalidate_merge_admission(&state_path, &state, &adapter)
+            .expect("all current gates");
+        fs::write(
+            &checks,
+            serde_json::json!({
+                "headRefOid": "0".repeat(40),
+                "statusCheckRollup": [{"name":"unit","state":"SUCCESS"}],
+            })
+            .to_string(),
+        )
+        .expect("stale-head checks");
+        assert!(
+            super::revalidate_merge_admission(&state_path, &state, &adapter).is_err(),
+            "passing checks from the prior head must not admit the current head"
+        );
+        fs::write(
+            &checks,
+            serde_json::json!({
+                "headRefOid": head,
+                "statusCheckRollup": [{"name":"unit","state":"FAILURE"}],
+            })
+            .to_string(),
+        )
+        .expect("failed checks");
+        assert!(
+            super::revalidate_merge_admission(&state_path, &state, &adapter).is_err(),
+            "admin merge must not bypass a rerun required check"
+        );
+        fs::write(
+            &checks,
+            serde_json::json!({
+                "headRefOid": head,
+                "statusCheckRollup": [{"name":"unit","state":"SUCCESS"}],
+            })
+            .to_string(),
+        )
+        .expect("checks restored");
+        fs::write(&comments, "[]").expect("result removed");
+        assert!(
+            super::revalidate_merge_admission(&state_path, &state, &adapter).is_err(),
+            "admin merge must not accept a deleted result receipt"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_result_publication_receipts_are_generation_addressed() {
+        let fixture = GitFixture::new("result-publication-generation");
+        let state_path = fixture.root.join("invocation.json");
+        let old_binding = "a".repeat(64);
+        let new_binding = "b".repeat(64);
+
+        let old_intent = super::result_publication_record_path(&state_path, &old_binding, "intent")
+            .expect("old intent path");
+        let old_complete =
+            super::result_publication_record_path(&state_path, &old_binding, "complete")
+                .expect("old complete path");
+        super::ensure_cleanup_record(&old_intent, &old_binding, "old intent").expect("old intent");
+        super::ensure_cleanup_record(&old_complete, &old_binding, "old complete")
+            .expect("old complete");
+
+        let new_intent = super::result_publication_record_path(&state_path, &new_binding, "intent")
+            .expect("new intent path");
+        let new_complete =
+            super::result_publication_record_path(&state_path, &new_binding, "complete")
+                .expect("new complete path");
+        super::ensure_cleanup_record(&new_intent, &new_binding, "new intent")
+            .expect("new generation must not collide with the prior commit");
+        super::ensure_cleanup_record(&new_complete, &new_binding, "new complete")
+            .expect("new completion must not collide with the prior commit");
+
+        assert_ne!(old_intent, new_intent);
+        assert_ne!(old_complete, new_complete);
+        assert_eq!(
+            fs::read_to_string(old_complete).expect("old receipt"),
+            format!("{old_binding}\n")
+        );
+        assert_eq!(
+            fs::read_to_string(new_complete).expect("new receipt"),
+            format!("{new_binding}\n")
+        );
+        assert!(
+            super::result_publication_record_path(&state_path, "../escape", "intent").is_err(),
+            "non-canonical generation identifiers must fail closed"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_remote_snapshot_ignores_claim_ledger_refs() {
+        let document = format!(
+            "{}\trefs/heads/main\n{}\trefs/autospec/claims/issue-42\n",
+            "a".repeat(40),
+            "b".repeat(40)
+        );
+
+        assert_eq!(
+            super::parse_bridge_remote_refs(&document).expect("claim ledger is separate authority"),
+            BTreeMap::from([("refs/heads/main".to_string(), "a".repeat(40))])
+        );
+        assert!(
+            super::parse_bridge_remote_refs(&format!(
+                "{}\trefs/autospec/unowned/issue-42\n",
+                "c".repeat(40)
+            ))
+            .is_err(),
+            "only the exact claim-ledger namespace may be excluded"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_requires_observed_exact_merged_state() {
+        let document = r#"{
+            "number":17,
+            "state":"MERGED",
+            "isDraft":false,
+            "headRefOid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "baseRefName":"main",
+            "mergeCommit":{"oid":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+        }"#;
+        assert_eq!(
+            super::parse_observed_merge(document, 17, &"a".repeat(40), "main",).expect("merged"),
+            "b".repeat(40)
+        );
+        assert!(super::parse_observed_merge(
+            &document.replace("\"MERGED\"", "\"OPEN\""),
+            17,
+            &"a".repeat(40),
+            "main",
+        )
+        .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_claim_takeover_blocks_admin_merge() {
+        let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("merge-takeover");
+        commit_implementation(&state);
+        let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{head}:refs/heads/{}", state.identity.branch),
+            ],
+        );
+        state.phase = super::BridgePhase::ResultAccepted;
+        state.pr = Some(17);
+        state.head_oid = Some(head.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("accepted state");
+        let gh = fixture.root.join("gh-merge");
+        let calls = fixture.root.join("merge-calls");
+        fs::write(
+            &gh,
+            format!("#!/bin/sh\nset -eu\nprintf '%s\\n' \"$*\" >> \"$GH_CALLS\"\n\
+             if [ \"$1 $2\" = 'pr view' ]; then\n\
+             printf '%s\\n' '{{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":null}}'\n\
+             exit 0\nfi\nexit 64\n"),
+        )
+        .expect("gh");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
+        let adapter = super::DraftPrAdapter {
+            gh,
+            environment: BTreeMap::from([("GH_CALLS".into(), calls.clone().into_os_string())]),
+        };
+
+        let error = super::admin_squash_merge_exact_with_refresh_and_admission(
+            &state_path,
+            &mut state,
+            &adapter,
+            || Ok(super::BridgeClaimOwnership::Lost),
+            || Ok(()),
+        )
+        .expect_err("takeover blocks merge");
+        assert!(error.contains("ownership"), "{error}");
+        assert!(!fs::read_to_string(calls)
+            .expect("calls")
+            .contains("pr merge"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_merge_failure_resumes_from_accepted_evidence() {
+        let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("merge-retry");
+        commit_implementation(&state);
+        let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{head}:refs/heads/{}", state.identity.branch),
+            ],
+        );
+        state.phase = super::BridgePhase::ResultAccepted;
+        state.pr = Some(17);
+        state.head_oid = Some(head.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("accepted state");
+        let gh = fixture.root.join("gh-merge-retry");
+        let fail_once = fixture.root.join("fail-once");
+        let merged = fixture.root.join("merged");
+        fs::write(&fail_once, "").expect("fail marker");
+        fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nset -eu\n\
+                 if [ \"$1 $2\" = 'pr view' ]; then\n\
+                   if [ -e \"$MERGED\" ]; then printf '%s\\n' '{{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":{{\"oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}}';\n\
+                   else printf '%s\\n' '{{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":null}}'; fi\n\
+                   exit 0\n\
+                 fi\n\
+                 if [ \"$1 $2\" = 'pr merge' ]; then\n\
+                   if [ -e \"$FAIL_ONCE\" ]; then rm \"$FAIL_ONCE\"; exit 73; fi\n\
+                   touch \"$MERGED\"; exit 0\n\
+                 fi\n\
+                 exit 64\n"
+            ),
+        )
+        .expect("gh");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
+        let adapter = super::DraftPrAdapter {
+            gh,
+            environment: BTreeMap::from([
+                ("FAIL_ONCE".into(), fail_once.into_os_string()),
+                ("MERGED".into(), merged.into_os_string()),
+            ]),
+        };
+
+        super::admin_squash_merge_exact_with_refresh_and_admission(
+            &state_path,
+            &mut state,
+            &adapter,
+            || Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }),
+            || Ok(()),
+        )
+        .expect_err("first merge fails");
+        assert_eq!(state.phase, super::BridgePhase::MergeRequested);
+        let merge_oid = super::admin_squash_merge_exact_with_refresh_and_admission(
+            &state_path,
+            &mut state,
+            &adapter,
+            || Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }),
+            || Ok(()),
+        )
+        .expect("retry observes merge");
+        assert_eq!(merge_oid, "b".repeat(40));
+        assert_eq!(state.phase, super::BridgePhase::Merged);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_recovers_merged_pr_after_branch_deletion_and_base_advance() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("merge-observed-after-delete");
+        commit_implementation(&state);
+        let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{head}:refs/heads/{}", state.identity.branch),
+            ],
+        );
+        state.phase = super::BridgePhase::MergeRequested;
+        state.pr = Some(17);
+        state.head_oid = Some(head.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("requested state");
+        git(
+            &fixture.root.join("seed"),
+            &["push", "origin", &format!(":{}", state.identity.branch)],
+        );
+        fs::write(fixture.root.join("seed/merged.txt"), "merged\n").expect("base advance");
+        git(&fixture.root.join("seed"), &["add", "merged.txt"]);
+        git(
+            &fixture.root.join("seed"),
+            &["commit", "-m", "merged result"],
+        );
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+        let gh = fixture.root.join("gh-merged-observation");
+        fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nset -eu\n\
+                 if [ \"$1 $2\" = 'pr view' ]; then\n\
+                   printf '%s\\n' '{{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":{{\"oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}}'\n\
+                   exit 0\n\
+                 fi\n\
+                 exit 64\n"
+            ),
+        )
+        .expect("gh");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
+        let adapter = super::DraftPrAdapter {
+            gh,
+            environment: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            super::admin_squash_merge_exact_with_refresh(&state_path, &mut state, &adapter, || Ok(
+                super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }
+            ))
+            .expect("merged observation must win over deleted refs"),
+            "b".repeat(40)
+        );
+        assert_eq!(state.phase, super::BridgePhase::Merged);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_base_drift_invalidates_every_commit_bound_gate() {
+        let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("merge-base-drift");
+        commit_implementation(&state);
+        let original_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{original_head}:refs/heads/{}", state.identity.branch),
+            ],
+        );
+        state.phase = super::BridgePhase::ReviewPassed;
+        state.pr = Some(17);
+        state.head_oid = Some(original_head.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("reviewed state");
+
+        fs::write(fixture.root.join("seed/base-drift.txt"), "drift\n").expect("base drift");
+        git(&fixture.root.join("seed"), &["add", "base-drift.txt"]);
+        git(&fixture.root.join("seed"), &["commit", "-m", "base drift"]);
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+
+        assert!(
+            super::reconcile_base_drift_with_refresh(&state_path, &mut state, || {
+                Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 })
+            })
+            .expect("reconcile"),
+            "drift must regenerate the lane"
+        );
+        assert_eq!(state.phase, super::BridgePhase::DraftCreated);
+        assert_ne!(state.identity.base_oid, original_head);
+        assert_ne!(state.head_oid.as_deref(), Some(original_head.as_str()));
+        let ancestor = Command::new("git")
+            .args([
+                "merge-base",
+                "--is-ancestor",
+                &state.identity.base_oid,
+                state.head_oid.as_deref().expect("new head"),
+            ])
+            .current_dir(&state.identity.worktree)
+            .status()
+            .expect("ancestry");
+        assert!(ancestor.success());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_base_drift_invalidates_accepted_and_requested_results() {
+        for phase in [
+            super::BridgePhase::ResultAccepted,
+            super::BridgePhase::MergeRequested,
+        ] {
+            let (fixture, mut state, _snapshot, _) =
+                implementation_proof_fixture(&format!("late-drift-{phase:?}"));
+            commit_implementation(&state);
+            let original_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+            git(
+                &state.identity.worktree,
+                &[
+                    "push",
+                    "origin",
+                    &format!("{original_head}:refs/heads/{}", state.identity.branch),
+                ],
+            );
+            state.phase = phase;
+            state.pr = Some(17);
+            state.head_oid = Some(original_head);
+            state.terminal_result = Some("accepted-result".into());
+            let state_path = fixture.root.join("state/invocation.json");
+            super::write_invocation_atomic(&state_path, &state).expect("accepted state");
+            fs::write(
+                fixture.root.join("seed/late-drift.txt"),
+                format!("{phase:?}\n"),
+            )
+            .expect("base drift");
+            git(&fixture.root.join("seed"), &["add", "late-drift.txt"]);
+            git(&fixture.root.join("seed"), &["commit", "-m", "late drift"]);
+            git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+
+            assert!(
+                super::reconcile_base_drift_with_refresh(&state_path, &mut state, || Ok(
+                    super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }
+                ))
+                .expect("late drift must regenerate")
+            );
+            assert_eq!(state.phase, super::BridgePhase::DraftCreated);
+            assert_eq!(state.terminal_result, None);
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_claim_takeover_blocks_base_drift_push() {
+        let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("drift-takeover");
+        commit_implementation(&state);
+        let original_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{original_head}:refs/heads/{}", state.identity.branch),
+            ],
+        );
+        state.phase = super::BridgePhase::ReviewPassed;
+        state.pr = Some(17);
+        state.head_oid = Some(original_head.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("reviewed state");
+        let durable_before = fs::read(&state_path).expect("durable state");
+        let local_head_before = git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--verify", "HEAD^{commit}"],
+        );
+        fs::write(fixture.root.join("seed/takeover.txt"), "drift\n").expect("base drift");
+        git(&fixture.root.join("seed"), &["add", "takeover.txt"]);
+        git(&fixture.root.join("seed"), &["commit", "-m", "base drift"]);
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+
+        let error = super::reconcile_base_drift_with_refresh(&state_path, &mut state, || {
+            Ok(super::BridgeClaimOwnership::Lost)
+        })
+        .expect_err("takeover blocks push");
+        assert!(error.contains("ownership"), "{error}");
+        let issue_ref = format!("refs/heads/{}", state.identity.branch);
+        assert_eq!(
+            super::remote_head_refs(&state.identity.repository_path)
+                .expect("remote refs")
+                .get(&issue_ref),
+            Some(&original_head)
+        );
+        assert_eq!(
+            git_stdout(
+                &state.identity.worktree,
+                &["rev-parse", "--verify", "HEAD^{commit}"]
+            ),
+            local_head_before
+        );
+        assert_eq!(fs::read(state_path).expect("durable state"), durable_before);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_recovers_crash_after_owned_base_merge() {
+        let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("drift-crash");
+        commit_implementation(&state);
+        let original_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{original_head}:refs/heads/{}", state.identity.branch),
+            ],
+        );
+        state.phase = super::BridgePhase::ReviewPassed;
+        state.pr = Some(17);
+        state.head_oid = Some(original_head);
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("reviewed state");
+        fs::write(fixture.root.join("seed/crash.txt"), "drift\n").expect("base drift");
+        git(&fixture.root.join("seed"), &["add", "crash.txt"]);
+        git(&fixture.root.join("seed"), &["commit", "-m", "base drift"]);
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+
+        super::BASE_DRIFT_FAILPOINT.store(1, Ordering::SeqCst);
+        let error = super::reconcile_base_drift_with_refresh(&state_path, &mut state, || {
+            Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 })
+        })
+        .expect_err("injected crash");
+        assert!(error.contains("injected crash"), "{error}");
+        let durable = super::PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("durable invocation"),
+        )
+        .expect("durable pre-merge binding remains");
+        assert_eq!(durable.phase, super::BridgePhase::ReviewPassed);
+
+        assert!(
+            super::reconcile_base_drift_with_refresh(&state_path, &mut state, || {
+                Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 })
+            })
+            .expect("adopt exact merge")
+        );
+        assert_eq!(state.phase, super::BridgePhase::DraftCreated);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_cleanup_resumes_after_owned_worktree_removal() {
+        let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("cleanup-resume");
+        commit_implementation(&state);
+        state.phase = super::BridgePhase::CleanupPending;
+        state.identity.runtime_session_id = None;
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("cleanup state");
+        let intent = super::cleanup_record_path(&state_path, "worktree-intent");
+        super::ensure_cleanup_record(
+            &intent,
+            &super::cleanup_binding(&state),
+            "test removal intent",
+        )
+        .expect("durable intent");
+        git(
+            &state.identity.repository_path,
+            &[
+                "worktree",
+                "remove",
+                state.identity.worktree.to_str().expect("worktree"),
+            ],
+        );
+
+        super::finalize_merged_executor(&state_path, &mut state, None).expect("resume cleanup");
+        assert_eq!(state.phase, super::BridgePhase::Complete);
+        assert!(super::cleanup_record_path(&state_path, "worktree-complete").exists());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_runtime_close_recovers_after_receipt_gap() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("runtime-close-recovery");
+        let autospec = state.identity.worktree.join(".autospec");
+        fs::create_dir_all(&autospec).expect("runtime manifest directory");
+        fs::write(
+            state.identity.worktree.join("runtime-up.py"),
+            "import http.server, os\npid=os.fork()\nif not pid:\n http.server.HTTPServer(('127.0.0.1', int(os.environ['AGENT_FRONTEND_PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()\nelse:\n open('runtime.pid','w').write(str(pid))\n",
+        )
+        .expect("runtime up");
+        fs::write(
+            state.identity.worktree.join("runtime-down.py"),
+            "import os, signal\npid=int(open('runtime.pid').read())\nos.kill(pid, signal.SIGTERM)\nos.remove('runtime.pid')\n",
+        )
+        .expect("runtime down");
+        fs::write(
+            autospec.join("runtime.yml"),
+            "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: python3 runtime-up.py\n    down: python3 runtime-down.py\n",
+        )
+        .expect("runtime manifest");
+        let state_root = fixture.root.join("runtime-state");
+        let previous = std::env::var_os("AGENT_ENV_STATE_ROOT");
+        std::env::set_var("AGENT_ENV_STATE_ROOT", &state_root);
+        let runtime = super::runtime_session_adapter(&state.identity.worktree)
+            .expect("runtime adapter")
+            .expect("runtime manifest");
+        state.identity.runtime_session_id = Some(runtime.session_id.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("runtime state");
+
+        super::RUNTIME_CLOSE_FAILPOINT.store(1, Ordering::SeqCst);
+        let error = super::close_owned_runtime(&state_path, &state, Some(runtime))
+            .expect_err("injected receipt gap");
+        assert!(error.contains("injected crash"), "{error}");
+        assert!(
+            super::cleanup_record_path(&state_path, "runtime-intent.json").exists(),
+            "close intent must precede runtime mutation"
+        );
+        assert!(!super::cleanup_record_path(&state_path, "runtime-complete").exists());
+
+        super::close_owned_runtime(&state_path, &state, None)
+            .expect("restart proves absence and writes receipt");
+        assert!(super::cleanup_record_path(&state_path, "runtime-complete").exists());
+        assert!(session_record_ids(&state_root).is_empty());
+        match previous {
+            Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),
+            None => std::env::remove_var("AGENT_ENV_STATE_ROOT"),
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_runtime_close_retries_partial_teardown_failure() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("runtime-close-partial-retry");
+        let autospec = state.identity.worktree.join(".autospec");
+        fs::create_dir_all(&autospec).expect("runtime manifest directory");
+        fs::write(
+            state.identity.worktree.join("runtime-up.py"),
+            "import http.server, os\npid=os.fork()\nif not pid:\n http.server.HTTPServer(('127.0.0.1', int(os.environ['AGENT_FRONTEND_PORT'])), http.server.SimpleHTTPRequestHandler).serve_forever()\nelse:\n open('runtime.pid','w').write(str(pid))\n",
+        )
+        .expect("runtime up");
+        fs::write(
+            state.identity.worktree.join("runtime-down.py"),
+            "import os, signal\ntry:\n open('down-attempted','x').write('1')\n raise RuntimeError('42')\nexcept FileExistsError:\n pass\npid=int(open('runtime.pid').read())\nos.kill(pid, signal.SIGTERM)\nos.remove('runtime.pid')\n",
+        )
+        .expect("runtime down");
+        fs::write(
+            autospec.join("runtime.yml"),
+            "version: 1\ndefault_mode: local\nmodes:\n  local:\n    command: python3 runtime-up.py\n    down: python3 runtime-down.py\n",
+        )
+        .expect("runtime manifest");
+        let state_root = fixture.root.join("runtime-state");
+        let previous = std::env::var_os("AGENT_ENV_STATE_ROOT");
+        std::env::set_var("AGENT_ENV_STATE_ROOT", &state_root);
+        let runtime = super::runtime_session_adapter(&state.identity.worktree)
+            .expect("runtime adapter")
+            .expect("runtime manifest");
+        state.identity.runtime_session_id = Some(runtime.session_id.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("runtime state");
+
+        let error = super::close_owned_runtime(&state_path, &state, Some(runtime))
+            .expect_err("first teardown fails");
+        assert!(error.contains("42") || error.contains("runtime"), "{error}");
+        assert!(!super::cleanup_record_path(&state_path, "runtime-complete").exists());
+
+        super::close_owned_runtime(&state_path, &state, None)
+            .expect("restart retries authoritative teardown");
+        assert!(super::cleanup_record_path(&state_path, "runtime-complete").exists());
+        assert!(session_record_ids(&state_root).is_empty());
+        match previous {
+            Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),
+            None => std::env::remove_var("AGENT_ENV_STATE_ROOT"),
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_missing_worktree_without_prior_intent() {
+        let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("cleanup-no-intent");
+        commit_implementation(&state);
+        state.phase = super::BridgePhase::CleanupPending;
+        state.identity.runtime_session_id = None;
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("cleanup state");
+        git(
+            &state.identity.repository_path,
+            &[
+                "worktree",
+                "remove",
+                state.identity.worktree.to_str().expect("worktree"),
+            ],
+        );
+
+        let error = super::finalize_merged_executor(&state_path, &mut state, None)
+            .expect_err("missing intent must fail closed");
+        assert!(error.contains("before a durable removal intent"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_requires_owned_runtime_cleanup_proof() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("cleanup-runtime-proof");
+        state.phase = super::BridgePhase::CleanupPending;
+        state.identity.runtime_session_id = Some("runtime-owned".into());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("cleanup state");
+
+        let error = super::finalize_merged_executor(&state_path, &mut state, None)
+            .expect_err("runtime receipt is mandatory");
+        assert!(error.contains("runtime session"), "{error}");
+        assert!(state.identity.worktree.exists());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_failure_budget_selects_queue_or_needs_human() {
+        assert_eq!(
+            super::failure_disposition(true, false),
+            crate::commands::claim::BridgeClaimDisposition::Retryable
+        );
+        assert_eq!(
+            super::failure_disposition(true, true),
+            crate::commands::claim::BridgeClaimDisposition::NeedsHuman
+        );
+        assert_eq!(
+            super::failure_disposition(false, false),
+            crate::commands::claim::BridgeClaimDisposition::NeedsHuman
+        );
     }
 }

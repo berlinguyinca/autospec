@@ -355,6 +355,43 @@ pub(crate) fn prepare_runtime_session(
     })
 }
 
+pub(crate) fn verify_runtime_session_released(
+    environment_dir: &Path,
+    session_id: &str,
+) -> Result<(), CommandFailure> {
+    session::verify_session_released(environment_dir, session_id)?;
+    session::verify_environment_released(environment_dir)
+}
+
+pub(crate) fn retry_runtime_session_cleanup(
+    repo: &Path,
+    mode: &str,
+    environment_dir: &Path,
+    session_id: &str,
+) -> Result<(), CommandFailure> {
+    if verify_runtime_session_released(environment_dir, session_id).is_ok() {
+        return Ok(());
+    }
+    let repo = canonical_repo(repo)?;
+    let identity = planning_identity(&repo, mode)?;
+    let context = context_from_identity(&repo, mode, &identity)?;
+    if context.environment_dir != environment_dir {
+        return Err(CommandFailure::diagnostic(
+            "RUNTIME_OWNER_MISMATCH: cleanup recovery environment changed",
+        ));
+    }
+    session::reconcile_for_exclusive_session(environment_dir)?;
+    session::verify_session_released(environment_dir, session_id)?;
+    down(DownOptions {
+        options: Options {
+            repo,
+            mode: mode.to_string(),
+        },
+        purge_maven: false,
+    })?;
+    verify_runtime_session_released(environment_dir, session_id)
+}
+
 #[derive(Debug, Clone)]
 struct DownOptions {
     options: Options,

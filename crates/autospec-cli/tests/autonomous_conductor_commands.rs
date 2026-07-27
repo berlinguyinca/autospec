@@ -253,6 +253,44 @@ fn native_executor_bridge_source_owns_child_supervision_contract() {
 }
 
 #[test]
+fn native_executor_bridge_source_owns_ready_through_cleanup_contract() {
+    let bridge = fs::read_to_string(
+        workspace_root().join("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs"),
+    )
+    .expect("read native executor bridge");
+    for required in [
+        "mark_exact_draft_ready",
+        "poll_exact_required_ci",
+        "run_strict_independent_reviewer",
+        "reconcile_base_drift",
+        "originate_and_accept_executor_result",
+        "admin_squash_merge_exact",
+        "finalize_merged_executor",
+        "finalize_failed_executor",
+    ] {
+        assert!(
+            bridge.contains(required),
+            "native executor bridge omitted completion contract: {required}"
+        );
+    }
+
+    let claim =
+        fs::read_to_string(workspace_root().join("crates/autospec-cli/src/commands/claim.rs"))
+            .expect("read claim command");
+    for required in [
+        "transition_bridge_claim",
+        "BridgeClaimDisposition::Retryable",
+        "BridgeClaimDisposition::NeedsHuman",
+        "BridgeTerminalMode::Resume",
+    ] {
+        assert!(
+            claim.contains(required),
+            "claim authority omitted completion contract: {required}"
+        );
+    }
+}
+
+#[test]
 fn fabricated_premerge_producer_pass_is_not_admissible_evidence() {
     let root = temp_dir("fabricated-premerge-pass");
     let repo = root.join("repo");
@@ -1808,7 +1846,10 @@ fn executor_result_records_an_owner_verified_blocked_outcome() {
         fs::read_to_string(&fixture.calls).expect("read GitHub calls")
     );
     let record = fixture.claim_record();
-    assert_eq!(record, before);
+    let mut expected = before;
+    expected.step = "executor_blocked".to_string();
+    expected.updated_at = record.updated_at.clone();
+    assert_eq!(record, expected);
     assert!(fs::read_to_string(&fixture.comments)
         .expect("read executor evidence")
         .contains("<!-- autospec-executor-result:begin -->"));
@@ -2116,7 +2157,10 @@ fn executor_result_accepts_a_claim_owner_success_with_linked_closeout_evidence()
         "{\"status\":\"accepted\",\"repo\":\"test/repo\",\"issue\":42,\"outcome\":\"succeeded\",\"pr\":17}\n"
     );
     let record = fixture.claim_record();
-    assert_eq!(record, before);
+    let mut expected = before;
+    expected.step = "executor_succeeded".to_string();
+    expected.updated_at = record.updated_at.clone();
+    assert_eq!(record, expected);
     let comments = parse_remote_comments_json(
         &fs::read_to_string(&fixture.comments).expect("read executor evidence"),
     )
@@ -2409,7 +2453,11 @@ fn executor_result_records_an_owner_verified_retryable_outcome() {
         String::from_utf8_lossy(&output.stdout),
         "{\"status\":\"retryable\",\"repo\":\"test/repo\",\"issue\":42,\"outcome\":\"retryable\",\"reason\":\"transient-network-error\"}\n"
     );
-    assert_eq!(fixture.claim_record(), before);
+    let record = fixture.claim_record();
+    let mut expected = before;
+    expected.step = "executor_retryable".to_string();
+    expected.updated_at = record.updated_at.clone();
+    assert_eq!(record, expected);
 }
 
 #[test]
@@ -2525,7 +2573,7 @@ fn executor_result_reports_a_post_write_confirmation_failure_as_blocked() {
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"result_recording_failed\"")
     );
-    assert_eq!(fixture.claim_record().step, "claimed");
+    assert_eq!(fixture.claim_record().step, "executor_succeeded");
     assert!(fs::read_to_string(&fixture.comments)
         .expect("read persisted but unconfirmed evidence")
         .contains("<!-- autospec-executor-result:begin -->"));
