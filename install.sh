@@ -75,6 +75,7 @@ OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"
 OH_MY_OPENCODE_PACKAGE="${OH_MY_OPENCODE_PACKAGE:-oh-my-opencode}"
 OH_MY_CLAUDE_PACKAGE="${OH_MY_CLAUDE_PACKAGE:-oh-my-claude-sisyphus}"
 ENSURE_TOOL_SCRIPT="$REPO_ROOT/skills/autospec-shared/scripts/ensure-tool.sh"
+CODEX_SANDBOX_HELPER="$REPO_ROOT/scripts/ensure-codex-sandbox.sh"
 DEPENDENCIES_PRESENT=""
 DEPENDENCIES_INSTALLED=""
 DEPENDENCIES_OPTIONAL_MISSING=""
@@ -756,6 +757,27 @@ verify_harness_tools() {
     err "required harness missing: $AUTOSPEC_HARNESS_TOOLS"
     err "install at least one supported harness and rerun: bash install.sh --skill $SKILL_ARG --harness $HARNESS_ARG"
     return 1
+}
+
+ensure_codex_sandbox_dependency() {
+    case " $HARNESSES_TO_RUN " in
+        *" codex "*) ;;
+        *) return 0 ;;
+    esac
+    if [ "$DRY_RUN" -eq 1 ]; then
+        info "[dry-run] ensure_codex_sandbox_dependency: would run $CODEX_SANDBOX_HELPER"
+        return 0
+    fi
+    if ! command_present codex; then
+        info "ensure_codex_sandbox_dependency: codex CLI unavailable; skipping host probe"
+        return 0
+    fi
+    if [ ! -f "$CODEX_SANDBOX_HELPER" ]; then
+        err "ensure_codex_sandbox_dependency: missing $CODEX_SANDBOX_HELPER"
+        return 1
+    fi
+    info "ensure_codex_sandbox_dependency: probing Codex permission-profile support"
+    bash "$CODEX_SANDBOX_HELPER"
 }
 
 print_dependency_summary() {
@@ -1857,6 +1879,7 @@ verify_harness_tools
 bootstrap_peer_ecosystems
 bootstrap_turbo
 check_codex
+ensure_codex_sandbox_dependency
 merge_claude_md
 offer_gitignore
 
