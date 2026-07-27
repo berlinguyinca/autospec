@@ -2553,6 +2553,8 @@ fn foreground_state_is_retained(state: &ConductorState) -> bool {
 #[derive(Debug, Clone)]
 struct ForegroundSelection {
     issue: u64,
+    title: String,
+    body: String,
     serialization_reasons: Vec<String>,
 }
 
@@ -2697,6 +2699,8 @@ fn select_foreground(
     };
     let selection = ForegroundSelection {
         issue: selected.issue.number,
+        title: selected.issue.title.clone(),
+        body: selected.issue.body.clone(),
         serialization_reasons: selected.serialization_reasons.clone(),
     };
     let admission =
@@ -2737,7 +2741,7 @@ fn dispatch_foreground(
 ) -> Result<ForegroundDispatchResult, ForegroundFailure> {
     let admission =
         resilience_admission_for_issue(layout, options, Some(selection.issue), Some(lease))?;
-    let branch = format!("autonomous/issue-{}", selection.issue);
+    let branch = format!("feat/autonomous-issue-{}", selection.issue);
     let worker_id = foreground_worker_id().map_err(CommandFailure::diagnostic)?;
     let claim_evidence =
         claim::lifecycle_claim_evidence(&layout.repo, selection.issue, &worker_id, &branch)?;
@@ -2776,6 +2780,8 @@ fn dispatch_foreground(
             layout,
             &options.repo_dir,
             selection.issue,
+            &selection.title,
+            &selection.body,
             &lease.worker_id,
             &lease.branch,
             &lease.claim_id,
@@ -2806,23 +2812,15 @@ fn dispatch_foreground(
                 CommandFailure::diagnostic(format!("cannot record executor receipt: {error}"))
             })?;
         persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
-        claim::record_executor_outcome(
-            claim::ClaimMutationIdentity {
-                repo: &lease.repo,
-                issue: lease.issue,
-                worker_id: &lease.worker_id,
-                branch: &lease.branch,
-                claim_id: &lease.claim_id,
-            },
-            &receipt.claim_step,
-        )?;
-        claim::reconcile_active_issue(
-            &lease.repo,
-            lease.issue,
-            &lease.worker_id,
-            &lease.branch,
-            &lease.claim_id,
-        )?;
+        if !receipt.bridge_finalized {
+            claim::reconcile_active_issue(
+                &lease.repo,
+                lease.issue,
+                &lease.worker_id,
+                &lease.branch,
+                &lease.claim_id,
+            )?;
+        }
         state =
             reconcile_successful_foreground_dispatch(state).map_err(CommandFailure::diagnostic)?;
         persist_foreground_state(state_path, &state).map_err(CommandFailure::diagnostic)?;
@@ -3062,43 +3060,38 @@ fn executor_child_result(
     }
     let outcome = field("outcome")
         .ok_or_else(|| CommandFailure::diagnostic("executor result requires outcome"))?;
-    let mut args = vec![
-        "executor-result".to_string(),
-        "--repo".to_string(),
-        repo.to_string(),
-        "--issue".to_string(),
-        issue.to_string(),
-        "--worker-id".to_string(),
-        worker_id.to_string(),
-        "--branch".to_string(),
-        branch.to_string(),
-        "--outcome".to_string(),
-        outcome.to_string(),
-    ];
-    if let Some(reason) = field("reason") {
-        args.extend(["--reason".to_string(), reason.to_string()]);
-    }
-    if outcome == "succeeded" {
-        for (flag, name) in [
-            ("--pr", "pr"),
-            ("--claim-id", "claim_id"),
-            ("--premerge-receipt", "premerge_receipt"),
-        ] {
-            let result = if name == "pr" {
-                value
-                    .get(name)
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|number| number.to_string())
-            } else {
-                field(name).map(str::to_string)
-            }
-            .ok_or_else(|| {
-                CommandFailure::diagnostic(format!("executor success requires {name}"))
-            })?;
-            args.extend([flag.to_string(), result]);
+    let status = if outcome == "succeeded" {
+        executor_bridge::BridgeRunStatus::Accepted {
+            pull_request: value
+                .get("pr")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|number| *number > 0)
+                .ok_or_else(|| CommandFailure::diagnostic("executor success requires pr"))?,
+            head_oid: expected_commit.to_string(),
+            premerge_receipt: field("premerge_receipt")
+                .filter(|receipt| is_lower_hex_digest(receipt))
+                .ok_or_else(|| {
+                    CommandFailure::diagnostic("executor success requires premerge_receipt")
+                })?
+                .to_string(),
         }
-    }
-    executor_result(&args)
+    } else {
+        executor_bridge::BridgeRunStatus::Pending
+    };
+    println!(
+        "{}",
+        executor_bridge::BridgeRunReceipt {
+            repository: repo.to_string(),
+            issue,
+            worker_id: worker_id.to_string(),
+            branch: branch.to_string(),
+            claim_id: claim_id.to_string(),
+            invocation_id: invocation_id.to_string(),
+            status,
+        }
+        .to_json()
+    );
+    Ok(())
 }
 
 fn executor_result(args: &[String]) -> Result<(), CommandFailure> {
@@ -3431,165 +3424,72 @@ fn emit_executor_protocol(
 
 #[derive(Debug, Clone)]
 struct ExecutorRequest {
-    program: PathBuf,
-    args: Vec<String>,
-    current_dir: PathBuf,
-    repo: String,
-    issue: u64,
-    worker_id: String,
-    branch: String,
-    claim_id: String,
-    invocation_id: String,
-    expected_commit: String,
+    bridge: executor_bridge::ExecutorBridgeRequest,
 }
 
 #[derive(Debug, Clone)]
 struct ExecutorReceipt {
     outcome: ConductorOutcome,
-    claim_step: String,
+    bridge_finalized: bool,
 }
 
 impl ExecutorRequest {
+    #[allow(clippy::too_many_arguments)]
     fn for_selected(
         layout: &RunLayout,
         repo_dir: &str,
         issue: u64,
+        issue_title: &str,
+        issue_body: &str,
         worker_id: &str,
         branch: &str,
         claim_id: &str,
     ) -> Result<Self, String> {
+        let canonical_branch = format!("feat/autonomous-issue-{issue}");
+        if branch != canonical_branch {
+            return Err("selected executor branch is not canonical".to_string());
+        }
         let invocation_id = format!("{}-{}", issue, claim_id);
-        let expected_commit = Command::new("git")
-            .arg("-C")
-            .arg(repo_dir)
-            .args(["rev-parse", "HEAD"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-            .filter(|commit| commit.len() == 40 || commit.len() == 64)
-            .unwrap_or_else(|| "0".repeat(40));
+        let generation = &sha256_hex(claim_id.as_bytes())[..16];
         Ok(Self {
-            program: std::env::current_exe()
-                .map_err(|error| format!("cannot resolve Rust executor program: {error}"))?,
-            args: vec![
-                "autonomous".to_string(),
-                "executor-child".to_string(),
-                "--repo".to_string(),
-                layout.repo.clone(),
-                "--issue".to_string(),
-                issue.to_string(),
-                "--worker-id".to_string(),
-                worker_id.to_string(),
-                "--branch".to_string(),
-                branch.to_string(),
-                "--claim-id".to_string(),
-                claim_id.to_string(),
-                "--expected-commit".to_string(),
-                expected_commit.clone(),
-                "--invocation-id".to_string(),
-                invocation_id.clone(),
-            ],
-            current_dir: PathBuf::from(repo_dir),
-            repo: layout.repo.clone(),
-            issue,
-            worker_id: worker_id.to_string(),
-            branch: branch.to_string(),
-            claim_id: claim_id.to_string(),
-            invocation_id,
-            expected_commit,
+            bridge: executor_bridge::ExecutorBridgeRequest {
+                repository: layout.repo.clone(),
+                repository_path: PathBuf::from(repo_dir),
+                issue,
+                issue_title: issue_title.to_string(),
+                issue_body: issue_body.to_string(),
+                worker_id: worker_id.to_string(),
+                claim_id: claim_id.to_string(),
+                invocation_id,
+                state_path: layout
+                    .state_dir
+                    .join("executor")
+                    .join(format!("issue-{issue}-{generation}.json")),
+                event_log: layout
+                    .log_dir
+                    .join(format!("executor-issue-{issue}-{generation}.jsonl")),
+            },
         })
     }
 
     fn run(&self) -> ExecutorReceipt {
-        let invocation_dir = self.current_dir.join(".autospec/executor-invocations");
-        let invocation_path = invocation_dir.join(format!("{}.json", self.invocation_id));
-        if let Ok(existing) = fs::read_to_string(&invocation_path) {
-            if existing.contains("\"terminal\":true") {
-                return ExecutorReceipt {
-                    outcome: ConductorOutcome::Blocked(EXECUTOR_PENDING_REASON.to_string()),
-                    claim_step: "executor_replayed".to_string(),
-                };
-            }
-        }
-        let mut command = Command::new(&self.program);
-        command
-            .args(&self.args)
-            .current_dir(&self.current_dir)
-            .env_remove("AUTOSPEC_AUTONOMOUS_PREMERGE_CMD")
-            .env_remove("AUTOSPEC_AUTONOMOUS_CMD")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        #[cfg(unix)]
-        command.process_group(0);
-        let mut child = match command.spawn() {
-            Ok(child) => child,
-            Err(_) => return ExecutorReceipt::failed(),
-        };
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let timed_out = loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break false,
-                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-                Ok(None) => {
-                    #[cfg(unix)]
-                    let _ = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
-                    let _ = child.kill();
-                    break true;
-                }
-                Err(_) => break true,
+        let receipt = match executor_bridge::run_executor_bridge(&self.bridge) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                eprintln!("executor bridge failed: {error}");
+                return ExecutorReceipt::failed();
             }
         };
-        let output = child.wait_with_output();
-        if timed_out {
-            return ExecutorReceipt {
-                outcome: ConductorOutcome::Retryable("executor_timeout".to_string()),
-                claim_step: "executor_timeout".to_string(),
-            };
-        }
-        let _ = fs::create_dir_all(&invocation_dir);
-        let expected = format!(
-            "{{\"schema\":1,\"status\":\"blocked\",\"repo\":\"{}\",\"issue\":{},\"invocation_id\":\"{}\",\"reason\":\"{}\"}}",
-            json_escape(&self.repo), self.issue, json_escape(&self.invocation_id), EXECUTOR_PENDING_REASON
-        );
-        let terminal = output.ok().and_then(|output| {
-            if !output.status.success() {
-                return None;
-            }
-            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if stdout == expected {
-                Some(ExecutorReceipt {
-                    outcome: ConductorOutcome::Blocked(EXECUTOR_PENDING_REASON.to_string()),
-                    claim_step: "executor_pending".to_string(),
-                })
-            } else if stdout.contains("\"status\":\"succeeded\"") {
-                Some(ExecutorReceipt {
-                    outcome: ConductorOutcome::Succeeded,
-                    claim_step: "executor_succeeded".to_string(),
-                })
-            } else if stdout.contains("\"status\":\"blocked\"") {
-                Some(ExecutorReceipt {
-                    outcome: ConductorOutcome::Blocked("executor_child_blocked".to_string()),
-                    claim_step: "executor_blocked".to_string(),
-                })
-            } else {
-                None
-            }
-        });
-        if let Some(receipt) = terminal {
-            let _ = fs::write(
-                &invocation_path,
-                format!(
-                    "{{\"terminal\":true,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"branch\":\"{}\",\"claim_id\":\"{}\",\"invocation_id\":\"{}\",\"expected_commit\":\"{}\"}}\n",
-                    json_escape(&self.repo), self.issue, json_escape(&self.worker_id),
-                    json_escape(&self.branch), json_escape(&self.claim_id),
-                    json_escape(&self.invocation_id), json_escape(&self.expected_commit)
-                ),
-            );
-            receipt
-        } else {
-            ExecutorReceipt::failed()
-        }
+        ExecutorReceipt::from_bridge_json(
+            &receipt.to_json(),
+            &self.bridge.repository,
+            self.bridge.issue,
+            &self.bridge.worker_id,
+            &format!("feat/autonomous-issue-{}", self.bridge.issue),
+            &self.bridge.claim_id,
+            &self.bridge.invocation_id,
+        )
+        .unwrap_or_else(|_| ExecutorReceipt::failed())
     }
 }
 
@@ -3597,8 +3497,49 @@ impl ExecutorReceipt {
     fn failed() -> Self {
         Self {
             outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
-            claim_step: "executor_receipt_failed".to_string(),
+            bridge_finalized: false,
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_bridge_json(
+        document: &str,
+        repo: &str,
+        issue: u64,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+        invocation_id: &str,
+    ) -> Result<Self, String> {
+        let receipt = executor_bridge::BridgeRunReceipt::from_json(document)?;
+        if receipt.repository != repo
+            || receipt.issue != issue
+            || receipt.worker_id != worker_id
+            || receipt.branch != branch
+            || receipt.claim_id != claim_id
+            || receipt.invocation_id != invocation_id
+        {
+            return Err("executor bridge receipt identity does not match request".to_string());
+        }
+        Ok(match receipt.status {
+            executor_bridge::BridgeRunStatus::Pending
+            | executor_bridge::BridgeRunStatus::Accepted { .. } => Self {
+                outcome: ConductorOutcome::Blocked("executor_bridge_nonterminal".to_string()),
+                bridge_finalized: false,
+            },
+            executor_bridge::BridgeRunStatus::Merged { .. } => Self {
+                outcome: ConductorOutcome::Succeeded,
+                bridge_finalized: true,
+            },
+            executor_bridge::BridgeRunStatus::Retryable { reason } => Self {
+                outcome: ConductorOutcome::Retryable(reason),
+                bridge_finalized: true,
+            },
+            executor_bridge::BridgeRunStatus::Blocked { reason } => Self {
+                outcome: ConductorOutcome::Blocked(reason),
+                bridge_finalized: true,
+            },
+        })
     }
 }
 
@@ -6667,16 +6608,18 @@ mod foreground_tests {
     #[test]
     fn executor_launch_failure_becomes_a_blocked_receipt() {
         let request = ExecutorRequest {
-            program: PathBuf::from("/definitely-not-an-autospec-executor"),
-            args: Vec::new(),
-            current_dir: std::env::temp_dir(),
-            repo: "test/repo".to_string(),
-            issue: 42,
-            worker_id: "worker-42".to_string(),
-            branch: "autonomous/issue-42".to_string(),
-            claim_id: "claim-42".to_string(),
-            invocation_id: "test-invocation".to_string(),
-            expected_commit: "a".repeat(40),
+            bridge: executor_bridge::ExecutorBridgeRequest {
+                repository: "test/repo".to_string(),
+                repository_path: PathBuf::from("/definitely-not-an-autospec-repository"),
+                issue: 42,
+                issue_title: "test".to_string(),
+                issue_body: "test".to_string(),
+                worker_id: "worker-42".to_string(),
+                claim_id: "claim-42".to_string(),
+                invocation_id: "test-invocation".to_string(),
+                state_path: std::env::temp_dir().join("autospec-missing-state"),
+                event_log: std::env::temp_dir().join("autospec-missing-events"),
+            },
         };
 
         let receipt = request.run();
@@ -6685,7 +6628,80 @@ mod foreground_tests {
             receipt.outcome,
             ConductorOutcome::Blocked("executor_receipt_failed".to_string())
         );
-        assert_eq!(receipt.claim_step, "executor_receipt_failed");
+    }
+
+    #[test]
+    fn executor_bridge_acceptance_is_nonterminal_and_only_observed_merge_is_success() {
+        let accepted = ExecutorReceipt::from_bridge_json(
+            r#"{"schema":1,"status":"accepted","repo":"test/repo","issue":42,"worker_id":"worker-42","branch":"feat/autonomous-issue-42","claim_id":"claim-42","invocation_id":"test-invocation","pr":17,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","premerge_receipt":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}"#,
+            "test/repo",
+            42,
+            "worker-42",
+            "feat/autonomous-issue-42",
+            "claim-42",
+            "test-invocation",
+        )
+        .expect("strict accepted bridge receipt");
+        assert!(
+            !accepted.bridge_finalized,
+            "accepted evidence is not a terminal result"
+        );
+
+        let merged = ExecutorReceipt::from_bridge_json(
+            r#"{"schema":1,"status":"merged","repo":"test/repo","issue":42,"worker_id":"worker-42","branch":"feat/autonomous-issue-42","claim_id":"claim-42","invocation_id":"test-invocation","pr":17,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","merge_oid":"cccccccccccccccccccccccccccccccccccccccc","claim_released":true}"#,
+            "test/repo",
+            42,
+            "worker-42",
+            "feat/autonomous-issue-42",
+            "claim-42",
+            "test-invocation",
+        )
+        .expect("strict merged bridge receipt");
+        assert_eq!(merged.outcome, ConductorOutcome::Succeeded);
+        assert!(
+            merged.bridge_finalized,
+            "the conductor must not repeat the bridge claim transition"
+        );
+    }
+
+    #[test]
+    fn executor_bridge_terminal_receipt_requires_release_and_exact_fields() {
+        for malformed in [
+            r#"{"schema":1,"status":"merged","repo":"test/repo","issue":42,"worker_id":"worker-42","branch":"feat/autonomous-issue-42","claim_id":"claim-42","invocation_id":"test-invocation","pr":17,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","merge_oid":"cccccccccccccccccccccccccccccccccccccccc","claim_released":false}"#,
+            r#"{"schema":1,"status":"merged","repo":"test/repo","issue":42,"worker_id":"worker-42","branch":"feat/autonomous-issue-42","claim_id":"claim-42","invocation_id":"test-invocation","pr":17,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","merge_oid":"cccccccccccccccccccccccccccccccccccccccc","claim_released":true,"unexpected":1}"#,
+            r#"{"schema":1,"status":"pending","status":"merged","repo":"test/repo","issue":42,"worker_id":"worker-42","branch":"feat/autonomous-issue-42","claim_id":"claim-42","invocation_id":"test-invocation","pr":17,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","merge_oid":"cccccccccccccccccccccccccccccccccccccccc","claim_released":true}"#,
+            r#"{"schema":1,"status":"merged","repo":"test/repo","issue":"42","worker_id":"worker-42","branch":"feat/autonomous-issue-42","claim_id":"claim-42","invocation_id":"test-invocation","pr":17,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","merge_oid":"cccccccccccccccccccccccccccccccccccccccc","claim_released":true}"#,
+            r#"{"schema":1,"status":"merged","repo":"test/repo","issue":42,"worker_id":"worker-42","branch":"feat/autonomous-issue-42","claim_id":"claim-42","invocation_id":"test-invocation","pr":17,"head_oid":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","merge_oid":"cccccccccccccccccccccccccccccccccccccccc","claim_released":true}"#,
+            r#"{"schema":1,"status":"merged","repo":"test/repo","issue":42,"worker_id":"worker-42","branch":"feat/autonomous-issue-42","claim_id":"claim-42","invocation_id":"test-invocation","pr":17,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","merge_oid":"cccccccc","claim_released":true}"#,
+            r#"{"schema":1,"status":"merged","repo":"test/repo","issue":42,"worker_id":"worker-42","branch":"feat/autonomous-issue-42","claim_id":"claim-42","invocation_id":"test-invocation","pr":17,"head_oid":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","merge_oid":"cccccccccccccccccccccccccccccccccccccccc","claim_released":true} {}"#,
+        ] {
+            assert!(
+                ExecutorReceipt::from_bridge_json(
+                    malformed,
+                    "test/repo",
+                    42,
+                    "worker-42",
+                    "feat/autonomous-issue-42",
+                    "claim-42",
+                    "test-invocation",
+                )
+                .is_err(),
+                "terminal bridge receipt must be exact and prove claim release"
+            );
+        }
+        assert!(
+            ExecutorReceipt::from_bridge_json(
+                r#"{"schema":1,"status":"pending","repo":"other/repo","issue":42,"worker_id":"worker-42","branch":"feat/autonomous-issue-42","claim_id":"claim-42","invocation_id":"test-invocation"}"#,
+                "test/repo",
+                42,
+                "worker-42",
+                "feat/autonomous-issue-42",
+                "claim-42",
+                "test-invocation",
+            )
+            .is_err(),
+            "a syntactically valid receipt must still bind the exact invocation identity"
+        );
     }
 
     #[test]

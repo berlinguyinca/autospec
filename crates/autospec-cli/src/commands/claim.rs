@@ -1684,6 +1684,33 @@ pub(crate) fn transition_bridge_claim(
     Ok(BridgeClaimTransition::Transitioned)
 }
 
+pub(crate) fn observe_terminal_bridge_claim(
+    identity: ClaimMutationIdentity<'_>,
+    pull_request: Option<u64>,
+    disposition: BridgeClaimDisposition,
+) -> Result<bool, CommandFailure> {
+    let Some(selected) = read_claim_ref(identity.repo, identity.issue)? else {
+        return Ok(false);
+    };
+    let expected_state = match disposition {
+        BridgeClaimDisposition::Merged => "merged",
+        BridgeClaimDisposition::Retryable => "released",
+        BridgeClaimDisposition::NeedsHuman => "failed",
+    };
+    let expected_step = match disposition {
+        BridgeClaimDisposition::Merged => "merged",
+        BridgeClaimDisposition::Retryable => "retryable_released",
+        BridgeClaimDisposition::NeedsHuman => "needs_human",
+    };
+    let expected_pr = pull_request.map_or_else(String::new, |number| number.to_string());
+    Ok(selected.record.worker_id == identity.worker_id
+        && selected.record.claim_id.as_deref() == Some(identity.claim_id)
+        && selected.record.branch == identity.branch
+        && selected.record.state == expected_state
+        && selected.record.step == expected_step
+        && selected.record.pr == expected_pr)
+}
+
 fn project_bridge_terminal_audit(
     identity: ClaimMutationIdentity<'_>,
     pull_request: Option<u64>,
@@ -1894,6 +1921,7 @@ fn exact_successful_executor_result(
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn record_executor_outcome(
     identity: ClaimMutationIdentity<'_>,
     outcome: &str,
@@ -2086,6 +2114,7 @@ fn safe_wait_diagnostic(value: &str) -> String {
     redact_secrets(value).chars().take(512).collect()
 }
 
+#[allow(dead_code)]
 fn record_executor_result_with_step(
     identity: ClaimMutationIdentity<'_>,
     outcome: &ConductorOutcome,
