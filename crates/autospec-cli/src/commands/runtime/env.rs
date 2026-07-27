@@ -1308,6 +1308,10 @@ fn slugify(value: &str) -> String {
 }
 
 fn state_root() -> Result<PathBuf, CommandFailure> {
+    #[cfg(test)]
+    if let Some(root) = TEST_STATE_ROOT.with(|root| root.borrow().clone()) {
+        return Ok(root);
+    }
     if let Some(root) = std::env::var_os("AGENT_ENV_STATE_ROOT").filter(|root| !root.is_empty()) {
         return Ok(PathBuf::from(root));
     }
@@ -1315,6 +1319,17 @@ fn state_root() -> Result<PathBuf, CommandFailure> {
         CommandFailure::diagnostic("HOME is required for runtime environment state")
     })?;
     Ok(PathBuf::from(home).join(".autospec/envs"))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_STATE_ROOT: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_test_state_root(root: Option<PathBuf>) {
+    TEST_STATE_ROOT.with(|current| *current.borrow_mut() = root);
 }
 
 fn state_from_context(
@@ -1555,7 +1570,6 @@ mod runtime_session_tests {
         root: PathBuf,
         repo: PathBuf,
         state_root: PathBuf,
-        previous_state_root: Option<std::ffi::OsString>,
     }
 
     impl RuntimeFixture {
@@ -1593,17 +1607,11 @@ mod runtime_session_tests {
             fs::write(repo.join("tracked.txt"), "fixture\n").expect("tracked fixture");
             git(&repo, &["add", "."]);
             git(&repo, &["commit", "-m", "runtime fixture"]);
-            let previous_state_root = std::env::var_os("AGENT_ENV_STATE_ROOT");
-            // SECURITY-REVIEW: independent #2598 reviewer LGTM; test mutex serializes env mutation.
-            // SAFETY: TEST_ENVIRONMENT excludes concurrent access to this process environment key.
-            unsafe {
-                std::env::set_var("AGENT_ENV_STATE_ROOT", &state_root);
-            }
+            super::set_test_state_root(Some(state_root.clone()));
             Self {
                 root,
                 repo,
                 state_root,
-                previous_state_root,
             }
         }
 
@@ -1614,14 +1622,7 @@ mod runtime_session_tests {
 
     impl Drop for RuntimeFixture {
         fn drop(&mut self) {
-            // SECURITY-REVIEW: independent #2598 reviewer LGTM; test mutex serializes env mutation.
-            // SAFETY: TEST_ENVIRONMENT excludes concurrent access to this process environment key.
-            unsafe {
-                match self.previous_state_root.take() {
-                    Some(value) => std::env::set_var("AGENT_ENV_STATE_ROOT", value),
-                    None => std::env::remove_var("AGENT_ENV_STATE_ROOT"),
-                }
-            }
+            super::set_test_state_root(None);
             let _ = fs::remove_dir_all(&self.root);
         }
     }

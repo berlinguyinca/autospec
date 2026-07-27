@@ -94,21 +94,23 @@ RUNTIME_SIGNAL_INSTALL = '''unsafe {
 
 def approved_unsafe_boundary(relative_path, source, match):
     """Allow only independently reviewed unsafe boundaries with invariant proof."""
-    preceding = source[:match.start()].splitlines()[-3:]
-    reviewed_paths = {
-        "crates/autospec-cli/src/commands/autonomous/executor_bridge.rs",
-        "crates/autospec-cli/src/commands/runtime/env.rs",
-        "crates/autospec-cli/src/commands/runtime/env/session.rs",
+    function_matches = list(re.finditer(r"\bfn\s+([A-Za-z0-9_]+)\s*\(", source[:match.start()]))
+    function_name = function_matches[-1].group(1) if function_matches else ""
+    candidate = rust_code_only(source)[match.start():]
+    reviewed = {
+        "crates/autospec-cli/src/commands/autonomous/executor_bridge.rs": {
+            "autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine",
+            "autonomous_executor_bridge_clean_supervision_restores_prior_subreaper_state",
+            "autonomous_executor_bridge_clean_supervision_preserves_enabled_subreaper_state",
+        },
+        "crates/autospec-cli/src/commands/runtime/env/session.rs": {"verify_active"},
     }
-    if (
-        relative_path in reviewed_paths
-        and any(
-            line.strip().startswith("// SECURITY-REVIEW: independent #2598 reviewer LGTM;")
-            for line in preceding
-        )
-        and any(line.strip().startswith("// SAFETY:") for line in preceding)
-    ):
-        return True
+    if function_name in reviewed.get(relative_path, set()):
+        if relative_path.endswith("executor_bridge.rs"):
+            return candidate.startswith(
+                "unsafe {\n            nix::libc::prctl(\n                nix::libc::PR_GET_CHILD_SUBREAPER,"
+            )
+        return candidate.startswith("unsafe { nix::libc::geteuid() }")
     if relative_path != RUNTIME_SIGNAL_FFI_PATH:
         return False
     code = rust_code_only(source)

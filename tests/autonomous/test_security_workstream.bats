@@ -130,6 +130,40 @@ RS
     [ "$(jq -s '[.[] | select(.dimension == "unsafe" and .file == "crates/autospec-cli/src/commands/runtime/env.rs")] | length' "$WORK/attributed.jsonl")" -eq 1 ]
 }
 
+@test "rank: reviewed unsafe approval is bound to exact path function and body" {
+    local root="$WORK/reviewed-boundaries"
+    local bridge="$root/crates/autospec-cli/src/commands/autonomous/executor_bridge.rs"
+    run test -x "$SCRIPT"
+    [ "$status" -eq 0 ]
+    mkdir -p "$(dirname "$bridge")"
+    : > "$WORK/empty.jsonl"
+    cat > "$bridge" <<'EOF'
+fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine() {
+    let mut value = 0_i32;
+    let _ = unsafe {
+            nix::libc::prctl(
+                nix::libc::PR_GET_CHILD_SUBREAPER,
+                std::ptr::addr_of_mut!(value), 0, 0, 0)
+    };
+}
+fn wrong_location() {
+    let mut value = 0_i32;
+    let _ = unsafe {
+            nix::libc::prctl(
+                nix::libc::PR_GET_CHILD_SUBREAPER,
+                std::ptr::addr_of_mut!(value), 0, 0, 0)
+    };
+}
+fn autonomous_executor_bridge_clean_supervision_restores_prior_subreaper_state() {
+    unsafe { altered_body(); }
+    unsafe { extra_block(); }
+}
+EOF
+    run "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$root" --out "$WORK/boundaries.jsonl"
+    [ "$status" -eq 0 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/boundaries.jsonl")" -eq 3 ]
+}
+
 @test "issue filing: high-severity findings produce lint-clean remediation issues" {
     cat > "$WORK/ranked.jsonl" <<'JSONL'
 {"gap_id":"G1","dimension":"secrets","severity":"must-fix","priority":"P0","severity_rank":100,"exploitability":5,"exposure":5,"file":"app/config.env","line":3,"title":"Hardcoded API token","body":"Remove the token and rotate the credential.","dedupe_key":"sec-secret","remediation":"Remove the committed token, rotate it, and add a regression scan."}
