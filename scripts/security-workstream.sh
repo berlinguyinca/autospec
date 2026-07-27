@@ -422,16 +422,23 @@ def added_unsafe_token_lines(root, merge_base, old_path, current_path):
     )
     counts = {}
     current_line = None
+    has_current_content = False
     for line in diff.splitlines():
         hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)", line)
         if hunk:
             current_line = int(hunk.group(1))
+            has_current_content = False
         elif current_line is not None and line == "~":
-            current_line += 1
+            if has_current_content:
+                current_line += 1
+            has_current_content = False
         elif current_line is not None and line.startswith("+") and not line.startswith("+++"):
+            has_current_content = True
             added = len(re.findall(r"\bunsafe\b", line[1:]))
             if added:
                 counts[current_line] = counts.get(current_line, 0) + added
+        elif current_line is not None and not line.startswith("-"):
+            has_current_content = True
     raw_diff = run_git(
         root,
         [

@@ -212,6 +212,7 @@ RS
     printf '%s\n' \
         'fn moved(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' \
         'fn anchor() {}' > "$repo/src/internal-move.rs"
+    printf '%s\n' 'fn x() {}' 'fn y() {}' 'fn z() {}' > "$repo/src/deletion-before-add.rs"
     printf '%s\n' 'fn replacement() -> i32 { 42 }' > "$repo/src/replacement.rs"
     cat > "$repo/src/attribute.rs" <<'RS'
 #[
@@ -230,6 +231,7 @@ RS
     printf '%s\n' \
         'fn anchor() {}' \
         'fn moved(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$repo/src/internal-move.rs"
+    printf '%s\n' 'unsafe fn z() {}' > "$repo/src/deletion-before-add.rs"
     sed -i '2s/cfg(any())/unsafe(no_mangle)/' "$repo/src/attribute.rs"
     printf '%s\n' 'fn replacement(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$repo/src/replacement.rs"
     git -C "$repo" mv src/rename.rs src/moved.rs
@@ -239,18 +241,19 @@ RS
 
     run bash "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$repo" --base "$base" --out "$WORK/pr.jsonl"
     [ "$status" -eq 0 ]
-    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/pr.jsonl")" -eq 2 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/pr.jsonl")" -eq 3 ]
     jq -e 'select(.dimension == "unsafe" and .file == "src/attribute.rs" and .line == 2)' "$WORK/pr.jsonl" >/dev/null
+    jq -e 'select(.dimension == "unsafe" and .file == "src/deletion-before-add.rs" and .line == 1)' "$WORK/pr.jsonl" >/dev/null
     jq -e 'select(.dimension == "unsafe" and .file == "src/replacement.rs" and .line == 1)' "$WORK/pr.jsonl" >/dev/null
 
     run bash "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$repo" --out "$WORK/tree.jsonl"
     [ "$status" -eq 0 ]
-    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/tree.jsonl")" -eq 6 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/tree.jsonl")" -eq 7 ]
 
     printf '%s\n' 'fn new(ptr: *const i32) -> i32 { unsafe { std::ptr::read(ptr) } }' > "$repo/src/untracked.rs"
     run bash "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$repo" --base "$base" --out "$WORK/untracked.jsonl"
     [ "$status" -eq 0 ]
-    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/untracked.jsonl")" -eq 3 ]
+    [ "$(jq -s '[.[] | select(.dimension == "unsafe")] | length' "$WORK/untracked.jsonl")" -eq 4 ]
 
     run bash "$SCRIPT" rank --findings "$WORK/empty.jsonl" --root "$repo" --base missing-base --out "$WORK/invalid.jsonl"
     [ "$status" -eq 2 ]
