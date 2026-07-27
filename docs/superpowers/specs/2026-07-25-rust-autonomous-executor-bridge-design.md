@@ -8,19 +8,20 @@ session to write `.autospec/executor-result.json`.
 
 ## Context
 
-The foreground conductor already selects, safety-reviews, and claims one issue
-with an exact repository, worker, branch, claim generation, and invocation
-identity. Its current `executor-child` does not implement that issue. It reads a
-fixed result artifact and otherwise emits `implementation_executor_pending`.
-The parent then persists that pending response as terminal, so every later
-supervisor relaunch replays the same dead end.
+Before this change, the foreground conductor selected, safety-reviewed, and
+claimed one issue with an exact repository, worker, branch, claim generation,
+and invocation identity, but its `executor-child` did not implement that issue.
+It read a fixed result artifact and otherwise emitted
+`implementation_executor_pending`. The parent then persisted that pending
+response as terminal, so every later supervisor relaunch replayed the same dead
+end.
 
 This is observable in the live `berlinguyinca/autospec-gui` run: issues #34,
 #35, and #36 were discovered, but #36 remains claimed with no pull request.
 
 ## Chosen approach
 
-The Rust conductor will own a native executor bridge. It will launch the
+The Rust conductor owns a native executor bridge. It launches the
 configured Codex, Claude, or OpenCode binary directly with an explicit argument
 vector in an isolated issue worktree. It will not call `autospec-run`, `omx`, a
 legacy autonomous script, or a shell-owned conductor.
@@ -117,13 +118,22 @@ canonical child executable, argv digest, boot/start identity, child PID/process
 group, progress timestamp, PR/head identity when known, and terminal result
 when one exists.
 
-`pending` and active phases are non-terminal. A restarted conductor adopts a
+`pending` and active phases are non-terminal. State and terminal receipts are
+scoped to the exact claim generation. A restarted conductor adopts a
 clean matching worktree and resumes from the last independently proven
 boundary. A live child is observed rather than duplicated only when PID,
 process-group, canonical executable, argv digest, and start/boot identity all
 match. Ambiguous or reused process identity is never signaled. A dead child
 returns to the last safe phase. Only an observed merged PR, explicit blocked
 failure, or exhausted retry state is terminal.
+
+Runtime recovery persists the exact environment directory, session identity,
+and original manifest snapshot before provisioning. A transient conductor
+failure relinquishes only the process lease; it does not tear down resources
+that the next matching invocation must adopt. Final cleanup reconstructs the
+original context from that durable snapshot, so changing or removing the
+repository's current runtime manifest cannot redirect or strand owned
+resources.
 
 During implementation, verification, CI wait, and review, the bridge
 periodically performs a compare-and-set refresh of the exact GitHub claim
