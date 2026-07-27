@@ -530,6 +530,11 @@ pub(crate) fn advance_claim_ref_for_test(
 
 fn project_claim_ref_to_comments(repo: &str, head: &ClaimRefHead) {
     let result = list_comments(repo, head.record.issue).and_then(|comments| {
+        if comments.iter().any(|comment| {
+            parse_run_state_comment(&comment.body).is_ok_and(|record| record == head.record)
+        }) {
+            return Ok(());
+        }
         let parent = authoritative_run_state_comment(&comments);
         create_comment(
             repo,
@@ -1501,6 +1506,48 @@ pub(crate) struct ExecutorSuccessBinding<'a> {
     pub(crate) premerge_receipt: &'a str,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BridgeClaimDisposition {
+    Merged,
+    Retryable,
+    NeedsHuman,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BridgeClaimTransition {
+    Transitioned,
+    OwnershipLost,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BridgeTerminalMode {
+    Fresh,
+    Resume,
+    Lost,
+}
+
+fn bridge_terminal_mode(
+    record: &RunStateRecord,
+    identity: ClaimMutationIdentity<'_>,
+    desired_state: &str,
+    desired_step: &str,
+    desired_pr: &str,
+) -> BridgeTerminalMode {
+    if record.worker_id != identity.worker_id
+        || record.claim_id.as_deref() != Some(identity.claim_id)
+        || record.branch != identity.branch
+    {
+        return BridgeTerminalMode::Lost;
+    }
+    if record.state == desired_state && record.step == desired_step && record.pr == desired_pr {
+        BridgeTerminalMode::Resume
+    } else if record.state == "claimed" {
+        BridgeTerminalMode::Fresh
+    } else {
+        BridgeTerminalMode::Lost
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) struct ClaimMutationIdentity<'a> {
     pub(crate) repo: &'a str,
@@ -1510,11 +1557,127 @@ pub(crate) struct ClaimMutationIdentity<'a> {
     pub(crate) claim_id: &'a str,
 }
 
+pub(crate) fn transition_bridge_claim(
+    identity: ClaimMutationIdentity<'_>,
+    pull_request: Option<u64>,
+    disposition: BridgeClaimDisposition,
+) -> Result<BridgeClaimTransition, CommandFailure> {
+    let Some(selected) = read_claim_ref(identity.repo, identity.issue)? else {
+        return Ok(BridgeClaimTransition::OwnershipLost);
+    };
+    if disposition == BridgeClaimDisposition::Merged && pull_request.is_none() {
+        return Err(CommandFailure::diagnostic(
+            "merged bridge claim transition requires a pull request",
+        ));
+    }
+    let desired_state = match disposition {
+        BridgeClaimDisposition::Merged => "merged",
+        BridgeClaimDisposition::Retryable => "released",
+        BridgeClaimDisposition::NeedsHuman => "failed",
+    };
+    let desired_step = match disposition {
+        BridgeClaimDisposition::Merged => "merged",
+        BridgeClaimDisposition::Retryable => "retryable_released",
+        BridgeClaimDisposition::NeedsHuman => "needs_human",
+    };
+    let desired_pr = pull_request.map_or_else(String::new, |number| number.to_string());
+    let mode = bridge_terminal_mode(
+        &selected.record,
+        identity,
+        desired_state,
+        desired_step,
+        &desired_pr,
+    );
+    if mode == BridgeTerminalMode::Lost {
+        return Ok(BridgeClaimTransition::OwnershipLost);
+    }
+    let (record, head) = if mode == BridgeTerminalMode::Resume {
+        (selected.record.clone(), Box::new(selected))
+    } else {
+        let mut record = selected.record.clone();
+        record.state = desired_state.to_string();
+        record.step = desired_step.to_string();
+        record.pr = desired_pr;
+        record.updated_at = utc_now_iso()?;
+        let head = match advance_claim_ref(identity.repo, identity.issue, Some(&selected), &record)?
+        {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => return Ok(BridgeClaimTransition::OwnershipLost),
+        };
+        (record, head)
+    };
+    project_claim_ref_to_comments(identity.repo, &head);
+    if disposition == BridgeClaimDisposition::Merged {
+        let body = format!(
+            "{RUN_TERMINAL_BEGIN_MARKER}\n{{\"schema\":1,\"repo\":\"{}\",\"issue\":{},\"worker_id\":\"{}\",\"state\":\"merged\",\"branch\":\"{}\",\"pr\":\"{}\",\"finalized_at\":\"{}\"}}\n{RUN_TERMINAL_END_MARKER}",
+            json_escape(identity.repo),
+            identity.issue,
+            json_escape(identity.worker_id),
+            json_escape(identity.branch),
+            pull_request.expect("validated merged pull request"),
+            json_escape(&record.updated_at),
+        );
+        if !list_comments(identity.repo, identity.issue)?
+            .iter()
+            .any(|comment| comment.body == body)
+        {
+            create_comment(identity.repo, identity.issue, &body)?;
+        }
+    }
+
+    let mut arguments = vec![
+        "issue".to_string(),
+        "edit".to_string(),
+        identity.issue.to_string(),
+        "--repo".to_string(),
+        identity.repo.to_string(),
+        "--remove-label".to_string(),
+        "in-progress-by-bot".to_string(),
+    ];
+    match disposition {
+        BridgeClaimDisposition::Merged => {}
+        BridgeClaimDisposition::Retryable => {
+            arguments.extend([
+                "--remove-label".to_string(),
+                "autospec:needs-human".to_string(),
+                "--add-label".to_string(),
+                "auto-implement".to_string(),
+            ]);
+        }
+        BridgeClaimDisposition::NeedsHuman => {
+            arguments.extend([
+                "--remove-label".to_string(),
+                "auto-implement".to_string(),
+                "--add-label".to_string(),
+                "autospec:needs-human".to_string(),
+            ]);
+        }
+    }
+    run_gh_with_retry(&arguments, "transition autonomous bridge claim labels")?;
+    emit_claim_telemetry(
+        "session.terminal",
+        identity.repo,
+        identity.issue,
+        record.step.as_str(),
+    );
+    Ok(BridgeClaimTransition::Transitioned)
+}
+
 pub(crate) fn record_executor_result(
     identity: ClaimMutationIdentity<'_>,
     outcome: &ConductorOutcome,
     pull_request: Option<u64>,
     success: Option<ExecutorSuccessBinding<'_>>,
+) -> Result<ExecutorResultRecord, CommandFailure> {
+    record_executor_result_with_receipt(identity, outcome, pull_request, success, None)
+}
+
+pub(crate) fn record_executor_result_with_receipt(
+    identity: ClaimMutationIdentity<'_>,
+    outcome: &ConductorOutcome,
+    pull_request: Option<u64>,
+    success: Option<ExecutorSuccessBinding<'_>>,
+    stable_receipt_id: Option<&str>,
 ) -> Result<ExecutorResultRecord, CommandFailure> {
     let ClaimMutationIdentity {
         repo,
@@ -1568,7 +1731,15 @@ pub(crate) fn record_executor_result(
         }
     };
 
-    let receipt_id = executor_result_receipt_id()?;
+    let receipt_id = match stable_receipt_id {
+        Some(receipt_id) if !receipt_id.trim().is_empty() => receipt_id.to_string(),
+        Some(_) => {
+            return Err(CommandFailure::diagnostic(
+                "executor result stable receipt ID must not be empty",
+            ))
+        }
+        None => executor_result_receipt_id()?,
+    };
     match advance_claim_ref(repo, issue, Some(&selected), &selected.record)? {
         ClaimRefAdvance::Won(_) => {}
         ClaimRefAdvance::Lost => return Ok(ExecutorResultRecord::OwnershipLost),
@@ -1588,7 +1759,10 @@ pub(crate) fn record_executor_result(
             .as_ref()
             .map(|binding| binding.premerge_receipt.to_string()),
     );
-    create_comment(repo, issue, &evidence.to_marked_comment())?;
+    let existing_comments = list_comments(repo, issue)?;
+    if !executor_result_evidence_exists(&existing_comments, &evidence) {
+        create_comment(repo, issue, &evidence.to_marked_comment())?;
+    }
 
     let confirmed_comments = list_comments(repo, issue)?;
     if !executor_result_evidence_exists(&confirmed_comments, &evidence) {
@@ -1610,6 +1784,38 @@ pub(crate) fn record_executor_result(
         return Ok(ExecutorResultRecord::OwnershipLost);
     }
     Ok(ExecutorResultRecord::Recorded)
+}
+
+pub(crate) fn authoritative_executor_result(
+    identity: ClaimMutationIdentity<'_>,
+    pull_request: u64,
+) -> Result<Option<ExecutorResultEvidence>, CommandFailure> {
+    let Some(selected) = read_claim_ref(identity.repo, identity.issue)? else {
+        return Ok(None);
+    };
+    if !has_exact_claim_generation(
+        &selected.record,
+        identity.worker_id,
+        identity.claim_id,
+        identity.branch,
+    ) {
+        return Ok(None);
+    }
+    let comments = deduplicate_identical_comments(list_comments(identity.repo, identity.issue)?);
+    let evidence = successful_executor_result_for_pull_request(&comments, pull_request);
+    Ok(evidence.filter(|evidence| {
+        evidence.repo == identity.repo
+            && evidence.issue == identity.issue
+            && evidence.worker_id == identity.worker_id
+            && evidence.branch == identity.branch
+            && evidence.claim_id.as_deref() == Some(identity.claim_id)
+    }))
+}
+
+fn deduplicate_identical_comments(mut comments: Vec<RemoteComment>) -> Vec<RemoteComment> {
+    comments.sort_by(|left, right| left.body.cmp(&right.body));
+    comments.dedup_by(|left, right| left.body == right.body);
+    comments
 }
 
 pub(crate) fn record_executor_outcome(
@@ -3519,10 +3725,17 @@ mod tests {
         publish_session_binding, read_claim_ref_in, validated_claim_remote, ClaimRefAdvance,
         SessionBindingIdentity,
     };
-    use autospec_core::claim::RunStateRecord;
+    use autospec_core::claim::{
+        successful_executor_result_for_pull_request, ExecutorResultEvidence, RemoteComment,
+        RunStateRecord,
+    };
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::{Arc, Barrier};
+    use std::sync::{Arc, Barrier, Mutex};
+
+    static BRIDGE_TRANSITION_ENV: Mutex<()> = Mutex::new(());
 
     #[test]
     fn claim_settle_millis_preserves_decimal_second_configuration() {
@@ -3694,6 +3907,199 @@ mod tests {
             1,
         )
         .with_claim_id(claim_id)
+    }
+
+    #[test]
+    fn bridge_terminal_projection_resumes_only_the_exact_terminal_generation() {
+        let identity = super::ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker-a",
+            claim_id: "claim-a",
+        };
+        let mut terminal = claim_record("worker-a", "claim-a", "merged");
+        terminal.step = "merged".into();
+        terminal.pr = "17".into();
+        assert_eq!(
+            super::bridge_terminal_mode(&terminal, identity, "merged", "merged", "17"),
+            super::BridgeTerminalMode::Resume
+        );
+
+        terminal.claim_id = Some("claim-takeover".into());
+        assert_eq!(
+            super::bridge_terminal_mode(&terminal, identity, "merged", "merged", "17"),
+            super::BridgeTerminalMode::Lost
+        );
+    }
+
+    #[test]
+    fn bridge_result_recovery_collapses_only_identical_publication_retries() {
+        let evidence = ExecutorResultEvidence::new(
+            "owner/repo",
+            42,
+            "worker-a",
+            "feat/worker-a",
+            "succeeded",
+            Some(17),
+            "premerge_passed",
+            "stable-receipt",
+            Some("claim-a".into()),
+            Some("a".repeat(40)),
+            Some("b".repeat(64)),
+        );
+        let body = evidence.to_marked_comment();
+        let comments = super::deduplicate_identical_comments(vec![
+            RemoteComment::new(1, body.clone(), "2026-07-26T00:00:00Z"),
+            RemoteComment::new(2, body, "2026-07-26T00:00:01Z"),
+        ]);
+        assert_eq!(comments.len(), 1);
+        assert_eq!(
+            successful_executor_result_for_pull_request(&comments, 17),
+            Some(evidence)
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_bridge_transition_projection(
+        label: &str,
+        disposition: super::BridgeClaimDisposition,
+        expected_state: &str,
+        expected_edit: &str,
+        expected_comments: usize,
+    ) {
+        let fixture = ClaimRefFixture::new(label);
+        let bin = fixture.root.join("bin");
+        let gh = bin.join("gh");
+        let calls = fixture.root.join("gh-calls");
+        let comments = fixture.root.join("comments.json");
+        std::fs::create_dir(&bin).expect("bin");
+        std::fs::write(&comments, "[]").expect("comments");
+        std::fs::write(
+            &gh,
+            "#!/bin/sh\n\
+             set -eu\n\
+             printf '%s\\n' \"$*\" >> \"$GH_CALLS\"\n\
+             if [ \"$1\" = api ]; then cat \"$GH_COMMENTS\"; exit 0; fi\n\
+             if [ \"$1 $2\" = 'issue comment' ]; then\n\
+               body=''; while [ \"$#\" -gt 0 ]; do if [ \"$1\" = --body ]; then shift; body=$1; fi; shift || true; done\n\
+               jq --arg body \"$body\" '. + [{id:(length + 1),body:$body,updated_at:\"2026-07-26T00:00:00Z\"}]' \"$GH_COMMENTS\" > \"$GH_COMMENTS.tmp\"\n\
+               mv \"$GH_COMMENTS.tmp\" \"$GH_COMMENTS\"; exit 0\n\
+             fi\n\
+             if [ \"$1 $2\" = 'issue edit' ]; then exit 0; fi\n\
+             exit 64\n",
+        )
+        .expect("gh");
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).expect("gh mode");
+        let old_path = std::env::var_os("PATH");
+        let old_remote = std::env::var_os("AUTOSPEC_CLAIM_GIT_REMOTE");
+        let old_state = std::env::var_os("AUTOSPEC_CLAIM_GIT_STATE_DIR");
+        let old_calls = std::env::var_os("GH_CALLS");
+        let old_comments = std::env::var_os("GH_COMMENTS");
+        let old_retries = std::env::var_os("AUTOSPEC_GH_API_RETRIES");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                bin.display(),
+                old_path.as_deref().unwrap_or_default().to_string_lossy()
+            ),
+        );
+        std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", &fixture.remote);
+        std::env::set_var(
+            "AUTOSPEC_CLAIM_GIT_STATE_DIR",
+            fixture.root.join("claim-state"),
+        );
+        std::env::set_var("GH_CALLS", &calls);
+        std::env::set_var("GH_COMMENTS", &comments);
+        std::env::set_var("AUTOSPEC_GH_API_RETRIES", "1");
+
+        let claimed = claim_record("worker-a", "claim-a", "claimed");
+        assert!(matches!(
+            advance_claim_ref_in(
+                Path::new("git"),
+                &fixture.clients[0],
+                fixture.remote.to_str().unwrap(),
+                "owner/repo",
+                42,
+                None,
+                &claimed,
+            )
+            .expect("seed authoritative claim"),
+            ClaimRefAdvance::Won(_)
+        ));
+        let identity = super::ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker-a",
+            claim_id: "claim-a",
+        };
+        let pr = (disposition == super::BridgeClaimDisposition::Merged).then_some(17);
+        assert_eq!(
+            super::transition_bridge_claim(identity, pr, disposition).expect("transition"),
+            super::BridgeClaimTransition::Transitioned
+        );
+        assert_eq!(
+            super::transition_bridge_claim(identity, pr, disposition).expect("resume projection"),
+            super::BridgeClaimTransition::Transitioned
+        );
+        let head = super::read_claim_ref("owner/repo", 42)
+            .expect("read claim")
+            .expect("claim head");
+        assert_eq!(head.record.state, expected_state);
+        assert_ne!(head.record.state, "claimed");
+        let call_log = std::fs::read_to_string(calls).expect("calls");
+        assert!(call_log.contains(expected_edit), "{call_log}");
+        let comment_value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(comments).expect("comments JSON"))
+                .expect("comments");
+        assert_eq!(
+            comment_value.as_array().expect("comment array").len(),
+            expected_comments,
+            "restart duplicated a projection"
+        );
+
+        for (key, value) in [
+            ("PATH", old_path),
+            ("AUTOSPEC_CLAIM_GIT_REMOTE", old_remote),
+            ("AUTOSPEC_CLAIM_GIT_STATE_DIR", old_state),
+            ("GH_CALLS", old_calls),
+            ("GH_COMMENTS", old_comments),
+            ("AUTOSPEC_GH_API_RETRIES", old_retries),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bridge_terminal_transitions_project_exact_labels_and_resume_idempotently() {
+        let _guard = BRIDGE_TRANSITION_ENV.lock().expect("transition env");
+        assert_bridge_transition_projection(
+            "bridge-retryable",
+            super::BridgeClaimDisposition::Retryable,
+            "released",
+            "issue edit 42 --repo owner/repo --remove-label in-progress-by-bot --remove-label autospec:needs-human --add-label auto-implement",
+            1,
+        );
+        assert_bridge_transition_projection(
+            "bridge-needs-human",
+            super::BridgeClaimDisposition::NeedsHuman,
+            "failed",
+            "issue edit 42 --repo owner/repo --remove-label in-progress-by-bot --remove-label auto-implement --add-label autospec:needs-human",
+            1,
+        );
+        assert_bridge_transition_projection(
+            "bridge-merged",
+            super::BridgeClaimDisposition::Merged,
+            "merged",
+            "issue edit 42 --repo owner/repo --remove-label in-progress-by-bot",
+            2,
+        );
     }
 
     #[test]
