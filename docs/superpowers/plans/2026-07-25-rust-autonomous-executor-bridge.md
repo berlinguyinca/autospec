@@ -15,6 +15,23 @@ remain the result-ingestion boundaries.
 runtime alias table, runtime broker, claim/premerge types, and serial Rust
 integration tests. No new dependencies.
 
+## Implementation record
+
+The conductor integration keeps the high-level bridge entrypoint in
+`executor_bridge.rs` so one Rust authority owns process launch, durable
+receipts, Git/GitHub proof, and cleanup. Conductor state remains responsible for
+queue selection and retry scheduling only. Recovery state and terminal receipts
+are claim-generation scoped, and a durable raw supervisor allows a restarted
+conductor to observe one live harness and later consume its exact exit without
+launching a duplicate.
+
+Runtime recovery records the environment directory, session identity, and
+original manifest snapshot before provisioning. This is stricter than deriving
+cleanup from the current repository manifest: a changed or removed manifest
+cannot redirect cleanup, and an incomplete persisted runtime binding fails
+closed. Retry preserves dirty issue-worktree evidence, then advances clean
+committed work to a changed base without force under a fresh claim generation.
+
 ## Constraints
 
 - Work only in the issue worktree created from the configured base resolver:
