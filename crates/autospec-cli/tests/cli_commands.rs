@@ -2660,6 +2660,17 @@ fn autonomous_start_records_argv_and_passthrough_options_in_launch_provenance() 
     assert!(launch.contains("\"budget_issues\":\"4\""));
     assert!(launch.contains("\"no_digest\":true"));
     assert!(launch.contains("\"poll_interval_sec\":\"15\""));
+    let launch: serde_json::Value = serde_json::from_str(&launch).expect("parse launch json");
+    let conductor = launch["conductor_argv"].as_array().expect("conductor argv");
+    let supervisor = launch["supervisor_argv"]
+        .as_array()
+        .expect("supervisor argv");
+    assert!(conductor.windows(2).any(|values| {
+        values[0].as_str() == Some("--poll-interval-sec") && values[1].as_str() == Some("15")
+    }));
+    assert!(supervisor.windows(2).any(|values| {
+        values[0].as_str() == Some("--repair-interval-sec") && values[1].as_str() == Some("5")
+    }));
     cleanup_pids(&operator_dir.join("berlinguyinca_autospec"));
 }
 
@@ -3356,12 +3367,13 @@ fn autonomous_supervise_contention_tracks_exactly_one_replacement_conductor() {
             .stderr(Stdio::piped());
         command
     };
-    let first = supervisor().spawn().expect("first supervisor starts");
-    let second = supervisor().spawn().expect("second supervisor starts");
-    let outputs = [
-        first.wait_with_output().expect("first supervisor exits"),
-        second.wait_with_output().expect("second supervisor exits"),
-    ];
+    let supervisors = (0..4)
+        .map(|_| supervisor().spawn().expect("contending supervisor starts"))
+        .collect::<Vec<_>>();
+    let outputs = supervisors
+        .into_iter()
+        .map(|child| child.wait_with_output().expect("supervisor exits"))
+        .collect::<Vec<_>>();
     let restarted = outputs
         .iter()
         .filter(|output| {
@@ -3373,7 +3385,134 @@ fn autonomous_supervise_contention_tracks_exactly_one_replacement_conductor() {
     assert!(outputs.iter().all(|output| output.status.success()));
     assert_eq!(restarted, 1, "outputs={outputs:?}");
     assert!(process_is_alive(&tracked_pid));
+    let lock = std::fs::symlink_metadata(scope.join("supervisor-repair.lock"))
+        .expect("supervisor repair lock metadata");
+    assert!(lock.is_file());
+    #[cfg(unix)]
+    assert_eq!(lock.permissions().mode() & 0o777, 0o600);
     cleanup_pids(&scope);
+}
+
+#[test]
+fn autonomous_supervise_repair_lock_keeps_ambiguous_metadata_fail_closed() {
+    let temp = temp_dir("autospec-autonomous-supervise-ambiguous");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    std::fs::create_dir_all(&scope).expect("create operator scope");
+    std::fs::write(scope.join("launch.json"), "{}\n").expect("write launch evidence");
+    std::fs::write(scope.join("conductor.pid"), "not-process-metadata\n")
+        .expect("write ambiguous conductor metadata");
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "supervise",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--once",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .output()
+        .expect("supervise ambiguous metadata");
+
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"action\":\"repair-deferred\""),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(scope.join("conductor.pid")).expect("ambiguous metadata remains"),
+        "not-process-metadata\n"
+    );
+    assert!(scope.join("supervisor-repair.lock").is_file());
+}
+
+#[test]
+fn autonomous_supervise_rechecks_stop_after_waiting_for_repair_lock() {
+    let temp = temp_dir("autospec-autonomous-supervise-stop-race");
+    let operator_dir = temp.join("operator");
+    let log_dir = temp.join("logs");
+    let state_dir = temp.join("state");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    let path = hermetic_autonomous_path(&temp);
+    let start = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("PATH", &path)
+        .output()
+        .expect("start conductor");
+    assert!(start.status.success());
+    let old_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("conductor pid");
+    terminate_fixture_process(&old_pid);
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(scope.join("supervisor-repair.lock"))
+        .expect("open repair lock");
+    lock.lock().expect("hold repair lock");
+
+    let child = autospec()
+        .args([
+            "autonomous",
+            "supervise",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--once",
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", &state_dir)
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
+        .env("PATH", &path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start waiting supervisor");
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert!(process_is_alive(&child.id().to_string()));
+    std::fs::write(scope.join("stop.flag"), "immediate\noperator@test\n").expect("request stop");
+    drop(lock);
+    let output = child.wait_with_output().expect("waiting supervisor exits");
+
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("\"action\":\"stop-requested\""),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(read_pid(&scope, "conductor"), old_pid);
 }
 
 #[test]
