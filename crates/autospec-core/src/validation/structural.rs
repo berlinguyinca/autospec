@@ -16,33 +16,57 @@ pub struct RefactorDraft {
 }
 
 /// Return one deterministic, behavior-preserving draft for each oversized Rust module.
-pub fn oversized_module_refactor_issues(root: &Path, warning: usize, error: usize) -> Vec<RefactorDraft> {
+pub fn oversized_module_refactor_issues(
+    root: &Path,
+    warning: usize,
+    error: usize,
+) -> Vec<RefactorDraft> {
     let mut drafts = Vec::new();
     let mut files = Vec::new();
     collect_rust_files(root, &mut files);
     files.sort();
     for file in files {
-        let Ok(text) = fs::read_to_string(&file) else { continue };
+        let Ok(text) = fs::read_to_string(&file) else {
+            continue;
+        };
         let lines = text.lines().count();
-        if lines < warning { continue; }
+        if lines < warning {
+            continue;
+        }
         let severity = if lines >= error { "error" } else { "warning" };
-        let relative = file.strip_prefix(root).unwrap_or(&file).display().to_string();
-        let responsibility = text.lines().find_map(|line| {
-            let trimmed = line.trim();
-            trimmed.strip_prefix("pub fn ").or_else(|| trimmed.strip_prefix("pub async fn "))
-                .map(|name| name.split('(').next().unwrap_or(name).to_string())
-        }).unwrap_or_else(|| "module responsibilities".to_string());
+        let relative = file
+            .strip_prefix(root)
+            .unwrap_or(&file)
+            .display()
+            .to_string();
+        let responsibility = text
+            .lines()
+            .find_map(|line| {
+                let trimmed = line.trim();
+                trimmed
+                    .strip_prefix("pub fn ")
+                    .or_else(|| trimmed.strip_prefix("pub async fn "))
+                    .map(|name| name.split('(').next().unwrap_or(name).to_string())
+            })
+            .unwrap_or_else(|| "module responsibilities".to_string());
         drafts.push(RefactorDraft { file: relative.clone(), severity, title: format!("Extract {responsibility} from {relative}"), body: format!("Add a characterization test before a behavior-preserving extraction of {responsibility} from {relative}.") });
     }
     drafts
 }
 
 fn collect_rust_files(root: &Path, output: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else { return };
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() { collect_rust_files(&path, output); }
-        else if path.extension().is_some_and(|ext| ext == "rs") && path.to_string_lossy().contains("/src/") { output.push(path); }
+        if path.is_dir() {
+            collect_rust_files(&path, output);
+        } else if path.extension().is_some_and(|ext| ext == "rs")
+            && path.to_string_lossy().contains("/src/")
+        {
+            output.push(path);
+        }
     }
 }
 

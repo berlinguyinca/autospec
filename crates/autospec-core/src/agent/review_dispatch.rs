@@ -20,9 +20,7 @@ pub enum ReviewDispatchOutcome {
 
 /// Build argv for a broad review without splitting slash-command options.
 pub fn build_review_argv(kind: HarnessKind, since: &str, gaps_file: &str) -> Vec<String> {
-    let command = format!(
-        "/autospec-review --remediation --since {since} --emit-gaps {gaps_file}"
-    );
+    let command = format!("/autospec-review --remediation --since {since} --emit-gaps {gaps_file}");
     let executable = match kind {
         HarnessKind::Claude => "claude",
         HarnessKind::Codex => "codex",

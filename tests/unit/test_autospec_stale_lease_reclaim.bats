@@ -1,16 +1,6 @@
 #!/usr/bin/env bats
-# tests/unit/test_autospec_stale_lease_reclaim.bats — cross-machine stale-lease
-# reclaim keyed on the lock comment's SERVER-SIDE updated_at vs the reclaim TTL.
-#
-# Fixed evaluation order (spec §Critical-improvement fold-in):
-#   (1) determine the lowest-id marked lock comment = current owner;
-#   (2) if I am NOT that owner and the lowest-id lock is FRESH -> claim lost,
-#       self-clean my own comment, exit 2 (a fresh winner is never a stale lease);
-#   (3) ONLY if the lowest-id lock is STALE -> reclaim: upsert my own worker_id +
-#       fresh updated_at, re-run read-back verify (re-resolve lowest id), exit 0.
-#
-# Staleness is judged strictly on the SERVER updated_at returned by
-# `gh api .../comments`, never a local clock stored in the lock body.
+# Cross-machine reclaim is decided by the authoritative Git-ref record's
+# updated_at and ttl_seconds. Audit comment ordering is deliberately irrelevant.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -19,21 +9,24 @@ setup() {
     LABELS="$TEST_TMP/labels.txt"
     COMMENTS="$TEST_TMP/comments.json"
     CALLS="$TEST_TMP/calls.log"
+    CLAIM_REMOTE="$TEST_TMP/claim-remote.git"
     printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
     printf '[]\n' > "$COMMENTS"
+    git init --bare -q "$CLAIM_REMOTE"
 
-    # Shared PATH-shadow gh stub (see tests/fixtures/gh-mock/gh). It returns the
-    # raw comments JSON for `api .../comments`, so updated_at fields seeded into
-    # the fixture flow through to the script's server-timestamp read.
     mkdir -p "$TEST_TMP/bin"
     cp "$REPO_ROOT/tests/fixtures/gh-mock/gh" "$TEST_TMP/bin/gh"
     chmod +x "$TEST_TMP/bin/gh"
-    export PATH="$TEST_TMP/bin:$PATH"
+    export PATH="$TEST_TMP/bin:/usr/bin:/bin"
     export AUTOSPEC_TEST_LABELS="$LABELS"
     export AUTOSPEC_TEST_COMMENTS="$COMMENTS"
     export AUTOSPEC_TEST_CALLS="$CALLS"
-    export AUTOSPEC_TEST_FORCE_OWNER=""
     export AUTOSPEC_GH_API_RETRY_SLEEP=0
+    export AUTOSPEC_CLAIM_GIT_REMOTE="$CLAIM_REMOTE"
+    export AUTOSPEC_CLAIM_GIT_STATE_DIR="$TEST_TMP/claim-state"
+    export AUTOSPEC_HEARTBEAT_DIR="$TEST_TMP/heartbeats"
+    export AUTOSPEC_CLAIM_CONFIRM_READS=1
+    export AUTOSPEC_CLAIM_SETTLE_MILLIS=0
 }
 
 teardown() {
@@ -44,84 +37,79 @@ claim_acquire() {
     "$AUTOSPEC" claim acquire "$@"
 }
 
-# iso UTC timestamp N seconds in the past (portable BSD/GNU).
 iso_ago() {
     date -u -j -v-"$1"S +'%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
         || date -u -d "@$(( $(date -u +%s) - $1 ))" +'%Y-%m-%dT%H:%M:%SZ'
 }
 
-# Seed a single marked lock comment (id 100) owned by worker-a with the given
-# server updated_at. Mirrors the descending-array shape used elsewhere, but a
-# single comment suffices for the owner/staleness decision.
-seed_owned_lock() {
-    updated_at="$1"
-    cat > "$COMMENTS" <<JSON
-[
-  {
-    "id": 100,
-    "updated_at": "$updated_at",
-    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"$updated_at\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"
-  }
-]
-JSON
+seed_claim_ref() {
+    worker_id="$1"
+    branch="$2"
+    claim_id="$3"
+    updated_at="$4"
+    message="$TEST_TMP/claim-message"
+    tree="$(git --git-dir "$CLAIM_REMOTE" mktree </dev/null)"
+    cat > "$message" <<EOF
+autospec-claim-ledger-v1
+generation=fixture-$claim_id
+
+<!-- autospec-run-state:begin -->
+{"schema":1,"repo":"testorg/testrepo","issue":42,"worker_id":"$worker_id","state":"claimed","branch":"$branch","pr":"","step":"claimed","paths":[],"claimed_at":"$updated_at","updated_at":"$updated_at","ttl_seconds":10800,"claim_id":"$claim_id"}
+<!-- autospec-run-state:end -->
+EOF
+    oid="$(
+        GIT_AUTHOR_NAME='Autospec Test' \
+        GIT_AUTHOR_EMAIL='autospec-test@localhost' \
+        GIT_COMMITTER_NAME='Autospec Test' \
+        GIT_COMMITTER_EMAIL='autospec-test@localhost' \
+        git --git-dir "$CLAIM_REMOTE" commit-tree "$tree" -F "$message"
+    )"
+    git --git-dir "$CLAIM_REMOTE" update-ref refs/autospec/claims/issue-42 "$oid"
 }
 
-@test "(a) stale lowest-id lock: a new worker reclaims, exit 0, refreshes updated_at" {
-    # worker-a's lock server updated_at aged well past the default 10800s TTL.
-    seed_owned_lock "$(iso_ago 20000)"
+@test "a stale authoritative generation is reclaimed by a new worker" {
+    seed_claim_ref worker-a feat/worker-a claim-a "$(iso_ago 20000)"
 
-    run bash -c '"$0" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-b --branch feat/x 2>&1' "$AUTOSPEC"
+    run claim_acquire --issue 42 --repo testorg/testrepo \
+        --worker-id worker-b --branch feat/worker-b
     [ "$status" -eq 0 ]
     [[ "$output" == *'"claimed":true'* ]]
     [[ "$output" == *'"worker_id":"worker-b"'* ]]
-    [[ "$output" != *'claim lost'* ]]
-    # the surviving marked lock is now owned by worker-b with a fresh updated_at
-    run jq -r 'map(select((.body//"")|contains("autospec-run-state:begin")))
-               | sort_by(.id) | .[0].body' "$COMMENTS"
-    [[ "$output" == *'worker-b'* ]]
-    [[ "$output" != *'worker-a'* ]]
+
+    run "$AUTOSPEC" claim state read --issue 42 --repo testorg/testrepo
+    [[ "$output" == *'"worker_id":"worker-b"'* ]]
+    [[ "$output" != *'"claim_id":"claim-a"'* ]]
 }
 
-@test "(b) fresh lowest-id lock owned by another worker: exit 2, no reclaim" {
-    # worker-a's lock is well within TTL: a live-but-slow worker must NOT be
-    # reclaimed. worker-b loses and self-cleans.
-    seed_owned_lock "$(iso_ago 60)"
+@test "a fresh authoritative generation rejects another worker" {
+    seed_claim_ref worker-a feat/worker-a claim-a "$(iso_ago 60)"
 
-    run claim_acquire --issue 42 --repo testorg/testrepo --worker-id worker-b
+    run claim_acquire --issue 42 --repo testorg/testrepo \
+        --worker-id worker-b --branch feat/worker-b
     [ "$status" -eq 2 ]
     [[ "$output" == *'"claimed":false'* ]]
     [[ "$output" == *'"reason":"claim_lost"'* ]]
-    # never logged a reclaim for a fresh lease
-    ! grep -q 'stale lease reclaimed' "$CALLS"
+
+    run "$AUTOSPEC" claim state read --issue 42 --repo testorg/testrepo
+    [[ "$output" == *'"claim_id":"claim-a"'* ]]
 }
 
-@test "(c) ordering guard: higher-id worker vs FRESH lower-id lock -> lost, no reclaim regardless of updated_at" {
-    # Two marked comments: lowest id 100 (worker-a, FRESH) and higher id 101
-    # (worker-b). worker-b is the higher id; it must conclude claim lost and must
-    # NOT mistake worker-a's fresh lower-id comment for a stale lease.
+@test "audit comment ordering cannot steal a fresh Git-ref generation" {
     fresh="$(iso_ago 30)"
+    seed_claim_ref worker-a feat/worker-a claim-a "$fresh"
     cat > "$COMMENTS" <<JSON
 [
-  {
-    "id": 101,
-    "updated_at": "$fresh",
-    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-b\",\"state\":\"claimed\",\"claimed_at\":\"$fresh\",\"updated_at\":\"$fresh\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"
-  },
-  {
-    "id": 100,
-    "updated_at": "$fresh",
-    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"claimed_at\":\"$fresh\",\"updated_at\":\"$fresh\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"
-  }
+  {"id":101,"updated_at":"$fresh","body":"worker-b audit projection"},
+  {"id":100,"updated_at":"$fresh","body":"worker-a audit projection"}
 ]
 JSON
-    run claim_acquire --issue 42 --repo testorg/testrepo --worker-id worker-b
+
+    run claim_acquire --issue 42 --repo testorg/testrepo \
+        --worker-id worker-b --branch feat/worker-b
     [ "$status" -eq 2 ]
     [[ "$output" == *'"reason":"claim_lost"'* ]]
-    ! grep -q 'stale lease reclaimed' "$CALLS"
-    # the fresh lower-id winner (100) is never deleted by the loser
-    ! grep -q 'api repos/testorg/testrepo/issues/comments/100 -X DELETE' "$CALLS"
-    # and its body is never overwritten: no lease theft of a fresh lower-id lock
-    run jq -r 'map(select(.id == 100)) | .[0].body' "$COMMENTS"
-    [[ "$output" == *'worker-a'* ]]
-    [[ "$output" != *'worker-b'* ]]
+
+    run "$AUTOSPEC" claim state read --issue 42 --repo testorg/testrepo
+    [[ "$output" == *'"worker_id":"worker-a"'* ]]
+    [ "$(jq -r '.[0].id' "$COMMENTS")" = 101 ]
 }

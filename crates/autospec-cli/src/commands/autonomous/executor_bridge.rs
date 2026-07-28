@@ -11557,6 +11557,9 @@ where
     ensure_failure_cleanup_intent(state_path, state, retryable, exhausted, reason)?;
     close_owned_runtime(state_path, state, runtime)?;
     let disposition = failure_disposition(retryable, exhausted);
+    if disposition == BridgeClaimDisposition::Retryable {
+        prepare_available_worktree_transfer(state_path, state, None)?;
+    }
     if disposition == BridgeClaimDisposition::Retryable && state.pr.is_some() {
         close_retryable_pull_request_with_refresh(
             state_path,
@@ -21643,6 +21646,23 @@ exit 64
         state.identity.runtime_session_id = None;
         let state_path = fixture.root.join("state/terminal-failure.json");
         super::write_invocation_atomic(&state_path, &state).expect("persist failure state");
+        let scope_root = state
+            .identity
+            .worktree
+            .parent()
+            .expect("executor scope root")
+            .to_path_buf();
+        let issue = state.identity.issue;
+        super::ensure_active_worktree_ownership(
+            &state.identity.repository_path,
+            &scope_root,
+            issue,
+            &state.identity.worktree,
+            &state.identity.branch,
+            &state.identity.claim_id,
+            &state.identity.invocation_id,
+        )
+        .expect("seed active worktree ownership");
 
         super::set_zero_effect_recovery_failpoint(
             super::ZeroEffectRecoveryFailpoint::AfterClaimTransition,
@@ -21657,6 +21677,15 @@ exit 64
             "executor_zero_effect_completion",
             |_, disposition| {
                 assert_eq!(disposition, super::BridgeClaimDisposition::Retryable);
+                let transfer: serde_json::Value = serde_json::from_str(
+                    &fs::read_to_string(super::ownership_transfer_path(&scope_root, issue))
+                        .expect("read ownership offered before claim release"),
+                )
+                .expect("parse ownership offered before claim release");
+                assert_eq!(
+                    transfer["state"], "available",
+                    "retryable failure must offer retained worktree ownership before release"
+                );
                 Ok(super::BridgeClaimTransition::Transitioned)
             },
         )

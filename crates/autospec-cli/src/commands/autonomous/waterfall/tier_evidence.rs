@@ -1,6 +1,3 @@
-use std::fs;
-use std::io;
-
 use autospec_core::autonomous::no_work::NoWorkTier;
 use autospec_core::autonomous::waterfall::{SealedEvidence, TierReceipt, WaterfallState};
 
@@ -57,21 +54,7 @@ impl WaterfallStore {
         }
         self.verify_tier2_evidence(state.next_pass_id(), receipt)?;
         let receipt_path = self.receipt_path(receipt)?;
-        match fs::remove_file(&receipt_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(WaterfallStoreError::InvalidReceipt(
-                    "obsolete Tier 2 receipt disappeared during rotation".to_string(),
-                ))
-            }
-            Err(error) => {
-                return Err(WaterfallStoreError::Diagnostic(format!(
-                    "cannot remove obsolete Tier 2 receipt {}: {error}",
-                    receipt_path.display()
-                )))
-            }
-        }
-        Ok(())
+        evidence::remove_obsolete_tier2_receipt(&receipt_path)
     }
 
     pub(in crate::commands::autonomous) fn persist_tier3_evidence(

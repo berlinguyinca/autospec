@@ -26,7 +26,15 @@ fn claim_acquire_uses_the_configured_trusted_actor_policy() {
     let comments = fixture.join("comments.json");
     let mode = fixture.join("labels.mode");
     let policy = fixture.join("trusted-actors.yml");
+    let claim_remote = fixture.join("claim-remote.git");
     fs::create_dir_all(&bin).expect("create fixture bin directory");
+    assert!(Command::new("git")
+        .args(["init", "--bare"])
+        .arg(&claim_remote)
+        .output()
+        .expect("initialize claim remote")
+        .status
+        .success());
     fs::write(&comments, "[]\n").expect("write empty comments");
     fs::write(&mode, "ready\n").expect("write initial label mode");
     fs::write(
@@ -81,6 +89,7 @@ exit 0
         .env("AUTOSPEC_CLAIM_POLICY_MODE", &mode)
         .env("AUTOSPEC_CLAIM_POLICY_BODY", body)
         .env("AUTOSPEC_CONFIG_FILE", &policy)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &claim_remote)
         .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
         .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
         .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")

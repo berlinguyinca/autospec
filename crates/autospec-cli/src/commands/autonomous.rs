@@ -1756,25 +1756,46 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
     let stop_options = options.clone();
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
-    let mut stopped = 0;
-    let mut conductor_pid = None;
-    for name in ["supervisor", "monitor", "conductor"] {
-        let unit = read_unit(name, &layout);
-        let terminated = terminate_unit(name, &unit).map_err(CommandFailure::diagnostic)?;
-        if terminated {
-            stopped += 1;
+    let units = ["supervisor", "monitor", "conductor"].map(|name| (name, read_unit(name, &layout)));
+    let terminate_units = || {
+        let mut stopped = 0;
+        let mut conductor_pid = None;
+        for (name, unit) in &units {
+            let terminated = terminate_unit(name, unit).map_err(CommandFailure::diagnostic)?;
+            if terminated {
+                stopped += 1;
+            }
+            if *name == "conductor"
+                && (terminated || unit.metadata_state == UnitMetadataState::Stale)
+            {
+                conductor_pid = Some(unit.pid.clone());
+            }
         }
-        if name == "conductor" && (terminated || unit.metadata_state == UnitMetadataState::Stale) {
-            conductor_pid = Some(unit.pid);
+        wait_for_scope_stopped(&layout);
+        Ok::<(usize, Option<String>), CommandFailure>((stopped, conductor_pid))
+    };
+    let (lifecycle, lease, stopped) = if options.force {
+        let (stopped, conductor_pid) = terminate_units()?;
+        if let Some(pid) = conductor_pid {
+            release_terminated_owner(&layout, &pid).map_err(CommandFailure::diagnostic)?;
         }
-    }
-    wait_for_scope_stopped(&layout);
-    if let Some(pid) = conductor_pid {
-        release_terminated_owner(&layout, &pid).map_err(CommandFailure::diagnostic)?;
-    }
-    let (lifecycle, lease) =
-        acquire_lifecycle_start(&layout, &options, LifecycleTransition::Restart)
-            .map_err(LifecycleStartError::into_command_failure)?;
+        let (lifecycle, lease) =
+            acquire_lifecycle_start(&layout, &options, LifecycleTransition::Restart)
+                .map_err(LifecycleStartError::into_command_failure)?;
+        (lifecycle, lease, stopped)
+    } else {
+        let (lifecycle, lease) =
+            acquire_lifecycle_start(&layout, &options, LifecycleTransition::Restart)
+                .map_err(LifecycleStartError::into_command_failure)?;
+        let (stopped, _) = match terminate_units() {
+            Ok(stopped) => stopped,
+            Err(error) => {
+                release_launch_lease(&layout.repo, &lease)?;
+                return Err(error);
+            }
+        };
+        (lifecycle, lease, stopped)
+    };
     let launched = restart_after_lease(&layout, &options, &lifecycle, &lease, stopped);
     let (stopped, conductor, monitor, supervisor) = match launched {
         Ok(units) => units,
@@ -2559,8 +2580,11 @@ fn run_foreground_with_lease(
         retire_recovered_claim_acquisition(&state_path, &layout.repo, issue)?;
         state = state
             .transition(ConductorEvent::RetryScheduled)
+            .and_then(|state| state.transition(ConductorEvent::Claimed))
             .map_err(CommandFailure::diagnostic)?;
-        persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
+        let retired =
+            retire_foreground_ownership(&state_path, state).map_err(CommandFailure::diagnostic)?;
+        return Ok(ForegroundCompletion::State(Box::new(retired)));
     }
     if matches!(
         state.phase(),
@@ -2606,9 +2630,7 @@ fn run_foreground_with_lease(
                 None => None,
             };
         }
-        if state.phase() == ConductorPhase::Claim
-            && local_acquisition.is_some()
-            && lease.is_none()
+        if state.phase() == ConductorPhase::Claim && local_acquisition.is_some() && lease.is_none()
         {
             let dispatching = state
                 .transition(ConductorEvent::Claimed)

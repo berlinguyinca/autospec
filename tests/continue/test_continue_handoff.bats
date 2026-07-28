@@ -45,6 +45,7 @@ EOF
 
     # AUTOSPEC_HANDOFF_DISPATCHER=1 needed because stubs live in tmpdir.
     export AUTOSPEC_HANDOFF_DISPATCHER=1
+    export AUTOSPEC_HANDOFF_DISPATCHER_KIND=claude
     # Prepend stub dir so it wins over real binaries (if any) on PATH.
     # Keep core utils available.
     export PATH="$STUB_BIN:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"

@@ -25,6 +25,7 @@ EOF
     chmod +x "$STUB_BIN/claude"
 
     export AUTOSPEC_HANDOFF_DISPATCHER=1
+    export AUTOSPEC_HANDOFF_DISPATCHER_KIND=claude
     export PATH="$STUB_BIN:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
     export AUTOSPEC_CONTINUE_HISTORY="$WORK/history.json"
     export HOME="$WORK"
@@ -49,7 +50,7 @@ EOF
     # Use --skip-refine so we don't depend on a real refine pipeline.
     # The full path (extract -> handoff) is exercised; refine integration is
     # covered separately by test_continue_handoff.bats.
-    run bash "$SCRIPT" --from-message "$MSG" --skip-refine --autonomous
+    run bash "$SCRIPT" --from-message "$MSG" --skip-refine --autonomous --no-loop
     [ "$status" -eq 0 ]
 
     # Dispatcher received the extracted block.

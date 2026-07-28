@@ -113,8 +113,8 @@ fn assert_evidence_delegation(code: &str, scope: &str) {
         .filter(|token| *token == "remove_file")
         .count();
     assert_eq!(
-        qualified_calls, 2,
-        "{scope} must retain exactly two approved fs::remove_file calls"
+        qualified_calls, 4,
+        "{scope} must retain exactly four approved fs::remove_file calls"
     );
     assert_eq!(
         leaf_count, qualified_calls,
@@ -152,6 +152,8 @@ fn assert_tier_evidence_delegation(code: &str, scope: &str) {
                     "persist"
                         | "WaterfallEvidenceArtifact"
                         | "verify_tier2"
+                        | "clear_obsolete_tier2_policy"
+                        | "remove_obsolete_tier2_receipt"
                         | "verify_tier3"
                         | "clear_unreferenced_tier4"
                         | "verify_tier4"

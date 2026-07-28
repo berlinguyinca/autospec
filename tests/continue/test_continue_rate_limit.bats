@@ -31,6 +31,7 @@ EOF
     chmod +x "$STUB_BIN/refine-prompt.sh"
 
     export AUTOSPEC_HANDOFF_DISPATCHER=1
+    export AUTOSPEC_HANDOFF_DISPATCHER_KIND=claude
     export PATH="$STUB_BIN:/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin"
 
     export AUTOSPEC_CONTINUE_HISTORY="$WORK/history.json"

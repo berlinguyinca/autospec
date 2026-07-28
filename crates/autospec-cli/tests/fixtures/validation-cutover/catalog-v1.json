@@ -17,6 +17,7 @@
     "check_self_update",
     "check_self_update_duo",
     "check_startup_preflight",
+    "check_rust_output_macros",
     "check_codex_skills_install",
     "check_shared_script_install",
     "check_root_helper_wrapper_policy",
