@@ -4367,7 +4367,7 @@ fn inventory_ecosystem_manifests(worktree: &Path) -> Result<Vec<PathBuf>, String
             if file_type.is_dir() {
                 if matches!(
                     name.as_ref(),
-                    ".git" | ".autospec" | "target" | "node_modules" | ".venv" | "vendor"
+                    ".git" | ".autospec" | ".next" | "target" | "node_modules" | ".venv" | "vendor"
                 ) {
                     continue;
                 }
@@ -36584,6 +36584,24 @@ exit 19
         let error = super::resolve_full_suite(&nested.repo, "", &[], &BTreeMap::new())
             .expect_err("root Cargo must not hide nested package area");
         assert!(error.contains("tools/web/package.json"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_ignores_next_build_manifest() {
+        let fixture = GitFixture::new("ecosystem-next-build");
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"scripts":{"lint":"eslint .","typecheck":"tsc --noEmit","test":"node test.mjs","build":"next build"}}"#,
+        )
+        .expect("root package manifest");
+        fs::create_dir_all(fixture.repo.join(".next")).expect("Next.js build directory");
+        fs::write(fixture.repo.join(".next/package.json"), "{}\n")
+            .expect("generated Next.js package manifest");
+
+        let suite = super::resolve_full_suite(&fixture.repo, "", &[], &BTreeMap::new())
+            .expect("generated Next.js manifest must not require operator verification");
+
+        assert_eq!(suite.plan.commands.len(), 4);
     }
 
     #[test]
