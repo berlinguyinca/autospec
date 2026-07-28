@@ -15,7 +15,15 @@ normal operation:
 3. The reviewer receives the issue contract and exact commit to review.
 
 The resolved reviewer executable must be external to both the source repository
-and its issue worktree. Review command output, error output, and any
+and its issue worktree. Automatic reviewers run with a sanitized allowlist
+environment rather than inheriting the conductor environment. Codex uses its
+read-only sandbox; Claude receives only `Read`, `Glob`, and `Grep` in plan mode;
+OpenCode receives an inline runtime policy that denies every tool except read,
+glob, grep, list, and LSP. OpenCode's separate
+`AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER` remains required for implementation
+work, but automatic review does not use it.
+
+Review command output, error output, and any
 harness-specific result are stored under the private executor state tree,
 outside reviewed source. An external private normalizer captures normal harness
 diagnostics without treating transport traces as findings. Codex uses its final
@@ -25,8 +33,11 @@ exactly `LGTM`, then emits only `LGTM` on stdout and nothing on stderr to the
 strict review gate. The receipt binds the normalizer, captured diagnostics, and
 verdict so crash recovery cannot substitute any of them. The harness inherits a
 1 MiB file-size limit, and reaching that limit in stdout, stderr, or the Codex
-result fails review rather than accepting truncated evidence. Local, git,
-GitHub, or other remote mutation during review fails the gate.
+result fails review rather than accepting truncated evidence. The verdict file
+is cleared before every launch so an interrupted attempt cannot authorize its
+retry. A durable receipt is validated before a restarted executor resolves or
+launches another harness. Local, git, GitHub, or other remote mutation during
+review fails the gate.
 
 If no configured alias is usable, the executor reports
 `executor_harness_unknown` before review can mutate the pull request.

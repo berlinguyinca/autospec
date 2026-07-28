@@ -5318,9 +5318,10 @@ exit 1
         fs::copy(self.bin.join("gh"), bin.join("gh")).expect("copy bridge gh fixture");
         fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755))
             .expect("make bridge gh executable");
+        let review_launches = safe_root.join("review-launches");
         write_executable(
             &bin.join("codex-bridge-fixture"),
-            r#"#!/bin/sh
+            &r#"#!/bin/sh
 set -eu
 [ "${1:-}" = "sandbox" ] && exit 0
 artifact=""
@@ -5342,7 +5343,7 @@ case "$prompt" in
       printf '%s\n' 'codex startup/tool trace: normal non-verdict diagnostic output' >&2
       i=$((i + 1))
     done
-    printf '%s\n' "$$" >> "$AUTOSPEC_BRIDGE_REVIEW_LAUNCHES"
+    printf '%s\n' "$$" >> '__AUTOSPEC_BRIDGE_REVIEW_LAUNCHES__'
     exit 0
     ;;
 esac
@@ -5399,7 +5400,11 @@ chmod 600 "$artifact"
 if [ -n "${AUTOSPEC_BRIDGE_HARNESS_DONE:-}" ]; then
   : > "$AUTOSPEC_BRIDGE_HARNESS_DONE"
 fi
-"#,
+"#
+            .replace(
+                "__AUTOSPEC_BRIDGE_REVIEW_LAUNCHES__",
+                &review_launches.display().to_string(),
+            ),
         );
         for (scanner, output) in [
             (
