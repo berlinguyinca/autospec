@@ -1802,6 +1802,25 @@ fn observe_terminal_label_release(
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DirectCommand {
     pub(crate) argv: Vec<String>,
+    accepted_exit_codes: Vec<i32>,
+    identity_digest: Option<String>,
+}
+
+impl DirectCommand {
+    fn success(argv: Vec<String>) -> Self {
+        Self {
+            argv,
+            accepted_exit_codes: vec![0],
+            identity_digest: None,
+        }
+    }
+
+    fn accepts(&self, terminal: &AttemptTerminal) -> bool {
+        matches!(
+            terminal,
+            AttemptTerminal::Exited(code) if self.accepted_exit_codes.contains(code)
+        )
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1823,6 +1842,7 @@ pub(crate) struct ResolvedFullSuite {
 }
 
 const REQUIRED_SCANNERS: [&str; 4] = ["gitleaks", "semgrep", "trivy", "license-checker"];
+const GITLEAKS_NEXT_PATH_ALLOWLIST: &str = r"(^|/)\.next(/|$)";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ScannerExecutables {
@@ -1909,7 +1929,7 @@ fn validate_scanner_result(
     if !REQUIRED_SCANNERS.contains(&scanner) {
         return Err(format!("executor scanner identity is unknown: {scanner}"));
     }
-    if exit_status != 0 {
+    if exit_status != 0 && !(scanner == "gitleaks" && exit_status == 1) {
         return Err(format!(
             "executor required scanner {scanner} failed with exit status {exit_status}"
         ));
@@ -1935,7 +1955,13 @@ fn validate_scanner_result(
                     .to_string()
             })?;
             if findings.is_empty() {
-                Ok(())
+                if exit_status == 0 {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "executor required scanner gitleaks failed with exit status {exit_status}"
+                    ))
+                }
             } else {
                 Err("executor required scanner gitleaks reported findings".to_string())
             }
@@ -2045,6 +2071,7 @@ fn scanner_command(
     scanner: &str,
     executable: &Path,
     worktree: &Path,
+    gitleaks_config: &Path,
     gitleaks_report: &Path,
 ) -> Result<DirectCommand, String> {
     let executable = executable
@@ -2063,6 +2090,10 @@ fn scanner_command(
                 "--redact",
                 "--source",
                 worktree,
+                "--config",
+                gitleaks_config
+                    .to_str()
+                    .ok_or_else(|| "gitleaks config path is not UTF-8".to_string())?,
                 "--report-format",
                 "json",
                 "--report-path",
@@ -2114,7 +2145,115 @@ fn scanner_command(
         ),
         _ => return Err(format!("executor scanner identity is unknown: {scanner}")),
     }
-    Ok(DirectCommand { argv })
+    let mut command = DirectCommand::success(argv);
+    if scanner == "gitleaks" {
+        command.accepted_exit_codes = vec![0, 1];
+        command.identity_digest = Some(gitleaks_policy_digest(Path::new(worktree))?);
+    }
+    Ok(command)
+}
+
+fn gitleaks_policy_document(worktree: &Path) -> Result<String, String> {
+    let repository_config = worktree.join(".gitleaks.toml");
+    let extension = if repository_config
+        .try_exists()
+        .map_err(|error| format!("inspect repository Gitleaks config: {error}"))?
+    {
+        reject_symlink_path(&repository_config)?;
+        if !repository_config
+            .metadata()
+            .map_err(|error| format!("inspect repository Gitleaks config: {error}"))?
+            .is_file()
+        {
+            return Err("repository Gitleaks config is not a regular file".to_string());
+        }
+        let canonical = fs::canonicalize(&repository_config)
+            .map_err(|error| format!("canonicalize repository Gitleaks config: {error}"))?;
+        let path = canonical
+            .to_str()
+            .ok_or_else(|| "repository Gitleaks config path is not UTF-8".to_string())?;
+        format!(
+            "path = {}",
+            serde_json::to_string(path)
+                .map_err(|error| format!("encode repository Gitleaks config path: {error}"))?
+        )
+    } else {
+        "useDefault = true".to_string()
+    };
+    Ok(format!(
+        "title = \"Autospec executor Gitleaks policy\"\n\
+         \n\
+         [extend]\n\
+         {extension}\n\
+         \n\
+         [[allowlists]]\n\
+         description = \"Ignore generated Next.js output only\"\n\
+         paths = ['''{GITLEAKS_NEXT_PATH_ALLOWLIST}''']"
+    ))
+}
+
+fn gitleaks_policy_digest(worktree: &Path) -> Result<String, String> {
+    let policy = gitleaks_policy_document(worktree)?;
+    Ok(sha256_hex(format!("{policy}\n").as_bytes()))
+}
+
+fn materialize_gitleaks_policy(worktree: &Path, scanner_root: &Path) -> Result<PathBuf, String> {
+    let policy = gitleaks_policy_document(worktree)?;
+    let path = scanner_root.join("policy.toml");
+    write_private_atomic(&path, policy.as_bytes(), "Gitleaks scanner policy")?;
+    Ok(path)
+}
+
+fn reset_gitleaks_temporary_report(path: &Path) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    if path
+        .try_exists()
+        .map_err(|error| format!("inspect temporary Gitleaks report: {error}"))?
+    {
+        let metadata = fs::metadata(path)
+            .map_err(|error| format!("inspect temporary Gitleaks report: {error}"))?;
+        if !metadata.is_file() {
+            return Err("temporary Gitleaks report is not a regular file".to_string());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            // SAFETY: geteuid has no arguments or memory-safety preconditions.
+            if metadata.uid() != unsafe { nix::libc::geteuid() } {
+                return Err("temporary Gitleaks report has foreign ownership".to_string());
+            }
+        }
+        fs::remove_file(path)
+            .map_err(|error| format!("clear temporary Gitleaks report: {error}"))?;
+    }
+    drop(create_private_artifact(path)?);
+    Ok(())
+}
+
+fn publish_gitleaks_report(temporary: &Path, durable: &Path) -> Result<Vec<u8>, String> {
+    reject_symlink_path(temporary)?;
+    let metadata = fs::metadata(temporary)
+        .map_err(|error| format!("inspect temporary Gitleaks report: {error}"))?;
+    if !metadata.is_file() {
+        return Err("temporary Gitleaks report is not a regular file".to_string());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no arguments or memory-safety preconditions.
+        if metadata.uid() != unsafe { nix::libc::geteuid() } {
+            return Err("temporary Gitleaks report has foreign ownership".to_string());
+        }
+    }
+    let result =
+        fs::read(temporary).map_err(|error| format!("read temporary Gitleaks report: {error}"))?;
+    if result.len() as u64 > MAX_DIRECT_OUTPUT_BYTES {
+        return Err("executor required scanner gitleaks result exceeded 1 MiB".to_string());
+    }
+    write_private_atomic(durable, &result, "durable Gitleaks report")?;
+    fs::remove_file(temporary)
+        .map_err(|error| format!("remove temporary Gitleaks report: {error}"))?;
+    fs::read(durable).map_err(|error| format!("read durable Gitleaks report: {error}"))
 }
 
 pub(crate) fn run_required_scanners(
@@ -2130,21 +2269,19 @@ pub(crate) fn run_required_scanners(
         let scanner_root = artifact_root.join(scanner);
         ensure_private_directory(&scanner_root)?;
         let report = scanner_root.join("result.json");
+        let policy = scanner_root.join("policy.toml");
+        let temporary_report = scanner_root.join("result.tmp.json");
         if scanner == "gitleaks" {
-            let completed = scanner_root.join("process/command-000.json").is_file();
-            if report.is_file() {
-                validate_private_state_file(&report)
-                    .map_err(|error| format!("existing gitleaks report is unsafe: {error}"))?;
-                if !completed {
-                    fs::remove_file(&report)
-                        .map_err(|error| format!("clear partial gitleaks report: {error}"))?;
-                    drop(create_private_artifact(&report)?);
-                }
-            } else {
-                drop(create_private_artifact(&report)?);
-            }
+            materialize_gitleaks_policy(worktree, &scanner_root)?;
+            reset_gitleaks_temporary_report(&temporary_report)?;
         }
-        let command = scanner_command(scanner, executables.path(scanner)?, worktree, &report)?;
+        let command = scanner_command(
+            scanner,
+            executables.path(scanner)?,
+            worktree,
+            &policy,
+            &temporary_report,
+        )?;
         let plan = DirectCommandPlan {
             commands: vec![command],
         };
@@ -2159,16 +2296,18 @@ pub(crate) fn run_required_scanners(
         .into_iter()
         .next()
         .ok_or_else(|| format!("executor required scanner {scanner} produced no observation"))?;
-        let result_path = if scanner == "gitleaks" {
-            report
+        let (result_path, result) = if scanner == "gitleaks" {
+            let result = publish_gitleaks_report(&temporary_report, &report)?;
+            (report, result)
         } else {
-            command.stdout_path.clone()
+            let result_path = command.stdout_path.clone();
+            let result = fs::read(&result_path)
+                .map_err(|error| format!("read required scanner {scanner} result: {error}"))?;
+            (result_path, result)
         };
         reject_symlink_path(&result_path)?;
         validate_private_state_file(&result_path)
             .map_err(|error| format!("executor required scanner {scanner} result: {error}"))?;
-        let result = fs::read(&result_path)
-            .map_err(|error| format!("read required scanner {scanner} result: {error}"))?;
         if result.len() as u64 > MAX_DIRECT_OUTPUT_BYTES {
             return Err(format!(
                 "executor required scanner {scanner} result exceeded 1 MiB"
@@ -2480,7 +2619,7 @@ fn load_or_create_evidence_intent(
     request: &DeterministicEvidenceRequest<'_>,
     input_digest: &str,
 ) -> Result<EvidenceIntent, String> {
-    let (semantic_input_digest, _) = evidence_input_digests(lane, request);
+    let (semantic_input_digest, _) = evidence_input_digests(lane, request)?;
     let path = artifact_root.join("intent.json");
     if path.is_file() {
         validate_private_state_file(&path)
@@ -2989,15 +3128,17 @@ fn select_evidence_generation(lane_root: &Path, base_input_digest: &str) -> Resu
 fn evidence_input_digests(
     lane: &PremergeLaneIdentity,
     request: &DeterministicEvidenceRequest<'_>,
-) -> (String, String) {
+) -> Result<(String, String), String> {
+    let scanner_policy_digest = gitleaks_policy_digest(&request.state.identity.worktree)?;
     let semantic_input_digest = sha256_hex(
         format!(
-            "{}\0{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}",
             lane.lane_digest(),
             request.state.identity.base_ref,
             request.state.identity.base_oid,
             request.issue_body,
-            request.spec_documents.join("\0")
+            request.spec_documents.join("\0"),
+            scanner_policy_digest,
         )
         .as_bytes(),
     );
@@ -3012,7 +3153,7 @@ fn evidence_input_digests(
         )
         .as_bytes(),
     );
-    (semantic_input_digest, input_digest)
+    Ok((semantic_input_digest, input_digest))
 }
 
 #[derive(Debug)]
@@ -3093,7 +3234,10 @@ fn observed_evidence_bundle(
             &scanner.name,
             scanner_executables.path(&scanner.name)?,
             worktree,
-            &intent.attempt_root.join("security/gitleaks/result.json"),
+            &intent.attempt_root.join("security/gitleaks/policy.toml"),
+            &intent
+                .attempt_root
+                .join("security/gitleaks/result.tmp.json"),
         )?;
         let executable = fs::canonicalize(scanner_executables.path(&scanner.name)?)
             .map_err(|error| format!("canonicalize scanner executable: {error}"))?;
@@ -3485,7 +3629,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
     }
     ensure_private_directory(request.artifact_root)?;
     let _attempt_lease = acquire_evidence_attempt_lease(request.artifact_root)?;
-    let (_, base_input_digest) = evidence_input_digests(&lane, &request);
+    let (_, base_input_digest) = evidence_input_digests(&lane, &request)?;
     let input_digest = select_evidence_generation(request.artifact_root, &base_input_digest)?;
     let attempt_root = request
         .artifact_root
@@ -4076,7 +4220,7 @@ fn parse_direct_command_plan(line: &str) -> Result<DirectCommandPlan, String> {
                     argv[0]
                 ));
             }
-            Ok(DirectCommand { argv })
+            Ok(DirectCommand::success(argv))
         })
         .collect::<Result<Vec<_>, String>>()?;
     Ok(DirectCommandPlan { commands })
@@ -4273,9 +4417,11 @@ fn detected_full_suite(worktree: &Path) -> Result<Vec<DirectCommand>, String> {
             "npm"
         };
         for script in ["lint", "typecheck", "test", "build"] {
-            commands.push(DirectCommand {
-                argv: vec![runner.to_string(), "run".to_string(), script.to_string()],
-            });
+            commands.push(DirectCommand::success(vec![
+                runner.to_string(),
+                "run".to_string(),
+                script.to_string(),
+            ]));
         }
     }
     if worktree.join("pom.xml").is_file() {
@@ -4284,13 +4430,11 @@ fn detected_full_suite(worktree: &Path) -> Result<Vec<DirectCommand>, String> {
         } else {
             "mvn"
         };
-        commands.push(DirectCommand {
-            argv: vec![
-                runner.to_string(),
-                "--batch-mode".to_string(),
-                "verify".to_string(),
-            ],
-        });
+        commands.push(DirectCommand::success(vec![
+            runner.to_string(),
+            "--batch-mode".to_string(),
+            "verify".to_string(),
+        ]));
     }
     if worktree.join("build.gradle").is_file() || worktree.join("build.gradle.kts").is_file() {
         let runner = if worktree.join("gradlew").is_file() {
@@ -4298,9 +4442,11 @@ fn detected_full_suite(worktree: &Path) -> Result<Vec<DirectCommand>, String> {
         } else {
             "gradle"
         };
-        commands.push(DirectCommand {
-            argv: vec![runner.to_string(), "check".to_string(), "build".to_string()],
-        });
+        commands.push(DirectCommand::success(vec![
+            runner.to_string(),
+            "check".to_string(),
+            "build".to_string(),
+        ]));
     }
     if worktree.join("go.mod").is_file() {
         for argv in [
@@ -4308,9 +4454,9 @@ fn detected_full_suite(worktree: &Path) -> Result<Vec<DirectCommand>, String> {
             vec!["go", "test", "./..."],
             vec!["go", "build", "./..."],
         ] {
-            commands.push(DirectCommand {
-                argv: argv.into_iter().map(str::to_string).collect(),
-            });
+            commands.push(DirectCommand::success(
+                argv.into_iter().map(str::to_string).collect(),
+            ));
         }
     }
     let pyproject = worktree.join("pyproject.toml");
@@ -4515,13 +4661,48 @@ fn direct_intent_document(
     .to_string()
 }
 
+#[allow(clippy::too_many_arguments)]
+fn direct_intent_document_with_policy(
+    attempt_id: &str,
+    commit_oid: &str,
+    runtime_session_id: Option<&str>,
+    executable: &Path,
+    argv: &[String],
+    accepted_exit_codes: &[i32],
+    identity_digest: Option<&str>,
+) -> String {
+    if accepted_exit_codes == [0] && identity_digest.is_none() {
+        return direct_intent_document(
+            attempt_id,
+            commit_oid,
+            runtime_session_id,
+            executable,
+            argv,
+        );
+    }
+    serde_json::json!({
+        "schema": 2,
+        "attempt_id": attempt_id,
+        "resolution": "resolved",
+        "commit_oid": commit_oid,
+        "runtime_session_id": runtime_session_id,
+        "executable": executable,
+        "argv": argv,
+        "accepted_exit_codes": accepted_exit_codes,
+        "identity_digest": identity_digest,
+    })
+    .to_string()
+}
+
 fn direct_unresolved_intent_document(
     attempt_id: &str,
     commit_oid: &str,
     runtime_session_id: Option<&str>,
     argv: &[String],
+    accepted_exit_codes: &[i32],
+    identity_digest: Option<&str>,
 ) -> String {
-    serde_json::json!({
+    let mut value = serde_json::json!({
         "schema": 2,
         "attempt_id": attempt_id,
         "resolution": "unresolved",
@@ -4529,8 +4710,12 @@ fn direct_unresolved_intent_document(
         "runtime_session_id": runtime_session_id,
         "executable": Path::new(&argv[0]),
         "argv": argv,
-    })
-    .to_string()
+    });
+    if accepted_exit_codes != [0] || identity_digest.is_some() {
+        value["accepted_exit_codes"] = serde_json::json!(accepted_exit_codes);
+        value["identity_digest"] = serde_json::json!(identity_digest);
+    }
+    value.to_string()
 }
 
 fn new_direct_attempt_id_candidate() -> Result<String, String> {
@@ -5936,6 +6121,8 @@ pub(crate) fn execute_direct_plan(
                     &commit_oid,
                     runtime.map(DirectRuntimeAdapter::session_id),
                     &command.argv,
+                    &command.accepted_exit_codes,
+                    command.identity_digest.as_deref(),
                 );
                 write_private_create_once(
                     &paths.intent,
@@ -5981,12 +6168,14 @@ pub(crate) fn execute_direct_plan(
                 attempt_id = reserve_direct_attempt_id(&paths)?;
             }
         }
-        let mut intent_body = direct_intent_document(
+        let mut intent_body = direct_intent_document_with_policy(
             &attempt_id,
             &commit_oid,
             runtime.map(DirectRuntimeAdapter::session_id),
             &executable,
             &effective.argv,
+            &effective.accepted_exit_codes,
+            effective.identity_digest.as_deref(),
         );
         let reconciled_launch = match reconcile_direct_launch(&paths, Some(&intent_body)) {
             Ok(reconciled) => {
@@ -6039,21 +6228,23 @@ pub(crate) fn execute_direct_plan(
                 runtime.map(DirectRuntimeAdapter::session_id),
             )?;
             let terminal = recovered.terminal.clone();
-            if terminal.is_success()
+            if command.accepts(&terminal)
                 || (reconciled_launch && matches!(terminal, AttemptTerminal::CleanupFailed(_)))
             {
                 archive_reconciled_direct_failure(&paths)?;
                 attempt_id = reserve_direct_attempt_id(&paths)?;
-                intent_body = direct_intent_document(
+                intent_body = direct_intent_document_with_policy(
                     &attempt_id,
                     &commit_oid,
                     runtime.map(DirectRuntimeAdapter::session_id),
                     &executable,
                     &effective.argv,
+                    &effective.accepted_exit_codes,
+                    effective.identity_digest.as_deref(),
                 );
             } else {
                 observed.push(recovered);
-                if !terminal.is_success() {
+                if !command.accepts(&terminal) {
                     return Err(format!(
                         "executor direct command segment {index} {}",
                         terminal.failure_message()
@@ -6126,7 +6317,7 @@ pub(crate) fn execute_direct_plan(
         validate_observed_command(&worktree, &observation)?;
         let terminal = observation.terminal.clone();
         observed.push(observation);
-        if !terminal.is_success() {
+        if !command.accepts(&terminal) {
             let cleanup = runtime
                 .map(DirectRuntimeAdapter::close_verified)
                 .transpose();
@@ -6164,6 +6355,8 @@ fn recover_observed_command(
                 &observed.commit_oid,
                 runtime_session_id,
                 &declared.argv,
+                &declared.accepted_exit_codes,
+                declared.identity_digest.as_deref(),
             );
             let persisted_intent = fs::read_to_string(record_path.with_extension("intent.json"))
                 .map_err(|error| format!("read unresolved direct command intent: {error}"))?;
@@ -6178,6 +6371,22 @@ fn recover_observed_command(
             let executable = resolve_direct_executable(worktree, &declared.argv[0])?;
             let mut argv = declared.argv.clone();
             argv[0] = executable.display().to_string();
+            let expected_intent = direct_intent_document_with_policy(
+                &observed.attempt_id,
+                &observed.commit_oid,
+                runtime_session_id,
+                &executable,
+                &argv,
+                &declared.accepted_exit_codes,
+                declared.identity_digest.as_deref(),
+            );
+            let persisted_intent = fs::read_to_string(record_path.with_extension("intent.json"))
+                .map_err(|error| format!("read resolved direct command intent: {error}"))?;
+            if persisted_intent != expected_intent {
+                return Err(
+                    "recovered command differs from its resolved invocation intent".to_string(),
+                );
+            }
             (executable, argv)
         };
     if observed.attempt_id != expected_attempt_id
@@ -28072,9 +28281,9 @@ exit 64
         let first_launch = fs::read(&fixture.paths.launch).expect("first launch snapshot");
         let later_marker_body = fs::read(&later_marker).expect("later marker snapshot");
         let plan = super::DirectCommandPlan {
-            commands: vec![super::DirectCommand {
-                argv: vec!["/usr/bin/true".to_string()],
-            }],
+            commands: vec![super::DirectCommand::success(vec![
+                "/usr/bin/true".to_string()
+            ])],
         };
 
         let error = super::execute_direct_plan(
@@ -35017,7 +35226,8 @@ exit 19
             model_output: None,
             stall_timeout: Duration::from_secs(1),
         };
-        let (_, first_digest) = super::evidence_input_digests(&lane, &first_request);
+        let (_, first_digest) =
+            super::evidence_input_digests(&lane, &first_request).expect("first evidence digests");
         let first_root = lane_root.join("attempts").join(&first_digest[..24]);
         super::ensure_private_directory(&first_root).expect("first attempt root");
         let first_intent = super::load_or_create_evidence_intent(
@@ -35042,7 +35252,8 @@ exit 19
             runtime: Some(&second),
             ..first_request
         };
-        let (_, second_digest) = super::evidence_input_digests(&lane, &second_request);
+        let (_, second_digest) =
+            super::evidence_input_digests(&lane, &second_request).expect("second evidence digests");
         let second_root = lane_root.join("attempts").join(&second_digest[..24]);
         super::ensure_private_directory(&second_root).expect("second attempt root");
         super::load_or_create_evidence_intent(&second_root, &lane, &second_request, &second_digest)
@@ -35051,6 +35262,109 @@ exit 19
         assert_ne!(first_root, second_root);
         assert!(first_root.join("intent.json").is_file());
         assert!(second_root.join("intent.json").is_file());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_scanner_policy_digest_rotates_failed_evidence_once() {
+        // Break caught: a failed attempt created under the old scanner policy replaying after
+        // the generated Gitleaks policy changes, or rotating again on every same-policy restart.
+        let fixture = GitFixture::new("evidence-scanner-policy-generation");
+        let mut state = supervision_state(&fixture);
+        let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        state.identity.branch = "main".into();
+        state.identity.base_oid = commit.clone();
+        state.head_oid = Some(commit.clone());
+        let proof = super::ImplementationProof {
+            head_oid: commit.clone(),
+            closeout_body: String::new(),
+        };
+        let lane = super::PremergeLaneIdentity::new(
+            state.identity.repository.clone(),
+            state.identity.issue,
+            state.identity.worker_id.clone(),
+            state.identity.claim_id.clone(),
+            "main",
+            commit,
+        )
+        .expect("lane");
+        let scanner_paths = super::ScannerExecutables {
+            paths: BTreeMap::new(),
+        };
+        let evidence_env = BTreeMap::new();
+        let request = super::DeterministicEvidenceRequest {
+            state: &state,
+            proof: &proof,
+            issue_body: "issue",
+            spec_documents: &[],
+            env: &evidence_env,
+            scanners: &scanner_paths,
+            artifact_root: &fixture.root,
+            runtime: None,
+            model_output: None,
+            stall_timeout: Duration::from_secs(1),
+        };
+        let legacy_semantic = autospec_core::autonomous::waterfall::sha256_hex(
+            format!(
+                "{}\0{}\0{}\0{}\0{}",
+                lane.lane_digest(),
+                request.state.identity.base_ref,
+                request.state.identity.base_oid,
+                request.issue_body,
+                request.spec_documents.join("\0")
+            )
+            .as_bytes(),
+        );
+        let legacy_digest = autospec_core::autonomous::waterfall::sha256_hex(
+            format!("{legacy_semantic}\0").as_bytes(),
+        );
+        let (_, policy_digest) =
+            super::evidence_input_digests(&lane, &request).expect("policy evidence digests");
+        assert_ne!(
+            policy_digest, legacy_digest,
+            "scanner policy must change the stable evidence input"
+        );
+
+        let lane_root = fixture.root.join("lane-evidence");
+        super::ensure_private_directory(&lane_root).expect("lane root");
+        let old_relative = format!("attempts/{}", &legacy_digest[..24]);
+        let old_root = lane_root.join(&old_relative);
+        super::ensure_private_directory(&old_root).expect("old attempt");
+        super::write_private_create_once(
+            &old_root.join("intent.json"),
+            b"{\"failed\":true}",
+            "old failed evidence",
+        )
+        .expect("old failed artifact");
+        let active = serde_json::json!({
+            "schema": 2,
+            "attempt_path": old_relative,
+            "input_digest": legacy_digest,
+            "base_input_digest": legacy_digest,
+            "intent_digest": "old",
+            "runtime_session_id": serde_json::Value::Null,
+        })
+        .to_string();
+        super::write_private_atomic(
+            &lane_root.join("active.json"),
+            active.as_bytes(),
+            "old active evidence",
+        )
+        .expect("old active marker");
+
+        let first = super::select_evidence_generation(&lane_root, &policy_digest)
+            .expect("policy change rotates failed evidence");
+        let diagnostics = || {
+            fs::read_dir(lane_root.join("diagnostics"))
+                .expect("diagnostics directory")
+                .count()
+        };
+        assert_ne!(first, legacy_digest);
+        assert_eq!(diagnostics(), 1);
+
+        let second = super::select_evidence_generation(&lane_root, &policy_digest)
+            .expect("same policy reuses rotated generation");
+        assert_eq!(second, first);
+        assert_eq!(diagnostics(), 1, "same policy rotated more than once");
     }
 
     #[test]
@@ -36240,6 +36554,154 @@ exit 19
     }
 
     #[test]
+    fn autonomous_executor_bridge_gitleaks_ignores_only_next_generated_output() {
+        // Break caught: generated Next.js bundles replaying source-like test secrets into the
+        // required scan while an equivalent finding in a source fixture must still block.
+        let fixture = GitFixture::new("gitleaks-next-policy");
+        fs::write(
+            fixture.repo.join(".gitleaks.toml"),
+            "title = \"Autospec test policy\"\n\
+             [[rules]]\n\
+             id = \"autospec-test-secret\"\n\
+             description = \"harmless test marker\"\n\
+             regex = '''AUTOSPEC_TEST_SECRET_[A-Z]+'''\n",
+        )
+        .expect("test Gitleaks config");
+        let generated = fixture.repo.join(".next/cache");
+        let source = fixture.repo.join("fixtures/cache");
+        fs::create_dir_all(&generated).expect("generated Next.js cache");
+        fs::create_dir_all(&source).expect("source fixture cache");
+        let token = "AUTOSPEC_TEST_SECRET_ALPHA";
+        fs::write(generated.join("bundle.js"), format!("{token}\n"))
+            .expect("generated secret fixture");
+        fs::write(source.join("source.js"), format!("{token}\n")).expect("source secret fixture");
+        let gitleaks =
+            super::resolve_direct_executable(&fixture.repo, "gitleaks").expect("real gitleaks");
+        let scanners = super::ScannerExecutables::from_paths(
+            ["gitleaks", "semgrep", "trivy", "license-checker"]
+                .into_iter()
+                .map(|scanner| (scanner.to_string(), gitleaks.clone()))
+                .collect(),
+        )
+        .expect("scanner paths");
+        let artifact_root = fixture.root.join("scanner-evidence");
+
+        let error = super::run_required_scanners(
+            &fixture.repo,
+            &artifact_root,
+            &scanners,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("source finding must block the required scan");
+        let report = artifact_root.join("gitleaks/result.json");
+        let findings: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&report).expect("durable Gitleaks finding report"),
+        )
+        .expect("Gitleaks JSON report");
+        let paths = findings
+            .as_array()
+            .expect("Gitleaks findings array")
+            .iter()
+            .map(|finding| {
+                finding
+                    .get("File")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("finding file")
+            })
+            .collect::<Vec<_>>();
+
+        assert!(error.contains("gitleaks reported findings"), "{error}");
+        assert!(
+            paths
+                .iter()
+                .any(|path| path.ends_with("fixtures/cache/source.js")),
+            "{paths:?}"
+        );
+        assert!(
+            paths.iter().all(|path| !path.contains("/.next/")),
+            "{paths:?}"
+        );
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(report)
+                .expect("durable report metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_gitleaks_preserves_repository_rules() {
+        // Break caught: the generated exclusion policy replacing a repository's custom rules
+        // instead of extending them.
+        let fixture = GitFixture::new("gitleaks-repository-policy");
+        fs::write(
+            fixture.repo.join(".gitleaks.toml"),
+            "title = \"Repository policy\"\n\
+             [[rules]]\n\
+             id = \"autospec-repository-secret\"\n\
+             description = \"repository secret fixture\"\n\
+             regex = '''AUTOSPEC_CUSTOM_SECRET_[A-Z]+'''\n",
+        )
+        .expect("repository Gitleaks config");
+        fs::create_dir_all(fixture.repo.join(".next/cache")).expect("generated Next.js cache");
+        fs::create_dir_all(fixture.repo.join("fixtures/cache")).expect("source fixture cache");
+        fs::write(
+            fixture.repo.join(".next/cache/bundle.js"),
+            "AUTOSPEC_CUSTOM_SECRET_GENERATED\n",
+        )
+        .expect("generated custom-rule fixture");
+        fs::write(
+            fixture.repo.join("fixtures/cache/source.js"),
+            "AUTOSPEC_CUSTOM_SECRET_SOURCE\n",
+        )
+        .expect("source custom-rule fixture");
+        let gitleaks =
+            super::resolve_direct_executable(&fixture.repo, "gitleaks").expect("real gitleaks");
+        let scanners = super::ScannerExecutables::from_paths(
+            ["gitleaks", "semgrep", "trivy", "license-checker"]
+                .into_iter()
+                .map(|scanner| (scanner.to_string(), gitleaks.clone()))
+                .collect(),
+        )
+        .expect("scanner paths");
+        let artifact_root = fixture.root.join("scanner-evidence");
+
+        super::run_required_scanners(
+            &fixture.repo,
+            &artifact_root,
+            &scanners,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("repository source finding must block");
+        let findings: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(artifact_root.join("gitleaks/result.json"))
+                .expect("repository-rule report"),
+        )
+        .expect("repository-rule JSON");
+        let findings = findings.as_array().expect("Gitleaks findings array");
+
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(
+            findings[0]
+                .get("RuleID")
+                .and_then(serde_json::Value::as_str),
+            Some("autospec-repository-secret")
+        );
+        assert!(
+            findings[0]
+                .get("File")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|path| path.ends_with("fixtures/cache/source.js")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn autonomous_executor_bridge_restart_reruns_all_scanner_results() {
         // Break caught: successful scanner records recovered from disk becoming authoritative
         // security evidence without re-executing each scanner in the current process.
@@ -36306,8 +36768,43 @@ exit 19
     }
 
     #[test]
+    fn autonomous_executor_bridge_policy_digest_prevents_command_replay() {
+        // Break caught: an identical scanner argv recovering a terminal record created under
+        // different generated-policy content.
+        let fixture = GitFixture::new("scanner-policy-command-identity");
+        let artifact_root = fixture.root.join("command-evidence");
+        let command = |digest: &str| {
+            let mut command = super::DirectCommand::success(vec!["/usr/bin/true".to_string()]);
+            command.identity_digest = Some(digest.to_string());
+            super::DirectCommandPlan {
+                commands: vec![command],
+            }
+        };
+
+        super::execute_direct_plan(
+            &fixture.repo,
+            &command(&"a".repeat(64)),
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("first policy-bound command");
+        let error = super::execute_direct_plan(
+            &fixture.repo,
+            &command(&"b".repeat(64)),
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("different policy digest must not replay the old terminal record");
+
+        assert!(error.contains("invocation intent"), "{error}");
+    }
+
+    #[test]
     fn autonomous_executor_bridge_scanner_argv_is_direct_and_fail_closed() {
         let worktree = Path::new("/safe/worktree");
+        let config = Path::new("/safe/evidence/gitleaks-policy.toml");
         let report = Path::new("/safe/evidence/gitleaks.json");
         let expected = [
             (
@@ -36320,6 +36817,8 @@ exit 19
                     "--redact",
                     "--source",
                     "/safe/worktree",
+                    "--config",
+                    "/safe/evidence/gitleaks-policy.toml",
                     "--report-format",
                     "json",
                     "--report-path",
@@ -36368,7 +36867,7 @@ exit 19
         ];
         for (scanner, argv) in expected {
             assert_eq!(
-                super::scanner_command(scanner, Path::new(argv[0]), worktree, report)
+                super::scanner_command(scanner, Path::new(argv[0]), worktree, config, report)
                     .expect("scanner command")
                     .argv,
                 argv
@@ -37198,9 +37697,9 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         fs::write(&local, "#!/bin/sh\nprintf 'LGTM\\n'\n").expect("local reviewer");
         fs::set_permissions(&local, fs::Permissions::from_mode(0o755)).expect("reviewer mode");
         let local_plan = super::DirectCommandPlan {
-            commands: vec![super::DirectCommand {
-                argv: vec![local.to_string_lossy().into_owned()],
-            }],
+            commands: vec![super::DirectCommand::success(vec![local
+                .to_string_lossy()
+                .into_owned()])],
         };
         assert!(
             super::independent_reviewer_plan(&state, &local_plan).is_err(),
