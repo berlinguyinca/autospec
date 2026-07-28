@@ -1844,7 +1844,7 @@ pub(crate) struct ResolvedFullSuite {
 const REQUIRED_SCANNERS: [&str; 4] = ["gitleaks", "semgrep", "trivy", "license-checker"];
 const GITLEAKS_NEXT_PATH_ALLOWLIST: &str = r"(^|/)\.next(/|$)";
 const REQUIRED_SCANNER_POLICY_SCHEMA: &str =
-    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-diff-v2;license-checker-prod-diff-v3";
+    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-diff-v2;license-checker-prod-diff-v4";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ScannerExecutables {
@@ -2100,27 +2100,100 @@ fn validate_trivy_transport(exit_status: i32, stdout: &[u8], stderr: &[u8]) -> R
     }
 }
 
-fn changed_paths_since_base(worktree: &Path, base_oid: &str) -> Result<BTreeSet<String>, String> {
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct ChangedPaths {
+    paths: BTreeSet<String>,
+    added: BTreeSet<String>,
+    deleted: BTreeSet<String>,
+}
+
+impl ChangedPaths {
+    fn contains(&self, path: &str) -> bool {
+        self.paths.contains(path)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &String> {
+        self.paths.iter()
+    }
+
+    fn is_added(&self, path: &str) -> bool {
+        self.added.contains(path)
+    }
+
+    fn is_deleted(&self, path: &str) -> bool {
+        self.deleted.contains(path)
+    }
+}
+
+fn changed_paths_since_base(worktree: &Path, base_oid: &str) -> Result<ChangedPaths, String> {
     let range = format!("{base_oid}..HEAD");
-    let paths = git_bytes(
+    let output = git_bytes(
         worktree,
         &[
             "diff",
-            "--name-only",
+            "--name-status",
             "-z",
+            "--find-renames",
             "--diff-filter=ACMRTD",
             &range,
             "--",
         ],
     )?;
-    paths
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| {
+    let mut fields = output.split(|byte| *byte == 0);
+    let mut changed = ChangedPaths::default();
+    while let Some(status) = fields.next() {
+        if status.is_empty() {
+            if fields.next().is_some() {
+                return Err("git changed path output contains an empty status".to_string());
+            }
+            break;
+        }
+        let status = std::str::from_utf8(status)
+            .map_err(|_| "git changed path status is not valid UTF-8".to_string())?;
+        let kind = status
+            .chars()
+            .next()
+            .ok_or_else(|| "git changed path output contains an empty status".to_string())?;
+        let mut next_path = || {
+            let path = fields
+                .next()
+                .filter(|path| !path.is_empty())
+                .ok_or_else(|| "git changed path output is truncated".to_string())?;
             String::from_utf8(path.to_vec())
                 .map_err(|_| "git changed path is not valid UTF-8".to_string())
-        })
-        .collect()
+        };
+        match kind {
+            'A' => {
+                let path = next_path()?;
+                changed.added.insert(path.clone());
+                changed.paths.insert(path);
+            }
+            'D' => {
+                let path = next_path()?;
+                changed.deleted.insert(path.clone());
+                changed.paths.insert(path);
+            }
+            'M' | 'T' => {
+                changed.paths.insert(next_path()?);
+            }
+            'R' => {
+                let old = next_path()?;
+                let new = next_path()?;
+                changed.deleted.insert(old.clone());
+                changed.added.insert(new.clone());
+                changed.paths.insert(old);
+                changed.paths.insert(new);
+            }
+            'C' => {
+                let _source = next_path()?;
+                let destination = next_path()?;
+                changed.added.insert(destination.clone());
+                changed.paths.insert(destination);
+            }
+            _ => return Err(format!("git changed path status is unsupported: {status}")),
+        }
+    }
+    Ok(changed)
 }
 
 fn trivy_relative_target(worktree: &Path, target: &str) -> Result<String, String> {
@@ -2176,7 +2249,7 @@ fn require_trivy_attributable_target(worktree: &Path, relative: &str) -> Result<
 fn filter_trivy_result_for_changes(
     value: &serde_json::Value,
     worktree: &Path,
-    changed_paths: &BTreeSet<String>,
+    changed_paths: &ChangedPaths,
 ) -> Result<serde_json::Value, String> {
     let mut filtered = value.clone();
     let object = filtered.as_object_mut().ok_or_else(|| {
@@ -2245,22 +2318,33 @@ fn publish_trivy_diff_report(
     fs::read(durable).map_err(|error| format!("read durable Trivy report: {error}"))
 }
 
-fn npm_production_dependencies(value: &serde_json::Value) -> serde_json::Value {
-    let object = value.as_object();
+fn npm_production_dependencies(value: Option<&serde_json::Value>) -> serde_json::Value {
+    let object = value.and_then(serde_json::Value::as_object);
     serde_json::json!({
         "dependencies": object.and_then(|value| value.get("dependencies")),
         "optionalDependencies": object.and_then(|value| value.get("optionalDependencies")),
         "bundledDependencies": object.and_then(|value| value.get("bundledDependencies")),
         "bundleDependencies": object.and_then(|value| value.get("bundleDependencies")),
+        "peerDependencies": object.and_then(|value| value.get("peerDependencies")),
+        "peerDependenciesMeta": object.and_then(|value| value.get("peerDependenciesMeta")),
     })
+}
+
+fn parse_package_json(body: &[u8], source: &str) -> Result<serde_json::Value, String> {
+    let value = serde_json::from_slice::<serde_json::Value>(body)
+        .map_err(|error| format!("parse {source}: {error}"))?;
+    if !value.is_object() {
+        return Err(format!("{source} is not a JSON object"));
+    }
+    Ok(value)
 }
 
 fn npm_dependency_inputs_changed(
     worktree: &Path,
     base_oid: &str,
-    changed_paths: &BTreeSet<String>,
+    changed_paths: &ChangedPaths,
 ) -> Result<bool, String> {
-    for path in changed_paths {
+    for path in changed_paths.iter() {
         let name = Path::new(path).file_name().and_then(|name| name.to_str());
         if matches!(
             name,
@@ -2271,20 +2355,24 @@ fn npm_dependency_inputs_changed(
         if name != Some("package.json") {
             continue;
         }
-        let current = fs::read(worktree.join(path))
-            .ok()
-            .map(|body| serde_json::from_slice::<serde_json::Value>(&body))
-            .transpose()
-            .map_err(|error| format!("parse current {path}: {error}"))?
-            .unwrap_or(serde_json::Value::Null);
-        let base_spec = format!("{base_oid}:{path}");
-        let base = git_bytes(worktree, &["show", &base_spec])
-            .ok()
-            .map(|body| serde_json::from_slice::<serde_json::Value>(&body))
-            .transpose()
-            .map_err(|error| format!("parse base {path}: {error}"))?
-            .unwrap_or(serde_json::Value::Null);
-        if npm_production_dependencies(&current) != npm_production_dependencies(&base) {
+        let current = if changed_paths.is_deleted(path) {
+            None
+        } else {
+            let body = fs::read(worktree.join(path))
+                .map_err(|error| format!("read current {path}: {error}"))?;
+            Some(parse_package_json(&body, &format!("current {path}"))?)
+        };
+        let base = if changed_paths.is_added(path) {
+            None
+        } else {
+            let base_spec = format!("{base_oid}:{path}");
+            let body = git_bytes(worktree, &["show", &base_spec])
+                .map_err(|error| format!("read base {path}: {error}"))?;
+            Some(parse_package_json(&body, &format!("base {path}"))?)
+        };
+        if npm_production_dependencies(current.as_ref())
+            != npm_production_dependencies(base.as_ref())
+        {
             return Ok(true);
         }
     }
@@ -2404,16 +2492,9 @@ fn scanner_command(
             .map(str::to_string),
         ),
         "license-checker" => argv.extend(
-            [
-                "--json",
-                "--production",
-                "--start",
-                worktree,
-                "--failOn",
-                "GPL;AGPL;LGPL",
-            ]
-            .into_iter()
-            .map(str::to_string),
+            ["--json", "--production", "--start", worktree]
+                .into_iter()
+                .map(str::to_string),
         ),
         _ => return Err(format!("executor scanner identity is unknown: {scanner}")),
     }
@@ -37319,6 +37400,239 @@ exit 19
     }
 
     #[test]
+    fn autonomous_executor_bridge_license_checker_uses_json_policy_in_real_scanner_run() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("license-real-scanner-run");
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"dependencies":{"fixture":"1.0.0"},"scripts":{"test":"old"}}"#,
+        )
+        .expect("baseline manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline manifest"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"dependencies":{"fixture":"1.0.0"},"scripts":{"test":"new"}}"#,
+        )
+        .expect("script-only manifest change");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "change script"]);
+
+        let bin = fixture.root.join("scanner-bin");
+        fs::create_dir_all(&bin).expect("scanner bin");
+        let gitleaks = bin.join("gitleaks");
+        write_executable(
+            &gitleaks,
+            "#!/bin/sh\n\
+             set -eu\n\
+             report=''\n\
+             while [ \"$#\" -gt 0 ]; do\n\
+               if [ \"$1\" = --report-path ]; then report=\"$2\"; shift 2; else shift; fi\n\
+             done\n\
+             printf '%s' '[]' > \"$report\"\n",
+        );
+        let semgrep = bin.join("semgrep");
+        write_executable(
+            &semgrep,
+            "#!/bin/sh\n\
+             set -eu\n\
+             printf '%s\\n' '{\"results\":[],\"errors\":[],\"paths\":{\"scanned\":[\"package.json\"],\"skipped\":[]}}'\n",
+        );
+        let trivy = bin.join("trivy");
+        write_executable(
+            &trivy,
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' '{\"Results\":[{\"Target\":\".\"}]}'\n",
+        );
+        let license_checker = bin.join("license-checker");
+        write_executable(
+            &license_checker,
+            "#!/bin/sh\n\
+             set -eu\n\
+             for argument in \"$@\"; do\n\
+               [ \"$argument\" != --failOn ] || exit 97\n\
+             done\n\
+             printf '%s\\n' '{\"fixture@1.0.0\":{\"licenses\":\"LGPL-3.0\"}}'\n",
+        );
+        let scanners = super::ScannerExecutables::from_paths(BTreeMap::from([
+            ("gitleaks".to_string(), gitleaks),
+            ("semgrep".to_string(), semgrep),
+            ("trivy".to_string(), trivy),
+            ("license-checker".to_string(), license_checker),
+        ]))
+        .expect("scanner paths");
+
+        let observations = super::run_required_scanners(
+            &fixture.repo,
+            &base_oid,
+            &fixture.root.join("scanner-evidence"),
+            &scanners,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("JSON policy must accept a pre-existing forbidden license");
+        let license = observations
+            .iter()
+            .find(|observation| observation.name == "license-checker")
+            .expect("license-checker observation");
+        assert!(
+            !license
+                .command
+                .argv
+                .iter()
+                .any(|argument| argument == "--failOn"),
+            "{:?}",
+            license.command.argv
+        );
+        let result: serde_json::Value = serde_json::from_slice(
+            &fs::read(&license.result_path).expect("license-checker result"),
+        )
+        .expect("native license-checker JSON");
+        assert!(result.get("fixture@1.0.0").is_some(), "{result}");
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&license.result_path)
+                .expect("license result metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_license_checker_preserves_deleted_and_renamed_paths() {
+        let deleted = GitFixture::new("license-deleted-input");
+        fs::write(
+            deleted.repo.join("package.json"),
+            r#"{"dependencies":{"fixture":"1.0.0"}}"#,
+        )
+        .expect("baseline manifest");
+        git(&deleted.repo, &["add", "package.json"]);
+        git(&deleted.repo, &["commit", "-m", "baseline manifest"]);
+        let base_oid = git_stdout(&deleted.repo, &["rev-parse", "HEAD"]);
+        git(&deleted.repo, &["rm", "package.json"]);
+        git(&deleted.repo, &["commit", "-m", "delete manifest"]);
+        let changed =
+            super::changed_paths_since_base(&deleted.repo, &base_oid).expect("deleted paths");
+        assert!(changed.contains("package.json"), "{changed:?}");
+        assert!(
+            super::npm_dependency_inputs_changed(&deleted.repo, &base_oid, &changed)
+                .expect("deleted dependency input")
+        );
+
+        let renamed = GitFixture::new("license-renamed-input");
+        fs::write(renamed.repo.join("package-lock.json"), "{}\n").expect("baseline lockfile");
+        git(&renamed.repo, &["add", "package-lock.json"]);
+        git(&renamed.repo, &["commit", "-m", "baseline lockfile"]);
+        let base_oid = git_stdout(&renamed.repo, &["rev-parse", "HEAD"]);
+        git(
+            &renamed.repo,
+            &["mv", "package-lock.json", "archived-lock.json"],
+        );
+        git(&renamed.repo, &["commit", "-m", "rename lockfile away"]);
+        let changed =
+            super::changed_paths_since_base(&renamed.repo, &base_oid).expect("renamed paths");
+        assert!(changed.contains("package-lock.json"), "{changed:?}");
+        assert!(changed.contains("archived-lock.json"), "{changed:?}");
+        assert!(
+            super::npm_dependency_inputs_changed(&renamed.repo, &base_oid, &changed)
+                .expect("renamed dependency input")
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_license_checker_tracks_peer_dependency_inputs() {
+        for (field, base_value, current_value) in [
+            (
+                "peerDependencies",
+                serde_json::json!({"fixture": "1.0.0"}),
+                serde_json::json!({"fixture": "2.0.0"}),
+            ),
+            (
+                "peerDependenciesMeta",
+                serde_json::json!({"fixture": {"optional": true}}),
+                serde_json::json!({"fixture": {"optional": false}}),
+            ),
+        ] {
+            let fixture = GitFixture::new(&format!("license-{field}"));
+            let mut baseline = serde_json::Map::new();
+            baseline.insert(field.to_string(), base_value);
+            fs::write(
+                fixture.repo.join("package.json"),
+                serde_json::to_vec(&baseline).expect("baseline JSON"),
+            )
+            .expect("baseline manifest");
+            git(&fixture.repo, &["add", "package.json"]);
+            git(&fixture.repo, &["commit", "-m", "baseline manifest"]);
+            let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+            let mut current = serde_json::Map::new();
+            current.insert(field.to_string(), current_value);
+            fs::write(
+                fixture.repo.join("package.json"),
+                serde_json::to_vec(&current).expect("current JSON"),
+            )
+            .expect("current manifest");
+            git(&fixture.repo, &["add", "package.json"]);
+            git(
+                &fixture.repo,
+                &["commit", "-m", "change peer dependency input"],
+            );
+
+            let changed =
+                super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
+            assert!(
+                super::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+                    .expect("peer dependency input classification"),
+                "{field} changes must rerun strict license policy"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_license_checker_fails_closed_on_manifest_read_error() {
+        let fixture = GitFixture::new("license-manifest-read-error");
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"dependencies":{"fixture":"1.0.0"}}"#,
+        )
+        .expect("baseline manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline manifest"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"dependencies":{"fixture":"2.0.0"}}"#,
+        )
+        .expect("changed manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "change dependency"]);
+        let changed =
+            super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
+        let manifest = fixture.repo.join("package.json");
+        let mut permissions = fs::metadata(&manifest)
+            .expect("manifest metadata")
+            .permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&manifest, permissions).expect("make manifest unreadable");
+
+        let result = super::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed);
+
+        let mut permissions = fs::metadata(&manifest)
+            .expect("manifest metadata")
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&manifest, permissions).expect("restore manifest permissions");
+        let error = result.expect_err("manifest read failure must not become an absent manifest");
+        assert!(error.contains("read current package.json"), "{error}");
+
+        let error = super::npm_dependency_inputs_changed(&fixture.repo, "missing-base", &changed)
+            .expect_err("base attribution failure must not become an absent manifest");
+        assert!(error.contains("read base package.json"), "{error}");
+    }
+
+    #[test]
     fn autonomous_executor_bridge_gitleaks_ignores_only_next_generated_output() {
         // Break caught: generated Next.js bundles replaying source-like test secrets into the
         // required scan while an equivalent finding in a source fixture must still block.
@@ -37645,8 +37959,6 @@ exit 19
                     "--production",
                     "--start",
                     "/safe/worktree",
-                    "--failOn",
-                    "GPL;AGPL;LGPL",
                 ],
             ),
         ];
