@@ -1788,10 +1788,11 @@ fn stop(options: Options) -> Result<(), String> {
         },
     )?;
     let mut stopped = 0;
-    let units: &[&str] = match options.stop_mode {
-        StopMode::Graceful => &["supervisor", "monitor"],
-        StopMode::Immediate => &["supervisor", "monitor", "conductor"],
-    };
+    // The conductor owns durable direct-command supervisors. Killing it here can strand a
+    // completed child before the strict EXIT/DONE fence is published, making safe recovery
+    // impossible. Both stop modes therefore drain the conductor at its next observed boundary;
+    // immediate still differs through the persisted mode consumed by the conductor.
+    let units: &[&str] = &["supervisor", "monitor"];
     for name in units {
         let unit = read_unit(name, &layout);
         let terminated = terminate_unit(name, &unit)?;
@@ -1802,17 +1803,19 @@ fn stop(options: Options) -> Result<(), String> {
             release_terminated_owner(&layout, &unit.pid)?;
         }
     }
+    let draining = read_unit("conductor", &layout).running;
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"stop\",\"repo\":\"{}\",\"mode\":\"{}\",\"stop_flag\":\"{}\",\"stopped\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"stop\",\"repo\":\"{}\",\"mode\":\"{}\",\"stop_flag\":\"{}\",\"stopped\":{},\"draining\":{}}}",
             json_escape(&options.repo),
             options.stop_mode.as_str(),
             json_escape(&stop_flag.display().to_string()),
-            stopped
+            stopped,
+            draining
         );
     } else {
         println!(
-            "autospec autonomous stop: mode={} stop_flag={} stopped {stopped}",
+            "autospec autonomous stop: mode={} stop_flag={} stopped {stopped} draining={draining}",
             options.stop_mode.as_str(),
             stop_flag.display()
         );
