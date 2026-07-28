@@ -36558,11 +36558,20 @@ exit 19
         // Break caught: generated Next.js bundles replaying source-like test secrets into the
         // required scan while an equivalent finding in a source fixture must still block.
         let fixture = GitFixture::new("gitleaks-next-policy");
+        fs::write(
+            fixture.repo.join(".gitleaks.toml"),
+            "title = \"Autospec test policy\"\n\
+             [[rules]]\n\
+             id = \"autospec-test-secret\"\n\
+             description = \"harmless test marker\"\n\
+             regex = '''AUTOSPEC_TEST_SECRET_[A-Z]+'''\n",
+        )
+        .expect("test Gitleaks config");
         let generated = fixture.repo.join(".next/cache");
         let source = fixture.repo.join("fixtures/cache");
         fs::create_dir_all(&generated).expect("generated Next.js cache");
         fs::create_dir_all(&source).expect("source fixture cache");
-        let token = "export BUNDLE_ENTERPRISE__CONTRIBSYS__COM=cafebabe:deadbeef";
+        let token = "AUTOSPEC_TEST_SECRET_ALPHA";
         fs::write(generated.join("bundle.js"), format!("{token}\n"))
             .expect("generated secret fixture");
         fs::write(source.join("source.js"), format!("{token}\n")).expect("source secret fixture");
