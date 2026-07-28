@@ -31,6 +31,7 @@ setup() {
     STUB_BIN="$TEST_TMP/bin"
     mkdir -p "$STUB_BIN"
     HANDOFF_LOG="$TEST_TMP/handoff.log"
+    export AUTOSPEC_HANDOFF_DISPATCHER_KIND=claude
 }
 
 teardown() {

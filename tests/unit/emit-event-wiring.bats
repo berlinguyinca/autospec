@@ -35,6 +35,7 @@ SH
 teardown() {
   rm -rf "$TMP"
   unset AUTOSPEC_DB_DSN BIN_LOG AUTOSPEC_DB_DISABLE
+  unset AUTOSPEC_CLAIM_GIT_REMOTE AUTOSPEC_CLAIM_GIT_STATE_DIR
   unset AUTOSPEC_TELEMETRY_ENABLED AUTOSPEC_DB_HOST_LABEL
   unset AUTOSPEC_DB_SPOOL_MAX_BYTES AUTOSPEC_INSTALL_DB_MODULE
 }
@@ -78,6 +79,9 @@ _enable_emit() {
 _install_gh_stub() {
   COMMENTS="$TMP/comments.json"
   printf '[]\n' > "$COMMENTS"
+  git init --bare --quiet "$TMP/claim-remote.git"
+  export AUTOSPEC_CLAIM_GIT_REMOTE="$TMP/claim-remote.git"
+  export AUTOSPEC_CLAIM_GIT_STATE_DIR="$TMP/claim-state"
   cat > "$TMP/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
@@ -85,6 +89,21 @@ comments="${AUTOSPEC_TEST_COMMENTS:?}"
 
 if [ "$1" = "repo" ] && [ "$2" = "view" ]; then
   printf 'o/n\n'
+  exit 0
+fi
+
+if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+  cat <<'JSON'
+{"labels":["auto-implement","in-progress-by-bot","safety:reviewed"],"body":"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","title":"telemetry fixture","author":"fixture-agent"}
+JSON
+  exit 0
+fi
+
+if [ "$1" = "label" ] && [ "$2" = "create" ]; then
+  exit 0
+fi
+
+if [ "$1" = "issue" ] && [ "$2" = "edit" ]; then
   exit 0
 fi
 
@@ -146,6 +165,27 @@ SH
   export AUTOSPEC_GH_API_RETRY_SLEEP=0
 }
 
+_acquire_claim() {
+  "$AUTOSPEC" claim acquire \
+    --issue 42 \
+    --repo o/n \
+    --worker-id worker-a \
+    --branch feat/telemetry
+}
+
+_upsert_claim() {
+  claim_id="$1"
+  state="$2"
+  "$AUTOSPEC" claim state upsert \
+    --issue 42 \
+    --repo o/n \
+    --worker-id worker-a \
+    --claim-id "$claim_id" \
+    --branch feat/telemetry \
+    --state "$state" \
+    --step "$state"
+}
+
 @test "heartbeat write emits exactly one heartbeat event" {
   _enable_emit
   export AUTOSPEC_ACTIVE_RUNS_DIR="$TMP/active-runs"
@@ -183,11 +223,11 @@ SH
   [[ "$enabled_output" == *"/o__n.json" ]]
 }
 
-@test "claim state upsert with no prior state comment emits session.started" {
+@test "claim acquire emits session.started for the first authoritative generation" {
   _enable_emit
   _install_gh_stub
 
-  run "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed
+  run _acquire_claim
   [ "$status" -eq 0 ]
 
   [ -f "$BIN_LOG" ]
@@ -202,9 +242,10 @@ SH
   _enable_emit
   _install_gh_stub
 
-  "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed >/dev/null
+  lease="$(_acquire_claim)"
+  claim_id="$(printf '%s\n' "$lease" | jq -r '.claim_id')"
   : > "$BIN_LOG"   # only assert on the SECOND upsert's emit
-  run "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state worktree_ready --step worktree_ready
+  run _upsert_claim "$claim_id" worktree_ready
   [ "$status" -eq 0 ]
 
   [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
@@ -216,9 +257,15 @@ SH
   _enable_emit
   _install_gh_stub
 
-  "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed >/dev/null
+  lease="$(_acquire_claim)"
+  claim_id="$(printf '%s\n' "$lease" | jq -r '.claim_id')"
   : > "$BIN_LOG"   # only assert on clear's emit
-  run "$AUTOSPEC" claim state clear --issue 42 --repo o/n
+  run "$AUTOSPEC" claim state clear \
+    --issue 42 \
+    --repo o/n \
+    --worker-id worker-a \
+    --claim-id "$claim_id" \
+    --branch feat/telemetry
   [ "$status" -eq 0 ]
 
   [ "$(wc -l < "$BIN_LOG" | tr -d ' ')" -eq 1 ]
@@ -248,7 +295,9 @@ SH
   export PATH="$TMP/bin:$PATH"
   _install_gh_stub
 
-  run "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed
+  lease="$(_acquire_claim)"
+  claim_id="$(printf '%s\n' "$lease" | jq -r '.claim_id')"
+  run _upsert_claim "$claim_id" worktree_ready
   [ "$status" -eq 0 ]
   [ ! -s "$BIN_LOG" ]
 }
@@ -259,7 +308,9 @@ SH
   export AUTOSPEC_ACTIVE_RUNS_DIR="$TMP/active-runs-dsn-leak"
 
   bash "$REGISTRY" write --repo o/n --repo-dir /abs/checkout --harness claude --command "echo hi" --host h1 >/dev/null
-  "$AUTOSPEC" claim state upsert --issue 42 --repo o/n --worker-id worker-a --state claimed --step claimed >/dev/null
+  lease="$(_acquire_claim)"
+  claim_id="$(printf '%s\n' "$lease" | jq -r '.claim_id')"
+  _upsert_claim "$claim_id" worktree_ready >/dev/null
 
   run cat "$BIN_LOG"
   [[ "$output" != *"postgresql://"* ]]

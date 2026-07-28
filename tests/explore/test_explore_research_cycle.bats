@@ -24,6 +24,11 @@ EOF
     # Build a fake research dir with deterministic mini-researchers we control.
     export AUTOSPEC_RESEARCH_DIR="$TMP/fake-research"
     mkdir -p "$AUTOSPEC_RESEARCH_DIR"
+    for source in spec-vs-code prior-reports codebase-signals open-issues \
+        source-analysis dependency-health internet quality-resilience dogfooding \
+        self-leverage style-normalization; do
+        make_fake_researcher "$source" "{\"source\":\"$source\",\"proposals\":[]}"
+    done
     # explore-research-cycle.sh prefers installed AUTOSPEC_SCRIPTS_DIR weights.
     # Unit expectations here assert the canonical static priors, so force the
     # weights resolver to a nonexistent path and prevent operator-local

@@ -15,6 +15,8 @@ setup() {
     TMPWORK="$(mktemp -d -t refine-692.XXXXXX)"
     SCHEMA_SINGLE="$REPO_ROOT/schemas/autospec-refinement.schema.json"
     SCHEMA_LOOP="$REPO_ROOT/schemas/autospec-refinement-loop.schema.json"
+    export AUTOSPEC_HANDOFF_DISPATCHER_KIND=claude
+    export AUTOSPEC_REFINE_LENS_MODE=deterministic
 }
 
 teardown() {

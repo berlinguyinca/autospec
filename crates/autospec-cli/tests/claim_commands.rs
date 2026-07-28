@@ -1412,6 +1412,80 @@ exit 17
 }
 
 #[test]
+fn stale_startup_recovery_retries_a_prepared_label_transition() {
+    let fixture = temp_dir("autospec-claim-recover-prepared-ref");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
+    let repo = claim_git_repo(&fixture);
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "available",
+            "",
+            "",
+            "stale_startup_recovered",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-a"),
+    );
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    std::fs::write(&comments, "[]\n").expect("comments fixture");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" >> "$AUTOSPEC_CLAIM_LOG"
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then
+  cat "$AUTOSPEC_CLAIM_COMMENTS"
+  exit 0
+fi
+if { [ "$1" = issue ] && [ "$2" = comment ]; } || { [ "$1" = issue ] && [ "$2" = edit ]; }; then
+  exit 0
+fi
+exit 17
+"#,
+    );
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "recover-stale-startup",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--timeout-seconds",
+            "300",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .output()
+        .expect("autospec prepared stale startup recovery starts");
+
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":true"));
+    let calls = std::fs::read_to_string(log).expect("gh call log");
+    assert!(calls.contains("issue\nedit\n42"));
+    assert!(claim_ref_message(&repo, 42).contains("\"state\":\"available\""));
+}
+
+#[test]
 fn clear_releases_exact_claim_generation_without_deleting_ref() {
     let fixture = temp_dir("autospec-claim-clear-exact-generation");
     let bin = fixture.join("bin");

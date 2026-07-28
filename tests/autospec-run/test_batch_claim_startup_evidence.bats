@@ -12,6 +12,10 @@ setup() {
     TMPDIR_BATS="$(mktemp -d)"
     MOCK_BIN="$TMPDIR_BATS/bin"
     mkdir -p "$MOCK_BIN"
+    git init --bare --quiet "$TMPDIR_BATS/claim-remote.git"
+    export AUTOSPEC_CLAIM_GIT_REMOTE="$TMPDIR_BATS/claim-remote.git"
+    export AUTOSPEC_CLAIM_GIT_STATE_DIR="$TMPDIR_BATS/claim-state"
+    seed_claim_ref "2000-01-01T00:00:00Z"
     : > "$TMPDIR_BATS/edit.log"
     : > "$TMPDIR_BATS/clear.log"
     mkdir -p "$TMPDIR_BATS/heartbeats/test__repo"
@@ -29,6 +33,12 @@ write_git_mock() {
     cat > "$MOCK_BIN/git.new" <<MOCKEOF
 #!/usr/bin/env bash
 if [ "\$1" = "ls-remote" ]; then
+    if printf '%s\n' "\$*" | grep -q 'refs/autospec/claims/issue-1858'; then
+        if [ "\${FAIL_CLAIM_REF_READ:-0}" = "1" ]; then
+            exit 2
+        fi
+        exec "$REAL_GIT" "\$@"
+    fi
     # No remote branch ref exists for the issue-1858 startup-failure fixture.
     if [ "\${GIT_LS_REMOTE_FAIL:-0}" = "1" ]; then
         exit 2
@@ -42,6 +52,36 @@ fi
 exec "$REAL_GIT" "\$@"
 MOCKEOF
     publish_mock "$MOCK_BIN/git.new" "$MOCK_BIN/git"
+}
+
+seed_claim_ref() {
+    updated_at="$1"
+    message="$TMPDIR_BATS/claim-message"
+    jq --arg updated_at "$updated_at" \
+        '.claimed_at = $updated_at | .updated_at = $updated_at | .claim_id = "claim-generation-a"' \
+        "$FIXTURE" > "$TMPDIR_BATS/claim-record.json"
+    {
+        printf 'autospec-claim-ledger-v1\n'
+        printf 'generation=fixture-claim-generation-a\n\n'
+        printf '<!-- autospec-run-state:begin -->\n'
+        jq -c . "$TMPDIR_BATS/claim-record.json"
+        printf '<!-- autospec-run-state:end -->\n'
+    } > "$message"
+    tree="$(git --git-dir "$AUTOSPEC_CLAIM_GIT_REMOTE" mktree </dev/null)"
+    oid="$(
+        GIT_AUTHOR_NAME='Autospec Test' \
+        GIT_AUTHOR_EMAIL='autospec-test@localhost' \
+        GIT_COMMITTER_NAME='Autospec Test' \
+        GIT_COMMITTER_EMAIL='autospec-test@localhost' \
+        git --git-dir "$AUTOSPEC_CLAIM_GIT_REMOTE" commit-tree "$tree" -F "$message"
+    )"
+    git --git-dir "$AUTOSPEC_CLAIM_GIT_REMOTE" \
+        update-ref refs/autospec/claims/issue-1858 "$oid"
+}
+
+claim_ref_body() {
+    git --git-dir "$AUTOSPEC_CLAIM_GIT_REMOTE" \
+        show -s --format=%B refs/autospec/claims/issue-1858
 }
 
 write_gh_mock() {
@@ -135,6 +175,7 @@ publish_mock() {
 
 teardown() {
     rm -rf "$TMPDIR_BATS"
+    unset AUTOSPEC_CLAIM_GIT_REMOTE AUTOSPEC_CLAIM_GIT_STATE_DIR
 }
 
 safe_body() {
@@ -183,11 +224,11 @@ run_list_ready() {
     [ "$(printf '%s\n' "$output" | jq -r '.batch | map(.number) | join(",")')" = "1859,1860,1861" ] \
         || { printf 'queue output: %s\n' "$output" >&3; false; }
     grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$TMPDIR_BATS/edit.log"
-    grep -q -- '^api repos/test/repo/issues/comments/10 -X DELETE' "$TMPDIR_BATS/clear.log"
+    claim_ref_body | grep -q '"state":"available"'
 }
 
 @test "transient run-state read failures preserve claimed issue instead of requeueing it" {
-    FAIL_RUN_STATE_READ=1 run run_list_ready
+    FAIL_CLAIM_REF_READ=1 run run_list_ready
 
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "1858" ]
@@ -200,7 +241,8 @@ run_list_ready() {
 }
 
 @test "young no-evidence startup claims are ignored for worker capacity until timeout" {
-    FRESH_RUN_STATE=1 run run_list_ready
+    seed_claim_ref "$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+    run run_list_ready
 
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "" ]
@@ -226,15 +268,19 @@ run_list_ready() {
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "1858" ]
     grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$TMPDIR_BATS/edit.log"
-    [ ! -s "$TMPDIR_BATS/clear.log" ]
+    claim_ref_body | grep -q '"state":"available"'
 }
 
-@test "failed run-state clear rolls labels back and preserves claimed issue" {
-    RUN_STATE_CLEAR_FAIL=1 AUTOSPEC_GH_API_RETRIES=1 run run_list_ready
+@test "prepared stale recovery retries its label transition on the next scan" {
+    ISSUE_EDIT_FAIL=1 AUTOSPEC_GH_API_RETRIES=1 run run_list_ready
 
     [ "$status" -eq 0 ]
     [ "$(printf '%s\n' "$output" | jq -r '.claimed | map(.number) | join(",")')" = "1858" ]
+    claim_ref_body | grep -q '"state":"available"'
+
+    : > "$TMPDIR_BATS/edit.log"
+    run run_list_ready
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | jq -r '.worker_cap.active_count')" = "0" ]
     grep -q -- '--remove-label in-progress-by-bot --add-label auto-implement' "$TMPDIR_BATS/edit.log"
-    grep -q -- '--remove-label auto-implement --add-label in-progress-by-bot' "$TMPDIR_BATS/edit.log"
-    grep -q -- '^api repos/test/repo/issues/comments/10 -X DELETE' "$TMPDIR_BATS/clear.log"
 }
