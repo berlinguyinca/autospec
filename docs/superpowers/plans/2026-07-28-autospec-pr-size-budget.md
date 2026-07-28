@@ -4,24 +4,24 @@
 
 **Goal:** Enforce a deterministic small-PR budget and transparently continue unfinished autonomous work through ordered child issues.
 
-**Architecture:** A dependency-free Rust evaluator owns patch measurements, limits, and proactive/hard verdicts; the Rust and shell linters consume that policy with boundary-parity tests. The autonomous executor then uses the same verdict before push, draft, ready, and merge, while durable continuation receipts drive idempotent child publication through the existing `autospec parent` and `Depends on issue #N` machinery.
+**Architecture:** A dependency-free Rust evaluator owns measurements and verdicts; Rust and shell linters consume it with parity tests. The executor binds the verdict to existing exact-head evidence, while durable receipts publish children through append-only parent reconciliation.
 
-**Tech Stack:** Rust 2024 workspace, Bash, Bats, `gh`, existing Autospec private-state and parent-reconciliation APIs.
+**Tech Stack:** Rust 2024 workspace, Bash, Bats, `gh`, existing Autospec private-state and parent APIs.
 
 ## Global Constraints
 
-- Hard limits are 400 additions-plus-deletions, 8 raw files, and 3 logical units.
-- Proactive continuation begins at 320 changed lines, 7 raw files, or 3 logical units while acceptance criteria remain unfinished.
-- A skill `SKILL.md` / `codex/prompt.md` / `opencode/agent.md` trio and derived skill goldens count as one logical unit.
-- A binary diff is hard-oversized because its changed-line count cannot be proved.
-- Hard-oversized work is never pushed, drafted, readied, or merged; its local branch and commits remain intact.
-- The only exception grammar is `Guardian: skip-PR_SIZE # <reason>`.
-- Exception categories are generated migration, dependency-solver lockfile, and mandatory lock-step artifacts; manual implementation and test code are never exempt.
-- Continuation children contain `Depends on issue #N`; part PRs use `Part of #N`, and only child issues are closed by part PRs.
-- The original issue closes only through the existing `autospec parent` reconciliation after every child is terminal.
-- Continuation publication and notifications are durable, restart-safe, and idempotent.
-- Every task starts with a failing test, keeps its PR within the size contract, and passes focused validation before commit.
-- No new dependency is permitted.
+- Hard limits: 400 additions-plus-deletions, 8 raw files, and 3 logical units.
+- Proactive limits: 320 changed lines, 7 raw files, or 3 logical units while criteria remain.
+- A skill adapter trio and its derived goldens count as one logical unit.
+- Binary diffs are hard-oversized because their line count cannot be proved.
+- Oversized work is never pushed, drafted, readied, or merged; local commits remain intact.
+- Only `Guardian: skip-PR_SIZE # <reason>` can request an exception.
+- Allowed categories: generated migration, dependency-solver lockfile, mandatory lock-step artifacts.
+- Manual implementation and test code are never exempt; valid exceptions emit `INFO:PR_SIZE`.
+- Children use `Depends on issue #N`; part PRs use `Part of #N` and close only their child.
+- Only existing `autospec parent` reconciliation closes the umbrella after every child is terminal.
+- Publication and session notifications are durable, restart-safe, idempotent, and desktop-free.
+- Each task uses TDD, adds no dependency, and stays within this same PR-size contract.
 
 ---
 
@@ -31,18 +31,16 @@
 - Create: `crates/autospec-core/src/lint/pr_size.rs`
 - Modify: `crates/autospec-core/src/lint/diff.rs`
 - Modify: `crates/autospec-core/src/lint/mod.rs`
-- Test: inline unit tests in `crates/autospec-core/src/lint/pr_size.rs`
+- Test: inline tests in `pr_size.rs`
 
 **Interfaces:**
-- Consumes: `UnifiedDiff`, `DiffFile`, and existing skill-trio logical-unit semantics.
+- Consumes: `UnifiedDiff` and current issue logical-unit semantics.
 - Produces: `PatchSizeLimits`, `PatchSize`, `PatchSizeDimension`, `PatchSizeEvaluation`, and `evaluate_patch_size(&UnifiedDiff, PatchSizeLimits)`.
 
-- [ ] **Step 1: Write evaluator boundary tests**
-
-Add table-driven tests that build unified diffs and assert these exact outcomes:
+- [ ] **Step 1: Write failing boundaries**
 
 ```rust
-assert_eq!(evaluate(400, 8, 3).hard_dimensions(), &[]);
+assert!(evaluate(400, 8, 3).hard_dimensions().is_empty());
 assert_eq!(evaluate(401, 8, 3).hard_dimensions(), &[PatchSizeDimension::ChangedLines]);
 assert_eq!(evaluate(400, 9, 3).hard_dimensions(), &[PatchSizeDimension::RawFiles]);
 assert_eq!(evaluate(400, 8, 4).hard_dimensions(), &[PatchSizeDimension::LogicalUnits]);
@@ -51,21 +49,13 @@ assert!(evaluate(1, 7, 1).is_proactive());
 assert!(evaluate(1, 1, 3).is_proactive());
 ```
 
-Also prove a skill adapter trio plus `tests/fixtures/skill-goldens/<skill>.sha256` measures as one logical unit, and prove a binary diff is hard-oversized.
+Also prove one adapter trio plus its golden is one unit and a binary diff is hard.
 
-- [ ] **Step 2: Run the new tests and capture the red result**
+- [ ] **Step 2: Capture red**
 
-Run:
+Run `cargo test -p autospec-core lint::pr_size -- --nocapture`; expect missing module/types.
 
-```bash
-cargo test -p autospec-core lint::pr_size -- --nocapture
-```
-
-Expected: compilation fails because `lint::pr_size` and its types do not exist.
-
-- [ ] **Step 3: Extend the unified-diff evidence**
-
-Add removed-line and binary evidence without filesystem access:
+- [ ] **Step 3: Extend diff evidence**
 
 ```rust
 pub struct DiffFile {
@@ -74,129 +64,70 @@ pub struct DiffFile {
     pub is_binary: bool,
     pub hunks: Vec<DiffHunk>,
 }
-
-impl DiffFile {
-    pub fn removed_line_count(&self) -> usize;
-    pub fn changed_line_count(&self) -> usize;
-}
 ```
 
-`parse_unified_diff` sets `is_binary` for `Binary files ... differ` and for `GIT binary patch`.
+Add `removed_line_count` and `changed_line_count`; recognize `Binary files` and `GIT binary patch`.
 
-- [ ] **Step 4: Implement the typed evaluator**
-
-Expose these exact defaults and relationships:
+- [ ] **Step 4: Implement exact limits**
 
 ```rust
 pub const DEFAULT_MAX_CHANGED_LINES: usize = 400;
 pub const DEFAULT_MAX_RAW_FILES: usize = 8;
 pub const DEFAULT_MAX_LOGICAL_UNITS: usize = 3;
 pub const PROACTIVE_PERCENT: usize = 80;
-
-pub fn proactive_reached(value: usize, limit: usize) -> bool {
-    value.saturating_mul(100) >= limit.saturating_mul(PROACTIVE_PERCENT)
-}
 ```
 
-`PatchSizeEvaluation` stores measured counts plus ordered proactive and hard dimensions. Hard means `>` for numeric limits; any binary path adds `PatchSizeDimension::BinaryDiff`.
+Use `value.saturating_mul(100) >= limit.saturating_mul(80)` for proactive and `>` for hard.
 
-- [ ] **Step 5: Reuse one logical-unit function**
+- [ ] **Step 5: Remove logical-unit drift**
 
-Move the current skill-trio and derived-golden normalization behind a `pub(crate)` helper used by both issue lint and `pr_size`; replace issue lint’s literal `3` with `DEFAULT_MAX_LOGICAL_UNITS` so issue sizing and implementation sizing cannot drift.
+Expose one `pub(crate)` trio/golden normalizer and replace issue lint’s literal `3` with `DEFAULT_MAX_LOGICAL_UNITS`.
 
 - [ ] **Step 6: Verify and commit**
 
-Run:
+Run fmt, the focused core tests, core clippy with `-D warnings`, and `git diff --check`; commit `feat: define the autonomous patch size budget`.
 
-```bash
-cargo fmt --all -- --check
-cargo test -p autospec-core lint::pr_size lint::tests::files_touched -- --nocapture
-cargo clippy -p autospec-core --all-targets --all-features -- -D warnings
-git diff --check
-```
-
-Commit with:
-
-```text
-feat: define the autonomous patch size budget
-```
-
-### Task 2: Rust `PR_SIZE` lint rule and narrow exceptions
+### Task 2: Rust `PR_SIZE` rule and exceptions
 
 **Files:**
 - Modify: `crates/autospec-core/src/lint/implementation.rs`
 - Modify: `crates/autospec-core/src/lint/mod.rs`
-- Test: inline unit tests in `crates/autospec-core/src/lint/implementation.rs`
+- Test: inline implementation-lint tests
 
 **Interfaces:**
-- Consumes: `evaluate_patch_size`, `PatchSizeLimits`, and `UnifiedDiff` from Task 1.
-- Produces: `ImplementationLintRule::PrSize`, `ImplementationLintOptions::patch_size_limits`, and auditable `ERROR:PR_SIZE` / `INFO:PR_SIZE` findings.
+- Consumes: Task 1’s evaluator.
+- Produces: `ImplementationLintRule::PrSize`, `ImplementationLintOptions::patch_size_limits`, and `ERROR:PR_SIZE` / `INFO:PR_SIZE`.
 
-- [ ] **Step 1: Write failing Rust linter tests**
-
-Add tests for exact pass/fail boundaries and exception behavior:
+- [ ] **Step 1: Write failing lint cases**
 
 ```rust
-let at_limit = lint_diff(diff_with_changed_lines(400), None);
-assert_eq!(findings_for(&at_limit, "PR_SIZE"), vec![]);
-
-let over_limit = lint_diff(diff_with_changed_lines(401), None);
-assert_eq!(over_limit.blocking_count, 1);
-assert!(over_limit.findings[0].message.contains("401/400"));
+assert!(findings_for(&lint_diff(diff_lines(400), None), "PR_SIZE").is_empty());
+let result = lint_diff(diff_lines(401), None);
+assert_eq!(result.blocking_count, 1);
+assert!(result.findings[0].message.contains("changed_lines=401/400"));
 ```
 
-Test all three allowed categories with matching paths, plus bare, unknown, manual-code, and test-code reasons that remain blocking.
+Cover 8/9 files, 3/4 units, binary, every valid category, bare/unknown reasons, and mixed manual paths.
 
-- [ ] **Step 2: Run the focused tests and capture the red result**
+- [ ] **Step 2: Capture red**
 
-Run:
+Run `cargo test -p autospec-core lint::implementation::tests::pr_size -- --nocapture`; expect missing `PrSize`.
 
-```bash
-cargo test -p autospec-core lint::implementation::tests::pr_size -- --nocapture
-```
+- [ ] **Step 3: Add the first ordered detector**
 
-Expected: compilation fails because `ImplementationLintRule::PrSize` does not exist.
-
-- [ ] **Step 3: Add the blocking rule**
-
-Insert `PrSize` into the stable ordered detector pass before scope/test/complexity rules. Its directive is exactly:
+Report all measured dimensions and use this exact directive:
 
 ```text
 Freeze the completed capped slice and move unmet acceptance criteria to ordered continuation issues; never push or merge this oversized diff.
 ```
 
-The finding message reports `changed_lines=<n>/400 raw_files=<n>/8 logical_units=<n>/3` and lists binary paths when present.
+- [ ] **Step 4: Validate shape, not prose**
 
-- [ ] **Step 4: Validate `skip-PR_SIZE` by category and paths**
-
-Keep generic skip parsing for other rules. For `PR_SIZE`, downgrade to `Info` only when both the normalized reason category and every size-causing path match:
-
-```rust
-enum PrSizeException {
-    GeneratedMigration,
-    DependencySolverLockfile,
-    MandatoryLockStepArtifacts,
-}
-```
-
-Generated migrations must live under an existing migration directory and contain a generator provenance marker in changed/context evidence; lockfiles must be recognized dependency-solver lockfile basenames; lock-step artifacts must be only byte-identical adapter trios or derived goldens whose normalized manual patch is within budget. Any manual source/test path preserves the error.
+Generated migrations require a migration path plus generator provenance in diff evidence; lockfiles require a known solver-lock basename; lock-step requires byte-identical adapter hunks or derived goldens with the normalized manual patch within budget. Otherwise retain `Error`.
 
 - [ ] **Step 5: Verify and commit**
 
-Run:
-
-```bash
-cargo fmt --all -- --check
-cargo test -p autospec-core lint::implementation::tests -- --nocapture
-cargo clippy -p autospec-core --all-targets --all-features -- -D warnings
-git diff --check
-```
-
-Commit with:
-
-```text
-feat: block oversized implementations in Rust
-```
+Run fmt, implementation-lint tests, core clippy, and diff check; commit `feat: block oversized implementations in Rust`.
 
 ### Task 3: Shell linter parity
 
@@ -206,12 +137,10 @@ feat: block oversized implementations in Rust
 - Modify: `AGENTS.md`
 
 **Interfaces:**
-- Consumes: the exact constants, output fields, directive, and exception categories from Tasks 1-2.
-- Produces: shell `PR_SIZE` findings byte-compatible in meaning with the Rust linter and documented `RULE_ID` policy.
+- Consumes: Tasks 1-2 constants, messages, and exception categories.
+- Produces: equivalent shell findings and documented `PR_SIZE` policy.
 
-- [ ] **Step 1: Add failing Bats boundary tests**
-
-Create fixtures through temporary git commits and assert:
+- [ ] **Step 1: Write failing Bats cases**
 
 ```bash
 run "$LINTER" --base "$base" --head "$head"
@@ -220,76 +149,43 @@ run "$LINTER" --base "$base" --head "$head"
 [[ "$output" == *"changed_lines=401/400"* ]]
 ```
 
-Cover 400/401 lines, 8/9 files, 3/4 logical units, binary diffs, the three valid categories, and invalid or path-mismatched exceptions.
+Cover every numeric boundary, binary, three valid exceptions, and invalid/mixed exceptions.
 
-- [ ] **Step 2: Run the focused Bats tests and capture the red result**
+- [ ] **Step 2: Capture red**
 
-Run:
+Run `bats tests/unit/test_lint_implementation.bats --filter 'PR_SIZE'`; expect no finding.
 
-```bash
-bats tests/unit/test_lint_implementation.bats --filter 'PR_SIZE'
-```
+- [ ] **Step 3: Implement shell counting**
 
-Expected: tests fail because the shell linter emits no `PR_SIZE` finding.
+Use `git diff --numstat` for additions+deletions and binary rows, unique raw paths, and the same trio/golden normalization.
 
-- [ ] **Step 3: Implement deterministic shell counting**
+- [ ] **Step 4: Implement narrow skips**
 
-Count additions plus deletions from `git diff --numstat`, count unique raw paths, normalize the adapter trio and derived goldens with the same path rules as Rust, and fail closed on `-\t-\t<path>` binary rows.
+Accept exact grammar only when category and every size-causing path match; support the Task 2 directive under `--directives`.
 
-- [ ] **Step 4: Implement the narrow shell exception**
+- [ ] **Step 5: Document and verify**
 
-Parse exact `Guardian: skip-PR_SIZE # <reason>` syntax, classify the same three categories, verify every size-causing path, and emit `INFO:PR_SIZE` only for a valid category/path pairing. Emit the same directive as Task 2 for errors and `--directives`.
+Add `PR_SIZE` to AGENTS rule/directive tables. Run `bash -n`, focused Bats, `scripts/validate-agents-md-contract.sh`, and diff check; commit `feat: keep shell patch budgets in parity`.
 
-- [ ] **Step 5: Document the rule**
-
-Add `PR_SIZE` to the implementation-quality `RULE_ID` and directive tables in `AGENTS.md`, including 400/8/3, the three allowed categories, and the statement that manual source/test changes cannot be exempted.
-
-- [ ] **Step 6: Verify and commit**
-
-Run:
-
-```bash
-bash -n scripts/lint-implementation.sh
-bats tests/unit/test_lint_implementation.bats --filter 'PR_SIZE'
-scripts/validate-agents-md-contract.sh
-git diff --check
-```
-
-Commit with:
-
-```text
-feat: keep shell patch budgets in parity
-```
-
-### Task 4: Rust remote-mutation and merge admission
+### Task 4: Rust remote and merge admission
 
 **Files:**
 - Modify: `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
-- Test: inline executor-bridge tests in `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
+- Test: inline executor-bridge tests
 
 **Interfaces:**
-- Consumes: Rust `PR_SIZE` lint findings and typed `PatchSizeEvaluation`.
-- Produces: commit-bound `PatchSizeAdmission` evidence used before push/draft and bound into existing exact-head premerge/merge admission.
+- Consumes: Rust `PR_SIZE` and `PatchSizeEvaluation`.
+- Produces: exact-head `PatchSizeAdmission` bound into existing premerge evidence.
 
-- [ ] **Step 1: Add failing remote-boundary tests**
+- [ ] **Step 1: Write failing mutation tests**
 
-Extend the existing “lint blocks before git/gh mutation” harness with command ledgers. Assert a 401-line or 9-file diff performs zero `git push`, `gh pr create`, `gh pr ready`, and `gh pr merge` calls.
+For 401 lines and 9 files assert zero `git push`, `gh pr create`, `gh pr ready`, or `gh pr merge`. Assert merge rejects a missing, stale, or mismatched size receipt.
 
-Add drift tests where the draft was admitted at 400 lines and the exact head later measures 401, and where the size receipt is missing or bound to another head; merge must fail before `gh pr merge`.
+- [ ] **Step 2: Capture red**
 
-- [ ] **Step 2: Run the executor tests and capture the red result**
+Run `cargo test -p autospec-cli executor_bridge::tests::pr_size -- --nocapture --test-threads=1`; expect no admission.
 
-Run:
-
-```bash
-cargo test -p autospec-cli executor_bridge::tests::pr_size -- --nocapture --test-threads=1
-```
-
-Expected: tests fail because the executor has no commit-bound size admission.
-
-- [ ] **Step 3: Add commit-bound admission evidence**
-
-Add:
+- [ ] **Step 3: Add typed evidence**
 
 ```rust
 struct PatchSizeAdmission {
@@ -299,288 +195,150 @@ struct PatchSizeAdmission {
 }
 ```
 
-Compute it from the same exact base/head diff supplied to implementation lint. Persist only the measurement and OIDs needed to prove the verdict; do not infer a verdict from formatted linter text. Bind it into the existing premerge evidence receipt.
+Compute it from the exact lint diff and bind it into existing premerge evidence.
 
-- [ ] **Step 4: Gate every remote transition**
+- [ ] **Step 4: Gate exact transitions**
 
-Require a non-hard `PatchSizeAdmission` before `push_exact_issue_head` and draft creation. `revalidate_merge_admission` must require the same exact-head admission in accepted premerge evidence, so ready and admin merge reject missing, stale, or mismatched receipts without recomputing an ad-hoc second diff.
+Require non-hard evidence before push/draft. Make `revalidate_merge_admission` reject missing or OID-mismatched evidence, covering ready and admin merge without a second ad-hoc diff.
 
 - [ ] **Step 5: Verify and commit**
 
-Run:
-
-```bash
-cargo fmt --all -- --check
-cargo test -p autospec-cli executor_bridge::tests::pr_size -- --nocapture --test-threads=1
-cargo test -p autospec-cli executor_bridge::tests::implementation_lint_blocks_before_remote_mutation -- --nocapture --test-threads=1
-cargo clippy -p autospec-cli --all-targets --all-features -- -D warnings
-git diff --check
-```
-
-Commit with:
-
-```text
-feat: enforce patch admission at remote boundaries
-```
+Run fmt, focused mutation/admission regressions, CLI clippy, and diff check; commit `feat: enforce patch admission at remote boundaries`.
 
 ### Task 5: Durable continuation receipt
 
 **Files:**
 - Modify: `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
-- Test: inline executor-bridge tests in `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
+- Test: inline executor-bridge tests
 
 **Interfaces:**
-- Consumes: proactive/hard `PatchSizeEvaluation`, executor issue identity, and a typed worker `ContinuationReport`.
-- Produces: private `ContinuationReceipt` persisted beside executor invocation state and loaded idempotently by receipt identity.
+- Consumes: `PatchSizeEvaluation`, issue identity, and typed `ContinuationReport`.
+- Produces: private `ContinuationReceipt` loaded idempotently by issue/base/head identity.
 
-- [ ] **Step 1: Add failing receipt lifecycle tests**
+- [ ] **Step 1: Write failing lifecycle tests**
 
-Prove these state transitions without invoking `gh`:
+Assert: `320 + unmet -> planned`, `319 + unmet -> absent`, `320 + complete -> absent`, `401 -> oversized_checkpoint`, restart reuses exact content, and hard handling preserves commits.
 
-```text
-320 lines + unmet criteria -> receipt status planned
-319 lines + unmet criteria -> no receipt
-320 lines + all criteria complete -> no receipt
-401 lines -> receipt status oversized_checkpoint
-same base/head/issue after restart -> same receipt path and content
-```
+- [ ] **Step 2: Capture red**
 
-Also assert the local branch and commits still exist after hard oversize handling.
+Run `cargo test -p autospec-cli executor_bridge::tests::continuation_receipt -- --nocapture --test-threads=1`; expect no receipt.
 
-- [ ] **Step 2: Run the receipt tests and capture the red result**
+- [ ] **Step 3: Add worker/report contract**
 
-Run:
+The worker checks budget after coherent edit/test checkpoints, stops adding criteria at proactive status, commits a passing slice, and reports completed plus ordered unmet criteria. Empty unmet criteria never create a continuation.
 
-```bash
-cargo test -p autospec-cli executor_bridge::tests::continuation_receipt -- --nocapture --test-threads=1
-```
+- [ ] **Step 4: Persist receipt fail-closed**
 
-Expected: tests fail because no continuation receipt is written.
+Store schema, repository, umbrella, OIDs, budget, trigger, criteria, children, and status through existing private/symlink-safe create-once helpers; reject identity/content mismatch.
 
-- [ ] **Step 3: Define the worker report and receipt schemas**
+- [ ] **Step 5: Notify the session**
 
-The worker emits completed criteria, ordered unmet criteria, and whether a coherent capped slice is ready; the controller independently supplies measured budget and OIDs. Persist schema version, repository, umbrella issue, base/head OIDs, measured budget, trigger kind, completed criteria, ordered unmet criteria, child issue numbers, and publication status. Derive the filename from repository + issue + base/head identity.
+Notify threshold, hard checkpoint, invalid exception, and recovery with measurements and receipt path; never invoke desktop notification.
 
-- [ ] **Step 4: Add the proactive worker contract**
+- [ ] **Step 6: Verify and commit**
 
-The local worker prompt requires a deterministic diff-budget check after each coherent edit/test checkpoint. At 320 lines, 7 files, or 3 units it stops adding criteria, commits the passing slice, and emits `ContinuationReport`; if no criteria remain it emits an empty unmet list and no continuation is created.
+Run fmt, receipt tests, CLI clippy, and diff check; commit `feat: preserve autonomous continuation intent`.
 
-- [ ] **Step 5: Implement fail-closed private persistence**
-
-Use existing private-directory, symlink-rejection, create-once, and atomic-state helpers. An identity/content mismatch is an invariant failure. A restart loads the same receipt and never truncates or replaces it.
-
-- [ ] **Step 6: Emit local lifecycle notifications**
-
-Use the existing session notification path for proactive threshold, hard checkpoint, invalid exception, and receipt recovery. Include measured counts and the receipt path; do not use desktop notifications.
-
-- [ ] **Step 7: Verify and commit**
-
-Run:
-
-```bash
-cargo fmt --all -- --check
-cargo test -p autospec-cli executor_bridge::tests::continuation_receipt -- --nocapture --test-threads=1
-cargo clippy -p autospec-cli --all-targets --all-features -- -D warnings
-git diff --check
-```
-
-Commit with:
-
-```text
-feat: preserve autonomous continuation intent
-```
-
-### Task 6: Idempotent parent extension
+### Task 6: Append-only parent extension
 
 **Files:**
 - Modify: `crates/autospec-core/src/state/mod.rs`
 - Modify: `crates/autospec-cli/src/commands/parent.rs`
 - Modify: `crates/autospec-cli/src/commands/options.rs`
-- Test: inline parent/state tests in the modified Rust files
+- Test: inline parent/state tests
 
 **Interfaces:**
-- Consumes: immutable trusted parent decomposition records and existing `record/reconcile-child/sweep` behavior.
+- Consumes: immutable trusted parent records.
 - Produces: `extend_parent_decomposition(parent, children)` and `autospec parent extend --parent N --children A,B`.
 
-- [ ] **Step 1: Add failing extension tests**
+- [ ] **Step 1: Write failing extension tests**
 
-Prove extension posts a new trusted full-list record, preserves prior children and their terminal states, and is idempotent when the requested set already exists.
+Prove ordered-superset append, prior terminal-state preservation, idempotent repeat, and rejection of removal, duplicate, other-parent, and parent-self children.
 
-Also prove it rejects child removal, duplicate children, a child already linked to another parent, and a parent/child identity collision.
+- [ ] **Step 2: Capture red**
 
-- [ ] **Step 2: Run the parent tests and capture the red result**
+Run parent tests in core and CLI; expect missing extension API/subcommand.
 
-Run:
+- [ ] **Step 3: Implement append-only core behavior**
 
-```bash
-cargo test -p autospec-core state::tests::parent -- --nocapture
-cargo test -p autospec-cli commands::parent::tests::extend -- --nocapture
-```
+Load the latest trusted full list, validate ownership, post one new full-list marker only when changed, and return an explicit `changed` boolean.
 
-Expected: compilation fails because parent extension does not exist.
+- [ ] **Step 4: Add CLI parsing**
 
-- [ ] **Step 3: Implement append-only core extension**
-
-Load the latest trusted decomposition, require the proposed list to be an ordered superset, validate every child ownership invariant, and post one new full-list marker. Repeating the same request performs no remote write.
-
-- [ ] **Step 4: Add the CLI subcommand**
-
-Parse:
-
-```text
-autospec parent extend --parent <N> --children <A,B,...>
-```
-
-Return the same typed summary shape as `parent record`, with an explicit `changed` boolean.
+Support exact `autospec parent extend --parent <N> --children <A,B,...>` and the same typed summary shape as `record`.
 
 - [ ] **Step 5: Verify and commit**
 
-Run:
-
-```bash
-cargo fmt --all -- --check
-cargo test -p autospec-core state::tests::parent -- --nocapture
-cargo test -p autospec-cli commands::parent::tests::extend -- --nocapture
-cargo clippy -p autospec-cli -p autospec-core --all-targets --all-features -- -D warnings
-git diff --check
-```
-
-Commit with:
-
-```text
-feat: extend autonomous parent decompositions
-```
+Run fmt, core/CLI parent tests, core+CLI clippy, and diff check; commit `feat: extend autonomous parent decompositions`.
 
 ### Task 7: Idempotent continuation publication
 
 **Files:**
 - Modify: `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
-- Test: inline executor-bridge tests in `crates/autospec-cli/src/commands/autonomous/executor_bridge.rs`
+- Test: inline executor-bridge tests
 
 **Interfaces:**
-- Consumes: `ContinuationReceipt`, `autospec parent extend`, and ready-queue `Depends on issue #N` parsing.
-- Produces: ordered child issue publication, `Part of #N` part-PR metadata, receipt-backed restart recovery, and umbrella-completion notifications.
+- Consumes: `ContinuationReceipt`, parent extension, and `Depends on issue #N`.
+- Produces: ordered child publication, correct part-PR metadata, restart recovery, and completion notifications.
 
-- [ ] **Step 1: Add failing publication/restart tests**
+- [ ] **Step 1: Write failing publication tests**
 
-With the existing fake `gh` adapter, prove one receipt with two unmet slices creates exactly two child issues, where child 2 contains `Depends on issue #<child1>`. Re-run from the persisted receipt and assert zero duplicate issue-create calls.
+Two unmet slices create two children; child 2 depends on child 1. Restart creates none. Existing parent is extended; otherwise create a tracker containing current issue plus children. Umbrella closes only after both child PRs merge.
 
-Add reconciliation tests proving the umbrella stays open after child 1 merges and closes only after both child PRs are observed merged. When the current issue already has a parent, append children there; otherwise create one tracker containing the current issue and continuations.
+- [ ] **Step 2: Capture red**
 
-- [ ] **Step 2: Run the publication tests and capture the red result**
+Run `cargo test -p autospec-cli executor_bridge::tests::continuation_publication -- --nocapture --test-threads=1`; expect no publisher.
 
-Run:
+- [ ] **Step 3: Build exact child bodies**
 
-```bash
-cargo test -p autospec-cli executor_bridge::tests::continuation_publication -- --nocapture --test-threads=1
-```
+Include concrete goal, remaining checkbox criteria, paths, tests, one-line smoke command, `Part of #<umbrella>`, and dependency except on child 1.
 
-Expected: the executor cannot publish continuation children from a receipt.
+- [ ] **Step 4: Publish idempotently**
 
-- [ ] **Step 3: Build child issue bodies deterministically**
+Search by receipt marker before create, authoritative-reread one result, persist number, and call parent extension with the ordered full child list.
 
-Each child body contains one concrete goal, remaining acceptance criteria, exact implementation paths, tests, a one-line primary smoke command, `Part of #<umbrella>`, and an ordered `Depends on issue #N` line except for the first child.
+- [ ] **Step 5: Preserve closure semantics**
 
-- [ ] **Step 4: Publish and record children idempotently**
+Part PRs contain `Part of #<umbrella>` and `Closes #<child>`, never `Closes #<umbrella>`; retain reconcile-after-merge and sweep-at-start.
 
-Before each create, search for the receipt identity marker. After create, authoritative-reread exactly one marker issue, persist its number, and call parent `extend` with the complete ordered child set. Restart resumes at the first missing child.
+- [ ] **Step 6: Notify and verify**
 
-- [ ] **Step 5: Keep PR closure semantics exact**
+Notify create/recovery/umbrella completion. Run fmt, publisher tests, CLI clippy, and diff check; commit `feat: publish ordered autonomous continuations`.
 
-Generated part PR bodies contain `Part of #<umbrella>` and `Closes #<child>`; they never contain `Closes #<umbrella>`. Continue to use `reconcile-child` after merge and `sweep` at batch start.
-
-- [ ] **Step 6: Notify publication and completion**
-
-Emit session notifications when a child is created or recovered and when parent reconciliation observes every child terminal. Include issue and PR URLs when known.
-
-- [ ] **Step 7: Verify and commit**
-
-Run:
-
-```bash
-cargo fmt --all -- --check
-cargo test -p autospec-cli executor_bridge::tests::continuation_publication -- --nocapture --test-threads=1
-cargo clippy -p autospec-cli --all-targets --all-features -- -D warnings
-git diff --check
-```
-
-Commit with:
-
-```text
-feat: publish ordered autonomous continuations
-```
-
-### Task 8: Multi-harness proactive checkpoint behavior
+### Task 8: Multi-harness proactive behavior
 
 **Files:**
-- Modify: `skills/autospec-run/SKILL.md`
-- Modify: `skills/autospec-run/codex/prompt.md`
-- Modify: `skills/autospec-run/opencode/agent.md`
-- Modify: `skills/autospec/SKILL.md`
-- Modify: `skills/autospec/codex/prompt.md`
-- Modify: `skills/autospec/opencode/agent.md`
-- Modify: the existing validation script that gates Phase 4 linter and merge-gate wording
-- Test: that validation script and generated skill goldens
+- Modify: both `skills/autospec-run` and `skills/autospec` adapter trios
+- Modify: the existing Phase 4 linter/merge wording validator
+- Test: that validator and skill goldens
 
 **Interfaces:**
-- Consumes: shell `PR_SIZE`, Rust continuation behavior, `autospec parent extend`, and exact 320/7/3 proactive thresholds.
-- Produces: lock-step harness instructions that checkpoint before push, split unmet acceptance criteria, and rerun the same hard gate before final merge.
+- Consumes: shell/Rust gates, receipt publisher, parent extension, and 320/7/3 thresholds.
+- Produces: lock-step instructions for pre-push checkpoint, continuation, and final exact-head gate.
 
-- [ ] **Step 1: Add failing contract assertions**
+- [ ] **Step 1: Write failing contract assertions**
 
-Assert all six adapter bodies contain exact requirements for:
+Require all adapters to contain `320 changed lines`, `7 raw files`, `3 logical units`, exception grammar, `Part of #<umbrella>`, and `Depends on issue #N`; require checkpoint/lint before push and final lint before merge.
 
-```text
-320 changed lines
-7 raw files
-3 logical units
-Guardian: skip-PR_SIZE # <reason>
-Part of #<umbrella>
-Depends on issue #N
-```
+- [ ] **Step 2: Capture red**
 
-Also assert the Phase 4 order is checkpoint/lint, then push/draft, and final lint, then merge.
+Run the selected validator; expect missing proactive and pre-push requirements.
 
-- [ ] **Step 2: Run the validation and capture the red result**
+- [ ] **Step 3: Update canonical bodies**
 
-Run the selected validation script directly.
+At each checkpoint run exact base..HEAD policy. Proactive status freezes a completed slice and publishes unmet criteria; hard status preserves the branch without push/draft. Final gate reruns after base/docs repair and requires reviewer acceptance of valid `INFO:PR_SIZE`.
 
-Expected: it fails because current adapters do not specify proactive continuations or pre-push `PR_SIZE` admission.
+- [ ] **Step 4: Mirror and verify**
 
-- [ ] **Step 3: Update canonical skill bodies**
+Mirror bodies with harness-only frontmatter, regenerate goldens, run lock-step validation, then `cargo run -p autospec-cli -- validate --json`; require zero required failures.
 
-At each implementation checkpoint, invoke the installed/current-repo deterministic linter against exact base..HEAD. At proactive status with unmet criteria, stop expanding the slice and hand the remaining criteria to the receipt/publisher path. On hard error, preserve the branch and do not push or draft.
+- [ ] **Step 5: Commit**
 
-- [ ] **Step 4: Preserve lock-step adapters**
-
-Copy each canonical skill body to its Codex and OpenCode adapters while retaining only their harness-specific frontmatter. The final merge gate reruns the exact-head linter and requires reviewer acceptance for any valid `INFO:PR_SIZE` exception.
-
-- [ ] **Step 5: Regenerate and verify goldens**
-
-Run:
-
-```bash
-scripts/generate-skill-goldens.sh
-scripts/validate-skill-lockstep.sh
-cargo run -p autospec-cli -- validate --json
-git diff --check
-```
-
-Expected: every required validation passes and the JSON summary reports zero required failures.
-
-- [ ] **Step 6: Commit**
-
-Commit with:
-
-```text
-feat: continue large autonomous work in capped parts
-```
+Commit `feat: continue large autonomous work in capped parts`.
 
 ## Final integration verification
 
-- [ ] Rebase every child branch on the latest `origin/main` before its PR review.
-- [ ] Run each child’s focused tests and confirm its diff is within 400 changed lines, 8 raw files, and 3 logical units.
-- [ ] Run `cargo run -p autospec-cli -- validate --json` sequentially on the final child and confirm all required checks pass.
-- [ ] Run an independent whole-feature review against this plan and the design spec.
-- [ ] Merge children in dependency order and run `autospec parent sweep` after each merge.
-- [ ] Confirm issue `#2699` closes only after the final child is terminal.
+- [ ] Rebase each child on latest `origin/main`; run focused tests and prove its diff is within 400/8/3.
+- [ ] Run the full JSON validator sequentially on the final child with zero required failures.
+- [ ] Obtain independent whole-feature review against this plan and its design.
+- [ ] Merge in dependency order, sweep after each merge, and confirm issue `#2699` closes only after the final child is terminal.
