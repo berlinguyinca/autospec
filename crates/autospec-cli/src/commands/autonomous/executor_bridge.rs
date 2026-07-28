@@ -2761,13 +2761,7 @@ fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> 
             let raw = fs::read(&scanner.command.stdout_path)
                 .map_err(|error| format!("read raw Trivy report: {error}"))?;
             validate_trivy_transport(exit_status, &raw, &stderr)?;
-            validate_scanner_result_with_license_policy(
-                &scanner.name,
-                0,
-                &result,
-                &stderr,
-                false,
-            )?;
+            validate_scanner_result_with_license_policy(&scanner.name, 0, &result, &stderr, false)?;
         } else {
             validate_scanner_result_with_license_policy(
                 &scanner.name,
