@@ -1844,7 +1844,7 @@ pub(crate) struct ResolvedFullSuite {
 const REQUIRED_SCANNERS: [&str; 4] = ["gitleaks", "semgrep", "trivy", "license-checker"];
 const GITLEAKS_NEXT_PATH_ALLOWLIST: &str = r"(^|/)\.next(/|$)";
 const REQUIRED_SCANNER_POLICY_SCHEMA: &str =
-    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-diff-v2;license-checker-v1";
+    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-diff-v2;license-checker-diff-v2";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ScannerExecutables {
@@ -1928,6 +1928,16 @@ fn validate_scanner_result(
     stdout: &[u8],
     stderr: &[u8],
 ) -> Result<(), String> {
+    validate_scanner_result_with_license_policy(scanner, exit_status, stdout, stderr, false)
+}
+
+fn validate_scanner_result_with_license_policy(
+    scanner: &str,
+    exit_status: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+    allow_preexisting_forbidden_license: bool,
+) -> Result<(), String> {
     if !REQUIRED_SCANNERS.contains(&scanner) {
         return Err(format!("executor scanner identity is unknown: {scanner}"));
     }
@@ -1973,7 +1983,9 @@ fn validate_scanner_result(
         }
         "semgrep" => validate_semgrep_result(&value, exit_status),
         "trivy" => validate_trivy_result(&value, exit_status),
-        "license-checker" => validate_license_checker_result(&value),
+        "license-checker" => {
+            validate_license_checker_result(&value, allow_preexisting_forbidden_license)
+        }
         _ => unreachable!("scanner identity checked above"),
     }
 }
@@ -2233,7 +2245,28 @@ fn publish_trivy_diff_report(
     fs::read(durable).map_err(|error| format!("read durable Trivy report: {error}"))
 }
 
-fn validate_license_checker_result(value: &serde_json::Value) -> Result<(), String> {
+fn npm_dependency_inputs_changed(changed_paths: &BTreeSet<String>) -> bool {
+    changed_paths.iter().any(|path| {
+        Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| {
+                matches!(
+                    name,
+                    "package.json"
+                        | "package-lock.json"
+                        | "npm-shrinkwrap.json"
+                        | "pnpm-lock.yaml"
+                        | "yarn.lock"
+                )
+            })
+    })
+}
+
+fn validate_license_checker_result(
+    value: &serde_json::Value,
+    allow_preexisting_forbidden: bool,
+) -> Result<(), String> {
     let packages = value.as_object().ok_or_else(|| {
         "executor required scanner license-checker output does not match its JSON object schema"
             .to_string()
@@ -2255,9 +2288,10 @@ fn validate_license_checker_result(value: &serde_json::Value) -> Result<(), Stri
                 )
             })?
             .to_ascii_uppercase();
-        if ["GPL", "AGPL", "LGPL"]
-            .iter()
-            .any(|forbidden| license.contains(forbidden))
+        if !allow_preexisting_forbidden
+            && ["GPL", "AGPL", "LGPL"]
+                .iter()
+                .any(|forbidden| license.contains(forbidden))
         {
             return Err(format!(
                 "executor required scanner license-checker reported forbidden license for {package}"
@@ -2544,7 +2578,15 @@ pub(crate) fn run_required_scanners(
             validate_trivy_transport(exit_status, &raw, &stderr)?;
             validate_scanner_result(scanner, 0, &result, &stderr)?;
         } else {
-            validate_scanner_result(scanner, exit_status, &result, &stderr)?;
+            let allow_preexisting_forbidden_license = scanner == "license-checker"
+                && !npm_dependency_inputs_changed(&changed_paths_since_base(worktree, base_oid)?);
+            validate_scanner_result_with_license_policy(
+                scanner,
+                exit_status,
+                &result,
+                &stderr,
+                allow_preexisting_forbidden_license,
+            )?;
         }
         observations.push(ObservedScanner {
             name: scanner.to_string(),
@@ -2626,6 +2668,20 @@ fn typed_evidence_from_observed(
     )
 }
 
+fn observed_scanner_base_oid(scanners: &[ObservedScanner]) -> Result<&str, String> {
+    let semgrep = scanners
+        .iter()
+        .find(|scanner| scanner.name == "semgrep")
+        .ok_or_else(|| "observed security evidence is missing Semgrep baseline".to_string())?;
+    semgrep
+        .command
+        .argv
+        .windows(2)
+        .find(|pair| pair[0] == "--baseline-commit")
+        .map(|pair| pair[1].as_str())
+        .ok_or_else(|| "observed Semgrep evidence is missing its baseline commit".to_string())
+}
+
 fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> Result<(), String> {
     let names = scanners
         .iter()
@@ -2637,6 +2693,8 @@ fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> 
             "observed security evidence is missing or duplicates a required scanner".to_string(),
         );
     }
+    let changed_paths = changed_paths_since_base(worktree, observed_scanner_base_oid(scanners)?)?;
+    let allow_preexisting_forbidden_license = !npm_dependency_inputs_changed(&changed_paths);
     for scanner in scanners {
         validate_observed_command(worktree, &scanner.command)?;
         reject_symlink_path(&scanner.result_path)?;
@@ -2671,7 +2729,13 @@ fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> 
             validate_trivy_transport(exit_status, &raw, &stderr)?;
             validate_scanner_result(&scanner.name, 0, &result, &stderr)?;
         } else {
-            validate_scanner_result(&scanner.name, exit_status, &result, &stderr)?;
+            validate_scanner_result_with_license_policy(
+                &scanner.name,
+                exit_status,
+                &result,
+                &stderr,
+                scanner.name == "license-checker" && allow_preexisting_forbidden_license,
+            )?;
         }
     }
     Ok(())
@@ -35673,7 +35737,7 @@ exit 19
         let gitleaks_policy_digest =
             super::gitleaks_policy_digest(&fixture.repo).expect("current Gitleaks policy digest");
         let previous_policy_schema =
-            "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-v1;license-checker-v1";
+            "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-diff-v2;license-checker-v1";
         let previous_semantic = autospec_core::autonomous::waterfall::sha256_hex(
             format!(
                 "{}\0{}\0{}\0{}\0{}\0{}\0{}",
@@ -37171,6 +37235,44 @@ exit 19
     }
 
     #[test]
+    fn autonomous_executor_bridge_license_checker_findings_follow_dependency_inputs() {
+        let fixture = GitFixture::new("license-changed-inputs");
+        fs::write(fixture.repo.join("package-lock.json"), "{}\n").expect("baseline lockfile");
+        git(&fixture.repo, &["add", "package-lock.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline lockfile"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        fs::write(fixture.repo.join("feature.js"), "feature();\n").expect("feature source");
+        git(&fixture.repo, &["add", "feature.js"]);
+        git(&fixture.repo, &["commit", "-m", "feature source"]);
+        let report = serde_json::json!({
+            "@img/sharp-libvips-linux-x64@1.2.4": {"licenses": "LGPL-3.0"}
+        });
+        let changed =
+            super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
+        super::validate_license_checker_result(
+            &report,
+            !super::npm_dependency_inputs_changed(&changed),
+        )
+        .expect("unchanged dependency finding must not block feature work");
+
+        fs::write(
+            fixture.repo.join("package-lock.json"),
+            "{\"changed\":true}\n",
+        )
+        .expect("changed lockfile");
+        git(&fixture.repo, &["add", "package-lock.json"]);
+        git(&fixture.repo, &["commit", "-m", "change lockfile"]);
+        let changed =
+            super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
+        let error = super::validate_license_checker_result(
+            &report,
+            !super::npm_dependency_inputs_changed(&changed),
+        )
+        .expect_err("changed dependency finding must block");
+        assert!(error.contains("forbidden license"), "{error}");
+    }
+
+    #[test]
     fn autonomous_executor_bridge_gitleaks_ignores_only_next_generated_output() {
         // Break caught: generated Next.js bundles replaying source-like test secrets into the
         // required scan while an equivalent finding in a source fixture must still block.
@@ -37336,7 +37438,10 @@ exit 19
                 r#"{"results":[],"errors":[],"paths":{"scanned":["feature.js"],"skipped":[]}}"#,
             ),
             ("trivy", r#"{"Results":[{"Target":"."}]}"#),
-            ("license-checker", r#"{"fixture@1.0.0":{"licenses":"MIT"}}"#),
+            (
+                "license-checker",
+                r#"{"fixture@1.0.0":{"licenses":"LGPL-3.0"}}"#,
+            ),
         ] {
             let executable = bin.join(scanner);
             let count = bin.join(format!("{scanner}.count"));
