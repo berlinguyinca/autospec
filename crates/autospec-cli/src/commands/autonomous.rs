@@ -2559,8 +2559,11 @@ fn run_foreground_with_lease(
         retire_recovered_claim_acquisition(&state_path, &layout.repo, issue)?;
         state = state
             .transition(ConductorEvent::RetryScheduled)
+            .and_then(|state| state.transition(ConductorEvent::Claimed))
             .map_err(CommandFailure::diagnostic)?;
-        persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
+        let retired =
+            retire_foreground_ownership(&state_path, state).map_err(CommandFailure::diagnostic)?;
+        return Ok(ForegroundCompletion::State(Box::new(retired)));
     }
     if matches!(
         state.phase(),
