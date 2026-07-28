@@ -2981,6 +2981,7 @@ fn collect_nested_direct_ownership(
     root: &Path,
     direct_roots: &mut Vec<(PathBuf, BTreeSet<usize>)>,
 ) -> Result<(), String> {
+    reject_symlink_path(root)?;
     if !root.is_dir() {
         return Ok(());
     }
@@ -20502,16 +20503,7 @@ fn ensure_private_directory(path: &Path) -> Result<(), String> {
     reject_symlink_path(path)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-        if let Ok(metadata) = fs::metadata(path) {
-            // SAFETY: geteuid has no arguments or memory-safety preconditions.
-            if metadata.uid() != unsafe { nix::libc::geteuid() } {
-                return Err(format!(
-                    "executor directory has foreign ownership: {}",
-                    path.display()
-                ));
-            }
-        }
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
         let mut builder = fs::DirBuilder::new();
         builder.recursive(true).mode(0o700);
         builder
@@ -20519,12 +20511,13 @@ fn ensure_private_directory(path: &Path) -> Result<(), String> {
             .map_err(|error| format!("create executor directory {}: {error}", path.display()))?;
         let metadata = fs::metadata(path)
             .map_err(|error| format!("inspect executor directory {}: {error}", path.display()))?;
-        if !metadata.is_dir() || metadata.uid() != unsafe { nix::libc::geteuid() } {
+        if !metadata.is_dir() {
             return Err(format!(
-                "executor directory is not an owned directory: {}",
+                "executor directory path is not a directory: {}",
                 path.display()
             ));
         }
+        validate_executor_ownership(path, &[])?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .map_err(|error| format!("secure executor directory {}: {error}", path.display()))?;
     }
@@ -28412,6 +28405,39 @@ exit 64
                 directory.display()
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_nested_root_symlinks_fail_closed_before_absence_check() {
+        // Break caught: dangling or non-directory root symlinks looking absent to `is_dir` and
+        // bypassing the nested evidence ownership boundary.
+        let fixture = GitFixture::new("nested-root-symlink");
+        let file_target = fixture.root.join("foreign-file");
+        fs::write(&file_target, b"foreign\n").expect("file target");
+        for (label, target) in [
+            ("dangling", fixture.root.join("missing-target")),
+            ("file", file_target.clone()),
+        ] {
+            let root = fixture.root.join(format!("{label}-root"));
+            symlink(&target, &root).expect("nested root symlink");
+
+            let error = super::reconcile_nested_direct_ownership(&root)
+                .expect_err("root symlink must fail closed");
+
+            assert!(error.contains("symlink"), "{label}: {error}");
+            assert!(
+                fs::symlink_metadata(&root)
+                    .expect("root symlink metadata")
+                    .file_type()
+                    .is_symlink(),
+                "{label} root was mutated"
+            );
+        }
+        assert_eq!(
+            fs::read(&file_target).expect("file target after rejection"),
+            b"foreign\n"
+        );
     }
 
     #[cfg(target_os = "linux")]
