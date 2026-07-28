@@ -173,6 +173,52 @@ fn terminal_transition_process_failpoint() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(debug_assertions)]
+fn merged_reconciliation_process_failpoint() -> Result<(), String> {
+    let Some(path) =
+        std::env::var_os("AUTOSPEC_TEST_MERGED_RECONCILIATION_FAIL_ONCE").map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+    if path.exists() {
+        return Ok(());
+    }
+    write_private_create_once(
+        &path,
+        b"merged reconciliation interrupted\n",
+        "executor merged reconciliation test failpoint",
+    )?;
+    Err("injected executor crash after merged reconciliation".to_string())
+}
+
+#[cfg(not(debug_assertions))]
+fn merged_reconciliation_process_failpoint() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(debug_assertions)]
+fn merged_claim_transition_process_failpoint() -> Result<(), String> {
+    let Some(path) =
+        std::env::var_os("AUTOSPEC_TEST_MERGED_CLAIM_TRANSITION_FAIL_ONCE").map(PathBuf::from)
+    else {
+        return Ok(());
+    };
+    if path.exists() {
+        return Ok(());
+    }
+    write_private_create_once(
+        &path,
+        b"merged claim transition interrupted\n",
+        "executor merged claim transition test failpoint",
+    )?;
+    Err("injected executor crash after merged claim transition".to_string())
+}
+
+#[cfg(not(debug_assertions))]
+fn merged_claim_transition_process_failpoint() -> Result<(), String> {
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BridgeRunStatus {
     Pending,
@@ -703,7 +749,7 @@ pub(crate) fn recoverable_implementation_completion(
         return Ok(false);
     }
     validate_private_state_file(&state_path)?;
-    let state = PersistedInvocation::from_json(
+    let mut state = PersistedInvocation::from_json(
         &fs::read_to_string(&state_path)
             .map_err(|error| format!("read completed executor invocation: {error}"))?,
     )?;
@@ -713,7 +759,49 @@ pub(crate) fn recoverable_implementation_completion(
                 .to_string(),
         );
     }
+    if !state.identity.worktree.exists()
+        && matches!(
+            state.phase,
+            BridgePhase::DraftCreated
+                | BridgePhase::Ready
+                | BridgePhase::CiPassed
+                | BridgePhase::ReviewPassed
+                | BridgePhase::ResultAccepted
+                | BridgePhase::MergeRequested
+        )
+        && executor_terminal_processes_are_quiescent(&state)?
+        && reconcile_exact_merged_invocation(&state_path, &mut state, &DraftPrAdapter::github_cli())
+            .map_err(|error| error.to_string())?
+    {
+        finalize_merged_executor(&state_path, &mut state, None)
+            .map_err(|error| error.to_string())?;
+        return Ok(state.phase == BridgePhase::Complete);
+    }
+    if state.phase == BridgePhase::Merged
+        && !state.identity.worktree.exists()
+        && executor_terminal_processes_are_quiescent(&state)?
+    {
+        finalize_merged_executor(&state_path, &mut state, None)
+            .map_err(|error| error.to_string())?;
+        return Ok(state.phase == BridgePhase::Complete);
+    }
     recoverable_implementation_completion_for_state(&state_path, &state)
+}
+
+fn executor_terminal_processes_are_quiescent(state: &PersistedInvocation) -> Result<bool, String> {
+    if persisted_executor_is_live(state)? {
+        return Ok(false);
+    }
+    let Some(expected) = state.draft_process.as_ref() else {
+        return Ok(true);
+    };
+    let Some(observed) = observe_process_birth(expected.pid)? else {
+        return Ok(true);
+    };
+    if expected.owns_birth(&observed) {
+        return Ok(false);
+    }
+    Err("completed executor draft process identity changed; refusing recovery".to_string())
 }
 
 fn invocation_matches_lease(
@@ -820,6 +908,36 @@ fn run_executor_bridge_with_codex_probe(
     if let Some(recovered) = recovered.as_ref() {
         if recovered.phase == BridgePhase::Complete {
             return publish_complete_receipt(request, recovered, &terminal_path);
+        }
+        if recovered.phase == BridgePhase::Merged
+            && !recovered.identity.worktree.exists()
+            && executor_terminal_processes_are_quiescent(recovered)?
+        {
+            let mut recovered = recovered.clone();
+            finalize_merged_executor(&request.state_path, &mut recovered, None)?;
+            return publish_complete_receipt(request, &recovered, &terminal_path);
+        }
+        if !recovered.identity.worktree.exists()
+            && matches!(
+                recovered.phase,
+                BridgePhase::DraftCreated
+                    | BridgePhase::Ready
+                    | BridgePhase::CiPassed
+                    | BridgePhase::ReviewPassed
+                    | BridgePhase::ResultAccepted
+                    | BridgePhase::MergeRequested
+            )
+            && executor_terminal_processes_are_quiescent(recovered)?
+        {
+            let mut recovered = recovered.clone();
+            if reconcile_exact_merged_invocation(
+                &request.state_path,
+                &mut recovered,
+                &DraftPrAdapter::github_cli(),
+            )? {
+                finalize_merged_executor(&request.state_path, &mut recovered, None)?;
+                return publish_complete_receipt(request, &recovered, &terminal_path);
+            }
         }
         if startup_needs_zero_effect_recovery(recovered.phase) {
             repaired_zero_effect_completion =
@@ -10590,6 +10708,313 @@ fn observe_pull_request(
     })
 }
 
+fn reconcile_exact_merged_invocation(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<bool, BridgeRunFailure> {
+    let snapshot = state.clone();
+    let reconciled =
+        reconcile_exact_merged_invocation_with_refresh(state_path, state, adapter, || {
+            refresh_bridge_claim(&snapshot, ClaimRenewalPhase::Verification)
+        })?;
+    if reconciled {
+        merged_reconciliation_process_failpoint()?;
+    }
+    Ok(reconciled)
+}
+
+fn reconcile_exact_merged_invocation_with_refresh<Refresh>(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    adapter: &DraftPrAdapter,
+    mut refresh: Refresh,
+) -> Result<bool, BridgeRunFailure>
+where
+    Refresh: FnMut() -> Result<BridgeClaimOwnership, BridgeRunFailure>,
+{
+    if refresh()? == BridgeClaimOwnership::Lost {
+        return Err(BridgeRunFailure::ownership_lost(
+            "executor merged reconciliation lost exact claim ownership",
+        ));
+    }
+    let pull_request = state
+        .pr
+        .ok_or_else(|| "executor merged reconciliation requires a pull request".to_string())?;
+    let persisted_head = state
+        .head_oid
+        .clone()
+        .ok_or_else(|| "executor merged reconciliation requires a persisted head".to_string())?;
+    let output = Command::new(&adapter.gh)
+        .args([
+            "pr",
+            "view",
+            &pull_request.to_string(),
+            "--repo",
+            &state.identity.repository,
+            "--json",
+            "number,state,isDraft,headRefName,headRefOid,baseRefName,mergeCommit",
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| {
+            BridgeRunFailure::transient(format!("observe merged executor reconciliation: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(BridgeRunFailure::transient(format!(
+            "observe merged executor reconciliation failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        BridgeRunFailure::invariant(format!("parse merged executor reconciliation: {error}"))
+    })?;
+    let object = strict_object(
+        value,
+        &[
+            "number",
+            "state",
+            "isDraft",
+            "headRefName",
+            "headRefOid",
+            "baseRefName",
+            "mergeCommit",
+        ],
+        "merged executor reconciliation",
+    )?;
+    if text(&object, "state")? != "MERGED" {
+        return Ok(false);
+    }
+    let base = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor reconciliation base must name origin".to_string())?;
+    if number(&object, "number")? != pull_request
+        || required(&object, "isDraft")?.as_bool() != Some(false)
+        || text(&object, "headRefName")? != state.identity.branch
+        || text(&object, "baseRefName")? != base
+    {
+        return Err("executor merged reconciliation PR identity mismatch"
+            .to_string()
+            .into());
+    }
+    let merged_head = text(&object, "headRefOid")?;
+    if !canonical_git_oid(&persisted_head) || !canonical_git_oid(&merged_head) {
+        return Err("executor merged reconciliation head OID is invalid"
+            .to_string()
+            .into());
+    }
+    let merge = strict_object(
+        required(&object, "mergeCommit")?.clone(),
+        &["oid"],
+        "merged executor reconciliation commit",
+    )?;
+    let merge_oid = text(&merge, "oid")?;
+    if !canonical_git_oid(&merge_oid) {
+        return Err("executor merged reconciliation commit OID is invalid"
+            .to_string()
+            .into());
+    }
+    verify_merged_head_inclusion(
+        &state.identity.repository_path,
+        &state.identity.branch,
+        &persisted_head,
+        &merged_head,
+    )
+    .map_err(BridgeRunFailure::invariant)?;
+    let pre_reconciliation_digest =
+        preserve_pre_reconciliation_invocation(state_path, state, &persisted_head)?;
+    let record = serde_json::json!({
+        "schema": 1,
+        "state": "externally_advanced_terminal_reconciliation",
+        "binding": cleanup_binding(state),
+        "repo": state.identity.repository,
+        "issue": state.identity.issue,
+        "worker_id": state.identity.worker_id,
+        "claim_id": state.identity.claim_id,
+        "invocation_id": state.identity.invocation_id,
+        "pr": pull_request,
+        "branch": state.identity.branch,
+        "base": base,
+        "persisted_head": persisted_head,
+        "pre_reconciliation_digest": pre_reconciliation_digest,
+        "local_head": merged_head,
+        "merged_head": merged_head,
+        "merge_oid": merge_oid,
+    });
+    write_private_create_once(
+        &cleanup_record_path(state_path, "merged-reconciliation"),
+        serde_json::to_string(&record)
+            .map_err(|error| format!("serialize merged executor reconciliation: {error}"))?
+            .as_bytes(),
+        "executor merged reconciliation",
+    )?;
+    state.head_oid = Some(merged_head);
+    state.terminal_result = Some(merge_oid);
+    state.phase = BridgePhase::Merged;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    Ok(true)
+}
+
+fn preserve_pre_reconciliation_invocation(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    persisted_head: &str,
+) -> Result<String, String> {
+    validate_private_state_file(state_path)?;
+    let body = fs::read(state_path)
+        .map_err(|error| format!("read pre-reconciliation invocation: {error}"))?;
+    let durable = PersistedInvocation::from_json(
+        std::str::from_utf8(&body)
+            .map_err(|error| format!("pre-reconciliation invocation is not UTF-8: {error}"))?,
+    )?;
+    if durable != *state || durable.head_oid.as_deref() != Some(persisted_head) {
+        return Err("pre-reconciliation invocation changed before retirement".to_string());
+    }
+    write_private_create_once(
+        &cleanup_record_path(state_path, "pre-merged-invocation"),
+        &body,
+        "executor pre-reconciliation invocation",
+    )?;
+    Ok(sha256_hex(&body))
+}
+
+fn verify_merged_head_inclusion(
+    repository_path: &Path,
+    branch: &str,
+    persisted_head: &str,
+    merged_head: &str,
+) -> Result<(), String> {
+    if !canonical_git_oid(persisted_head) || !canonical_git_oid(merged_head) {
+        return Err("executor merged reconciliation head OID is invalid".to_string());
+    }
+    let branch_ref = format!("refs/heads/{branch}^{{commit}}");
+    let local_head = git_stdout(repository_path, &["rev-parse", "--verify", &branch_ref])?;
+    if local_head != merged_head {
+        return Err(
+            "executor merged reconciliation local branch does not match PR head".to_string(),
+        );
+    }
+    let ancestry = Command::new("git")
+        .args(["merge-base", "--is-ancestor", persisted_head, merged_head])
+        .current_dir(repository_path)
+        .output()
+        .map_err(|error| format!("verify executor merged reconciliation ancestry: {error}"))?;
+    if ancestry.status.success() {
+        return Ok(());
+    }
+    if ancestry.status.code() == Some(1) {
+        return Err("executor persisted head is not contained in the merged PR head".to_string());
+    }
+    Err(format!(
+        "verify executor merged reconciliation ancestry failed: {}",
+        String::from_utf8_lossy(&ancestry.stderr).trim()
+    ))
+}
+
+fn validate_merged_reconciliation_record(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<(), String> {
+    let path = cleanup_record_path(state_path, "merged-reconciliation");
+    validate_private_state_file(&path)?;
+    let value: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&path)
+            .map_err(|error| format!("read executor merged reconciliation: {error}"))?,
+    )
+    .map_err(|error| format!("parse executor merged reconciliation: {error}"))?;
+    let object = strict_object(
+        value,
+        &[
+            "schema",
+            "state",
+            "binding",
+            "repo",
+            "issue",
+            "worker_id",
+            "claim_id",
+            "invocation_id",
+            "pr",
+            "branch",
+            "base",
+            "persisted_head",
+            "pre_reconciliation_digest",
+            "local_head",
+            "merged_head",
+            "merge_oid",
+        ],
+        "executor merged reconciliation",
+    )?;
+    let merged_head = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "merged executor invocation has no head".to_string())?;
+    let merge_oid = state
+        .terminal_result
+        .as_deref()
+        .ok_or_else(|| "merged executor invocation has no merge OID".to_string())?;
+    let base = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor reconciliation base must name origin".to_string())?;
+    let persisted_head = text(&object, "persisted_head")?;
+    let pre_reconciliation_digest = text(&object, "pre_reconciliation_digest")?;
+    if checked_u32(&object, "schema")? != 1
+        || text(&object, "state")? != "externally_advanced_terminal_reconciliation"
+        || text(&object, "binding")? != cleanup_binding(state)
+        || text(&object, "repo")? != state.identity.repository
+        || number(&object, "issue")? != state.identity.issue
+        || text(&object, "worker_id")? != state.identity.worker_id
+        || text(&object, "claim_id")? != state.identity.claim_id
+        || text(&object, "invocation_id")? != state.identity.invocation_id
+        || number(&object, "pr")? != state.pr.unwrap_or_default()
+        || text(&object, "branch")? != state.identity.branch
+        || text(&object, "base")? != base
+        || text(&object, "local_head")? != merged_head
+        || text(&object, "merged_head")? != merged_head
+        || text(&object, "merge_oid")? != merge_oid
+    {
+        return Err("executor merged reconciliation record changed".to_string());
+    }
+    let snapshot_path = cleanup_record_path(state_path, "pre-merged-invocation");
+    validate_private_state_file(&snapshot_path)?;
+    let snapshot_body = fs::read(&snapshot_path)
+        .map_err(|error| format!("read executor pre-reconciliation invocation: {error}"))?;
+    if !canonical_sha256(&pre_reconciliation_digest)
+        || sha256_hex(&snapshot_body) != pre_reconciliation_digest
+    {
+        return Err("executor pre-reconciliation invocation digest changed".to_string());
+    }
+    let snapshot =
+        PersistedInvocation::from_json(std::str::from_utf8(&snapshot_body).map_err(|error| {
+            format!("executor pre-reconciliation invocation is not UTF-8: {error}")
+        })?)?;
+    if snapshot.identity != state.identity
+        || snapshot.pr != state.pr
+        || snapshot.head_oid.as_deref() != Some(persisted_head.as_str())
+        || !matches!(
+            snapshot.phase,
+            BridgePhase::DraftCreated
+                | BridgePhase::Ready
+                | BridgePhase::CiPassed
+                | BridgePhase::ReviewPassed
+                | BridgePhase::ResultAccepted
+                | BridgePhase::MergeRequested
+        )
+    {
+        return Err("executor pre-reconciliation invocation identity changed".to_string());
+    }
+    verify_merged_head_inclusion(
+        &state.identity.repository_path,
+        &state.identity.branch,
+        &persisted_head,
+        merged_head,
+    )
+}
+
 fn revalidate_merge_admission(
     state_path: &Path,
     state: &PersistedInvocation,
@@ -11487,6 +11912,7 @@ pub(crate) fn record_runtime_session_closed(
 }
 
 fn remove_exact_owned_worktree(
+    state_path: &Path,
     state: &PersistedInvocation,
     removal_intent: &Path,
 ) -> Result<(), String> {
@@ -11501,16 +11927,66 @@ fn remove_exact_owned_worktree(
         &["worktree", "list", "--porcelain"],
     )?;
     if !state.identity.worktree.exists() {
+        let expected_path = format!("worktree {}", state.identity.worktree.display());
+        let expected_branch = format!("branch refs/heads/{}", state.identity.branch);
+        let matching = registry
+            .split("\n\n")
+            .filter(|block| block.lines().any(|line| line == expected_path))
+            .collect::<Vec<_>>();
+        if matching.len() > 1 {
+            return Err("executor worktree registration is ambiguous".to_string());
+        }
+        if let Some(registration) = matching.first() {
+            validate_merged_reconciliation_record(state_path, state)?;
+            let expected_head = format!(
+                "HEAD {}",
+                state
+                    .head_oid
+                    .as_deref()
+                    .ok_or_else(|| "merged executor cleanup has no head".to_string())?
+            );
+            if !registration.lines().any(|line| line == expected_branch)
+                || !registration.lines().any(|line| line == expected_head)
+                || !registration
+                    .lines()
+                    .any(|line| line.starts_with("prunable "))
+            {
+                return Err(
+                    "missing executor worktree registration is not exact and prunable".to_string(),
+                );
+            }
+            let output = Command::new("git")
+                .args([
+                    "worktree",
+                    "remove",
+                    "--force",
+                    state.identity.worktree.to_string_lossy().as_ref(),
+                ])
+                .current_dir(&state.identity.repository_path)
+                .output()
+                .map_err(|error| format!("remove prunable executor worktree: {error}"))?;
+            if !output.status.success() {
+                return Err(format!(
+                    "remove prunable executor worktree failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            let after = git_stdout(
+                &state.identity.repository_path,
+                &["worktree", "list", "--porcelain"],
+            )?;
+            if after
+                .lines()
+                .any(|line| line == format!("worktree {}", state.identity.worktree.display()))
+            {
+                return Err("prunable executor worktree registration survived removal".to_string());
+            }
+            return Ok(());
+        }
         if !intent_preexisted {
             return Err(
                 "executor worktree disappeared before a durable removal intent".to_string(),
             );
-        }
-        if registry
-            .lines()
-            .any(|line| line == format!("worktree {}", state.identity.worktree.display()))
-        {
-            return Err("executor worktree is missing but remains registered".to_string());
         }
         return Ok(());
     }
@@ -11593,13 +12069,14 @@ pub(crate) fn finalize_merged_executor(
                 ))
             }
         }
+        merged_claim_transition_process_failpoint()?;
         state.phase = BridgePhase::CleanupPending;
         state.progress_at = unix_now()?;
         write_invocation_atomic(state_path, state)?;
     }
     close_owned_runtime(state_path, state, runtime.take())?;
     let removal_intent = cleanup_record_path(state_path, "worktree-intent");
-    remove_exact_owned_worktree(state, &removal_intent)?;
+    remove_exact_owned_worktree(state_path, state, &removal_intent)?;
     ensure_cleanup_record(
         &cleanup_record_path(state_path, "worktree-complete"),
         &binding,
@@ -36498,6 +36975,224 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
             "main",
         )
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_merged_reconciliation_is_exact_and_fail_closed() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("merged-reconciliation-exact");
+        commit_implementation(&state);
+        let persisted_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        fs::write(
+            state.identity.worktree.join("reviewer-follow-up.txt"),
+            "reviewer follow-up\n",
+        )
+        .expect("reviewer follow-up");
+        git(&state.identity.worktree, &["add", "reviewer-follow-up.txt"]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "reviewer follow-up"],
+        );
+        let merged_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        state.phase = super::BridgePhase::DraftCreated;
+        state.pr = Some(17);
+        state.head_oid = Some(persisted_head.clone());
+        state.supervisor = None;
+        state.process = None;
+        state.draft_process = None;
+        let observation = fixture.root.join("merged-observation.json");
+        let gh = fixture.root.join("gh-merged-reconciliation");
+        fs::write(&gh, "#!/bin/sh\nset -eu\ncat \"$MERGED_OBSERVATION\"\n").expect("gh");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
+        let adapter = super::DraftPrAdapter {
+            gh,
+            environment: BTreeMap::from([(
+                "MERGED_OBSERVATION".into(),
+                observation.clone().into_os_string(),
+            )]),
+        };
+        let exact = serde_json::json!({
+            "number": 17,
+            "state": "MERGED",
+            "isDraft": false,
+            "headRefName": state.identity.branch,
+            "headRefOid": merged_head,
+            "baseRefName": "main",
+            "mergeCommit": {"oid": "b".repeat(40)},
+        });
+        fs::write(&observation, exact.to_string()).expect("exact observation");
+        let state_path = fixture.root.join("state/exact.json");
+        super::write_invocation_atomic(&state_path, &state).expect("persist pre-reconciliation");
+        let mut reconciled = state.clone();
+        assert!(super::reconcile_exact_merged_invocation_with_refresh(
+            &state_path,
+            &mut reconciled,
+            &adapter,
+            || Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }),
+        )
+        .expect("exact merged reconciliation"));
+        assert_eq!(reconciled.phase, super::BridgePhase::Merged);
+        assert_eq!(reconciled.head_oid.as_deref(), Some(merged_head.as_str()));
+        assert_eq!(
+            reconciled.terminal_result.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        super::validate_merged_reconciliation_record(&state_path, &reconciled)
+            .expect("bound reconciliation record");
+
+        for (name, mutated) in [
+            ("open", serde_json::json!({"state": "OPEN"})),
+            ("draft", serde_json::json!({"isDraft": true})),
+            ("number", serde_json::json!({"number": 18})),
+            (
+                "branch",
+                serde_json::json!({"headRefName": "feat/autonomous-issue-99"}),
+            ),
+            ("base", serde_json::json!({"baseRefName": "release"})),
+            ("head-oid", serde_json::json!({"headRefOid": "not-an-oid"})),
+            (
+                "merge-oid",
+                serde_json::json!({"mergeCommit": {"oid": "not-an-oid"}}),
+            ),
+            (
+                "local-head",
+                serde_json::json!({"headRefOid": persisted_head}),
+            ),
+        ] {
+            let mut document = exact.clone();
+            let object = document.as_object_mut().expect("observation object");
+            for (key, value) in mutated.as_object().expect("mutation object") {
+                object.insert(key.clone(), value.clone());
+            }
+            fs::write(&observation, document.to_string()).expect("mutated observation");
+            let mut candidate = state.clone();
+            let candidate_path = fixture.root.join(format!("state/{name}.json"));
+            let outcome = super::reconcile_exact_merged_invocation_with_refresh(
+                &candidate_path,
+                &mut candidate,
+                &adapter,
+                || Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }),
+            );
+            if name == "open" {
+                assert!(!outcome.expect("open PR is not terminal"));
+            } else {
+                assert!(outcome.is_err(), "{name} must fail closed");
+            }
+            assert_eq!(candidate, state, "{name} must not mutate invocation state");
+            assert!(
+                !candidate_path.exists(),
+                "{name} must not publish terminal state"
+            );
+        }
+
+        let reconciliation_path = super::cleanup_record_path(&state_path, "merged-reconciliation");
+        let mut changed_record: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&reconciliation_path).expect("read reconciliation"),
+        )
+        .expect("parse reconciliation");
+        changed_record["persisted_head"] = serde_json::json!(state.identity.base_oid);
+        fs::write(&reconciliation_path, changed_record.to_string())
+            .expect("change reconciliation record");
+        assert!(
+            super::validate_merged_reconciliation_record(&state_path, &reconciled).is_err(),
+            "changed persisted evidence must fail closed"
+        );
+
+        let base = state.identity.base_oid.clone();
+        let tree = git_stdout(
+            &state.identity.repository_path,
+            &["rev-parse", &format!("{base}^{{tree}}")],
+        );
+        let divergent = git_stdout(
+            &state.identity.repository_path,
+            &["commit-tree", &tree, "-p", &base, "-m", "divergent head"],
+        );
+        git(
+            &state.identity.repository_path,
+            &[
+                "update-ref",
+                &format!("refs/heads/{}", state.identity.branch),
+                &divergent,
+                &merged_head,
+            ],
+        );
+        let mut divergent_observation = exact.clone();
+        divergent_observation["headRefOid"] = serde_json::json!(divergent);
+        fs::write(&observation, divergent_observation.to_string()).expect("divergent observation");
+        let mut nonancestor = state.clone();
+        let nonancestor_path = fixture.root.join("state/nonancestor.json");
+        let error = super::reconcile_exact_merged_invocation_with_refresh(
+            &nonancestor_path,
+            &mut nonancestor,
+            &adapter,
+            || Ok(super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }),
+        )
+        .expect_err("non-ancestor merged head must fail closed");
+        assert!(error.to_string().contains("not contained"), "{error}");
+        assert_eq!(nonancestor, state);
+        assert!(!nonancestor_path.exists());
+
+        fs::write(&observation, exact.to_string()).expect("restore exact observation");
+        let mut lost = state.clone();
+        let lost_path = fixture.root.join("state/ownership-lost.json");
+        let error = super::reconcile_exact_merged_invocation_with_refresh(
+            &lost_path,
+            &mut lost,
+            &adapter,
+            || Ok(super::BridgeClaimOwnership::Lost),
+        )
+        .expect_err("claim takeover must block reconciliation");
+        assert!(error.to_string().contains("ownership"), "{error}");
+        assert_eq!(lost, state);
+        assert!(!lost_path.exists());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_merged_reconciliation_waits_for_exact_live_process() {
+        let (_fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("merged-reconciliation-live-process");
+        let args = vec!["30".to_string()];
+        let executable = fs::canonicalize("/usr/bin/sleep").expect("sleep executable");
+        let mut child = Command::new(&executable)
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .expect("spawn live executor fixture");
+        let mut cleanup =
+            DetachedForkedCleanup::new(child.id()).expect("arm live executor cleanup");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let identity = loop {
+            if let Some(identity) =
+                super::observe_process_identity(child.id(), &super::argv_digest(&args))
+                    .expect("observe live executor")
+            {
+                if identity.executable == executable
+                    && identity.argv_digest == super::argv_digest(&args)
+                    && identity.process_group == identity.pid
+                {
+                    break identity;
+                }
+            }
+            assert!(Instant::now() < deadline, "live executor was not observed");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        cleanup.confirm_identity(identity.clone());
+        state.supervisor = Some(identity);
+
+        assert!(
+            !super::executor_terminal_processes_are_quiescent(&state)
+                .expect("inspect exact live process"),
+            "remote terminal truth must not retire a generation while its exact process is live"
+        );
+        assert!(
+            child
+                .try_wait()
+                .expect("inspect live executor fixture")
+                .is_none(),
+            "the quiescence gate must not mutate the live process"
+        );
     }
 
     #[cfg(unix)]

@@ -1983,6 +1983,240 @@ fn foreground_resumes_nonzero_draft_created_receipt_failure_without_second_harne
 }
 
 #[test]
+fn foreground_retires_exact_merged_draft_when_worktree_is_missing() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let harness_launches = fixture.root.join("merged-draft-harness.launches");
+    let configure = |command: &mut Command| {
+        command
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches);
+    };
+
+    let mut first_command = fixture.command();
+    configure(&mut first_command);
+    first_command.env("AUTOSPEC_BRIDGE_FAIL_GH_AFTER_CREATE_ALWAYS", "1");
+    let first = first_command
+        .output()
+        .expect("persist a DraftCreated invocation");
+    assert!(
+        first.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+
+    let invocation = fs::read_dir(fixture.scoped_dir().join("executor"))
+        .expect("executor state directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| is_generation_invocation_path(path, 42))
+        .expect("generation-scoped invocation");
+    let mut invocation_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&invocation).expect("read DraftCreated invocation"),
+    )
+    .expect("parse DraftCreated invocation");
+    let persisted_head = invocation_state["head_oid"]
+        .as_str()
+        .expect("persisted implementation head")
+        .to_string();
+    let worktree = PathBuf::from(
+        invocation_state["identity"]["worktree"]
+            .as_str()
+            .expect("persisted executor worktree"),
+    );
+    invocation_state["phase"] = serde_json::json!("draft_created");
+    invocation_state["pr"] = serde_json::json!(17);
+    fs::write(&invocation, format!("{invocation_state}\n"))
+        .expect("seed exact DraftCreated gate-failure state");
+
+    fs::write(
+        worktree.join("reviewer-follow-up.txt"),
+        "reviewer-owned follow-up\n",
+    )
+    .expect("write reviewer follow-up");
+    git_fixture(&worktree, &["add", "reviewer-follow-up.txt"]);
+    git_fixture(&worktree, &["commit", "-m", "test: add reviewer follow-up"]);
+    let merged_head = git_fixture(&worktree, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        merged_head, persisted_head,
+        "the regression requires an externally advanced merged head"
+    );
+    let merge_oid = merged_head.clone();
+    let mut pull_requests: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&fixture.pull_requests).expect("read pull request fixture"),
+    )
+    .expect("parse pull request fixture");
+    pull_requests[0]["headRefOid"] = serde_json::json!(merged_head);
+    pull_requests[0]["isDraft"] = serde_json::json!(false);
+    fs::write(&fixture.pull_requests, format!("{pull_requests}\n"))
+        .expect("advance exact pull request head");
+    fs::write(&bridge.merged, format!("{merge_oid}\n")).expect("mark exact PR merged");
+    let mut exact_claim = fixture.claim_record_from(&bridge.remote);
+    exact_claim.pr = "17".to_string();
+    exact_claim.step = "verification".to_string();
+    fixture.transition_claim_ref_to(&exact_claim, &bridge.remote);
+
+    let unrelated = bridge.executor_fixture.join("unrelated-prunable");
+    git_fixture(
+        &fixture.repo_dir,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feat/unrelated-prunable",
+            unrelated.to_str().expect("unrelated worktree path"),
+            "main",
+        ],
+    );
+    fs::remove_dir_all(&unrelated).expect("make unrelated registration prunable");
+    fs::remove_dir_all(&worktree).expect("remove exact executor worktree");
+    let registry_before = git_fixture(&fixture.repo_dir, &["worktree", "list", "--porcelain"]);
+    assert!(registry_before.contains(worktree.to_str().expect("worktree path")));
+    assert!(registry_before.contains(unrelated.to_str().expect("unrelated path")));
+    assert_eq!(
+        fixture.claim_record_from(&bridge.remote).pr,
+        "17",
+        "the authoritative generation must bind the exact pull request"
+    );
+
+    fs::write(
+        fixture.state_path(),
+        selected_foreground_state()
+            .transition(ConductorEvent::Claimed)
+            .expect("seed claimed conductor")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+            })
+            .expect("seed receipt failure")
+            .to_json(),
+    )
+    .expect("persist receipt-failed conductor state");
+    let calls_before = fs::read_to_string(&fixture.calls).expect("calls before recovery");
+    let reconciliation_crash = fixture.root.join("merged-reconciliation.crashed");
+
+    let mut interrupted_recovery = fixture.command();
+    configure(&mut interrupted_recovery);
+    interrupted_recovery.env(
+        "AUTOSPEC_TEST_MERGED_RECONCILIATION_FAIL_ONCE",
+        &reconciliation_crash,
+    );
+    let interrupted = interrupted_recovery
+        .output()
+        .expect("interrupt merged reconciliation after durable state");
+    assert!(
+        !interrupted.status.success(),
+        "the crash boundary must interrupt the first recovery"
+    );
+    assert!(reconciliation_crash.exists());
+    let interrupted_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&invocation).expect("read interrupted invocation"),
+    )
+    .expect("parse interrupted invocation");
+    assert_eq!(interrupted_state["phase"], "merged");
+    assert_eq!(
+        fixture.claim_record_from(&bridge.remote).state,
+        "claimed",
+        "the reconciliation record and Merged state precede claim terminalization"
+    );
+
+    let claim_transition_crash = fixture.root.join("merged-claim-transition.crashed");
+    let mut transition_recovery = fixture.command();
+    configure(&mut transition_recovery);
+    transition_recovery.env(
+        "AUTOSPEC_TEST_MERGED_CLAIM_TRANSITION_FAIL_ONCE",
+        &claim_transition_crash,
+    );
+    let transition_interrupted = transition_recovery
+        .output()
+        .expect("interrupt after exact claim terminalization");
+    assert!(
+        !transition_interrupted.status.success(),
+        "the claim transition boundary must interrupt recovery"
+    );
+    assert!(claim_transition_crash.exists());
+    assert_eq!(
+        fixture.claim_record_from(&bridge.remote).state,
+        "merged",
+        "the claim transition must be durable before local cleanup"
+    );
+    let post_transition_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&invocation).expect("read post-transition invocation"),
+    )
+    .expect("parse post-transition invocation");
+    assert_eq!(post_transition_state["phase"], "merged");
+
+    let mut final_recovery = fixture.command();
+    configure(&mut final_recovery);
+    let recovered = final_recovery
+        .output()
+        .expect("resume and retire exact already-merged invocation");
+    assert!(
+        recovered.status.success(),
+        "stdout={} stderr={} state={:?} calls={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr),
+        fixture.read_state(),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    assert_eq!(fixture.claim_record_from(&bridge.remote).state, "merged");
+    assert_eq!(
+        fs::read_to_string(&harness_launches)
+            .expect("harness launch ledger")
+            .lines()
+            .count(),
+        1,
+        "terminal retirement must not relaunch the implementation harness"
+    );
+    let calls_after = fs::read_to_string(&fixture.calls).expect("calls after recovery");
+    assert_eq!(
+        calls_after.matches("\npr\ncreate\n").count(),
+        calls_before.matches("\npr\ncreate\n").count()
+    );
+    assert_eq!(
+        calls_after.matches("\npr\nmerge\n").count(),
+        calls_before.matches("\npr\nmerge\n").count(),
+        "terminal reconciliation must not attempt a second merge"
+    );
+
+    let reconciliation_path = invocation.with_extension("cleanup-merged-reconciliation");
+    let reconciliation: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&reconciliation_path).expect("read merged reconciliation record"),
+    )
+    .expect("parse merged reconciliation record");
+    assert_eq!(reconciliation["persisted_head"], persisted_head);
+    assert_eq!(reconciliation["merged_head"], merged_head);
+    assert_eq!(reconciliation["merge_oid"], merge_oid);
+    assert_eq!(reconciliation["pr"], 17);
+    let terminal: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(invocation.with_extension("terminal.json"))
+            .expect("read terminal bridge receipt"),
+    )
+    .expect("parse terminal bridge receipt");
+    assert_eq!(
+        terminal["head_oid"], merged_head,
+        "the terminal receipt reports the actual merged PR head"
+    );
+
+    let registry_after = git_fixture(&fixture.repo_dir, &["worktree", "list", "--porcelain"]);
+    assert!(!registry_after.contains(worktree.to_str().expect("exact worktree path")));
+    assert!(
+        registry_after.contains(unrelated.to_str().expect("unrelated path")),
+        "exact cleanup must preserve unrelated prunable registrations"
+    );
+}
+
+#[test]
 fn foreground_persistent_post_create_outage_stays_on_the_exact_claim() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
@@ -4758,9 +4992,19 @@ if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = 
     *)
       if [ -e "$AUTOSPEC_BRIDGE_MERGED" ]; then
         merge=$(cat "$AUTOSPEC_BRIDGE_MERGED")
-        printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":{\"oid\":\"$merge\"}}"
+        case " $* " in
+          *" number,state,isDraft,headRefName,headRefOid,baseRefName,mergeCommit "*)
+            printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":{\"oid\":\"$merge\"}}" ;;
+          *)
+            printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":{\"oid\":\"$merge\"}}" ;;
+        esac
       else
-        printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":null}"
+        case " $* " in
+          *" number,state,isDraft,headRefName,headRefOid,baseRefName,mergeCommit "*)
+            printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":null}" ;;
+          *)
+            printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":null}" ;;
+        esac
       fi ;;
   esac
   exit 0
@@ -5529,11 +5773,15 @@ printf '%s\n' '[]' > "$report"
     }
 
     fn claim_record(&self) -> RunStateRecord {
+        self.claim_record_from(&self.claim_remote)
+    }
+
+    fn claim_record_from(&self, remote: &Path) -> RunStateRecord {
         let message = git_fixture(
             &self.root,
             &[
                 "--git-dir",
-                self.claim_remote.to_str().expect("claim remote path"),
+                remote.to_str().expect("claim remote path"),
                 "show",
                 "-s",
                 "--format=%B",
