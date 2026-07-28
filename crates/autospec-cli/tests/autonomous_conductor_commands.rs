@@ -3049,6 +3049,45 @@ fn session_follow_switches_to_repaired_conductor_log_from_offset_zero() {
 }
 
 #[test]
+fn session_follow_reports_one_wait_per_supervisor_repair_outage() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    fixture.start_blocked_detached();
+    let mut follower = fixture.spawn_following_start(5);
+    wait_for_file_contents(
+        &fixture.root.join("follower.log"),
+        "autospec autonomous attached",
+    );
+
+    let mut supervisor = Command::new("sleep");
+    supervisor.arg("300").process_group(0);
+    let supervisor = supervisor.spawn().expect("spawn live supervisor");
+    let supervisor_pid = supervisor.id();
+    let mut supervisor = GuardedProcessGroup::new(supervisor);
+    let (_, start_time_ticks) =
+        process_identity(supervisor_pid).expect("supervisor process identity");
+    fs::write(
+        fixture.scoped_dir().join("supervisor.pid"),
+        format!(
+            "{{\"pid\":{supervisor_pid},\"repo\":\"test/repo\",\"scope\":\"test_repo\",\"pgid\":{supervisor_pid},\"start_time_ticks\":{start_time_ticks}}}\n"
+        ),
+    )
+    .expect("record live supervisor");
+    fixture.terminate_recorded_conductor();
+
+    assert!(follower.wait().success());
+    supervisor.terminate_and_wait();
+    let output = fs::read_to_string(fixture.root.join("follower.log")).expect("read follower log");
+    assert_eq!(
+        output
+            .matches("autospec autonomous follow: waiting for supervisor repair")
+            .count(),
+        1,
+        "{output}"
+    );
+}
+
+#[test]
 fn session_follow_resets_explicit_log_cursor_after_live_pid_replacement() {
     let fixture = ForegroundFixture::new();
     fixture.initialize_git_remote();

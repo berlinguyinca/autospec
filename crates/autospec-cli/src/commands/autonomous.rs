@@ -114,6 +114,7 @@ const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const TERMINAL_RETIREMENT_PAUSE: &str = "executor_terminal_retirement";
 const OWNERSHIP_RETIREMENT_PAUSE: &str = "executor_ownership_retirement";
 const EXECUTOR_PENDING_REASON: &str = "implementation_executor_pending";
+const DEFAULT_SUPERVISOR_REPAIR_INTERVAL_SECS: u64 = 5;
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone)]
@@ -124,6 +125,7 @@ struct Options {
     repo_dir: String,
     pid: String,
     interval_sec: u64,
+    repair_interval_sec: Option<u64>,
     drain_stall_secs: u64,
     drain_poll_secs: u64,
     lines: usize,
@@ -155,6 +157,7 @@ impl Default for Options {
             repo_dir: ".".to_string(),
             pid: String::new(),
             interval_sec: 300,
+            repair_interval_sec: None,
             drain_stall_secs: 1_800,
             drain_poll_secs: 15,
             lines: 50,
@@ -614,6 +617,16 @@ fn parse(args: &[String]) -> Result<Options, String> {
                 options.interval_sec = raw
                     .parse::<u64>()
                     .map_err(|_| format!("invalid --poll-interval-sec value: {raw}"))?;
+            }
+            "--repair-interval-sec" => {
+                index += 1;
+                let raw = args
+                    .get(index)
+                    .ok_or_else(|| "--repair-interval-sec requires a value".to_string())?;
+                options.repair_interval_sec = Some(
+                    raw.parse::<u64>()
+                        .map_err(|_| format!("invalid --repair-interval-sec value: {raw}"))?,
+                );
             }
             "--stall-secs" => {
                 index += 1;
@@ -1575,11 +1588,19 @@ fn supervise(options: Options) -> Result<(), String> {
             if persisted_stop_mode(&layout)?.is_some() {
                 action = "stop-requested".to_string();
             } else {
-                match repair_stopped_conductor(&layout, &options, &recorded) {
-                    Ok(replacement) => {
+                match repair_stopped_conductor(&layout, &options) {
+                    Ok(RepairOutcome::Restarted(replacement)) => {
                         watched_pid = replacement.pid;
                         conductor_running = true;
                         action = "restarted-conductor".to_string();
+                    }
+                    Ok(RepairOutcome::AlreadyRunning(pid)) => {
+                        watched_pid = pid;
+                        conductor_running = true;
+                        action = "already-repaired".to_string();
+                    }
+                    Ok(RepairOutcome::StopRequested) => {
+                        action = "stop-requested".to_string();
                     }
                     Err(error) => {
                         eprintln!("autospec-supervise: repair deferred: {error}");
@@ -1610,22 +1631,37 @@ fn supervise(options: Options) -> Result<(), String> {
         if options.once || (options.iterations > 0 && iteration >= options.iterations) {
             break;
         }
-        thread::sleep(Duration::from_secs(options.interval_sec));
+        thread::sleep(Duration::from_secs(
+            options.repair_interval_sec.unwrap_or(options.interval_sec),
+        ));
     }
     Ok(())
+}
+
+enum RepairOutcome {
+    Restarted(UnitRecord),
+    AlreadyRunning(String),
+    StopRequested,
 }
 
 fn repair_stopped_conductor(
     layout: &RunLayout,
     options: &Options,
-    recorded: &UnitStatus,
-) -> Result<UnitRecord, String> {
+) -> Result<RepairOutcome, String> {
+    let _repair_lock = acquire_supervisor_repair_lock(layout)?;
+    if persisted_stop_mode(layout)?.is_some() {
+        return Ok(RepairOutcome::StopRequested);
+    }
+    let recorded = read_unit("conductor", layout);
+    if recorded.metadata_state == UnitMetadataState::Live {
+        return Ok(RepairOutcome::AlreadyRunning(recorded.pid));
+    }
     if recorded.metadata_state == UnitMetadataState::Ambiguous {
         return Err("conductor metadata is ambiguous".to_string());
     }
     // Clear stale records while the terminated owner's lease still fences new launches. If the
     // lease were released first, another supervisor could publish replacement metadata here.
-    remove_stale_unit_metadata(recorded)?;
+    remove_stale_unit_metadata(&recorded)?;
     if !recorded.pid.is_empty() {
         reap_terminated_child(&recorded.pid)?;
         release_terminated_owner(layout, &recorded.pid)?;
@@ -1649,7 +1685,41 @@ fn repair_stopped_conductor(
     if repaired.is_err() {
         release_launch_lease(&layout.repo, &lease).map_err(|error| error.message)?;
     }
-    repaired
+    repaired.map(RepairOutcome::Restarted)
+}
+
+fn acquire_supervisor_repair_lock(layout: &RunLayout) -> Result<File, String> {
+    fs::create_dir_all(&layout.state_dir)
+        .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
+    let path = layout.state_dir.join("supervisor-repair.lock");
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if !metadata.file_type().is_file() {
+            return Err(format!(
+                "supervisor repair lock is not a regular file: {}",
+                path.display()
+            ));
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600).custom_flags(nix::libc::O_NOFOLLOW);
+    let lock = options.open(&path).map_err(|error| {
+        format!(
+            "cannot open supervisor repair lock {}: {error}",
+            path.display()
+        )
+    })?;
+    if !lock
+        .metadata()
+        .map_err(|error| format!("cannot inspect supervisor repair lock: {error}"))?
+        .is_file()
+    {
+        return Err("supervisor repair lock is not a regular file".to_string());
+    }
+    lock.lock()
+        .map_err(|error| format!("cannot acquire supervisor repair lock: {error}"))?;
+    Ok(lock)
 }
 
 fn status(options: Options) -> Result<(), CommandFailure> {
@@ -4962,6 +5032,13 @@ fn companion_command(options: &Options, subcommand: &str) -> Result<ForegroundCo
         options.interval_sec.to_string(),
     ];
     if subcommand == "supervise" {
+        args.push("--repair-interval-sec".to_string());
+        args.push(
+            options
+                .interval_sec
+                .min(DEFAULT_SUPERVISOR_REPAIR_INTERVAL_SECS)
+                .to_string(),
+        );
         args.extend(conductor_passthrough_args(options));
         if !options.log_path.is_empty() {
             args.push("--log".to_string());
@@ -6816,6 +6893,7 @@ fn follow_scoped_conductor(layout: &RunLayout, options: &Options) -> Result<(), 
     let mut conductor_pid = String::new();
     let mut offset = 0usize;
     let mut iteration = 0u64;
+    let mut waiting_for_repair = false;
     loop {
         iteration += 1;
         let unit = read_unit("conductor", layout);
@@ -6827,6 +6905,7 @@ fn follow_scoped_conductor(layout: &RunLayout, options: &Options) -> Result<(), 
                 ));
             }
             UnitMetadataState::Live => {
+                waiting_for_repair = false;
                 if unit.pid != conductor_pid || unit.logpath != logpath {
                     println!("autospec autonomous follow: log={}", unit.logpath);
                     conductor_pid = unit.pid.clone();
@@ -6845,7 +6924,10 @@ fn follow_scoped_conductor(layout: &RunLayout, options: &Options) -> Result<(), 
                     println!("autospec autonomous follow: conductor exited");
                     return Ok(());
                 }
-                println!("autospec autonomous follow: waiting for supervisor repair");
+                if !waiting_for_repair {
+                    println!("autospec autonomous follow: waiting for supervisor repair");
+                    waiting_for_repair = true;
+                }
             }
         }
         if options.iterations > 0 && iteration >= options.iterations {
