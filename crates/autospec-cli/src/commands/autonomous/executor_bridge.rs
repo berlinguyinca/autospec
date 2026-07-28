@@ -1088,16 +1088,19 @@ fn run_executor_bridge_with_codex_probe(
         .identity
         .worktree
         .join(".autospec/executor-closeout.md");
+    let launch_phase = matches!(
+        state.phase,
+        BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
+    );
+    if launch_phase || state.phase == BridgePhase::ImplementationComplete {
+        prepare_private_closeout_sink(&state.identity.worktree, &closeout_path)?;
+    }
     let prompt = build_implementer_prompt(
         &state.identity,
         &request.issue_title,
         &request.issue_body,
         &closeout_path,
     )?;
-    let launch_phase = matches!(
-        state.phase,
-        BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
-    );
     if resolved_harness.is_none()
         && launch_phase
         && has_durable_harness_recovery_evidence(&request.state_path, &state)?
@@ -20148,6 +20151,41 @@ fn ensure_private_directory(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn prepare_private_closeout_sink(worktree: &Path, closeout: &Path) -> Result<(), String> {
+    let expected = worktree.join(".autospec/executor-closeout.md");
+    if closeout != expected {
+        return Err("executor Closeout sink must use the exact worktree artifact path".to_string());
+    }
+    let artifact_dir = closeout
+        .parent()
+        .ok_or_else(|| "executor Closeout sink has no artifact directory".to_string())?;
+    ensure_private_directory(artifact_dir)?;
+    reject_symlink_path(closeout)?;
+    match fs::symlink_metadata(closeout) {
+        Ok(metadata) if metadata.is_file() => {
+            #[cfg(unix)]
+            fs::set_permissions(closeout, fs::Permissions::from_mode(0o600)).map_err(|error| {
+                format!(
+                    "secure executor Closeout sink {}: {error}",
+                    closeout.display()
+                )
+            })?;
+        }
+        Ok(_) => return Err("executor Closeout sink is not a regular file".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            drop(create_private_artifact(closeout)?);
+        }
+        Err(error) => {
+            return Err(format!(
+                "inspect executor Closeout sink {}: {error}",
+                closeout.display()
+            ))
+        }
+    }
+    validate_private_state_file(closeout)
+        .map_err(|error| format!("executor Closeout sink must be private: {error}"))
+}
+
 fn reject_symlink_path(path: &Path) -> Result<(), String> {
     let mut current = PathBuf::new();
     for component in path.components() {
@@ -21709,6 +21747,72 @@ mod tests {
         assert!(
             !super::exact_prunable_zero_effect_completion(&ambiguous_state_path, &ambiguous)
                 .expect("ambiguous prunable registrations remain fail-closed")
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_prepares_private_closeout_sink() {
+        let (_fixture, state, _state_path, _) =
+            zero_effect_classifier_fixture("private-closeout-sink", false, false);
+        let artifact_dir = state.identity.worktree.join(".autospec");
+        let closeout = artifact_dir.join("executor-closeout.md");
+        fs::create_dir_all(&artifact_dir).expect("create public artifact directory");
+        fs::write(&closeout, "preserved closeout\n").expect("write public closeout");
+        fs::set_permissions(&artifact_dir, fs::Permissions::from_mode(0o775))
+            .expect("make artifact directory public");
+        fs::set_permissions(&closeout, fs::Permissions::from_mode(0o664))
+            .expect("make closeout public");
+
+        super::prepare_private_closeout_sink(&state.identity.worktree, &closeout)
+            .expect("prepare private closeout sink");
+
+        assert_eq!(
+            fs::metadata(&artifact_dir)
+                .expect("artifact directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&closeout)
+                .expect("closeout metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_to_string(&closeout).expect("read preserved closeout"),
+            "preserved closeout\n"
+        );
+
+        fs::remove_file(&closeout).expect("remove recovered closeout");
+        fs::set_permissions(&artifact_dir, fs::Permissions::from_mode(0o775))
+            .expect("restore public artifact directory");
+        super::prepare_private_closeout_sink(&state.identity.worktree, &closeout)
+            .expect("create private closeout sink");
+        assert_eq!(
+            fs::metadata(&artifact_dir)
+                .expect("created artifact directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&closeout)
+                .expect("created closeout metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&closeout)
+                .expect("created closeout length")
+                .len(),
+            0
         );
     }
 
