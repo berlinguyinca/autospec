@@ -5974,7 +5974,9 @@ pub(crate) fn execute_direct_plan(
                 command,
                 runtime.map(DirectRuntimeAdapter::session_id),
             )?;
-            if matches!(recovered.terminal, AttemptTerminal::SpawnFailed(_)) {
+            if matches!(recovered.terminal, AttemptTerminal::SpawnFailed(_))
+                || repaired_supervisor_resolution_failure(&recovered.terminal)
+            {
                 archive_reconciled_direct_failure(&paths)?;
                 attempt_id = reserve_direct_attempt_id(&paths)?;
             }
@@ -17051,6 +17053,24 @@ fn resolve_executor_supervisor_executable(
     Err(format!(
         "{primary_error}; executor supervisor argv-zero fallback cannot prove running-image identity on this platform"
     ))
+}
+
+fn repaired_supervisor_resolution_failure(terminal: &AttemptTerminal) -> bool {
+    let AttemptTerminal::InfrastructureFailed(reason) = terminal else {
+        return false;
+    };
+    if !reason.starts_with("resolve executor supervisor executable:")
+        && !reason.starts_with("canonicalize executor supervisor executable:")
+    {
+        return false;
+    }
+    let argv_zero = std::env::args_os().next();
+    resolve_executor_supervisor_executable(
+        std::env::current_exe()
+            .map_err(|error| format!("resolve executor supervisor executable: {error}")),
+        argv_zero.as_deref(),
+    )
+    .is_ok()
 }
 
 fn launch_and_supervise(
@@ -34278,6 +34298,61 @@ exit 19
         assert!(error.contains("infrastructure"), "{error}");
         assert_eq!(record["terminal"]["kind"], "infrastructure_failed");
         assert!(artifact_root.join("command-000.intent.json").is_file());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_retries_repaired_supervisor_resolution_failure() {
+        let fixture = GitFixture::new("direct-repaired-supervisor-resolution");
+        let artifact_root = fixture.root.join("evidence");
+        let plan = super::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
+
+        super::set_launch_failpoint(super::LaunchFailpoint::ParentReadiness);
+        super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("first attempt records cleanup-proven infrastructure failure");
+        super::set_launch_failpoint(super::LaunchFailpoint::None);
+        let record_path = artifact_root.join("command-000.json");
+        let observed = super::read_observed_command_record(&fixture.repo, &record_path)
+            .expect("read infrastructure record");
+        let repaired = super::observed_command_document(
+            &observed.attempt_id,
+            &observed.commit_oid,
+            observed.runtime_session_id.as_deref(),
+            &observed.executable,
+            &observed.argv,
+            &observed.process_executable,
+            &observed.process_argv,
+            &super::AttemptTerminal::InfrastructureFailed(
+                "canonicalize executor supervisor executable: No such file or directory (os error 2)"
+                    .to_string(),
+            ),
+            &observed.stdout_path,
+            &observed.stdout_digest,
+            &observed.stderr_path,
+            &observed.stderr_digest,
+        );
+        fs::write(&record_path, repaired).expect("persist repaired failure fixture");
+
+        let recovered = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("healthy supervisor resolution starts a fresh attempt");
+
+        assert_eq!(recovered[0].terminal, super::AttemptTerminal::Exited(0));
+        assert!(fs::read_dir(&artifact_root)
+            .expect("failure archive")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
     }
 
     fn direct_launch_supervisor_pid(path: &Path) -> u32 {
