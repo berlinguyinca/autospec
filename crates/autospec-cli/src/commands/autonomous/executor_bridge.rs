@@ -1661,17 +1661,16 @@ fn ensure_premerge_and_review(
         )?;
     }
     if state.phase == BridgePhase::CiPassed {
-        let review = environment
-            .get("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
-            .and_then(|value| value.to_str())
-            .ok_or_else(|| {
-                "AUTOSPEC_EXECUTOR_REVIEW_COMMAND is required for independent review".to_string()
-            })?;
-        let plan = parse_direct_command_plan(review)?;
+        let reviewer = resolve_independent_reviewer(
+            request,
+            state,
+            environment,
+            &request.state_path.with_extension("review-artifacts"),
+        )?;
         run_strict_independent_reviewer(
             &request.state_path,
             state,
-            &plan,
+            &reviewer,
             &request.state_path.with_extension("review-artifacts"),
             Duration::from_secs(300),
             remote,
@@ -1826,6 +1825,20 @@ impl DirectCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct DirectCommandPlan {
     pub(crate) commands: Vec<DirectCommand>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IndependentReviewer {
+    plan: DirectCommandPlan,
+    automatic: Option<AutomaticReviewerArtifacts>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AutomaticReviewerArtifacts {
+    normalizer: PathBuf,
+    inner_stdout: PathBuf,
+    inner_stderr: PathBuf,
+    result: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6732,6 +6745,222 @@ fn resolve_direct_executable(worktree: &Path, executable: &str) -> Result<PathBu
     Ok(canonical)
 }
 
+fn resolve_independent_reviewer(
+    request: &ExecutorBridgeRequest,
+    state: &PersistedInvocation,
+    environment: &BTreeMap<String, OsString>,
+    artifact_root: &Path,
+) -> Result<IndependentReviewer, String> {
+    if let Some(command) = environment.get("AUTOSPEC_EXECUTOR_REVIEW_COMMAND") {
+        let command = command
+            .to_str()
+            .ok_or_else(|| "AUTOSPEC_EXECUTOR_REVIEW_COMMAND must be valid UTF-8".to_string())?;
+        return Ok(IndependentReviewer {
+            plan: parse_direct_command_plan(command)?,
+            automatic: None,
+        });
+    }
+
+    let resolved =
+        HarnessConfig::load(&state.identity.repository_path, environment)?.resolve(environment)?;
+    validate_external_reviewer_executable(state, &resolved.executable)?;
+    ensure_private_directory(artifact_root)?;
+    let artifact_root = fs::canonicalize(artifact_root)
+        .map_err(|error| format!("canonicalize reviewer artifact root: {error}"))?;
+    validate_external_reviewer_artifact_root(state, &artifact_root)?;
+    let harness_artifact = artifact_root.join("harness-result.txt");
+    if resolved.kind == HarnessKind::Codex {
+        prepare_private_reviewer_result(&harness_artifact)?;
+    }
+    let prompt = independent_reviewer_prompt(request, state)?;
+    let invocation = resolved.invocation(&state.identity.worktree, &harness_artifact, &prompt)?;
+    let validated = validate_invocation(&invocation, &state.identity.worktree)?;
+    let automatic =
+        prepare_automatic_reviewer_normalizer(resolved.kind, &validated, &artifact_root)?;
+    validate_external_reviewer_executable(state, &automatic.normalizer)?;
+    Ok(IndependentReviewer {
+        plan: DirectCommandPlan {
+            commands: vec![DirectCommand::success(vec![automatic
+                .normalizer
+                .display()
+                .to_string()])],
+        },
+        automatic: Some(automatic),
+    })
+}
+
+fn validate_external_reviewer_executable(
+    state: &PersistedInvocation,
+    executable: &Path,
+) -> Result<(), String> {
+    let source_repo = fs::canonicalize(&state.identity.repository_path)
+        .map_err(|error| format!("canonicalize reviewer source repository: {error}"))?;
+    let worktree = fs::canonicalize(&state.identity.worktree)
+        .map_err(|error| format!("canonicalize reviewer worktree: {error}"))?;
+    if executable.starts_with(&source_repo) || executable.starts_with(&worktree) {
+        return Err(
+            "executor independent reviewer executable must be external to reviewed code"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_external_reviewer_artifact_root(
+    state: &PersistedInvocation,
+    artifact_root: &Path,
+) -> Result<(), String> {
+    let source_repo = fs::canonicalize(&state.identity.repository_path)
+        .map_err(|error| format!("canonicalize reviewer source repository: {error}"))?;
+    let worktree = fs::canonicalize(&state.identity.worktree)
+        .map_err(|error| format!("canonicalize reviewer worktree: {error}"))?;
+    if artifact_root.starts_with(&source_repo) || artifact_root.starts_with(&worktree) {
+        return Err(
+            "executor independent reviewer artifacts must be external to reviewed code".to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn prepare_private_reviewer_result(path: &Path) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_file() => {
+            validate_private_state_file(path).map_err(|error| {
+                format!("executor reviewer result artifact must be private: {error}")
+            })?;
+        }
+        Ok(_) => return Err("executor reviewer result artifact is not a regular file".to_string()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            drop(create_private_artifact(path)?);
+        }
+        Err(error) => return Err(format!("inspect reviewer result artifact: {error}")),
+    }
+    validate_private_state_file(path)
+        .map_err(|error| format!("executor reviewer result artifact must be private: {error}"))
+}
+
+#[cfg(unix)]
+fn posix_shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(unix)]
+fn prepare_automatic_reviewer_normalizer(
+    kind: HarnessKind,
+    invocation: &ValidatedInvocation,
+    artifact_root: &Path,
+) -> Result<AutomaticReviewerArtifacts, String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let inner_stdout = artifact_root.join("harness.stdout");
+    let inner_stderr = artifact_root.join("harness.stderr");
+    prepare_private_reviewer_result(&inner_stdout)?;
+    prepare_private_reviewer_result(&inner_stderr)?;
+    let result = if kind == HarnessKind::Codex {
+        let result = artifact_root.join("harness-result.txt");
+        prepare_private_reviewer_result(&result)?;
+        result
+    } else {
+        inner_stdout.clone()
+    };
+    let program = invocation
+        .program
+        .to_str()
+        .ok_or_else(|| "automatic reviewer executable must be valid UTF-8".to_string())?;
+    if !invocation.environment_overrides.is_empty() {
+        return Err(
+            "automatic reviewer normalization does not accept invocation environment overrides"
+                .to_string(),
+        );
+    }
+    let mut command = posix_shell_quote(program);
+    for argument in &invocation.args {
+        command.push(' ');
+        command.push_str(&posix_shell_quote(argument));
+    }
+    let body = format!(
+        "#!/bin/sh\n\
+         set -u\n\
+         umask 077\n\
+         ulimit -f {output_blocks} || exit 68\n\
+         if {command} >{stdout} 2>{stderr}; then\n\
+         \t:\n\
+         else\n\
+         \tstatus=$?\n\
+         \texit \"$status\"\n\
+         fi\n\
+         for artifact in {stdout} {stderr} {result}; do\n\
+         \tsize=$(wc -c < \"$artifact\") || exit 69\n\
+         \t[ \"$size\" -lt {output_bytes} ] || exit 70\n\
+         done\n\
+         result=$(cat {result}) || exit 66\n\
+         [ \"$result\" = 'LGTM' ] || exit 67\n\
+         printf '%s\\n' 'LGTM'\n",
+        output_blocks = MAX_DIRECT_OUTPUT_BYTES.div_ceil(512),
+        output_bytes = MAX_DIRECT_OUTPUT_BYTES,
+        stdout = posix_shell_quote(
+            inner_stdout
+                .to_str()
+                .ok_or_else(|| "reviewer stdout path must be valid UTF-8".to_string())?
+        ),
+        stderr = posix_shell_quote(
+            inner_stderr
+                .to_str()
+                .ok_or_else(|| "reviewer stderr path must be valid UTF-8".to_string())?
+        ),
+        result = posix_shell_quote(
+            result
+                .to_str()
+                .ok_or_else(|| "reviewer result path must be valid UTF-8".to_string())?
+        ),
+    );
+    let normalizer = artifact_root.join("review-normalizer.sh");
+    write_private_create_once(
+        &normalizer,
+        body.as_bytes(),
+        "automatic reviewer normalizer",
+    )?;
+    fs::set_permissions(&normalizer, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("make automatic reviewer normalizer executable: {error}"))?;
+    validate_private_state_file(&normalizer)
+        .map_err(|error| format!("automatic reviewer normalizer must be private: {error}"))?;
+    Ok(AutomaticReviewerArtifacts {
+        normalizer,
+        inner_stdout,
+        inner_stderr,
+        result,
+    })
+}
+
+#[cfg(not(unix))]
+fn prepare_automatic_reviewer_normalizer(
+    _kind: HarnessKind,
+    _invocation: &ValidatedInvocation,
+    _artifact_root: &Path,
+) -> Result<AutomaticReviewerArtifacts, String> {
+    Err("automatic reviewer normalization requires a POSIX host".to_string())
+}
+
+fn independent_reviewer_prompt(
+    request: &ExecutorBridgeRequest,
+    state: &PersistedInvocation,
+) -> Result<String, String> {
+    let head = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor independent review requires a stable head".to_string())?;
+    Ok(format!(
+        "Independently review commit {head} in the current worktree against GitHub issue #{}: {}.\n\
+         Acceptance contract:\n{}\n\
+         Inspect the base-to-HEAD diff, tests, security boundaries, and issue scope without \
+         mutating local files, git state, GitHub state, or any external system. Return exactly \
+         LGTM only when no blocking finding remains. Otherwise return concise blocking findings \
+         and do not include LGTM.",
+        request.issue, request.issue_title, request.issue_body
+    ))
+}
+
 fn independent_reviewer_plan(
     state: &PersistedInvocation,
     plan: &DirectCommandPlan,
@@ -6746,16 +6975,7 @@ fn independent_reviewer_plan(
         .first()
         .ok_or_else(|| "executor independent reviewer command is empty".to_string())?;
     let executable = resolve_direct_executable(&state.identity.worktree, executable)?;
-    let source_repo = fs::canonicalize(&state.identity.repository_path)
-        .map_err(|error| format!("canonicalize reviewer source repository: {error}"))?;
-    let worktree = fs::canonicalize(&state.identity.worktree)
-        .map_err(|error| format!("canonicalize reviewer worktree: {error}"))?;
-    if executable.starts_with(&source_repo) || executable.starts_with(&worktree) {
-        return Err(
-            "executor independent reviewer executable must be external to reviewed code"
-                .to_string(),
-        );
-    }
+    validate_external_reviewer_executable(state, &executable)?;
     let mut trusted = plan.clone();
     trusted.commands[0].argv[0] = executable
         .into_os_string()
@@ -7639,6 +7859,37 @@ fn strict_lgtm_artifacts(stdout_path: &Path, stderr_path: &Path) -> Result<(), S
         return Err("executor independent reviewer emitted stderr findings".to_string());
     }
     strict_lgtm(&output)
+}
+
+fn strict_lgtm_harness_result(path: &Path) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    validate_private_state_file(path)
+        .map_err(|error| format!("executor reviewer harness result must be private: {error}"))?;
+    let result = fs::read_to_string(path)
+        .map_err(|error| format!("read executor reviewer harness result: {error}"))?;
+    strict_lgtm(&result)
+}
+
+fn private_reviewer_artifact_digest(path: &Path) -> Result<String, String> {
+    reject_symlink_path(path)?;
+    validate_private_state_file(path)
+        .map_err(|error| format!("executor reviewer artifact must be private: {error}"))?;
+    let bytes =
+        fs::read(path).map_err(|error| format!("read executor reviewer artifact: {error}"))?;
+    if bytes.len() as u64 > MAX_DIRECT_OUTPUT_BYTES {
+        return Err("executor reviewer artifact exceeded the output limit".to_string());
+    }
+    Ok(sha256_hex(&bytes))
+}
+
+fn validate_automatic_reviewer_artifacts(
+    artifacts: &AutomaticReviewerArtifacts,
+) -> Result<(), String> {
+    private_reviewer_artifact_digest(&artifacts.normalizer)?;
+    private_reviewer_artifact_digest(&artifacts.inner_stdout)?;
+    private_reviewer_artifact_digest(&artifacts.inner_stderr)?;
+    private_reviewer_artifact_digest(&artifacts.result)?;
+    strict_lgtm_harness_result(&artifacts.result)
 }
 
 pub(crate) fn accept_executor_result(
@@ -12890,10 +13141,10 @@ fn failure_disposition(retryable: bool, exhausted: bool) -> BridgeClaimDispositi
     }
 }
 
-pub(crate) fn run_strict_independent_reviewer(
+fn run_strict_independent_reviewer(
     state_path: &Path,
     state: &mut PersistedInvocation,
-    plan: &DirectCommandPlan,
+    reviewer: &IndependentReviewer,
     artifact_root: &Path,
     stall_timeout: Duration,
     remote: &DraftPrAdapter,
@@ -12902,7 +13153,7 @@ pub(crate) fn run_strict_independent_reviewer(
     run_strict_independent_reviewer_with_refresh(
         state_path,
         state,
-        plan,
+        reviewer,
         artifact_root,
         stall_timeout,
         remote,
@@ -12913,7 +13164,7 @@ pub(crate) fn run_strict_independent_reviewer(
 fn run_strict_independent_reviewer_with_refresh<Refresh>(
     state_path: &Path,
     state: &mut PersistedInvocation,
-    plan: &DirectCommandPlan,
+    reviewer: &IndependentReviewer,
     artifact_root: &Path,
     stall_timeout: Duration,
     remote: &DraftPrAdapter,
@@ -12922,6 +13173,7 @@ fn run_strict_independent_reviewer_with_refresh<Refresh>(
 where
     Refresh: FnMut() -> Result<BridgeClaimOwnership, BridgeRunFailure>,
 {
+    let plan = &reviewer.plan;
     if state.phase != BridgePhase::CiPassed || plan.commands.len() != 1 {
         return Err(
             "executor independent review requires one bounded command after CI"
@@ -12988,7 +13240,10 @@ where
             .into());
     }
     strict_lgtm_artifacts(&observation.stdout_path, &observation.stderr_path)?;
-    write_review_receipt(state_path, state, observation)?;
+    if let Some(automatic) = reviewer.automatic.as_ref() {
+        validate_automatic_reviewer_artifacts(automatic)?;
+    }
+    write_review_receipt(state_path, state, observation, reviewer)?;
     if refresh()? == BridgeClaimOwnership::Lost {
         return Err(BridgeRunFailure::ownership_lost(
             "executor independent review lost claim after verdict",
@@ -13031,16 +13286,36 @@ fn write_review_receipt(
     state_path: &Path,
     state: &PersistedInvocation,
     observation: &ObservedDirectCommand,
+    reviewer: &IndependentReviewer,
 ) -> Result<(), String> {
-    let body = serde_json::json!({
-        "schema": 2,
-        "binding": review_binding(state)?,
-        "stdout_path": observation.stdout_path,
-        "stdout_digest": observation.stdout_digest,
-        "stderr_path": observation.stderr_path,
-        "stderr_digest": observation.stderr_digest,
-    })
-    .to_string();
+    let body = match reviewer.automatic.as_ref() {
+        Some(automatic) => serde_json::json!({
+            "schema": 3,
+            "binding": review_binding(state)?,
+            "stdout_path": observation.stdout_path,
+            "stdout_digest": observation.stdout_digest,
+            "stderr_path": observation.stderr_path,
+            "stderr_digest": observation.stderr_digest,
+            "normalizer_path": automatic.normalizer,
+            "normalizer_digest": private_reviewer_artifact_digest(&automatic.normalizer)?,
+            "inner_stdout_path": automatic.inner_stdout,
+            "inner_stdout_digest": private_reviewer_artifact_digest(&automatic.inner_stdout)?,
+            "inner_stderr_path": automatic.inner_stderr,
+            "inner_stderr_digest": private_reviewer_artifact_digest(&automatic.inner_stderr)?,
+            "result_path": automatic.result,
+            "result_digest": private_reviewer_artifact_digest(&automatic.result)?,
+        })
+        .to_string(),
+        None => serde_json::json!({
+            "schema": 2,
+            "binding": review_binding(state)?,
+            "stdout_path": observation.stdout_path,
+            "stdout_digest": observation.stdout_digest,
+            "stderr_path": observation.stderr_path,
+            "stderr_digest": observation.stderr_digest,
+        })
+        .to_string(),
+    };
     write_private_create_once(
         &review_receipt_path(state_path, state)?,
         format!("{body}\n").as_bytes(),
@@ -13056,9 +13331,13 @@ fn validate_review_receipt(state_path: &Path, state: &PersistedInvocation) -> Re
             .map_err(|error| format!("read executor independent review receipt: {error}"))?,
     )
     .map_err(|error| format!("parse executor independent review receipt: {error}"))?;
-    let object = strict_object(
-        value,
-        &[
+    let schema = value
+        .as_object()
+        .and_then(|object| object.get("schema"))
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "executor independent review receipt schema is invalid".to_string())?;
+    let fields: &[&str] = match schema {
+        2 => &[
             "schema",
             "binding",
             "stdout_path",
@@ -13066,9 +13345,28 @@ fn validate_review_receipt(state_path: &Path, state: &PersistedInvocation) -> Re
             "stderr_path",
             "stderr_digest",
         ],
-        "executor independent review receipt",
-    )?;
-    if checked_u32(&object, "schema")? != 2 || text(&object, "binding")? != review_binding(state)? {
+        3 => &[
+            "schema",
+            "binding",
+            "stdout_path",
+            "stdout_digest",
+            "stderr_path",
+            "stderr_digest",
+            "normalizer_path",
+            "normalizer_digest",
+            "inner_stdout_path",
+            "inner_stdout_digest",
+            "inner_stderr_path",
+            "inner_stderr_digest",
+            "result_path",
+            "result_digest",
+        ],
+        _ => return Err("executor independent review receipt schema is unsupported".to_string()),
+    };
+    let object = strict_object(value, fields, "executor independent review receipt")?;
+    if checked_u32(&object, "schema")? as u64 != schema
+        || text(&object, "binding")? != review_binding(state)?
+    {
         return Err("executor independent review receipt identity mismatch".to_string());
     }
     let stdout_path = PathBuf::from(text(&object, "stdout_path")?);
@@ -13087,7 +13385,24 @@ fn validate_review_receipt(state_path: &Path, state: &PersistedInvocation) -> Re
     if !stderr.is_empty() || sha256_hex(&stderr) != text(&object, "stderr_digest")? {
         return Err("executor independent review stderr artifact is not empty".to_string());
     }
-    strict_lgtm(&output)
+    strict_lgtm(&output)?;
+    if schema == 3 {
+        for (path_field, digest_field) in [
+            ("normalizer_path", "normalizer_digest"),
+            ("inner_stdout_path", "inner_stdout_digest"),
+            ("inner_stderr_path", "inner_stderr_digest"),
+            ("result_path", "result_digest"),
+        ] {
+            let path = PathBuf::from(text(&object, path_field)?);
+            if private_reviewer_artifact_digest(&path)? != text(&object, digest_field)? {
+                return Err(format!(
+                    "executor independent review {path_field} digest mismatch"
+                ));
+            }
+        }
+        strict_lgtm_harness_result(&PathBuf::from(text(&object, "result_path")?))?;
+    }
+    Ok(())
 }
 
 fn run_implementation_lint(
@@ -21290,10 +21605,10 @@ mod tests {
     use super::{
         build_implementer_prompt, provision_issue_worktree, recover_invocation, resolve_base,
         runtime_session_adapter, supervise_harness, validate_trusted_ownership,
-        write_invocation_atomic, BridgeIdentity, BridgePhase, HarnessConfig, HarnessInvocation,
-        HarnessKind, MutationSnapshot, PersistedInvocation, ProcessIdentity, ResolvedBase,
-        SupervisionConfig, SupervisionOutcome, CLAUDE_BUILTIN_TOOLS, CLAUDE_FORBIDDEN_TOOLS,
-        CLAUDE_LOCAL_TOOLS,
+        write_invocation_atomic, BridgeIdentity, BridgePhase, ExecutorBridgeRequest, HarnessConfig,
+        HarnessInvocation, HarnessKind, MutationSnapshot, PersistedInvocation, ProcessIdentity,
+        ResolvedBase, SupervisionConfig, SupervisionOutcome, CLAUDE_BUILTIN_TOOLS,
+        CLAUDE_FORBIDDEN_TOOLS, CLAUDE_LOCAL_TOOLS,
     };
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -25611,6 +25926,235 @@ exit 64
             fs::canonicalize("/bin/true").expect("canonical /bin/true")
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn reviewer_request(state: &PersistedInvocation, state_path: PathBuf) -> ExecutorBridgeRequest {
+        ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: state.identity.repository_path.clone(),
+            issue: state.identity.issue,
+            issue_title: "Review configured harness".to_string(),
+            issue_body: "## Goal\n\nReview the configured harness.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            event_log: state_path.with_extension("events.jsonl"),
+            state_path,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_resolves_private_external_reviewer_when_override_is_unset() {
+        // Break caught: CI completion still requiring a hand-written reviewer command.
+        let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("automatic-reviewer");
+        commit_implementation(&state);
+        state.phase = BridgePhase::CiPassed;
+        state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
+        let state_path = fixture.root.join("state/invocation.json");
+        let request = reviewer_request(&state, state_path.clone());
+        let table = write_alias_table(
+            &fixture.root,
+            &format!(
+                "codex\t{}\tautospec-codex\tCodex fixture\n",
+                fs::canonicalize("/bin/true")
+                    .expect("canonical reviewer")
+                    .display()
+            ),
+        );
+        let mut env = environment(&table);
+        env.insert(
+            "AUTOSPEC_HANDOFF_DISPATCHER_KIND".to_string(),
+            OsString::from("codex"),
+        );
+        let artifact_root = state_path.with_extension("review-artifacts");
+
+        let reviewer = super::resolve_independent_reviewer(&request, &state, &env, &artifact_root)
+            .expect("resolve configured reviewer");
+
+        let command = reviewer.plan.commands.first().expect("one reviewer");
+        let automatic = reviewer.automatic.expect("automatic reviewer artifacts");
+        assert_eq!(reviewer.plan.commands.len(), 1);
+        assert_eq!(
+            PathBuf::from(command.argv.first().expect("reviewer executable")),
+            automatic.normalizer
+        );
+        let result = automatic.result;
+        assert!(result.starts_with(&artifact_root));
+        assert!(!result.starts_with(&state.identity.repository_path));
+        assert!(!result.starts_with(&state.identity.worktree));
+        assert_eq!(
+            fs::metadata(&result)
+                .expect("review result metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&automatic.normalizer)
+                .expect("normalizer metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        let normalizer = fs::read_to_string(&automatic.normalizer).expect("normalizer");
+        assert!(normalizer.contains("Return exactly LGTM"));
+        assert!(normalizer.contains("harness.stdout"));
+        assert!(normalizer.contains("harness.stderr"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_normalizes_claude_and_opencode_stdout_verdicts() {
+        // Break caught: the automatic boundary only supporting Codex's result-file protocol.
+        for kind in ["claude", "opencode"] {
+            let (fixture, mut state, _snapshot, _) =
+                implementation_proof_fixture(&format!("automatic-{kind}-reviewer"));
+            commit_implementation(&state);
+            state.phase = BridgePhase::CiPassed;
+            state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
+            let state_path = fixture.root.join("state/invocation.json");
+            let request = reviewer_request(&state, state_path.clone());
+            let table = write_alias_table(
+                &fixture.root,
+                &format!(
+                    "{kind}\t{}\tautospec-{kind}\t{kind} fixture\n",
+                    fs::canonicalize("/bin/true")
+                        .expect("canonical reviewer")
+                        .display()
+                ),
+            );
+            let mut env = environment(&table);
+            env.insert(
+                "AUTOSPEC_HANDOFF_DISPATCHER_KIND".to_string(),
+                OsString::from(kind),
+            );
+            if kind == "opencode" {
+                env.insert(
+                    "AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER".to_string(),
+                    fs::canonicalize("/bin/true")
+                        .expect("canonical adapter")
+                        .into_os_string(),
+                );
+            }
+            let artifact_root = state_path.with_extension("review-artifacts");
+
+            let reviewer =
+                super::resolve_independent_reviewer(&request, &state, &env, &artifact_root)
+                    .expect("resolve configured reviewer");
+            let automatic = reviewer.automatic.expect("automatic reviewer artifacts");
+
+            assert_eq!(automatic.result, automatic.inner_stdout, "{kind}");
+            assert_ne!(automatic.result, automatic.inner_stderr, "{kind}");
+            assert!(automatic.normalizer.starts_with(&artifact_root), "{kind}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_bounds_automatic_reviewer_output_while_running() {
+        // Break caught: inner harness redirection bypassing the direct observer's disk bound.
+        let root = test_root("automatic-reviewer-output-bound");
+        let harness = root.join("noisy-reviewer");
+        write_executable(
+            &harness,
+            "#!/bin/sh\n\
+             head -c 2097152 /dev/zero >&2 || :\n\
+             printf '%s\\n' LGTM\n",
+        );
+        let artifact_root = root.join("review-artifacts");
+        super::ensure_private_directory(&artifact_root).expect("private review artifact directory");
+        let invocation = super::ValidatedInvocation {
+            program: fs::canonicalize(&harness).expect("canonical noisy reviewer"),
+            args: Vec::new(),
+            current_dir: root.clone(),
+            environment_overrides: Vec::new(),
+        };
+        let automatic = super::prepare_automatic_reviewer_normalizer(
+            super::HarnessKind::Claude,
+            &invocation,
+            &artifact_root,
+        )
+        .expect("automatic reviewer normalizer");
+
+        let output = Command::new(&automatic.normalizer)
+            .current_dir(&root)
+            .output()
+            .expect("run noisy reviewer");
+
+        assert!(!output.status.success(), "{output:?}");
+        assert_ne!(output.stdout, b"LGTM\n");
+        for path in [
+            &automatic.inner_stdout,
+            &automatic.inner_stderr,
+            &automatic.result,
+        ] {
+            assert!(
+                fs::metadata(path).expect("bounded artifact").len()
+                    <= super::MAX_DIRECT_OUTPUT_BYTES,
+                "{} exceeded the hard bound",
+                path.display()
+            );
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_explicit_reviewer_command_bypasses_alias_resolution() {
+        // Break caught: an installed-alias failure overriding the operator's explicit command.
+        let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("explicit-reviewer");
+        state.phase = BridgePhase::CiPassed;
+        state.head_oid = Some("a".repeat(40));
+        let request = reviewer_request(&state, fixture.root.join("state/invocation.json"));
+        let mut env = BTreeMap::new();
+        env.insert(
+            "AUTOSPEC_HARNESS_RUNTIME_ALIASES".to_string(),
+            fixture.root.join("missing-aliases.tsv").into_os_string(),
+        );
+        env.insert(
+            "AUTOSPEC_EXECUTOR_REVIEW_COMMAND".to_string(),
+            OsString::from("/usr/bin/printf LGTM"),
+        );
+
+        let reviewer = super::resolve_independent_reviewer(
+            &request,
+            &state,
+            &env,
+            &fixture.root.join("review-artifacts"),
+        )
+        .expect("explicit review command");
+
+        assert_eq!(
+            reviewer.plan.commands[0].argv,
+            vec!["/usr/bin/printf", "LGTM"]
+        );
+        assert!(reviewer.automatic.is_none());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_unknown_automatic_reviewer_is_typed() {
+        // Break caught: a missing installed reviewer degrading into an ambiguous command error.
+        let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("unknown-reviewer");
+        state.phase = BridgePhase::CiPassed;
+        state.head_oid = Some("a".repeat(40));
+        let request = reviewer_request(&state, fixture.root.join("state/invocation.json"));
+        let table = write_alias_table(
+            &fixture.root,
+            "codex\tmissing-reviewer\tautospec-codex\tCodex missing\n",
+        );
+        let env = environment(&table);
+
+        let error = super::resolve_independent_reviewer(
+            &request,
+            &state,
+            &env,
+            &fixture.root.join("review-artifacts"),
+        )
+        .expect_err("missing automatic reviewer");
+
+        assert!(error.contains("executor_harness_unknown"), "{error}");
     }
 
     #[test]
@@ -38098,6 +38642,91 @@ exit 19
 
     #[cfg(unix)]
     #[test]
+    fn autonomous_executor_bridge_reviewer_rejects_non_lgtm_harness_result() {
+        // Break caught: accepting strict stdout while the harness result contains findings.
+        let root = test_root("reviewer-harness-result");
+        let result = root.join("harness-result.txt");
+        fs::write(&result, "finding: unsafe boundary\n").expect("reviewer result");
+        fs::set_permissions(&result, fs::Permissions::from_mode(0o600))
+            .expect("private reviewer result");
+
+        let error = super::strict_lgtm_harness_result(&result)
+            .expect_err("harness findings must block review");
+
+        assert!(error.contains("strict LGTM"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_review_receipt_binds_private_harness_diagnostics() {
+        // Break caught: crash recovery accepting a normalized verdict after inner evidence changed.
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("review-receipt-inner-evidence");
+        state.head_oid = Some("a".repeat(40));
+        let state_path = fixture.root.join("state/invocation.json");
+        let artifacts = fixture.root.join("review-artifacts");
+        fs::create_dir_all(&artifacts).expect("review artifact directory");
+        let stdout = artifacts.join("outer.stdout");
+        let stderr = artifacts.join("outer.stderr");
+        let normalizer = artifacts.join("review-normalizer.sh");
+        let inner_stdout = artifacts.join("harness.stdout");
+        let inner_stderr = artifacts.join("harness.stderr");
+        let result = artifacts.join("harness-result.txt");
+        for (path, body) in [
+            (&stdout, b"LGTM\n".as_slice()),
+            (&stderr, b"".as_slice()),
+            (&normalizer, b"#!/bin/sh\nprintf '%s\\n' LGTM\n".as_slice()),
+            (&inner_stdout, b"agent transcript\n".as_slice()),
+            (&inner_stderr, b"transport trace\n".as_slice()),
+            (&result, b"LGTM\n".as_slice()),
+        ] {
+            super::write_private_create_once(path, body, "test review artifact")
+                .expect("private review artifact");
+        }
+        let receipt = serde_json::json!({
+            "schema": 3,
+            "binding": super::review_binding(&state).expect("review binding"),
+            "stdout_path": stdout,
+            "stdout_digest": autospec_core::autonomous::waterfall::sha256_hex(b"LGTM\n"),
+            "stderr_path": stderr,
+            "stderr_digest": autospec_core::autonomous::waterfall::sha256_hex(b""),
+            "normalizer_path": normalizer,
+            "normalizer_digest": super::private_reviewer_artifact_digest(&normalizer)
+                .expect("normalizer digest"),
+            "inner_stdout_path": inner_stdout,
+            "inner_stdout_digest": super::private_reviewer_artifact_digest(&inner_stdout)
+                .expect("inner stdout digest"),
+            "inner_stderr_path": inner_stderr,
+            "inner_stderr_digest": super::private_reviewer_artifact_digest(&inner_stderr)
+                .expect("inner stderr digest"),
+            "result_path": result,
+            "result_digest": super::private_reviewer_artifact_digest(&result)
+                .expect("result digest"),
+        })
+        .to_string();
+        let receipt_path =
+            super::review_receipt_path(&state_path, &state).expect("review receipt path");
+        super::write_private_create_once(
+            &receipt_path,
+            format!("{receipt}\n").as_bytes(),
+            "test review receipt",
+        )
+        .expect("review receipt");
+
+        super::validate_review_receipt(&state_path, &state).expect("intact review receipt");
+        fs::write(&inner_stderr, "changed transport trace\n").expect("tamper inner stderr");
+        let error = super::validate_review_receipt(&state_path, &state)
+            .expect_err("changed inner evidence must invalidate receipt");
+
+        assert!(
+            error.contains("inner_stderr_path digest mismatch"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn autonomous_executor_bridge_paginated_comments_flatten_exact_typed_values() {
         // Break caught: executor comment reads combining --slurp and --jq never reach GitHub.
         let fixture = GitFixture::new("paginated-comments");
@@ -38226,11 +38855,15 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
             environment: BTreeMap::from([("API_CALLS".into(), api_calls.clone().into_os_string())]),
         };
         let plan = super::parse_direct_command_plan("/usr/bin/printf LGTM").expect("review plan");
+        let reviewer = super::IndependentReviewer {
+            plan,
+            automatic: None,
+        };
 
         let error = super::run_strict_independent_reviewer_with_refresh(
             &state_path,
             &mut state,
-            &plan,
+            &reviewer,
             &fixture.root.join("review-artifacts"),
             Duration::from_secs(5),
             &adapter,

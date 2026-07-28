@@ -563,6 +563,7 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
+    let review_launches = bridge.safe_root.join("review-launches");
     let mut command = fixture.command();
     command
         .env("PATH", path_with(&bridge.bin))
@@ -572,7 +573,8 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+        .env("AUTOSPEC_BRIDGE_REVIEW_LAUNCHES", &review_launches)
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND");
 
     let first = command.output().expect("execute selected issue");
     assert!(
@@ -624,6 +626,14 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
     assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
     assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
     assert!(calls.lines().any(|line| line == "--match-head-commit"));
+    assert_eq!(
+        fs::read_to_string(&review_launches)
+            .expect("configured reviewer launch")
+            .lines()
+            .count(),
+        1,
+        "unset review override must invoke exactly one configured external harness"
+    );
     let receipt = fs::read_to_string(&terminal).expect("terminal bridge receipt");
     assert!(receipt.contains("\"status\":\"merged\""));
     assert!(receipt.contains("\"claim_released\":true"));
@@ -5312,16 +5322,30 @@ exit 1
             &bin.join("codex-bridge-fixture"),
             r#"#!/bin/sh
 set -eu
-case " $* " in
-  *"sandbox"*) exit 0 ;;
-esac
+[ "${1:-}" = "sandbox" ] && exit 0
 artifact=""
 previous=""
+prompt=""
 for value in "$@"; do
   if [ "$previous" = "--output-last-message" ]; then artifact="$value"; fi
   previous="$value"
+  prompt="$value"
 done
 test -n "$artifact"
+case "$prompt" in
+  *"Return exactly LGTM"*)
+    printf '%s\n' 'LGTM'
+    printf '%s\n' 'LGTM' > "$artifact"
+    chmod 600 "$artifact"
+    i=0
+    while [ "$i" -lt 64 ]; do
+      printf '%s\n' 'codex startup/tool trace: normal non-verdict diagnostic output' >&2
+      i=$((i + 1))
+    done
+    printf '%s\n' "$$" >> "$AUTOSPEC_BRIDGE_REVIEW_LAUNCHES"
+    exit 0
+    ;;
+esac
 mkdir -p tests/smoke "$(dirname "$artifact")"
 if [ -n "${AUTOSPEC_BRIDGE_HARNESS_LAUNCHES:-}" ]; then
   printf '%s\n' "$$" >> "$AUTOSPEC_BRIDGE_HARNESS_LAUNCHES"
@@ -5378,8 +5402,11 @@ fi
 "#,
         );
         for (scanner, output) in [
-            ("semgrep", r#"{"results":[],"errors":[]}"#),
-            ("trivy", r#"{"Results":[]}"#),
+            (
+                "semgrep",
+                r#"{"results":[],"errors":[],"paths":{"scanned":["tests/smoke/generation.sh"],"skipped":[]}}"#,
+            ),
+            ("trivy", r#"{"Results":[{"Target":"."}]}"#),
             ("license-checker", r#"{"fixture@1.0.0":{"licenses":"MIT"}}"#),
         ] {
             write_executable(

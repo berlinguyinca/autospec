@@ -1,0 +1,41 @@
+# Autonomous Runbook
+
+## Independent review
+
+After deterministic premerge checks and required CI pass, the native autonomous
+executor launches one independent reviewer. No reviewer command is required for
+normal operation:
+
+1. Autospec loads the installed four-column harness alias table from
+   `AUTOSPEC_HARNESS_RUNTIME_ALIASES`, `AUTOSPEC_CONFIG_DIR`, the user Autospec
+   config directory, or the repository fallback.
+2. `AUTOSPEC_HANDOFF_DISPATCHER_KIND` and the active Codex, Claude, or OpenCode
+   session marker select the reviewer. With no marker, Autospec chooses the
+   first installed alias whose executable is available on `PATH`.
+3. The reviewer receives the issue contract and exact commit to review.
+
+The resolved reviewer executable must be external to both the source repository
+and its issue worktree. Review command output, error output, and any
+harness-specific result are stored under the private executor state tree,
+outside reviewed source. An external private normalizer captures normal harness
+diagnostics without treating transport traces as findings. Codex uses its final
+message artifact as the verdict; Claude and OpenCode use their captured text
+output. The normalizer succeeds only when that harness-specific verdict is
+exactly `LGTM`, then emits only `LGTM` on stdout and nothing on stderr to the
+strict review gate. The receipt binds the normalizer, captured diagnostics, and
+verdict so crash recovery cannot substitute any of them. The harness inherits a
+1 MiB file-size limit, and reaching that limit in stdout, stderr, or the Codex
+result fails review rather than accepting truncated evidence. Local, git,
+GitHub, or other remote mutation during review fails the gate.
+
+If no configured alias is usable, the executor reports
+`executor_harness_unknown` before review can mutate the pull request.
+
+### Explicit override
+
+`AUTOSPEC_EXECUTOR_REVIEW_COMMAND` remains the highest-priority operator
+override. When set, Autospec validates and runs that single bounded direct
+command instead of reading or resolving the harness alias table. The same exit,
+mutation, and result-receipt checks still apply. Because an explicit command is
+already the operator-defined trust boundary, its stdout must be exactly `LGTM`
+and its stderr must remain empty; it does not receive automatic normalization.
