@@ -1214,7 +1214,13 @@ fn fresh_lease_blocks_restart_before_kill_or_stop_clear() {
     let _ = conductor.kill();
     let _ = conductor.wait();
 
-    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        output.status.code(),
+        Some(20),
+        "stdout={} stderr={}",
+        stdout(&output),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         stdout(&output),
         "{\"decision\":\"park\",\"reason\":\"conductor_lease_held\"}\n"
@@ -1229,6 +1235,45 @@ fn fresh_lease_blocks_restart_before_kill_or_stop_clear() {
         "restart must not clear a stop flag while the lease is held"
     );
     assert!(!fixture.operator_lifecycle_path().exists());
+}
+
+#[test]
+fn restart_releases_new_lease_when_owned_process_termination_is_rejected() {
+    let fixture = ResilienceFixture::new();
+    let mut conductor = Command::new("sleep")
+        .arg("30")
+        .spawn()
+        .expect("start unowned conductor");
+    write_file(
+        &fixture.operator_root.join("owner_repo/conductor.pid"),
+        &format!("{}\n", conductor.id()),
+    );
+
+    let output = fixture.run_autonomous(&["restart", "--repo", "owner/repo"]);
+    let conductor_survived = conductor
+        .try_wait()
+        .expect("inspect unowned conductor")
+        .is_none();
+    let _ = conductor.kill();
+    let _ = conductor.wait();
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout={} stderr={}",
+        stdout(&output),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("process group ownership is unverified")
+    );
+    assert!(conductor_survived, "restart must not signal an unowned PID");
+    assert!(
+        fs::read_to_string(fixture.canonical_state_path())
+            .expect("read released restart lease")
+            .contains("\"status\":\"released\""),
+        "a post-acquisition termination error must release the exact new lease"
+    );
 }
 
 #[test]
@@ -1257,9 +1302,12 @@ exit 1
         .env("PATH", path_with(&bin))
         .output()
         .expect("start native foreground child");
+    let conductor_logpath_file = fixture
+        .operator_root
+        .join("owner_repo/conductor.logpath");
 
     for _ in 0..80 {
-        if token_capture.exists() {
+        if token_capture.exists() && conductor_logpath_file.exists() {
             break;
         }
         thread::sleep(Duration::from_millis(25));
@@ -1267,12 +1315,10 @@ exit 1
     let token = fs::read_to_string(&token_capture).expect("capture child lease token");
     let launch = fs::read_to_string(fixture.operator_root.join("owner_repo/launch.json"))
         .expect("read launch metadata");
-    let conductor_log = fs::read_to_string(
-        log_root
-            .join("owner_repo")
-            .join("autospec-autonomous-conductor.log"),
-    )
-    .expect("read foreground log");
+    let conductor_log_path = fs::read_to_string(conductor_logpath_file)
+        .expect("read foreground log path");
+    let conductor_log =
+        fs::read_to_string(conductor_log_path.trim()).expect("read foreground log");
 
     assert!(output.status.success());
     assert!(
@@ -1313,7 +1359,13 @@ fn malformed_restart_state_rejects_before_process_or_stop_mutation() {
     let _ = conductor.kill();
     let _ = conductor.wait();
 
-    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(
+        output.status.code(),
+        Some(3),
+        "stdout={} stderr={}",
+        stdout(&output),
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert_eq!(
         stdout(&output),
         "{\"decision\":\"reject\",\"reason\":\"malformed_state\"}\n"

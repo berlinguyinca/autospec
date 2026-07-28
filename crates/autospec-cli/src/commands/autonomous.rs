@@ -1756,25 +1756,27 @@ fn restart(options: Options) -> Result<(), CommandFailure> {
     let stop_options = options.clone();
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let options = options_with_resolved_repo(options, &layout);
-    let mut stopped = 0;
-    let mut conductor_pid = None;
-    for name in ["supervisor", "monitor", "conductor"] {
-        let unit = read_unit(name, &layout);
-        let terminated = terminate_unit(name, &unit).map_err(CommandFailure::diagnostic)?;
-        if terminated {
-            stopped += 1;
-        }
-        if name == "conductor" && (terminated || unit.metadata_state == UnitMetadataState::Stale) {
-            conductor_pid = Some(unit.pid);
-        }
-    }
-    wait_for_scope_stopped(&layout);
-    if let Some(pid) = conductor_pid {
-        release_terminated_owner(&layout, &pid).map_err(CommandFailure::diagnostic)?;
-    }
+    let units = ["supervisor", "monitor", "conductor"].map(|name| (name, read_unit(name, &layout)));
     let (lifecycle, lease) =
         acquire_lifecycle_start(&layout, &options, LifecycleTransition::Restart)
             .map_err(LifecycleStartError::into_command_failure)?;
+    let stopped = match (|| {
+        let mut stopped = 0;
+        for (name, unit) in units {
+            let terminated = terminate_unit(name, &unit).map_err(CommandFailure::diagnostic)?;
+            if terminated {
+                stopped += 1;
+            }
+        }
+        wait_for_scope_stopped(&layout);
+        Ok::<usize, CommandFailure>(stopped)
+    })() {
+        Ok(stopped) => stopped,
+        Err(error) => {
+            release_launch_lease(&layout.repo, &lease)?;
+            return Err(error);
+        }
+    };
     let launched = restart_after_lease(&layout, &options, &lifecycle, &lease, stopped);
     let (stopped, conductor, monitor, supervisor) = match launched {
         Ok(units) => units,
