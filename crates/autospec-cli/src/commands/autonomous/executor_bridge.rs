@@ -1972,7 +1972,7 @@ fn validate_scanner_result(
             }
         }
         "semgrep" => validate_semgrep_result(&value, exit_status),
-        "trivy" => validate_trivy_result(&value),
+        "trivy" => validate_trivy_result(&value, exit_status),
         "license-checker" => validate_license_checker_result(&value),
         _ => unreachable!("scanner identity checked above"),
     }
@@ -2029,11 +2029,12 @@ fn validate_semgrep_result(value: &serde_json::Value, exit_status: i32) -> Resul
     }
 }
 
-fn validate_trivy_result(value: &serde_json::Value) -> Result<(), String> {
+fn trivy_has_findings(value: &serde_json::Value) -> Result<bool, String> {
     let object = value.as_object().ok_or_else(|| {
         "executor required scanner trivy output does not match its JSON object schema".to_string()
     })?;
     let results = required_json_array("trivy", object, "Results")?;
+    let mut has_findings = false;
     for result in results {
         let result = result.as_object().ok_or_else(|| {
             "executor required scanner trivy Results entry is not a JSON object".to_string()
@@ -2049,19 +2050,47 @@ fn validate_trivy_result(value: &serde_json::Value) -> Result<(), String> {
                     format!("executor required scanner trivy field {field} is not a JSON array")
                 })?;
                 if !findings.is_empty() {
-                    return Err(format!(
-                        "executor required scanner trivy reported findings in {field}"
-                    ));
+                    has_findings = true;
                 }
             }
         }
     }
-    Ok(())
+    Ok(has_findings)
+}
+
+fn validate_trivy_result(value: &serde_json::Value, exit_status: i32) -> Result<(), String> {
+    if trivy_has_findings(value)? {
+        Err("executor required scanner trivy reported findings".to_string())
+    } else if exit_status == 1 {
+        Err("executor required scanner trivy exited 1 without native findings".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_trivy_transport(exit_status: i32, stdout: &[u8], stderr: &[u8]) -> Result<(), String> {
+    if exit_status != 1 {
+        return validate_scanner_result("trivy", exit_status, stdout, stderr);
+    }
+    let diagnostics = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    if ["degraded", "fallback", "scanner missing", "skipped"]
+        .iter()
+        .any(|marker| diagnostics.contains(marker))
+    {
+        return Err("executor required scanner trivy reported degraded execution".to_string());
+    }
+    let value = serde_json::from_slice::<serde_json::Value>(stdout)
+        .map_err(|error| format!("executor required scanner trivy output is malformed: {error}"))?;
+    if trivy_has_findings(&value)? {
+        Ok(())
+    } else {
+        Err("executor required scanner trivy exited 1 without native findings".to_string())
+    }
 }
 
 fn changed_paths_since_base(worktree: &Path, base_oid: &str) -> Result<BTreeSet<String>, String> {
     let range = format!("{base_oid}..HEAD");
-    git_stdout(
+    let paths = git_bytes(
         worktree,
         &[
             "diff",
@@ -2071,14 +2100,15 @@ fn changed_paths_since_base(worktree: &Path, base_oid: &str) -> Result<BTreeSet<
             &range,
             "--",
         ],
-    )
-    .map(|paths| {
-        paths
-            .split('\0')
-            .filter(|path| !path.is_empty())
-            .map(str::to_string)
-            .collect()
-    })
+    )?;
+    paths
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            String::from_utf8(path.to_vec())
+                .map_err(|_| "git changed path is not valid UTF-8".to_string())
+        })
+        .collect()
 }
 
 fn trivy_relative_target(worktree: &Path, target: &str) -> Result<String, String> {
@@ -2112,6 +2142,22 @@ fn trivy_relative_target(worktree: &Path, target: &str) -> Result<String, String
         return Err("executor required scanner trivy reported unsafe target path".to_string());
     }
     Ok(parts.join("/"))
+}
+
+fn require_trivy_attributable_target(worktree: &Path, relative: &str) -> Result<(), String> {
+    let path = worktree.join(relative);
+    reject_symlink_path(&path)?;
+    if !path
+        .metadata()
+        .map(|metadata| metadata.is_file())
+        .unwrap_or(false)
+        || git_bytes(worktree, &["ls-files", "--error-unmatch", "--", relative]).is_err()
+    {
+        return Err(
+            "executor required scanner trivy reported unattributable target path".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn filter_trivy_result_for_changes(
@@ -2158,8 +2204,11 @@ fn filter_trivy_result_for_changes(
             .ok_or_else(|| {
                 "executor required scanner trivy finding has no target path".to_string()
             })?;
-        if changed_paths.contains(&trivy_relative_target(worktree, target)?) {
+        let relative = trivy_relative_target(worktree, target)?;
+        if changed_paths.contains(&relative) {
             kept.push(result);
+        } else {
+            require_trivy_attributable_target(worktree, &relative)?;
         }
     }
     *results = kept;
@@ -2487,12 +2536,15 @@ pub(crate) fn run_required_scanners(
         }
         let stderr = fs::read(&command.stderr_path)
             .map_err(|error| format!("read required scanner {scanner} stderr: {error}"))?;
-        validate_scanner_result(
-            scanner,
-            command.exit_code().unwrap_or(128),
-            &result,
-            &stderr,
-        )?;
+        let exit_status = command.exit_code().unwrap_or(128);
+        if scanner == "trivy" {
+            let raw = fs::read(&command.stdout_path)
+                .map_err(|error| format!("read raw Trivy report: {error}"))?;
+            validate_trivy_transport(exit_status, &raw, &stderr)?;
+            validate_scanner_result(scanner, 0, &result, &stderr)?;
+        } else {
+            validate_scanner_result(scanner, exit_status, &result, &stderr)?;
+        }
         observations.push(ObservedScanner {
             name: scanner.to_string(),
             command,
@@ -2611,12 +2663,15 @@ fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> 
                 scanner.name
             )
         })?;
-        validate_scanner_result(
-            &scanner.name,
-            scanner.command.exit_code().unwrap_or(128),
-            &result,
-            &stderr,
-        )?;
+        let exit_status = scanner.command.exit_code().unwrap_or(128);
+        if scanner.name == "trivy" {
+            let raw = fs::read(&scanner.command.stdout_path)
+                .map_err(|error| format!("read raw Trivy report: {error}"))?;
+            validate_trivy_transport(exit_status, &raw, &stderr)?;
+            validate_scanner_result(&scanner.name, 0, &result, &stderr)?;
+        } else {
+            validate_scanner_result(&scanner.name, exit_status, &result, &stderr)?;
+        }
     }
     Ok(())
 }
@@ -36993,9 +37048,11 @@ exit 19
             super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
         let filtered = super::filter_trivy_result_for_changes(&report, &fixture.repo, &changed)
             .expect("filter unchanged lockfile finding");
+        super::validate_trivy_transport(1, &serde_json::to_vec(&report).expect("raw report"), b"")
+            .expect("raw Trivy findings justify exit 1");
         super::validate_scanner_result(
             "trivy",
-            1,
+            0,
             &serde_json::to_vec(&filtered).expect("filtered report"),
             b"",
         )
@@ -37014,12 +37071,12 @@ exit 19
             .expect("filter changed lockfile finding");
         let error = super::validate_scanner_result(
             "trivy",
-            1,
+            0,
             &serde_json::to_vec(&filtered).expect("filtered report"),
             b"",
         )
         .expect_err("changed lockfile finding must block");
-        assert!(error.contains("Vulnerabilities"), "{error}");
+        assert!(error.contains("reported findings"), "{error}");
 
         let unsafe_report = serde_json::json!({
             "SchemaVersion": 2,
@@ -37031,6 +37088,55 @@ exit 19
         let error = super::filter_trivy_result_for_changes(&unsafe_report, &fixture.repo, &changed)
             .expect_err("unsafe Trivy target must fail closed");
         assert!(error.contains("unsafe target"), "{error}");
+
+        for target in ["missing/package-lock.json", "src"] {
+            if target == "src" {
+                fs::create_dir_all(fixture.repo.join(target)).expect("directory target");
+            }
+            let unknown_report = serde_json::json!({
+                "SchemaVersion": 2,
+                "Results": [{
+                    "Target": target,
+                    "Vulnerabilities": [{"VulnerabilityID": "CVE-1"}]
+                }]
+            });
+            let error =
+                super::filter_trivy_result_for_changes(&unknown_report, &fixture.repo, &changed)
+                    .expect_err("unattributable Trivy target must fail closed");
+            assert!(error.contains("unattributable target"), "{error}");
+        }
+
+        let whitespace_path = " changed-lock.json ";
+        fs::write(fixture.repo.join(whitespace_path), "{}\n").expect("whitespace target");
+        git(&fixture.repo, &["add", whitespace_path]);
+        git(&fixture.repo, &["commit", "-m", "whitespace target"]);
+        let changed =
+            super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
+        let whitespace_report = serde_json::json!({
+            "SchemaVersion": 2,
+            "Results": [{
+                "Target": whitespace_path,
+                "Vulnerabilities": [{"VulnerabilityID": "CVE-1"}]
+            }]
+        });
+        let filtered =
+            super::filter_trivy_result_for_changes(&whitespace_report, &fixture.repo, &changed)
+                .expect("whitespace target remains attributable");
+        assert!(
+            super::validate_scanner_result(
+                "trivy",
+                0,
+                &serde_json::to_vec(&filtered).expect("filtered report"),
+                b"",
+            )
+            .is_err(),
+            "changed whitespace target finding must remain"
+        );
+
+        let error =
+            super::validate_scanner_result("trivy", 1, br#"{"SchemaVersion":2,"Results":[]}"#, b"")
+                .expect_err("Trivy exit 1 requires native findings");
+        assert!(error.contains("without native findings"), "{error}");
     }
 
     #[test]
