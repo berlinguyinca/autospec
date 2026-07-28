@@ -8,7 +8,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
@@ -17023,12 +17023,34 @@ fn resolve_executor_supervisor_executable(
                 "{primary_error}; executor supervisor argv-zero fallback is not an absolute path"
             )
         })?;
-    fs::canonicalize(fallback).map_err(|error| {
+    let canonical = fs::canonicalize(fallback).map_err(|error| {
         format!(
             "{primary_error}; canonicalize executor supervisor argv-zero fallback {}: {error}",
             fallback.display()
         )
-    })
+    })?;
+    #[cfg(target_os = "linux")]
+    {
+        let running = fs::metadata("/proc/self/exe").map_err(|error| {
+            format!("{primary_error}; inspect running executor supervisor image: {error}")
+        })?;
+        let candidate = fs::metadata(&canonical).map_err(|error| {
+            format!(
+                "{primary_error}; inspect executor supervisor argv-zero fallback {}: {error}",
+                canonical.display()
+            )
+        })?;
+        if running.dev() != candidate.dev() || running.ino() != candidate.ino() {
+            return Err(format!(
+                "{primary_error}; executor supervisor argv-zero fallback does not identify the running image"
+            ));
+        }
+        Ok(canonical)
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err(format!(
+        "{primary_error}; executor supervisor argv-zero fallback cannot prove running-image identity on this platform"
+    ))
 }
 
 fn launch_and_supervise(
@@ -20972,18 +20994,13 @@ mod tests {
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn autonomous_executor_bridge_recovers_supervisor_executable_from_argv_zero() {
-        let fixture = test_root("supervisor-executable-fallback");
-        let executable = fixture.join("autospec");
-        fs::write(&executable, b"installed binary").expect("write fallback executable");
-        let missing = fixture.join("autospec-deleted");
+        let executable = std::env::current_exe().expect("current test executable");
 
         let resolved = super::resolve_executor_supervisor_executable(
-            Err(format!(
-                "canonicalize executor supervisor executable: {}",
-                missing.display()
-            )),
+            Err("canonicalize executor supervisor executable: stale path".to_string()),
             Some(executable.as_os_str()),
         )
         .expect("resolve stable argv-zero fallback");
@@ -20992,6 +21009,52 @@ mod tests {
             resolved,
             fs::canonicalize(executable).expect("canonical fallback")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_rejects_unrelated_argv_zero_fallback() {
+        let fixture = test_root("supervisor-executable-unrelated");
+        let unrelated = fixture.join("autospec");
+        fs::write(&unrelated, b"unrelated binary").expect("write unrelated executable");
+
+        let error = super::resolve_executor_supervisor_executable(
+            Err("canonicalize executor supervisor executable: stale path".to_string()),
+            Some(unrelated.as_os_str()),
+        )
+        .expect_err("reject unrelated argv-zero");
+
+        assert!(
+            error.contains("does not identify the running image"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_prefers_primary_supervisor_executable() {
+        let primary = std::env::current_exe().expect("current test executable");
+
+        let resolved = super::resolve_executor_supervisor_executable(
+            Ok(primary.clone()),
+            Some(Path::new("/unrelated/argv-zero").as_os_str()),
+        )
+        .expect("resolve primary executable");
+
+        assert_eq!(
+            resolved,
+            fs::canonicalize(primary).expect("canonical primary")
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_relative_argv_zero_fallback() {
+        let error = super::resolve_executor_supervisor_executable(
+            Err("canonicalize executor supervisor executable: stale path".to_string()),
+            Some(Path::new("autospec").as_os_str()),
+        )
+        .expect_err("reject relative argv-zero");
+
+        assert!(error.contains("not an absolute path"), "{error}");
     }
 
     #[cfg(target_os = "linux")]
