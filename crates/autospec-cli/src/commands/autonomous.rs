@@ -2746,7 +2746,7 @@ fn executor_receipt_failure_is_recoverable(
     if claim::recover_for_conductor(&layout.repo, issue, &acquisition)?.is_none() {
         return Ok(false);
     }
-    executor_bridge::recoverable_zero_effect_completion(
+    executor_bridge::recoverable_implementation_completion(
         &layout.state_dir.join("executor"),
         &acquisition,
     )

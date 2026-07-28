@@ -1859,6 +1859,130 @@ fn foreground_post_harness_gh_read_outage_resumes_the_exact_claim() {
 }
 
 #[test]
+fn foreground_resumes_nonzero_draft_created_receipt_failure_without_second_harness() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let harness_launches = fixture.root.join("draft-created-harness.launches");
+    let configure = |command: &mut Command| {
+        command
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches);
+    };
+
+    let mut first_command = fixture.command();
+    configure(&mut first_command);
+    first_command.env("AUTOSPEC_BRIDGE_FAIL_GH_AFTER_CREATE_ALWAYS", "1");
+    let first = first_command
+        .output()
+        .expect("persist nonzero DraftCreated invocation");
+    assert!(
+        first.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Dispatch);
+    let invocation = fs::read_dir(fixture.scoped_dir().join("executor"))
+        .expect("executor state directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| is_generation_invocation_path(path, 42))
+        .expect("generation-scoped invocation");
+    let mut invocation_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&invocation).expect("read DraftCreated invocation"),
+    )
+    .expect("parse DraftCreated invocation");
+    assert_eq!(
+        invocation_state["phase"], "draft_creating",
+        "the injected authoritative reread outage must follow the real draft mutation"
+    );
+    assert!(
+        invocation_state["draft_process"].is_object(),
+        "successful draft creation must retain its exited gh process identity"
+    );
+    invocation_state["phase"] = serde_json::json!("draft_created");
+    invocation_state["pr"] = serde_json::json!(17);
+    fs::write(&invocation, format!("{invocation_state}\n"))
+        .expect("seed exact DraftCreated gate-failure state");
+    let acquisition_path = fixture
+        .state_path()
+        .with_extension("claim-acquisition.json");
+    assert!(
+        acquisition_path.is_file(),
+        "exact local acquisition must survive the transient post-create outage"
+    );
+    let acquisition: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&acquisition_path).expect("read exact local acquisition"),
+    )
+    .expect("parse exact local acquisition");
+    for field in ["worker_id", "branch", "claim_id"] {
+        assert_eq!(
+            invocation_state["identity"][field], acquisition[field],
+            "persisted invocation must retain the acquired {field}"
+        );
+    }
+    fs::write(
+        fixture.state_path(),
+        selected_foreground_state()
+            .transition(ConductorEvent::Claimed)
+            .expect("seed claimed conductor")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+            })
+            .expect("seed receipt failure")
+            .to_json(),
+    )
+    .expect("persist receipt-failed conductor state");
+    let before = fs::read_to_string(&fixture.calls).expect("calls before recovery");
+    assert_eq!(
+        fs::read_to_string(&harness_launches)
+            .expect("initial harness launch ledger")
+            .lines()
+            .count(),
+        1
+    );
+
+    let mut recovery = fixture.command();
+    configure(&mut recovery);
+    let recovered = recovery
+        .output()
+        .expect("resume exact nonzero DraftCreated invocation");
+    assert!(
+        recovered.status.success(),
+        "stdout={} stderr={} state={:?} calls={}",
+        String::from_utf8_lossy(&recovered.stdout),
+        String::from_utf8_lossy(&recovered.stderr),
+        fixture.read_state(),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+    assert_eq!(
+        fs::read_to_string(&harness_launches)
+            .expect("recovered harness launch ledger")
+            .lines()
+            .count(),
+        1,
+        "receipt recovery must resume the exact invocation without launching another implementer"
+    );
+    let after = fs::read_to_string(&fixture.calls).expect("calls after recovery");
+    assert_eq!(
+        after.matches("\npr\ncreate\n").count(),
+        before.matches("\npr\ncreate\n").count(),
+        "receipt recovery must adopt the existing draft"
+    );
+    assert_eq!(after.matches("\npr\nmerge\n").count(), 1);
+}
+
+#[test]
 fn foreground_persistent_post_create_outage_stays_on_the_exact_claim() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
