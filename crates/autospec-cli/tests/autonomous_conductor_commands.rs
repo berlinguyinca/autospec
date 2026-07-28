@@ -442,6 +442,87 @@ fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() 
 }
 
 #[test]
+fn foreground_resumes_no_ready_pause() {
+    let fixture = ForegroundFixture::new();
+    let paused = no_ready_paused_state();
+    seed_foreground_state(&fixture, &paused);
+    fs::write(&fixture.mode, "reviewed\n").expect("make issue queue-ready");
+
+    let output = fixture.run_foreground();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let resumed = fixture.read_state();
+    assert_ne!(resumed, paused, "ready work left the conductor parked");
+    assert_eq!(resumed.selected_issue(), Some(42));
+    assert_ne!(resumed.pause_reason(), Some("no_ready_issue_after_review"));
+}
+
+#[test]
+fn foreground_still_empty_pause_polls_without_process_churn() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let paused = no_ready_paused_state();
+    seed_foreground_state(&fixture, &paused);
+    let output = fixture
+        .detached_command("start")
+        .args(["--detach", "--branch", "main", "--poll-interval-sec", "1"])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("start parked foreground conductor");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_for_file_contents(&fixture.calls, "labels=auto-implement");
+    let conductor_pid = fixture
+        .recorded_conductor_pid()
+        .expect("recorded conductor pid");
+
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let same_process = fixture.recorded_conductor_pid() == Some(conductor_pid)
+        && process_is_running(conductor_pid);
+    let retained = fixture.read_state();
+    fixture.terminate_recorded_conductor();
+
+    assert!(
+        same_process,
+        "empty paused conductor exited instead of polling in process"
+    );
+    assert_eq!(retained, paused);
+}
+
+#[test]
+fn foreground_rejects_ambiguous_no_ready_pause_resume_phase() {
+    let fixture = ForegroundFixture::new();
+    let ambiguous = ConductorState::new("test/repo", ConductorScope::Repository, 3)
+        .expect("state")
+        .transition(ConductorEvent::Pause {
+            reason: "no_ready_issue_after_review".to_string(),
+        })
+        .expect("ambiguous pause");
+    seed_foreground_state(&fixture, &ambiguous);
+
+    let output = fixture.run_foreground();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("no-ready foreground pause must resume from Select"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.read_state(), ambiguous);
+}
+
+#[test]
 fn foreground_rejects_tampered_tier_one_evidence_during_receipt_replay() {
     let fixture = ForegroundFixture::new();
     let first = fixture
@@ -1157,6 +1238,25 @@ fn selected_foreground_state() -> ConductorState {
             serialization_reasons: Vec::new(),
         })
         .unwrap()
+}
+
+fn no_ready_paused_state() -> ConductorState {
+    ConductorState::new("test/repo", ConductorScope::Repository, 3)
+        .expect("state")
+        .transition(ConductorEvent::ScanFoundWork)
+        .expect("scan")
+        .transition(ConductorEvent::SafetyReviewed)
+        .expect("review")
+        .transition(ConductorEvent::Pause {
+            reason: "no_ready_issue_after_review".to_string(),
+        })
+        .expect("no-ready pause")
+}
+
+fn seed_foreground_state(fixture: &ForegroundFixture, state: &ConductorState) {
+    fs::create_dir_all(fixture.state_path().parent().expect("state parent"))
+        .expect("create foreground state directory");
+    fs::write(fixture.state_path(), state.to_json()).expect("seed foreground state");
 }
 
 fn legacy_executor_pending_state() -> ConductorState {
