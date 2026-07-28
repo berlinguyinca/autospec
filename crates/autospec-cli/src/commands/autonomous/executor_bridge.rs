@@ -1929,7 +1929,7 @@ fn validate_scanner_result(
     if !REQUIRED_SCANNERS.contains(&scanner) {
         return Err(format!("executor scanner identity is unknown: {scanner}"));
     }
-    if exit_status != 0 && !(scanner == "gitleaks" && exit_status == 1) {
+    if exit_status != 0 && !(["gitleaks", "semgrep"].contains(&scanner) && exit_status == 1) {
         return Err(format!(
             "executor required scanner {scanner} failed with exit status {exit_status}"
         ));
@@ -1966,7 +1966,7 @@ fn validate_scanner_result(
                 Err("executor required scanner gitleaks reported findings".to_string())
             }
         }
-        "semgrep" => validate_semgrep_result(&value),
+        "semgrep" => validate_semgrep_result(&value, exit_status),
         "trivy" => validate_trivy_result(&value),
         "license-checker" => validate_license_checker_result(&value),
         _ => unreachable!("scanner identity checked above"),
@@ -1988,7 +1988,7 @@ fn required_json_array<'a>(
         })
 }
 
-fn validate_semgrep_result(value: &serde_json::Value) -> Result<(), String> {
+fn validate_semgrep_result(value: &serde_json::Value, exit_status: i32) -> Result<(), String> {
     let object = value.as_object().ok_or_else(|| {
         "executor required scanner semgrep output does not match its JSON object schema".to_string()
     })?;
@@ -2000,7 +2000,13 @@ fn validate_semgrep_result(value: &serde_json::Value) -> Result<(), String> {
     if !results.is_empty() {
         return Err("executor required scanner semgrep reported findings".to_string());
     }
-    Ok(())
+    if exit_status == 0 {
+        Ok(())
+    } else {
+        Err(format!(
+            "executor required scanner semgrep failed with exit status {exit_status}"
+        ))
+    }
 }
 
 fn validate_trivy_result(value: &serde_json::Value) -> Result<(), String> {
@@ -2071,6 +2077,7 @@ fn scanner_command(
     scanner: &str,
     executable: &Path,
     worktree: &Path,
+    base_oid: &str,
     gitleaks_config: &Path,
     gitleaks_report: &Path,
 ) -> Result<DirectCommand, String> {
@@ -2108,11 +2115,13 @@ fn scanner_command(
             [
                 "scan",
                 "--config",
-                "auto",
+                "p/default",
                 "--metrics",
                 "off",
                 "--error",
                 "--json",
+                "--baseline-commit",
+                base_oid,
                 worktree,
             ]
             .into_iter()
@@ -2146,8 +2155,10 @@ fn scanner_command(
         _ => return Err(format!("executor scanner identity is unknown: {scanner}")),
     }
     let mut command = DirectCommand::success(argv);
-    if scanner == "gitleaks" {
+    if ["gitleaks", "semgrep"].contains(&scanner) {
         command.accepted_exit_codes = vec![0, 1];
+    }
+    if scanner == "gitleaks" {
         command.identity_digest = Some(gitleaks_policy_digest(Path::new(worktree))?);
     }
     Ok(command)
@@ -2258,6 +2269,7 @@ fn publish_gitleaks_report(temporary: &Path, durable: &Path) -> Result<Vec<u8>, 
 
 pub(crate) fn run_required_scanners(
     worktree: &Path,
+    base_oid: &str,
     artifact_root: &Path,
     executables: &ScannerExecutables,
     runtime: Option<&DirectRuntimeAdapter>,
@@ -2279,6 +2291,7 @@ pub(crate) fn run_required_scanners(
             scanner,
             executables.path(scanner)?,
             worktree,
+            base_oid,
             &policy,
             &temporary_report,
         )?;
@@ -3183,6 +3196,7 @@ fn acquire_evidence_attempt_lease(lane_root: &Path) -> Result<EvidenceAttemptLea
 #[allow(clippy::too_many_arguments)]
 fn observed_evidence_bundle(
     worktree: &Path,
+    base_oid: &str,
     artifact_root: &Path,
     intent: &EvidenceIntent,
     qa: QaEvidence,
@@ -3234,6 +3248,7 @@ fn observed_evidence_bundle(
             &scanner.name,
             scanner_executables.path(&scanner.name)?,
             worktree,
+            base_oid,
             &intent.attempt_root.join("security/gitleaks/policy.toml"),
             &intent
                 .attempt_root
@@ -3702,6 +3717,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
         )?;
         let scanners = run_required_scanners(
             &request.state.identity.worktree,
+            &request.state.identity.base_oid,
             &attempt_root.join("security"),
             request.scanners,
             request.runtime,
@@ -3741,6 +3757,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
         );
         let bundle = observed_evidence_bundle(
             &request.state.identity.worktree,
+            &request.state.identity.base_oid,
             request.artifact_root,
             &intent,
             qa.clone(),
@@ -35450,6 +35467,7 @@ exit 19
         };
         let scanners = super::run_required_scanners(
             &fixture.repo,
+            "HEAD",
             &attempt_root.join("security"),
             &scanner_executables,
             None,
@@ -35466,6 +35484,7 @@ exit 19
         );
         let mut bundle = super::observed_evidence_bundle(
             &fixture.repo,
+            "HEAD",
             lane_root,
             &intent,
             qa_evidence,
@@ -36536,6 +36555,14 @@ exit 19
             assert!(error.contains(scanner), "{scanner}: {error}");
             assert!(error.contains("reported"), "{scanner}: {error}");
         }
+        let semgrep_finding = br#"{"results":[{"check_id":"rule"}],"errors":[]}"#;
+        let error = super::validate_scanner_result("semgrep", 1, semgrep_finding, b"")
+            .expect_err("Semgrep finding exit must reach native JSON validation");
+        assert!(error.contains("reported findings"), "{error}");
+        let error =
+            super::validate_scanner_result("semgrep", 1, br#"{"results":[],"errors":[]}"#, b"")
+                .expect_err("empty Semgrep JSON must not legitimize a non-zero exit");
+        assert!(error.contains("exit status 1"), "{error}");
 
         let wrong_shape = [
             ("gitleaks", br#"{"results":[],"errors":[]}"#.as_slice()),
@@ -36588,6 +36615,7 @@ exit 19
 
         let error = super::run_required_scanners(
             &fixture.repo,
+            "HEAD",
             &artifact_root,
             &scanners,
             None,
@@ -36672,6 +36700,7 @@ exit 19
 
         super::run_required_scanners(
             &fixture.repo,
+            "HEAD",
             &artifact_root,
             &scanners,
             None,
@@ -36742,6 +36771,7 @@ exit 19
 
         let first = super::run_required_scanners(
             &fixture.repo,
+            "HEAD",
             &artifact_root,
             &scanners,
             None,
@@ -36750,6 +36780,7 @@ exit 19
         .expect("first scanner pass");
         let second = super::run_required_scanners(
             &fixture.repo,
+            "HEAD",
             &artifact_root,
             &scanners,
             None,
@@ -36831,11 +36862,13 @@ exit 19
                     "/scanner/semgrep",
                     "scan",
                     "--config",
-                    "auto",
+                    "p/default",
                     "--metrics",
                     "off",
                     "--error",
                     "--json",
+                    "--baseline-commit",
+                    "base-oid",
                     "/safe/worktree",
                 ],
             ),
@@ -36867,12 +36900,60 @@ exit 19
         ];
         for (scanner, argv) in expected {
             assert_eq!(
-                super::scanner_command(scanner, Path::new(argv[0]), worktree, config, report)
-                    .expect("scanner command")
-                    .argv,
+                super::scanner_command(
+                    scanner,
+                    Path::new(argv[0]),
+                    worktree,
+                    "base-oid",
+                    config,
+                    report,
+                )
+                .expect("scanner command")
+                .argv,
                 argv
             );
         }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_semgrep_is_metrics_private_and_baseline_scoped() {
+        // Break caught: `--config auto --metrics off` is rejected by Semgrep before scanning,
+        // while an unscoped repository scan also blocks feature work on pre-existing findings.
+        let command = super::scanner_command(
+            "semgrep",
+            Path::new("/scanner/semgrep"),
+            Path::new("/safe/worktree"),
+            "base-oid",
+            Path::new("/safe/evidence/gitleaks-policy.toml"),
+            Path::new("/safe/evidence/gitleaks.json"),
+        )
+        .expect("Semgrep command");
+
+        assert!(
+            command
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["--config", "p/default"]),
+            "{:?}",
+            command.argv
+        );
+        assert!(
+            command
+                .argv
+                .iter()
+                .any(|argument| argument == "--baseline-commit"),
+            "{:?}",
+            command.argv
+        );
+        assert!(
+            command
+                .argv
+                .windows(2)
+                .any(|pair| pair == ["--metrics", "off"]),
+            "{:?}",
+            command.argv
+        );
+        assert_eq!(command.accepted_exit_codes, vec![0, 1]);
     }
 
     #[test]
