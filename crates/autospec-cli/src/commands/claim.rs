@@ -5515,7 +5515,7 @@ mod tests {
             "refresh_claim_generation",
             "upsert_record",
             "clear",
-            "recover_stale_startup_record",
+            "recover_authoritative_stale_startup",
             "record_executor_result",
         ] {
             assert!(
@@ -5524,7 +5524,7 @@ mod tests {
             );
         }
         assert!(source_function(source, "clear").contains("has_exact_claim_generation"));
-        let recovery = source_function(source, "recover_stale_startup_record");
+        let recovery = source_function(source, "recover_authoritative_stale_startup");
         assert!(recovery.contains("\"available\""));
         assert!(recovery.contains("\"stale_startup_recovered\""));
         for function in [
