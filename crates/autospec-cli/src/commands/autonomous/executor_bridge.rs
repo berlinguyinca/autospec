@@ -1844,7 +1844,7 @@ pub(crate) struct ResolvedFullSuite {
 const REQUIRED_SCANNERS: [&str; 4] = ["gitleaks", "semgrep", "trivy", "license-checker"];
 const GITLEAKS_NEXT_PATH_ALLOWLIST: &str = r"(^|/)\.next(/|$)";
 const REQUIRED_SCANNER_POLICY_SCHEMA: &str =
-    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-diff-v2;license-checker-diff-v2";
+    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-diff-v2;license-checker-prod-diff-v3";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ScannerExecutables {
@@ -2108,7 +2108,7 @@ fn changed_paths_since_base(worktree: &Path, base_oid: &str) -> Result<BTreeSet<
             "diff",
             "--name-only",
             "-z",
-            "--diff-filter=ACMRT",
+            "--diff-filter=ACMRTD",
             &range,
             "--",
         ],
@@ -2245,22 +2245,50 @@ fn publish_trivy_diff_report(
     fs::read(durable).map_err(|error| format!("read durable Trivy report: {error}"))
 }
 
-fn npm_dependency_inputs_changed(changed_paths: &BTreeSet<String>) -> bool {
-    changed_paths.iter().any(|path| {
-        Path::new(path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| {
-                matches!(
-                    name,
-                    "package.json"
-                        | "package-lock.json"
-                        | "npm-shrinkwrap.json"
-                        | "pnpm-lock.yaml"
-                        | "yarn.lock"
-                )
-            })
+fn npm_production_dependencies(value: &serde_json::Value) -> serde_json::Value {
+    let object = value.as_object();
+    serde_json::json!({
+        "dependencies": object.and_then(|value| value.get("dependencies")),
+        "optionalDependencies": object.and_then(|value| value.get("optionalDependencies")),
+        "bundledDependencies": object.and_then(|value| value.get("bundledDependencies")),
+        "bundleDependencies": object.and_then(|value| value.get("bundleDependencies")),
     })
+}
+
+fn npm_dependency_inputs_changed(
+    worktree: &Path,
+    base_oid: &str,
+    changed_paths: &BTreeSet<String>,
+) -> Result<bool, String> {
+    for path in changed_paths {
+        let name = Path::new(path).file_name().and_then(|name| name.to_str());
+        if matches!(
+            name,
+            Some("package-lock.json" | "npm-shrinkwrap.json" | "pnpm-lock.yaml" | "yarn.lock")
+        ) {
+            return Ok(true);
+        }
+        if name != Some("package.json") {
+            continue;
+        }
+        let current = fs::read(worktree.join(path))
+            .ok()
+            .map(|body| serde_json::from_slice::<serde_json::Value>(&body))
+            .transpose()
+            .map_err(|error| format!("parse current {path}: {error}"))?
+            .unwrap_or(serde_json::Value::Null);
+        let base_spec = format!("{base_oid}:{path}");
+        let base = git_bytes(worktree, &["show", &base_spec])
+            .ok()
+            .map(|body| serde_json::from_slice::<serde_json::Value>(&body))
+            .transpose()
+            .map_err(|error| format!("parse base {path}: {error}"))?
+            .unwrap_or(serde_json::Value::Null);
+        if npm_production_dependencies(&current) != npm_production_dependencies(&base) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn validate_license_checker_result(
@@ -2579,7 +2607,11 @@ pub(crate) fn run_required_scanners(
             validate_scanner_result(scanner, 0, &result, &stderr)?;
         } else {
             let allow_preexisting_forbidden_license = scanner == "license-checker"
-                && !npm_dependency_inputs_changed(&changed_paths_since_base(worktree, base_oid)?);
+                && !npm_dependency_inputs_changed(
+                    worktree,
+                    base_oid,
+                    &changed_paths_since_base(worktree, base_oid)?,
+                )?;
             validate_scanner_result_with_license_policy(
                 scanner,
                 exit_status,
@@ -2693,8 +2725,10 @@ fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> 
             "observed security evidence is missing or duplicates a required scanner".to_string(),
         );
     }
-    let changed_paths = changed_paths_since_base(worktree, observed_scanner_base_oid(scanners)?)?;
-    let allow_preexisting_forbidden_license = !npm_dependency_inputs_changed(&changed_paths);
+    let base_oid = observed_scanner_base_oid(scanners)?;
+    let changed_paths = changed_paths_since_base(worktree, base_oid)?;
+    let allow_preexisting_forbidden_license =
+        !npm_dependency_inputs_changed(worktree, base_oid, &changed_paths)?;
     for scanner in scanners {
         validate_observed_command(worktree, &scanner.command)?;
         reject_symlink_path(&scanner.result_path)?;
@@ -37238,11 +37272,21 @@ exit 19
     fn autonomous_executor_bridge_license_checker_findings_follow_dependency_inputs() {
         let fixture = GitFixture::new("license-changed-inputs");
         fs::write(fixture.repo.join("package-lock.json"), "{}\n").expect("baseline lockfile");
-        git(&fixture.repo, &["add", "package-lock.json"]);
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"dependencies":{"sharp":"1.0.0"},"scripts":{"test":"old"}}"#,
+        )
+        .expect("baseline manifest");
+        git(&fixture.repo, &["add", "package-lock.json", "package.json"]);
         git(&fixture.repo, &["commit", "-m", "baseline lockfile"]);
         let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
         fs::write(fixture.repo.join("feature.js"), "feature();\n").expect("feature source");
-        git(&fixture.repo, &["add", "feature.js"]);
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"dependencies":{"sharp":"1.0.0"},"scripts":{"test":"new"}}"#,
+        )
+        .expect("script-only manifest change");
+        git(&fixture.repo, &["add", "feature.js", "package.json"]);
         git(&fixture.repo, &["commit", "-m", "feature source"]);
         let report = serde_json::json!({
             "@img/sharp-libvips-linux-x64@1.2.4": {"licenses": "LGPL-3.0"}
@@ -37251,7 +37295,8 @@ exit 19
             super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
         super::validate_license_checker_result(
             &report,
-            !super::npm_dependency_inputs_changed(&changed),
+            !super::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+                .expect("dependency input classification"),
         )
         .expect("unchanged dependency finding must not block feature work");
 
@@ -37266,7 +37311,8 @@ exit 19
             super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
         let error = super::validate_license_checker_result(
             &report,
-            !super::npm_dependency_inputs_changed(&changed),
+            !super::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+                .expect("dependency input classification"),
         )
         .expect_err("changed dependency finding must block");
         assert!(error.contains("forbidden license"), "{error}");
