@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{CString, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -8,7 +8,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::fs::{FileExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
@@ -5974,7 +5974,9 @@ pub(crate) fn execute_direct_plan(
                 command,
                 runtime.map(DirectRuntimeAdapter::session_id),
             )?;
-            if matches!(recovered.terminal, AttemptTerminal::SpawnFailed(_)) {
+            if matches!(recovered.terminal, AttemptTerminal::SpawnFailed(_))
+                || repaired_supervisor_resolution_failure(&recovered.terminal)
+            {
                 archive_reconciled_direct_failure(&paths)?;
                 attempt_id = reserve_direct_attempt_id(&paths)?;
             }
@@ -16580,11 +16582,12 @@ fn spawn_blocked_harness(
     sinks: &OutputSinkPaths,
     attempt_id: Option<&str>,
 ) -> Result<ForkedChild, SpawnFailure> {
-    let supervisor_executable = fs::canonicalize(
+    let argv_zero = std::env::args_os().next();
+    let supervisor_executable = resolve_executor_supervisor_executable(
         std::env::current_exe()
-            .map_err(|error| format!("resolve executor supervisor executable: {error}"))?,
-    )
-    .map_err(|error| format!("canonicalize executor supervisor executable: {error}"))?;
+            .map_err(|error| format!("resolve executor supervisor executable: {error}")),
+        argv_zero.as_deref(),
+    )?;
     let supervisor_argv_digest = argv_digest(&std::env::args().skip(1).collect::<Vec<_>>());
     let executable = CString::new(harness.program.as_os_str().as_bytes())
         .map_err(|_| "executor program contains a NUL byte".to_string())?;
@@ -17001,6 +17004,73 @@ fn spawn_blocked_harness(
             }
         }
     }
+}
+
+fn resolve_executor_supervisor_executable(
+    current_executable: Result<PathBuf, String>,
+    argv_zero: Option<&OsStr>,
+) -> Result<PathBuf, String> {
+    let primary_error = match current_executable {
+        Ok(path) => match fs::canonicalize(&path) {
+            Ok(canonical) => return Ok(canonical),
+            Err(error) => format!("canonicalize executor supervisor executable: {error}"),
+        },
+        Err(error) => error,
+    };
+    let fallback = argv_zero
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            format!(
+                "{primary_error}; executor supervisor argv-zero fallback is not an absolute path"
+            )
+        })?;
+    let canonical = fs::canonicalize(fallback).map_err(|error| {
+        format!(
+            "{primary_error}; canonicalize executor supervisor argv-zero fallback {}: {error}",
+            fallback.display()
+        )
+    })?;
+    #[cfg(target_os = "linux")]
+    {
+        let running = fs::metadata("/proc/self/exe").map_err(|error| {
+            format!("{primary_error}; inspect running executor supervisor image: {error}")
+        })?;
+        let candidate = fs::metadata(&canonical).map_err(|error| {
+            format!(
+                "{primary_error}; inspect executor supervisor argv-zero fallback {}: {error}",
+                canonical.display()
+            )
+        })?;
+        if running.dev() != candidate.dev() || running.ino() != candidate.ino() {
+            return Err(format!(
+                "{primary_error}; executor supervisor argv-zero fallback does not identify the running image"
+            ));
+        }
+        Ok(canonical)
+    }
+    #[cfg(not(target_os = "linux"))]
+    Err(format!(
+        "{primary_error}; executor supervisor argv-zero fallback cannot prove running-image identity on this platform"
+    ))
+}
+
+fn repaired_supervisor_resolution_failure(terminal: &AttemptTerminal) -> bool {
+    let AttemptTerminal::InfrastructureFailed(reason) = terminal else {
+        return false;
+    };
+    if !reason.starts_with("resolve executor supervisor executable:")
+        && !reason.starts_with("canonicalize executor supervisor executable:")
+    {
+        return false;
+    }
+    let argv_zero = std::env::args_os().next();
+    resolve_executor_supervisor_executable(
+        std::env::current_exe()
+            .map_err(|error| format!("resolve executor supervisor executable: {error}")),
+        argv_zero.as_deref(),
+    )
+    .is_ok()
 }
 
 fn launch_and_supervise(
@@ -20943,6 +21013,69 @@ mod tests {
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_recovers_supervisor_executable_from_argv_zero() {
+        let executable = std::env::current_exe().expect("current test executable");
+
+        let resolved = super::resolve_executor_supervisor_executable(
+            Err("canonicalize executor supervisor executable: stale path".to_string()),
+            Some(executable.as_os_str()),
+        )
+        .expect("resolve stable argv-zero fallback");
+
+        assert_eq!(
+            resolved,
+            fs::canonicalize(executable).expect("canonical fallback")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_rejects_unrelated_argv_zero_fallback() {
+        let fixture = test_root("supervisor-executable-unrelated");
+        let unrelated = fixture.join("autospec");
+        fs::write(&unrelated, b"unrelated binary").expect("write unrelated executable");
+
+        let error = super::resolve_executor_supervisor_executable(
+            Err("canonicalize executor supervisor executable: stale path".to_string()),
+            Some(unrelated.as_os_str()),
+        )
+        .expect_err("reject unrelated argv-zero");
+
+        assert!(
+            error.contains("does not identify the running image"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_prefers_primary_supervisor_executable() {
+        let primary = std::env::current_exe().expect("current test executable");
+
+        let resolved = super::resolve_executor_supervisor_executable(
+            Ok(primary.clone()),
+            Some(Path::new("/unrelated/argv-zero").as_os_str()),
+        )
+        .expect("resolve primary executable");
+
+        assert_eq!(
+            resolved,
+            fs::canonicalize(primary).expect("canonical primary")
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_relative_argv_zero_fallback() {
+        let error = super::resolve_executor_supervisor_executable(
+            Err("canonicalize executor supervisor executable: stale path".to_string()),
+            Some(Path::new("autospec").as_os_str()),
+        )
+        .expect_err("reject relative argv-zero");
+
+        assert!(error.contains("not an absolute path"), "{error}");
+    }
 
     #[cfg(target_os = "linux")]
     struct DetachedSupervisorCleanup(ProcessIdentity);
@@ -34165,6 +34298,61 @@ exit 19
         assert!(error.contains("infrastructure"), "{error}");
         assert_eq!(record["terminal"]["kind"], "infrastructure_failed");
         assert!(artifact_root.join("command-000.intent.json").is_file());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_retries_repaired_supervisor_resolution_failure() {
+        let fixture = GitFixture::new("direct-repaired-supervisor-resolution");
+        let artifact_root = fixture.root.join("evidence");
+        let plan = super::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
+
+        super::set_launch_failpoint(super::LaunchFailpoint::ParentReadiness);
+        super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("first attempt records cleanup-proven infrastructure failure");
+        super::set_launch_failpoint(super::LaunchFailpoint::None);
+        let record_path = artifact_root.join("command-000.json");
+        let observed = super::read_observed_command_record(&fixture.repo, &record_path)
+            .expect("read infrastructure record");
+        let repaired = super::observed_command_document(
+            &observed.attempt_id,
+            &observed.commit_oid,
+            observed.runtime_session_id.as_deref(),
+            &observed.executable,
+            &observed.argv,
+            &observed.process_executable,
+            &observed.process_argv,
+            &super::AttemptTerminal::InfrastructureFailed(
+                "canonicalize executor supervisor executable: No such file or directory (os error 2)"
+                    .to_string(),
+            ),
+            &observed.stdout_path,
+            &observed.stdout_digest,
+            &observed.stderr_path,
+            &observed.stderr_digest,
+        );
+        fs::write(&record_path, repaired).expect("persist repaired failure fixture");
+
+        let recovered = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("healthy supervisor resolution starts a fresh attempt");
+
+        assert_eq!(recovered[0].terminal, super::AttemptTerminal::Exited(0));
+        assert!(fs::read_dir(&artifact_root)
+            .expect("failure archive")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
     }
 
     fn direct_launch_supervisor_pid(path: &Path) -> u32 {
