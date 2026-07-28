@@ -43,6 +43,7 @@ EOF
     chmod +x "$STUB_BIN/claude"
     export PATH="$STUB_BIN:$PATH"
     export AUTOSPEC_HANDOFF_DISPATCHER=1
+    export AUTOSPEC_HANDOFF_DISPATCHER_KIND=claude
 }
 
 teardown() {

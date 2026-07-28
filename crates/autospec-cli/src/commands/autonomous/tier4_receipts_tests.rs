@@ -89,7 +89,10 @@ fn concurrent_tier4_fixture_owners_use_distinct_integer_tagged_roots() {
             roots_ready.wait();
             assert!(root.path().is_dir(), "owner {owner} lost its fixture root");
             let path = root.path().to_path_buf();
-            assert!(path.is_absolute(), "fixture owner {owner} must use an isolated absolute root");
+            assert!(
+                path.is_absolute(),
+                "fixture owner {owner} must use an isolated absolute root"
+            );
             let integer_tag = path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -107,8 +110,14 @@ fn concurrent_tier4_fixture_owners_use_distinct_integer_tagged_roots() {
 
     start.wait();
     let [first, second] = owners.map(|owner| owner.join().expect("fixture owner"));
-    assert_ne!(first.0, second.0, "concurrent owners shared one fixture root");
-    assert_ne!(first.1, second.1, "concurrent owners reused one integer tag");
+    assert_ne!(
+        first.0, second.0,
+        "concurrent owners shared one fixture root"
+    );
+    assert_ne!(
+        first.1, second.1,
+        "concurrent owners reused one integer tag"
+    );
 }
 
 fn alternate_source_policy() -> Tier4SourcePolicy {

@@ -371,8 +371,13 @@ fn queue_ready_fails_closed_when_a_later_github_page_is_malformed() {
         .expect("queue command starts");
 
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr)
-        .contains("could not parse GitHub auto-implement issue page 2"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("could not fetch GitHub auto-implement issue page 2 after 3 attempts"),
+        "stderr={} stdout={}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[test]

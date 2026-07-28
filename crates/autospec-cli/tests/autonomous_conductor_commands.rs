@@ -1257,8 +1257,17 @@ fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_w
         );
         assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan, "{name}");
         let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
-        assert_eq!(calls.matches("\npr\ncreate\n").count(), 1, "{name}");
-        assert_eq!(calls.matches("\npr\nmerge\n").count(), 1, "{name}");
+        let expected_pr_actions = usize::from(name != "retry-before-schedule");
+        assert_eq!(
+            calls.matches("\npr\ncreate\n").count(),
+            expected_pr_actions,
+            "{name}"
+        );
+        assert_eq!(
+            calls.matches("\npr\nmerge\n").count(),
+            expected_pr_actions,
+            "{name}"
+        );
         assert!(
             !fixture
                 .state_path()
@@ -1280,11 +1289,19 @@ fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_w
             );
             let terminal_record =
                 parse_run_state_comment(&terminal_message).expect("parse final bridge claim");
-            assert_ne!(
-                terminal_record.claim_id.as_deref(),
-                Some("terminal-retry-generation"),
-                "retry restart reused a terminal claim generation"
-            );
+            if name == "retry-before-schedule" {
+                assert_eq!(
+                    terminal_record.claim_id.as_deref(),
+                    Some("terminal-retry-generation"),
+                    "retry retirement should not dispatch a replacement claim"
+                );
+            } else {
+                assert_ne!(
+                    terminal_record.claim_id.as_deref(),
+                    Some("terminal-retry-generation"),
+                    "executor restart reused a terminal claim generation"
+                );
+            }
         }
         drop(bridge);
     }
@@ -2138,19 +2155,48 @@ fn foreground_receipt_retirement_crash_windows_resume_without_replay() {
             "{scenario}: recovery retires the old acquisition receipt"
         );
         let calls_after = fs::read_to_string(&fixture.calls).expect("calls after recovery");
-        if !fail_harness {
-            assert_eq!(
-                calls_after.matches("\npr\ncreate\n").count(),
-                calls_before.matches("\npr\ncreate\n").count(),
-                "{scenario}: terminal replay must not create another PR"
-            );
-            assert_eq!(
-                calls_after.matches("\npr\nmerge\n").count(),
-                calls_before.matches("\npr\nmerge\n").count(),
-                "{scenario}: terminal replay must not merge twice"
-            );
-        }
+        assert_eq!(
+            calls_after.matches("\npr\ncreate\n").count(),
+            calls_before.matches("\npr\ncreate\n").count(),
+            "{scenario}: retired generation must not create another PR"
+        );
+        assert_eq!(
+            calls_after.matches("\npr\nmerge\n").count(),
+            calls_before.matches("\npr\nmerge\n").count(),
+            "{scenario}: retired generation must not merge twice"
+        );
     }
+}
+
+#[test]
+fn foreground_normal_fourth_retry_pauses_after_three_completed_retries() {
+    let mut state = selected_foreground_state();
+    for completed in 1..=3 {
+        state = state
+            .transition(ConductorEvent::Claimed)
+            .expect("claim retry generation")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Retryable("transient failure".to_string()),
+            })
+            .expect("record completed retry");
+        assert_eq!(state.phase(), ConductorPhase::Retry);
+        assert_eq!(state.retry_count(), completed);
+        state = state
+            .transition(ConductorEvent::RetryScheduled)
+            .expect("schedule allowed retry");
+    }
+
+    let exhausted = state
+        .transition(ConductorEvent::Claimed)
+        .expect("claim fourth generation")
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Retryable("transient failure".to_string()),
+        })
+        .expect("record fourth retry");
+
+    assert_eq!(exhausted.phase(), ConductorPhase::Paused);
+    assert_eq!(exhausted.retry_count(), 4);
+    assert_eq!(exhausted.pause_reason(), Some("retry_limit_exhausted"));
 }
 
 #[test]

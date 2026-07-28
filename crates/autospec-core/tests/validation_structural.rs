@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use autospec_core::validation::{StructuralCheck, StructuralValidator};
 use autospec_core::validation::structural::oversized_module_refactor_issues;
+use autospec_core::validation::{StructuralCheck, StructuralValidator};
 
 #[test]
 fn oversized_modules_emit_bounded_behavior_preserving_drafts() {

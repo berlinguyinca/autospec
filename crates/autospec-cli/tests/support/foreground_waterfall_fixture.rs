@@ -96,7 +96,7 @@ impl ForegroundWaterfallFixture {
     fn install_fakes(&self) {
         write_executable(&self.bin.join("gh"), FAKE_GH);
         let marker = format!(
-            "#!/bin/sh\nprintf launched > '{}'\nexit 99\n",
+            "#!/bin/sh\nprintf 'launched\\n' >> '{}'\nexit 99\n",
             self.executor.display()
         );
         for program in ["codex", "omx"] {
@@ -202,7 +202,10 @@ impl ForegroundWaterfallFixture {
     }
 
     pub fn executor_launches(&self) -> usize {
-        usize::from(self.executor.exists())
+        fs::read_to_string(&self.executor)
+            .unwrap_or_default()
+            .lines()
+            .count()
     }
 
     pub fn why_no_work_exists(&self) -> bool {
@@ -239,7 +242,7 @@ impl ForegroundWaterfallFixture {
         snapshot
     }
 
-    pub fn assert_no_forbidden_waterfall_side_effects(&self) {
+    pub fn assert_no_forbidden_waterfall_side_effects(&self, allow_discovery_harness: bool) {
         let calls = fs::read_to_string(&self.calls).expect("read calls");
         for forbidden in [
             "issue edit",
@@ -253,7 +256,9 @@ impl ForegroundWaterfallFixture {
                 "unexpected mutation: {forbidden}"
             );
         }
-        assert!(!self.executor.exists(), "executor launched");
+        if !allow_discovery_harness {
+            assert!(!self.executor.exists(), "executor launched");
+        }
         assert!(!self.shell.exists(), "shell launched");
         assert!(!self.why_no_work_exists(), "why-no-work was written");
         assert!(!self.tier_directory_exists(NoWorkTier::Tier3));

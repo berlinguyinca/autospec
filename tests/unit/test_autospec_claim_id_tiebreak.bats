@@ -1,13 +1,6 @@
 #!/usr/bin/env bats
-# tests/unit/test_autospec_claim_id_tiebreak.bats — earliest-comment-id CAS tiebreak.
-#
-# Proves the lock comment is selected by lowest numeric id (the CAS
-# linearization point), never by API/array order:
-#   (a) `autospec claim state read` returns the body of the lowest id (100), not array order;
-#   (b) the worker owning the higher id (101) loses, exits 2 `claim_lost`,
-#       and DELETEs only its own (101) comment — never the winner's (100);
-#   (c) dedup never DELETEs the lowest id (100).
-# Covers both the both-create and both-patch races.
+# The dedicated Git ref is the claim CAS linearization point. GitHub comments
+# are audit projections and must never decide ownership.
 
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -16,19 +9,24 @@ setup() {
     LABELS="$TEST_TMP/labels.txt"
     COMMENTS="$TEST_TMP/comments.json"
     CALLS="$TEST_TMP/calls.log"
+    CLAIM_REMOTE="$TEST_TMP/claim-remote.git"
     printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
     printf '[]\n' > "$COMMENTS"
+    git init --bare -q "$CLAIM_REMOTE"
 
-    # Shared PATH-shadow gh stub (see tests/fixtures/gh-mock/gh).
     mkdir -p "$TEST_TMP/bin"
     cp "$REPO_ROOT/tests/fixtures/gh-mock/gh" "$TEST_TMP/bin/gh"
     chmod +x "$TEST_TMP/bin/gh"
-    export PATH="$TEST_TMP/bin:$PATH"
+    export PATH="$TEST_TMP/bin:/usr/bin:/bin"
     export AUTOSPEC_TEST_LABELS="$LABELS"
     export AUTOSPEC_TEST_COMMENTS="$COMMENTS"
     export AUTOSPEC_TEST_CALLS="$CALLS"
-    export AUTOSPEC_TEST_FORCE_OWNER=""
     export AUTOSPEC_GH_API_RETRY_SLEEP=0
+    export AUTOSPEC_CLAIM_GIT_REMOTE="$CLAIM_REMOTE"
+    export AUTOSPEC_CLAIM_GIT_STATE_DIR="$TEST_TMP/claim-state"
+    export AUTOSPEC_HEARTBEAT_DIR="$TEST_TMP/heartbeats"
+    export AUTOSPEC_CLAIM_CONFIRM_READS=1
+    export AUTOSPEC_CLAIM_SETTLE_MILLIS=0
 }
 
 teardown() {
@@ -43,120 +41,77 @@ claim_acquire() {
     "$AUTOSPEC" claim acquire "$@"
 }
 
-# Seed two marked lock comments in DESCENDING array order so a naive
-# .[0]/sed-1p selection would pick the higher id. Only sort_by(.id) gets 100.
-seed_descending_array_order() {
-    cat > "$COMMENTS" <<'JSON'
-[
-  {
-    "id": 101,
-    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-b\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:01Z\",\"updated_at\":\"2026-01-01T00:00:01Z\"}\n<!-- autospec-run-state:end -->"
-  },
-  {
-    "id": 100,
-    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\"}\n<!-- autospec-run-state:end -->"
-  }
-]
-JSON
+claim_oid() {
+    git --git-dir "$CLAIM_REMOTE" rev-parse refs/autospec/claims/issue-42
 }
 
-@test "read returns the body of the lowest id, not array order" {
-    seed_descending_array_order
+acquire_worker_a() {
+    claim_acquire --issue 42 --repo testorg/testrepo \
+        --worker-id worker-a --branch feat/worker-a
+}
+
+@test "read returns the authoritative Git-ref owner" {
+    run acquire_worker_a
+    [ "$status" -eq 0 ]
+
     run claim_state read --issue 42 --repo testorg/testrepo
     [ "$status" -eq 0 ]
     [[ "$output" == *'"worker_id":"worker-a"'* ]]
-    [[ "$output" != *'"worker_id":"worker-b"'* ]]
+    [[ "$output" == *'"branch":"feat/worker-a"'* ]]
+    [[ "$output" == *'"claim_id":"claim-'* ]]
 }
 
-@test "dedup keeps the lowest id (100) and deletes the higher (101)" {
-    seed_descending_array_order
-    run claim_state upsert --issue 42 --repo testorg/testrepo --worker-id worker-a --state worktree_ready
+@test "one exact successor advances the same issue ref" {
+    acquired="$(acquire_worker_a)"
+    claim_id="$(printf '%s' "$acquired" | jq -r .claim_id)"
+    before="$(claim_oid)"
+
+    run claim_state upsert --issue 42 --repo testorg/testrepo \
+        --worker-id worker-a --claim-id "$claim_id" --branch feat/worker-a \
+        --state worktree_ready --step worktree_ready
     [ "$status" -eq 0 ]
-
-    # exactly one marked comment survives
-    run jq '[.[].body | select(contains("autospec-run-state:begin"))] | length' "$COMMENTS"
-    [ "$output" = "1" ]
-    # the survivor is the lowest id (100), never 101
-    run jq -r '.[0].id' "$COMMENTS"
-    [ "$output" = "100" ]
-    # 101 was DELETEd via REST, 100 was not
-    grep -q 'api repos/testorg/testrepo/issues/comments/101 -X DELETE' "$CALLS"
-    ! grep -q 'api repos/testorg/testrepo/issues/comments/100 -X DELETE' "$CALLS"
+    [ "$(claim_oid)" != "$before" ]
+    [ "$(git --git-dir "$CLAIM_REMOTE" for-each-ref --format='%(refname)' \
+        refs/autospec/claims/issue-42 | wc -l | tr -d ' ')" -eq 1 ]
 }
 
-@test "both-patch race: higher-id worker loses, deletes only its own comment, exits 2" {
-    # worker-a holds the lowest-id lock (100). worker-b genuinely owns the
-    # higher id (101). worker-b runs the claim path; FORCE_OWNER keeps worker-a
-    # as the owner of the patched lowest id, so worker-b's read-back shows it
-    # lost. worker-b must DELETE only its OWN comment (101), never the winner's
-    # lowest id (100).
-    seed_descending_array_order
+@test "a fresh competing worker loses without advancing the winner ref" {
+    acquire_worker_a >/dev/null
     printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
+    before="$(claim_oid)"
 
-    AUTOSPEC_TEST_FORCE_OWNER=worker-a run claim_acquire --issue 42 --repo testorg/testrepo --worker-id worker-b
+    run claim_acquire --issue 42 --repo testorg/testrepo \
+        --worker-id worker-b --branch feat/worker-b
     [ "$status" -eq 2 ]
     [[ "$output" == *'"claimed":false'* ]]
     [[ "$output" == *'"reason":"claim_lost"'* ]]
-    # loser self-deletes its OWN comment (101) ...
-    grep -q 'api repos/testorg/testrepo/issues/comments/101 -X DELETE' "$CALLS"
-    # ... and never the winner's lowest id (100)
-    ! grep -q 'api repos/testorg/testrepo/issues/comments/100 -X DELETE' "$CALLS"
+    [ "$(claim_oid)" = "$before" ]
 }
 
-@test "dotted worker_id self-cleans only its own comment, never a near-collision" {
-    # Cross-machine correctness: a worker_id with a regex metacharacter must
-    # match by LITERAL equality, not jq test(). winner-a holds the lowest-id
-    # lock (100) and wins via FORCE_OWNER. The loser's worker_id contains a dot
-    # (mac.lan:bob:monitor:1, its own comment is 101). A DIFFERENT worker owns a
-    # near-collision id (macXlan:bob:monitor:1, comment 102) where `.` would
-    # regex-match `X`. The loser must DELETE only its OWN comment (101) and never
-    # the near-collision's (102) nor the winner's (100).
-    cat > "$COMMENTS" <<'JSON'
-[
-  {
-    "id": 100,
-    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"winner-a\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\"}\n<!-- autospec-run-state:end -->"
-  },
-  {
-    "id": 101,
-    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"mac.lan:bob:monitor:1\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:01Z\",\"updated_at\":\"2026-01-01T00:00:01Z\"}\n<!-- autospec-run-state:end -->"
-  },
-  {
-    "id": 102,
-    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"macXlan:bob:monitor:1\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:02Z\",\"updated_at\":\"2026-01-01T00:00:02Z\"}\n<!-- autospec-run-state:end -->"
-  }
-]
-JSON
+@test "a dotted worker id cannot collide with a different owner" {
+    acquire_worker_a >/dev/null
     printf 'auto-implement\nctx:32k\nsafety:reviewed\n' > "$LABELS"
 
-    AUTOSPEC_TEST_FORCE_OWNER=winner-a run claim_acquire --issue 42 --repo testorg/testrepo --worker-id 'mac.lan:bob:monitor:1'
+    run claim_acquire --issue 42 --repo testorg/testrepo \
+        --worker-id 'mac.lan:bob:monitor:1' --branch feat/dotted
     [ "$status" -eq 2 ]
-    [[ "$output" == *'"claimed":false'* ]]
     [[ "$output" == *'"reason":"claim_lost"'* ]]
-    # loser self-deletes its OWN comment (101) ...
-    grep -q 'api repos/testorg/testrepo/issues/comments/101 -X DELETE' "$CALLS"
-    # ... and NEVER the near-collision's (102), even though `.` regex-matches `X`
-    ! grep -q 'api repos/testorg/testrepo/issues/comments/102 -X DELETE' "$CALLS"
-    # ... and never the winner's lowest id (100)
-    ! grep -q 'api repos/testorg/testrepo/issues/comments/100 -X DELETE' "$CALLS"
+
+    run claim_state read --issue 42 --repo testorg/testrepo
+    [[ "$output" == *'"worker_id":"worker-a"'* ]]
+    [[ "$output" != *'mac.lan:bob:monitor:1'* ]]
 }
 
-@test "both-create race: two distinct marked comments, lower id wins the read" {
-    # No pre-existing lock; both workers CREATE a fresh marked comment, ending
-    # with two distinct marked comments (100 then 101). read returns the lower id.
-    cat > "$COMMENTS" <<'JSON'
-[
-  {
-    "id": 100,
-    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:00Z\",\"updated_at\":\"2026-01-01T00:00:00Z\"}\n<!-- autospec-run-state:end -->"
-  },
-  {
-    "id": 101,
-    "body": "<!-- autospec-run-state:begin -->\n{\"schema\":1,\"issue\":42,\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-b\",\"state\":\"claimed\",\"claimed_at\":\"2026-01-01T00:00:01Z\",\"updated_at\":\"2026-01-01T00:00:01Z\"}\n<!-- autospec-run-state:end -->"
-  }
-]
-JSON
+@test "the first successful acquire remains the only fresh generation owner" {
+    run acquire_worker_a
+    [ "$status" -eq 0 ]
+    first_claim="$(printf '%s' "$output" | jq -r .claim_id)"
+
+    run claim_acquire --issue 42 --repo testorg/testrepo \
+        --worker-id worker-b --branch feat/worker-b
+    [ "$status" -eq 2 ]
+
     run claim_state read --issue 42 --repo testorg/testrepo
     [ "$status" -eq 0 ]
-    [[ "$output" == *'"worker_id":"worker-a"'* ]]
+    [ "$(printf '%s' "$output" | jq -r .claim_id)" = "$first_claim" ]
 }

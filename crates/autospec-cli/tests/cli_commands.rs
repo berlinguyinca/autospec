@@ -3552,7 +3552,7 @@ fn autonomous_restart_rejects_a_fresh_existing_lease_without_killing_conductor_o
 
     assert_lease_held(&output);
     assert_eq!(read_pid(&scope, "conductor"), old_conductor);
-    assert!(process_is_alive(&old_conductor));
+    assert!(process_starts(&old_conductor));
     assert_eq!(
         std::fs::read_to_string(&stop_flag).expect("preserved stop flag"),
         "graceful\nexisting\n"
@@ -3595,11 +3595,27 @@ fn autonomous_restart_replaces_unleased_legacy_conductor_metadata() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let new_conductor = read_pid(&scope, "conductor");
 
-    assert!(output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(stdout.contains("\"subcommand\":\"restart\""));
     assert_ne!(old_conductor, new_conductor);
-    assert!(!process_is_alive(&old_conductor));
-    assert!(process_is_alive(&new_conductor));
+    assert!(process_stops(&old_conductor));
+    assert!(
+        process_starts(&new_conductor),
+        "stdout={} stderr={} conductor_log={}",
+        stdout,
+        String::from_utf8_lossy(&output.stderr),
+        std::fs::read_to_string(
+            std::fs::read_to_string(scope.join("conductor.logpath"))
+                .unwrap_or_default()
+                .trim()
+        )
+        .unwrap_or_default()
+    );
     let launch = std::fs::read_to_string(scope.join("launch.json")).expect("launch json");
     assert!(launch.contains("\"max_cycles\":\"7\""));
 
@@ -3776,10 +3792,14 @@ fn autonomous_status(
 }
 
 fn read_pid(scope: &std::path::Path, name: &str) -> String {
-    std::fs::read_to_string(scope.join(format!("{name}.pid")))
+    let metadata = std::fs::read_to_string(scope.join(format!("{name}.pid")))
         .unwrap()
         .trim()
-        .to_string()
+        .to_string();
+    serde_json::from_str::<serde_json::Value>(&metadata)
+        .ok()
+        .and_then(|value| value.get("pid").and_then(serde_json::Value::as_u64))
+        .map_or(metadata, |pid| pid.to_string())
 }
 
 fn process_is_alive(pid: &str) -> bool {
@@ -3789,6 +3809,16 @@ fn process_is_alive(pid: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
+}
+
+fn process_starts(pid: &str) -> bool {
+    for _ in 0..20 {
+        if process_is_alive(pid) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    false
 }
 
 fn process_is_zombie(pid: &str) -> bool {
@@ -3835,18 +3865,20 @@ fn fresh_lease_state_path(state_dir: &std::path::Path) -> std::path::PathBuf {
 
 fn seed_unleased_legacy_conductor(scope: &std::path::Path) -> String {
     std::fs::create_dir_all(scope).expect("legacy conductor scope");
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            "sleep 20 </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\"",
-        ])
-        .output()
-        .expect("legacy conductor process");
-    assert!(output.status.success());
-    let pid = String::from_utf8(output.stdout)
-        .expect("legacy conductor pid")
-        .trim()
-        .to_string();
+    let legacy_launcher = scope.join("autospec-autonomous.sh");
+    write_executable(&legacy_launcher, "#!/bin/sh\nsleep 20\n");
+    let mut command = Command::new(&legacy_launcher);
+    command
+        .arg("run-foreground")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = command.spawn().expect("legacy conductor process");
+    let pid = child.id().to_string();
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     std::fs::write(scope.join("conductor.pid"), format!("{pid}\n"))
         .expect("legacy conductor pid metadata");
     std::fs::write(scope.join("conductor.logpath"), "legacy-conductor.log\n")

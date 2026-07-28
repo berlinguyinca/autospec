@@ -32,11 +32,17 @@ pub fn validate(root: &Path) -> Result<(), String> {
         };
         scan_sources(&path.join("src"), target_kind, &mut findings)?;
     }
-    if findings.is_empty() { Ok(()) } else { Err(findings.join("\n")) }
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(findings.join("\n"))
+    }
 }
 
 fn scan_sources(path: &Path, target_kind: &str, findings: &mut Vec<String>) -> Result<(), String> {
-    if !path.is_dir() { return Ok(()); }
+    if !path.is_dir() {
+        return Ok(());
+    }
     for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let file = entry.path();
@@ -46,8 +52,13 @@ fn scan_sources(path: &Path, target_kind: &str, findings: &mut Vec<String>) -> R
             let text = fs::read_to_string(&file).map_err(|e| e.to_string())?;
             for (line_no, line) in text.lines().enumerate() {
                 if !(line.contains("println!(") || line.contains("eprintln!(")) // autospec:allow-output
-                    || line.contains("autospec:allow-output") { continue; }
-                if target_kind == "binary" { continue; }
+                    || line.contains("autospec:allow-output")
+                {
+                    continue;
+                }
+                if target_kind == "binary" {
+                    continue;
+                }
                 let remediation = if target_kind == "library" {
                     "use tracing or an injected writer"
                 } else {

@@ -24,6 +24,11 @@ EOF
 
     export AUTOSPEC_RESEARCH_DIR="$TMP/fake-research"
     mkdir -p "$AUTOSPEC_RESEARCH_DIR"
+    for source in spec-vs-code prior-reports codebase-signals open-issues \
+        source-analysis dependency-health internet quality-resilience dogfooding \
+        self-leverage style-normalization; do
+        make_fake_researcher "$source" "{\"source\":\"$source\",\"proposals\":[]}"
+    done
 }
 
 teardown() {

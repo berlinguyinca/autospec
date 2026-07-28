@@ -1115,6 +1115,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
         }
     }
+    emit_claim_telemetry("session.started", &repo, options.issue, "claimed");
     Ok(ClaimLease {
         issue: options.issue,
         repo,
@@ -1486,54 +1487,71 @@ struct RecoveryOutcome {
     reason: String,
 }
 
+pub(crate) fn recover_active_issue(
+    repo: &str,
+    issue: u64,
+    timeout_seconds: u64,
+) -> Result<bool, CommandFailure> {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
+        return Ok(false);
+    };
+    recover_authoritative_stale_startup(repo, issue, timeout_seconds, selected)
+        .map(|outcome| outcome.recovered)
+}
+
+/// A newly-created claim without a heartbeat, branch, or PR is kept during its
+/// startup grace period but must not consume a worker slot yet. Read failures
+/// and malformed records remain counted so the queue fails closed.
+pub(crate) fn active_issue_counts_toward_worker_capacity(
+    repo: &str,
+    issue: u64,
+    timeout_seconds: u64,
+) -> Result<bool, CommandFailure> {
+    if let Some(selected) = read_claim_ref(repo, issue)? {
+        return active_record_counts_toward_worker_capacity(
+            repo,
+            issue,
+            &selected.record,
+            timeout_seconds,
+        );
+    }
+    let comments = list_comments(repo, issue)?;
+    let Some(selected) = select_run_state(&comments, repo, issue) else {
+        return Ok(true);
+    };
+    active_record_counts_toward_worker_capacity(repo, issue, &selected.record, timeout_seconds)
+}
+
+fn active_record_counts_toward_worker_capacity(
+    repo: &str,
+    issue: u64,
+    record: &RunStateRecord,
+    timeout_seconds: u64,
+) -> Result<bool, CommandFailure> {
+    if record.state != "claimed" {
+        return Ok(true);
+    }
+    if !record.pr.is_empty()
+        || startup_heartbeat_exists(repo, issue)
+        || branch_ref_exists(&record.branch)
+    {
+        return Ok(true);
+    }
+    let Some(updated_at) = parse_iso_timestamp(&record.updated_at) else {
+        return Ok(true);
+    };
+    Ok(unix_now()
+        .map(|now| now.saturating_sub(updated_at) > timeout_seconds)
+        .unwrap_or(true))
+}
+
 fn recover_stale_startup_record(
     repo: &str,
     issue: u64,
     timeout_seconds: u64,
 ) -> Result<RecoveryOutcome, CommandFailure> {
     if let Some(selected) = read_claim_ref(repo, issue)? {
-        if selected.record.state != "claimed"
-            || !selected.record.pr.is_empty()
-            || startup_heartbeat_exists(repo, issue)
-            || branch_ref_exists(&selected.record.branch)
-            || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
-        {
-            return Ok(RecoveryOutcome {
-                recovered: false,
-                reason: "claim_evidence_or_fresh_state".to_string(),
-            });
-        }
-        let mut available = selected.record.clone();
-        available.state = "available".to_string();
-        available.step = "stale_startup_recovered".to_string();
-        available.updated_at = utc_now_iso()?;
-        let head = match advance_claim_ref(repo, issue, Some(&selected), &available)? {
-            ClaimRefAdvance::Won(head) => head,
-            ClaimRefAdvance::Lost => {
-                return Ok(RecoveryOutcome {
-                    recovered: false,
-                    reason: "ownership_lost".to_string(),
-                })
-            }
-        };
-        project_claim_ref_to_comments(repo, &head);
-        let release_labels = [
-            "issue".to_string(),
-            "edit".to_string(),
-            issue.to_string(),
-            "--repo".to_string(),
-            repo.to_string(),
-            "--remove-label".to_string(),
-            "in-progress-by-bot".to_string(),
-            "--add-label".to_string(),
-            "auto-implement".to_string(),
-        ];
-        run_gh_with_retry(&release_labels, "release stale startup claim labels")?;
-        emit_claim_telemetry("session.terminal", repo, issue, "stale_startup_recovered");
-        return Ok(RecoveryOutcome {
-            recovered: true,
-            reason: "released_stale_startup_claim".to_string(),
-        });
+        return recover_authoritative_stale_startup(repo, issue, timeout_seconds, selected);
     }
     let comments = list_comments(repo, issue)?;
     let Some(selected) = select_run_state(&comments, repo, issue) else {
@@ -1558,18 +1576,7 @@ fn recover_stale_startup_record(
             reason: "claim_evidence_or_fresh_state".to_string(),
         });
     }
-    let release_labels = [
-        "issue".to_string(),
-        "edit".to_string(),
-        issue.to_string(),
-        "--repo".to_string(),
-        repo.to_string(),
-        "--remove-label".to_string(),
-        "in-progress-by-bot".to_string(),
-        "--add-label".to_string(),
-        "auto-implement".to_string(),
-    ];
-    run_gh_with_retry(&release_labels, "release stale startup claim labels")?;
+    release_stale_startup_labels(repo, issue)?;
     if let Err(error) = clear_marked_state(repo, &comments) {
         let restore_labels = [
             "issue".to_string(),
@@ -1593,6 +1600,70 @@ fn recover_stale_startup_record(
         recovered: true,
         reason: "released_stale_startup_claim".to_string(),
     })
+}
+
+fn recover_authoritative_stale_startup(
+    repo: &str,
+    issue: u64,
+    timeout_seconds: u64,
+    selected: ClaimRefHead,
+) -> Result<RecoveryOutcome, CommandFailure> {
+    if selected.record.state == "available" && selected.record.step == "stale_startup_recovered" {
+        release_stale_startup_labels(repo, issue)?;
+        emit_claim_telemetry("session.terminal", repo, issue, "stale_startup_recovered");
+        return Ok(RecoveryOutcome {
+            recovered: true,
+            reason: "released_stale_startup_claim".to_string(),
+        });
+    }
+    if selected.record.state != "claimed"
+        || !selected.record.pr.is_empty()
+        || startup_heartbeat_exists(repo, issue)
+        || branch_ref_exists(&selected.record.branch)
+        || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
+    {
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "claim_evidence_or_fresh_state".to_string(),
+        });
+    }
+    let mut available = selected.record.clone();
+    available.state = "available".to_string();
+    available.step = "stale_startup_recovered".to_string();
+    available.updated_at = utc_now_iso()?;
+    let head = match advance_claim_ref(repo, issue, Some(&selected), &available)? {
+        ClaimRefAdvance::Won(head) => head,
+        ClaimRefAdvance::Lost => {
+            return Ok(RecoveryOutcome {
+                recovered: false,
+                reason: "ownership_lost".to_string(),
+            })
+        }
+    };
+    project_claim_ref_to_comments(repo, &head);
+    release_stale_startup_labels(repo, issue)?;
+    emit_claim_telemetry("session.terminal", repo, issue, "stale_startup_recovered");
+    Ok(RecoveryOutcome {
+        recovered: true,
+        reason: "released_stale_startup_claim".to_string(),
+    })
+}
+
+fn release_stale_startup_labels(repo: &str, issue: u64) -> Result<(), CommandFailure> {
+    run_gh_with_retry(
+        &[
+            "issue".to_string(),
+            "edit".to_string(),
+            issue.to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--remove-label".to_string(),
+            "in-progress-by-bot".to_string(),
+            "--add-label".to_string(),
+            "auto-implement".to_string(),
+        ],
+        "release stale startup claim labels",
+    )
 }
 
 fn clear_marked_state(
@@ -1644,6 +1715,26 @@ pub(crate) fn reconcile_active_issue(
 ) -> Result<(), CommandFailure> {
     let _ = reconcile_linked_pr_record(repo, issue, worker_id, branch, expected_claim_id)?;
     Ok(())
+}
+
+pub(crate) fn reconcile_authoritative_active_issue(
+    repo: &str,
+    issue: u64,
+) -> Result<(), CommandFailure> {
+    let Some(selected) = read_claim_ref(repo, issue)? else {
+        return Ok(());
+    };
+    reconcile_active_issue(
+        repo,
+        issue,
+        &selected.record.worker_id,
+        &selected.record.branch,
+        selected
+            .record
+            .claim_id
+            .as_deref()
+            .ok_or_else(|| CommandFailure::diagnostic("active claim has no generation identity"))?,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5424,7 +5515,7 @@ mod tests {
             "refresh_claim_generation",
             "upsert_record",
             "clear",
-            "recover_stale_startup_record",
+            "recover_authoritative_stale_startup",
             "record_executor_result",
         ] {
             assert!(
@@ -5433,7 +5524,7 @@ mod tests {
             );
         }
         assert!(source_function(source, "clear").contains("has_exact_claim_generation"));
-        let recovery = source_function(source, "recover_stale_startup_record");
+        let recovery = source_function(source, "recover_authoritative_stale_startup");
         assert!(recovery.contains("\"available\""));
         assert!(recovery.contains("\"stale_startup_recovered\""));
         for function in [
@@ -5453,5 +5544,28 @@ mod tests {
         let lease = source_function(source, "has_active_executor_claim");
         assert!(lease.contains("record.updated_at"));
         assert!(lease.contains("record.ttl_seconds"));
+    }
+
+    #[test]
+    fn prepared_recovery_counts_toward_capacity_until_labels_converge() {
+        let record = RunStateRecord::new(
+            "owner/repo",
+            42,
+            "worker-a",
+            "available",
+            "",
+            "",
+            "stale_startup_recovered",
+            Vec::new(),
+            "2999-01-01T00:00:00Z",
+            "2999-01-01T00:00:00Z",
+            300,
+        )
+        .with_claim_id("claim-a");
+
+        assert!(
+            super::active_record_counts_toward_worker_capacity("owner/repo", 42, &record, 300)
+                .expect("classify prepared recovery")
+        );
     }
 }
