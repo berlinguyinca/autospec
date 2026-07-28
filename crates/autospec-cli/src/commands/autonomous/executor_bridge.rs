@@ -3231,6 +3231,10 @@ fn collect_nested_direct_ownership(
         direct_roots.push((root.to_path_buf(), indices));
     }
     for entry in entries {
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "nested evidence entry name is not UTF-8".to_string())?;
         let file_type = entry
             .file_type()
             .map_err(|error| format!("inspect nested evidence ownership entry: {error}"))?;
@@ -3238,7 +3242,47 @@ fn collect_nested_direct_ownership(
             return Err("nested evidence ownership contains a forbidden symlink".to_string());
         }
         if file_type.is_dir() {
-            collect_nested_direct_ownership(&entry.path(), direct_roots)?;
+            if is_direct_transaction_directory(&name) {
+                validate_nested_diagnostic_tree(&entry.path())?;
+            } else {
+                collect_nested_direct_ownership(&entry.path(), direct_roots)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_direct_transaction_directory(name: &str) -> bool {
+    let Some(tail) = name.strip_prefix("command-") else {
+        return false;
+    };
+    let (digits, suffix) = tail.split_at(tail.len().min(3));
+    digits.len() == 3
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && (suffix.starts_with(".archive-") || suffix.starts_with(".retire-"))
+}
+
+fn validate_nested_diagnostic_tree(root: &Path) -> Result<(), String> {
+    ensure_private_directory(root)
+        .map_err(|error| format!("repair nested transaction directory: {error}"))?;
+    for entry in fs::read_dir(root)
+        .map_err(|error| format!("inventory nested transaction directory: {error}"))?
+    {
+        let entry =
+            entry.map_err(|error| format!("read nested transaction directory entry: {error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect nested transaction directory entry: {error}"))?;
+        if file_type.is_symlink() {
+            return Err("nested evidence ownership contains a forbidden symlink".to_string());
+        }
+        if file_type.is_dir() {
+            validate_nested_diagnostic_tree(&entry.path())?;
+        } else if file_type.is_file() {
+            validate_private_state_file(&entry.path())
+                .map_err(|error| format!("nested transaction artifact is unsafe: {error}"))?;
+        } else {
+            return Err("nested transaction contains an unsupported file type".to_string());
         }
     }
     Ok(())
@@ -28677,6 +28721,87 @@ exit 64
             fs::read(&file_target).expect("file target after rejection"),
             b"foreign\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_nested_transaction_archives_are_not_live_attempts() {
+        // Break caught: completed archive and retirement snapshots being rediscovered as live
+        // command roots, then failing because their attempt reservation was intentionally moved.
+        let fixture = GitFixture::new("nested-transaction-archives");
+        for kind in ["archive", "retire"] {
+            let root = fixture.root.join(kind);
+            super::ensure_private_directory(&root).expect("private transaction parent");
+            let transaction = root.join(format!("command-000.{kind}-completed"));
+            super::ensure_private_directory(&transaction).expect("private transaction");
+            let attempt_id = if kind == "archive" {
+                "a".repeat(64)
+            } else {
+                "b".repeat(64)
+            };
+            let intent = super::direct_intent_document(
+                &attempt_id,
+                &"c".repeat(40),
+                None,
+                Path::new("/usr/bin/true"),
+                &["/usr/bin/true".to_string()],
+            );
+            super::write_private_create_once(
+                &transaction.join("command-000.intent.json"),
+                intent.as_bytes(),
+                "archived direct intent",
+            )
+            .expect("archived intent");
+            for marker in ["manifest", "complete"] {
+                super::write_private_create_once(
+                    &transaction.join(marker),
+                    b"complete\n",
+                    "completed direct transaction marker",
+                )
+                .expect("transaction marker");
+            }
+
+            super::reconcile_nested_direct_ownership(&root)
+                .expect("completed transaction is diagnostic, not live");
+        }
+
+        let root = fixture.root.join("combined");
+        super::ensure_private_directory(&root).expect("combined transaction parent");
+        for name in [
+            "command-000.archive-completed",
+            "command-000.retire-completed",
+            "command-000.attempt-ids",
+        ] {
+            let diagnostic = root.join(name);
+            super::ensure_private_directory(&diagnostic).expect("combined diagnostic directory");
+            super::write_private_create_once(
+                &diagnostic.join("evidence"),
+                b"complete\n",
+                "combined diagnostic artifact",
+            )
+            .expect("combined diagnostic artifact");
+        }
+
+        super::reconcile_nested_direct_ownership(&root)
+            .expect("transaction archives and attempt reservations are diagnostic, not live");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_nested_transaction_archives_reject_symlinks() {
+        let fixture = GitFixture::new("nested-transaction-archive-symlink");
+        let root = fixture.root.join("archive");
+        let transaction = root.join("command-000.archive-completed");
+        super::ensure_private_directory(&transaction).expect("private transaction");
+        symlink(
+            fixture.repo.join("README.md"),
+            transaction.join("captured-link"),
+        )
+        .expect("archived symlink");
+
+        let error = super::reconcile_nested_direct_ownership(&root)
+            .expect_err("archived symlink remains fail-closed");
+        assert!(error.contains("forbidden symlink"), "{error}");
     }
 
     #[cfg(target_os = "linux")]
