@@ -1055,6 +1055,11 @@ fn run_executor_bridge_with_codex_probe(
             },
         )
         .map_err(bridge_provision_failure)?;
+        protected
+            .verify(&state.identity.repository_path, &state.identity.branch)
+            .map_err(BridgeRunFailure::from)?;
+        commit_sandboxed_executor_diff(&state, &request.issue_title)
+            .map_err(BridgeRunFailure::from)?;
     }
     let proof = match recover_or_prove_implementation(
         &request.state_path,
@@ -7887,9 +7892,10 @@ pub(crate) fn build_implementer_prompt(
          - You MUST NOT push.\n\
          - You MUST NOT create, edit, ready, close, or merge a pull request.\n\
          - You MUST NOT mutate remote Git or GitHub state.\n\
-         - Autospec Rust owns all remote mutations after independently verifying your work.\n\
+         - You MUST NOT create local commits or replace the worktree's Git metadata.\n\
+         - Autospec Rust owns local commits and all remote mutations after independently verifying your work.\n\
          \n\
-         Implement the issue, run its required local tests, and create local commits.\n\
+         Implement the issue and run its required local tests. Leave the verified diff in the worktree.\n\
          Write exactly one Closeout report to {closeout}; it must contain Result, labeled Claims,\n\
          Proof type, Before/after, Artifacts with rerunnable commands, Scoped git status,\n\
          and One likely hidden failure.\n\
@@ -8198,6 +8204,487 @@ pub(crate) struct ImplementationProof {
     closeout_body: String,
 }
 
+fn executor_commit_subject(issue: u64, issue_title: &str) -> String {
+    let title = issue_title.lines().next().unwrap_or_default().trim();
+    let conventional = [
+        "feat", "fix", "docs", "refactor", "test", "chore", "perf", "build", "ci",
+    ];
+    let valid = title.split_once(": ").is_some_and(|(prefix, description)| {
+        let commit_type = prefix
+            .split_once('(')
+            .map_or(prefix, |(commit_type, scope)| {
+                if !scope.ends_with(')')
+                    || scope.len() <= 1
+                    || scope[..scope.len() - 1].chars().any(|character| {
+                        character.is_whitespace() || matches!(character, '(' | ')')
+                    })
+                {
+                    return "";
+                }
+                commit_type
+            });
+        conventional.contains(&commit_type) && !description.trim().is_empty()
+    });
+    if title.len() <= 120 && valid {
+        title.to_string()
+    } else {
+        format!("chore: implement autospec issue #{issue}")
+    }
+}
+
+const EXECUTOR_INTERNAL_PATHSPECS: [&str; 3] = [
+    ":(exclude).autospec/executor-closeout.md",
+    ":(exclude).autospec/local-git",
+    ":(exclude).autospec/original-git-pointer",
+];
+
+#[derive(Debug)]
+struct TrustedWorktreeGit {
+    git_dir: PathBuf,
+    hooks_dir: PathBuf,
+    worktree: PathBuf,
+}
+
+impl TrustedWorktreeGit {
+    fn command(&self) -> Command {
+        let mut command = Command::new("git");
+        command
+            .args(["-c", "core.fsmonitor=false"])
+            .arg("--git-dir")
+            .arg(&self.git_dir)
+            .arg("--work-tree")
+            .arg(&self.worktree);
+        command
+    }
+}
+
+fn trusted_worktree_git(state: &PersistedInvocation) -> Result<TrustedWorktreeGit, String> {
+    trusted_worktree_git_paths(&state.identity.repository_path, &state.identity.worktree)
+}
+
+fn trusted_worktree_git_paths(
+    repository_path: &Path,
+    worktree_path: &Path,
+) -> Result<TrustedWorktreeGit, String> {
+    let worktree = fs::canonicalize(worktree_path)
+        .map_err(|error| format!("canonicalize executor worktree: {error}"))?;
+    let git_pointer = worktree.join(".git");
+    let metadata = fs::symlink_metadata(&git_pointer)
+        .map_err(|error| format!("inspect executor worktree Git metadata: {error}"))?;
+    let test_primary = cfg!(test)
+        && metadata.file_type().is_dir()
+        && fs::canonicalize(repository_path)
+            .map_err(|error| format!("canonicalize executor test repository: {error}"))?
+            == worktree;
+    if !test_primary && (!metadata.file_type().is_file() || metadata.file_type().is_symlink()) {
+        return Err("executor worktree Git metadata is not a trusted gitdir file".to_string());
+    }
+    let git_dir = if test_primary {
+        fs::canonicalize(&git_pointer)
+            .map_err(|error| format!("canonicalize executor test gitdir: {error}"))?
+    } else {
+        let pointer = fs::read_to_string(&git_pointer)
+            .map_err(|error| format!("read executor worktree gitdir: {error}"))?;
+        let pointer = pointer
+            .trim()
+            .strip_prefix("gitdir: ")
+            .ok_or_else(|| "executor worktree Git metadata has no gitdir pointer".to_string())?;
+        if pointer.is_empty() || pointer.contains('\n') || pointer.contains('\r') {
+            return Err("executor worktree Git metadata has an invalid gitdir pointer".to_string());
+        }
+        let candidate = PathBuf::from(pointer);
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            worktree.join(candidate)
+        };
+        fs::canonicalize(candidate)
+            .map_err(|error| format!("canonicalize executor worktree gitdir: {error}"))?
+    };
+
+    let common = PathBuf::from(git_stdout(
+        repository_path,
+        &["rev-parse", "--git-common-dir"],
+    )?);
+    let common = if common.is_absolute() {
+        common
+    } else {
+        repository_path.join(common)
+    };
+    let common = fs::canonicalize(common)
+        .map_err(|error| format!("canonicalize executor common gitdir: {error}"))?;
+    if !test_primary {
+        let registrations = fs::canonicalize(common.join("worktrees"))
+            .map_err(|error| format!("canonicalize executor worktree registrations: {error}"))?;
+        if git_dir.parent() != Some(registrations.as_path()) {
+            return Err(
+                "executor worktree gitdir is not registered by the target repository".to_string(),
+            );
+        }
+        let registered_pointer = fs::read_to_string(git_dir.join("gitdir"))
+            .map_err(|error| format!("read registered executor worktree pointer: {error}"))?;
+        let registered_pointer = PathBuf::from(registered_pointer.trim());
+        let registered_pointer = fs::canonicalize(&registered_pointer).map_err(|error| {
+            format!("canonicalize registered executor worktree pointer: {error}")
+        })?;
+        let expected_pointer = fs::canonicalize(&git_pointer)
+            .map_err(|error| format!("canonicalize executor worktree pointer: {error}"))?;
+        if registered_pointer != expected_pointer {
+            return Err(
+                "executor worktree gitdir is registered to a different worktree".to_string(),
+            );
+        }
+    }
+
+    let mut binding = TrustedWorktreeGit {
+        git_dir,
+        hooks_dir: PathBuf::new(),
+        worktree,
+    };
+    let hooks = binding
+        .command()
+        .args(["rev-parse", "--git-path", "hooks"])
+        .output()
+        .map_err(|error| format!("resolve executor Git hook directory: {error}"))?;
+    if !hooks.status.success() {
+        return Err(format!(
+            "resolve executor Git hook directory: {}",
+            String::from_utf8_lossy(&hooks.stderr).trim()
+        ));
+    }
+    let hooks = PathBuf::from(String::from_utf8_lossy(&hooks.stdout).trim());
+    let hooks = if hooks.is_absolute() {
+        hooks
+    } else {
+        binding.worktree.join(hooks)
+    };
+    let hooks = fs::canonicalize(hooks)
+        .map_err(|error| format!("canonicalize executor Git hook directory: {error}"))?;
+    if !test_primary && hooks.starts_with(&binding.worktree) {
+        return Err(
+            "executor Git hook directory is writable by the sandboxed implementer".to_string(),
+        );
+    }
+    for entry in fs::read_dir(&hooks)
+        .map_err(|error| format!("inventory executor Git hook directory: {error}"))?
+    {
+        let hook = entry.map_err(|error| format!("inventory executor Git hook entry: {error}"))?;
+        let file_type = hook
+            .file_type()
+            .map_err(|error| format!("inspect executor Git hook entry: {error}"))?;
+        if file_type.is_symlink() {
+            let target = fs::canonicalize(hook.path())
+                .map_err(|error| format!("canonicalize executor Git hook: {error}"))?;
+            if target.starts_with(&binding.worktree) {
+                return Err(
+                    "executor Git hook resolves into the sandboxed implementer worktree"
+                        .to_string(),
+                );
+            }
+        }
+        #[cfg(unix)]
+        if !hook.file_name().to_string_lossy().ends_with(".sample")
+            && hook
+                .metadata()
+                .map_err(|error| format!("inspect executor Git hook mode: {error}"))?
+                .permissions()
+                .mode()
+                & 0o111
+                != 0
+        {
+            return Err(
+                "executor commit cannot safely run active Git hooks outside containment"
+                    .to_string(),
+            );
+        }
+    }
+    binding.hooks_dir = hooks;
+    Ok(binding)
+}
+
+fn sandboxed_executor_diff(state: &PersistedInvocation) -> Result<Vec<u8>, String> {
+    let binding = trusted_worktree_git(state)?;
+    sandboxed_executor_diff_with_binding(&binding)
+}
+
+fn sandboxed_executor_diff_with_binding(binding: &TrustedWorktreeGit) -> Result<Vec<u8>, String> {
+    let output = binding
+        .command()
+        .args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            ".",
+        ])
+        .args(EXECUTOR_INTERNAL_PATHSPECS)
+        .output()
+        .map_err(|error| format!("inspect sandboxed executor diff: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "inspect sandboxed executor diff: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
+}
+
+fn trusted_git_config(
+    binding: &TrustedWorktreeGit,
+    args: &[&str],
+) -> Result<Option<String>, String> {
+    let output = binding
+        .command()
+        .arg("config")
+        .args(args)
+        .output()
+        .map_err(|error| format!("inspect executor Git configuration: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        )),
+        Some(1) => Ok(None),
+        _ => Err(format!(
+            "inspect executor Git configuration: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+fn reject_external_filters(binding: &TrustedWorktreeGit) -> Result<(), String> {
+    let mut changed = BTreeSet::new();
+    for args in [
+        vec![
+            "diff-index",
+            "--cached",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "--",
+            ".",
+        ],
+        vec![
+            "ls-files",
+            "--modified",
+            "--deleted",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ],
+    ] {
+        let output = binding
+            .command()
+            .args(args)
+            .args(EXECUTOR_INTERNAL_PATHSPECS)
+            .output()
+            .map_err(|error| format!("inventory executor paths for clean filters: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "inventory executor paths for clean filters: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        for path in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            changed.insert(
+                std::str::from_utf8(path)
+                    .map_err(|_| {
+                        "executor cannot attest clean filters for a non-UTF-8 path".to_string()
+                    })?
+                    .to_string(),
+            );
+        }
+    }
+    for path in changed {
+        let output = binding
+            .command()
+            .args(["check-attr", "-z", "filter", "--", &path])
+            .output()
+            .map_err(|error| format!("attest executor clean filter for {path}: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "attest executor clean filter for {path}: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let fields = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|field| !field.is_empty())
+            .collect::<Vec<_>>();
+        let value = fields
+            .get(2)
+            .ok_or_else(|| format!("attest executor clean filter for {path}: malformed output"))?;
+        if !matches!(*value, b"unspecified" | b"unset") {
+            return Err(format!(
+                "executor path {path} selects external clean filter {}",
+                String::from_utf8_lossy(value)
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn resolve_signing_program(binding: &TrustedWorktreeGit, program: &str) -> Result<PathBuf, String> {
+    let candidate = PathBuf::from(program);
+    let resolved = if candidate.components().count() > 1 {
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            binding.worktree.join(candidate)
+        };
+        fs::canonicalize(candidate)
+            .map_err(|error| format!("canonicalize executor signing program: {error}"))?
+    } else {
+        let path = std::env::var_os("PATH")
+            .ok_or_else(|| "executor signing program resolution requires PATH".to_string())?;
+        std::env::split_paths(&path)
+            .map(|directory| directory.join(program))
+            .find(|candidate| candidate.is_file())
+            .map(fs::canonicalize)
+            .transpose()
+            .map_err(|error| format!("canonicalize executor signing program: {error}"))?
+            .ok_or_else(|| format!("executor signing program {program} is unavailable"))?
+    };
+    if resolved.starts_with(&binding.worktree) {
+        return Err(
+            "executor signing program is writable by the sandboxed implementer".to_string(),
+        );
+    }
+    Ok(resolved)
+}
+
+fn attest_executor_signing(binding: &TrustedWorktreeGit) -> Result<(), String> {
+    let signing = trusted_git_config(binding, &["--type=bool", "--get", "commit.gpgSign"])?
+        .is_some_and(|value| value == "true");
+    if !signing {
+        return Ok(());
+    }
+    let format =
+        trusted_git_config(binding, &["--get", "gpg.format"])?.unwrap_or_else(|| "openpgp".into());
+    let format_program = format!("gpg.{format}.program");
+    let program = trusted_git_config(binding, &["--get", &format_program])?
+        .or(trusted_git_config(binding, &["--get", "gpg.program"])?)
+        .unwrap_or_else(|| match format.as_str() {
+            "ssh" => "ssh-keygen".into(),
+            "x509" => "gpgsm".into(),
+            _ => "gpg".into(),
+        });
+    resolve_signing_program(binding, &program)?;
+    if format == "ssh" {
+        if trusted_git_config(binding, &["--get", "gpg.ssh.defaultKeyCommand"])?.is_some() {
+            return Err(
+                "executor SSH signing key command requires contained commit support".to_string(),
+            );
+        }
+        if let Some(key) = trusted_git_config(binding, &["--get", "user.signingKey"])? {
+            if !key.starts_with("key::") {
+                let key = PathBuf::from(key);
+                let key = if key.is_absolute() {
+                    key
+                } else {
+                    binding.worktree.join(key)
+                };
+                if key.exists()
+                    && fs::canonicalize(key)
+                        .map_err(|error| format!("canonicalize executor signing key: {error}"))?
+                        .starts_with(&binding.worktree)
+                {
+                    return Err(
+                        "executor signing key is writable by the sandboxed implementer".to_string(),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn commit_sandboxed_executor_diff(
+    state: &PersistedInvocation,
+    issue_title: &str,
+) -> Result<bool, String> {
+    let binding = trusted_worktree_git(state)?;
+    let branch = binding
+        .command()
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .map_err(|error| format!("inspect executor commit branch: {error}"))?;
+    if !branch.status.success() {
+        return Err(format!(
+            "inspect executor commit branch: {}",
+            String::from_utf8_lossy(&branch.stderr).trim()
+        ));
+    }
+    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+    if branch != state.identity.branch {
+        return Err(format!(
+            "executor commit branch mismatch: expected {}, observed {branch}",
+            state.identity.branch
+        ));
+    }
+    if sandboxed_executor_diff(state)?.is_empty() {
+        return Ok(false);
+    }
+    reject_external_filters(&binding)?;
+    attest_executor_signing(&binding)?;
+
+    let add = binding
+        .command()
+        .args(["add", "--all", "--", "."])
+        .args(EXECUTOR_INTERNAL_PATHSPECS)
+        .output()
+        .map_err(|error| format!("stage sandboxed executor diff: {error}"))?;
+    if !add.status.success() {
+        return Err(format!(
+            "stage sandboxed executor diff: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        ));
+    }
+    let staged = binding
+        .command()
+        .args(["diff", "--cached", "--quiet", "--exit-code"])
+        .status()
+        .map_err(|error| format!("inspect staged sandboxed executor diff: {error}"))?;
+    match staged.code() {
+        Some(0) => return Ok(false),
+        Some(1) => {}
+        _ => {
+            return Err(
+                "inspect staged sandboxed executor diff returned an unexpected status".to_string(),
+            )
+        }
+    }
+
+    let subject = executor_commit_subject(state.identity.issue, issue_title);
+    let commit = binding
+        .command()
+        .arg("-c")
+        .arg(format!(
+            "core.hooksPath={}",
+            binding.hooks_dir.to_string_lossy()
+        ))
+        .args(["commit", "-m", &subject])
+        .output()
+        .map_err(|error| format!("commit sandboxed executor diff: {error}"))?;
+    if !commit.status.success() {
+        return Err(format!(
+            "commit sandboxed executor diff: {}",
+            String::from_utf8_lossy(&commit.stderr).trim()
+        ));
+    }
+    if !sandboxed_executor_diff(state)?.is_empty() {
+        return Err("sandboxed executor worktree remained dirty after Rust commit".to_string());
+    }
+    Ok(true)
+}
+
 pub(crate) fn prove_implementation(
     state_path: &Path,
     state: &mut PersistedInvocation,
@@ -8228,12 +8715,7 @@ pub(crate) fn prove_implementation(
             state.identity.branch
         ));
     }
-    if !git_bytes(
-        &state.identity.worktree,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?
-    .is_empty()
-    {
+    if !sandboxed_executor_diff(state)?.is_empty() {
         return Err("executor implementation worktree must be clean".to_string());
     }
     let head = git_stdout(
@@ -10340,36 +10822,50 @@ fn ensure_base_drift_intent(state_path: &Path, intent: &BaseDriftIntent) -> Resu
 }
 
 fn verify_or_create_base_merge(
+    repository_path: &Path,
     worktree: &Path,
     intent: &BaseDriftIntent,
 ) -> Result<String, String> {
-    let current = git_stdout(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let binding = trusted_worktree_git_paths(repository_path, worktree)?;
+    let git_stdout = |args: &[&str]| -> Result<String, String> {
+        let output = binding
+            .command()
+            .args(args)
+            .output()
+            .map_err(|error| format!("inspect executor base merge: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "inspect executor base merge: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    };
+    let current = git_stdout(&["rev-parse", "--verify", "HEAD^{commit}"])?;
     if current == intent.old_head {
-        let merge = Command::new("git")
+        let merge = binding
+            .command()
+            .arg("-c")
+            .arg(format!(
+                "core.hooksPath={}",
+                binding.hooks_dir.to_string_lossy()
+            ))
             .args(["merge", "--no-edit", &intent.new_base])
-            .current_dir(worktree)
             .output()
             .map_err(|error| format!("merge updated executor base: {error}"))?;
         if !merge.status.success() {
-            let _ = Command::new("git")
-                .args(["merge", "--abort"])
-                .current_dir(worktree)
-                .output();
+            let _ = binding.command().args(["merge", "--abort"]).output();
             return Err(format!(
                 "merge updated executor base failed: {}",
                 String::from_utf8_lossy(&merge.stderr).trim()
             ));
         }
     }
-    let merged = git_stdout(worktree, &["rev-parse", "--verify", "HEAD^{commit}"])?;
-    let parents = git_stdout(worktree, &["show", "-s", "--format=%P", &merged])?;
+    let merged = git_stdout(&["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let parents = git_stdout(&["show", "-s", "--format=%P", &merged])?;
     let parents = parents.split_whitespace().collect::<Vec<_>>();
     if parents != [intent.old_head.as_str(), intent.new_base.as_str()]
-        || !git_bytes(
-            worktree,
-            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-        )?
-        .is_empty()
+        || !sandboxed_executor_diff_with_binding(&binding)?.is_empty()
     {
         return Err("executor base-drift recovery found an unowned merge HEAD".to_string());
     }
@@ -10478,12 +10974,7 @@ where
         push_exact_issue_head(state, &mut refresh)?;
         return Ok(false);
     }
-    if !git_bytes(
-        &state.identity.worktree,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?
-    .is_empty()
-    {
+    if !sandboxed_executor_diff(state)?.is_empty() {
         return Err("executor base reconciliation requires a clean worktree"
             .to_string()
             .into());
@@ -10510,7 +11001,11 @@ where
         new_base: observed_base.clone(),
     };
     ensure_base_drift_intent(state_path, &intent)?;
-    let updated_head = verify_or_create_base_merge(&state.identity.worktree, &intent)?;
+    let updated_head = verify_or_create_base_merge(
+        &state.identity.repository_path,
+        &state.identity.worktree,
+        &intent,
+    )?;
     fail_base_drift_after_merge()?;
     state.identity.base_oid = observed_base;
     state.head_oid = Some(updated_head);
@@ -11721,25 +12216,37 @@ fn verify_proven_local_state(
     state: &PersistedInvocation,
     proof: &ImplementationProof,
 ) -> Result<(), String> {
-    let branch = git_stdout(
-        &state.identity.worktree,
-        &["symbolic-ref", "--quiet", "--short", "HEAD"],
-    )?;
+    let binding = trusted_worktree_git(state)?;
+    let branch = binding
+        .command()
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .map_err(|error| format!("inspect proven executor branch: {error}"))?;
+    if !branch.status.success() {
+        return Err(format!(
+            "inspect proven executor branch: {}",
+            String::from_utf8_lossy(&branch.stderr).trim()
+        ));
+    }
+    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
     if branch != state.identity.branch {
         return Err("executor proven implementation branch changed before mutation".to_string());
     }
-    if !git_bytes(
-        &state.identity.worktree,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?
-    .is_empty()
-    {
+    if !sandboxed_executor_diff(state)?.is_empty() {
         return Err("executor proven implementation worktree must be clean before mutation".into());
     }
-    let head = git_stdout(
-        &state.identity.worktree,
-        &["rev-parse", "--verify", "HEAD^{commit}"],
-    )?;
+    let head = binding
+        .command()
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()
+        .map_err(|error| format!("inspect proven executor HEAD: {error}"))?;
+    if !head.status.success() {
+        return Err(format!(
+            "inspect proven executor HEAD: {}",
+            String::from_utf8_lossy(&head.stderr).trim()
+        ));
+    }
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
     if head != proof.head_oid {
         return Err("executor proven implementation HEAD changed before mutation".to_string());
     }
@@ -11784,21 +12291,40 @@ fn verify_exact_evidence_lane(
             "executor evidence lane lost its authoritative claim generation",
         ));
     }
-    let branch = git_stdout(
-        &state.identity.worktree,
-        &["symbolic-ref", "--quiet", "--short", "HEAD"],
-    )?;
+    let binding = trusted_worktree_git(state)?;
+    let branch = binding
+        .command()
+        .args(["symbolic-ref", "--quiet", "--short", "HEAD"])
+        .output()
+        .map_err(|error| format!("inspect executor evidence branch: {error}"))?;
+    if !branch.status.success() {
+        return Err(format!(
+            "inspect executor evidence branch: {}",
+            String::from_utf8_lossy(&branch.stderr).trim()
+        )
+        .into());
+    }
+    let branch = String::from_utf8_lossy(&branch.stdout).trim().to_string();
     if branch != state.identity.branch {
         return Err("executor evidence lane branch drifted".to_string().into());
     }
-    let head = git_stdout(
-        &state.identity.worktree,
-        &["rev-parse", "--verify", "HEAD^{commit}"],
-    )?;
+    let head = binding
+        .command()
+        .args(["rev-parse", "--verify", "HEAD^{commit}"])
+        .output()
+        .map_err(|error| format!("inspect executor evidence HEAD: {error}"))?;
+    if !head.status.success() {
+        return Err(format!(
+            "inspect executor evidence HEAD: {}",
+            String::from_utf8_lossy(&head.stderr).trim()
+        )
+        .into());
+    }
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
     if head != proof.head_oid || head != state.head_oid.as_deref().unwrap_or_default() {
         return Err("executor evidence lane HEAD drifted".to_string().into());
     }
-    verify_clean_evidence_worktree(&state.identity.worktree, artifact_root)?;
+    verify_clean_evidence_worktree(state, artifact_root)?;
     verify_full_suite_base(
         &state.identity.worktree,
         &state.identity.base_ref,
@@ -11810,14 +12336,15 @@ fn verify_exact_evidence_lane(
     Ok(())
 }
 
-fn verify_clean_evidence_worktree(worktree: &Path, artifact_root: &Path) -> Result<(), String> {
+fn verify_clean_evidence_worktree(
+    state: &PersistedInvocation,
+    artifact_root: &Path,
+) -> Result<(), String> {
+    let worktree = &state.identity.worktree;
     let allowed = fs::canonicalize(artifact_root)
         .ok()
         .and_then(|root| root.strip_prefix(worktree).ok().map(PathBuf::from));
-    let status = git_bytes(
-        worktree,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
-    )?;
+    let status = sandboxed_executor_diff(state)?;
     for record in status
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
@@ -19016,7 +19543,7 @@ fn reconcile_preserved_worktree_base(
     }
 
     ensure_base_drift_intent(&state_anchor, &intent)?;
-    let merged_head = verify_or_create_base_merge(path, &intent)?;
+    let merged_head = verify_or_create_base_merge(repo, path, &intent)?;
     if remote_head.is_some_and(|remote_head| remote_head != &merged_head) {
         let output = Command::new("git")
             .args([
@@ -24425,6 +24952,8 @@ exit 64
             "MUST NOT push",
             "MUST NOT create, edit, ready, close, or merge a pull request",
             "MUST NOT mutate remote Git or GitHub state",
+            "MUST NOT create local commits or replace the worktree's Git metadata",
+            "Autospec Rust owns local commits",
         ] {
             assert!(
                 prompt.contains(required),
@@ -27193,7 +27722,10 @@ exit 64
         state.phase = BridgePhase::ImplementationComplete;
         let snapshot =
             MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
-        let closeout = state.identity.worktree.join(".autospec/closeout.md");
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
         fs::create_dir_all(closeout.parent().expect("closeout parent"))
             .expect("closeout directory");
         fs::write(
@@ -27223,6 +27755,385 @@ exit 64
         git(
             &state.identity.worktree,
             &["commit", "-m", "feat: implement fixture"],
+        );
+    }
+
+    #[test]
+    fn rust_commits_sandboxed_executor_diff_before_proof() {
+        let (fixture, state, _snapshot, closeout) =
+            implementation_proof_fixture("rust-commit-sandboxed-diff");
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+        let base = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "implemented by sandboxed harness\n",
+        )
+        .expect("write sandboxed diff");
+
+        assert!(
+            super::commit_sandboxed_executor_diff(&state, "test: add behavior coverage")
+                .expect("Rust-owned executor commit")
+        );
+
+        let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        assert_ne!(head, base);
+        super::verify_proven_local_state(
+            &state,
+            &super::ImplementationProof {
+                head_oid: head.clone(),
+                closeout_body: fs::read_to_string(closeout).expect("closeout body"),
+            },
+        )
+        .expect("internal closeout must not block proven implementation");
+        assert_eq!(
+            git_stdout(&state.identity.worktree, &["log", "-1", "--format=%s"]),
+            "test: add behavior coverage"
+        );
+        assert_eq!(
+            git_stdout(
+                &state.identity.worktree,
+                &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
+            ),
+            "implementation.txt"
+        );
+        assert_eq!(
+            String::from_utf8(
+                super::sandboxed_executor_diff(&state).expect("implementation-only status")
+            )
+            .expect("utf8 status"),
+            ""
+        );
+        assert!(
+            !super::commit_sandboxed_executor_diff(&state, "test: duplicate").expect("clean no-op")
+        );
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref",
+                ]
+            ),
+            remote_before
+        );
+    }
+
+    #[test]
+    fn rust_commit_rejects_model_writable_hooks_without_executing_them() {
+        let (fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-model-hooks");
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "recoverable diff\n",
+        )
+        .expect("write sandboxed diff");
+        let hooks = state.identity.worktree.join(".githooks");
+        fs::create_dir_all(&hooks).expect("hooks directory");
+        let marker = fixture.root.join("hook-escaped-sandbox");
+        let hook = hooks.join("pre-commit");
+        fs::write(
+            &hook,
+            format!("#!/bin/sh\nprintf compromised > {}\n", marker.display()),
+        )
+        .expect("write model-controlled hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("make model-controlled hook executable");
+        git(&fixture.repo, &["config", "core.hooksPath", ".githooks"]);
+
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked hook escape")
+            .expect_err("model-writable hooks must fail closed");
+
+        assert!(error.contains("hook"), "{error}");
+        assert!(
+            !marker.exists(),
+            "model-controlled hook escaped its sandbox"
+        );
+        assert!(state.identity.worktree.join("implementation.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_commit_rejects_registered_hook_symlink_into_worktree() {
+        let (fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-hook-symlink");
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "recoverable diff\n",
+        )
+        .expect("write sandboxed diff");
+        let model_hook = state.identity.worktree.join(".githooks/post-index-change");
+        fs::create_dir_all(model_hook.parent().expect("model hook parent"))
+            .expect("model hook directory");
+        let marker = fixture.root.join("hook-symlink-escaped-sandbox");
+        fs::write(
+            &model_hook,
+            format!("#!/bin/sh\nprintf compromised > {}\n", marker.display()),
+        )
+        .expect("write model-controlled hook");
+        fs::set_permissions(&model_hook, fs::Permissions::from_mode(0o755))
+            .expect("make model-controlled hook executable");
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        std::os::unix::fs::symlink(&model_hook, common_dir.join("hooks/post-index-change"))
+            .expect("hook symlink");
+
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked hook symlink")
+            .expect_err("hook symlinks into the model worktree must fail closed");
+
+        assert!(error.contains("hook"), "{error}");
+        assert!(
+            !marker.exists(),
+            "symlinked model-controlled hook escaped its sandbox"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_commit_rejects_model_selected_clean_filter_without_executing_it() {
+        let (fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-clean-filter");
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "recoverable diff\n",
+        )
+        .expect("write sandboxed diff");
+        fs::write(
+            state.identity.worktree.join(".gitattributes"),
+            "implementation.txt filter=escape\n",
+        )
+        .expect("write model-controlled attributes");
+        let marker = fixture.root.join("filter-escaped-sandbox");
+        let filter = state.identity.worktree.join("filter.sh");
+        fs::write(
+            &filter,
+            format!(
+                "#!/bin/sh\nprintf compromised > {}\ncat\n",
+                marker.display()
+            ),
+        )
+        .expect("write model-controlled filter");
+        fs::set_permissions(&filter, fs::Permissions::from_mode(0o755))
+            .expect("make model-controlled filter executable");
+        git(
+            &fixture.repo,
+            &[
+                "config",
+                "filter.escape.clean",
+                filter.to_str().expect("filter path"),
+            ],
+        );
+
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked filter escape")
+            .expect_err("external clean filters must fail closed");
+
+        assert!(error.contains("filter"), "{error}");
+        assert!(!marker.exists(), "clean filter escaped its sandbox");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_commit_rejects_worktree_signing_program_without_executing_it() {
+        let (fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-signing-program");
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "recoverable diff\n",
+        )
+        .expect("write sandboxed diff");
+        let marker = fixture.root.join("signer-escaped-sandbox");
+        let signer = state.identity.worktree.join("signer.sh");
+        fs::write(
+            &signer,
+            format!(
+                "#!/bin/sh\nprintf compromised > {}\nexit 1\n",
+                marker.display()
+            ),
+        )
+        .expect("write model-controlled signer");
+        fs::set_permissions(&signer, fs::Permissions::from_mode(0o755))
+            .expect("make model-controlled signer executable");
+        git(&fixture.repo, &["config", "commit.gpgSign", "true"]);
+        git(
+            &fixture.repo,
+            &[
+                "config",
+                "gpg.program",
+                signer.to_str().expect("signer path"),
+            ],
+        );
+
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked signer escape")
+            .expect_err("worktree signing programs must fail closed");
+
+        assert!(error.contains("sign"), "{error}");
+        assert!(!marker.exists(), "signing program escaped its sandbox");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_commit_rejects_ssh_default_key_command_without_executing_it() {
+        let (fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-default-key-command");
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "recoverable diff\n",
+        )
+        .expect("write sandboxed diff");
+        let marker = fixture.root.join("key-command-escaped-sandbox");
+        let key_command = state.identity.worktree.join("key-command.sh");
+        fs::write(
+            &key_command,
+            format!(
+                "#!/bin/sh\nprintf compromised > {}\nprintf 'key::invalid\\n'\n",
+                marker.display()
+            ),
+        )
+        .expect("write model-controlled key command");
+        fs::set_permissions(&key_command, fs::Permissions::from_mode(0o755))
+            .expect("make model-controlled key command executable");
+        git(&fixture.repo, &["config", "commit.gpgSign", "true"]);
+        git(&fixture.repo, &["config", "gpg.format", "ssh"]);
+        git(
+            &fixture.repo,
+            &[
+                "config",
+                "gpg.ssh.defaultKeyCommand",
+                key_command.to_str().expect("key command path"),
+            ],
+        );
+
+        let error =
+            super::commit_sandboxed_executor_diff(&state, "test: blocked key command escape")
+                .expect_err("SSH default key commands must fail closed");
+
+        assert!(
+            error.contains("sign") || error.contains("key command"),
+            "{error}"
+        );
+        assert!(
+            !marker.exists(),
+            "SSH default key command escaped its sandbox"
+        );
+    }
+
+    #[test]
+    fn rust_commit_rejects_unregistered_worktree_git_metadata() {
+        let (_fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-unregistered-gitdir");
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "recoverable diff\n",
+        )
+        .expect("write sandboxed diff");
+        let local_git = state.identity.worktree.join(".autospec/local-git");
+        fs::create_dir_all(local_git.parent().expect("local git parent"))
+            .expect("local git parent");
+        git(
+            &state.identity.worktree,
+            &[
+                "init",
+                "--bare",
+                local_git.to_str().expect("local git path"),
+            ],
+        );
+        fs::write(
+            state.identity.worktree.join(".git"),
+            format!("gitdir: {}\n", local_git.display()),
+        )
+        .expect("replace worktree git pointer");
+
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked metadata escape")
+            .expect_err("unregistered Git metadata must fail closed");
+
+        assert!(
+            error.contains("gitdir") || error.contains("Git metadata"),
+            "{error}"
+        );
+        assert!(state.identity.worktree.join("implementation.txt").exists());
+    }
+
+    #[test]
+    fn executor_commit_subject_requires_a_conventional_description() {
+        assert_eq!(
+            super::executor_commit_subject(42, "fix:"),
+            "chore: implement autospec issue #42"
+        );
+        assert_eq!(
+            super::executor_commit_subject(42, "fix:no-space"),
+            "chore: implement autospec issue #42"
+        );
+        assert_eq!(
+            super::executor_commit_subject(42, "fix(parser): reject invalid input"),
+            "fix(parser): reject invalid input"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation() {
+        let (fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-sandboxed-failure");
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "recoverable diff\n",
+        )
+        .expect("write sandboxed diff");
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        let hook = common_dir.join("hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nexit 1\n").expect("write rejecting hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("make rejecting hook executable");
+
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked commit")
+            .expect_err("hook must block Rust-owned commit");
+
+        assert!(error.contains("commit"), "{error}");
+        assert!(git_stdout(
+            &state.identity.worktree,
+            &["status", "--porcelain=v1", "--untracked-files=all"]
+        )
+        .contains("implementation.txt"));
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref",
+                ]
+            ),
+            remote_before
         );
     }
 
@@ -28038,7 +28949,7 @@ exit 64
 
     #[cfg(unix)]
     const DRAFT_ISSUE_BODY: &str =
-        "## Implementation outline\n\n- implementation.txt\n- .autospec/closeout.md\n";
+        "## Implementation outline\n\n- implementation.txt\n- .autospec/executor-closeout.md\n";
 
     #[cfg(unix)]
     impl PreparedDraftTransaction {
@@ -29197,7 +30108,7 @@ exit 64
                 &mut prepared.state,
                 &prepared.proof,
                 "Implement issue",
-                "## Implementation outline\n\n- implementation.txt\n- .autospec/closeout.md\n",
+                "## Implementation outline\n\n- implementation.txt\n- .autospec/executor-closeout.md\n",
                 &prepared.adapter,
             )
             .expect_err("nonexact draft must fail closed");
@@ -34110,23 +35021,30 @@ exit 19
 
     #[test]
     fn autonomous_executor_bridge_exact_lane_cleanliness_excludes_only_owned_evidence() {
-        let fixture = GitFixture::new("exact-lane-clean");
-        let artifact_root = fixture.repo.join(".autospec/evidence/premerge/lane");
+        let (fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("exact-lane-clean");
+        let artifact_root = state
+            .identity
+            .worktree
+            .join(".autospec/evidence/premerge/lane");
         fs::create_dir_all(&artifact_root).expect("owned evidence directory");
         fs::write(artifact_root.join("attempt.json"), "{}\n").expect("owned evidence");
-        super::verify_clean_evidence_worktree(&fixture.repo, &artifact_root)
+        super::verify_clean_evidence_worktree(&state, &artifact_root)
             .expect("owned evidence is excluded");
 
-        fs::write(fixture.repo.join("unowned.tmp"), "drift").expect("unowned artifact");
-        let untracked = super::verify_clean_evidence_worktree(&fixture.repo, &artifact_root)
+        fs::write(state.identity.worktree.join("unowned.tmp"), "drift").expect("unowned artifact");
+        let untracked = super::verify_clean_evidence_worktree(&state, &artifact_root)
             .expect_err("unowned untracked file must block");
         assert!(untracked.contains("unowned.tmp"), "{untracked}");
-        fs::remove_file(fixture.repo.join("unowned.tmp")).expect("remove unowned artifact");
+        fs::remove_file(state.identity.worktree.join("unowned.tmp"))
+            .expect("remove unowned artifact");
 
-        fs::write(fixture.repo.join("README.md"), "tracked drift").expect("tracked drift");
-        let tracked = super::verify_clean_evidence_worktree(&fixture.repo, &artifact_root)
+        fs::write(state.identity.worktree.join("README.md"), "tracked drift")
+            .expect("tracked drift");
+        let tracked = super::verify_clean_evidence_worktree(&state, &artifact_root)
             .expect_err("tracked mutation must block");
         assert!(tracked.contains("README.md"), "{tracked}");
+        drop(fixture);
     }
 
     #[test]
