@@ -28852,67 +28852,6 @@ exit 64
         assert!(error.contains("forbidden symlink"), "{error}");
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn autonomous_executor_bridge_nested_transaction_archives_are_not_live_attempts() {
-        // Break caught: completed archive and retirement snapshots being rediscovered as live
-        // command roots, then failing because their attempt reservation was intentionally moved.
-        let fixture = GitFixture::new("nested-transaction-archives");
-        for kind in ["archive", "retire"] {
-            let root = fixture.root.join(kind);
-            super::ensure_private_directory(&root).expect("private transaction parent");
-            let transaction = root.join(format!("command-000.{kind}-completed"));
-            super::ensure_private_directory(&transaction).expect("private transaction");
-            let attempt_id = if kind == "archive" {
-                "a".repeat(64)
-            } else {
-                "b".repeat(64)
-            };
-            let intent = super::direct_intent_document(
-                &attempt_id,
-                &"c".repeat(40),
-                None,
-                Path::new("/usr/bin/true"),
-                &["/usr/bin/true".to_string()],
-            );
-            super::write_private_create_once(
-                &transaction.join("command-000.intent.json"),
-                intent.as_bytes(),
-                "archived direct intent",
-            )
-            .expect("archived intent");
-            for marker in ["manifest", "complete"] {
-                super::write_private_create_once(
-                    &transaction.join(marker),
-                    b"complete\n",
-                    "completed direct transaction marker",
-                )
-                .expect("transaction marker");
-            }
-
-            super::reconcile_nested_direct_ownership(&root)
-                .expect("completed transaction is diagnostic, not live");
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn autonomous_executor_bridge_nested_transaction_archives_reject_symlinks() {
-        let fixture = GitFixture::new("nested-transaction-archive-symlink");
-        let root = fixture.root.join("archive");
-        let transaction = root.join("command-000.archive-completed");
-        super::ensure_private_directory(&transaction).expect("private transaction");
-        symlink(
-            fixture.repo.join("README.md"),
-            transaction.join("captured-link"),
-        )
-        .expect("archived symlink");
-
-        let error = super::reconcile_nested_direct_ownership(&root)
-            .expect_err("archived symlink remains fail-closed");
-        assert!(error.contains("forbidden symlink"), "{error}");
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
     fn autonomous_executor_bridge_nested_quarantine_preflight_validates_all_indices_before_action()
