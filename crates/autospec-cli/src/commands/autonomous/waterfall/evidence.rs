@@ -251,6 +251,23 @@ pub(super) fn clear_obsolete_tier2_policy(
     }
 }
 
+pub(super) fn remove_obsolete_tier2_receipt(
+    receipt_path: &Path,
+) -> Result<(), WaterfallStoreError> {
+    match fs::remove_file(receipt_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            Err(WaterfallStoreError::InvalidReceipt(
+                "obsolete Tier 2 receipt disappeared during rotation".to_string(),
+            ))
+        }
+        Err(error) => Err(WaterfallStoreError::Diagnostic(format!(
+            "cannot remove obsolete Tier 2 receipt {}: {error}",
+            receipt_path.display()
+        ))),
+    }
+}
+
 fn clear_tier4_temporaries(
     root: &Path,
     pass_id: u64,
