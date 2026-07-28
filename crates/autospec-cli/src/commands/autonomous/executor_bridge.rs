@@ -12707,16 +12707,8 @@ fn close_integration_issue_after_observed_merge(
                 .into(),
         );
     }
-    let default_ref = git_stdout(
-        &state.identity.repository_path,
-        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
-    )
-    .map_err(BridgeRunFailure::invariant)?;
-    let default_base = default_ref.strip_prefix("refs/remotes/").ok_or_else(|| {
-        BridgeRunFailure::invariant(
-            "executor issue close default branch is not an origin remote reference",
-        )
-    })?;
+    let default_base = authoritative_remote_default_base(&state.identity.repository_path)
+        .map_err(BridgeRunFailure::invariant)?;
     if state.identity.base_ref == default_base {
         return Ok(());
     }
@@ -12750,6 +12742,59 @@ fn close_integration_issue_after_observed_merge(
     Err(BridgeRunFailure::invariant(
         "successful integration issue close was not observed",
     ))
+}
+
+fn authoritative_remote_default_base(repo: &Path) -> Result<String, String> {
+    let output = git_stdout(repo, &["ls-remote", "--symref", "origin", "HEAD"])?;
+    let mut branch = None;
+    let mut advertised_oid = None;
+    for line in output.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        match fields.as_slice() {
+            ["ref:", reference, "HEAD"] => {
+                let candidate = reference
+                    .strip_prefix("refs/heads/")
+                    .ok_or_else(|| format!("remote default symref is not a branch: {reference}"))?;
+                if branch.replace(candidate.to_string()).is_some() {
+                    return Err("remote default branch advertisement is ambiguous".to_string());
+                }
+            }
+            [candidate, "HEAD"] if canonical_git_oid(candidate) => {
+                if advertised_oid.replace((*candidate).to_string()).is_some() {
+                    return Err("remote default HEAD advertisement is ambiguous".to_string());
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "remote default HEAD advertisement is malformed: {line}"
+                ));
+            }
+        }
+    }
+    let branch = branch.ok_or_else(|| "remote default branch symref is missing".to_string())?;
+    validate_branch(&branch)?;
+    let advertised_oid =
+        advertised_oid.ok_or_else(|| "remote default HEAD oid is missing".to_string())?;
+    let reference = format!("refs/heads/{branch}");
+    let branch_output = git_stdout(repo, &["ls-remote", "--refs", "origin", &reference])?;
+    let mut lines = branch_output.lines();
+    let line = lines
+        .next()
+        .ok_or_else(|| format!("remote default branch is missing: {branch}"))?;
+    if lines.next().is_some() {
+        return Err("remote default branch advertisement is ambiguous".to_string());
+    }
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    let [branch_oid, observed_reference] = fields.as_slice() else {
+        return Err("remote default branch advertisement is malformed".to_string());
+    };
+    if !canonical_git_oid(branch_oid)
+        || *observed_reference != reference
+        || *branch_oid != advertised_oid
+    {
+        return Err("remote default HEAD and branch tip are ambiguous".to_string());
+    }
+    Ok(format!("origin/{branch}"))
 }
 
 fn observe_exact_issue_state(
@@ -39158,6 +39203,21 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         let (fixture, mut state, _snapshot, _) =
             implementation_proof_fixture("close-integration-issue");
         state.identity.base_ref = "origin/autospec/autonomous-main".to_string();
+        git(
+            &fixture.repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/autospec/autonomous-main",
+            ],
+        );
+        let advertised = git_stdout(&fixture.repo, &["ls-remote", "--symref", "origin", "HEAD"]);
+        assert!(
+            advertised
+                .lines()
+                .any(|line| line == "ref: refs/heads/main\tHEAD"),
+            "bare remote must advertise main independently of stale local origin/HEAD: {advertised}"
+        );
         state.phase = super::BridgePhase::MergeRequested;
         state.pr = Some(17);
         state.head_oid = Some("a".repeat(40));
