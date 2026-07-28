@@ -221,7 +221,7 @@ set -eu
 heartbeat_dir="$AUTOSPEC_PROCESS_HEARTBEAT_DIR/o5_owner_r4_repo"
 mkdir -p "$heartbeat_dir"
 for step in claimed validation merge finalize; do
-  printf '{"step":"%s"}\n' "$step" > "$heartbeat_dir/42.json"
+  printf '{"repo":"owner/repo","issue":42,"branch":"feat/autonomous-issue-42","step":"%s","ts":"2026-07-28T00:00:00Z","worker_id":"test-worker","claim_id":"test-claim"}\n' "$step" > "$heartbeat_dir/42.json"
   sleep 1
   if [ -f "$AUTOSPEC_TEST_DRAIN_OBSERVATION" ] && grep -q '"progress":"heartbeat"' "$AUTOSPEC_TEST_DRAIN_OBSERVATION"; then
     exit 0
@@ -262,9 +262,9 @@ set -eu
 heartbeat_dir="$AUTOSPEC_HEARTBEAT_DIR/o5_owner_r4_repo"
 mkdir -p "$heartbeat_dir"
 sleep 1
-printf '{"step":"claimed"}\n' > "$heartbeat_dir/42.json"
+printf '%s\n' '{"repo":"owner/repo","issue":42,"branch":"feat/autonomous-issue-42","step":"claimed","ts":"2026-07-28T00:00:00Z","worker_id":"test-worker","claim_id":"test-claim"}' > "$heartbeat_dir/42.json"
 sleep 1
-printf '{"step":"validated"}\n' > "$heartbeat_dir/42.json"
+printf '%s\n' '{"repo":"owner/repo","issue":42,"branch":"feat/autonomous-issue-42","step":"validated","ts":"2026-07-28T00:00:00Z","worker_id":"test-worker","claim_id":"test-claim"}' > "$heartbeat_dir/42.json"
 sleep 3
 "#,
     );
@@ -295,9 +295,9 @@ set -eu
 heartbeat_dir="$AUTOSPEC_HEARTBEAT_DIR/o5_owner_r4_repo"
 mkdir -p "$heartbeat_dir"
 sleep 1
-printf '{"step":"claimed"}\n' > "$heartbeat_dir/42.json"
+printf '%s\n' '{"repo":"owner/repo","issue":42,"branch":"feat/autonomous-issue-42","step":"claimed","ts":"2026-07-28T00:00:00Z","worker_id":"test-worker","claim_id":"test-claim"}' > "$heartbeat_dir/42.json"
 sleep 1
-printf '{"step":"validated"}\n' > "$heartbeat_dir/42.json"
+printf '%s\n' '{"repo":"owner/repo","issue":42,"branch":"feat/autonomous-issue-42","step":"validated","ts":"2026-07-28T00:00:00Z","worker_id":"test-worker","claim_id":"test-claim"}' > "$heartbeat_dir/42.json"
 sleep 3
 "#,
     );
@@ -327,7 +327,7 @@ set -eu
 heartbeat_dir="$AUTOSPEC_WATCHDOG_DIR/process-heartbeats/o5_owner_r4_repo"
 mkdir -p "$heartbeat_dir"
 for step in claimed validated finalized complete; do
-  printf '{"step":"%s"}\n' "$step" > "$heartbeat_dir/42.json"
+  printf '{"repo":"owner/repo","issue":42,"branch":"feat/autonomous-issue-42","step":"%s","ts":"2026-07-28T00:00:00Z","worker_id":"test-worker","claim_id":"test-claim"}\n' "$step" > "$heartbeat_dir/42.json"
   sleep 1
   if [ -f "$AUTOSPEC_TEST_DRAIN_OBSERVATION" ] && grep -q '"progress":"heartbeat"' "$AUTOSPEC_TEST_DRAIN_OBSERVATION"; then
     exit 0
