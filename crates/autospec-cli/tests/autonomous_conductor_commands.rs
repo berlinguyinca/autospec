@@ -1499,6 +1499,26 @@ fn foreground_retries_an_exact_zero_effect_completion_on_a_fresh_claim_generatio
         ConductorPhase::Paused,
         "terminal claim crash must preserve paused dispatch recovery"
     );
+    let terminal_receipt = invocation.with_extension("terminal.json");
+    assert!(
+        invocation
+            .with_extension("zero-effect-recovery.json")
+            .is_file(),
+        "terminal claim transition must preserve the zero-effect recovery marker"
+    );
+    assert!(
+        !terminal_receipt.exists(),
+        "terminal transition crash must precede receipt publication"
+    );
+    let mut completed_state: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&invocation).expect("read released zero-effect invocation"),
+    )
+    .expect("parse released zero-effect invocation");
+    completed_state["phase"] = serde_json::json!("complete");
+    completed_state["terminal_result"] =
+        serde_json::json!("retryable:executor_zero_effect_completion");
+    fs::write(&invocation, format!("{completed_state}\n"))
+        .expect("seed Complete invocation before terminal receipt publication");
 
     let mut terminal_recovery_command = fixture.command();
     configure(&mut terminal_recovery_command);

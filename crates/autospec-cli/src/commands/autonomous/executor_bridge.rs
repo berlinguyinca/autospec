@@ -791,13 +791,15 @@ fn run_executor_bridge_with_codex_probe(
     let recovered = load_invocation_for_request(request, &repository_path, &canonical_branch)?;
     let mut repaired_zero_effect_completion = false;
     if let Some(recovered) = recovered.as_ref() {
-        repaired_zero_effect_completion =
-            prepare_zero_effect_recovery(&request.state_path, recovered)?;
-        if !repaired_zero_effect_completion {
-            repair_missing_post_child_worktree(recovered)?;
-        }
         if recovered.phase == BridgePhase::Complete {
             return publish_complete_receipt(request, recovered, &terminal_path);
+        }
+        if startup_needs_zero_effect_recovery(recovered.phase) {
+            repaired_zero_effect_completion =
+                prepare_zero_effect_recovery(&request.state_path, recovered)?;
+            if !repaired_zero_effect_completion {
+                repair_missing_post_child_worktree(recovered)?;
+            }
         }
         if failure_cleanup_intent_path(&request.state_path).exists() {
             let reason = read_failure_cleanup_intent(&request.state_path, recovered)?;
@@ -1159,6 +1161,13 @@ fn run_executor_bridge_with_codex_probe(
         "executor terminal receipt",
     )?;
     Ok(receipt)
+}
+
+fn startup_needs_zero_effect_recovery(phase: BridgePhase) -> bool {
+    !matches!(
+        phase,
+        BridgePhase::Merged | BridgePhase::CleanupPending | BridgePhase::Complete
+    )
 }
 
 #[cfg(target_os = "linux")]
@@ -20427,6 +20436,152 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_publishes_complete_receipt_before_marker_recovery() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let (fixture, mut state, state_path, _) =
+            zero_effect_classifier_fixture("complete-before-marker", false, true);
+        super::ensure_zero_effect_recovery_marker(&state_path, &state)
+            .expect("persist zero-effect recovery marker");
+        state.phase = super::BridgePhase::Complete;
+        state.terminal_result = Some("retryable:executor_zero_effect_completion".to_string());
+        super::write_invocation_atomic(&state_path, &state).expect("persist Complete invocation");
+
+        let claimed = autospec_core::claim::RunStateRecord::new(
+            state.identity.repository.clone(),
+            state.identity.issue,
+            state.identity.worker_id.clone(),
+            "claimed",
+            state.identity.branch.clone(),
+            "",
+            "claimed",
+            Vec::new(),
+            "2026-07-27T00:00:00Z",
+            "2026-07-27T00:00:00Z",
+            1,
+        )
+        .with_claim_id(state.identity.claim_id.clone());
+        assert!(crate::commands::claim::advance_claim_ref_for_test(
+            &state.identity.repository_path,
+            &claimed,
+        )
+        .expect("seed claimed generation"));
+        let released = autospec_core::claim::RunStateRecord::new(
+            state.identity.repository.clone(),
+            state.identity.issue,
+            state.identity.worker_id.clone(),
+            "released",
+            state.identity.branch.clone(),
+            "",
+            "retryable_released",
+            Vec::new(),
+            "2026-07-27T00:00:00Z",
+            "2026-07-27T00:00:00Z",
+            2,
+        )
+        .with_claim_id(state.identity.claim_id.clone());
+        assert!(crate::commands::claim::advance_claim_ref_for_test(
+            &state.identity.repository_path,
+            &released,
+        )
+        .expect("seed released claim"));
+        let bin = fixture.root.join("bin");
+        fs::create_dir(&bin).expect("create fake gh directory");
+        write_executable(
+            &bin.join("gh"),
+            "#!/bin/sh\n\
+             if [ \"$1 $2\" = \"issue view\" ]; then printf '%s\\n' '{\"labels\":[]}'; fi\n\
+             exit 0\n",
+        );
+        let previous_path = std::env::var_os("PATH");
+        let previous_claim_remote = std::env::var_os("AUTOSPEC_CLAIM_GIT_REMOTE");
+        std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.root.join("remote.git"));
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: state.identity.repository_path.clone(),
+            issue: state.identity.issue,
+            issue_title: "Publish terminal receipt".to_string(),
+            issue_body: "## Goal\n\nPublish the completed receipt.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: fixture.root.join("events.jsonl"),
+        };
+
+        let first = super::run_executor_bridge(&request)
+            .expect("publish receipt from exact Complete invocation");
+        let second = super::run_executor_bridge(&request).expect("reuse exact terminal receipt");
+        match previous_path {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+        match previous_claim_remote {
+            Some(remote) => std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", remote),
+            None => std::env::remove_var("AUTOSPEC_CLAIM_GIT_REMOTE"),
+        }
+
+        assert_eq!(first, second, "startup must publish one idempotent receipt");
+        assert!(matches!(
+            first.status,
+            super::BridgeRunStatus::Retryable { ref reason }
+                if reason == "executor_zero_effect_completion"
+        ));
+        assert!(
+            state_path.with_extension("terminal.json").is_file(),
+            "Complete startup did not publish its terminal receipt"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_tampered_implementation_marker_remains_fail_closed() {
+        let (_fixture, state, state_path, _) =
+            zero_effect_classifier_fixture("implementation-marker-tamper", false, true);
+        super::ensure_zero_effect_recovery_marker(&state_path, &state)
+            .expect("persist zero-effect recovery marker");
+        fs::write(
+            super::zero_effect_recovery_marker_path(&state_path),
+            "{\"schema\":1,\"binding\":\"foreign\"}\n",
+        )
+        .expect("tamper zero-effect recovery marker");
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: state.identity.repository_path.clone(),
+            issue: state.identity.issue,
+            issue_title: "Reject marker tamper".to_string(),
+            issue_body: "## Goal\n\nReject the changed recovery marker.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path,
+            event_log: PathBuf::from("/tmp/unused-zero-effect-events.jsonl"),
+        };
+
+        let error = super::run_executor_bridge(&request)
+            .expect_err("ImplementationComplete marker mismatch must fail closed");
+        assert!(error.to_string().contains("identity mismatch"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_terminal_phases_bypass_zero_effect_recovery() {
+        for phase in [
+            super::BridgePhase::Merged,
+            super::BridgePhase::CleanupPending,
+            super::BridgePhase::Complete,
+        ] {
+            assert!(
+                !super::startup_needs_zero_effect_recovery(phase),
+                "{phase:?} must use terminal recovery instead of zero-effect classification"
+            );
+        }
+        assert!(
+            super::startup_needs_zero_effect_recovery(super::BridgePhase::ImplementationComplete),
+            "ImplementationComplete marker evidence must remain fail-closed"
+        );
+    }
+
     #[test]
     fn autonomous_executor_bridge_resumes_failure_after_terminal_claim_transition_crash() {
         let (fixture, mut state, _snapshot, _) =
@@ -20631,6 +20786,12 @@ mod tests {
         let scope_root = worktree.path.parent().expect("scope root");
         let state_path = scope_root.join("cleanup-state.json");
         super::write_invocation_atomic(&state_path, &state).expect("persist cleanup invocation");
+        super::write_private_create_once(
+            &super::zero_effect_recovery_marker_path(&state_path),
+            b"{\"schema\":1,\"binding\":\"stale-terminal-marker\"}\n",
+            "test stale terminal zero-effect marker",
+        )
+        .expect("persist stale terminal marker");
         super::ensure_cleanup_record(
             &super::cleanup_record_path(&state_path, "worktree-intent"),
             &super::cleanup_binding(&state),
