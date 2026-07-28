@@ -3019,11 +3019,12 @@ fn collect_nested_direct_ownership(
     root: &Path,
     direct_roots: &mut Vec<(PathBuf, BTreeSet<usize>)>,
 ) -> Result<(), String> {
+    reject_symlink_path(root)?;
     if !root.is_dir() {
         return Ok(());
     }
-    validate_private_directory(root)
-        .map_err(|error| format!("nested evidence directory is unsafe: {error}"))?;
+    ensure_private_directory(root)
+        .map_err(|error| format!("repair nested evidence directory: {error}"))?;
     let entries = fs::read_dir(root)
         .map_err(|error| format!("inventory nested evidence ownership: {error}"))?
         .collect::<Result<Vec<_>, _>>()
@@ -3062,6 +3063,23 @@ fn reconcile_nested_direct_ownership(root: &Path) -> Result<(), String> {
             resume_direct_failure_archive(&paths)?;
             reconcile_direct_launch(&paths, None)?;
         }
+    }
+    Ok(())
+}
+
+fn ensure_private_evidence_path(worktree: &Path, path: &Path) -> Result<(), String> {
+    let evidence_root = worktree.join(".autospec");
+    let relative = path
+        .strip_prefix(&evidence_root)
+        .map_err(|_| "executor evidence path escapes the worktree evidence root".to_string())?;
+    ensure_private_directory(&evidence_root)?;
+    let mut current = evidence_root;
+    for component in relative.components() {
+        let std::path::Component::Normal(component) = component else {
+            return Err("executor evidence path contains a non-normal component".to_string());
+        };
+        current.push(component);
+        ensure_private_directory(&current)?;
     }
     Ok(())
 }
@@ -3117,8 +3135,8 @@ fn select_evidence_generation(lane_root: &Path, base_input_digest: &str) -> Resu
         }
         if active_base_input_digest != base_input_digest {
             let attempt_root = lane_root.join(attempt);
+            reconcile_nested_direct_ownership(&attempt_root)?;
             if evidence_attempt_has_any_artifacts(&attempt_root)? {
-                reconcile_nested_direct_ownership(&attempt_root)?;
                 return rotate_partial_evidence_attempt(
                     lane_root,
                     attempt,
@@ -3668,7 +3686,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
                 .into(),
         );
     }
-    ensure_private_directory(request.artifact_root)?;
+    ensure_private_evidence_path(&request.state.identity.worktree, request.artifact_root)?;
     let _attempt_lease = acquire_evidence_attempt_lease(request.artifact_root)?;
     let (_, base_input_digest) = evidence_input_digests(&lane, &request)?;
     let input_digest = select_evidence_generation(request.artifact_root, &base_input_digest)?;
@@ -3676,7 +3694,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
         .artifact_root
         .join("attempts")
         .join(&input_digest[..24]);
-    ensure_private_directory(&attempt_root)?;
+    ensure_private_evidence_path(&request.state.identity.worktree, &attempt_root)?;
     let intent = load_or_create_evidence_intent(&attempt_root, &lane, &request, &input_digest)?;
     let active = serde_json::json!({
         "schema": 2,
@@ -20526,14 +20544,29 @@ fn safe_scope(scope: &str) -> Result<String, String> {
 
 fn ensure_private_directory(path: &Path) -> Result<(), String> {
     reject_symlink_path(path)?;
-    fs::create_dir_all(path)
-        .map_err(|error| format!("create executor directory {}: {error}", path.display()))?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder
+            .create(path)
+            .map_err(|error| format!("create executor directory {}: {error}", path.display()))?;
+        let metadata = fs::metadata(path)
+            .map_err(|error| format!("inspect executor directory {}: {error}", path.display()))?;
+        if !metadata.is_dir() {
+            return Err(format!(
+                "executor directory path is not a directory: {}",
+                path.display()
+            ));
+        }
+        validate_executor_ownership(path, &[])?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))
             .map_err(|error| format!("secure executor directory {}: {error}", path.display()))?;
     }
+    #[cfg(not(unix))]
+    fs::create_dir_all(path)
+        .map_err(|error| format!("create executor directory {}: {error}", path.display()))?;
     Ok(())
 }
 
@@ -28355,6 +28388,101 @@ exit 64
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_nested_legacy_evidence_directories_are_repaired() {
+        // Break caught: evidence parents created by older releases used the process umask and
+        // blocked recovery forever once nested ownership validation required mode 0700.
+        let fixture = GitFixture::new("nested-legacy-evidence-directories");
+        let root = fixture.root.join("evidence/premerge");
+        let nested = root.join("attempts/legacy/qa");
+        fs::create_dir_all(&nested).expect("legacy evidence hierarchy");
+        let nested_directories = [
+            root.clone(),
+            root.join("attempts"),
+            root.join("attempts/legacy"),
+            nested.clone(),
+        ];
+        for directory in &nested_directories {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o775))
+                .expect("make legacy evidence directory");
+        }
+
+        super::reconcile_nested_direct_ownership(&root)
+            .expect("repair owned legacy evidence hierarchy");
+
+        for directory in &nested_directories {
+            assert_eq!(
+                fs::metadata(directory)
+                    .expect("repaired directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "{}",
+                directory.display()
+            );
+        }
+
+        let evidence = fixture.repo.join(".autospec/evidence");
+        let premerge = evidence.join("premerge");
+        let lane = premerge.join("lane");
+        fs::create_dir_all(&lane).expect("legacy lane hierarchy");
+        for directory in [&evidence, &premerge] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o775))
+                .expect("make legacy lane parent");
+        }
+
+        super::ensure_private_evidence_path(&fixture.repo, &lane)
+            .expect("repair full evidence ancestor chain");
+
+        for directory in [fixture.repo.join(".autospec"), evidence, premerge, lane] {
+            assert_eq!(
+                fs::metadata(&directory)
+                    .expect("private evidence ancestor metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "{}",
+                directory.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_nested_root_symlinks_fail_closed_before_absence_check() {
+        // Break caught: dangling or non-directory root symlinks looking absent to `is_dir` and
+        // bypassing the nested evidence ownership boundary.
+        let fixture = GitFixture::new("nested-root-symlink");
+        let file_target = fixture.root.join("foreign-file");
+        fs::write(&file_target, b"foreign\n").expect("file target");
+        for (label, target) in [
+            ("dangling", fixture.root.join("missing-target")),
+            ("file", file_target.clone()),
+        ] {
+            let root = fixture.root.join(format!("{label}-root"));
+            symlink(&target, &root).expect("nested root symlink");
+
+            let error = super::reconcile_nested_direct_ownership(&root)
+                .expect_err("root symlink must fail closed");
+
+            assert!(error.contains("symlink"), "{label}: {error}");
+            assert!(
+                fs::symlink_metadata(&root)
+                    .expect("root symlink metadata")
+                    .file_type()
+                    .is_symlink(),
+                "{label} root was mutated"
+            );
+        }
+        assert_eq!(
+            fs::read(&file_target).expect("file target after rejection"),
+            b"foreign\n"
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn autonomous_executor_bridge_nested_quarantine_preflight_validates_all_indices_before_action()
@@ -35414,6 +35542,75 @@ exit 19
             .expect("same policy reuses rotated generation");
         assert_eq!(second, first);
         assert_eq!(diagnostics(), 1, "same policy rotated more than once");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_generation_selection_repairs_stale_owned_attempt_before_probe() {
+        // Break caught: strict artifact probing rejecting same-owner attempt directories created
+        // by an older release before the production generation selector can repair them.
+        let fixture = GitFixture::new("generation-select-legacy-evidence");
+        let lane_root = fixture.root.join("lane");
+        super::ensure_private_directory(&lane_root).expect("lane root");
+        let old_base = autospec_core::autonomous::waterfall::sha256_hex(b"legacy-input");
+        let current_base = autospec_core::autonomous::waterfall::sha256_hex(b"current-input");
+        let old_relative = format!("attempts/{}", &old_base[..24]);
+        let old_attempt = lane_root.join(&old_relative);
+        let nested = old_attempt.join("qa/smoke");
+        fs::create_dir_all(&nested).expect("legacy nested attempt");
+        super::write_private_create_once(
+            &nested.join("result.json"),
+            b"{\"exit\":0}",
+            "legacy evidence artifact",
+        )
+        .expect("legacy artifact");
+        for directory in [&old_attempt, &old_attempt.join("qa"), &nested] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o775))
+                .expect("make legacy attempt directory");
+        }
+        let active = serde_json::json!({
+            "schema": 2,
+            "attempt_path": old_relative,
+            "input_digest": old_base,
+            "base_input_digest": old_base,
+            "intent_digest": "legacy",
+            "runtime_session_id": serde_json::Value::Null,
+        })
+        .to_string();
+        super::write_private_atomic(
+            &lane_root.join("active.json"),
+            active.as_bytes(),
+            "legacy active evidence",
+        )
+        .expect("legacy active marker");
+
+        let selected = super::select_evidence_generation(&lane_root, &current_base)
+            .expect("repair and rotate stale owned attempt");
+
+        assert_ne!(selected, old_base);
+        assert!(!old_attempt.exists(), "stale attempt was not archived");
+        let archived = fs::read_dir(lane_root.join("diagnostics"))
+            .expect("diagnostic generations")
+            .flatten()
+            .next()
+            .expect("archived legacy generation")
+            .path();
+        for directory in [&archived, &archived.join("qa"), &archived.join("qa/smoke")] {
+            assert_eq!(
+                fs::metadata(directory)
+                    .expect("repaired directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "{}",
+                directory.display()
+            );
+        }
+        assert!(
+            archived.join("qa/smoke/result.json").is_file(),
+            "rotation lost the repaired legacy artifact"
+        );
     }
 
     #[test]
