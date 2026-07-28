@@ -2186,7 +2186,7 @@ fn gitleaks_policy_document(worktree: &Path) -> Result<String, String> {
          [extend]\n\
          {extension}\n\
          \n\
-         [[allowlists]]\n\
+         [allowlist]\n\
          description = \"Ignore generated Next.js output only\"\n\
          paths = ['''{GITLEAKS_NEXT_PATH_ALLOWLIST}''']"
     ))
@@ -36594,6 +36594,7 @@ exit 19
             Duration::from_secs(5),
         )
         .expect_err("source finding must block the required scan");
+        assert!(error.contains("gitleaks reported findings"), "{error}");
         let report = artifact_root.join("gitleaks/result.json");
         let findings: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(&report).expect("durable Gitleaks finding report"),
@@ -36611,7 +36612,6 @@ exit 19
             })
             .collect::<Vec<_>>();
 
-        assert!(error.contains("gitleaks reported findings"), "{error}");
         assert!(
             paths
                 .iter()
