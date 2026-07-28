@@ -2813,14 +2813,18 @@ fn executor_receipt_failure_is_recoverable(
     {
         return Ok(true);
     }
-    if claim::recover_for_conductor(&layout.repo, issue, &acquisition)?.is_none() {
+    let Some(active) = claim::recover_for_conductor(&layout.repo, issue, &acquisition)? else {
         return Ok(false);
+    };
+    let executor_state = layout.state_dir.join("executor");
+    if executor_bridge::recoverable_implementation_completion(&executor_state, &active)
+        .map_err(CommandFailure::diagnostic)?
+    {
+        return Ok(true);
     }
-    executor_bridge::recoverable_implementation_completion(
-        &layout.state_dir.join("executor"),
-        &acquisition,
-    )
-    .map_err(CommandFailure::diagnostic)
+    executor_bridge::exact_invocation_exists(&executor_state, &active)
+        .map(|exists| !exists)
+        .map_err(CommandFailure::diagnostic)
 }
 
 fn recover_completed_bridge_lease(
