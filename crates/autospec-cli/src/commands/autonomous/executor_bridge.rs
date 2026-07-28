@@ -2146,12 +2146,13 @@ fn trivy_relative_target(worktree: &Path, target: &str) -> Result<String, String
 
 fn require_trivy_attributable_target(worktree: &Path, relative: &str) -> Result<(), String> {
     let path = worktree.join(relative);
+    let literal = format!(":(literal){relative}");
     reject_symlink_path(&path)?;
     if !path
         .metadata()
         .map(|metadata| metadata.is_file())
         .unwrap_or(false)
-        || git_bytes(worktree, &["ls-files", "--error-unmatch", "--", relative]).is_err()
+        || git_bytes(worktree, &["ls-files", "--error-unmatch", "--", &literal]).is_err()
     {
         return Err(
             "executor required scanner trivy reported unattributable target path".to_string(),
@@ -37133,9 +37134,23 @@ exit 19
             "changed whitespace target finding must remain"
         );
 
+        let metacharacter_path = "*";
+        fs::write(fixture.repo.join(metacharacter_path), "{}\n")
+            .expect("untracked pathspec metacharacter target");
+        let metacharacter_report = serde_json::json!({
+            "SchemaVersion": 2,
+            "Results": [{
+                "Target": metacharacter_path,
+                "Vulnerabilities": [{"VulnerabilityID": "CVE-1"}]
+            }]
+        });
         let error =
-            super::validate_scanner_result("trivy", 1, br#"{"SchemaVersion":2,"Results":[]}"#, b"")
-                .expect_err("Trivy exit 1 requires native findings");
+            super::filter_trivy_result_for_changes(&metacharacter_report, &fixture.repo, &changed)
+                .expect_err("an untracked pathspec metacharacter must not match tracked files");
+        assert!(error.contains("unattributable target"), "{error}");
+
+        let error = super::validate_trivy_transport(1, br#"{"SchemaVersion":2,"Results":[]}"#, b"")
+            .expect_err("Trivy exit 1 requires native findings");
         assert!(error.contains("without native findings"), "{error}");
     }
 
