@@ -9,7 +9,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::str::FromStr;
 #[cfg(test)]
@@ -1844,7 +1844,7 @@ pub(crate) struct ResolvedFullSuite {
 const REQUIRED_SCANNERS: [&str; 4] = ["gitleaks", "semgrep", "trivy", "license-checker"];
 const GITLEAKS_NEXT_PATH_ALLOWLIST: &str = r"(^|/)\.next(/|$)";
 const REQUIRED_SCANNER_POLICY_SCHEMA: &str =
-    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-v1;license-checker-v1";
+    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-diff-v2;license-checker-v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ScannerExecutables {
@@ -1931,7 +1931,9 @@ fn validate_scanner_result(
     if !REQUIRED_SCANNERS.contains(&scanner) {
         return Err(format!("executor scanner identity is unknown: {scanner}"));
     }
-    if exit_status != 0 && !(["gitleaks", "semgrep"].contains(&scanner) && exit_status == 1) {
+    if exit_status != 0
+        && !(["gitleaks", "semgrep", "trivy"].contains(&scanner) && exit_status == 1)
+    {
         return Err(format!(
             "executor required scanner {scanner} failed with exit status {exit_status}"
         ));
@@ -2057,6 +2059,130 @@ fn validate_trivy_result(value: &serde_json::Value) -> Result<(), String> {
     Ok(())
 }
 
+fn changed_paths_since_base(worktree: &Path, base_oid: &str) -> Result<BTreeSet<String>, String> {
+    let range = format!("{base_oid}..HEAD");
+    git_stdout(
+        worktree,
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--diff-filter=ACMRT",
+            &range,
+            "--",
+        ],
+    )
+    .map(|paths| {
+        paths
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+}
+
+fn trivy_relative_target(worktree: &Path, target: &str) -> Result<String, String> {
+    let target = Path::new(target);
+    let relative = if target.is_absolute() {
+        target.strip_prefix(worktree).map_err(|_| {
+            "executor required scanner trivy reported unsafe target path".to_string()
+        })?
+    } else {
+        target
+    };
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => parts.push(
+                part.to_str()
+                    .ok_or_else(|| {
+                        "executor required scanner trivy reported non-UTF-8 target".to_string()
+                    })?
+                    .to_string(),
+            ),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err(
+                    "executor required scanner trivy reported unsafe target path".to_string(),
+                )
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err("executor required scanner trivy reported unsafe target path".to_string());
+    }
+    Ok(parts.join("/"))
+}
+
+fn filter_trivy_result_for_changes(
+    value: &serde_json::Value,
+    worktree: &Path,
+    changed_paths: &BTreeSet<String>,
+) -> Result<serde_json::Value, String> {
+    let mut filtered = value.clone();
+    let object = filtered.as_object_mut().ok_or_else(|| {
+        "executor required scanner trivy output does not match its JSON object schema".to_string()
+    })?;
+    let results = object
+        .get_mut("Results")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| {
+            "executor required scanner trivy output is missing JSON array field Results".to_string()
+        })?;
+    let mut kept = Vec::new();
+    for result in std::mem::take(results) {
+        let result_object = result.as_object().ok_or_else(|| {
+            "executor required scanner trivy Results entry is not a JSON object".to_string()
+        })?;
+        let mut has_findings = false;
+        for field in [
+            "Vulnerabilities",
+            "Misconfigurations",
+            "Secrets",
+            "Licenses",
+        ] {
+            if let Some(findings) = result_object.get(field) {
+                let findings = findings.as_array().ok_or_else(|| {
+                    format!("executor required scanner trivy field {field} is not a JSON array")
+                })?;
+                has_findings |= !findings.is_empty();
+            }
+        }
+        if !has_findings {
+            kept.push(result);
+            continue;
+        }
+        let target = result_object
+            .get("Target")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                "executor required scanner trivy finding has no target path".to_string()
+            })?;
+        if changed_paths.contains(&trivy_relative_target(worktree, target)?) {
+            kept.push(result);
+        }
+    }
+    *results = kept;
+    Ok(filtered)
+}
+
+fn publish_trivy_diff_report(
+    raw: &Path,
+    durable: &Path,
+    worktree: &Path,
+    base_oid: &str,
+) -> Result<Vec<u8>, String> {
+    let raw = fs::read(raw).map_err(|error| format!("read raw Trivy report: {error}"))?;
+    let value = serde_json::from_slice::<serde_json::Value>(&raw)
+        .map_err(|error| format!("executor required scanner trivy output is malformed: {error}"))?;
+    let changed_paths = changed_paths_since_base(worktree, base_oid)?;
+    let filtered = filter_trivy_result_for_changes(&value, worktree, &changed_paths)?;
+    let filtered = serde_json::to_vec(&filtered)
+        .map_err(|error| format!("encode diff-scoped Trivy report: {error}"))?;
+    write_private_atomic(durable, &filtered, "durable Trivy report")?;
+    fs::read(durable).map_err(|error| format!("read durable Trivy report: {error}"))
+}
+
 fn validate_license_checker_result(value: &serde_json::Value) -> Result<(), String> {
     let packages = value.as_object().ok_or_else(|| {
         "executor required scanner license-checker output does not match its JSON object schema"
@@ -2180,7 +2306,7 @@ fn scanner_command(
         _ => return Err(format!("executor scanner identity is unknown: {scanner}")),
     }
     let mut command = DirectCommand::success(argv);
-    if ["gitleaks", "semgrep"].contains(&scanner) {
+    if ["gitleaks", "semgrep", "trivy"].contains(&scanner) {
         command.accepted_exit_codes = vec![0, 1];
     }
     if scanner == "gitleaks" {
@@ -2334,14 +2460,22 @@ pub(crate) fn run_required_scanners(
         .into_iter()
         .next()
         .ok_or_else(|| format!("executor required scanner {scanner} produced no observation"))?;
-        let (result_path, result) = if scanner == "gitleaks" {
-            let result = publish_gitleaks_report(&temporary_report, &report)?;
-            (report, result)
-        } else {
-            let result_path = command.stdout_path.clone();
-            let result = fs::read(&result_path)
-                .map_err(|error| format!("read required scanner {scanner} result: {error}"))?;
-            (result_path, result)
+        let (result_path, result) = match scanner {
+            "gitleaks" => {
+                let result = publish_gitleaks_report(&temporary_report, &report)?;
+                (report, result)
+            }
+            "trivy" => {
+                let result =
+                    publish_trivy_diff_report(&command.stdout_path, &report, worktree, base_oid)?;
+                (report, result)
+            }
+            _ => {
+                let result_path = command.stdout_path.clone();
+                let result = fs::read(&result_path)
+                    .map_err(|error| format!("read required scanner {scanner} result: {error}"))?;
+                (result_path, result)
+            }
         };
         reject_symlink_path(&result_path)?;
         validate_private_state_file(&result_path)
@@ -3302,8 +3436,10 @@ fn observed_evidence_bundle(
             .map_err(|error| format!("canonicalize scanner executable: {error}"))?;
         let mut expected_argv = expected.argv;
         expected_argv[0] = executable.display().to_string();
-        let expected_result = if scanner.name == "gitleaks" {
-            intent.attempt_root.join("security/gitleaks/result.json")
+        let expected_result = if ["gitleaks", "trivy"].contains(&scanner.name.as_str()) {
+            intent
+                .attempt_root
+                .join(format!("security/{}/result.json", scanner.name))
         } else {
             scanner.command.stdout_path.clone()
         };
@@ -35477,7 +35613,7 @@ exit 19
         let gitleaks_policy_digest =
             super::gitleaks_policy_digest(&fixture.repo).expect("current Gitleaks policy digest");
         let previous_policy_schema =
-            "gitleaks-next-v1;semgrep-p-default-baseline-v1;trivy-v1;license-checker-v1";
+            "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-v1;license-checker-v1";
         let previous_semantic = autospec_core::autonomous::waterfall::sha256_hex(
             format!(
                 "{}\0{}\0{}\0{}\0{}\0{}\0{}",
@@ -36824,6 +36960,77 @@ exit 19
                 .expect_err("another tool's JSON shape must not be accepted");
             assert!(error.contains(scanner), "{scanner}: {error}");
         }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_trivy_findings_are_scoped_to_changed_targets() {
+        let fixture = GitFixture::new("trivy-changed-targets");
+        let command = super::scanner_command(
+            "trivy",
+            Path::new("/scanner/trivy"),
+            &fixture.repo,
+            "base-oid",
+            Path::new("/safe/gitleaks-policy.toml"),
+            Path::new("/safe/gitleaks-result.json"),
+        )
+        .expect("Trivy command");
+        assert_eq!(command.accepted_exit_codes, vec![0, 1]);
+        fs::write(fixture.repo.join("package-lock.json"), "{}\n").expect("baseline lockfile");
+        git(&fixture.repo, &["add", "package-lock.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline lockfile"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        fs::write(fixture.repo.join("feature.js"), "feature();\n").expect("feature source");
+        git(&fixture.repo, &["add", "feature.js"]);
+        git(&fixture.repo, &["commit", "-m", "feature source"]);
+        let report = serde_json::json!({
+            "SchemaVersion": 2,
+            "Results": [{
+                "Target": "package-lock.json",
+                "Vulnerabilities": [{"VulnerabilityID": "CVE-1"}]
+            }]
+        });
+        let changed =
+            super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
+        let filtered = super::filter_trivy_result_for_changes(&report, &fixture.repo, &changed)
+            .expect("filter unchanged lockfile finding");
+        super::validate_scanner_result(
+            "trivy",
+            1,
+            &serde_json::to_vec(&filtered).expect("filtered report"),
+            b"",
+        )
+        .expect("unchanged lockfile finding must not block feature work");
+
+        fs::write(
+            fixture.repo.join("package-lock.json"),
+            "{\"changed\":true}\n",
+        )
+        .expect("changed lockfile");
+        git(&fixture.repo, &["add", "package-lock.json"]);
+        git(&fixture.repo, &["commit", "-m", "change lockfile"]);
+        let changed =
+            super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
+        let filtered = super::filter_trivy_result_for_changes(&report, &fixture.repo, &changed)
+            .expect("filter changed lockfile finding");
+        let error = super::validate_scanner_result(
+            "trivy",
+            1,
+            &serde_json::to_vec(&filtered).expect("filtered report"),
+            b"",
+        )
+        .expect_err("changed lockfile finding must block");
+        assert!(error.contains("Vulnerabilities"), "{error}");
+
+        let unsafe_report = serde_json::json!({
+            "SchemaVersion": 2,
+            "Results": [{
+                "Target": "../outside/package-lock.json",
+                "Vulnerabilities": [{"VulnerabilityID": "CVE-1"}]
+            }]
+        });
+        let error = super::filter_trivy_result_for_changes(&unsafe_report, &fixture.repo, &changed)
+            .expect_err("unsafe Trivy target must fail closed");
+        assert!(error.contains("unsafe target"), "{error}");
     }
 
     #[test]
