@@ -96,6 +96,8 @@ static METADATA_WIP_SYNC_EVENTS: std::sync::Mutex<Vec<&'static str>> =
 #[cfg(test)]
 static WORKTREE_REPAIR_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
+static PRUNABLE_RECLAIM_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
 static ZERO_EFFECT_RECOVERY_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT: AtomicU8 = AtomicU8::new(0);
@@ -17546,7 +17548,24 @@ fn provision_issue_worktree_for_claim(
     let path = scope_root.join(format!("issue-{issue}"));
     reject_symlink_path(&path)?;
 
+    let reclaimed = if let Some((claim_id, invocation_id)) = generation {
+        reclaim_prunable_zero_effect_branch(
+            &canonical_repo,
+            &scope_root,
+            issue,
+            &path,
+            &branch,
+            base,
+            claim_id,
+            invocation_id,
+        )?
+    } else {
+        false
+    };
     let existing = path.exists();
+    if reclaimed && !existing {
+        return Err("executor prunable branch reclaim did not restore its worktree".to_string());
+    }
     if existing {
         validate_existing_worktree(&canonical_repo, &path, &branch, &scope_root, base)?;
     } else {
@@ -17603,6 +17622,310 @@ fn provision_issue_worktree_for_claim(
         base_ref: base.base_ref.clone(),
         base_oid: base.base_oid.clone(),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reclaim_prunable_zero_effect_branch(
+    repo: &Path,
+    scope_root: &Path,
+    issue: u64,
+    path: &Path,
+    branch: &str,
+    base: &ResolvedBase,
+    claim_id: &str,
+    invocation_id: &str,
+) -> Result<bool, String> {
+    let intent_path = scope_root.join(format!("issue-{issue}.prunable-reclaim-intent.json"));
+    if path.exists() && !intent_path.exists() {
+        return Ok(false);
+    }
+    let branch_ref = format!("refs/heads/{branch}");
+    if !intent_path.exists() && !git_ref_exists(repo, &branch_ref)? {
+        return Ok(false);
+    }
+
+    let configured_base = git_stdout(
+        repo,
+        &[
+            "config",
+            "--get",
+            &format!("branch.{branch}.autospecBaseOid"),
+        ],
+    )
+    .map_err(|_| "executor prunable branch base identity is missing".to_string())?;
+    for (key, expected) in [
+        (
+            format!("branch.{branch}.autospecBaseRef"),
+            base.base_ref.as_str(),
+        ),
+        (
+            format!("branch.{branch}.autospecRepositoryPath"),
+            repo.to_str()
+                .ok_or_else(|| "canonical repository path is not UTF-8".to_string())?,
+        ),
+    ] {
+        let observed = git_stdout(repo, &["config", "--get", &key])
+            .map_err(|_| format!("executor prunable branch identity is missing: {key}"))?;
+        if observed != expected {
+            return Err(format!(
+                "executor prunable branch identity mismatch for {key}: expected {expected}, observed {observed}"
+            ));
+        }
+    }
+    if git(
+        repo,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &configured_base,
+            &base.base_oid,
+        ],
+    )
+    .is_err()
+    {
+        return Err(
+            "executor prunable branch current base does not descend from its recorded base"
+                .to_string(),
+        );
+    }
+    let local_head = git_stdout(
+        repo,
+        &["rev-parse", "--verify", &format!("{branch_ref}^{{commit}}")],
+    )?;
+    if local_head != configured_base {
+        return Err("executor prunable branch head changed from its recorded base".to_string());
+    }
+    if remote_head_refs(repo)?.contains_key(&branch_ref) {
+        return Err("executor prunable branch exists on the remote".to_string());
+    }
+    validate_prunable_zero_effect_transfer(
+        repo,
+        scope_root,
+        issue,
+        path,
+        branch,
+        &configured_base,
+    )?;
+
+    let intent = format!(
+        "{}\n",
+        serde_json::json!({
+            "schema": 1,
+            "repository_path": repo,
+            "issue": issue,
+            "worktree": path,
+            "branch": branch,
+            "recorded_base_oid": configured_base,
+            "current_base_ref": base.base_ref,
+            "current_base_oid": base.base_oid,
+            "claim_id": claim_id,
+            "invocation_id": invocation_id,
+        })
+    );
+    if intent_path.exists() {
+        validate_private_state_file(&intent_path)?;
+        let observed = fs::read_to_string(&intent_path)
+            .map_err(|error| format!("read executor prunable reclaim intent: {error}"))?;
+        if observed != intent {
+            return Err("executor prunable reclaim intent identity changed".to_string());
+        }
+    }
+
+    let registry = git_stdout(repo, &["worktree", "list", "--porcelain"])?;
+    let blocks = registry.split("\n\n").collect::<Vec<_>>();
+    let expected_path = format!("worktree {}", path.display());
+    let expected_branch = format!("branch {branch_ref}");
+    let expected_head = format!("HEAD {local_head}");
+    if path.exists() {
+        if !intent_path.exists() {
+            return Ok(false);
+        }
+        let live = blocks.iter().filter(|block| {
+            block.lines().any(|line| line == expected_path)
+                && block.lines().any(|line| line == expected_branch)
+                && block.lines().any(|line| line == expected_head)
+                && !block.lines().any(|line| line.starts_with("prunable "))
+        });
+        if live.count() != 1 {
+            return Err(
+                "executor prunable reclaim resumed with a conflicting live registration"
+                    .to_string(),
+            );
+        }
+        validate_existing_worktree(
+            repo,
+            path,
+            branch,
+            scope_root,
+            &ResolvedBase {
+                base_ref: base.base_ref.clone(),
+                base_oid: local_head.clone(),
+                explore_mode: base.explore_mode,
+            },
+        )?;
+        if !git_bytes(
+            path,
+            &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        )?
+        .is_empty()
+        {
+            return Err("executor reattached zero-effect worktree is not clean".to_string());
+        }
+        clear_worktree_repair_intent(&intent_path, scope_root)?;
+        return Ok(true);
+    }
+
+    let prunable = blocks
+        .iter()
+        .filter(|block| block.lines().any(|line| line.starts_with("prunable ")))
+        .collect::<Vec<_>>();
+    let exact_prunable = prunable
+        .iter()
+        .filter(|block| {
+            block.lines().any(|line| line == expected_path)
+                && block.lines().any(|line| line == expected_branch)
+                && block.lines().any(|line| line == expected_head)
+        })
+        .count();
+    if !intent_path.exists() {
+        if exact_prunable != 1 {
+            return Err(
+                "executor zero-effect branch is not the one exact prunable registration"
+                    .to_string(),
+            );
+        }
+        write_private_create_once(
+            &intent_path,
+            intent.as_bytes(),
+            "executor prunable branch reclaim intent",
+        )?;
+    } else {
+        let conflicts = blocks.iter().any(|block| {
+            block.lines().any(|line| line == expected_path)
+                || block.lines().any(|line| line == expected_branch)
+        });
+        if conflicts && exact_prunable != 1 {
+            return Err(
+                "executor prunable reclaim intent conflicts with a registration".to_string(),
+            );
+        }
+    }
+
+    if exact_prunable == 1 {
+        git(
+            repo,
+            &[
+                "worktree",
+                "remove",
+                path.to_str()
+                    .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
+            ],
+        )?;
+    }
+    let registry = git_stdout(repo, &["worktree", "list", "--porcelain"])?;
+    if registry
+        .lines()
+        .any(|line| line == expected_path || line == expected_branch)
+    {
+        return Err("executor prunable registration survived exact removal".to_string());
+    }
+    if git_stdout(
+        repo,
+        &["rev-parse", "--verify", &format!("{branch_ref}^{{commit}}")],
+    )? != local_head
+    {
+        return Err("executor prunable branch changed during registration removal".to_string());
+    }
+    fail_prunable_reclaim(1, "after registration removal")?;
+    git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            path.to_str()
+                .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
+            branch,
+        ],
+    )?;
+    fail_prunable_reclaim(2, "after worktree reattachment")?;
+    clear_worktree_repair_intent(&intent_path, scope_root)?;
+    Ok(true)
+}
+
+fn validate_prunable_zero_effect_transfer(
+    repo: &Path,
+    scope_root: &Path,
+    issue: u64,
+    path: &Path,
+    branch: &str,
+    head: &str,
+) -> Result<(), String> {
+    let transfer_path = ownership_transfer_path(scope_root, issue);
+    if !transfer_path.exists() {
+        return Ok(());
+    }
+    validate_private_state_file(&transfer_path)?;
+    let value: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&transfer_path)
+            .map_err(|error| format!("read executor ownership transfer: {error}"))?,
+    )
+    .map_err(|error| format!("parse executor ownership transfer: {error}"))?;
+    let object = strict_object(
+        value,
+        &[
+            "schema",
+            "state",
+            "repository_path",
+            "issue",
+            "worktree",
+            "branch",
+            "from_claim_id",
+            "from_invocation_id",
+            "head_oid",
+            "status_digest",
+            "runtime_receipt",
+            "cleanup_binding",
+        ],
+        "executor zero-effect ownership transfer",
+    )?;
+    if checked_u32(&object, "schema")? != 1
+        || text(&object, "state")? != "available"
+        || PathBuf::from(text(&object, "repository_path")?) != repo
+        || number(&object, "issue")? != issue
+        || PathBuf::from(text(&object, "worktree")?) != path
+        || text(&object, "branch")? != branch
+        || text(&object, "head_oid")? != head
+        || text(&object, "status_digest")? != sha256_hex(&[])
+    {
+        return Err("executor zero-effect ownership transfer identity changed".to_string());
+    }
+    let runtime_receipt = PathBuf::from(text(&object, "runtime_receipt")?);
+    if !runtime_receipt.as_os_str().is_empty() {
+        validate_cleanup_record(
+            &runtime_receipt,
+            &text(&object, "cleanup_binding")?,
+            "executor zero-effect transfer runtime receipt",
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn fail_prunable_reclaim(boundary: u8, label: &str) -> Result<(), String> {
+    if PRUNABLE_RECLAIM_FAILPOINT
+        .compare_exchange(boundary, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        Err(format!("injected executor prunable reclaim crash {label}"))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(test))]
+fn fail_prunable_reclaim(_boundary: u8, _label: &str) -> Result<(), String> {
+    Ok(())
 }
 
 fn zero_effect_completion_header_is_exact(
@@ -18835,8 +19158,13 @@ fn validate_trusted_ownership(paths: &[&Path], trusted_uid: u32) -> Result<(), S
 
 fn registered_worktree_paths(repo: &Path) -> Result<Vec<PathBuf>, String> {
     let body = git_stdout(repo, &["worktree", "list", "--porcelain"])?;
-    body.lines()
-        .filter_map(|line| line.strip_prefix("worktree "))
+    body.split("\n\n")
+        .filter(|block| !block.lines().any(|line| line.starts_with("prunable ")))
+        .filter_map(|block| {
+            block
+                .lines()
+                .find_map(|line| line.strip_prefix("worktree "))
+        })
         .map(|path| {
             fs::canonicalize(path)
                 .map_err(|error| format!("canonicalize registered worktree {path}: {error}"))
@@ -21558,6 +21886,433 @@ exit 64
             ],
         );
         let _ = fs::remove_dir_all(adopted.path.parent().expect("scope root"));
+    }
+
+    fn prunable_zero_effect_branch_fixture(
+        label: &str,
+        preserve_transfer: bool,
+    ) -> (GitFixture, String, super::IssueWorktree, ResolvedBase) {
+        let fixture = GitFixture::new(label);
+        let original =
+            resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve original base");
+        let scope = format!(
+            "{label}_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &original,
+            Some(("claim-old", "invocation-old")),
+        )
+        .expect("provision original zero-effect worktree");
+        let transfer_path =
+            super::ownership_transfer_path(worktree.path.parent().expect("scope root"), 42);
+        let mut transfer: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&transfer_path).expect("read ownership transfer"),
+        )
+        .expect("parse ownership transfer");
+        transfer["state"] = serde_json::json!("available");
+        transfer
+            .as_object_mut()
+            .expect("ownership transfer object")
+            .remove("to_claim_id");
+        transfer
+            .as_object_mut()
+            .expect("ownership transfer object")
+            .remove("to_invocation_id");
+        fs::write(
+            &transfer_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&transfer).expect("serialize ownership transfer")
+            ),
+        )
+        .expect("release zero-effect worktree ownership");
+        if !preserve_transfer {
+            fs::remove_file(&transfer_path).expect("remove optional ownership transfer");
+        }
+        fs::remove_dir_all(&worktree.path).expect("make worktree registration prunable");
+
+        fs::write(fixture.repo.join("base-advance.txt"), "advanced\n").expect("write base advance");
+        git(&fixture.repo, &["add", "base-advance.txt"]);
+        git(&fixture.repo, &["commit", "-m", "feat: advance base"]);
+        git(&fixture.repo, &["push", "origin", "main"]);
+        let advanced =
+            resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve advanced base");
+        (fixture, scope, worktree, advanced)
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_reclaims_prunable_zero_effect_branch_for_fresh_claim() {
+        let (fixture, scope, worktree, advanced) =
+            prunable_zero_effect_branch_fixture("prunable-zero-effect-branch", false);
+        let unrelated = fixture.root.join("unrelated-prunable");
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "unrelated-prunable",
+                unrelated.to_str().expect("unrelated worktree path"),
+                &advanced.base_oid,
+            ],
+        );
+        fs::remove_dir_all(&unrelated).expect("make unrelated registration prunable");
+
+        let reclaimed = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &advanced,
+            Some(("claim-fresh", "invocation-fresh")),
+        )
+        .expect("reclaim exact zero-effect branch");
+
+        assert_eq!(reclaimed.path, worktree.path);
+        assert_eq!(
+            git_stdout(&reclaimed.path, &["rev-parse", "--verify", "HEAD^{commit}"]),
+            advanced.base_oid
+        );
+        assert_eq!(
+            git_stdout(&reclaimed.path, &["status", "--porcelain=v1"]),
+            ""
+        );
+        let registry = git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"]);
+        assert!(
+            registry.contains(&format!("worktree {}", unrelated.display()))
+                && registry.lines().any(|line| line.starts_with("prunable ")),
+            "reclaim must leave unrelated prunable registrations untouched: {registry}"
+        );
+
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "remove",
+                reclaimed.path.to_str().expect("worktree path"),
+            ],
+        );
+        let _ = fs::remove_dir_all(reclaimed.path.parent().expect("scope root"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_prunable_zero_effect_branch_resumes_both_crash_boundaries() {
+        for boundary in [1, 2] {
+            let label = format!("prunable-zero-effect-crash-{boundary}");
+            let (fixture, scope, worktree, advanced) =
+                prunable_zero_effect_branch_fixture(&label, false);
+            let recorded_head = git_stdout(
+                &fixture.repo,
+                &[
+                    "config",
+                    "--get",
+                    &format!("branch.{}.autospecBaseOid", worktree.branch),
+                ],
+            );
+            super::PRUNABLE_RECLAIM_FAILPOINT.store(boundary, Ordering::SeqCst);
+            let interrupted = super::provision_issue_worktree_for_claim(
+                &fixture.repo,
+                &scope,
+                42,
+                &advanced,
+                Some(("claim-fresh", "invocation-fresh")),
+            )
+            .expect_err("interrupt exact prunable reclaim");
+            assert!(interrupted.contains("injected executor prunable reclaim crash"));
+            let intent = worktree
+                .path
+                .parent()
+                .expect("scope root")
+                .join("issue-42.prunable-reclaim-intent.json");
+            assert!(intent.is_file());
+            assert_eq!(
+                git_stdout(
+                    &fixture.repo,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        &format!("refs/heads/{}^{{commit}}", worktree.branch),
+                    ],
+                ),
+                recorded_head,
+                "reclaim must never rewrite the branch ref"
+            );
+            assert_eq!(worktree.path.exists(), boundary == 2);
+
+            let resumed = super::provision_issue_worktree_for_claim(
+                &fixture.repo,
+                &scope,
+                42,
+                &advanced,
+                Some(("claim-fresh", "invocation-fresh")),
+            )
+            .expect("resume exact prunable reclaim");
+            assert!(!intent.exists());
+            assert_eq!(
+                git_stdout(&resumed.path, &["rev-parse", "--verify", "HEAD^{commit}"]),
+                advanced.base_oid
+            );
+            let transfer: serde_json::Value = serde_json::from_str(
+                &fs::read_to_string(super::ownership_transfer_path(
+                    resumed.path.parent().expect("scope root"),
+                    42,
+                ))
+                .expect("fresh ownership"),
+            )
+            .expect("parse fresh ownership");
+            assert_eq!(transfer["state"], "adopted");
+            assert_eq!(transfer["to_claim_id"], "claim-fresh");
+
+            git(
+                &fixture.repo,
+                &[
+                    "worktree",
+                    "remove",
+                    resumed.path.to_str().expect("worktree path"),
+                ],
+            );
+            let _ = fs::remove_dir_all(resumed.path.parent().expect("scope root"));
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_prunable_zero_effect_branch_near_misses_do_not_mutate() {
+        for mode in [
+            "changed-head",
+            "remote-branch",
+            "config-mismatch",
+            "transfer-mismatch",
+        ] {
+            let label = format!("prunable-zero-effect-near-{mode}");
+            let (fixture, scope, worktree, advanced) =
+                prunable_zero_effect_branch_fixture(&label, true);
+            match mode {
+                "changed-head" => git(
+                    &fixture.repo,
+                    &[
+                        "update-ref",
+                        &format!("refs/heads/{}", worktree.branch),
+                        &advanced.base_oid,
+                    ],
+                ),
+                "remote-branch" => git(
+                    &fixture.repo,
+                    &[
+                        "push",
+                        "origin",
+                        &format!(
+                            "refs/heads/{}:refs/heads/{}",
+                            worktree.branch, worktree.branch
+                        ),
+                    ],
+                ),
+                "config-mismatch" => git(
+                    &fixture.repo,
+                    &[
+                        "config",
+                        &format!("branch.{}.autospecRepositoryPath", worktree.branch),
+                        fixture.root.to_str().expect("foreign repository path"),
+                    ],
+                ),
+                "transfer-mismatch" => {
+                    let transfer_path = super::ownership_transfer_path(
+                        worktree.path.parent().expect("scope root"),
+                        42,
+                    );
+                    let mut transfer: serde_json::Value = serde_json::from_str(
+                        &fs::read_to_string(&transfer_path).expect("read ownership transfer"),
+                    )
+                    .expect("parse ownership transfer");
+                    transfer["head_oid"] = serde_json::json!(advanced.base_oid);
+                    fs::write(
+                        transfer_path,
+                        format!(
+                            "{}\n",
+                            serde_json::to_string(&transfer)
+                                .expect("serialize mismatched ownership transfer")
+                        ),
+                    )
+                    .expect("write mismatched ownership transfer");
+                }
+                _ => unreachable!(),
+            }
+            let registry_before = git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"]);
+            let head_before = git_stdout(
+                &fixture.repo,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/heads/{}^{{commit}}", worktree.branch),
+                ],
+            );
+
+            super::provision_issue_worktree_for_claim(
+                &fixture.repo,
+                &scope,
+                42,
+                &advanced,
+                Some(("claim-fresh", "invocation-fresh")),
+            )
+            .expect_err("near miss must fail closed");
+
+            assert_eq!(
+                git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"]),
+                registry_before
+            );
+            assert_eq!(
+                git_stdout(
+                    &fixture.repo,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        &format!("refs/heads/{}^{{commit}}", worktree.branch),
+                    ],
+                ),
+                head_before
+            );
+            assert!(!worktree
+                .path
+                .parent()
+                .expect("scope root")
+                .join("issue-42.prunable-reclaim-intent.json")
+                .exists());
+            let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_prunable_zero_effect_branch_path_near_misses_do_not_mutate() {
+        use std::os::unix::fs::symlink;
+
+        for mode in ["present", "symlink"] {
+            let label = format!("prunable-zero-effect-path-{mode}");
+            let (fixture, scope, worktree, advanced) =
+                prunable_zero_effect_branch_fixture(&label, false);
+            let head_before = git_stdout(
+                &fixture.repo,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/heads/{}^{{commit}}", worktree.branch),
+                ],
+            );
+            if mode == "present" {
+                fs::create_dir(&worktree.path).expect("create foreign path");
+            } else {
+                symlink(fixture.root.join("missing-target"), &worktree.path)
+                    .expect("create dangling worktree symlink");
+            }
+
+            super::provision_issue_worktree_for_claim(
+                &fixture.repo,
+                &scope,
+                42,
+                &advanced,
+                Some(("claim-fresh", "invocation-fresh")),
+            )
+            .expect_err("present path must fail closed");
+
+            assert_eq!(
+                git_stdout(
+                    &fixture.repo,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        &format!("refs/heads/{}^{{commit}}", worktree.branch),
+                    ],
+                ),
+                head_before
+            );
+            assert!(!worktree
+                .path
+                .parent()
+                .expect("scope root")
+                .join("issue-42.prunable-reclaim-intent.json")
+                .exists());
+            if mode == "present" {
+                fs::remove_dir(&worktree.path).expect("remove foreign path");
+            } else {
+                fs::remove_file(&worktree.path).expect("remove worktree symlink");
+            }
+            let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_prunable_zero_effect_branch_foreign_registration_does_not_mutate()
+    {
+        let (fixture, scope, worktree, advanced) =
+            prunable_zero_effect_branch_fixture("prunable-zero-effect-foreign-registration", true);
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "remove",
+                worktree.path.to_str().expect("worktree path"),
+            ],
+        );
+        git(
+            &fixture.repo,
+            &["branch", "foreign-registration", &advanced.base_oid],
+        );
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                worktree.path.to_str().expect("worktree path"),
+                "foreign-registration",
+            ],
+        );
+        fs::remove_dir_all(&worktree.path).expect("make foreign registration prunable");
+        let registry_before = git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"]);
+        let head_before = git_stdout(
+            &fixture.repo,
+            &[
+                "rev-parse",
+                "--verify",
+                &format!("refs/heads/{}^{{commit}}", worktree.branch),
+            ],
+        );
+
+        super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &advanced,
+            Some(("claim-fresh", "invocation-fresh")),
+        )
+        .expect_err("foreign registration must fail closed");
+
+        assert_eq!(
+            git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"]),
+            registry_before
+        );
+        assert_eq!(
+            git_stdout(
+                &fixture.repo,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    &format!("refs/heads/{}^{{commit}}", worktree.branch),
+                ],
+            ),
+            head_before
+        );
+        assert!(!worktree
+            .path
+            .parent()
+            .expect("scope root")
+            .join("issue-42.prunable-reclaim-intent.json")
+            .exists());
+        let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
     }
 
     #[test]
