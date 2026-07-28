@@ -759,6 +759,22 @@ pub(crate) fn recoverable_implementation_completion(
                 .to_string(),
         );
     }
+    if state.phase == BridgePhase::ImplementationComplete {
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        match fs::symlink_metadata(&closeout) {
+            Ok(_) => prepare_private_closeout_sink(&state.identity.worktree, &closeout)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "inspect completed executor Closeout sink {}: {error}",
+                    closeout.display()
+                ))
+            }
+        }
+    }
     if !state.identity.worktree.exists()
         && matches!(
             state.phase,
@@ -21813,6 +21829,95 @@ mod tests {
                 .expect("created closeout length")
                 .len(),
             0
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_hardens_closeout_before_recovery_classification() {
+        let (_fixture, mut state, state_path, _) =
+            zero_effect_classifier_fixture("private-closeout-recovery", false, false);
+        state.identity.invocation_id =
+            format!("{}-{}", state.identity.issue, state.identity.claim_id);
+        let snapshot_path = super::remote_snapshot_path(&state_path);
+        let mut snapshot: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&snapshot_path).expect("read remote snapshot"),
+        )
+        .expect("parse remote snapshot");
+        snapshot["identity"]["invocation_id"] = serde_json::json!(state.identity.invocation_id);
+        let snapshot = format!("{snapshot}\n");
+        fs::write(&snapshot_path, &snapshot).expect("write exact remote snapshot");
+        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+            .expect("secure exact remote snapshot");
+        state.remote_snapshot_digest = Some(super::sha256_hex(snapshot.as_bytes()));
+        super::write_invocation_atomic(&state_path, &state).expect("persist exact invocation");
+        let sinks = super::output_sink_paths(&state_path, &state.identity.invocation_id)
+            .expect("exact output sinks");
+        fs::create_dir_all(sinks.exit_status.parent().expect("exit parent"))
+            .expect("create exact exit parent");
+        let mut exit = [0_u8; 16];
+        exit[..4].copy_from_slice(&0_i32.to_ne_bytes());
+        exit[4..8].copy_from_slice(b"EXIT");
+        exit[8..12].copy_from_slice(&0_i32.to_ne_bytes());
+        exit[12..].copy_from_slice(b"DONE");
+        fs::write(&sinks.exit_status, exit).expect("write exact exit status");
+        fs::set_permissions(&sinks.exit_status, fs::Permissions::from_mode(0o600))
+            .expect("secure exact exit status");
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "implemented\n",
+        )
+        .expect("write implementation diff");
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        fs::create_dir_all(closeout.parent().expect("closeout parent"))
+            .expect("create closeout parent");
+        fs::write(
+            &closeout,
+            "## Closeout report\n\n\
+Result: Added the requested implementation.\n\
+Claims: [verified] runtime the focused test exits with status 0.\n\
+Proof type: runtime\n\
+Before/after: Before 0 implementation files; after 1 implementation file.\n\
+Artifacts: `implementation.txt`; rerun with `test -f implementation.txt`.\n\
+Scoped git status: Added `implementation.txt`; closeout excluded from the commit.\n\
+One likely hidden failure: The focused fixture does not exercise a remote push.\n",
+        )
+        .expect("write closeout");
+        fs::set_permissions(&closeout, fs::Permissions::from_mode(0o664))
+            .expect("make closeout public");
+
+        let state_dir = state_path.parent().expect("state directory");
+        let generation = &super::sha256_hex(state.identity.claim_id.as_bytes())[..16];
+        let exact_state_path =
+            state_dir.join(format!("issue-{}-{generation}.json", state.identity.issue));
+        fs::rename(&state_path, &exact_state_path).expect("move exact invocation");
+        fs::rename(
+            super::remote_snapshot_path(&state_path),
+            super::remote_snapshot_path(&exact_state_path),
+        )
+        .expect("move exact remote snapshot");
+        let lease = crate::commands::claim::ClaimLease {
+            issue: state.identity.issue,
+            repo: state.identity.repository.clone(),
+            worker_id: state.identity.worker_id.clone(),
+            branch: state.identity.branch.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            session_id: None,
+        };
+
+        assert!(
+            super::recoverable_implementation_completion(state_dir, &lease)
+                .expect("classify hardened completion")
+        );
+        assert_eq!(
+            fs::metadata(&closeout)
+                .expect("hardened closeout metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
         );
     }
 
