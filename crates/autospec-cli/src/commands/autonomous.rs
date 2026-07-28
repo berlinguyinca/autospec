@@ -3139,6 +3139,7 @@ fn execute_foreground_dispatch(
         let lease = match recovered_lease.take() {
             Some(lease) => lease,
             None => {
+                synchronize_integration_base(options)?;
                 let branch = format!("feat/autonomous-issue-{}", selection.issue);
                 let worker_id = foreground_worker_id().map_err(CommandFailure::diagnostic)?;
                 let lease = claim::acquire_for_conductor(
@@ -3273,6 +3274,16 @@ fn execute_foreground_dispatch(
         }
         return Ok(ForegroundDispatchResult::State(Box::new(state)));
     }
+}
+
+fn synchronize_integration_base(options: &Options) -> Result<(), CommandFailure> {
+    executor_bridge::synchronize_configured_integration_base(Path::new(&options.repo_dir)).map_err(
+        |error| {
+            CommandFailure::diagnostic(format!(
+                "cannot synchronize autonomous integration base: {error}"
+            ))
+        },
+    )
 }
 
 fn reconcile_successful_foreground_dispatch(

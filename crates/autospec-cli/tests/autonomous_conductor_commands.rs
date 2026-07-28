@@ -779,6 +779,218 @@ fn foreground_accepts_fast_forwarded_explore_head() {
 }
 
 #[test]
+fn autonomous_integration_base_sync() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    git_fixture(
+        &fixture.repo_dir,
+        &["checkout", "-b", "autospec/autonomous-main"],
+    );
+    fs::write(
+        fixture.repo_dir.join("integration-only.txt"),
+        "preserve integration work\n",
+    )
+    .expect("write integration-only commit");
+    git_fixture(&fixture.repo_dir, &["add", "integration-only.txt"]);
+    git_fixture(
+        &fixture.repo_dir,
+        &["commit", "-m", "preserve integration work"],
+    );
+    git_fixture(
+        &fixture.repo_dir,
+        &["push", "-u", "origin", "autospec/autonomous-main"],
+    );
+    let integration_oid = git_fixture(&fixture.repo_dir, &["rev-parse", "HEAD"]);
+
+    git_fixture(&fixture.repo_dir, &["checkout", "main"]);
+    for sequence in 1..=6 {
+        let path = format!("main-{sequence}.txt");
+        fs::write(
+            fixture.repo_dir.join(&path),
+            format!("authoritative main commit {sequence}\n"),
+        )
+        .expect("write main commit");
+        git_fixture(&fixture.repo_dir, &["add", &path]);
+        git_fixture(
+            &fixture.repo_dir,
+            &["commit", "-m", &format!("advance main {sequence}")],
+        );
+    }
+    git_fixture(&fixture.repo_dir, &["push", "origin", "main"]);
+    let main_oid = git_fixture(&fixture.repo_dir, &["rev-parse", "HEAD"]);
+
+    fs::create_dir_all(fixture.repo_dir.join(".autospec")).expect("create integration config");
+    fs::write(
+        fixture.repo_dir.join(".autospec/explore-mode.json"),
+        format!(
+            "{{\"branch\":\"autospec/autonomous-main\",\"base\":\"main\",\"head_sha\":\"{integration_oid}\",\"kind\":\"integration\"}}\n"
+        ),
+    )
+    .expect("write integration mode");
+
+    let hook_log = fixture.root.join("integration-sync-hook.log");
+    write_executable(
+        &bridge.remote.join("hooks/pre-receive"),
+        &format!(
+            r#"#!/bin/sh
+set -eu
+zero=0000000000000000000000000000000000000000
+while read -r old new reference; do
+  printf '%s %s %s\n' "$reference" "$old" "$new" >> '{hook_log}'
+  case "$reference" in
+    refs/heads/*)
+      if [ "$old" != "$zero" ] && ! git merge-base --is-ancestor "$old" "$new"; then
+        printf 'force %s %s %s\n' "$reference" "$old" "$new" >> '{hook_log}'
+      fi
+      ;;
+    refs/autospec/claims/issue-42)
+      git merge-base --is-ancestor '{main_oid}' refs/heads/autospec/autonomous-main
+      git merge-base --is-ancestor '{integration_oid}' refs/heads/autospec/autonomous-main
+      ;;
+  esac
+done
+"#,
+            hook_log = hook_log.display(),
+        ),
+    );
+
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_BRIDGE_BASE_REF", "autospec/autonomous-main")
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .output()
+        .expect("run integration-base synchronization");
+
+    assert!(
+        output.status.success(),
+        "status={:?} stdout={} stderr={} hook={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&hook_log).unwrap_or_default()
+    );
+    let remote = bridge.remote.to_str().expect("bridge remote");
+    for ancestor in [&main_oid, &integration_oid] {
+        git_fixture(
+            &fixture.root,
+            &[
+                "--git-dir",
+                remote,
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                "refs/heads/autospec/autonomous-main",
+            ],
+        );
+    }
+    let hook_events = fs::read_to_string(&hook_log).expect("integration sync hook events");
+    let sync_position = hook_events
+        .find("refs/heads/autospec/autonomous-main")
+        .expect("integration branch update");
+    let claim_position = hook_events
+        .find("refs/autospec/claims/issue-42")
+        .expect("claim acquisition");
+    assert!(
+        sync_position < claim_position,
+        "claim preceded integration sync: {hook_events}"
+    );
+    assert!(
+        !hook_events.contains("\nforce "),
+        "integration sync attempted a forced update: {hook_events}"
+    );
+}
+
+#[test]
+fn autonomous_integration_base_sync_conflict_precedes_claim() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    git_fixture(
+        &fixture.repo_dir,
+        &["checkout", "-b", "autospec/autonomous-main"],
+    );
+    fs::write(fixture.repo_dir.join("README.md"), "integration edit\n")
+        .expect("write integration conflict");
+    git_fixture(&fixture.repo_dir, &["add", "README.md"]);
+    git_fixture(&fixture.repo_dir, &["commit", "-m", "integration edit"]);
+    git_fixture(
+        &fixture.repo_dir,
+        &["push", "-u", "origin", "autospec/autonomous-main"],
+    );
+    let integration_oid = git_fixture(&fixture.repo_dir, &["rev-parse", "HEAD"]);
+    git_fixture(&fixture.repo_dir, &["checkout", "main"]);
+    fs::write(fixture.repo_dir.join("README.md"), "default edit\n")
+        .expect("write default conflict");
+    git_fixture(&fixture.repo_dir, &["add", "README.md"]);
+    git_fixture(&fixture.repo_dir, &["commit", "-m", "default edit"]);
+    git_fixture(&fixture.repo_dir, &["push", "origin", "main"]);
+    fs::create_dir_all(fixture.repo_dir.join(".autospec")).expect("create integration config");
+    fs::write(
+        fixture.repo_dir.join(".autospec/explore-mode.json"),
+        format!(
+            "{{\"branch\":\"autospec/autonomous-main\",\"base\":\"main\",\"head_sha\":\"{integration_oid}\",\"kind\":\"integration\"}}\n"
+        ),
+    )
+    .expect("write integration mode");
+
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_BRIDGE_BASE_REF", "autospec/autonomous-main")
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .output()
+        .expect("run conflicting integration-base synchronization");
+
+    assert!(!output.status.success(), "conflicting sync dispatched work");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("synchronization conflict"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_fixture(
+            &fixture.root,
+            &[
+                "--git-dir",
+                bridge.remote.to_str().expect("bridge remote"),
+                "rev-parse",
+                "refs/heads/autospec/autonomous-main",
+            ],
+        ),
+        integration_oid,
+        "conflicting sync changed the integration branch"
+    );
+    let claim = Command::new("git")
+        .args([
+            "ls-remote",
+            "--refs",
+            bridge.remote.to_str().expect("bridge remote"),
+            "refs/autospec/claims/issue-42",
+        ])
+        .output()
+        .expect("inspect claim ref");
+    assert!(claim.status.success());
+    assert!(
+        claim.stdout.is_empty(),
+        "claim acquisition happened before conflict detection"
+    );
+}
+
+#[test]
 fn foreground_recovers_complete_bridge_after_transient_terminal_observation_failure() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();

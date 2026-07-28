@@ -19190,6 +19190,332 @@ pub(crate) fn resolve_base(
     fetch_and_resolve_base(repo, branch, false)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RemoteIntegrationRefs {
+    default_branch: String,
+    default_oid: String,
+    integration_oid: String,
+}
+
+pub(crate) fn synchronize_configured_integration_base(repo: &Path) -> Result<(), String> {
+    let explore_path = repo.join(".autospec/explore-mode.json");
+    reject_symlink_path(&explore_path)?;
+    match fs::symlink_metadata(&explore_path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err("executor explore-mode path is not a regular file".to_string());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(format!(
+                "inspect executor explore mode {}: {error}",
+                explore_path.display()
+            ));
+        }
+    }
+
+    let selected = resolve_base(repo, &BTreeMap::new())?;
+    if !selected.explore_mode {
+        return Err("executor integration synchronization requires explore mode".to_string());
+    }
+    let integration_branch = selected
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor integration base is not an origin branch".to_string())?;
+    let preserved_integration_oid = selected.base_oid;
+    let mut expected_default_branch = None;
+    let mut last_race = "remote references changed during integration synchronization".to_string();
+
+    for _ in 0..3 {
+        let observed = observe_remote_integration_refs(repo, integration_branch)?;
+        if observed.default_branch == integration_branch {
+            return Err(
+                "executor integration branch matches the remote default branch".to_string(),
+            );
+        }
+        match expected_default_branch.as_deref() {
+            Some(expected) if expected != observed.default_branch => {
+                return Err(format!(
+                    "remote default branch changed during integration synchronization: {expected} -> {}",
+                    observed.default_branch
+                ));
+            }
+            None => expected_default_branch = Some(observed.default_branch.clone()),
+            _ => {}
+        }
+        if !git_is_ancestor(repo, &preserved_integration_oid, &observed.integration_oid)? {
+            return Err(
+                "remote integration branch changed non-fast-forward during synchronization"
+                    .to_string(),
+            );
+        }
+
+        if git_is_ancestor(repo, &observed.default_oid, &observed.integration_oid)? {
+            let confirmed = observe_remote_integration_refs(repo, integration_branch)?;
+            if confirmed == observed {
+                return Ok(());
+            }
+            last_race =
+                "remote references changed while confirming integration ancestry".to_string();
+            continue;
+        }
+
+        let merged_oid =
+            merge_integration_tips(repo, &observed.integration_oid, &observed.default_oid)?;
+        if !git_is_ancestor(repo, &preserved_integration_oid, &merged_oid)?
+            || !git_is_ancestor(repo, &observed.default_oid, &merged_oid)?
+        {
+            return Err("executor integration merge did not preserve both branch tips".to_string());
+        }
+
+        let before_push = observe_remote_integration_refs(repo, integration_branch)?;
+        if before_push != observed {
+            last_race = "remote references changed before integration push".to_string();
+            continue;
+        }
+        let destination = format!("refs/heads/{integration_branch}");
+        let update = format!("{merged_oid}:{destination}");
+        if let Err(error) = git(repo, &["push", "--porcelain", "origin", &update]) {
+            last_race = format!("non-force integration push raced or failed: {error}");
+            continue;
+        }
+
+        let current = observe_remote_integration_refs(repo, integration_branch)?;
+        if !git_is_ancestor(repo, &preserved_integration_oid, &current.integration_oid)? {
+            return Err(
+                "remote integration branch lost its pre-synchronization commits".to_string(),
+            );
+        }
+        if git_is_ancestor(repo, &current.default_oid, &current.integration_oid)? {
+            return Ok(());
+        }
+        last_race = "remote default branch advanced after integration synchronization".to_string();
+    }
+
+    Err(format!(
+        "executor integration synchronization exhausted 3 race-safe attempts: {last_race}"
+    ))
+}
+
+fn observe_remote_integration_refs(
+    repo: &Path,
+    integration_branch: &str,
+) -> Result<RemoteIntegrationRefs, String> {
+    validate_branch(integration_branch)?;
+    let (default_branch, advertised_head_oid) = remote_default_branch(repo)?;
+    if default_branch == integration_branch {
+        return Err("executor integration branch matches the remote default branch".to_string());
+    }
+    let default_oid = remote_branch_oid(repo, &default_branch)?;
+    if default_oid != advertised_head_oid {
+        return Err("remote default HEAD and branch tip are ambiguous".to_string());
+    }
+    let integration_oid = remote_branch_oid(repo, integration_branch)?;
+    fetch_remote_branch_objects(repo, &default_branch, &default_oid)?;
+    fetch_remote_branch_objects(repo, integration_branch, &integration_oid)?;
+    Ok(RemoteIntegrationRefs {
+        default_branch,
+        default_oid,
+        integration_oid,
+    })
+}
+
+fn remote_default_branch(repo: &Path) -> Result<(String, String), String> {
+    let output = git_stdout(repo, &["ls-remote", "--symref", "origin", "HEAD"])?;
+    let mut branch = None;
+    let mut oid = None;
+    for line in output.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        match fields.as_slice() {
+            ["ref:", reference, "HEAD"] => {
+                let candidate = reference
+                    .strip_prefix("refs/heads/")
+                    .ok_or_else(|| format!("remote default symref is not a branch: {reference}"))?;
+                if branch.replace(candidate.to_string()).is_some() {
+                    return Err("remote default branch advertisement is ambiguous".to_string());
+                }
+            }
+            [candidate, "HEAD"] if canonical_git_oid(candidate) => {
+                if oid.replace((*candidate).to_string()).is_some() {
+                    return Err("remote default HEAD advertisement is ambiguous".to_string());
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "remote default HEAD advertisement is malformed: {line}"
+                ));
+            }
+        }
+    }
+    let branch = branch.ok_or_else(|| "remote default branch symref is missing".to_string())?;
+    validate_branch(&branch)?;
+    let oid = oid.ok_or_else(|| "remote default HEAD oid is missing".to_string())?;
+    Ok((branch, oid))
+}
+
+fn remote_branch_oid(repo: &Path, branch: &str) -> Result<String, String> {
+    validate_branch(branch)?;
+    let reference = format!("refs/heads/{branch}");
+    let output = git_stdout(repo, &["ls-remote", "--refs", "origin", &reference])?;
+    let mut lines = output.lines();
+    let line = lines
+        .next()
+        .ok_or_else(|| format!("remote branch is missing: {branch}"))?;
+    if lines.next().is_some() {
+        return Err(format!(
+            "remote branch advertisement is ambiguous: {branch}"
+        ));
+    }
+    let mut fields = line.split_whitespace();
+    let oid = fields
+        .next()
+        .filter(|oid| canonical_git_oid(oid))
+        .ok_or_else(|| format!("remote branch oid is invalid: {branch}"))?;
+    let observed = fields
+        .next()
+        .ok_or_else(|| format!("remote branch reference is missing: {branch}"))?;
+    if fields.next().is_some() || observed != reference {
+        return Err(format!(
+            "remote branch advertisement is malformed: {branch}"
+        ));
+    }
+    Ok(oid.to_string())
+}
+
+fn fetch_remote_branch_objects(
+    repo: &Path,
+    branch: &str,
+    expected_oid: &str,
+) -> Result<(), String> {
+    let reference = format!("refs/heads/{branch}");
+    git(
+        repo,
+        &[
+            "fetch",
+            "--quiet",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "origin",
+            &reference,
+        ],
+    )
+    .map_err(|error| format!("fetch remote integration input {branch}: {error}"))?;
+    let commit = git_stdout(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("{expected_oid}^{{commit}}"),
+        ],
+    )?;
+    if commit != expected_oid {
+        return Err(format!(
+            "remote integration input changed while fetching {branch}"
+        ));
+    }
+    Ok(())
+}
+
+fn git_is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> Result<bool, String> {
+    let output = Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(repo)
+        .output()
+        .map_err(|error| format!("verify Git ancestry: {error}"))?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(format!(
+            "verify Git ancestry failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )),
+    }
+}
+
+fn merge_integration_tips(
+    repo: &Path,
+    integration_oid: &str,
+    default_oid: &str,
+) -> Result<String, String> {
+    let sequence = INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let worktree = std::env::temp_dir().join(format!(
+        "autospec-integration-sync-{}-{sequence}",
+        std::process::id()
+    ));
+    fs::create_dir(&worktree)
+        .map_err(|error| format!("create integration sync worktree: {error}"))?;
+    #[cfg(unix)]
+    fs::set_permissions(&worktree, fs::Permissions::from_mode(0o700))
+        .map_err(|error| format!("make integration sync worktree private: {error}"))?;
+    if let Err(error) = git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            worktree
+                .to_str()
+                .ok_or_else(|| "integration sync worktree path is not UTF-8".to_string())?,
+            integration_oid,
+        ],
+    ) {
+        let _ = fs::remove_dir(&worktree);
+        return Err(format!(
+            "create detached integration sync worktree: {error}"
+        ));
+    }
+
+    let merge = git(
+        &worktree,
+        &[
+            "-c",
+            "commit.gpgSign=false",
+            "merge",
+            "--no-edit",
+            "--no-gpg-sign",
+            default_oid,
+        ],
+    );
+    if let Err(error) = merge {
+        let abort = git(&worktree, &["merge", "--abort"]);
+        let cleanup = remove_integration_sync_worktree(repo, &worktree);
+        if let Err(cleanup_error) = cleanup {
+            return Err(format!(
+                "integration merge failed ({error}); cleanup failed: {cleanup_error}"
+            ));
+        }
+        if let Err(abort_error) = abort {
+            return Err(format!(
+                "integration merge failed ({error}); abort failed: {abort_error}"
+            ));
+        }
+        return Err(format!(
+            "integration base synchronization conflict: {error}"
+        ));
+    }
+    let head = git_stdout(&worktree, &["rev-parse", "--verify", "HEAD^{commit}"]);
+    let cleanup = remove_integration_sync_worktree(repo, &worktree);
+    match (head, cleanup) {
+        (Ok(head), Ok(())) => Ok(head),
+        (Err(error), Ok(())) => Err(error),
+        (_, Err(error)) => Err(error),
+    }
+}
+
+fn remove_integration_sync_worktree(repo: &Path, worktree: &Path) -> Result<(), String> {
+    git(
+        repo,
+        &[
+            "worktree",
+            "remove",
+            worktree
+                .to_str()
+                .ok_or_else(|| "integration sync worktree path is not UTF-8".to_string())?,
+        ],
+    )
+    .map_err(|error| format!("remove integration sync worktree: {error}"))
+}
+
 fn configured_base_branch(repo: &Path) -> Result<Option<String>, String> {
     let path = repo.join(".autospec/autospec.yml");
     if !path.exists() {
@@ -21984,6 +22310,213 @@ mod tests {
         fs::remove_file(fixture.repo.join(".autospec/explore-mode.json")).expect("remove explore");
         let selected = resolve_base(&fixture.repo, &BTreeMap::new()).expect("configured base");
         assert_eq!(selected.base_oid, config_oid);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_is_idempotent() {
+        let fixture = GitFixture::new("integration-sync-idempotent");
+        let integration_oid = fixture.branch("autospec/autonomous-main");
+        fs::create_dir_all(fixture.repo.join(".autospec")).expect("create config directory");
+        fs::write(
+            fixture.repo.join(".autospec/explore-mode.json"),
+            format!(
+                "{{\"branch\":\"autospec/autonomous-main\",\"base\":\"main\",\"head_sha\":\"{integration_oid}\",\"kind\":\"integration\"}}\n"
+            ),
+        )
+        .expect("write integration mode");
+        fs::write(fixture.repo.join("main-advance.txt"), "advance main\n").expect("advance main");
+        git(&fixture.repo, &["add", "main-advance.txt"]);
+        git(&fixture.repo, &["commit", "-m", "advance main"]);
+        git(&fixture.repo, &["push", "origin", "main"]);
+        let main_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+
+        super::synchronize_configured_integration_base(&fixture.repo).expect("first sync");
+        let first = git_stdout(
+            &fixture.repo,
+            &["ls-remote", "--heads", "origin", "autospec/autonomous-main"],
+        );
+        let first_oid = first.split_whitespace().next().expect("first remote oid");
+        assert!(
+            super::git_is_ancestor(&fixture.repo, &main_oid, first_oid).expect("main ancestry"),
+            "default tip was not integrated"
+        );
+        assert!(
+            super::git_is_ancestor(&fixture.repo, &integration_oid, first_oid)
+                .expect("integration ancestry"),
+            "integration tip was not preserved"
+        );
+
+        super::synchronize_configured_integration_base(&fixture.repo).expect("idempotent sync");
+        let second = git_stdout(
+            &fixture.repo,
+            &["ls-remote", "--heads", "origin", "autospec/autonomous-main"],
+        );
+        assert_eq!(
+            second, first,
+            "an already-synchronized retry created a commit"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_conflict_fails_closed() {
+        let fixture = GitFixture::new("integration-sync-conflict");
+        git(
+            &fixture.repo,
+            &["checkout", "-b", "autospec/autonomous-main"],
+        );
+        fs::write(fixture.repo.join("README.md"), "integration edit\n").expect("integration edit");
+        git(&fixture.repo, &["add", "README.md"]);
+        git(&fixture.repo, &["commit", "-m", "integration edit"]);
+        git(
+            &fixture.repo,
+            &["push", "-u", "origin", "autospec/autonomous-main"],
+        );
+        let integration_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        git(&fixture.repo, &["checkout", "main"]);
+        fs::write(fixture.repo.join("README.md"), "default edit\n").expect("default edit");
+        git(&fixture.repo, &["add", "README.md"]);
+        git(&fixture.repo, &["commit", "-m", "default edit"]);
+        git(&fixture.repo, &["push", "origin", "main"]);
+        fs::create_dir_all(fixture.repo.join(".autospec")).expect("create config directory");
+        fs::write(
+            fixture.repo.join(".autospec/explore-mode.json"),
+            format!(
+                "{{\"branch\":\"autospec/autonomous-main\",\"base\":\"main\",\"head_sha\":\"{integration_oid}\",\"kind\":\"integration\"}}\n"
+            ),
+        )
+        .expect("write integration mode");
+
+        let error = super::synchronize_configured_integration_base(&fixture.repo)
+            .expect_err("conflicting integration sync must fail closed");
+
+        assert!(error.contains("synchronization conflict"), "{error}");
+        let remote = git_stdout(
+            &fixture.repo,
+            &["ls-remote", "--heads", "origin", "autospec/autonomous-main"],
+        );
+        assert_eq!(
+            remote.split_whitespace().next(),
+            Some(integration_oid.as_str()),
+            "conflict changed the integration ref"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_rejects_ambiguous_default_ref() {
+        let fixture = GitFixture::new("integration-sync-ambiguous-default");
+        let integration_oid = fixture.branch("autospec/autonomous-main");
+        fs::create_dir_all(fixture.repo.join(".autospec")).expect("create config directory");
+        fs::write(
+            fixture.repo.join(".autospec/explore-mode.json"),
+            format!(
+                "{{\"branch\":\"autospec/autonomous-main\",\"base\":\"main\",\"head_sha\":\"{integration_oid}\",\"kind\":\"integration\"}}\n"
+            ),
+        )
+        .expect("write integration mode");
+        let main_oid = git_stdout(&fixture.repo, &["rev-parse", "origin/main"]);
+        git(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().expect("remote"),
+                "update-ref",
+                "--no-deref",
+                "HEAD",
+                &main_oid,
+            ],
+        );
+
+        let error = super::synchronize_configured_integration_base(&fixture.repo)
+            .expect_err("direct remote HEAD must not be guessed as a default branch");
+
+        assert!(error.contains("symref is missing"), "{error}");
+        let remote = git_stdout(
+            &fixture.repo,
+            &["ls-remote", "--heads", "origin", "autospec/autonomous-main"],
+        );
+        assert_eq!(
+            remote.split_whitespace().next(),
+            Some(integration_oid.as_str()),
+            "ambiguous default authority changed integration"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_retries_default_race() {
+        let fixture = GitFixture::new("integration-sync-race");
+        let integration_oid = fixture.branch("autospec/autonomous-main");
+        fs::create_dir_all(fixture.repo.join(".autospec")).expect("create config directory");
+        fs::write(
+            fixture.repo.join(".autospec/explore-mode.json"),
+            format!(
+                "{{\"branch\":\"autospec/autonomous-main\",\"base\":\"main\",\"head_sha\":\"{integration_oid}\",\"kind\":\"integration\"}}\n"
+            ),
+        )
+        .expect("write integration mode");
+        fs::write(fixture.repo.join("main-advance.txt"), "advance main\n").expect("advance main");
+        git(&fixture.repo, &["add", "main-advance.txt"]);
+        git(&fixture.repo, &["commit", "-m", "advance main"]);
+        git(&fixture.repo, &["push", "origin", "main"]);
+        let remote = fixture.root.join("remote.git");
+        let marker = fixture.root.join("advance-default-once");
+        write_executable(
+            &remote.join("hooks/post-receive"),
+            &format!(
+                r#"#!/bin/sh
+set -eu
+while read -r old new reference; do
+  if [ "$reference" = refs/heads/autospec/autonomous-main ] && [ ! -e '{marker}' ]; then
+    current=$(git rev-parse refs/heads/main)
+    tree=$(git rev-parse "$current^{{tree}}")
+    advanced=$(printf '%s\n' 'advance default during integration sync' |
+      GIT_AUTHOR_NAME='Autospec Test' \
+      GIT_AUTHOR_EMAIL='autospec@example.invalid' \
+      GIT_COMMITTER_NAME='Autospec Test' \
+      GIT_COMMITTER_EMAIL='autospec@example.invalid' \
+      git commit-tree "$tree" -p "$current")
+    git update-ref refs/heads/main "$advanced" "$current"
+    : > '{marker}'
+  fi
+done
+"#,
+                marker = marker.display(),
+            ),
+        );
+
+        super::synchronize_configured_integration_base(&fixture.repo)
+            .expect("retry after default ref race");
+
+        let default_oid = git_stdout(&fixture.repo, &["ls-remote", "--heads", "origin", "main"]);
+        let default_oid = default_oid
+            .split_whitespace()
+            .next()
+            .expect("default remote oid");
+        let current_integration = git_stdout(
+            &fixture.repo,
+            &["ls-remote", "--heads", "origin", "autospec/autonomous-main"],
+        );
+        let current_integration = current_integration
+            .split_whitespace()
+            .next()
+            .expect("integration remote oid");
+        super::fetch_remote_branch_objects(&fixture.repo, "main", default_oid)
+            .expect("fetch raced default");
+        super::fetch_remote_branch_objects(
+            &fixture.repo,
+            "autospec/autonomous-main",
+            current_integration,
+        )
+        .expect("fetch final integration");
+        assert!(
+            super::git_is_ancestor(&fixture.repo, default_oid, current_integration)
+                .expect("final default ancestry"),
+            "retry returned before the raced default tip was integrated"
+        );
+        assert!(
+            super::git_is_ancestor(&fixture.repo, &integration_oid, current_integration)
+                .expect("preserved integration ancestry"),
+            "retry lost the original integration commit"
+        );
     }
 
     #[test]

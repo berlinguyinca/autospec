@@ -8,6 +8,17 @@ different recovery window; active workers refresh their claims as they run.
 The conductor also defaults `AUTOSPEC_RESCAN_INTERVAL` to `300` seconds after
 an empty backlog, while an explicit environment value remains authoritative.
 
+Before acquiring a fresh issue claim while `.autospec/explore-mode.json` selects
+an integration or explore branch, the Rust conductor synchronizes that remote
+branch with the remote's advertised default-branch tip. It performs the merge in
+a private detached worktree, proves both prior tips remain ancestors, and pushes
+only a non-force fast-forward update. An already-synchronized retry is a no-op.
+Concurrent integration/default updates are re-read and retried up to three
+times; a merge conflict, missing or ambiguous remote HEAD symref, non-fast-forward
+integration rewrite, exhausted race, or cleanup failure stops before claim
+acquisition. Resolve conflicts on the integration branch and retry the conductor;
+never force-push either branch to bypass this guard.
+
 Tier-2 explore drains default `AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS` to `600`
 seconds without observable output; set the variable explicitly for slower
 repositories or remote research providers.
