@@ -1,6 +1,6 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::Path;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -42,6 +42,35 @@ struct ClaimRefHead {
 enum ClaimRefAdvance {
     Won(Box<ClaimRefHead>),
     Lost,
+}
+
+#[derive(Debug)]
+enum StartupHeartbeatEvidence {
+    Absent,
+    Blocking,
+    ExpiredDead {
+        path: PathBuf,
+        snapshot: HeartbeatSnapshot,
+    },
+}
+
+#[derive(Debug)]
+struct HeartbeatSnapshot {
+    document: Vec<u8>,
+    identity: RegularFileIdentity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegularFileIdentity {
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    length: u64,
+    #[cfg(unix)]
+    modified_seconds: i64,
+    #[cfg(unix)]
+    modified_nanoseconds: i64,
 }
 
 fn claim_ref_name(issue: u64) -> String {
@@ -1566,11 +1595,16 @@ fn recover_stale_startup_record(
             reason: "claim_has_pr".to_string(),
         });
     }
-    if startup_heartbeat_exists(repo, issue)
-        || branch_ref_exists(&selected.record.branch)
+    if branch_ref_exists(&selected.record.branch)
         || !server_lease_is_stale(&selected.server_updated_at, timeout_seconds)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "claim_evidence_or_fresh_state".to_string(),
+        });
+    }
+    if startup_heartbeat_blocks_recovery(repo, issue, &selected.record)? {
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
@@ -1618,10 +1652,15 @@ fn recover_authoritative_stale_startup(
     }
     if selected.record.state != "claimed"
         || !selected.record.pr.is_empty()
-        || startup_heartbeat_exists(repo, issue)
         || branch_ref_exists(&selected.record.branch)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "claim_evidence_or_fresh_state".to_string(),
+        });
+    }
+    if startup_heartbeat_blocks_recovery(repo, issue, &selected.record)? {
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
@@ -3773,6 +3812,415 @@ fn startup_heartbeat_exists(repo: &str, issue: u64) -> bool {
     })
 }
 
+fn startup_heartbeat_blocks_recovery(
+    repo: &str,
+    issue: u64,
+    record: &RunStateRecord,
+) -> Result<bool, CommandFailure> {
+    match classify_startup_heartbeat(repo, issue, record)? {
+        StartupHeartbeatEvidence::Absent => Ok(false),
+        StartupHeartbeatEvidence::Blocking => Ok(true),
+        StartupHeartbeatEvidence::ExpiredDead { path, snapshot } => {
+            quarantine_stale_startup_heartbeat(repo, issue, &path, &snapshot)?;
+            Ok(false)
+        }
+    }
+}
+
+fn classify_startup_heartbeat(
+    repo: &str,
+    issue: u64,
+    record: &RunStateRecord,
+) -> Result<StartupHeartbeatEvidence, CommandFailure> {
+    let path = heartbeat_root()?
+        .join(super::autonomous::drain::repository_progress_key(repo))
+        .join(format!("{issue}.json"));
+    let snapshot = match read_regular_file_no_follow(&path) {
+        Ok(snapshot) => snapshot,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StartupHeartbeatEvidence::Absent)
+        }
+        Err(_) => return Ok(StartupHeartbeatEvidence::Blocking),
+    };
+    let value: serde_json::Value = match serde_json::from_slice(&snapshot.document) {
+        Ok(value) => value,
+        Err(_) => return Ok(StartupHeartbeatEvidence::Blocking),
+    };
+    let Some(claim_id) = record.claim_id.as_deref() else {
+        return Ok(StartupHeartbeatEvidence::Blocking);
+    };
+    let issue_text = issue.to_string();
+    let exact_identity = record.repo == repo
+        && record.issue == issue
+        && value.get("repo").and_then(serde_json::Value::as_str) == Some(repo)
+        && value.get("issue").and_then(serde_json::Value::as_str) == Some(issue_text.as_str())
+        && value.get("worker_id").and_then(serde_json::Value::as_str)
+            == Some(record.worker_id.as_str())
+        && value.get("branch").and_then(serde_json::Value::as_str) == Some(record.branch.as_str())
+        && value.get("claim_id").and_then(serde_json::Value::as_str) == Some(claim_id)
+        && value.get("pr").and_then(serde_json::Value::as_str) == Some(record.pr.as_str());
+    if !exact_identity {
+        return Ok(StartupHeartbeatEvidence::Blocking);
+    }
+    let Some(timestamp) = value.get("ts").and_then(serde_json::Value::as_u64) else {
+        return Ok(StartupHeartbeatEvidence::Blocking);
+    };
+    if unix_now()?.saturating_sub(timestamp) <= record.ttl_seconds {
+        return Ok(StartupHeartbeatEvidence::Blocking);
+    }
+    let Some(pid) = foreground_conductor_pid(&record.worker_id) else {
+        return Ok(StartupHeartbeatEvidence::Blocking);
+    };
+    if !local_pid_is_provably_dead(pid) {
+        return Ok(StartupHeartbeatEvidence::Blocking);
+    }
+    Ok(StartupHeartbeatEvidence::ExpiredDead { path, snapshot })
+}
+
+fn foreground_conductor_pid(worker_id: &str) -> Option<u32> {
+    let suffix = worker_id.strip_prefix("rust-foreground-conductor-")?;
+    let (pid, nonce) = suffix.split_once('-')?;
+    if nonce.is_empty() || !nonce.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let pid = pid.parse::<u32>().ok()?;
+    (pid > 0 && pid <= i32::MAX as u32).then_some(pid)
+}
+
+#[cfg(unix)]
+fn local_pid_is_provably_dead(pid: u32) -> bool {
+    matches!(
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None),
+        Err(nix::errno::Errno::ESRCH)
+    )
+}
+
+#[cfg(not(unix))]
+fn local_pid_is_provably_dead(_pid: u32) -> bool {
+    false
+}
+
+fn quarantine_stale_startup_heartbeat(
+    repo: &str,
+    issue: u64,
+    source: &Path,
+    expected: &HeartbeatSnapshot,
+) -> Result<PathBuf, CommandFailure> {
+    let heartbeat_root = heartbeat_root()?;
+    let state_root = heartbeat_root.parent().ok_or_else(|| {
+        CommandFailure::diagnostic("heartbeat directory has no parent for operator quarantine")
+    })?;
+    quarantine_stale_startup_heartbeat_in(state_root, repo, issue, source, expected, || {})
+}
+
+fn quarantine_stale_startup_heartbeat_in<F>(
+    state_root: &Path,
+    repo: &str,
+    issue: u64,
+    source: &Path,
+    expected: &HeartbeatSnapshot,
+    before_remove: F,
+) -> Result<PathBuf, CommandFailure>
+where
+    F: FnOnce(),
+{
+    let quarantine_directory = prepare_heartbeat_quarantine(state_root, repo)?;
+    verify_heartbeat_snapshot(source, expected, issue)?;
+    let target = persist_heartbeat_copy(&quarantine_directory, issue, expected)?;
+    identity_bound_heartbeat_removal(
+        source,
+        &quarantine_directory,
+        issue,
+        expected,
+        before_remove,
+    )?;
+    Ok(target)
+}
+
+fn prepare_heartbeat_quarantine(state_root: &Path, repo: &str) -> Result<PathBuf, CommandFailure> {
+    let quarantine_root = state_root.join("operator-quarantine");
+    create_private_directory(&quarantine_root)?;
+    let repository_quarantine =
+        quarantine_root.join(super::autonomous::drain::repository_progress_key(repo));
+    create_private_directory(&repository_quarantine)?;
+    let quarantine_directory = repository_quarantine.join("stale-claim-heartbeats");
+    create_private_directory(&quarantine_directory)?;
+    Ok(quarantine_directory)
+}
+
+fn verify_heartbeat_snapshot(
+    source: &Path,
+    expected: &HeartbeatSnapshot,
+    issue: u64,
+) -> Result<(), CommandFailure> {
+    let current = read_regular_file_no_follow(source).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "re-read stale startup heartbeat for issue {issue}: {error}"
+        ))
+    })?;
+    if current.identity != expected.identity || current.document != expected.document {
+        return Err(CommandFailure::diagnostic(format!(
+            "startup heartbeat for issue {issue} changed during stale recovery"
+        )));
+    }
+    Ok(())
+}
+
+fn persist_heartbeat_copy(
+    quarantine_directory: &Path,
+    issue: u64,
+    expected: &HeartbeatSnapshot,
+) -> Result<PathBuf, CommandFailure> {
+    let target = quarantine_directory.join(format!(
+        "{issue}.json.{}",
+        unique_operation_id("stale-heartbeat")?
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&target).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "create stale startup heartbeat quarantine for issue {issue}: {error}"
+        ))
+    })?;
+    if let Err(error) = file
+        .write_all(&expected.document)
+        .and_then(|()| file.sync_all())
+    {
+        drop(file);
+        let _ = fs::remove_file(&target);
+        return Err(CommandFailure::diagnostic(format!(
+            "persist stale startup heartbeat quarantine for issue {issue}: {error}"
+        )));
+    }
+    drop(file);
+    sync_directory(quarantine_directory, issue)?;
+    Ok(target)
+}
+
+fn identity_bound_heartbeat_removal<F>(
+    source: &Path,
+    quarantine_directory: &Path,
+    issue: u64,
+    expected: &HeartbeatSnapshot,
+    before_remove: F,
+) -> Result<(), CommandFailure>
+where
+    F: FnOnce(),
+{
+    let operation_directory = quarantine_directory.join(unique_operation_id("handoff")?);
+    create_private_directory(&operation_directory)?;
+    let moved_source = operation_directory.join(format!("{issue}.json"));
+    before_remove();
+    if let Err(error) = fs::rename(source, &moved_source) {
+        let _ = fs::remove_dir(&operation_directory);
+        return Err(CommandFailure::diagnostic(format!(
+            "atomically move startup heartbeat for issue {issue}: {error}"
+        )));
+    }
+    finish_identity_bound_heartbeat_removal(
+        source,
+        quarantine_directory,
+        &operation_directory,
+        &moved_source,
+        issue,
+        expected,
+    )
+}
+
+fn finish_identity_bound_heartbeat_removal(
+    source: &Path,
+    quarantine_directory: &Path,
+    operation_directory: &Path,
+    moved_source: &Path,
+    issue: u64,
+    expected: &HeartbeatSnapshot,
+) -> Result<(), CommandFailure> {
+    let moved = match read_regular_file_no_follow(moved_source) {
+        Ok(moved) => moved,
+        Err(error) => {
+            restore_moved_heartbeat(moved_source, source, operation_directory, issue)?;
+            return Err(CommandFailure::diagnostic(format!(
+                "moved startup heartbeat for issue {issue} is unsafe: {error}"
+            )));
+        }
+    };
+    if moved.identity != expected.identity || moved.document != expected.document {
+        restore_moved_heartbeat(moved_source, source, operation_directory, issue)?;
+        return Err(CommandFailure::diagnostic(format!(
+            "startup heartbeat for issue {issue} was replaced during quarantine"
+        )));
+    }
+    match fs::symlink_metadata(source) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Ok(_) => {
+            remove_heartbeat_handoff(moved_source, operation_directory, issue)?;
+            return Err(CommandFailure::diagnostic(format!(
+                "a new startup heartbeat for issue {issue} appeared during quarantine"
+            )));
+        }
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "inspect startup heartbeat after quarantine for issue {issue}: {error}"
+            )))
+        }
+    }
+    remove_heartbeat_handoff(moved_source, operation_directory, issue)?;
+    if let Some(source_directory) = source.parent() {
+        sync_directory(source_directory, issue)?;
+    }
+    sync_directory(quarantine_directory, issue)
+}
+
+fn remove_heartbeat_handoff(
+    moved_source: &Path,
+    operation_directory: &Path,
+    issue: u64,
+) -> Result<(), CommandFailure> {
+    fs::remove_file(moved_source).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "remove identity-bound stale heartbeat for issue {issue}: {error}"
+        ))
+    })?;
+    fs::remove_dir(operation_directory).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "remove stale heartbeat handoff directory for issue {issue}: {error}"
+        ))
+    })
+}
+
+fn restore_moved_heartbeat(
+    moved_source: &Path,
+    source: &Path,
+    operation_directory: &Path,
+    issue: u64,
+) -> Result<(), CommandFailure> {
+    match fs::hard_link(moved_source, source) {
+        Ok(()) => {
+            fs::remove_file(moved_source).map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "remove restored heartbeat handoff for issue {issue}: {error}"
+                ))
+            })?;
+            fs::remove_dir(operation_directory).map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "remove restored heartbeat directory for issue {issue}: {error}"
+                ))
+            })?;
+            if let Some(source_directory) = source.parent() {
+                sync_directory(source_directory, issue)?;
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(CommandFailure::diagnostic(format!(
+            "restore replaced startup heartbeat for issue {issue}: {error}"
+        ))),
+    }
+}
+
+fn sync_directory(path: &Path, issue: u64) -> Result<(), CommandFailure> {
+    fs::File::open(path)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "sync startup heartbeat directory for issue {issue}: {error}"
+            ))
+        })
+}
+
+fn read_regular_file_no_follow(path: &Path) -> std::io::Result<HeartbeatSnapshot> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(path)?;
+    let before = file.metadata()?;
+    if !before.file_type().is_file() {
+        return Err(std::io::Error::other("path is not a regular file"));
+    }
+    let mut document = Vec::new();
+    file.read_to_end(&mut document)?;
+    let after = file.metadata()?;
+    let before_identity = regular_file_identity(&before);
+    let after_identity = regular_file_identity(&after);
+    if before_identity != after_identity || after.len() != document.len() as u64 {
+        return Err(std::io::Error::other(
+            "regular file changed while it was being read",
+        ));
+    }
+    Ok(HeartbeatSnapshot {
+        document,
+        identity: after_identity,
+    })
+}
+
+fn regular_file_identity(metadata: &fs::Metadata) -> RegularFileIdentity {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        RegularFileIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            length: metadata.len(),
+            modified_seconds: metadata.mtime(),
+            modified_nanoseconds: metadata.mtime_nsec(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        RegularFileIdentity {
+            length: metadata.len(),
+        }
+    }
+}
+
+fn create_private_directory(path: &Path) -> Result<(), CommandFailure> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_dir() => {
+            return Err(CommandFailure::diagnostic(
+                "private operator quarantine path is not a directory",
+            ))
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(path).map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "create private operator quarantine component: {error}"
+                ))
+            })?;
+        }
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "inspect private operator quarantine: {error}"
+            )))
+        }
+    }
+    let metadata = fs::symlink_metadata(path).map_err(|error| {
+        CommandFailure::diagnostic(format!("inspect private operator quarantine: {error}"))
+    })?;
+    if !metadata.file_type().is_dir() {
+        return Err(CommandFailure::diagnostic(
+            "private operator quarantine path is not a directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            CommandFailure::diagnostic(format!("protect private operator quarantine: {error}"))
+        })?;
+    }
+    Ok(())
+}
+
 fn branch_ref_exists(branch: &str) -> bool {
     if branch.trim().is_empty() {
         return false;
@@ -4125,6 +4573,76 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
 
     static BRIDGE_TRANSITION_ENV: Mutex<()> = Mutex::new(());
+
+    #[cfg(unix)]
+    #[test]
+    fn private_quarantine_directory_rejects_a_symlinked_ancestor() {
+        let fixture = std::env::temp_dir().join(format!(
+            "autospec-claim-quarantine-ancestor-{}-{}",
+            std::process::id(),
+            super::unique_operation_id("test").expect("test id")
+        ));
+        let outside = fixture.join("outside");
+        let linked = fixture.join("operator-quarantine");
+        std::fs::create_dir_all(&outside).expect("outside fixture");
+        std::os::unix::fs::symlink(&outside, &linked).expect("symlink fixture");
+
+        let result = super::create_private_directory(&linked.join("repo/stale-heartbeats"));
+
+        assert!(result.is_err());
+        assert!(
+            !outside.join("repo/stale-heartbeats").exists(),
+            "directory creation must not traverse a symlinked ancestor"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_heartbeat_quarantine_aborts_without_deleting_a_replacement() {
+        let fixture = std::env::temp_dir().join(format!(
+            "autospec-claim-quarantine-race-{}-{}",
+            std::process::id(),
+            super::unique_operation_id("test").expect("test id")
+        ));
+        let heartbeat_directory = fixture.join("process-heartbeats/repo");
+        std::fs::create_dir_all(&heartbeat_directory).expect("heartbeat fixture");
+        let source = heartbeat_directory.join("36.json");
+        let replacement = heartbeat_directory.join("replacement.json");
+        let original = b"{\"worker_id\":\"stale\"}\n";
+        let live = b"{\"worker_id\":\"replacement\"}\n";
+        std::fs::write(&source, original).expect("original heartbeat");
+        std::fs::write(&replacement, live).expect("replacement heartbeat");
+        let expected =
+            super::read_regular_file_no_follow(&source).expect("original heartbeat snapshot");
+
+        let result = super::quarantine_stale_startup_heartbeat_in(
+            &fixture,
+            "testorg/testrepo",
+            36,
+            &source,
+            &expected,
+            || {
+                std::fs::rename(&replacement, &source).expect("inject heartbeat replacement");
+            },
+        );
+
+        assert!(result.is_err(), "replacement must abort claim recovery");
+        assert_eq!(
+            std::fs::read(&source).expect("live replacement remains"),
+            live
+        );
+        let quarantine =
+            fixture.join("operator-quarantine/o7_testorg_r8_testrepo/stale-claim-heartbeats");
+        let entries = std::fs::read_dir(quarantine)
+            .expect("quarantine contents")
+            .map(|entry| entry.expect("quarantine entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(
+            std::fs::read(&entries[0]).expect("preserved stale heartbeat"),
+            original
+        );
+    }
 
     #[test]
     fn paginated_comments_parser_flattens_two_raw_pages() {

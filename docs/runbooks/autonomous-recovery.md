@@ -86,6 +86,33 @@ If a skeptic returns successfully but emits no recoverable verdict JSON, the
 bridge applies the same deterministic evidence fallback used for timed-out
 skeptics instead of discarding the entire discovery cycle.
 
+## Stale startup heartbeats
+
+`autospec claim state recover-stale-startup` does not treat heartbeat-file
+existence alone as proof that a claim is live. For an otherwise recoverable
+claim, Autospec parses the issue heartbeat and requires its repository, issue,
+worker, branch, PR, and claim ID to match the authoritative claim record. It
+then compares the heartbeat timestamp with that record's `ttl_seconds` and
+checks the PID encoded by a local `rust-foreground-conductor-<pid>-<nonce>`
+worker identity.
+
+An exact, expired heartbeat whose local PID is absent is preserved before
+recovery under:
+
+```text
+~/.autospec/operator-quarantine/<repository-key>/stale-claim-heartbeats/
+```
+
+The quarantine directory and files are private (`0700` and `0600` on Unix).
+Autospec removes the live heartbeat only after the quarantined copy is durable,
+then atomically moves and verifies the original device/inode before releasing
+the stale claim. A concurrently replaced heartbeat is restored or left at the
+live path and recovery aborts. A fresh heartbeat, a live PID, a malformed or
+mismatched identity, an unrecognized or remote worker identity, a symlinked
+quarantine component, an unsafe file type, or any quarantine failure blocks
+recovery. Operators should inspect the quarantined JSON when auditing a
+recovered claim; do not move it back into the live heartbeat directory.
+
 ## Native Tier 2 discovery
 
 The Rust foreground conductor runs Tier 2 after a completed empty Tier 1.5

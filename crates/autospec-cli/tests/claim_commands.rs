@@ -146,6 +146,94 @@ fn claim_ref_message(repo: &std::path::Path, issue: u64) -> String {
     git(repo, &["show", "-s", "--format=%B", "FETCH_HEAD"])
 }
 
+fn run_stale_heartbeat_recovery(
+    fixture: &std::path::Path,
+    record_worker_id: &str,
+    heartbeat_worker_id: &str,
+) -> (
+    std::process::Output,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    String,
+) {
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
+    let repo = claim_git_repo(fixture);
+    let branch = "autonomous/issue-36";
+    let claim_id = "claim-issue-36";
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            36,
+            record_worker_id,
+            "claimed",
+            branch,
+            "",
+            "claimed",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id(claim_id),
+    );
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    std::fs::write(&comments, "[]\n").expect("comments fixture");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" >> "$AUTOSPEC_CLAIM_LOG"
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/36/comments ]; then
+  cat "$AUTOSPEC_CLAIM_COMMENTS"
+  exit 0
+fi
+if { [ "$1" = issue ] && [ "$2" = comment ]; } || { [ "$1" = issue ] && [ "$2" = edit ]; }; then
+  exit 0
+fi
+exit 17
+"#,
+    );
+    let heartbeat_root = fixture.join("process-heartbeats");
+    let heartbeat_dir = heartbeat_root.join("o7_testorg_r8_testrepo");
+    std::fs::create_dir_all(&heartbeat_dir).expect("heartbeat directory");
+    let heartbeat = heartbeat_dir.join("36.json");
+    let heartbeat_body = format!(
+        "{{\"issue\":\"36\",\"branch\":\"{branch}\",\"step\":\"claimed\",\"ts\":1,\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"{heartbeat_worker_id}\",\"claim_id\":\"{claim_id}\"}}\n"
+    );
+    std::fs::write(&heartbeat, &heartbeat_body).expect("stale heartbeat");
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "recover-stale-startup",
+            "--issue",
+            "36",
+            "--repo",
+            "testorg/testrepo",
+            "--timeout-seconds",
+            "300",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeat_root)
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .output()
+        .expect("autospec stale heartbeat recovery starts");
+    (output, repo, heartbeat, log, heartbeat_body)
+}
+
 fn claim_refresh_comments(
     worker_id: &str,
     branch: &str,
@@ -1330,6 +1418,164 @@ fn claim_state_recover_stale_startup_preserves_a_fresh_claim_without_label_mutat
     let calls = std::fs::read_to_string(log).expect("gh call log");
     assert!(!calls.contains("issue\nedit"));
     assert!(!calls.contains("\n-X\nDELETE"));
+}
+
+#[test]
+fn claim_stale_heartbeat_recovery_quarantines_expired_dead_issue_36() {
+    // Break caught: an expired heartbeat file alone kept issue 36 claimed for three days after
+    // its foreground conductor exited and no branch, PR, or claim work remained.
+    let fixture = temp_dir("autospec-claim-stale-heartbeat-dead");
+    let mut owner = Command::new("sh")
+        .args(["-c", "exit 0"])
+        .spawn()
+        .expect("spawn heartbeat owner");
+    let owner_pid = owner.id();
+    assert!(owner.wait().expect("wait for heartbeat owner").success());
+    let worker_id = format!("rust-foreground-conductor-{owner_pid}-1785023640181207169");
+    let (output, repo, heartbeat, _log, heartbeat_body) =
+        run_stale_heartbeat_recovery(&fixture, &worker_id, &worker_id);
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":true"));
+    assert!(
+        !heartbeat.exists(),
+        "stale heartbeat must leave the live path"
+    );
+    let quarantine =
+        fixture.join("operator-quarantine/o7_testorg_r8_testrepo/stale-claim-heartbeats");
+    let quarantined = std::fs::read_dir(&quarantine)
+        .expect("operator quarantine")
+        .map(|entry| entry.expect("quarantine entry").path())
+        .collect::<Vec<_>>();
+    assert_eq!(quarantined.len(), 1, "{quarantined:?}");
+    assert_eq!(
+        std::fs::read_to_string(&quarantined[0]).expect("quarantined heartbeat"),
+        heartbeat_body
+    );
+    assert_eq!(
+        std::fs::metadata(&quarantine)
+            .expect("quarantine metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    for private_directory in [
+        fixture.join("operator-quarantine"),
+        fixture.join("operator-quarantine/o7_testorg_r8_testrepo"),
+    ] {
+        assert_eq!(
+            std::fs::metadata(private_directory)
+                .expect("private quarantine metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+    }
+    assert_eq!(
+        std::fs::metadata(&quarantined[0])
+            .expect("quarantine file metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    let message = claim_ref_message(&repo, 36);
+    assert!(message.contains("\"state\":\"available\""));
+    assert!(message.contains("\"step\":\"stale_startup_recovered\""));
+}
+
+#[test]
+fn claim_stale_heartbeat_recovery_preserves_expired_heartbeat_for_live_conductor() {
+    let fixture = temp_dir("autospec-claim-stale-heartbeat-live");
+    let worker_id = format!(
+        "rust-foreground-conductor-{}-1785023640181207169",
+        std::process::id()
+    );
+    let (output, repo, heartbeat, log, _) =
+        run_stale_heartbeat_recovery(&fixture, &worker_id, &worker_id);
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":false"));
+    assert!(
+        heartbeat.exists(),
+        "live owner heartbeat must remain in place"
+    );
+    assert!(!fixture.join("operator-quarantine").exists());
+    let message = claim_ref_message(&repo, 36);
+    assert!(message.contains("\"state\":\"claimed\""));
+    let calls = std::fs::read_to_string(log).unwrap_or_default();
+    assert!(!calls.contains("issue\nedit"));
+}
+
+#[test]
+fn claim_stale_heartbeat_recovery_fails_closed_for_identity_mismatch() {
+    let fixture = temp_dir("autospec-claim-stale-heartbeat-mismatch");
+    let record_worker_id = "rust-foreground-conductor-2147483647-1";
+    let heartbeat_worker_id = "rust-foreground-conductor-2147483647-2";
+    let (output, repo, heartbeat, log, _) =
+        run_stale_heartbeat_recovery(&fixture, record_worker_id, heartbeat_worker_id);
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":false"));
+    assert!(
+        heartbeat.exists(),
+        "ambiguous identity heartbeat must remain in place"
+    );
+    assert!(!fixture.join("operator-quarantine").exists());
+    let message = claim_ref_message(&repo, 36);
+    assert!(message.contains("\"state\":\"claimed\""));
+    let calls = std::fs::read_to_string(log).unwrap_or_default();
+    assert!(!calls.contains("issue\nedit"));
+}
+
+#[test]
+fn claim_stale_heartbeat_recovery_rejects_symlinked_quarantine_ancestor() {
+    let fixture = temp_dir("autospec-claim-stale-heartbeat-symlink-quarantine");
+    let worker_id = "rust-foreground-conductor-2147483647-1";
+    let redirected = fixture.join("redirected-quarantine");
+    std::fs::create_dir(&redirected).expect("redirected quarantine fixture");
+    std::os::unix::fs::symlink(&redirected, fixture.join("operator-quarantine"))
+        .expect("symlinked quarantine root");
+
+    let (output, repo, heartbeat, _log, _) =
+        run_stale_heartbeat_recovery(&fixture, worker_id, worker_id);
+
+    assert!(
+        !output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        heartbeat.exists(),
+        "unsafe quarantine ancestry must leave heartbeat live"
+    );
+    assert_eq!(
+        std::fs::read_dir(&redirected)
+            .expect("redirected quarantine contents")
+            .count(),
+        0,
+        "recovery must not follow the quarantine symlink"
+    );
+    let message = claim_ref_message(&repo, 36);
+    assert!(message.contains("\"state\":\"claimed\""));
 }
 
 #[test]
