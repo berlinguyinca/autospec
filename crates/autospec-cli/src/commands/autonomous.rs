@@ -2533,7 +2533,9 @@ fn run_foreground_with_lease(
                     return Ok(ForegroundCompletion::State(Box::new(state)));
                 }
             } else if state.pause_reason() == Some("executor_receipt_failed") {
-                if executor_receipt_failure_is_recoverable(layout, &state_path, issue)? {
+                if executor_receipt_failure_is_recoverable(layout, &state_path, issue)?
+                    || claim_terminal
+                {
                     state = state
                         .transition(ConductorEvent::Resume)
                         .map_err(CommandFailure::diagnostic)?;

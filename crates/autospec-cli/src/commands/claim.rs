@@ -889,13 +889,41 @@ pub(crate) fn lifecycle_claim_evidence(
             LeaseFreshness::Fresh,
         )));
     };
-    let worker = WorkerId::try_from(selected.record.worker_id.as_str()).map_err(|reason| {
+    lifecycle_claim_evidence_from_record(
+        scope,
+        issue,
+        requested_worker,
+        requested_branch,
+        &selected.record,
+    )
+}
+
+fn lifecycle_claim_evidence_from_record(
+    scope: RepositoryScope,
+    issue: IssueNumber,
+    requested_worker: WorkerId,
+    requested_branch: ClaimBranch,
+    record: &RunStateRecord,
+) -> Result<ClaimEvidence, CommandFailure> {
+    let worker = WorkerId::try_from(record.worker_id.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("invalid recorded claim worker: {reason}"))
     })?;
-    let branch = ClaimBranch::try_from(selected.record.branch.as_str()).map_err(|reason| {
+    let branch = ClaimBranch::try_from(record.branch.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("invalid recorded claim branch: {reason}"))
     })?;
-    if selected.record.state == "merged" {
+    record.claim_id.as_deref().ok_or_else(|| {
+        CommandFailure::diagnostic("recorded lifecycle claim has no generation identity")
+    })?;
+    if matches!(record.state.as_str(), "released" | "retryable") {
+        return Ok(ClaimEvidence::Observed(ClaimContext::active(
+            scope,
+            issue,
+            requested_worker,
+            requested_branch,
+            LeaseFreshness::Fresh,
+        )));
+    }
+    if record.state == "merged" {
         return Ok(ClaimEvidence::Observed(ClaimContext::terminal(
             scope, issue, worker, branch,
         )));
@@ -905,7 +933,7 @@ pub(crate) fn lifecycle_claim_evidence(
         issue,
         worker,
         branch,
-        lifecycle_lease_freshness(&selected.record.updated_at),
+        lifecycle_lease_freshness(&record.updated_at),
     )))
 }
 
@@ -3991,8 +4019,12 @@ fn print_state_help() {
 mod tests {
     use super::{
         advance_claim_ref_in, claim_settle_millis, create_claim_ref_commit,
-        private_claim_git_dir_in, publish_session_binding, read_claim_ref_in,
-        validated_claim_remote, ClaimRefAdvance, SessionBindingIdentity,
+        lifecycle_claim_evidence_from_record, private_claim_git_dir_in, publish_session_binding,
+        read_claim_ref_in, validated_claim_remote, ClaimRefAdvance, SessionBindingIdentity,
+    };
+    use autospec_core::autonomous_lifecycle::{
+        ClaimBranch, ClaimContext, ClaimEvidence, IssueNumber, LeaseFreshness, RepositoryScope,
+        WorkerId,
     };
     use autospec_core::claim::{ExecutorResultEvidence, RemoteComment, RunStateRecord};
     #[cfg(unix)]
@@ -4227,6 +4259,73 @@ mod tests {
             1,
         )
         .with_claim_id(claim_id)
+    }
+
+    fn lifecycle_evidence(record: &RunStateRecord) -> Result<ClaimEvidence, super::CommandFailure> {
+        lifecycle_claim_evidence_from_record(
+            RepositoryScope::try_from("owner/repo").expect("repository scope"),
+            IssueNumber::new(42).expect("issue"),
+            WorkerId::try_from("worker-requested").expect("requested worker"),
+            ClaimBranch::try_from("feat/requested").expect("requested branch"),
+            record,
+        )
+    }
+
+    #[test]
+    fn lifecycle_claim_state_matrix_reuses_only_valid_available_generations() {
+        let requested = ClaimEvidence::Observed(ClaimContext::active(
+            RepositoryScope::try_from("owner/repo").expect("repository scope"),
+            IssueNumber::new(42).expect("issue"),
+            WorkerId::try_from("worker-requested").expect("requested worker"),
+            ClaimBranch::try_from("feat/requested").expect("requested branch"),
+            LeaseFreshness::Fresh,
+        ));
+        for state in ["released", "retryable"] {
+            assert_eq!(
+                lifecycle_evidence(&claim_record("worker-old", "claim-old", state))
+                    .expect("reusable claim evidence"),
+                requested,
+                "{state} must be available to the requested owner"
+            );
+        }
+
+        for state in ["claimed", "failed", "needs-human"] {
+            let mut record = claim_record("worker-old", "claim-old", state);
+            record.updated_at = "2999-01-01T00:00:00Z".to_string();
+            assert_eq!(
+                lifecycle_evidence(&record).expect("active claim evidence"),
+                ClaimEvidence::Observed(ClaimContext::active(
+                    RepositoryScope::try_from("owner/repo").expect("repository scope"),
+                    IssueNumber::new(42).expect("issue"),
+                    WorkerId::try_from("worker-old").expect("recorded worker"),
+                    ClaimBranch::try_from("feat/worker-old").expect("recorded branch"),
+                    LeaseFreshness::Fresh,
+                )),
+                "{state} must retain the recorded owner"
+            );
+        }
+
+        assert_eq!(
+            lifecycle_evidence(&claim_record("worker-old", "claim-old", "merged"))
+                .expect("merged claim evidence"),
+            ClaimEvidence::Observed(ClaimContext::terminal(
+                RepositoryScope::try_from("owner/repo").expect("repository scope"),
+                IssueNumber::new(42).expect("issue"),
+                WorkerId::try_from("worker-old").expect("recorded worker"),
+                ClaimBranch::try_from("feat/worker-old").expect("recorded branch"),
+            ))
+        );
+    }
+
+    #[test]
+    fn lifecycle_claim_rejects_malformed_reusable_generations() {
+        let mut empty_branch = claim_record("worker-old", "claim-old", "released");
+        empty_branch.branch.clear();
+        assert!(lifecycle_evidence(&empty_branch).is_err());
+
+        let mut missing_generation = claim_record("worker-old", "claim-old", "retryable");
+        missing_generation.claim_id = None;
+        assert!(lifecycle_evidence(&missing_generation).is_err());
     }
 
     #[test]

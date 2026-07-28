@@ -1099,7 +1099,7 @@ fn legacy_executor_pending_state() -> ConductorState {
 }
 
 #[test]
-fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() {
+fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_windows() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     for (name, state, seeded_claim_state) in [
         (
@@ -1149,6 +1149,17 @@ fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() 
                 .unwrap()
                 .transition(ConductorEvent::DispatchRecorded {
                     outcome: ConductorOutcome::Retryable("transient".to_string()),
+                })
+                .unwrap(),
+            Some("released"),
+        ),
+        (
+            "released-executor-receipt-failure",
+            selected_foreground_state()
+                .transition(ConductorEvent::Claimed)
+                .unwrap()
+                .transition(ConductorEvent::DispatchRecorded {
+                    outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
                 })
                 .unwrap(),
             Some("released"),
@@ -1205,8 +1216,28 @@ fn foreground_recovers_claim_and_retry_crash_windows_without_duplicate_claims() 
             )
             .expect("seed claim label projection");
         }
-        let output = fixture
-            .command()
+        let mut command = if name == "released-executor-receipt-failure" {
+            let mut command = fixture.configured_command();
+            command.args([
+                "autonomous",
+                "start",
+                "--foreground",
+                "--max-cycles",
+                "2",
+                "--poll-interval-sec",
+                "0",
+                "--repo",
+                "test/repo",
+                "--repo-dir",
+                fixture.repo_dir.to_str().expect("repo path"),
+                "--branch",
+                "main",
+            ]);
+            command
+        } else {
+            fixture.command()
+        };
+        let output = command
             .env("PATH", path_with(&bridge.bin))
             .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
             .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
