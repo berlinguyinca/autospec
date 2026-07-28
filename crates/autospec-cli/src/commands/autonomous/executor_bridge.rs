@@ -8080,9 +8080,16 @@ pub(crate) fn build_implementer_prompt(
          - Autospec Rust owns local commits and all remote mutations after independently verifying your work.\n\
          \n\
          Implement the issue and run its required local tests. Leave the verified diff in the worktree.\n\
-         Write exactly one Closeout report to {closeout}; it must contain Result, labeled Claims,\n\
-         Proof type, Before/after, Artifacts with rerunnable commands, Scoped git status,\n\
-         and One likely hidden failure.\n\
+         Write exactly one Closeout report to {closeout} and make your final response byte-for-byte\n\
+         identical to that report. Use exactly this field shape with no other headings or prose:\n\
+         ## Closeout report\n\
+         Result: <one-line outcome>\n\
+         Claims: <[verified]|[assumed]|[couldnt-verify]|[likely-wrong]> <runtime|static> <claim>\n\
+         Proof type: <runtime|static>\n\
+         Before/after: <measurable delta or n/a with reason>\n\
+         Artifacts: <exact paths and a rerunnable command>\n\
+         Scoped git status: <only files touched for this issue>\n\
+         One likely hidden failure: <single most probable remaining defect>\n\
          \n\
          Issue title:\n{title}\n\
          \n\
@@ -9023,7 +9030,7 @@ pub(crate) fn prove_implementation(
         );
     }
     snapshot.verify(&state.identity.repository_path, &state.identity.branch)?;
-    let closeout_body = validate_closeout_report(&state.identity.worktree, closeout_path)?;
+    let closeout_body = ensure_canonical_closeout_report(&state.identity.worktree, closeout_path)?;
     let canonical_closeout = fs::canonicalize(closeout_path)
         .map_err(|error| format!("canonicalize executor Closeout report: {error}"))?;
     let closeout_digest = sha256_hex(closeout_body.as_bytes());
@@ -9049,6 +9056,12 @@ pub(crate) fn prove_implementation(
 }
 
 fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, String> {
+    let body = read_private_closeout_report(worktree, path)?;
+    validate_closeout_report_body(&body)?;
+    Ok(body)
+}
+
+fn read_private_closeout_report(worktree: &Path, path: &Path) -> Result<String, String> {
     if !path.is_absolute()
         || path
             .components()
@@ -9077,6 +9090,10 @@ fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, Stri
     if body.len() > 64 * 1024 {
         return Err("executor Closeout report exceeds 64 KiB".to_string());
     }
+    Ok(body)
+}
+
+fn validate_closeout_report_body(body: &str) -> Result<(), String> {
     let lines = body.lines().collect::<Vec<_>>();
     let headings = lines
         .iter()
@@ -9181,7 +9198,38 @@ fn validate_closeout_report(worktree: &Path, path: &Path) -> Result<String, Stri
             "executor Closeout report runtime [verified] claim requires runtime proof".to_string(),
         );
     }
-    Ok(body)
+    Ok(())
+}
+
+fn ensure_canonical_closeout_report(worktree: &Path, path: &Path) -> Result<String, String> {
+    let body = read_private_closeout_report(worktree, path)?;
+    if validate_closeout_report_body(&body).is_ok() {
+        return Ok(body);
+    }
+    let digest = sha256_hex(body.as_bytes());
+    let archive = path.with_file_name(format!("executor-closeout.invalid-{}.md", &digest[..16]));
+    write_private_create_once(
+        &archive,
+        body.as_bytes(),
+        "invalid executor Closeout report archive",
+    )?;
+    let normalized = format!(
+        "## Closeout report\n\n\
+Result: Local implementation completed; Rust-owned verification remains authoritative.\n\
+Claims: [assumed] static the executor exited successfully but returned an invalid structured report.\n\
+Proof type: static\n\
+Before/after: n/a — malformed executor evidence was normalized without changing the implementation.\n\
+Artifacts: `{archive}`; rerun with `git show HEAD`.\n\
+Scoped git status: Rust verifies the exact issue worktree before any remote mutation.\n\
+One likely hidden failure: The executor summary may not match the committed implementation.",
+        archive = archive.display(),
+    );
+    write_private_atomic(
+        path,
+        normalized.as_bytes(),
+        "normalized executor Closeout report",
+    )?;
+    validate_closeout_report(worktree, path)
 }
 
 fn contains_issue_closing_directive(line: &str) -> bool {
@@ -19522,7 +19570,7 @@ fn recoverable_implementation_completion_for_state(
         }
         Ok(_) => {}
     }
-    validate_closeout_report(&state.identity.worktree, &closeout)?;
+    ensure_canonical_closeout_report(&state.identity.worktree, &closeout)?;
     Ok(true)
 }
 
@@ -21919,6 +21967,83 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_repairs_invalid_closeout() {
+        let (_fixture, state, state_path, _) =
+            zero_effect_classifier_fixture("invalid-closeout-recovery", false, false);
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "implemented\n",
+        )
+        .expect("write implementation");
+        git(&state.identity.worktree, &["add", "implementation.txt"]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "test: preserve completed implementation"],
+        );
+        let head_before = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        fs::create_dir_all(closeout.parent().expect("closeout parent"))
+            .expect("create closeout parent");
+        let invalid = "Implemented the issue.\n\nCloseout: executor-closeout.md\n";
+        fs::write(&closeout, invalid).expect("write invalid closeout");
+        fs::set_permissions(&closeout, fs::Permissions::from_mode(0o600))
+            .expect("secure invalid closeout");
+
+        assert!(
+            super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("repair invalid closeout")
+        );
+
+        let normalized = fs::read_to_string(&closeout).expect("read normalized closeout");
+        assert!(
+            super::validate_closeout_report(&state.identity.worktree, &closeout).is_ok(),
+            "{normalized}"
+        );
+        assert!(normalized.contains("Claims: [assumed] static"));
+        assert_eq!(
+            git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]),
+            head_before,
+            "closeout repair must preserve the committed implementation"
+        );
+        let archive_count = fs::read_dir(closeout.parent().expect("closeout parent"))
+            .expect("read closeout directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("executor-closeout.invalid-")
+            })
+            .count();
+        assert_eq!(
+            archive_count, 1,
+            "original malformed output must be archived"
+        );
+        let prompt = super::build_implementer_prompt(
+            &state.identity,
+            "Implement issue",
+            "## Goal\n\nImplement the issue.",
+            &closeout,
+        )
+        .expect("build exact closeout prompt");
+        for field in [
+            "Result:",
+            "Claims:",
+            "Proof type:",
+            "Before/after:",
+            "Artifacts:",
+            "Scoped git status:",
+            "One likely hidden failure:",
+        ] {
+            assert!(prompt.contains(field), "prompt omitted {field}");
+        }
+        assert!(prompt.contains("final response byte-for-byte"));
     }
 
     #[test]
