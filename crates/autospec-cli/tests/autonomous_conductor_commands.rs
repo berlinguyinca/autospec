@@ -1410,7 +1410,7 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
 }
 
 #[test]
-fn foreground_retries_an_exact_zero_effect_completion_on_a_fresh_claim_generation() {
+fn foreground_reclaims_prunable_zero_effect_branch_on_a_fresh_claim_generation() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
@@ -1472,14 +1472,24 @@ fn foreground_retries_an_exact_zero_effect_completion_on_a_fresh_claim_generatio
         &fs::read_to_string(&invocation).expect("read zero-effect invocation"),
     )
     .expect("parse zero-effect invocation");
-    let missing_scope = Path::new(
+    let zero_effect_worktree = PathBuf::from(
         zero_effect_state["identity"]["worktree"]
             .as_str()
             .expect("zero-effect worktree"),
-    )
-    .parent()
-    .expect("zero-effect scope");
+    );
+    let missing_scope = zero_effect_worktree.parent().expect("zero-effect scope");
     fs::remove_dir_all(missing_scope).expect("remove complete zero-effect scope");
+    let registry = git_fixture(&fixture.repo_dir, &["worktree", "list", "--porcelain"]);
+    assert!(
+        registry.contains(&format!(
+            "worktree {}",
+            zero_effect_state["identity"]["worktree"]
+                .as_str()
+                .expect("zero-effect worktree")
+        )) && registry.contains("branch refs/heads/feat/autonomous-issue-42")
+            && registry.lines().any(|line| line.starts_with("prunable ")),
+        "real conductor fixture must enter the exact prunable branch state: {registry}"
+    );
     zero_effect_state["phase"] = serde_json::json!("implementation_complete");
     fs::write(&invocation, format!("{zero_effect_state}\n"))
         .expect("seed exact post-child completion phase");
@@ -1519,6 +1529,41 @@ fn foreground_retries_an_exact_zero_effect_completion_on_a_fresh_claim_generatio
         serde_json::json!("retryable:executor_zero_effect_completion");
     fs::write(&invocation, format!("{completed_state}\n"))
         .expect("seed Complete invocation before terminal receipt publication");
+    let transfer_path = missing_scope.join("issue-42.ownership-transfer.json");
+    let transfer: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&transfer_path).expect("read available ownership transfer"),
+    )
+    .expect("parse available ownership transfer");
+    assert_eq!(
+        transfer["state"], "available",
+        "old generation must release the exact worktree before the fresh claim"
+    );
+    let old_claim_id = transfer["from_claim_id"]
+        .as_str()
+        .expect("old transfer claim")
+        .to_string();
+    let old_invocation_id = transfer["from_invocation_id"]
+        .as_str()
+        .expect("old transfer invocation")
+        .to_string();
+    assert!(
+        zero_effect_worktree.is_dir(),
+        "old-generation recovery must first restore the exact worktree"
+    );
+    fs::remove_dir_all(&zero_effect_worktree)
+        .expect("make the recovered worktree registration prunable");
+    let registry = git_fixture(&fixture.repo_dir, &["worktree", "list", "--porcelain"]);
+    let expected_path = format!("worktree {}", zero_effect_worktree.display());
+    let expected_branch = "branch refs/heads/feat/autonomous-issue-42";
+    let prunable = registry.split("\n\n").any(|block| {
+        block.lines().any(|line| line == expected_path)
+            && block.lines().any(|line| line == expected_branch)
+            && block.lines().any(|line| line.starts_with("prunable "))
+    });
+    assert!(
+        prunable,
+        "fresh generation must begin from the exact prunable registration: {registry}"
+    );
 
     let mut terminal_recovery_command = fixture.command();
     configure(&mut terminal_recovery_command);
@@ -1571,6 +1616,26 @@ fn foreground_retries_an_exact_zero_effect_completion_on_a_fresh_claim_generatio
             .iter()
             .any(|receipt| receipt.contains("\"status\":\"merged\"")),
         "the fresh generation did not merge: {terminal_receipts:?}"
+    );
+    let merged_receipt = terminal_receipts
+        .iter()
+        .filter_map(|receipt| serde_json::from_str::<serde_json::Value>(receipt).ok())
+        .find(|receipt| receipt["status"] == "merged")
+        .expect("fresh merged terminal receipt");
+    let adopted_transfer: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&transfer_path).expect("read adopted ownership transfer"),
+    )
+    .expect("parse adopted ownership transfer");
+    assert_eq!(adopted_transfer["state"], "adopted");
+    assert_eq!(adopted_transfer["from_claim_id"], old_claim_id);
+    assert_eq!(adopted_transfer["from_invocation_id"], old_invocation_id);
+    assert_eq!(
+        adopted_transfer["to_claim_id"], merged_receipt["claim_id"],
+        "fresh merged claim must own the reclaimed worktree"
+    );
+    assert_eq!(
+        adopted_transfer["to_invocation_id"], merged_receipt["invocation_id"],
+        "fresh merged invocation must own the reclaimed worktree"
     );
 }
 
@@ -4322,6 +4387,7 @@ issue() {
 claim_issue() {
   if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
     case " $* " in
+      *"{labels: [.labels[] | {name: .name}]}"*) if [ "$mode" = claimed ]; then labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then labels='[]'; else labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi ;;
       *" --jq "*) if [ "$mode" = claimed ]; then labels='["in-progress-by-bot","safety:reviewed"]'; elif [ "$mode" = terminal ]; then labels='[]'; else labels='["auto-implement","safety:reviewed"]'; fi ;;
       *) if [ "$mode" = claimed ]; then labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then labels='[]'; else labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi ;;
     esac
