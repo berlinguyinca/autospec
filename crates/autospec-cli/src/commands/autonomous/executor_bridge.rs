@@ -3096,8 +3096,8 @@ fn select_evidence_generation(lane_root: &Path, base_input_digest: &str) -> Resu
         }
         if active_base_input_digest != base_input_digest {
             let attempt_root = lane_root.join(attempt);
+            reconcile_nested_direct_ownership(&attempt_root)?;
             if evidence_attempt_has_any_artifacts(&attempt_root)? {
-                reconcile_nested_direct_ownership(&attempt_root)?;
                 return rotate_partial_evidence_attempt(
                     lane_root,
                     attempt,
@@ -35467,6 +35467,75 @@ exit 19
             .expect("same policy reuses rotated generation");
         assert_eq!(second, first);
         assert_eq!(diagnostics(), 1, "same policy rotated more than once");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_generation_selection_repairs_stale_owned_attempt_before_probe() {
+        // Break caught: strict artifact probing rejecting same-owner attempt directories created
+        // by an older release before the production generation selector can repair them.
+        let fixture = GitFixture::new("generation-select-legacy-evidence");
+        let lane_root = fixture.root.join("lane");
+        super::ensure_private_directory(&lane_root).expect("lane root");
+        let old_base = autospec_core::autonomous::waterfall::sha256_hex(b"legacy-input");
+        let current_base = autospec_core::autonomous::waterfall::sha256_hex(b"current-input");
+        let old_relative = format!("attempts/{}", &old_base[..24]);
+        let old_attempt = lane_root.join(&old_relative);
+        let nested = old_attempt.join("qa/smoke");
+        fs::create_dir_all(&nested).expect("legacy nested attempt");
+        super::write_private_create_once(
+            &nested.join("result.json"),
+            b"{\"exit\":0}",
+            "legacy evidence artifact",
+        )
+        .expect("legacy artifact");
+        for directory in [&old_attempt, &old_attempt.join("qa"), &nested] {
+            fs::set_permissions(directory, fs::Permissions::from_mode(0o775))
+                .expect("make legacy attempt directory");
+        }
+        let active = serde_json::json!({
+            "schema": 2,
+            "attempt_path": old_relative,
+            "input_digest": old_base,
+            "base_input_digest": old_base,
+            "intent_digest": "legacy",
+            "runtime_session_id": serde_json::Value::Null,
+        })
+        .to_string();
+        super::write_private_atomic(
+            &lane_root.join("active.json"),
+            active.as_bytes(),
+            "legacy active evidence",
+        )
+        .expect("legacy active marker");
+
+        let selected = super::select_evidence_generation(&lane_root, &current_base)
+            .expect("repair and rotate stale owned attempt");
+
+        assert_ne!(selected, old_base);
+        assert!(!old_attempt.exists(), "stale attempt was not archived");
+        let archived = fs::read_dir(lane_root.join("diagnostics"))
+            .expect("diagnostic generations")
+            .flatten()
+            .next()
+            .expect("archived legacy generation")
+            .path();
+        for directory in [&archived, &archived.join("qa"), &archived.join("qa/smoke")] {
+            assert_eq!(
+                fs::metadata(directory)
+                    .expect("repaired directory metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "{}",
+                directory.display()
+            );
+        }
+        assert!(
+            archived.join("qa/smoke/result.json").is_file(),
+            "rotation lost the repaired legacy artifact"
+        );
     }
 
     #[test]
