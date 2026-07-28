@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::{CString, OsString};
+use std::ffi::{CString, OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 #[cfg(unix)]
@@ -16580,11 +16580,12 @@ fn spawn_blocked_harness(
     sinks: &OutputSinkPaths,
     attempt_id: Option<&str>,
 ) -> Result<ForkedChild, SpawnFailure> {
-    let supervisor_executable = fs::canonicalize(
+    let argv_zero = std::env::args_os().next();
+    let supervisor_executable = resolve_executor_supervisor_executable(
         std::env::current_exe()
-            .map_err(|error| format!("resolve executor supervisor executable: {error}"))?,
-    )
-    .map_err(|error| format!("canonicalize executor supervisor executable: {error}"))?;
+            .map_err(|error| format!("resolve executor supervisor executable: {error}")),
+        argv_zero.as_deref(),
+    )?;
     let supervisor_argv_digest = argv_digest(&std::env::args().skip(1).collect::<Vec<_>>());
     let executable = CString::new(harness.program.as_os_str().as_bytes())
         .map_err(|_| "executor program contains a NUL byte".to_string())?;
@@ -17001,6 +17002,33 @@ fn spawn_blocked_harness(
             }
         }
     }
+}
+
+fn resolve_executor_supervisor_executable(
+    current_executable: Result<PathBuf, String>,
+    argv_zero: Option<&OsStr>,
+) -> Result<PathBuf, String> {
+    let primary_error = match current_executable {
+        Ok(path) => match fs::canonicalize(&path) {
+            Ok(canonical) => return Ok(canonical),
+            Err(error) => format!("canonicalize executor supervisor executable: {error}"),
+        },
+        Err(error) => error,
+    };
+    let fallback = argv_zero
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            format!(
+                "{primary_error}; executor supervisor argv-zero fallback is not an absolute path"
+            )
+        })?;
+    fs::canonicalize(fallback).map_err(|error| {
+        format!(
+            "{primary_error}; canonicalize executor supervisor argv-zero fallback {}: {error}",
+            fallback.display()
+        )
+    })
 }
 
 fn launch_and_supervise(
@@ -20943,6 +20971,28 @@ mod tests {
 
     static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
     static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn autonomous_executor_bridge_recovers_supervisor_executable_from_argv_zero() {
+        let fixture = test_root("supervisor-executable-fallback");
+        let executable = fixture.join("autospec");
+        fs::write(&executable, b"installed binary").expect("write fallback executable");
+        let missing = fixture.join("autospec-deleted");
+
+        let resolved = super::resolve_executor_supervisor_executable(
+            Err(format!(
+                "canonicalize executor supervisor executable: {}",
+                missing.display()
+            )),
+            Some(executable.as_os_str()),
+        )
+        .expect("resolve stable argv-zero fallback");
+
+        assert_eq!(
+            resolved,
+            fs::canonicalize(executable).expect("canonical fallback")
+        );
+    }
 
     #[cfg(target_os = "linux")]
     struct DetachedSupervisorCleanup(ProcessIdentity);
