@@ -2105,6 +2105,7 @@ struct ChangedPaths {
     paths: BTreeSet<String>,
     added: BTreeSet<String>,
     deleted: BTreeSet<String>,
+    type_changed: BTreeSet<String>,
 }
 
 impl ChangedPaths {
@@ -2122,6 +2123,10 @@ impl ChangedPaths {
 
     fn is_deleted(&self, path: &str) -> bool {
         self.deleted.contains(path)
+    }
+
+    fn is_type_changed(&self, path: &str) -> bool {
+        self.type_changed.contains(path)
     }
 }
 
@@ -2173,8 +2178,13 @@ fn changed_paths_since_base(worktree: &Path, base_oid: &str) -> Result<ChangedPa
                 changed.deleted.insert(path.clone());
                 changed.paths.insert(path);
             }
-            'M' | 'T' => {
+            'M' => {
                 changed.paths.insert(next_path()?);
+            }
+            'T' => {
+                let path = next_path()?;
+                changed.type_changed.insert(path.clone());
+                changed.paths.insert(path);
             }
             'R' => {
                 let old = next_path()?;
@@ -2358,8 +2368,20 @@ fn npm_dependency_inputs_changed(
         let current = if changed_paths.is_deleted(path) {
             None
         } else {
-            let body = fs::read(worktree.join(path))
-                .map_err(|error| format!("read current {path}: {error}"))?;
+            let current_path = worktree.join(path);
+            reject_symlink_path(&current_path)
+                .map_err(|error| format!("current {path} is unsafe: {error}"))?;
+            if !fs::metadata(&current_path)
+                .map_err(|error| format!("inspect current {path}: {error}"))?
+                .is_file()
+            {
+                return Err(format!("current {path} is not a regular file"));
+            }
+            if changed_paths.is_type_changed(path) {
+                return Ok(true);
+            }
+            let body =
+                fs::read(&current_path).map_err(|error| format!("read current {path}: {error}"))?;
             Some(parse_package_json(&body, &format!("current {path}"))?)
         };
         let base = if changed_paths.is_added(path) {
@@ -21956,6 +21978,56 @@ mod tests {
         }
     }
 
+    fn scanner_fixtures_with_license(
+        root: &Path,
+        license_report: &str,
+    ) -> super::ScannerExecutables {
+        let bin = root.join("scanner-bin");
+        fs::create_dir_all(&bin).expect("scanner bin");
+        let gitleaks = bin.join("gitleaks");
+        write_executable(
+            &gitleaks,
+            "#!/bin/sh\n\
+             set -eu\n\
+             report=''\n\
+             while [ \"$#\" -gt 0 ]; do\n\
+               if [ \"$1\" = --report-path ]; then report=\"$2\"; shift 2; else shift; fi\n\
+             done\n\
+             printf '%s' '[]' > \"$report\"\n",
+        );
+        let semgrep = bin.join("semgrep");
+        write_executable(
+            &semgrep,
+            "#!/bin/sh\n\
+             set -eu\n\
+             printf '%s\\n' '{\"results\":[],\"errors\":[],\"paths\":{\"scanned\":[\"package.json\"],\"skipped\":[]}}'\n",
+        );
+        let trivy = bin.join("trivy");
+        write_executable(
+            &trivy,
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' '{\"Results\":[{\"Target\":\".\"}]}'\n",
+        );
+        let license_checker = bin.join("license-checker");
+        write_executable(
+            &license_checker,
+            &format!(
+                "#!/bin/sh\n\
+                 set -eu\n\
+                 for argument in \"$@\"; do\n\
+                   [ \"$argument\" != --failOn ] || exit 97\n\
+                 done\n\
+                 printf '%s\\n' '{license_report}'\n"
+            ),
+        );
+        super::ScannerExecutables::from_paths(BTreeMap::from([
+            ("gitleaks".to_string(), gitleaks),
+            ("semgrep".to_string(), semgrep),
+            ("trivy".to_string(), trivy),
+            ("license-checker".to_string(), license_checker),
+        ]))
+        .expect("scanner paths")
+    }
+
     fn environment(table: &Path) -> BTreeMap<String, OsString> {
         BTreeMap::from([
             (
@@ -37419,48 +37491,10 @@ exit 19
         git(&fixture.repo, &["add", "package.json"]);
         git(&fixture.repo, &["commit", "-m", "change script"]);
 
-        let bin = fixture.root.join("scanner-bin");
-        fs::create_dir_all(&bin).expect("scanner bin");
-        let gitleaks = bin.join("gitleaks");
-        write_executable(
-            &gitleaks,
-            "#!/bin/sh\n\
-             set -eu\n\
-             report=''\n\
-             while [ \"$#\" -gt 0 ]; do\n\
-               if [ \"$1\" = --report-path ]; then report=\"$2\"; shift 2; else shift; fi\n\
-             done\n\
-             printf '%s' '[]' > \"$report\"\n",
+        let scanners = scanner_fixtures_with_license(
+            &fixture.root,
+            r#"{"fixture@1.0.0":{"licenses":"LGPL-3.0"}}"#,
         );
-        let semgrep = bin.join("semgrep");
-        write_executable(
-            &semgrep,
-            "#!/bin/sh\n\
-             set -eu\n\
-             printf '%s\\n' '{\"results\":[],\"errors\":[],\"paths\":{\"scanned\":[\"package.json\"],\"skipped\":[]}}'\n",
-        );
-        let trivy = bin.join("trivy");
-        write_executable(
-            &trivy,
-            "#!/bin/sh\nset -eu\nprintf '%s\\n' '{\"Results\":[{\"Target\":\".\"}]}'\n",
-        );
-        let license_checker = bin.join("license-checker");
-        write_executable(
-            &license_checker,
-            "#!/bin/sh\n\
-             set -eu\n\
-             for argument in \"$@\"; do\n\
-               [ \"$argument\" != --failOn ] || exit 97\n\
-             done\n\
-             printf '%s\\n' '{\"fixture@1.0.0\":{\"licenses\":\"LGPL-3.0\"}}'\n",
-        );
-        let scanners = super::ScannerExecutables::from_paths(BTreeMap::from([
-            ("gitleaks".to_string(), gitleaks),
-            ("semgrep".to_string(), semgrep),
-            ("trivy".to_string(), trivy),
-            ("license-checker".to_string(), license_checker),
-        ]))
-        .expect("scanner paths");
 
         let observations = super::run_required_scanners(
             &fixture.repo,
@@ -37498,6 +37532,48 @@ exit 19
                 & 0o777,
             0o600
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_license_checker_rejects_type_changed_symlink_manifest() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("license-type-changed-symlink");
+        let package = r#"{"dependencies":{"fixture":"1.0.0"}}"#;
+        fs::write(fixture.repo.join("package.json"), package).expect("baseline manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline manifest"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        let external = fixture.root.join("external-package.json");
+        fs::write(&external, package).expect("external manifest");
+        fs::remove_file(fixture.repo.join("package.json")).expect("remove regular manifest");
+        std::os::unix::fs::symlink(&external, fixture.repo.join("package.json"))
+            .expect("symlink manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "type change manifest"]);
+        let changed =
+            super::changed_paths_since_base(&fixture.repo, &base_oid).expect("changed paths");
+        assert!(
+            changed.is_type_changed("package.json"),
+            "Git T status must remain explicit: {changed:?}"
+        );
+
+        let scanners = scanner_fixtures_with_license(
+            &fixture.root,
+            r#"{"fixture@1.0.0":{"licenses":"LGPL-3.0"}}"#,
+        );
+
+        let error = super::run_required_scanners(
+            &fixture.repo,
+            &base_oid,
+            &fixture.root.join("scanner-evidence"),
+            &scanners,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("a type-changed symlink manifest must fail attribution");
+
+        assert!(error.contains("symlink"), "{error}");
     }
 
     #[test]
