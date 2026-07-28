@@ -105,6 +105,7 @@ enum ZeroEffectRecoveryFailpoint {
     AfterTransfer = 2,
     AfterRuntimeClose = 3,
     AfterClaimTransition = 4,
+    AfterScopeCreate = 5,
 }
 
 #[cfg(test)]
@@ -17699,6 +17700,39 @@ fn zero_effect_remote_and_branch_are_exact(
     zero_effect_remote_snapshot_is_exact(state_path, state)
 }
 
+fn exact_zero_effect_scope_root(state: &PersistedInvocation) -> Result<PathBuf, String> {
+    let expected_scope =
+        PathBuf::from("/tmp/autospec-executor").join(safe_scope(&state.identity.repository)?);
+    let expected_worktree = expected_scope.join(format!("issue-{}", state.identity.issue));
+    if state.identity.worktree != expected_worktree {
+        return Err(
+            "executor zero-effect worktree is outside its deterministic private scope".to_string(),
+        );
+    }
+    Ok(expected_scope)
+}
+
+fn validate_zero_effect_scope_identity(repo: &Path, scope_root: &Path) -> Result<bool, String> {
+    reject_symlink_path(scope_root)?;
+    let executor_root = scope_root
+        .parent()
+        .ok_or_else(|| "executor zero-effect scope has no deterministic root".to_string())?;
+    let root_metadata = fs::metadata(executor_root)
+        .map_err(|error| format!("read executor zero-effect root metadata: {error}"))?;
+    if !root_metadata.is_dir() {
+        return Err("executor zero-effect root is not a directory".to_string());
+    }
+    validate_executor_ownership(repo, &[executor_root])?;
+    if !scope_root
+        .try_exists()
+        .map_err(|error| format!("inspect executor zero-effect scope: {error}"))?
+    {
+        return Ok(false);
+    }
+    validate_private_directory(scope_root)?;
+    Ok(true)
+}
+
 fn exact_prunable_zero_effect_completion(
     state_path: &Path,
     state: &PersistedInvocation,
@@ -17708,17 +17742,13 @@ fn exact_prunable_zero_effect_completion(
     {
         return Ok(false);
     }
-    let scope_root = state
-        .identity
-        .worktree
-        .parent()
-        .ok_or_else(|| "executor zero-effect worktree has no private scope root".to_string())?;
+    let scope_root = exact_zero_effect_scope_root(state)?;
     let repo = fs::canonicalize(&state.identity.repository_path)
         .map_err(|error| format!("canonicalize zero-effect executor repository: {error}"))?;
     if repo != state.identity.repository_path {
         return Err("executor zero-effect repository identity changed".to_string());
     }
-    validate_executor_ownership(&repo, &[scope_root])?;
+    validate_zero_effect_scope_identity(&repo, &scope_root)?;
     reject_symlink_path(&state.identity.worktree)?;
     if !zero_effect_remote_and_branch_are_exact(state_path, state)? {
         return Ok(false);
@@ -17804,24 +17834,16 @@ fn marked_zero_effect_completion_is_exact(
     state: &PersistedInvocation,
 ) -> Result<bool, String> {
     validate_zero_effect_recovery_marker(state_path, state)?;
+    let scope_root = exact_zero_effect_scope_root(state)?;
     if !zero_effect_completion_header_is_exact(state_path, state)?
         || !zero_effect_remote_and_branch_are_exact(state_path, state)?
     {
         return Ok(false);
     }
     if state.identity.worktree.exists() {
-        let scope_root =
-            state.identity.worktree.parent().ok_or_else(|| {
-                "executor zero-effect worktree has no private scope root".to_string()
-            })?;
-        validate_repaired_worktree(state, &state.identity.repository_path, scope_root)?;
+        validate_repaired_worktree(state, &state.identity.repository_path, &scope_root)?;
         return Ok(true);
     }
-    let scope_root = state
-        .identity
-        .worktree
-        .parent()
-        .ok_or_else(|| "executor zero-effect worktree has no private scope root".to_string())?;
     let repair_intent =
         scope_root.join(format!("issue-{}.repair-intent.json", state.identity.issue));
     Ok(repair_intent.is_file() || exact_prunable_zero_effect_completion(state_path, state)?)
@@ -17862,6 +17884,11 @@ fn prepare_zero_effect_recovery(
             "executor marked zero-effect recovery evidence changed before repair".to_string(),
         );
     }
+    ensure_marked_zero_effect_scope(state_path, state)?;
+    zero_effect_recovery_failpoint(
+        ZeroEffectRecoveryFailpoint::AfterScopeCreate,
+        "after scope recreation",
+    )?;
     repair_missing_post_child_worktree(state)?;
     if !marked_zero_effect_completion_is_exact(state_path, state)? {
         return Err(
@@ -17870,6 +17897,47 @@ fn prepare_zero_effect_recovery(
     }
     zero_effect_recovery_failpoint(ZeroEffectRecoveryFailpoint::AfterRepair, "after repair")?;
     Ok(true)
+}
+
+fn ensure_marked_zero_effect_scope(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<(), String> {
+    validate_zero_effect_recovery_marker(state_path, state)?;
+    let scope_root = exact_zero_effect_scope_root(state)?;
+    let repo = fs::canonicalize(&state.identity.repository_path)
+        .map_err(|error| format!("canonicalize zero-effect recovery repository: {error}"))?;
+    if validate_zero_effect_scope_identity(&repo, &scope_root)? {
+        return Ok(());
+    }
+    let executor_root = scope_root
+        .parent()
+        .ok_or_else(|| "executor zero-effect scope has no deterministic root".to_string())?;
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(&scope_root) {
+        Ok(()) => {
+            #[cfg(unix)]
+            File::open(executor_root)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| format!("sync recreated executor zero-effect scope: {error}"))?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(format!(
+                "recreate exact executor zero-effect scope {}: {error}",
+                scope_root.display()
+            ));
+        }
+    }
+    if !validate_zero_effect_scope_identity(&repo, &scope_root)? {
+        return Err("executor zero-effect scope disappeared after recreation".to_string());
+    }
+    Ok(())
 }
 
 fn prepare_zero_effect_retry(
@@ -19304,6 +19372,7 @@ mod tests {
     struct GitFixture {
         root: PathBuf,
         repo: PathBuf,
+        executor_scope_roots: Vec<PathBuf>,
     }
 
     impl GitFixture {
@@ -19353,7 +19422,11 @@ mod tests {
             );
             git(&repo, &["config", "user.email", "autospec@example.invalid"]);
             git(&repo, &["config", "user.name", "Autospec Test"]);
-            Self { root, repo }
+            Self {
+                root,
+                repo,
+                executor_scope_roots: Vec::new(),
+            }
         }
 
         fn branch(&self, branch: &str) -> String {
@@ -19370,6 +19443,9 @@ mod tests {
 
     impl Drop for GitFixture {
         fn drop(&mut self) {
+            for scope_root in &self.executor_scope_roots {
+                let _ = fs::remove_dir_all(scope_root);
+            }
             let _ = fs::remove_dir_all(&self.root);
         }
     }
@@ -19727,8 +19803,17 @@ mod tests {
         changed_head: bool,
         remove_worktree: bool,
     ) -> (GitFixture, PersistedInvocation, PathBuf, PathBuf) {
-        let fixture = GitFixture::new(label);
-        let worktree = fixture.root.join("zero-effect-worktree");
+        let mut fixture = GitFixture::new(label);
+        let repository_scope = format!(
+            "test/{label}-{}-{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let scope_root = PathBuf::from("/tmp/autospec-executor")
+            .join(super::safe_scope(&repository_scope).expect("safe repository scope"));
+        super::ensure_private_directory(&scope_root).expect("private executor scope");
+        fixture.executor_scope_roots.push(scope_root.clone());
+        let worktree = scope_root.join("issue-42");
         git(
             &fixture.repo,
             &[
@@ -19747,6 +19832,7 @@ mod tests {
         }
         let mut state = supervision_state(&fixture);
         state.phase = BridgePhase::ImplementationComplete;
+        state.identity.repository = repository_scope;
         state.identity.worktree = fs::canonicalize(&worktree).expect("canonical worktree");
         state.identity.runtime_environment_dir = None;
         state.identity.runtime_session_id = None;
@@ -19876,6 +19962,141 @@ mod tests {
         assert!(
             !super::exact_prunable_zero_effect_completion(&ambiguous_state_path, &ambiguous)
                 .expect("ambiguous prunable registrations remain fail-closed")
+        );
+    }
+
+    #[cfg(unix)]
+    fn assert_private_scope(scope_root: &Path) {
+        assert!(
+            scope_root.is_dir(),
+            "recovery must recreate the exact scope"
+        );
+        assert_eq!(
+            fs::metadata(scope_root)
+                .expect("recreated scope metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "recreated scope must remain private"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_recreates_absent_exact_scope_after_durable_marker() {
+        let (_fixture, state, state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-missing-scope", false, true);
+        let scope_root = state.identity.worktree.parent().expect("scope root");
+        fs::remove_dir(scope_root).expect("remove empty executor scope");
+
+        assert!(
+            super::recoverable_zero_effect_completion_for_state(&state_path, &state)
+                .expect("classify exact missing-scope completion")
+        );
+        assert!(
+            !scope_root.exists(),
+            "read-only classification must not recreate the scope"
+        );
+        assert!(
+            !super::zero_effect_recovery_marker_path(&state_path).exists(),
+            "read-only classification must not persist the recovery marker"
+        );
+
+        super::set_zero_effect_recovery_failpoint(
+            super::ZeroEffectRecoveryFailpoint::AfterScopeCreate,
+        );
+        let interrupted = super::prepare_zero_effect_recovery(&state_path, &state)
+            .expect_err("interrupt after exact scope recreation");
+        super::set_zero_effect_recovery_failpoint(super::ZeroEffectRecoveryFailpoint::None);
+        assert!(
+            interrupted.contains("after scope recreation"),
+            "{interrupted}"
+        );
+        assert!(
+            super::zero_effect_recovery_marker_path(&state_path).is_file(),
+            "scope recreation must occur only after the marker is durable"
+        );
+        assert!(
+            !state.identity.worktree.exists(),
+            "scope recreation crash must precede worktree repair"
+        );
+        assert_private_scope(scope_root);
+        assert!(
+            super::prepare_zero_effect_recovery(&state_path, &state)
+                .expect("resume after exact scope recreation crash"),
+            "recovery must repair the worktree idempotently after restart"
+        );
+        assert!(
+            super::prepare_zero_effect_recovery(&state_path, &state)
+                .expect("repeat completed missing-scope recovery"),
+            "completed recovery must remain idempotent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_missing_scope_rejects_nondeterministic_path() {
+        let (_nondeterministic_fixture, mut nondeterministic, state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-nondeterministic-scope", false, true);
+        nondeterministic.identity.worktree = nondeterministic
+            .identity
+            .worktree
+            .with_file_name("issue-999");
+        let error =
+            super::recoverable_zero_effect_completion_for_state(&state_path, &nondeterministic)
+                .expect_err("non-deterministic worktree must remain fail-closed");
+        assert!(error.contains("deterministic private scope"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_missing_scope_rejects_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let (symlink_fixture, symlink_state, symlink_state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-symlink-scope", false, true);
+        let symlink_scope = symlink_state
+            .identity
+            .worktree
+            .parent()
+            .expect("symlink scope");
+        fs::remove_dir(symlink_scope).expect("remove empty symlink scope");
+        let foreign = symlink_fixture.root.join("foreign-scope");
+        fs::create_dir(&foreign).expect("create foreign scope target");
+        symlink(&foreign, symlink_scope).expect("install foreign scope symlink");
+        let error = super::recoverable_zero_effect_completion_for_state(
+            &symlink_state_path,
+            &symlink_state,
+        )
+        .expect_err("symlink scope must remain fail-closed");
+        assert!(error.contains("symlink"), "{error}");
+        assert!(
+            !super::zero_effect_recovery_marker_path(&symlink_state_path).exists(),
+            "unsafe scope must not gain a recovery marker"
+        );
+        fs::remove_file(symlink_scope).expect("remove scope symlink");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_missing_scope_rejects_non_private_directory() {
+        let (_public_fixture, public_state, public_state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-public-scope", false, true);
+        let public_scope = public_state
+            .identity
+            .worktree
+            .parent()
+            .expect("public scope");
+        fs::set_permissions(public_scope, fs::Permissions::from_mode(0o755))
+            .expect("make scope non-private");
+        let error =
+            super::recoverable_zero_effect_completion_for_state(&public_state_path, &public_state)
+                .expect_err("non-private scope must remain fail-closed");
+        assert!(error.contains("private"), "{error}");
+        assert!(
+            !super::zero_effect_recovery_marker_path(&public_state_path).exists(),
+            "non-private scope must not gain a recovery marker"
         );
     }
 

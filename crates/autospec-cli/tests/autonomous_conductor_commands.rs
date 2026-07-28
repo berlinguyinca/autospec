@@ -1472,6 +1472,14 @@ fn foreground_retries_an_exact_zero_effect_completion_on_a_fresh_claim_generatio
         &fs::read_to_string(&invocation).expect("read zero-effect invocation"),
     )
     .expect("parse zero-effect invocation");
+    let missing_scope = Path::new(
+        zero_effect_state["identity"]["worktree"]
+            .as_str()
+            .expect("zero-effect worktree"),
+    )
+    .parent()
+    .expect("zero-effect scope");
+    fs::remove_dir_all(missing_scope).expect("remove complete zero-effect scope");
     zero_effect_state["phase"] = serde_json::json!("implementation_complete");
     fs::write(&invocation, format!("{zero_effect_state}\n"))
         .expect("seed exact post-child completion phase");
