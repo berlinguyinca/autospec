@@ -2328,16 +2328,13 @@ fn publish_trivy_diff_report(
     fs::read(durable).map_err(|error| format!("read durable Trivy report: {error}"))
 }
 
-fn npm_production_dependencies(value: Option<&serde_json::Value>) -> serde_json::Value {
-    let object = value.and_then(serde_json::Value::as_object);
-    serde_json::json!({
-        "dependencies": object.and_then(|value| value.get("dependencies")),
-        "optionalDependencies": object.and_then(|value| value.get("optionalDependencies")),
-        "bundledDependencies": object.and_then(|value| value.get("bundledDependencies")),
-        "bundleDependencies": object.and_then(|value| value.get("bundleDependencies")),
-        "peerDependencies": object.and_then(|value| value.get("peerDependencies")),
-        "peerDependenciesMeta": object.and_then(|value| value.get("peerDependenciesMeta")),
-    })
+fn npm_dependency_inputs(value: Option<&serde_json::Value>) -> serde_json::Value {
+    let mut object = value
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    object.remove("scripts");
+    serde_json::Value::Object(object)
 }
 
 fn parse_package_json(body: &[u8], source: &str) -> Result<serde_json::Value, String> {
@@ -2392,9 +2389,7 @@ fn npm_dependency_inputs_changed(
                 .map_err(|error| format!("read base {path}: {error}"))?;
             Some(parse_package_json(&body, &format!("base {path}"))?)
         };
-        if npm_production_dependencies(current.as_ref())
-            != npm_production_dependencies(base.as_ref())
-        {
+        if npm_dependency_inputs(current.as_ref()) != npm_dependency_inputs(base.as_ref()) {
             return Ok(true);
         }
     }
@@ -37532,6 +37527,49 @@ exit 19
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_license_checker_rejects_overrides_only_dependency_change() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        // Break caught: an npm override changing the production graph was classified as
+        // irrelevant, allowing a newly introduced forbidden license as if it were pre-existing.
+        let fixture = GitFixture::new("license-overrides-only-change");
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"dependencies":{"fixture":"1.0.0"},"overrides":{"transitive":"1.0.0"}}"#,
+        )
+        .expect("baseline manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline manifest"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"dependencies":{"fixture":"1.0.0"},"overrides":{"transitive":"2.0.0"}}"#,
+        )
+        .expect("override-only manifest change");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(
+            &fixture.repo,
+            &["commit", "-m", "change production override"],
+        );
+
+        let scanners = scanner_fixtures_with_license(
+            &fixture.root,
+            r#"{"transitive@2.0.0":{"licenses":"LGPL-3.0"}}"#,
+        );
+
+        let error = super::run_required_scanners(
+            &fixture.repo,
+            &base_oid,
+            &fixture.root.join("scanner-evidence"),
+            &scanners,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("an override-only graph change must enforce forbidden-license policy");
+
+        assert!(error.contains("forbidden license"), "{error}");
     }
 
     #[cfg(unix)]
