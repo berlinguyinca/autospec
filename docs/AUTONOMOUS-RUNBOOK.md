@@ -18,10 +18,19 @@ The resolved reviewer executable must be external to both the source repository
 and its issue worktree. Automatic reviewers run with a sanitized allowlist
 environment rather than inheriting the conductor environment. Codex uses its
 read-only sandbox; Claude receives only `Read`, `Glob`, and `Grep` in plan mode;
-OpenCode receives an inline runtime policy that denies every tool except read,
-glob, grep, list, and LSP. OpenCode's separate
+OpenCode selects a dedicated `autospec-reviewer` agent whose inline agent-level
+policy denies every tool except read, glob, grep, list, and LSP. Its config root
+is a private executor artifact directory, host and Claude-compatible config
+loading is disabled, and the external home/data roots used for provider
+authentication remain available. OpenCode's separate
 `AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER` remains required for implementation
 work, but automatic review does not use it.
+
+Inherited `PATH`, XDG roots, `CODEX_HOME`, and `CLAUDE_CONFIG_DIR` are
+canonicalized before launch and fail closed if they resolve inside either
+reviewed repository. The external normalizer invokes `env`, `wc`, and `cat`
+through canonical absolute system paths, so worktree or host `PATH` shadowing
+cannot change its verdict checks.
 
 Review command output, error output, and any
 harness-specific result are stored under the private executor state tree,
