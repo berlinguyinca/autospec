@@ -1576,6 +1576,8 @@ fn observe_terminal_label_release(
             &state.identity.repository,
             "--json",
             "labels",
+            "--jq",
+            "{labels: [.labels[] | {name: .name}]}",
         ])
         .envs(&adapter.environment)
         .output()
@@ -20434,6 +20436,201 @@ mod tests {
                 .expect_err("marker mismatch remains fail-closed")
                 .contains("identity mismatch")
         );
+    }
+
+    #[cfg(unix)]
+    fn run_complete_terminal_label_fixture(
+        name: &str,
+        label_mode: &str,
+    ) -> (
+        Result<super::BridgeRunReceipt, super::BridgeRunFailure>,
+        bool,
+        String,
+        String,
+    ) {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let (fixture, mut state, state_path, _) = zero_effect_classifier_fixture(name, false, true);
+        super::ensure_zero_effect_recovery_marker(&state_path, &state)
+            .expect("persist zero-effect recovery marker");
+        state.phase = super::BridgePhase::Complete;
+        state.terminal_result = Some("retryable:executor_zero_effect_completion".to_string());
+        super::write_invocation_atomic(&state_path, &state).expect("persist Complete invocation");
+
+        let claimed = autospec_core::claim::RunStateRecord::new(
+            state.identity.repository.clone(),
+            state.identity.issue,
+            state.identity.worker_id.clone(),
+            "claimed",
+            state.identity.branch.clone(),
+            "",
+            "claimed",
+            Vec::new(),
+            "2026-07-27T00:00:00Z",
+            "2026-07-27T00:00:00Z",
+            1,
+        )
+        .with_claim_id(state.identity.claim_id.clone());
+        assert!(crate::commands::claim::advance_claim_ref_for_test(
+            &state.identity.repository_path,
+            &claimed,
+        )
+        .expect("seed claimed generation"));
+        let released = autospec_core::claim::RunStateRecord::new(
+            state.identity.repository.clone(),
+            state.identity.issue,
+            state.identity.worker_id.clone(),
+            "released",
+            state.identity.branch.clone(),
+            "",
+            "retryable_released",
+            Vec::new(),
+            "2026-07-27T00:00:00Z",
+            "2026-07-27T00:00:00Z",
+            2,
+        )
+        .with_claim_id(state.identity.claim_id.clone());
+        assert!(crate::commands::claim::advance_claim_ref_for_test(
+            &state.identity.repository_path,
+            &released,
+        )
+        .expect("seed released claim"));
+
+        let bin = fixture.root.join("bin");
+        let arguments = fixture.root.join("terminal-label-arguments");
+        fs::create_dir(&bin).expect("create fake gh directory");
+        write_executable(
+            &bin.join("gh"),
+            r#"#!/bin/sh
+set -eu
+if [ "$1 $2" = "issue view" ]; then
+  printf '%s\n' "$@" > "$GH_TERMINAL_LABEL_ARGUMENTS"
+  projected=0
+  if [ "${8:-}" = "--jq" ] &&
+     [ "${9:-}" = '{labels: [.labels[] | {name: .name}]}' ]; then
+    projected=1
+  fi
+  case "$GH_TERMINAL_LABEL_MODE" in
+    metadata)
+      if [ "$projected" -eq 1 ]; then
+        printf '%s\n' '{"labels":[{"name":"bug"}]}'
+      else
+        printf '%s\n' '{"labels":[{"id":"LA_kwDO","name":"bug","description":"real metadata","color":"d73a4a"}]}'
+      fi
+      ;;
+    forbidden)
+      if [ "$projected" -eq 1 ]; then
+        printf '%s\n' '{"labels":[{"name":"in-progress-by-bot"}]}'
+      else
+        printf '%s\n' '{"labels":[{"id":"LA_lock","name":"in-progress-by-bot","description":"claim owner","color":"ededed"}]}'
+      fi
+      ;;
+    malformed)
+      printf '%s\n' '{"labels":[{"name":7}]}'
+      ;;
+    *)
+      exit 65
+      ;;
+  esac
+  exit 0
+fi
+exit 64
+"#,
+        );
+        let previous_path = std::env::var_os("PATH");
+        let previous_claim_remote = std::env::var_os("AUTOSPEC_CLAIM_GIT_REMOTE");
+        let previous_label_mode = std::env::var_os("GH_TERMINAL_LABEL_MODE");
+        let previous_label_arguments = std::env::var_os("GH_TERMINAL_LABEL_ARGUMENTS");
+        std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.root.join("remote.git"));
+        std::env::set_var("GH_TERMINAL_LABEL_MODE", label_mode);
+        std::env::set_var("GH_TERMINAL_LABEL_ARGUMENTS", &arguments);
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: state.identity.repository_path.clone(),
+            issue: state.identity.issue,
+            issue_title: "Normalize terminal labels".to_string(),
+            issue_body: "## Goal\n\nNormalize terminal labels.".to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: fixture.root.join("events.jsonl"),
+        };
+        let repository = request.repository.clone();
+
+        let result = super::run_executor_bridge(&request);
+        let receipt_exists = state_path.with_extension("terminal.json").is_file();
+        let arguments = fs::read_to_string(arguments).expect("read terminal label arguments");
+        for (key, previous) in [
+            ("PATH", previous_path),
+            ("AUTOSPEC_CLAIM_GIT_REMOTE", previous_claim_remote),
+            ("GH_TERMINAL_LABEL_MODE", previous_label_mode),
+            ("GH_TERMINAL_LABEL_ARGUMENTS", previous_label_arguments),
+        ] {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        (result, receipt_exists, arguments, repository)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_terminal_label_projects_real_github_metadata() {
+        // Break caught: removing the jq projection sends color/id/description into strict parsing.
+        let (result, receipt_exists, arguments, repository) =
+            run_complete_terminal_label_fixture("terminal-label-metadata", "metadata");
+
+        let receipt = result.expect("real GitHub label metadata must publish the terminal receipt");
+        assert!(matches!(
+            receipt.status,
+            super::BridgeRunStatus::Retryable { ref reason }
+                if reason == "executor_zero_effect_completion"
+        ));
+        assert!(receipt_exists, "terminal receipt was not published");
+        assert_eq!(
+            arguments,
+            format!(
+                "issue\nview\n42\n--repo\n{repository}\n--json\nlabels\n--jq\n\
+                 {{labels: [.labels[] | {{name: .name}}]}}\n"
+            )
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_terminal_label_forbidden_owner_remains_fail_closed() {
+        // Break caught: projection accidentally drops label names or bypasses ownership blocking.
+        let (result, receipt_exists, _, _) =
+            run_complete_terminal_label_fixture("terminal-label-forbidden", "forbidden");
+
+        let error = result.expect_err("in-progress-by-bot must block terminal receipt publication");
+        assert_eq!(
+            error.detail,
+            "terminal executor receipt still owns in-progress-by-bot"
+        );
+        assert!(matches!(
+            error.kind,
+            super::BridgeFailureKind::InvariantNeedsHuman
+        ));
+        assert!(!receipt_exists, "forbidden label wrote a terminal receipt");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_terminal_label_malformed_projection_remains_fail_closed() {
+        // Break caught: normalized output is accepted without exact type validation.
+        let (result, receipt_exists, _, _) =
+            run_complete_terminal_label_fixture("terminal-label-malformed", "malformed");
+
+        let error = result.expect_err("malformed normalized labels must fail closed");
+        assert_eq!(error.detail, "name must be a string");
+        assert!(matches!(
+            error.kind,
+            super::BridgeFailureKind::InvariantNeedsHuman
+        ));
+        assert!(!receipt_exists, "malformed labels wrote a terminal receipt");
     }
 
     #[cfg(unix)]
