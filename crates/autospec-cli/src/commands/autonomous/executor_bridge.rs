@@ -28764,6 +28764,26 @@ exit 64
             super::reconcile_nested_direct_ownership(&root)
                 .expect("completed transaction is diagnostic, not live");
         }
+
+        let root = fixture.root.join("combined");
+        super::ensure_private_directory(&root).expect("combined transaction parent");
+        for name in [
+            "command-000.archive-completed",
+            "command-000.retire-completed",
+            "command-000.attempt-ids",
+        ] {
+            let diagnostic = root.join(name);
+            super::ensure_private_directory(&diagnostic).expect("combined diagnostic directory");
+            super::write_private_create_once(
+                &diagnostic.join("evidence"),
+                b"complete\n",
+                "combined diagnostic artifact",
+            )
+            .expect("combined diagnostic artifact");
+        }
+
+        super::reconcile_nested_direct_ownership(&root)
+            .expect("transaction archives and attempt reservations are diagnostic, not live");
     }
 
     #[cfg(unix)]
