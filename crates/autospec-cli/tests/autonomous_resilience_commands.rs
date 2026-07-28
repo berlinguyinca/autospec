@@ -1302,9 +1302,7 @@ exit 1
         .env("PATH", path_with(&bin))
         .output()
         .expect("start native foreground child");
-    let conductor_logpath_file = fixture
-        .operator_root
-        .join("owner_repo/conductor.logpath");
+    let conductor_logpath_file = fixture.operator_root.join("owner_repo/conductor.logpath");
 
     for _ in 0..80 {
         if token_capture.exists() && conductor_logpath_file.exists() {
@@ -1315,10 +1313,9 @@ exit 1
     let token = fs::read_to_string(&token_capture).expect("capture child lease token");
     let launch = fs::read_to_string(fixture.operator_root.join("owner_repo/launch.json"))
         .expect("read launch metadata");
-    let conductor_log_path = fs::read_to_string(conductor_logpath_file)
-        .expect("read foreground log path");
-    let conductor_log =
-        fs::read_to_string(conductor_log_path.trim()).expect("read foreground log");
+    let conductor_log_path =
+        fs::read_to_string(conductor_logpath_file).expect("read foreground log path");
+    let conductor_log = fs::read_to_string(conductor_log_path.trim()).expect("read foreground log");
 
     assert!(output.status.success());
     assert!(

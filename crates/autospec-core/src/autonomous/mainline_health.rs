@@ -233,14 +233,23 @@ pub fn evaluate_health_with_baseline(
         } else {
             MainlineHealthDiagnostic::BaselineReadFailed
         };
-        let mut health = MainlineHealth::diagnostic(branch, MainlineHealthOutcome::Wait, diagnostic);
+        let mut health =
+            MainlineHealth::diagnostic(branch, MainlineHealthOutcome::Wait, diagnostic);
         health.baseline_checks = baseline_checks;
         return health;
     }
-    let names = match baseline { HealthBaseline::Ready(names) => names, _ => unreachable!() };
+    let names = match baseline {
+        HealthBaseline::Ready(names) => names,
+        _ => unreachable!(),
+    };
     let mut health = evaluate_health(branch, branch_exists, evidence.clone());
-    let newly_red_checks = evidence.into_iter()
-        .filter(|check| check.required && check.verdict() == CheckVerdict::Failed && !names.contains(&check.name))
+    let newly_red_checks = evidence
+        .into_iter()
+        .filter(|check| {
+            check.required
+                && check.verdict() == CheckVerdict::Failed
+                && !names.contains(&check.name)
+        })
         .map(|check| check.name)
         .collect::<Vec<_>>();
     health.baseline_checks = baseline_checks;

@@ -21678,11 +21678,8 @@ exit 64
             |_, disposition| {
                 assert_eq!(disposition, super::BridgeClaimDisposition::Retryable);
                 let transfer: serde_json::Value = serde_json::from_str(
-                    &fs::read_to_string(super::ownership_transfer_path(
-                        &scope_root,
-                        issue,
-                    ))
-                    .expect("read ownership offered before claim release"),
+                    &fs::read_to_string(super::ownership_transfer_path(&scope_root, issue))
+                        .expect("read ownership offered before claim release"),
                 )
                 .expect("parse ownership offered before claim release");
                 assert_eq!(

@@ -2630,9 +2630,7 @@ fn run_foreground_with_lease(
                 None => None,
             };
         }
-        if state.phase() == ConductorPhase::Claim
-            && local_acquisition.is_some()
-            && lease.is_none()
+        if state.phase() == ConductorPhase::Claim && local_acquisition.is_some() && lease.is_none()
         {
             let dispatching = state
                 .transition(ConductorEvent::Claimed)

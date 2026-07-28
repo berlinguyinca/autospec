@@ -28,15 +28,13 @@ fn claim_acquire_uses_the_configured_trusted_actor_policy() {
     let policy = fixture.join("trusted-actors.yml");
     let claim_remote = fixture.join("claim-remote.git");
     fs::create_dir_all(&bin).expect("create fixture bin directory");
-    assert!(
-        Command::new("git")
-            .args(["init", "--bare"])
-            .arg(&claim_remote)
-            .output()
-            .expect("initialize claim remote")
-            .status
-            .success()
-    );
+    assert!(Command::new("git")
+        .args(["init", "--bare"])
+        .arg(&claim_remote)
+        .output()
+        .expect("initialize claim remote")
+        .status
+        .success());
     fs::write(&comments, "[]\n").expect("write empty comments");
     fs::write(&mode, "ready\n").expect("write initial label mode");
     fs::write(
