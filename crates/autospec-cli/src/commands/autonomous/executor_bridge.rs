@@ -103,6 +103,8 @@ static ZERO_EFFECT_RECOVERY_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 static ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static EXECUTOR_ROOT_HARDEN_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static IMPLEMENTATION_COMMIT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Clone, Copy)]
 enum ZeroEffectRecoveryFailpoint {
@@ -689,6 +691,29 @@ pub(crate) fn recoverable_zero_effect_completion(
         );
     }
     recoverable_zero_effect_completion_for_state(&state_path, &state)
+}
+
+pub(crate) fn recoverable_implementation_completion(
+    state_dir: &Path,
+    lease: &crate::commands::claim::ClaimLease,
+) -> Result<bool, String> {
+    let generation = &sha256_hex(lease.claim_id.as_bytes())[..16];
+    let state_path = state_dir.join(format!("issue-{}-{generation}.json", lease.issue));
+    if !state_path.exists() {
+        return Ok(false);
+    }
+    validate_private_state_file(&state_path)?;
+    let state = PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path)
+            .map_err(|error| format!("read completed executor invocation: {error}"))?,
+    )?;
+    if !invocation_matches_lease(&state, lease) {
+        return Err(
+            "completed executor invocation does not match the durable local acquisition"
+                .to_string(),
+        );
+    }
+    recoverable_implementation_completion_for_state(&state_path, &state)
 }
 
 fn invocation_matches_lease(
@@ -8606,6 +8631,72 @@ fn attest_executor_signing(binding: &TrustedWorktreeGit) -> Result<(), String> {
     Ok(())
 }
 
+fn stage_sandboxed_executor_diff(binding: &TrustedWorktreeGit) -> Result<(), String> {
+    let mut paths = BTreeSet::new();
+    for args in [
+        vec![
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            "HEAD",
+            "--",
+            ".",
+        ],
+        vec![
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+            "--",
+            ".",
+        ],
+    ] {
+        let output = binding
+            .command()
+            .args(args)
+            .args(EXECUTOR_INTERNAL_PATHSPECS)
+            .output()
+            .map_err(|error| format!("inventory sandboxed executor paths: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "inventory sandboxed executor paths: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        for path in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+        {
+            paths.insert(
+                std::str::from_utf8(path)
+                    .map_err(|_| {
+                        "executor cannot stage a non-UTF-8 implementation path".to_string()
+                    })?
+                    .to_string(),
+            );
+        }
+    }
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let add = binding
+        .command()
+        .arg("--literal-pathspecs")
+        .args(["add", "--all", "--"])
+        .args(paths)
+        .output()
+        .map_err(|error| format!("stage sandboxed executor diff: {error}"))?;
+    if !add.status.success() {
+        return Err(format!(
+            "stage sandboxed executor diff: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
 fn commit_sandboxed_executor_diff(
     state: &PersistedInvocation,
     issue_title: &str,
@@ -8634,19 +8725,7 @@ fn commit_sandboxed_executor_diff(
     }
     reject_external_filters(&binding)?;
     attest_executor_signing(&binding)?;
-
-    let add = binding
-        .command()
-        .args(["add", "--all", "--", "."])
-        .args(EXECUTOR_INTERNAL_PATHSPECS)
-        .output()
-        .map_err(|error| format!("stage sandboxed executor diff: {error}"))?;
-    if !add.status.success() {
-        return Err(format!(
-            "stage sandboxed executor diff: {}",
-            String::from_utf8_lossy(&add.stderr).trim()
-        ));
-    }
+    stage_sandboxed_executor_diff(&binding)?;
     let staged = binding
         .command()
         .args(["diff", "--cached", "--quiet", "--exit-code"])
@@ -8679,10 +8758,28 @@ fn commit_sandboxed_executor_diff(
             String::from_utf8_lossy(&commit.stderr).trim()
         ));
     }
+    implementation_commit_failpoint()?;
     if !sandboxed_executor_diff(state)?.is_empty() {
         return Err("sandboxed executor worktree remained dirty after Rust commit".to_string());
     }
     Ok(true)
+}
+
+#[cfg(test)]
+fn implementation_commit_failpoint() -> Result<(), String> {
+    if IMPLEMENTATION_COMMIT_FAILPOINT
+        .compare_exchange(1, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        Err("injected executor crash after implementation commit".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(test))]
+fn implementation_commit_failpoint() -> Result<(), String> {
+    Ok(())
 }
 
 pub(crate) fn prove_implementation(
@@ -18459,6 +18556,26 @@ fn zero_effect_completion_header_is_exact(
     state_path: &Path,
     state: &PersistedInvocation,
 ) -> Result<bool, String> {
+    if !implementation_completion_header_is_exact(state_path, state)? {
+        return Ok(false);
+    }
+    let closeout = state
+        .identity
+        .worktree
+        .join(".autospec/executor-closeout.md");
+    match fs::symlink_metadata(&closeout) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(format!(
+            "inspect zero-effect executor Closeout report: {error}"
+        )),
+        Ok(_) => Ok(false),
+    }
+}
+
+fn implementation_completion_header_is_exact(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
     if state.phase != BridgePhase::ImplementationComplete
         || state.supervisor.is_some()
         || state.process.is_some()
@@ -18484,19 +18601,6 @@ fn zero_effect_completion_header_is_exact(
     let exit_status = read_executor_exit_status(&sinks.exit_status)?;
     if exit_status != Some(0) {
         return Ok(false);
-    }
-    let closeout = state
-        .identity
-        .worktree
-        .join(".autospec/executor-closeout.md");
-    match fs::symlink_metadata(&closeout) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "inspect zero-effect executor Closeout report: {error}"
-            ))
-        }
-        Ok(_) => return Ok(false),
     }
     Ok(true)
 }
@@ -18565,6 +18669,54 @@ fn zero_effect_remote_and_branch_are_exact(
         return Ok(false);
     }
     zero_effect_remote_snapshot_is_exact(state_path, state)
+}
+
+fn committed_implementation_remote_and_branch_are_exact(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    let head = git_stdout(
+        &state.identity.worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )?;
+    if head == state.identity.base_oid {
+        return Ok(false);
+    }
+    let ancestry = Command::new("git")
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            &state.identity.base_oid,
+            &head,
+        ])
+        .current_dir(&state.identity.worktree)
+        .status()
+        .map_err(|error| format!("verify recovered executor base ancestry: {error}"))?;
+    if !ancestry.success() {
+        return Ok(false);
+    }
+    let base_branch = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor validated base ref must name origin".to_string())?;
+    let remote_base = git_stdout(
+        &state.identity.repository_path,
+        &[
+            "ls-remote",
+            "--exit-code",
+            "origin",
+            &format!("refs/heads/{base_branch}"),
+        ],
+    )?
+    .split_whitespace()
+    .next()
+    .ok_or_else(|| "executor remote base ref returned no OID".to_string())?
+    .to_string();
+    let branch_ref = format!("refs/heads/{}", state.identity.branch);
+    Ok(remote_base == state.identity.base_oid
+        && !remote_head_refs(&state.identity.repository_path)?.contains_key(&branch_ref)
+        && zero_effect_remote_snapshot_is_exact(state_path, state)?)
 }
 
 fn exact_zero_effect_scope_root(state: &PersistedInvocation) -> Result<PathBuf, String> {
@@ -18731,6 +18883,111 @@ fn recoverable_zero_effect_completion_for_state(
         return Ok(true);
     }
     exact_prunable_zero_effect_completion(state_path, state)
+}
+
+fn recoverable_implementation_completion_for_state(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    if state.phase != BridgePhase::ImplementationComplete {
+        if !matches!(
+            state.phase,
+            BridgePhase::ImplementationProven
+                | BridgePhase::BranchPushing
+                | BridgePhase::BranchPushed
+                | BridgePhase::DraftCreating
+                | BridgePhase::DraftCleanupPending
+                | BridgePhase::DraftCreated
+                | BridgePhase::Ready
+                | BridgePhase::CiPassed
+                | BridgePhase::ReviewPassed
+                | BridgePhase::ResultAccepted
+                | BridgePhase::MergeRequested
+                | BridgePhase::Merged
+                | BridgePhase::CleanupPending
+        ) || state.supervisor.is_some()
+            || state.process.is_some()
+        {
+            return Ok(false);
+        }
+        if let Some(expected) = &state.draft_process {
+            if !matches!(
+                state.phase,
+                BridgePhase::DraftCreated
+                    | BridgePhase::Ready
+                    | BridgePhase::CiPassed
+                    | BridgePhase::ReviewPassed
+                    | BridgePhase::ResultAccepted
+                    | BridgePhase::MergeRequested
+                    | BridgePhase::Merged
+                    | BridgePhase::CleanupPending
+            ) {
+                return Ok(false);
+            }
+            if let Some(observed) = observe_process_birth(expected.pid)? {
+                if expected.owns_birth(&observed) {
+                    return Ok(false);
+                }
+                return Err(
+                    "completed executor draft process identity changed; refusing recovery"
+                        .to_string(),
+                );
+            }
+        }
+        return Ok(recover_invocation(state_path, &state.identity)?.as_ref() == Some(state));
+    }
+    if recoverable_zero_effect_completion_for_state(state_path, state)? {
+        return Ok(true);
+    }
+    if !implementation_completion_header_is_exact(state_path, state)?
+        || !state.identity.worktree.is_dir()
+    {
+        return Ok(false);
+    }
+    let scope_root = exact_zero_effect_scope_root(state)?;
+    let repository = fs::canonicalize(&state.identity.repository_path)
+        .map_err(|error| format!("canonicalize completed executor repository: {error}"))?;
+    if repository != state.identity.repository_path {
+        return Err("completed executor repository identity changed".to_string());
+    }
+    if !validate_zero_effect_scope_identity(&repository, &scope_root)? {
+        return Ok(false);
+    }
+    validate_existing_worktree(
+        &repository,
+        &state.identity.worktree,
+        &state.identity.branch,
+        &scope_root,
+        &ResolvedBase {
+            base_ref: state.identity.base_ref.clone(),
+            base_oid: state.identity.base_oid.clone(),
+            explore_mode: false,
+        },
+    )?;
+    let implementation_diff = sandboxed_executor_diff(state)?;
+    let exact_completion = if implementation_diff.is_empty() {
+        committed_implementation_remote_and_branch_are_exact(state_path, state)?
+    } else {
+        zero_effect_remote_and_branch_are_exact(state_path, state)?
+    };
+    if !exact_completion {
+        return Ok(false);
+    }
+    let closeout = state
+        .identity
+        .worktree
+        .join(".autospec/executor-closeout.md");
+    match fs::symlink_metadata(&closeout) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(format!(
+                "inspect completed executor Closeout report: {error}"
+            ))
+        }
+        Ok(_) => {}
+    }
+    validate_closeout_report(&state.identity.worktree, &closeout)?;
+    Ok(true)
 }
 
 fn prepare_zero_effect_recovery(
@@ -19900,7 +20157,10 @@ pub(crate) fn recover_invocation(
         },
         matches!(
             invocation.phase,
-            BridgePhase::Pending | BridgePhase::Implementing | BridgePhase::Interrupted
+            BridgePhase::Pending
+                | BridgePhase::Implementing
+                | BridgePhase::Interrupted
+                | BridgePhase::ImplementationComplete
         ),
     )?;
     Ok(Some(invocation))
@@ -20894,6 +21154,305 @@ mod tests {
             !super::exact_prunable_zero_effect_completion(&ambiguous_state_path, &ambiguous)
                 .expect("ambiguous prunable registrations remain fail-closed")
         );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_recovers_exact_nonzero_implementation_completion() {
+        let (_fixture, state, state_path, _) =
+            zero_effect_classifier_fixture("implementation-complete-nonzero", false, false);
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "implemented\n",
+        )
+        .expect("write implementation diff");
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        fs::create_dir_all(closeout.parent().expect("closeout parent"))
+            .expect("create closeout parent");
+        fs::write(
+            &closeout,
+            "## Closeout report\n\n\
+Result: Added the requested implementation.\n\
+Claims: [verified] runtime the focused test exits with status 0.\n\
+Proof type: runtime\n\
+Before/after: Before 0 implementation files; after 1 implementation file.\n\
+Artifacts: `implementation.txt`; rerun with `test -f implementation.txt`.\n\
+Scoped git status: Added `implementation.txt`; closeout excluded from the commit.\n\
+One likely hidden failure: The focused fixture does not exercise a remote push.\n",
+        )
+        .expect("write closeout");
+        fs::set_permissions(&closeout, fs::Permissions::from_mode(0o600))
+            .expect("private closeout");
+
+        assert!(
+            super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("classify exact nonzero completion")
+        );
+        super::record_worktree_creation_identity(
+            &state.identity.repository_path,
+            &state.identity.branch,
+            &ResolvedBase {
+                base_ref: state.identity.base_ref.clone(),
+                base_oid: state.identity.base_oid.clone(),
+                explore_mode: false,
+            },
+        )
+        .expect("record worktree creation identity");
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        fs::write(common_dir.join("info/exclude"), ".autospec/\n")
+            .expect("ignore private executor artifacts");
+        assert!(
+            super::recover_invocation(&state_path, &state.identity)
+                .expect("recover nonzero completion")
+                .is_some(),
+            "bridge invocation loading must preserve its completed implementation diff"
+        );
+
+        fs::remove_file(&closeout).expect("remove closeout");
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("missing closeout remains fail-closed")
+        );
+
+        fs::write(&closeout, "internal-only\n").expect("write ignored internal metadata");
+        fs::set_permissions(&closeout, fs::Permissions::from_mode(0o600))
+            .expect("private internal metadata");
+        fs::remove_file(state.identity.worktree.join("implementation.txt"))
+            .expect("remove implementation diff");
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("internal metadata alone remains fail-closed")
+        );
+
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "implemented\n",
+        )
+        .expect("restore implementation diff");
+        let mut active = state.clone();
+        active.process = Some(ProcessIdentity {
+            pid: 42,
+            process_group: 42,
+            executable: PathBuf::from("/usr/bin/codex"),
+            argv_digest: "a".repeat(64),
+            boot_id: "boot".to_string(),
+            start_identity: "start".to_string(),
+        });
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &active)
+                .expect("live child state remains fail-closed")
+        );
+
+        fs::write(
+            &closeout,
+            "## Closeout report\n\n\
+Result: Added the requested implementation.\n\
+Claims: [verified] runtime the focused test exits with status 0.\n\
+Proof type: runtime\n\
+Before/after: Before 0 implementation files; after 1 implementation file.\n\
+Artifacts: `implementation.txt`; rerun with `test -f implementation.txt`.\n\
+Scoped git status: Added `implementation.txt`; closeout excluded from the commit.\n\
+One likely hidden failure: The focused fixture does not exercise a remote push.\n",
+        )
+        .expect("restore valid closeout");
+        git(&state.identity.worktree, &["add", "implementation.txt"]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "test: preserve completed implementation"],
+        );
+        let mut proven = state.clone();
+        proven.phase = BridgePhase::ImplementationProven;
+        proven.head_oid = Some(git_stdout(
+            &proven.identity.worktree,
+            &["rev-parse", "HEAD"],
+        ));
+        proven.closeout_path = Some(fs::canonicalize(&closeout).expect("canonical closeout"));
+        proven.closeout_digest = Some(super::sha256_hex(
+            fs::read_to_string(&closeout)
+                .expect("read valid closeout")
+                .as_bytes(),
+        ));
+        super::write_invocation_atomic(&state_path, &proven)
+            .expect("persist proven implementation");
+        assert!(
+            super::recoverable_implementation_completion_for_state(&state_path, &proven)
+                .expect("classify proven completion"),
+            "post-proof bridge state must remain resumable after a correctable gate failure"
+        );
+
+        let mut draft_created = proven.clone();
+        draft_created.phase = BridgePhase::DraftCreated;
+        draft_created.pr = Some(17);
+        draft_created.draft_process = Some(ProcessIdentity {
+            pid: u32::MAX,
+            process_group: u32::MAX,
+            executable: PathBuf::from("/usr/bin/gh"),
+            argv_digest: "b".repeat(64),
+            boot_id: "exited-boot".to_string(),
+            start_identity: "exited-start".to_string(),
+        });
+        for (phase, terminal_result) in [
+            (BridgePhase::DraftCreated, None),
+            (BridgePhase::Ready, None),
+            (BridgePhase::CiPassed, None),
+            (BridgePhase::ReviewPassed, None),
+            (
+                BridgePhase::ResultAccepted,
+                Some(format!("accepted:{}", "d".repeat(64))),
+            ),
+            (
+                BridgePhase::MergeRequested,
+                Some(format!("accepted:{}", "d".repeat(64))),
+            ),
+            (BridgePhase::Merged, Some("e".repeat(40))),
+            (BridgePhase::CleanupPending, Some("e".repeat(40))),
+        ] {
+            let mut completed_phase = draft_created.clone();
+            completed_phase.phase = phase;
+            completed_phase.terminal_result = terminal_result;
+            super::write_invocation_atomic(&state_path, &completed_phase)
+                .expect("persist exact post-draft state");
+            assert!(
+                super::recoverable_implementation_completion_for_state(
+                    &state_path,
+                    &completed_phase
+                )
+                .expect("classify post-draft state with exited gh process"),
+                "{phase:?} must remain resumable after its gh process exits"
+            );
+        }
+
+        for phase in [
+            BridgePhase::ImplementationProven,
+            BridgePhase::BranchPushing,
+            BridgePhase::BranchPushed,
+            BridgePhase::DraftCreating,
+            BridgePhase::DraftCleanupPending,
+        ] {
+            let mut pre_draft = draft_created.clone();
+            pre_draft.phase = phase;
+            assert!(
+                !super::recoverable_implementation_completion_for_state(&state_path, &pre_draft)
+                    .expect("pre-draft process remains fail-closed"),
+                "{phase:?} must not treat its draft process as completed"
+            );
+        }
+
+        let birth = super::observe_process_birth(std::process::id())
+            .expect("observe test process")
+            .expect("test process remains live");
+        let mut active_draft = draft_created;
+        active_draft.draft_process = Some(ProcessIdentity {
+            pid: birth.pid,
+            process_group: birth.process_group,
+            executable: PathBuf::from("/usr/bin/gh"),
+            argv_digest: "c".repeat(64),
+            boot_id: birth.boot_id,
+            start_identity: birth.start_identity,
+        });
+        assert!(!super::recoverable_implementation_completion_for_state(
+            &state_path,
+            &active_draft
+        )
+        .expect("live draft child remains fail-closed"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_recovers_commit_before_proof_persistence() {
+        let (_fixture, state, state_path, _) =
+            zero_effect_classifier_fixture("implementation-commit-before-proof", false, false);
+        let protected =
+            MutationSnapshot::capture(&state.identity.repository_path, &state.identity.branch)
+                .expect("capture protected repository state");
+        fs::write(
+            state.identity.worktree.join("implementation.txt"),
+            "committed before proof persistence\n",
+        )
+        .expect("write implementation diff");
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        fs::create_dir_all(closeout.parent().expect("closeout parent"))
+            .expect("create closeout parent");
+        fs::write(
+            &closeout,
+            "## Closeout report\n\n\
+Result: Added the requested implementation.\n\
+Claims: [verified] runtime the focused test exits with status 0.\n\
+Proof type: runtime\n\
+Before/after: Before 0 implementation files; after 1 implementation file.\n\
+Artifacts: `implementation.txt`; rerun with `test -f implementation.txt`.\n\
+Scoped git status: Added `implementation.txt`; closeout excluded from the commit.\n\
+One likely hidden failure: The focused fixture does not exercise a remote push.\n",
+        )
+        .expect("write closeout");
+        fs::set_permissions(&closeout, fs::Permissions::from_mode(0o600))
+            .expect("private closeout");
+        super::record_worktree_creation_identity(
+            &state.identity.repository_path,
+            &state.identity.branch,
+            &ResolvedBase {
+                base_ref: state.identity.base_ref.clone(),
+                base_oid: state.identity.base_oid.clone(),
+                explore_mode: false,
+            },
+        )
+        .expect("record worktree creation identity");
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        fs::write(common_dir.join("info/exclude"), ".autospec/\n")
+            .expect("ignore private executor artifacts");
+
+        super::IMPLEMENTATION_COMMIT_FAILPOINT.store(1, Ordering::SeqCst);
+        let error =
+            super::commit_sandboxed_executor_diff(&state, "test: persist implementation proof")
+                .expect_err("interrupt after Rust commit");
+        assert!(error.contains("after implementation commit"), "{error}");
+        let durable = PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("read interrupted invocation"),
+        )
+        .expect("parse interrupted invocation");
+        assert_eq!(durable.phase, BridgePhase::ImplementationComplete);
+        assert_eq!(
+            git_stdout(&durable.identity.worktree, &["status", "--porcelain=v1"]),
+            "",
+            "the Rust commit must leave an exact clean worktree"
+        );
+        assert_ne!(
+            git_stdout(&durable.identity.worktree, &["rev-parse", "HEAD"]),
+            durable.identity.base_oid
+        );
+        assert!(
+            super::recoverable_implementation_completion_for_state(&state_path, &durable)
+                .expect("classify commit-before-proof recovery"),
+            "an exact clean committed HEAD must resume without another implementer"
+        );
+
+        let mut recovered = super::recover_invocation(&state_path, &durable.identity)
+            .expect("recover committed invocation")
+            .expect("committed invocation remains present");
+        let proof = super::prove_implementation(&state_path, &mut recovered, &protected, &closeout)
+            .expect("persist recovered implementation proof");
+        assert_eq!(recovered.phase, BridgePhase::ImplementationProven);
+        assert_eq!(recovered.head_oid.as_deref(), Some(proof.head_oid.as_str()));
     }
 
     #[cfg(unix)]
@@ -27771,6 +28330,17 @@ exit 64
             ],
         );
         let base = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        fs::write(common_dir.join("info/exclude"), ".autospec/\n")
+            .expect("ignore private closeout directory");
         fs::write(
             state.identity.worktree.join("implementation.txt"),
             "implemented by sandboxed harness\n",
@@ -27823,6 +28393,56 @@ exit 64
                 ]
             ),
             remote_before
+        );
+    }
+
+    #[test]
+    fn rust_commit_treats_model_inventory_as_literal_paths() {
+        let (_fixture, state, _snapshot, closeout) =
+            implementation_proof_fixture("rust-commit-literal-paths");
+        git(
+            &state.identity.worktree,
+            &["add", "-f", ".autospec/executor-closeout.md"],
+        );
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "test: track private closeout fixture"],
+        );
+        fs::write(&closeout, "model-controlled internal rewrite\n")
+            .expect("modify tracked internal closeout");
+        let magic = ":(exclude)normal.txt";
+        fs::write(
+            state.identity.worktree.join(magic),
+            "literal implementation path\n",
+        )
+        .expect("write magic-looking implementation path");
+
+        assert!(
+            super::commit_sandboxed_executor_diff(&state, "test: preserve literal path")
+                .expect("Rust-owned literal-path commit")
+        );
+
+        assert_eq!(
+            git_stdout(
+                &state.identity.worktree,
+                &["diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"]
+            ),
+            magic,
+            "model-controlled pathspec syntax must not stage excluded internal artifacts"
+        );
+        assert_eq!(
+            git_stdout(
+                &state.identity.worktree,
+                &[
+                    "diff",
+                    "--name-only",
+                    "HEAD",
+                    "--",
+                    ".autospec/executor-closeout.md",
+                ]
+            ),
+            ".autospec/executor-closeout.md",
+            "the internal closeout rewrite must remain outside the Rust-owned commit"
         );
     }
 
