@@ -1844,7 +1844,7 @@ pub(crate) struct ResolvedFullSuite {
 const REQUIRED_SCANNERS: [&str; 4] = ["gitleaks", "semgrep", "trivy", "license-checker"];
 const GITLEAKS_NEXT_PATH_ALLOWLIST: &str = r"(^|/)\.next(/|$)";
 const REQUIRED_SCANNER_POLICY_SCHEMA: &str =
-    "gitleaks-next-v1;semgrep-p-default-baseline-v1;trivy-v1;license-checker-v1";
+    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-v1;license-checker-v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ScannerExecutables {
@@ -35309,8 +35309,8 @@ exit 19
 
     #[test]
     fn autonomous_executor_bridge_scanner_policy_digest_rotates_failed_evidence_once() {
-        // Break caught: a failed attempt created with the current Gitleaks policy but before the
-        // scanner-schema binding replaying after scanner argv changes, or rotating repeatedly.
+        // Break caught: a failed attempt created with the immediately previous scanner schema
+        // replaying after scanner argv changes, or rotating repeatedly on the same schema.
         let fixture = GitFixture::new("evidence-scanner-policy-generation");
         let mut state = supervision_state(&fixture);
         let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
@@ -35348,15 +35348,18 @@ exit 19
         };
         let gitleaks_policy_digest =
             super::gitleaks_policy_digest(&fixture.repo).expect("current Gitleaks policy digest");
+        let previous_policy_schema =
+            "gitleaks-next-v1;semgrep-p-default-baseline-v1;trivy-v1;license-checker-v1";
         let previous_semantic = autospec_core::autonomous::waterfall::sha256_hex(
             format!(
-                "{}\0{}\0{}\0{}\0{}\0{}",
+                "{}\0{}\0{}\0{}\0{}\0{}\0{}",
                 lane.lane_digest(),
                 request.state.identity.base_ref,
                 request.state.identity.base_oid,
                 request.issue_body,
                 request.spec_documents.join("\0"),
                 gitleaks_policy_digest,
+                previous_policy_schema,
             )
             .as_bytes(),
         );
