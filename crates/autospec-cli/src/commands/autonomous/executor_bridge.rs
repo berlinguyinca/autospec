@@ -97,6 +97,10 @@ static METADATA_WIP_SYNC_EVENTS: std::sync::Mutex<Vec<&'static str>> =
 static WORKTREE_REPAIR_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static ZERO_EFFECT_RECOVERY_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static EXECUTOR_ROOT_HARDEN_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Clone, Copy)]
 enum ZeroEffectRecoveryFailpoint {
@@ -17523,7 +17527,9 @@ fn provision_issue_worktree_for_claim(
         fs::canonicalize(repo).map_err(|error| format!("canonicalize repository: {error}"))?;
     let scope = safe_scope(repository_scope)?;
     let branch = format!("feat/autonomous-issue-{issue}");
-    let scope_root = PathBuf::from("/tmp/autospec-executor").join(scope);
+    let executor_root = PathBuf::from("/tmp/autospec-executor");
+    harden_executor_worktree_root(&canonical_repo, &executor_root)?;
+    let scope_root = executor_root.join(scope);
     ensure_private_directory(&scope_root)?;
     let _lease = WorktreeLease::acquire(&scope_root, issue)?;
     let path = scope_root.join(format!("issue-{issue}"));
@@ -17907,36 +17913,95 @@ fn ensure_marked_zero_effect_scope(
     let scope_root = exact_zero_effect_scope_root(state)?;
     let repo = fs::canonicalize(&state.identity.repository_path)
         .map_err(|error| format!("canonicalize zero-effect recovery repository: {error}"))?;
-    if validate_zero_effect_scope_identity(&repo, &scope_root)? {
-        return Ok(());
-    }
     let executor_root = scope_root
         .parent()
         .ok_or_else(|| "executor zero-effect scope has no deterministic root".to_string())?;
+    validate_zero_effect_scope_identity(&repo, &scope_root)?;
+    harden_executor_worktree_root(&repo, executor_root)?;
+    if !validate_zero_effect_scope_identity(&repo, &scope_root)? {
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&scope_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(format!(
+                    "recreate exact executor zero-effect scope {}: {error}",
+                    scope_root.display()
+                ));
+            }
+        }
+    }
+    if !validate_zero_effect_scope_identity(&repo, &scope_root)? {
+        return Err("executor zero-effect scope disappeared after recreation".to_string());
+    }
+    sync_zero_effect_scope_parent(executor_root)?;
+    if !validate_zero_effect_scope_identity(&repo, &scope_root)? {
+        return Err("executor zero-effect scope changed while its parent was synced".to_string());
+    }
+    Ok(())
+}
+
+fn harden_executor_worktree_root(repo: &Path, executor_root: &Path) -> Result<(), String> {
+    reject_symlink_path(executor_root)?;
+    let parent = executor_root
+        .parent()
+        .ok_or_else(|| "executor worktree root has no trusted parent".to_string())?;
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    match builder.create(&scope_root) {
-        Ok(()) => {
-            #[cfg(unix)]
-            File::open(executor_root)
-                .and_then(|directory| directory.sync_all())
-                .map_err(|error| format!("sync recreated executor zero-effect scope: {error}"))?;
-        }
+    match builder.create(executor_root) {
+        Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(error) => {
             return Err(format!(
-                "recreate exact executor zero-effect scope {}: {error}",
-                scope_root.display()
+                "create executor worktree root {}: {error}",
+                executor_root.display()
             ));
         }
     }
-    if !validate_zero_effect_scope_identity(&repo, &scope_root)? {
-        return Err("executor zero-effect scope disappeared after recreation".to_string());
+    reject_symlink_path(executor_root)?;
+    validate_executor_ownership(repo, &[executor_root])?;
+    #[cfg(test)]
+    if EXECUTOR_ROOT_HARDEN_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+        return Err("harden executor worktree root: injected failure".to_string());
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(executor_root, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("harden executor worktree root: {error}"))?;
+        File::open(executor_root)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync hardened executor worktree root: {error}"))?;
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| format!("sync executor worktree root parent: {error}"))?;
+    }
+    validate_private_directory(executor_root)?;
+    validate_executor_ownership(repo, &[executor_root])
+}
+
+#[cfg(unix)]
+fn sync_zero_effect_scope_parent(executor_root: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+        return Err("sync recreated executor zero-effect scope: injected failure".to_string());
+    }
+    File::open(executor_root)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync recreated executor zero-effect scope: {error}"))
+}
+
+#[cfg(not(unix))]
+fn sync_zero_effect_scope_parent(_executor_root: &Path) -> Result<(), String> {
     Ok(())
 }
 
@@ -20031,6 +20096,177 @@ mod tests {
             super::prepare_zero_effect_recovery(&state_path, &state)
                 .expect("repeat completed missing-scope recovery"),
             "completed recovery must remain idempotent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_retries_scope_parent_sync_before_worktree_repair() {
+        let (_fixture, state, state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-scope-parent-sync", false, true);
+        let scope_root = state.identity.worktree.parent().expect("scope root");
+        fs::remove_dir(scope_root).expect("remove empty executor scope");
+
+        super::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.store(1, Ordering::SeqCst);
+        let first = super::prepare_zero_effect_recovery(&state_path, &state)
+            .expect_err("scope parent sync must fail after recreation");
+        assert!(
+            first.contains("sync recreated executor zero-effect scope"),
+            "{first}"
+        );
+        assert_private_scope(scope_root);
+        assert!(
+            !state.identity.worktree.exists(),
+            "repair must not start before the recreated scope is durable"
+        );
+
+        super::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT.store(1, Ordering::SeqCst);
+        let retry = super::prepare_zero_effect_recovery(&state_path, &state)
+            .expect_err("restart must retry parent sync for the existing scope");
+        assert!(
+            retry.contains("sync recreated executor zero-effect scope"),
+            "{retry}"
+        );
+        assert!(
+            !state.identity.worktree.exists(),
+            "restart must not repair before the parent sync succeeds"
+        );
+
+        assert!(
+            super::prepare_zero_effect_recovery(&state_path, &state)
+                .expect("resume after durable scope parent sync"),
+            "recovery must proceed after the parent sync succeeds"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_hardens_root_only_after_zero_effect_marker() {
+        let (_fixture, state, state_path, _) =
+            zero_effect_classifier_fixture("zero-effect-root-hardening", false, true);
+        let scope_root = state.identity.worktree.parent().expect("scope root");
+        fs::remove_dir(scope_root).expect("remove empty executor scope");
+
+        super::EXECUTOR_ROOT_HARDEN_FAILPOINT.store(1, Ordering::SeqCst);
+        assert!(
+            super::recoverable_zero_effect_completion_for_state(&state_path, &state)
+                .expect("read-only missing-scope classification")
+        );
+        assert_eq!(
+            super::EXECUTOR_ROOT_HARDEN_FAILPOINT.load(Ordering::SeqCst),
+            1,
+            "classification must not harden or otherwise mutate the executor root"
+        );
+        assert!(
+            !super::zero_effect_recovery_marker_path(&state_path).exists(),
+            "classification must remain marker-free"
+        );
+
+        let error = super::prepare_zero_effect_recovery(&state_path, &state)
+            .expect_err("recovery must harden the executor root before scope recreation");
+        assert!(error.contains("harden executor worktree root"), "{error}");
+        assert!(
+            super::zero_effect_recovery_marker_path(&state_path).is_file(),
+            "root hardening must happen only after durable recovery authorization"
+        );
+        assert!(
+            !scope_root.exists() && !state.identity.worktree.exists(),
+            "failed root hardening must precede scope creation and worktree repair"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_scope_classification_leaves_root_mode_unchanged() {
+        let fixture = GitFixture::new("scope-root-mode");
+        let executor_root = fixture.root.join("executor-root");
+        let scope_root = executor_root.join("missing-scope");
+        fs::create_dir(&executor_root).expect("create isolated executor root");
+        fs::set_permissions(&executor_root, fs::Permissions::from_mode(0o775))
+            .expect("make isolated executor root group-writable");
+
+        assert!(
+            !super::validate_zero_effect_scope_identity(&fixture.repo, &scope_root)
+                .expect("read-only absent-scope validation")
+        );
+        assert_eq!(
+            fs::metadata(&executor_root)
+                .expect("executor root metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o775,
+            "read-only classification must not chmod the shared root"
+        );
+
+        super::harden_executor_worktree_root(&fixture.repo, &executor_root)
+            .expect("harden isolated executor root");
+        assert_eq!(
+            fs::metadata(&executor_root)
+                .expect("hardened executor root metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700,
+            "authorized recovery must make the shared root private"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_rejects_symlinked_executor_root_before_hardening() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = GitFixture::new("symlinked-executor-root");
+        let target = fixture.root.join("foreign-root");
+        let executor_root = fixture.root.join("executor-root-link");
+        fs::create_dir(&target).expect("create foreign root target");
+        symlink(&target, &executor_root).expect("create executor root symlink");
+        let scope_root = executor_root.join("missing-scope");
+
+        let classification = super::validate_zero_effect_scope_identity(&fixture.repo, &scope_root)
+            .expect_err("symlinked root must fail closed during classification");
+        assert!(classification.contains("symlink"), "{classification}");
+        let hardening = super::harden_executor_worktree_root(&fixture.repo, &executor_root)
+            .expect_err("symlinked root must fail closed before chmod");
+        assert!(hardening.contains("symlink"), "{hardening}");
+        assert!(
+            !scope_root.exists(),
+            "symlinked root rejection must not create the repository scope"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_provisioning_hardens_root_before_scope_creation() {
+        let fixture = GitFixture::new("provision-root-hardening");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let repository_scope = format!(
+            "provision-root-hardening-{}",
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let scope_root = PathBuf::from("/tmp/autospec-executor")
+            .join(super::safe_scope(&repository_scope).expect("safe scope"));
+
+        super::EXECUTOR_ROOT_HARDEN_FAILPOINT.store(1, Ordering::SeqCst);
+        match super::provision_issue_worktree(&fixture.repo, &repository_scope, 42, &base) {
+            Err(error) => assert!(error.contains("harden executor worktree root"), "{error}"),
+            Ok(worktree) => {
+                git(
+                    &fixture.repo,
+                    &[
+                        "worktree",
+                        "remove",
+                        worktree.path.to_str().expect("worktree path"),
+                    ],
+                );
+                let _ = fs::remove_dir_all(&scope_root);
+                panic!("provisioning skipped executor-root hardening");
+            }
+        }
+        assert!(
+            !scope_root.exists(),
+            "root hardening must precede repository scope creation"
         );
     }
 
