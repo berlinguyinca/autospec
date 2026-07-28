@@ -66,9 +66,17 @@ Guardian: skip-PR_SIZE # <reason>
 
 The reason must identify one of:
 
-- a generated migration;
-- dependency-solver lockfile output; or
-- mandatory lock-step artifacts such as harness mirrors and derived goldens.
+- `generated migration:` followed by the generator identity;
+- `dependency-solver lockfile:` followed by the solver identity; or
+- `mandatory lock-step artifacts:` followed by the mirrored artifact identity.
+
+The deterministic policy validates the diff shape as well as the prefix.
+Generated migrations must be confined to a migration directory and carry
+generator provenance in the diff. Lockfile exceptions may contain only
+recognized dependency-solver lockfile paths. Lock-step exceptions may exceed
+the raw limits only through byte-identical harness mirrors and their derived
+goldens; the normalized manual patch must remain within the limits. A mixed
+diff containing manual implementation or test changes remains blocking.
 
 Manual implementation or test code is never exempt. A syntactically valid
 exception produces an auditable `INFO:PR_SIZE` record and the independent
@@ -81,7 +89,8 @@ Continuation state is durable and idempotent. Restarting after issue creation,
 draft creation, or a merged child must reuse the recorded child instead of
 filing duplicates. The session receives notifications when Autospec approaches
 the threshold, splits work, blocks an invalid exception, creates a continuation,
-or completes the umbrella.
+or completes the umbrella. Notifications stay in the initiating Codex, Claude,
+or OpenCode session; desktop notification mechanisms are prohibited.
 
 ## Verification
 
