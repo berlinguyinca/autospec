@@ -8,6 +8,15 @@ different recovery window; active workers refresh their claims as they run.
 The conductor also defaults `AUTOSPEC_RESCAN_INTERVAL` to `300` seconds after
 an empty backlog, while an explicit environment value remains authoritative.
 
+When selection records `phase: paused`, `selected_issue: null`, and
+`pause_reason: no_ready_issue_after_review`, a continuous foreground conductor
+stays alive and polls at its configured interval. A later ready-queue snapshot
+with an eligible issue durably resets that exact pause to `Scan` before the
+normal scan, review, and selection path runs. An empty snapshot retains the
+pause without exiting for the supervisor to relaunch every five seconds.
+Paused states with another reason, a selected issue, or a resume phase other
+than `Select` are not reset; incompatible no-ready state fails closed.
+
 Tier-2 explore drains default `AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS` to `600`
 seconds without observable output; set the variable explicitly for slower
 repositories or remote research providers.
