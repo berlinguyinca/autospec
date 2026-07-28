@@ -3741,7 +3741,7 @@ pub(super) fn validate_persisted_observed_manifest(
             .ok_or_else(|| "persisted scanner name is missing".to_string())?;
         let command_path = resolve_relative(entry, "command_record")?;
         let command = read_observed_command_record(worktree, &command_path)?;
-        if !command.terminal.is_success() {
+        if !scanner_terminal_is_accepted(name, &command.terminal) {
             return Err(format!(
                 "persisted scanner {name} attempt is not successful"
             ));
@@ -4172,6 +4172,10 @@ impl AttemptTerminal {
             Self::OutputOverflow => serde_json::json!({"kind": "output_overflow"}),
         }
     }
+}
+
+fn scanner_terminal_is_accepted(name: &str, terminal: &AttemptTerminal) -> bool {
+    terminal.is_success() || (name == "trivy" && matches!(terminal, AttemptTerminal::Exited(1)))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -37020,6 +37024,18 @@ exit 19
 
     #[test]
     fn autonomous_executor_bridge_trivy_findings_are_scoped_to_changed_targets() {
+        assert!(super::scanner_terminal_is_accepted(
+            "trivy",
+            &super::AttemptTerminal::Exited(1)
+        ));
+        assert!(!super::scanner_terminal_is_accepted(
+            "semgrep",
+            &super::AttemptTerminal::Exited(1)
+        ));
+        assert!(!super::scanner_terminal_is_accepted(
+            "trivy",
+            &super::AttemptTerminal::Signaled(9)
+        ));
         let fixture = GitFixture::new("trivy-changed-targets");
         let command = super::scanner_command(
             "trivy",
