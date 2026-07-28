@@ -36781,6 +36781,7 @@ exit 19
 
     #[test]
     fn autonomous_executor_bridge_restart_reruns_all_scanner_results() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         // Break caught: successful scanner records recovered from disk becoming authoritative
         // security evidence without re-executing each scanner in the current process.
         let fixture = GitFixture::new("scanner-recovery");
@@ -37025,6 +37026,7 @@ exit 19
 
     #[test]
     fn autonomous_executor_bridge_scanner_command_semgrep_baseline_is_diff_scoped() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         // Break caught: a repository-wide scan blocking a feature on findings already present
         // in its claimed base commit, instead of evaluating only feature-introduced findings.
         let fixture = GitFixture::new("semgrep-baseline");
