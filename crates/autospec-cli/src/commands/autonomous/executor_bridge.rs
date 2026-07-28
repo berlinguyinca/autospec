@@ -1843,6 +1843,8 @@ pub(crate) struct ResolvedFullSuite {
 
 const REQUIRED_SCANNERS: [&str; 4] = ["gitleaks", "semgrep", "trivy", "license-checker"];
 const GITLEAKS_NEXT_PATH_ALLOWLIST: &str = r"(^|/)\.next(/|$)";
+const REQUIRED_SCANNER_POLICY_SCHEMA: &str =
+    "gitleaks-next-v1;semgrep-p-default-baseline-v1;trivy-v1;license-checker-v1";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ScannerExecutables {
@@ -1935,10 +1937,11 @@ fn validate_scanner_result(
         ));
     }
     let diagnostics = String::from_utf8_lossy(stderr).to_ascii_lowercase();
-    if ["degraded", "fallback", "scanner missing", "skipped"]
+    let degraded = ["degraded", "fallback", "scanner missing"]
         .iter()
         .any(|marker| diagnostics.contains(marker))
-    {
+        || (scanner != "semgrep" && diagnostics.contains("skipped"));
+    if degraded {
         return Err(format!(
             "executor required scanner {scanner} reported degraded execution"
         ));
@@ -3145,13 +3148,14 @@ fn evidence_input_digests(
     let scanner_policy_digest = gitleaks_policy_digest(&request.state.identity.worktree)?;
     let semantic_input_digest = sha256_hex(
         format!(
-            "{}\0{}\0{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}",
             lane.lane_digest(),
             request.state.identity.base_ref,
             request.state.identity.base_oid,
             request.issue_body,
             request.spec_documents.join("\0"),
             scanner_policy_digest,
+            REQUIRED_SCANNER_POLICY_SCHEMA,
         )
         .as_bytes(),
     );
@@ -36916,7 +36920,7 @@ exit 19
     }
 
     #[test]
-    fn autonomous_executor_bridge_semgrep_is_metrics_private_and_baseline_scoped() {
+    fn autonomous_executor_bridge_scanner_command_semgrep_is_private_and_baseline_scoped() {
         // Break caught: `--config auto --metrics off` is rejected by Semgrep before scanning,
         // while an unscoped repository scan also blocks feature work on pre-existing findings.
         let command = super::scanner_command(
@@ -36954,6 +36958,96 @@ exit 19
             command.argv
         );
         assert_eq!(command.accepted_exit_codes, vec![0, 1]);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_scanner_command_semgrep_baseline_is_diff_scoped() {
+        // Break caught: a repository-wide scan blocking a feature on findings already present
+        // in its claimed base commit, instead of evaluating only feature-introduced findings.
+        let fixture = GitFixture::new("semgrep-baseline");
+        let rule = fixture.root.join("semgrep-rule.yml");
+        fs::write(
+            &rule,
+            r#"rules:
+  - id: autospec-test-dangerous-call
+    languages:
+      - generic
+    message: deterministic test finding
+    severity: ERROR
+    pattern-regex: dangerous_call
+"#,
+        )
+        .expect("deterministic Semgrep rule");
+        fs::write(fixture.repo.join("old.js"), "dangerous_call('old');\n")
+            .expect("pre-existing finding");
+        git(&fixture.repo, &["add", "old.js"]);
+        git(&fixture.repo, &["commit", "-m", "baseline finding"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        fs::write(fixture.repo.join("feature.js"), "safe_call('feature');\n")
+            .expect("clean feature");
+        git(&fixture.repo, &["add", "feature.js"]);
+        git(&fixture.repo, &["commit", "-m", "clean feature"]);
+        let semgrep =
+            super::resolve_direct_executable(&fixture.repo, "semgrep").expect("real Semgrep");
+        let scan = |artifact: &str| {
+            let mut command = super::DirectCommand::success(vec![
+                semgrep.display().to_string(),
+                "scan".to_string(),
+                "--config".to_string(),
+                rule.display().to_string(),
+                "--metrics".to_string(),
+                "off".to_string(),
+                "--error".to_string(),
+                "--json".to_string(),
+                "--baseline-commit".to_string(),
+                base_oid.clone(),
+                ".".to_string(),
+            ]);
+            command.accepted_exit_codes = vec![0, 1];
+            let observed = super::execute_direct_plan(
+                &fixture.repo,
+                &super::DirectCommandPlan {
+                    commands: vec![command],
+                },
+                &fixture.root.join(artifact),
+                None,
+                Duration::from_secs(30),
+            )
+            .expect("Semgrep process observation");
+            let command = &observed[0];
+            let stdout = fs::read(&command.stdout_path).expect("Semgrep JSON");
+            let stderr = fs::read(&command.stderr_path).expect("Semgrep diagnostics");
+            (
+                command.exit_code().expect("Semgrep exit status"),
+                stdout,
+                stderr,
+            )
+        };
+
+        let (exit_status, stdout, stderr) = scan("clean-scan");
+        super::validate_scanner_result("semgrep", exit_status, &stdout, &stderr).unwrap_or_else(
+            |error| {
+                panic!(
+                    "pre-existing finding is outside the feature diff: {error}; {}",
+                    String::from_utf8_lossy(&stderr)
+                )
+            },
+        );
+
+        fs::write(
+            fixture.repo.join("feature.js"),
+            "dangerous_call('feature');\n",
+        )
+        .expect("new finding");
+        git(&fixture.repo, &["add", "feature.js"]);
+        git(
+            &fixture.repo,
+            &["commit", "-m", "introduce feature finding"],
+        );
+        let (exit_status, stdout, stderr) = scan("finding-scan");
+        let error = super::validate_scanner_result("semgrep", exit_status, &stdout, &stderr)
+            .expect_err("feature-introduced finding must block");
+        assert!(error.contains("reported findings"), "{error}");
     }
 
     #[test]
