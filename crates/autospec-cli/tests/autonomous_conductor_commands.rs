@@ -708,6 +708,77 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
 }
 
 #[test]
+fn foreground_accepts_fast_forwarded_explore_head() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let recorded_oid = git_fixture(&fixture.repo_dir, &["rev-parse", "HEAD"]);
+    git_fixture(
+        &fixture.repo_dir,
+        &["checkout", "-b", "autospec/autonomous-main"],
+    );
+    git_fixture(
+        &fixture.repo_dir,
+        &["push", "-u", "origin", "autospec/autonomous-main"],
+    );
+    fs::write(fixture.repo_dir.join("integration.txt"), "advanced\n")
+        .expect("advance integration branch");
+    git_fixture(&fixture.repo_dir, &["add", "integration.txt"]);
+    git_fixture(
+        &fixture.repo_dir,
+        &["commit", "-m", "advance integration branch"],
+    );
+    git_fixture(
+        &fixture.repo_dir,
+        &["push", "origin", "autospec/autonomous-main"],
+    );
+    let advanced_oid = git_fixture(&fixture.repo_dir, &["rev-parse", "HEAD"]);
+    git_fixture(&fixture.repo_dir, &["checkout", "main"]);
+    fs::create_dir_all(fixture.repo_dir.join(".autospec")).expect("create explore config");
+    fs::write(
+        fixture.repo_dir.join(".autospec/explore-mode.json"),
+        format!("{{\"branch\":\"autospec/autonomous-main\",\"head_sha\":\"{recorded_oid}\"}}\n"),
+    )
+    .expect("write stale explore head");
+
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_BRIDGE_BASE_REF", "autospec/autonomous-main")
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .output()
+        .expect("execute from fast-forwarded explore head");
+
+    assert!(
+        output.status.success(),
+        "status={:?} stdout={} stderr={}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git_fixture(
+            &fixture.root,
+            &[
+                "--git-dir",
+                bridge.remote.to_str().unwrap(),
+                "merge-base",
+                "--is-ancestor",
+                &advanced_oid,
+                "refs/heads/autospec/autonomous-main",
+            ],
+        ),
+        ""
+    );
+}
+
+#[test]
 fn foreground_recovers_complete_bridge_after_transient_terminal_observation_failure() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
@@ -4970,12 +5041,13 @@ if [ "$1" = pr ] && [ "$2" = list ]; then
 fi
 if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = create ]; then
   head=$(git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" rev-parse refs/heads/feat/autonomous-issue-42)
+  base="${AUTOSPEC_BRIDGE_BASE_REF:-main}"
   body_file=""; previous=""
   for value in "$@"; do
     if [ "$previous" = --body-file ]; then body_file="$value"; fi
     previous="$value"
   done
-  jq -n --rawfile body "$body_file" --arg head "$head" '[{"number":17,"body":$body,"headRefName":"feat/autonomous-issue-42","headRefOid":$head,"isDraft":true,"baseRefName":"main"}]' > "$AUTOSPEC_FOREGROUND_PULL_REQUESTS"
+  jq -n --rawfile body "$body_file" --arg head "$head" --arg base "$base" '[{"number":17,"body":$body,"headRefName":"feat/autonomous-issue-42","headRefOid":$head,"isDraft":true,"baseRefName":$base}]' > "$AUTOSPEC_FOREGROUND_PULL_REQUESTS"
   printf '%s\n' 'https://example.invalid/test/repo/pull/17'
   exit 0
 fi
@@ -4986,6 +5058,7 @@ if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = 
 fi
 if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = view ]; then
   head=$(jq -r '.[0].headRefOid' "$AUTOSPEC_FOREGROUND_PULL_REQUESTS")
+  base="${AUTOSPEC_BRIDGE_BASE_REF:-main}"
   case " $* " in
     *" headRefOid,statusCheckRollup "*)
       printf '%s\n' "{\"headRefOid\":\"$head\",\"statusCheckRollup\":[{\"name\":\"ci\",\"status\":\"COMPLETED\",\"conclusion\":\"SUCCESS\"}]}" ;;
@@ -4994,16 +5067,16 @@ if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = 
         merge=$(cat "$AUTOSPEC_BRIDGE_MERGED")
         case " $* " in
           *" number,state,isDraft,headRefName,headRefOid,baseRefName,mergeCommit "*)
-            printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":{\"oid\":\"$merge\"}}" ;;
+            printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":{\"oid\":\"$merge\"}}" ;;
           *)
-            printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":{\"oid\":\"$merge\"}}" ;;
+            printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":{\"oid\":\"$merge\"}}" ;;
         esac
       else
         case " $* " in
           *" number,state,isDraft,headRefName,headRefOid,baseRefName,mergeCommit "*)
-            printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":null}" ;;
+            printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":null}" ;;
           *)
-            printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"main\",\"mergeCommit\":null}" ;;
+            printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":null}" ;;
         esac
       fi ;;
   esac
@@ -5011,8 +5084,9 @@ if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = 
 fi
 if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = merge ]; then
   head=$(jq -r '.[0].headRefOid' "$AUTOSPEC_FOREGROUND_PULL_REQUESTS")
+  base="${AUTOSPEC_BRIDGE_BASE_REF:-main}"
   case " $* " in *" --match-head-commit $head "*) ;; *) exit 74 ;; esac
-  git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" update-ref refs/heads/main "$head"
+  git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" update-ref "refs/heads/$base" "$head"
   git --git-dir "$AUTOSPEC_BRIDGE_REMOTE" update-ref -d refs/heads/feat/autonomous-issue-42
   printf '%s\n' "$head" > "$AUTOSPEC_BRIDGE_MERGED"
   exit 0

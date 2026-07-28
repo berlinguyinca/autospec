@@ -18478,10 +18478,25 @@ pub(crate) fn resolve_base(
         }
         let selected = fetch_and_resolve_base(repo, branch, true)?;
         if selected.base_oid != recorded_oid {
-            return Err(format!(
-                "executor explore head mismatch: recorded {recorded_oid}, observed {}",
-                selected.base_oid
-            ));
+            if !canonical_git_oid(recorded_oid) {
+                return Err("executor explore head_sha is invalid".to_string());
+            }
+            let ancestry = Command::new("git")
+                .args([
+                    "merge-base",
+                    "--is-ancestor",
+                    recorded_oid,
+                    &selected.base_oid,
+                ])
+                .current_dir(repo)
+                .output()
+                .map_err(|error| format!("verify executor explore head ancestry: {error}"))?;
+            if !ancestry.status.success() {
+                return Err(format!(
+                    "executor explore head mismatch: recorded {recorded_oid}, observed {}",
+                    selected.base_oid
+                ));
+            }
         }
         return Ok(selected);
     }
@@ -21192,15 +21207,54 @@ mod tests {
     #[test]
     fn autonomous_executor_bridge_rejects_explore_main_and_unverified_head() {
         let fixture = GitFixture::new("explore-reject");
+        fixture.branch("autospec/explore-safe");
         fs::create_dir_all(fixture.repo.join(".autospec")).expect("create config directory");
         for body in [
             r#"{"branch":"main","head_sha":"0000000000000000000000000000000000000000"}"#,
             r#"{"branch":"autospec/missing","head_sha":"0000000000000000000000000000000000000000"}"#,
+            r#"{"branch":"autospec/explore-safe","head_sha":"not-an-oid"}"#,
         ] {
             fs::write(fixture.repo.join(".autospec/explore-mode.json"), body)
                 .expect("write invalid mode");
             assert!(resolve_base(&fixture.repo, &BTreeMap::new()).is_err());
         }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_accepts_fast_forwarded_explore_head() {
+        let fixture = GitFixture::new("explore-fast-forward");
+        let diverged_oid = fixture.branch("diverged");
+        let recorded_oid = fixture.branch("autospec/explore-safe");
+        fs::create_dir_all(fixture.repo.join(".autospec")).expect("create config directory");
+        fs::write(
+            fixture.repo.join(".autospec/explore-mode.json"),
+            format!("{{\"branch\":\"autospec/explore-safe\",\"head_sha\":\"{recorded_oid}\"}}\n"),
+        )
+        .expect("write explore mode");
+
+        git(&fixture.repo, &["checkout", "autospec/explore-safe"]);
+        fs::write(fixture.repo.join("advanced.txt"), "advanced").expect("advance explore branch");
+        git(&fixture.repo, &["add", "advanced.txt"]);
+        git(&fixture.repo, &["commit", "-m", "advance explore branch"]);
+        git(&fixture.repo, &["push", "origin", "autospec/explore-safe"]);
+        let advanced_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        git(&fixture.repo, &["checkout", "main"]);
+
+        let selected =
+            resolve_base(&fixture.repo, &BTreeMap::new()).expect("fast-forwarded explore base");
+
+        assert_eq!(selected.base_oid, advanced_oid);
+        assert_ne!(selected.base_oid, recorded_oid);
+        assert!(selected.explore_mode);
+
+        fs::write(
+            fixture.repo.join(".autospec/explore-mode.json"),
+            format!("{{\"branch\":\"autospec/explore-safe\",\"head_sha\":\"{diverged_oid}\"}}\n"),
+        )
+        .expect("write diverged explore mode");
+        let error = resolve_base(&fixture.repo, &BTreeMap::new())
+            .expect_err("diverged explore head must fail closed");
+        assert!(error.contains("explore head mismatch"), "{error}");
     }
 
     #[cfg(unix)]
