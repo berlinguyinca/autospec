@@ -139,9 +139,36 @@ fn tier2_publisher_rejects_a_marker_without_publication_labels() {
         "autospec",
     );
 
-    assert!(publication_plan(root.path(), REPO, &[existing])
-        .expect_err("untrusted marker fails closed")
-        .contains("missing origin:self"));
+    assert!(
+        publication_plan(root.path(), REPO, std::slice::from_ref(&existing))
+            .expect_err("untrusted marker fails closed")
+            .contains("missing origin:self")
+    );
+
+    let unqueued = RemoteIssue::open(
+        41,
+        existing.title.clone(),
+        existing.body.clone(),
+        vec!["origin:self".to_string()],
+        "autospec",
+    );
+    assert!(publication_plan(root.path(), REPO, &[unqueued])
+        .expect_err("open marker without queue label fails closed")
+        .contains("missing auto-implement"));
+
+    // Successful finalization removes `auto-implement`, so replaying the produced
+    // receipt must not restart-crash after the issue has already closed.
+    let finalized = RemoteIssue::closed(
+        41,
+        existing.title,
+        existing.body,
+        vec!["origin:self".to_string()],
+        "autospec",
+    );
+    assert_eq!(
+        publication_plan(root.path(), REPO, &[finalized]),
+        Ok(Vec::new())
+    );
 }
 
 #[test]

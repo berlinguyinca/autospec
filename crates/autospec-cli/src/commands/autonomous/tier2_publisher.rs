@@ -101,7 +101,12 @@ pub(super) fn publication_plan(
                 &test_command,
             )?),
             [issue] => {
-                for required in ["origin:self", "auto-implement"] {
+                let required_labels = if issue.closed {
+                    &["origin:self"][..]
+                } else {
+                    &["origin:self", "auto-implement"][..]
+                };
+                for required in required_labels {
                     if !issue.labels.iter().any(|label| label == required) {
                         return Err(format!(
                             "Tier 2 publication marker on issue {} is missing {required}",
