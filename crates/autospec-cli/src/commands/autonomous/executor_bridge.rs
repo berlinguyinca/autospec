@@ -12648,6 +12648,9 @@ pub(crate) fn finalize_merged_executor(
                 .into(),
         );
     }
+    if state.phase == BridgePhase::Merged {
+        close_integration_issue_after_observed_merge(state, &DraftPrAdapter::github_cli())?;
+    }
     let binding = cleanup_binding(state);
     let finalization_intent = cleanup_record_path(state_path, "intent");
     ensure_cleanup_record(
@@ -12686,6 +12689,112 @@ pub(crate) fn finalize_merged_executor(
     state.phase = BridgePhase::Complete;
     state.progress_at = unix_now()?;
     write_invocation_atomic(state_path, state).map_err(BridgeRunFailure::invariant)
+}
+
+fn close_integration_issue_after_observed_merge(
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<(), BridgeRunFailure> {
+    if state.phase != BridgePhase::Merged
+        || state
+            .terminal_result
+            .as_deref()
+            .is_none_or(|merge_oid| !canonical_git_oid(merge_oid))
+    {
+        return Err(
+            "executor issue close requires durable observed merged state"
+                .to_string()
+                .into(),
+        );
+    }
+    let default_ref = git_stdout(
+        &state.identity.repository_path,
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    )
+    .map_err(BridgeRunFailure::invariant)?;
+    let default_base = default_ref.strip_prefix("refs/remotes/").ok_or_else(|| {
+        BridgeRunFailure::invariant(
+            "executor issue close default branch is not an origin remote reference",
+        )
+    })?;
+    if state.identity.base_ref == default_base {
+        return Ok(());
+    }
+
+    if observe_exact_issue_state(state, adapter)? == "CLOSED" {
+        return Ok(());
+    }
+    let output = Command::new(&adapter.gh)
+        .args([
+            "issue",
+            "close",
+            &state.identity.issue.to_string(),
+            "--repo",
+            &state.identity.repository,
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| {
+            BridgeRunFailure::transient(format!("close merged integration issue: {error}"))
+        })?;
+    let observed = observe_exact_issue_state(state, adapter)?;
+    if observed == "CLOSED" {
+        return Ok(());
+    }
+    if !output.status.success() {
+        return Err(BridgeRunFailure::transient(format!(
+            "close merged integration issue failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Err(BridgeRunFailure::invariant(
+        "successful integration issue close was not observed",
+    ))
+}
+
+fn observe_exact_issue_state(
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<String, BridgeRunFailure> {
+    let output = Command::new(&adapter.gh)
+        .args([
+            "issue",
+            "view",
+            &state.identity.issue.to_string(),
+            "--repo",
+            &state.identity.repository,
+            "--json",
+            "number,state",
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| {
+            BridgeRunFailure::transient(format!("observe merged integration issue: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(BridgeRunFailure::transient(format!(
+            "observe merged integration issue failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        BridgeRunFailure::invariant(format!("parse merged integration issue: {error}"))
+    })?;
+    let object = strict_object(value, &["number", "state"], "merged integration issue")?;
+    if number(&object, "number")? != state.identity.issue {
+        return Err(
+            "merged integration issue observation returned another issue"
+                .to_string()
+                .into(),
+        );
+    }
+    let issue_state = text(&object, "state")?;
+    if !matches!(issue_state.as_str(), "OPEN" | "CLOSED") {
+        return Err("merged integration issue state is unsupported"
+            .to_string()
+            .into());
+    }
+    Ok(issue_state)
 }
 
 pub(crate) fn finalize_failed_executor(
@@ -39039,6 +39148,83 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
             "main",
         )
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_closes_integration_issue_after_observed_merge() {
+        // Break caught: GitHub does not auto-close issues when their PR lands on a non-default
+        // integration branch, while closing before durable merge observation is unsafe.
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("close-integration-issue");
+        state.identity.base_ref = "origin/autospec/autonomous-main".to_string();
+        state.phase = super::BridgePhase::MergeRequested;
+        state.pr = Some(17);
+        state.head_oid = Some("a".repeat(40));
+        state.terminal_result = None;
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("pre-merge invocation");
+
+        let gh = fixture.root.join("gh-close-integration-issue");
+        let calls = fixture.root.join("gh-close-integration-issue.calls");
+        let closed = fixture.root.join("issue-closed");
+        let fail_once = fixture.root.join("issue-close-fail-once");
+        fs::write(
+            &gh,
+            "#!/bin/sh\nset -eu\n\
+             printf '%s\\n' \"$*\" >> \"$GH_CALLS\"\n\
+             if [ \"$1 $2\" = 'issue view' ]; then\n\
+               if [ -e \"$ISSUE_CLOSED\" ]; then state=CLOSED; else state=OPEN; fi\n\
+               printf '{\"number\":42,\"state\":\"%s\"}\\n' \"$state\"\n\
+               exit 0\n\
+             fi\n\
+             if [ \"$1 $2 $3\" = 'issue close 42' ]; then\n\
+               if [ -e \"$FAIL_ONCE\" ]; then rm \"$FAIL_ONCE\"; exit 73; fi\n\
+               touch \"$ISSUE_CLOSED\"\n\
+               exit 0\n\
+             fi\n\
+             exit 64\n",
+        )
+        .expect("fake gh");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("fake gh mode");
+        let adapter = super::DraftPrAdapter {
+            gh,
+            environment: BTreeMap::from([
+                ("GH_CALLS".into(), calls.clone().into_os_string()),
+                ("ISSUE_CLOSED".into(), closed.clone().into_os_string()),
+                ("FAIL_ONCE".into(), fail_once.clone().into_os_string()),
+            ]),
+        };
+
+        super::close_integration_issue_after_observed_merge(&state, &adapter)
+            .expect_err("pre-merge phase must not close the issue");
+        assert!(!calls.exists(), "pre-merge close invoked GitHub");
+
+        state.phase = super::BridgePhase::Merged;
+        state.terminal_result = Some("b".repeat(40));
+        super::write_invocation_atomic(&state_path, &state).expect("merged invocation");
+        fs::write(&fail_once, "").expect("fail first close");
+
+        super::close_integration_issue_after_observed_merge(&state, &adapter)
+            .expect_err("failed issue close remains replayable");
+        let replay = super::PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("replayable invocation"),
+        )
+        .expect("replayable invocation JSON");
+        assert_eq!(replay.phase, super::BridgePhase::Merged);
+        assert!(!closed.exists(), "failed close changed remote issue state");
+
+        super::close_integration_issue_after_observed_merge(&state, &adapter)
+            .expect("replay closes exact integration issue");
+        super::close_integration_issue_after_observed_merge(&state, &adapter)
+            .expect("closed issue replay is idempotent");
+        assert!(closed.exists(), "issue was not closed");
+        let calls = fs::read_to_string(calls).expect("gh calls");
+        assert_eq!(
+            calls.matches("issue close 42 --repo owner/repo").count(),
+            2,
+            "{calls}"
+        );
     }
 
     #[cfg(unix)]
