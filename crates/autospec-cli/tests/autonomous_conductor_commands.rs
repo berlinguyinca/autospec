@@ -1379,6 +1379,91 @@ fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_w
 }
 
 #[test]
+fn foreground_recovers_active_claim_without_executor_invocation() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(
+        fixture.state_path(),
+        selected_foreground_state()
+            .transition(ConductorEvent::Claimed)
+            .expect("seed claimed conductor")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+            })
+            .expect("seed receipt failure")
+            .to_json(),
+    )
+    .expect("persist receipt-failed conductor state");
+    fixture.seed_claim_state_with_id(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        "claimed",
+        &fresh_iso_timestamp(),
+        EXECUTOR_CLAIM_ID,
+    );
+    fixture.seed_claim_acquisition_receipt(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
+    let seeded = git_fixture(
+        &fixture.claim_repo,
+        &[
+            "ls-remote",
+            "--refs",
+            fixture.claim_remote.to_str().expect("claim remote"),
+            "refs/autospec/claims/issue-42",
+        ],
+    );
+    let seeded = seeded.split_whitespace().next().expect("seeded claim oid");
+    git_fixture(
+        &fixture.claim_repo,
+        &[
+            "push",
+            bridge.remote.to_str().expect("bridge remote"),
+            &format!("{seeded}:refs/autospec/claims/issue-42"),
+        ],
+    );
+    fs::write(&fixture.mode, "claimed\n").expect("seed claim label projection");
+    assert!(
+        !fixture.scoped_dir().join("executor").exists(),
+        "the crash window must precede exact executor invocation persistence"
+    );
+
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .output()
+        .expect("recover claimed pre-invocation dispatch");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(
+        fixture.read_state().phase(),
+        ConductorPhase::Scan,
+        "an active exact claim with no invocation must retry dispatch"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
+}
+
+#[test]
 fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();

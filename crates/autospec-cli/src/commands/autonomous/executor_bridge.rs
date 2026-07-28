@@ -788,6 +788,28 @@ pub(crate) fn recoverable_implementation_completion(
     recoverable_implementation_completion_for_state(&state_path, &state)
 }
 
+pub(crate) fn exact_invocation_exists(
+    state_dir: &Path,
+    lease: &crate::commands::claim::ClaimLease,
+) -> Result<bool, String> {
+    let generation = &sha256_hex(lease.claim_id.as_bytes())[..16];
+    let state_path = state_dir.join(format!("issue-{}-{generation}.json", lease.issue));
+    match fs::symlink_metadata(&state_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("inspect executor invocation: {error}")),
+    }
+    validate_private_state_file(&state_path)?;
+    let state = PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path)
+            .map_err(|error| format!("read executor invocation: {error}"))?,
+    )?;
+    if !invocation_matches_lease(&state, lease) {
+        return Err("executor invocation does not match the durable local acquisition".to_string());
+    }
+    Ok(true)
+}
+
 fn executor_terminal_processes_are_quiescent(state: &PersistedInvocation) -> Result<bool, String> {
     if persisted_executor_is_live(state)? {
         return Ok(false);
@@ -25926,6 +25948,37 @@ exit 64
         .expect("terminal proof");
         assert!(super::legacy_bridge_proves_claim(&state_dir, &lease)
             .expect("exact completed generation proof"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_exact_invocation_probe_rejects_foreign_state() {
+        let root = test_root("exact-invocation-probe");
+        let state_dir = root.join("executor");
+        super::ensure_private_directory(&state_dir).expect("private executor state");
+        let lease = crate::commands::claim::ClaimLease {
+            issue: 42,
+            repo: "owner/repo".to_string(),
+            worker_id: "worker-1".to_string(),
+            branch: "feat/autonomous-issue-42".to_string(),
+            claim_id: "claim-42".to_string(),
+            session_id: None,
+        };
+        assert!(
+            !super::exact_invocation_exists(&state_dir, &lease).expect("missing exact invocation"),
+            "absence is the only state that permits pre-invocation retry"
+        );
+
+        let generation = &super::sha256_hex(lease.claim_id.as_bytes())[..16];
+        let state_path = state_dir.join(format!("issue-42-{generation}.json"));
+        let mut foreign = persisted_invocation();
+        foreign.identity.invocation_id = "42-claim-42".to_string();
+        foreign.identity.worker_id = "foreign-worker".to_string();
+        write_invocation_atomic(&state_path, &foreign).expect("persist foreign invocation");
+
+        assert!(super::exact_invocation_exists(&state_dir, &lease)
+            .expect_err("foreign invocation must fail closed")
+            .contains("does not match"));
         let _ = fs::remove_dir_all(root);
     }
 
