@@ -36,8 +36,8 @@ use autospec_core::claim::{
 };
 use autospec_core::coordination::ConductorOutcome;
 use autospec_core::lint::{
-    lint_implementation, parse_unified_diff, ImplementationLintContext, ImplementationLintOptions,
-    RepositoryIndex,
+    evaluate_patch_size, lint_implementation, parse_unified_diff, ImplementationLintContext,
+    ImplementationLintOptions, ImplementationLintSeverity, PatchSizeLimits, RepositoryIndex,
 };
 #[cfg(unix)]
 use nix::fcntl::OFlag;
@@ -11627,6 +11627,7 @@ where
         );
     }
     run_implementation_lint(state, proof, issue_body)?;
+    refresh_patch_size_admission(state_path, state, Some(issue_body))?;
 
     if state.phase == BridgePhase::ImplementationProven {
         state.phase = BridgePhase::BranchPushing;
@@ -11755,6 +11756,7 @@ where
         state.phase = BridgePhase::DraftCreating;
         state.progress_at = unix_now()?;
         write_invocation_atomic(state_path, state)?;
+        validate_patch_size_admission(state_path, state).map_err(BridgeRunFailure::invariant)?;
         let creation = create_draft_pull_request(
             state_path,
             state,
@@ -11888,6 +11890,7 @@ where
     Refresh: FnMut() -> Result<BridgeClaimOwnership, BridgeRunFailure>,
 {
     let admission = ready_admission(state, decision)?;
+    validate_patch_size_admission(state_path, state).map_err(BridgeRunFailure::invariant)?;
     let before = list_bridge_pull_requests(&state.identity.repository, adapter)?;
     let pull_request = exact_ready_merge_pull_request(&before, state, &admission)?;
     if pull_request.is_draft {
@@ -12458,6 +12461,7 @@ fn revalidate_merge_admission(
     state: &PersistedInvocation,
     adapter: &DraftPrAdapter,
 ) -> Result<(), BridgeRunFailure> {
+    validate_patch_size_admission(state_path, state).map_err(BridgeRunFailure::invariant)?;
     let expected_result = state
         .terminal_result
         .as_deref()
@@ -12684,12 +12688,14 @@ where
 }
 
 fn push_exact_issue_head<Refresh>(
+    state_path: &Path,
     state: &PersistedInvocation,
     refresh: &mut Refresh,
 ) -> Result<(), BridgeRunFailure>
 where
     Refresh: FnMut() -> Result<BridgeClaimOwnership, BridgeRunFailure>,
 {
+    validate_patch_size_admission(state_path, state).map_err(BridgeRunFailure::invariant)?;
     let head = state
         .head_oid
         .as_deref()
@@ -12931,7 +12937,8 @@ where
                 .to_string()
                 .into());
         }
-        push_exact_issue_head(state, &mut refresh)?;
+        refresh_patch_size_admission(state_path, state, None)?;
+        push_exact_issue_head(state_path, state, &mut refresh)?;
         return Ok(false);
     }
     if !sandboxed_executor_diff(state)?.is_empty() {
@@ -12982,7 +12989,8 @@ where
             explore_mode: false,
         },
     )?;
-    push_exact_issue_head(state, &mut refresh)?;
+    refresh_patch_size_admission(state_path, state, None)?;
+    push_exact_issue_head(state_path, state, &mut refresh)?;
     Ok(true)
 }
 
@@ -14290,6 +14298,219 @@ fn run_implementation_lint(
             result.blocking_count,
         ))
     }
+}
+
+#[derive(Clone, Debug)]
+struct PatchSizeAdmission {
+    schema: u32,
+    base_oid: String,
+    head_oid: String,
+    changed_lines: usize,
+    raw_files: usize,
+    logical_units: usize,
+    has_binary: bool,
+    policy_context: Option<String>,
+    evaluation_digest: String,
+}
+
+impl PatchSizeAdmission {
+    fn to_json(&self) -> String {
+        serde_json::json!({
+            "schema": self.schema,
+            "base_oid": self.base_oid,
+            "head_oid": self.head_oid,
+            "changed_lines": self.changed_lines,
+            "raw_files": self.raw_files,
+            "logical_units": self.logical_units,
+            "has_binary": self.has_binary,
+            "policy_context": self.policy_context,
+            "evaluation_digest": self.evaluation_digest,
+        })
+        .to_string()
+    }
+
+    fn from_json(body: &str) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_str(body)
+            .map_err(|error| format!("parse executor patch-size admission: {error}"))?;
+        let object = strict_object(
+            value,
+            &[
+                "schema",
+                "base_oid",
+                "head_oid",
+                "changed_lines",
+                "raw_files",
+                "logical_units",
+                "has_binary",
+                "policy_context",
+                "evaluation_digest",
+            ],
+            "executor patch-size admission",
+        )?;
+        let usize_field = |name| {
+            number(&object, name).and_then(|value| {
+                usize::try_from(value)
+                    .map_err(|_| format!("executor patch-size admission {name} is too large"))
+            })
+        };
+        Ok(Self {
+            schema: u32::try_from(number(&object, "schema")?)
+                .map_err(|_| "executor patch-size admission schema is too large".to_string())?,
+            base_oid: text(&object, "base_oid")?,
+            head_oid: text(&object, "head_oid")?,
+            changed_lines: usize_field("changed_lines")?,
+            raw_files: usize_field("raw_files")?,
+            logical_units: usize_field("logical_units")?,
+            has_binary: required(&object, "has_binary")?.as_bool().ok_or_else(|| {
+                "executor patch-size admission binary flag is invalid".to_string()
+            })?,
+            policy_context: match required(&object, "policy_context")? {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(value) => Some(value.clone()),
+                _ => {
+                    return Err(
+                        "executor patch-size admission policy context is invalid".to_string()
+                    )
+                }
+            },
+            evaluation_digest: text(&object, "evaluation_digest")?,
+        })
+    }
+
+    fn digest(&self) -> String {
+        sha256_hex(
+            format!(
+                "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+                self.schema,
+                self.base_oid,
+                self.head_oid,
+                self.changed_lines,
+                self.raw_files,
+                self.logical_units,
+                self.has_binary,
+                self.policy_context.as_deref().unwrap_or_default(),
+            )
+            .as_bytes(),
+        )
+    }
+}
+
+fn patch_size_receipt_path(state_path: &Path) -> PathBuf {
+    state_path.with_extension("patch-size-admission.json")
+}
+
+fn evaluate_patch_size_admission(
+    state: &PersistedInvocation,
+    head_oid: &str,
+    issue_body: &str,
+) -> Result<PatchSizeAdmission, String> {
+    if !canonical_git_oid(&state.identity.base_oid) || !canonical_git_oid(head_oid) {
+        return Err("executor patch-size admission requires canonical base/head OIDs".to_string());
+    }
+    let diff = git_stdout(
+        &state.identity.worktree,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--unified=3",
+            &state.identity.base_oid,
+            head_oid,
+        ],
+    )?;
+    let diff = parse_unified_diff(&diff)
+        .map_err(|error| format!("parse executor patch-size diff: {error}"))?;
+    let evaluation = evaluate_patch_size(&diff, PatchSizeLimits::default());
+    let repository = BridgeRepositoryIndex {
+        repo: state.identity.worktree.clone(),
+        tree_oid: head_oid.to_string(),
+    };
+    let lint = lint_implementation(
+        &diff,
+        ImplementationLintContext {
+            issue_body: (!issue_body.is_empty()).then_some(issue_body),
+            repository: &repository,
+            options: implementation_lint_options(),
+        },
+    );
+    if lint.findings.iter().any(|finding| {
+        finding.rule_id() == "PR_SIZE" && finding.severity == ImplementationLintSeverity::Error
+    }) {
+        return Err("executor patch-size admission rejected PR_SIZE".to_string());
+    }
+    let size = evaluation.size();
+    let mut admission = PatchSizeAdmission {
+        schema: 1,
+        base_oid: state.identity.base_oid.clone(),
+        head_oid: head_oid.to_string(),
+        changed_lines: size.changed_lines,
+        raw_files: size.raw_files,
+        logical_units: size.logical_units,
+        has_binary: size.has_binary,
+        policy_context: issue_body
+            .lines()
+            .find(|line| line.starts_with("Guardian: skip-PR_SIZE # "))
+            .map(str::to_string),
+        evaluation_digest: String::new(),
+    };
+    admission.evaluation_digest = admission.digest();
+    Ok(admission)
+}
+
+fn persist_patch_size_admission(
+    state_path: &Path,
+    admission: &PatchSizeAdmission,
+) -> Result<(), String> {
+    write_private_atomic(
+        &patch_size_receipt_path(state_path),
+        admission.to_json().as_bytes(),
+        "executor patch-size admission",
+    )
+}
+
+fn load_patch_size_admission(state_path: &Path) -> Result<PatchSizeAdmission, String> {
+    let path = patch_size_receipt_path(state_path);
+    validate_private_state_file(&path)
+        .map_err(|error| format!("executor patch-size admission is missing or unsafe: {error}"))?;
+    PatchSizeAdmission::from_json(
+        &fs::read_to_string(path)
+            .map_err(|error| format!("read executor patch-size admission: {error}"))?,
+    )
+}
+
+fn validate_patch_size_admission(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<PatchSizeAdmission, String> {
+    let admission = load_patch_size_admission(state_path)?;
+    if admission.schema != 1
+        || admission.base_oid != state.identity.base_oid
+        || admission.head_oid.as_str() != state.head_oid.as_deref().unwrap_or_default()
+    {
+        return Err("executor patch-size admission base/head mismatch".to_string());
+    }
+    if admission.evaluation_digest != admission.digest() {
+        return Err("executor patch-size admission evaluation digest mismatch".to_string());
+    }
+    Ok(admission)
+}
+
+fn refresh_patch_size_admission(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    issue_body: Option<&str>,
+) -> Result<(), String> {
+    let inherited = load_patch_size_admission(state_path).ok();
+    let policy = issue_body
+        .map(str::to_string)
+        .or_else(|| inherited.and_then(|receipt| receipt.policy_context))
+        .unwrap_or_default();
+    let head = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor patch-size refresh requires a head OID".to_string())?;
+    let admission = evaluate_patch_size_admission(state, head, &policy)?;
+    persist_patch_size_admission(state_path, &admission)?;
+    validate_patch_size_admission(state_path, state).map(|_| ())
 }
 
 fn implementation_lint_options() -> ImplementationLintOptions {
@@ -34599,6 +34820,144 @@ exit 64
         assert_eq!(calls.matches("pr create").count(), 0);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_pr_size_blocks_oversized_push_and_draft_without_mutation() {
+        // Break caught: an oversized exact-head diff reaching git push or gh pr create.
+        for (label, files, lines) in [("lines", 1, 401), ("files", 9, 1)] {
+            let (fixture, mut state, snapshot, closeout) =
+                implementation_proof_fixture(&format!("pr-size-{label}"));
+            let state_path = fixture.root.join("state/invocation.json");
+            let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
+            state.phase = BridgePhase::Pending;
+            super::write_invocation_atomic(&state_path, &state).expect("pending");
+            super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+                .expect("remote baseline");
+            state.phase = BridgePhase::ImplementationComplete;
+            for file in 0..files {
+                fs::write(
+                    state.identity.worktree.join(format!("slice-{file}.txt")),
+                    "changed\n".repeat(lines),
+                )
+                .expect("oversized slice");
+            }
+            git(&state.identity.worktree, &["add", "slice-*.txt"]);
+            git(
+                &state.identity.worktree,
+                &["commit", "-m", "test: oversized slice"],
+            );
+            let proof = super::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
+                .expect("proof");
+            let admission = super::evaluate_patch_size_admission(&state, &proof.head_oid, "")
+                .expect_err("exact oversized diff must be rejected before any remote transition");
+            assert!(admission.contains("PR_SIZE"), "{admission}");
+            let diff = super::git_stdout(
+                &state.identity.worktree,
+                &[
+                    "diff",
+                    "--unified=3",
+                    &state.identity.base_oid,
+                    &proof.head_oid,
+                ],
+            )
+            .and_then(|diff| super::parse_unified_diff(&diff).map_err(|error| error.to_string()))
+            .expect("exact oversized diff");
+            let size = super::evaluate_patch_size(&diff, super::PatchSizeLimits::default()).size();
+            assert_eq!((size.changed_lines, size.raw_files), (files * lines, files));
+            let outline = (0..files)
+                .map(|file| format!("- slice-{file}.txt"))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            let error = super::push_and_create_draft(
+                &state_path,
+                &mut state,
+                &proof,
+                "Oversized slice",
+                &format!("## Implementation outline\n\n{outline}\n"),
+                &adapter,
+            )
+            .expect_err("oversized slice must fail closed");
+
+            assert!(error.contains("PR_SIZE"), "{label}: {error}");
+            assert!(!git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref",
+                ],
+            )
+            .contains(&state.identity.branch));
+            assert!(!fs::read_to_string(fixture.root.join("gh-calls"))
+                .expect("gh ledger")
+                .contains("pr create"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_pr_size_receipt_rejects_missing_stale_and_mismatched_evidence() {
+        // Break caught: ready or merge trusting absent or non-exact patch-size evidence.
+        for case in ["missing", "stale", "mismatch"] {
+            let mut prepared = prepared_draft_transaction(&format!("pr-size-{case}"));
+            let receipt = super::patch_size_receipt_path(&prepared.state_path);
+            let admission = super::evaluate_patch_size_admission(
+                &prepared.state,
+                &prepared.proof.head_oid,
+                DRAFT_ISSUE_BODY,
+            )
+            .expect("admission");
+            if case != "missing" {
+                super::persist_patch_size_admission(&prepared.state_path, &admission)
+                    .expect("receipt");
+            }
+            if case == "stale" {
+                prepared.state.identity.base_oid = "b".repeat(40);
+            } else if case == "mismatch" {
+                let mut body: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(&receipt).expect("receipt"))
+                        .expect("receipt json");
+                body["changed_lines"] = 399.into();
+                fs::write(&receipt, body.to_string()).expect("tamper receipt");
+            }
+            prepared.state.phase = super::BridgePhase::DraftCreated;
+            prepared.state.pr = Some(17);
+            let lane = super::PremergeLaneIdentity::new(
+                prepared.state.identity.repository.clone(),
+                prepared.state.identity.issue,
+                prepared.state.identity.worker_id.clone(),
+                prepared.state.identity.claim_id.clone(),
+                prepared.state.identity.branch.clone(),
+                prepared.proof.head_oid.clone(),
+            )
+            .expect("lane");
+            let pass = super::PremergeDecision::Pass {
+                lane,
+                evidence_digest: "evidence".into(),
+            };
+            fs::write(prepared.fixture.root.join("gh-calls"), "").expect("clear ledger");
+            assert!(super::mark_exact_draft_ready(
+                &prepared.state_path,
+                &mut prepared.state,
+                &pass,
+                &prepared.adapter,
+            )
+            .expect_err(case)
+            .contains("patch-size"));
+            assert!(super::revalidate_merge_admission(
+                &prepared.state_path,
+                &prepared.state,
+                &prepared.adapter,
+            )
+            .expect_err(case)
+            .contains("patch-size"));
+            assert!(fs::read_to_string(prepared.fixture.root.join("gh-calls"))
+                .expect("ledger")
+                .is_empty());
+        }
+    }
+
     #[test]
     fn autonomous_executor_bridge_reuse_lens_follows_exact_environment_contract() {
         // Break caught: draft publication enabling reuse-only detectors when the shell gate is off.
@@ -42040,7 +42399,7 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
     }
 
     #[test]
-    fn autonomous_executor_bridge_base_drift_invalidates_every_commit_bound_gate() {
+    fn autonomous_executor_bridge_pr_size_base_drift_recomputes_exact_admission() {
         let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("merge-base-drift");
         commit_implementation(&state);
         let original_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
@@ -42057,6 +42416,10 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         state.head_oid = Some(original_head.clone());
         let state_path = fixture.root.join("state/invocation.json");
         super::write_invocation_atomic(&state_path, &state).expect("reviewed state");
+        let original =
+            super::evaluate_patch_size_admission(&state, &original_head, DRAFT_ISSUE_BODY)
+                .expect("original admission");
+        super::persist_patch_size_admission(&state_path, &original).expect("original receipt");
 
         fs::write(fixture.root.join("seed/base-drift.txt"), "drift\n").expect("base drift");
         git(&fixture.root.join("seed"), &["add", "base-drift.txt"]);
@@ -42073,6 +42436,13 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         assert_eq!(state.phase, super::BridgePhase::DraftCreated);
         assert_ne!(state.identity.base_oid, original_head);
         assert_ne!(state.head_oid.as_deref(), Some(original_head.as_str()));
+        let admission = super::validate_patch_size_admission(&state_path, &state)
+            .expect("drifted base/head have fresh patch-size evidence");
+        assert_eq!(admission.base_oid, state.identity.base_oid);
+        assert_eq!(Some(admission.head_oid.as_str()), state.head_oid.as_deref());
+        assert_ne!(admission.base_oid, original.base_oid);
+        assert_ne!(admission.head_oid, original.head_oid);
+        assert_ne!(admission.evaluation_digest, original.evaluation_digest);
         let ancestor = Command::new("git")
             .args([
                 "merge-base",
