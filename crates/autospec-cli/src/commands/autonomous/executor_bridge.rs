@@ -6657,6 +6657,17 @@ pub(crate) fn execute_direct_plan(
         };
         let mut effective = command.clone();
         effective.argv[0] = executable.display().to_string();
+        if paths.record.is_file()
+            && changed_automatic_reviewer_failure(
+                &worktree,
+                &paths,
+                command,
+                runtime.map(DirectRuntimeAdapter::session_id),
+            )?
+        {
+            archive_reconciled_direct_failure(&paths)?;
+            attempt_id = reserve_direct_attempt_id(&paths)?;
+        }
         if paths.record.is_file() {
             let recovered = recover_observed_command(
                 &worktree,
@@ -6840,6 +6851,79 @@ pub(crate) fn execute_direct_plan(
         return Err("executor direct command commit identity drifted during execution".to_string());
     }
     Ok(observed)
+}
+
+fn changed_automatic_reviewer_failure(
+    worktree: &Path,
+    paths: &DirectAttemptPaths,
+    declared: &DirectCommand,
+    runtime_session_id: Option<&str>,
+) -> Result<bool, String> {
+    if declared.review_capture.is_none() {
+        return Ok(false);
+    }
+    let Some(current_identity) = declared.identity_digest.as_deref() else {
+        return Ok(false);
+    };
+    if !valid_direct_attempt_id(current_identity) {
+        return Err("automatic reviewer identity digest is malformed".to_string());
+    }
+    let observed = read_observed_command_record(worktree, &paths.record)?;
+    if declared.accepts(&observed.terminal) {
+        return Ok(false);
+    }
+    let intent_path = paths.record.with_extension("intent.json");
+    validate_private_state_file(&intent_path)
+        .map_err(|error| format!("automatic reviewer intent is unsafe: {error}"))?;
+    let intent: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&intent_path)
+            .map_err(|error| format!("read automatic reviewer intent: {error}"))?,
+    )
+    .map_err(|error| format!("parse automatic reviewer intent: {error}"))?;
+    if intent.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
+        || intent.get("attempt_id").and_then(serde_json::Value::as_str)
+            != Some(observed.attempt_id.as_str())
+    {
+        return Err("automatic reviewer intent does not bind its terminal record".to_string());
+    }
+    let prior_identity = intent
+        .get("identity_digest")
+        .and_then(serde_json::Value::as_str);
+    if prior_identity.is_some_and(|identity| !valid_direct_attempt_id(identity)) {
+        return Err("persisted automatic reviewer identity digest is malformed".to_string());
+    }
+    if prior_identity == Some(current_identity) {
+        return Ok(false);
+    }
+    let prior_argv = intent
+        .get("argv")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "automatic reviewer intent argv is malformed".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "automatic reviewer intent argv is malformed".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if prior_identity.is_none() {
+        let legacy = prior_argv
+            .first()
+            .map(Path::new)
+            .filter(|path| path.file_name() == Some(OsStr::new("review-normalizer.sh")))
+            .filter(|path| path.parent() == paths.record.parent())
+            .ok_or_else(|| {
+                "legacy command lacks provable automatic reviewer identity".to_string()
+            })?;
+        validate_private_state_file(legacy)
+            .map_err(|error| format!("legacy automatic reviewer is unsafe: {error}"))?;
+    }
+    let mut prior = declared.clone();
+    prior.argv = prior_argv;
+    prior.identity_digest = prior_identity.map(str::to_string);
+    recover_observed_command(worktree, &paths.record, &prior, runtime_session_id)?;
+    Ok(true)
 }
 
 fn recover_observed_command(
@@ -7552,7 +7636,25 @@ fn prepare_automatic_reviewer_normalizer(
                 .ok_or_else(|| "reviewer result path must be valid UTF-8".to_string())?
         ),
     );
-    let normalizer = artifact_root.join("review-normalizer.sh");
+    let legacy_normalizer = artifact_root.join("review-normalizer.sh");
+    let normalizer = if legacy_normalizer.exists() {
+        validate_private_state_file(&legacy_normalizer).map_err(|error| {
+            format!("existing automatic reviewer normalizer is unsafe: {error}")
+        })?;
+        if fs::read(&legacy_normalizer)
+            .map_err(|error| format!("read existing automatic reviewer normalizer: {error}"))?
+            == body.as_bytes()
+        {
+            legacy_normalizer
+        } else {
+            artifact_root.join(format!(
+                "review-normalizer-{}.sh",
+                &sha256_hex(body.as_bytes())[..16]
+            ))
+        }
+    } else {
+        legacy_normalizer
+    };
     write_private_create_once(
         &normalizer,
         body.as_bytes(),
@@ -26762,6 +26864,53 @@ exit 64
 
     #[cfg(unix)]
     #[test]
+    fn automatic_reviewer_identity_change_preserves_superseded_normalizer() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("automatic-reviewer-upgrade");
+        commit_implementation(&state);
+        state.phase = BridgePhase::CiPassed;
+        state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
+        let state_path = fixture.root.join("state/invocation.json");
+        let request = reviewer_request(&state, state_path.clone());
+        let table = write_alias_table(
+            &fixture.root,
+            &format!(
+                "codex\t{}\tautospec-codex\tCodex fixture\n",
+                fs::canonicalize("/bin/true")
+                    .expect("canonical reviewer")
+                    .display()
+            ),
+        );
+        let mut env = environment(&table);
+        env.insert(
+            "AUTOSPEC_HANDOFF_DISPATCHER_KIND".to_string(),
+            OsString::from("codex"),
+        );
+        let artifact_root = state_path.with_extension("review-artifacts");
+        fs::create_dir_all(&artifact_root).expect("review artifact root");
+        fs::set_permissions(&artifact_root, fs::Permissions::from_mode(0o700))
+            .expect("private review artifact root");
+        let legacy = artifact_root.join("review-normalizer.sh");
+        write_executable(&legacy, "#!/bin/sh\nulimit -f 2048\nexit 25\n");
+        fs::set_permissions(&legacy, fs::Permissions::from_mode(0o700))
+            .expect("private legacy normalizer");
+
+        let reviewer = super::resolve_independent_reviewer(&request, &state, &env, &artifact_root)
+            .expect("resolve upgraded reviewer without deleting legacy evidence");
+        let automatic = reviewer.automatic.expect("automatic reviewer artifacts");
+
+        assert_ne!(automatic.normalizer, legacy);
+        assert_eq!(
+            fs::read_to_string(&legacy).expect("legacy normalizer"),
+            "#!/bin/sh\nulimit -f 2048\nexit 25\n"
+        );
+        assert!(!fs::read_to_string(&automatic.normalizer)
+            .expect("upgraded normalizer")
+            .contains("ulimit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn autonomous_executor_bridge_codex_reviewer_ignores_host_policy_but_keeps_auth() {
         // Break caught: retained CODEX_HOME loading host MCP, hook, or execpolicy mutation authority.
         let (fixture, mut state, _snapshot, _) =
@@ -37206,6 +37355,253 @@ exit 19
         assert!(archives
             .iter()
             .all(|entry| entry.path().join("complete").is_file()));
+    }
+
+    fn automatic_review_command(
+        executable: &Path,
+        capture_root: &Path,
+        identity_digest: &str,
+    ) -> super::DirectCommand {
+        fs::create_dir_all(capture_root).expect("review capture root");
+        fs::set_permissions(capture_root, fs::Permissions::from_mode(0o700))
+            .expect("private review capture root");
+        let artifacts =
+            ["inner.stdout", "inner.stderr", "result.txt"].map(|name| capture_root.join(name));
+        for path in &artifacts {
+            fs::write(path, b"").expect("review capture artifact");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .expect("private review capture artifact");
+        }
+        super::DirectCommand {
+            argv: vec![executable.display().to_string()],
+            accepted_exit_codes: vec![0],
+            identity_digest: Some(identity_digest.to_string()),
+            review_capture: Some(super::ReviewerCapturePolicy { artifacts }),
+        }
+    }
+
+    fn direct_failure_archive_count(root: &Path) -> usize {
+        fs::read_dir(root)
+            .expect("direct evidence root")
+            .flatten()
+            .filter(|entry| {
+                entry.file_name().to_string_lossy().contains(".archive-")
+                    && entry.path().join("complete").is_file()
+            })
+            .count()
+    }
+
+    fn rewrite_direct_terminal_as_signal(evidence: &Path, signal: i32) {
+        let record = evidence.join("command-000.json");
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&record).expect("direct failure record"))
+                .expect("direct failure record JSON");
+        value["terminal"] = serde_json::json!({"kind": "signaled", "signal": signal});
+        fs::write(&record, value.to_string()).expect("rewrite direct terminal");
+    }
+
+    #[test]
+    fn automatic_reviewer_identity_change_retries_signaled_failure_once() {
+        let fixture = GitFixture::new("review-identity-retry");
+        let evidence = fixture.root.join("review-evidence");
+        let capture = fixture.root.join("review-capture");
+        let executable = fixture.root.join("reviewer");
+        let marker = fixture.root.join("reviewer-ran");
+        write_executable(
+            &executable,
+            &format!(
+                "#!/bin/sh\nif [ ! -f '{}' ]; then : > '{}'; exit 1; fi\nexit 0\n",
+                marker.display(),
+                marker.display()
+            ),
+        );
+        let old = automatic_review_command(&executable, &capture, &"a".repeat(64));
+        let new = automatic_review_command(&executable, &capture, &"b".repeat(64));
+
+        let first = super::execute_direct_plan(
+            &fixture.repo,
+            &super::DirectCommandPlan {
+                commands: vec![old],
+            },
+            &evidence,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("old reviewer must leave a durable failure");
+        assert!(first.contains("exit status 1"), "{first}");
+        rewrite_direct_terminal_as_signal(&evidence, 25);
+        let recovered = super::execute_direct_plan(
+            &fixture.repo,
+            &super::DirectCommandPlan {
+                commands: vec![new],
+            },
+            &evidence,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("changed automatic-review identity retries once");
+
+        assert_eq!(recovered[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_eq!(direct_failure_archive_count(&evidence), 1);
+        let paths = super::direct_attempt_paths(&evidence, 0);
+        assert!(!super::changed_automatic_reviewer_failure(
+            &fixture.repo.canonicalize().expect("canonical repo"),
+            &paths,
+            &automatic_review_command(&executable, &capture, &"b".repeat(64)),
+            None,
+        )
+        .expect("restart inspects completed retry"));
+        assert_eq!(direct_failure_archive_count(&evidence), 1);
+        assert_eq!(
+            fs::read_dir(super::direct_attempt_reservation_directory(&paths))
+                .expect("attempt reservations")
+                .flatten()
+                .count(),
+            2,
+            "restart must not reserve a third automatic-review attempt"
+        );
+        let archive = fs::read_dir(&evidence)
+            .expect("failure archive")
+            .flatten()
+            .find(|entry| entry.file_name().to_string_lossy().contains(".archive-"))
+            .expect("archived failed review")
+            .path();
+        for name in [
+            "command-000.json",
+            "command-000.intent.json",
+            "command-000.stdout",
+            "command-000.stderr",
+            "complete",
+        ] {
+            assert!(archive.join(name).is_file(), "missing archived {name}");
+        }
+        assert!(fs::read_dir(&evidence)
+            .expect("launch retirement evidence")
+            .flatten()
+            .any(
+                |entry| entry.file_name().to_string_lossy().contains(".retire-")
+                    && entry.path().join("complete").is_file()
+            ));
+    }
+
+    #[test]
+    fn automatic_reviewer_identity_change_same_identity_keeps_terminal_failure() {
+        let fixture = GitFixture::new("review-identity-same");
+        let evidence = fixture.root.join("review-evidence");
+        let capture = fixture.root.join("review-capture");
+        let executable = fixture.root.join("reviewer");
+        let count = fixture.root.join("reviewer-count");
+        write_executable(
+            &executable,
+            &format!(
+                "#!/bin/sh\nn=0; [ ! -f '{}' ] || n=$(cat '{}'); n=$((n+1)); printf '%s' \"$n\" > '{}'; exit 1\n",
+                count.display(),
+                count.display(),
+                count.display()
+            ),
+        );
+        let command = || automatic_review_command(&executable, &capture, &"a".repeat(64));
+        let run = || {
+            super::execute_direct_plan(
+                &fixture.repo,
+                &super::DirectCommandPlan {
+                    commands: vec![command()],
+                },
+                &evidence,
+                None,
+                Duration::from_secs(5),
+            )
+        };
+
+        run().expect_err("first reviewer signal persists");
+        rewrite_direct_terminal_as_signal(&evidence, 25);
+        let second = run().expect_err("same reviewer identity must not retry");
+
+        assert!(second.contains("signal 25"), "{second}");
+        assert_eq!(fs::read_to_string(count).expect("reviewer count"), "1");
+        assert_eq!(direct_failure_archive_count(&evidence), 0);
+    }
+
+    #[test]
+    fn automatic_reviewer_identity_change_never_retries_success() {
+        let fixture = GitFixture::new("review-success-no-retry");
+        let evidence = fixture.root.join("review-evidence");
+        let capture = fixture.root.join("review-capture");
+        let command =
+            automatic_review_command(Path::new("/usr/bin/true"), &capture, &"a".repeat(64));
+        super::execute_direct_plan(
+            &fixture.repo,
+            &super::DirectCommandPlan {
+                commands: vec![command.clone()],
+            },
+            &evidence,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("successful automatic review");
+        let paths = super::direct_attempt_paths(&evidence, 0);
+        let changed =
+            automatic_review_command(Path::new("/usr/bin/true"), &capture, &"b".repeat(64));
+
+        assert!(!super::changed_automatic_reviewer_failure(
+            &fixture.repo.canonicalize().expect("canonical repo"),
+            &paths,
+            &changed,
+            None,
+        )
+        .expect("inspect successful review"));
+        assert_eq!(direct_failure_archive_count(&evidence), 0);
+    }
+
+    #[test]
+    fn automatic_reviewer_identity_change_recovers_ci_passed_review() {
+        let fixture = GitFixture::new("issue-52-ci-passed-review");
+        let evidence = fixture.root.join("receipts/52/ci_passed/review");
+        let capture = fixture.root.join("review-capture");
+        fs::create_dir_all(&evidence).expect("legacy review evidence");
+        fs::set_permissions(&evidence, fs::Permissions::from_mode(0o700))
+            .expect("private legacy review evidence");
+        let executable = evidence.join("review-normalizer.sh");
+        let repaired = fixture.root.join("reviewer-repaired");
+        write_executable(
+            &executable,
+            &format!(
+                "#!/bin/sh\n[ -f '{}' ] || exit 1\nexit 0\n",
+                repaired.display()
+            ),
+        );
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))
+            .expect("private legacy reviewer");
+        let mut first = automatic_review_command(&executable, &capture, &"a".repeat(64));
+        first.identity_digest = None;
+        super::execute_direct_plan(
+            &fixture.repo,
+            &super::DirectCommandPlan {
+                commands: vec![first],
+            },
+            &evidence,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("old ci_passed review terminal");
+        rewrite_direct_terminal_as_signal(&evidence, 25);
+        fs::write(&repaired, b"repaired\n").expect("repair reviewer");
+        let changed = automatic_review_command(&executable, &capture, &"b".repeat(64));
+
+        let recovered = super::execute_direct_plan(
+            &fixture.repo,
+            &super::DirectCommandPlan {
+                commands: vec![changed],
+            },
+            &evidence,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("ci_passed restart reaches repaired review");
+
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_eq!(direct_failure_archive_count(&evidence), 1);
     }
 
     #[cfg(target_os = "linux")]
