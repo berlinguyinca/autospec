@@ -34841,13 +34841,29 @@ exit 64
                 )
                 .expect("oversized slice");
             }
-            git(&state.identity.worktree, &["add", "."]);
+            git(&state.identity.worktree, &["add", "slice-*.txt"]);
             git(
                 &state.identity.worktree,
                 &["commit", "-m", "test: oversized slice"],
             );
             let proof = super::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
                 .expect("proof");
+            let admission = super::evaluate_patch_size_admission(&state, &proof.head_oid, "")
+                .expect_err("exact oversized diff must be rejected before any remote transition");
+            assert!(admission.contains("PR_SIZE"), "{admission}");
+            let diff = super::git_stdout(
+                &state.identity.worktree,
+                &[
+                    "diff",
+                    "--unified=3",
+                    &state.identity.base_oid,
+                    &proof.head_oid,
+                ],
+            )
+            .and_then(|diff| super::parse_unified_diff(&diff).map_err(|error| error.to_string()))
+            .expect("exact oversized diff");
+            let size = super::evaluate_patch_size(&diff, super::PatchSizeLimits::default()).size();
+            assert_eq!((size.changed_lines, size.raw_files), (files * lines, files));
             let outline = (0..files)
                 .map(|file| format!("- slice-{file}.txt"))
                 .collect::<Vec<_>>()
@@ -34883,76 +34899,63 @@ exit 64
     #[test]
     fn autonomous_executor_bridge_pr_size_receipt_rejects_missing_stale_and_mismatched_evidence() {
         // Break caught: ready or merge trusting absent or non-exact patch-size evidence.
-        let mut prepared = prepared_draft_transaction("pr-size-receipt");
-        let admission = super::evaluate_patch_size_admission(
-            &prepared.state,
-            &prepared.proof.head_oid,
-            DRAFT_ISSUE_BODY,
-        )
-        .expect("admission");
-        let receipt = super::patch_size_receipt_path(&prepared.state_path);
-        assert!(
-            super::validate_patch_size_admission(&prepared.state_path, &prepared.state).is_err()
-        );
-        super::persist_patch_size_admission(&prepared.state_path, &admission).expect("receipt");
-        super::validate_patch_size_admission(&prepared.state_path, &prepared.state)
-            .expect("exact receipt");
-
-        prepared.state.identity.base_oid = "b".repeat(40);
-        assert!(
-            super::validate_patch_size_admission(&prepared.state_path, &prepared.state)
-                .expect_err("stale base")
-                .contains("mismatch")
-        );
-        prepared.state.identity.base_oid = admission.base_oid.clone();
-        let mut mismatched: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&receipt).expect("receipt body"))
-                .expect("receipt json");
-        mismatched["changed_lines"] = 399.into();
-        fs::write(&receipt, mismatched.to_string()).expect("tamper receipt");
-        assert!(
-            super::validate_patch_size_admission(&prepared.state_path, &prepared.state)
-                .expect_err("mismatched evaluation")
-                .contains("digest")
-        );
-        fs::write(prepared.fixture.root.join("gh-calls"), "").expect("clear remote ledger");
-        assert!(super::revalidate_merge_admission(
-            &prepared.state_path,
-            &prepared.state,
-            &prepared.adapter,
-        )
-        .expect_err("merge must reject mismatched receipt")
-        .contains("digest"));
-        fs::remove_file(&receipt).expect("remove receipt");
-        prepared.state.phase = super::BridgePhase::DraftCreated;
-        prepared.state.pr = Some(17);
-        let lane = super::PremergeLaneIdentity::new(
-            prepared.state.identity.repository.clone(),
-            prepared.state.identity.issue,
-            prepared.state.identity.worker_id.clone(),
-            prepared.state.identity.claim_id.clone(),
-            prepared.state.identity.branch.clone(),
-            prepared.proof.head_oid.clone(),
-        )
-        .expect("lane");
-        let pass = super::PremergeDecision::Pass {
-            lane,
-            evidence_digest: "evidence".into(),
-        };
-        assert!(super::mark_exact_draft_ready(
-            &prepared.state_path,
-            &mut prepared.state,
-            &pass,
-            &prepared.adapter,
-        )
-        .expect_err("ready must reject missing receipt")
-        .contains("missing"));
-        assert!(
-            fs::read_to_string(prepared.fixture.root.join("gh-calls"))
-                .expect("remote ledger")
-                .is_empty(),
-            "receipt rejection must precede every gh mutation or observation"
-        );
+        for case in ["missing", "stale", "mismatch"] {
+            let mut prepared = prepared_draft_transaction(&format!("pr-size-{case}"));
+            let receipt = super::patch_size_receipt_path(&prepared.state_path);
+            let admission = super::evaluate_patch_size_admission(
+                &prepared.state,
+                &prepared.proof.head_oid,
+                DRAFT_ISSUE_BODY,
+            )
+            .expect("admission");
+            if case != "missing" {
+                super::persist_patch_size_admission(&prepared.state_path, &admission)
+                    .expect("receipt");
+            }
+            if case == "stale" {
+                prepared.state.identity.base_oid = "b".repeat(40);
+            } else if case == "mismatch" {
+                let mut body: serde_json::Value =
+                    serde_json::from_str(&fs::read_to_string(&receipt).expect("receipt"))
+                        .expect("receipt json");
+                body["changed_lines"] = 399.into();
+                fs::write(&receipt, body.to_string()).expect("tamper receipt");
+            }
+            prepared.state.phase = super::BridgePhase::DraftCreated;
+            prepared.state.pr = Some(17);
+            let lane = super::PremergeLaneIdentity::new(
+                prepared.state.identity.repository.clone(),
+                prepared.state.identity.issue,
+                prepared.state.identity.worker_id.clone(),
+                prepared.state.identity.claim_id.clone(),
+                prepared.state.identity.branch.clone(),
+                prepared.proof.head_oid.clone(),
+            )
+            .expect("lane");
+            let pass = super::PremergeDecision::Pass {
+                lane,
+                evidence_digest: "evidence".into(),
+            };
+            fs::write(prepared.fixture.root.join("gh-calls"), "").expect("clear ledger");
+            assert!(super::mark_exact_draft_ready(
+                &prepared.state_path,
+                &mut prepared.state,
+                &pass,
+                &prepared.adapter,
+            )
+            .expect_err(case)
+            .contains("patch-size"));
+            assert!(super::revalidate_merge_admission(
+                &prepared.state_path,
+                &prepared.state,
+                &prepared.adapter,
+            )
+            .expect_err(case)
+            .contains("patch-size"));
+            assert!(fs::read_to_string(prepared.fixture.root.join("gh-calls"))
+                .expect("ledger")
+                .is_empty());
+        }
     }
 
     #[test]
@@ -42413,6 +42416,10 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         state.head_oid = Some(original_head.clone());
         let state_path = fixture.root.join("state/invocation.json");
         super::write_invocation_atomic(&state_path, &state).expect("reviewed state");
+        let original =
+            super::evaluate_patch_size_admission(&state, &original_head, DRAFT_ISSUE_BODY)
+                .expect("original admission");
+        super::persist_patch_size_admission(&state_path, &original).expect("original receipt");
 
         fs::write(fixture.root.join("seed/base-drift.txt"), "drift\n").expect("base drift");
         git(&fixture.root.join("seed"), &["add", "base-drift.txt"]);
@@ -42433,6 +42440,9 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
             .expect("drifted base/head have fresh patch-size evidence");
         assert_eq!(admission.base_oid, state.identity.base_oid);
         assert_eq!(Some(admission.head_oid.as_str()), state.head_oid.as_deref());
+        assert_ne!(admission.base_oid, original.base_oid);
+        assert_ne!(admission.head_oid, original.head_oid);
+        assert_ne!(admission.evaluation_digest, original.evaluation_digest);
         let ancestor = Command::new("git")
             .args([
                 "merge-base",
