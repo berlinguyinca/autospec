@@ -1890,7 +1890,7 @@ fn autonomous_status_all_json_aliases_list_with_conductors_key() {
 }
 
 #[test]
-fn autonomous_stop_kills_only_the_target_repo_scope() {
+fn autonomous_immediate_stop_drains_only_the_target_repo_conductor() {
     let temp = temp_dir("autospec-autonomous-stop");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -1934,15 +1934,19 @@ fn autonomous_stop_kills_only_the_target_repo_scope() {
     assert!(output.status.success());
     assert!(stdout.contains("\"subcommand\":\"stop\""));
     assert!(stdout.contains("\"repo\":\"berlinguyinca/autospec\""));
-    assert!(stdout.contains("\"stopped\":3"));
+    assert!(stdout.contains("\"stopped\":2"));
+    assert!(stdout.contains("\"draining\":true"));
 
     let target_status = autonomous_status(&operator_dir, &log_dir, "berlinguyinca/autospec");
-    assert!(target_status.contains("\"conductor\":{\"running\":false"));
+    assert!(target_status.contains("\"conductor\":{\"running\":true"));
+    assert!(target_status.contains("\"monitor\":{\"running\":false"));
+    assert!(target_status.contains("\"supervisor\":{\"running\":false"));
     let other_status = autonomous_status(&operator_dir, &log_dir, "metabolomics-us/go-modules");
     assert!(other_status.contains("\"conductor\":{\"running\":true"));
     assert!(other_status.contains("\"monitor\":{\"running\":true"));
     assert!(other_status.contains("\"supervisor\":{\"running\":true"));
 
+    cleanup_pids(&operator_dir.join("berlinguyinca_autospec"));
     cleanup_pids(&operator_dir.join("metabolomics-us_go-modules"));
 }
 

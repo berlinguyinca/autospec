@@ -114,6 +114,7 @@ const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const TERMINAL_RETIREMENT_PAUSE: &str = "executor_terminal_retirement";
 const OWNERSHIP_RETIREMENT_PAUSE: &str = "executor_ownership_retirement";
 const EXECUTOR_PENDING_REASON: &str = "implementation_executor_pending";
+const NO_READY_ISSUE_PAUSE: &str = "no_ready_issue_after_review";
 const DEFAULT_SUPERVISOR_REPAIR_INTERVAL_SECS: u64 = 5;
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1788,10 +1789,11 @@ fn stop(options: Options) -> Result<(), String> {
         },
     )?;
     let mut stopped = 0;
-    let units: &[&str] = match options.stop_mode {
-        StopMode::Graceful => &["supervisor", "monitor"],
-        StopMode::Immediate => &["supervisor", "monitor", "conductor"],
-    };
+    // The conductor owns durable direct-command supervisors. Killing it here can strand a
+    // completed child before the strict EXIT/DONE fence is published, making safe recovery
+    // impossible. Both stop modes therefore drain the conductor at its next observed boundary;
+    // immediate still differs through the persisted mode consumed by the conductor.
+    let units: &[&str] = &["supervisor", "monitor"];
     for name in units {
         let unit = read_unit(name, &layout);
         let terminated = terminate_unit(name, &unit)?;
@@ -1802,17 +1804,19 @@ fn stop(options: Options) -> Result<(), String> {
             release_terminated_owner(&layout, &unit.pid)?;
         }
     }
+    let draining = read_unit("conductor", &layout).running;
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"stop\",\"repo\":\"{}\",\"mode\":\"{}\",\"stop_flag\":\"{}\",\"stopped\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"stop\",\"repo\":\"{}\",\"mode\":\"{}\",\"stop_flag\":\"{}\",\"stopped\":{},\"draining\":{}}}",
             json_escape(&options.repo),
             options.stop_mode.as_str(),
             json_escape(&stop_flag.display().to_string()),
-            stopped
+            stopped,
+            draining
         );
     } else {
         println!(
-            "autospec autonomous stop: mode={} stop_flag={} stopped {stopped}",
+            "autospec autonomous stop: mode={} stop_flag={} stopped {stopped} draining={draining}",
             options.stop_mode.as_str(),
             stop_flag.display()
         );
@@ -2392,12 +2396,16 @@ fn run_foreground_cycles(
         let completion = cycle?;
         heartbeat_result?;
         completed_cycles = completed_cycles.saturating_add(1);
+        let loopable_state = match &completion {
+            ForegroundCompletion::State(state) => {
+                state.phase() == ConductorPhase::Scan
+                    || no_ready_selection_pause(state).map_err(CommandFailure::diagnostic)?
+            }
+            ForegroundCompletion::Lifecycle(_) => false,
+        };
         let keep_running = continuous
             && cycle_limit.is_none_or(|limit| completed_cycles < limit)
-            && matches!(
-                &completion,
-                ForegroundCompletion::State(state) if state.phase() == ConductorPhase::Scan
-            );
+            && loopable_state;
         if !keep_running {
             return Ok(completion);
         }
@@ -2575,6 +2583,17 @@ fn run_foreground_with_lease(
     let state_path = foreground_state_path(layout, scope);
     let mut state =
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
+    if no_ready_selection_pause(&state).map_err(CommandFailure::diagnostic)? {
+        let ready = initial_plan.as_ref().map_err(|reason| {
+            CommandFailure::diagnostic(format!("cannot recheck paused foreground queue: {reason}"))
+        })?;
+        if ready.batch.is_empty() {
+            return Ok(ForegroundCompletion::State(Box::new(state)));
+        }
+        state = ConductorState::new(state.repo(), state.scope(), state.retry_limit())
+            .map_err(CommandFailure::diagnostic)?;
+        persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
+    }
     if state.phase() == ConductorPhase::Paused {
         if let Some(issue) = state.selected_issue() {
             let claim_terminal = claim::conductor_claim_is_terminal(&layout.repo, issue)?;
@@ -2904,6 +2923,23 @@ fn foreground_state_is_retained(state: &ConductorState) -> bool {
     )
 }
 
+fn no_ready_selection_pause(state: &ConductorState) -> Result<bool, String> {
+    if state.pause_reason() != Some(NO_READY_ISSUE_PAUSE) {
+        return Ok(false);
+    }
+    if state.phase() != ConductorPhase::Paused || state.selected_issue().is_some() {
+        return Err("no-ready foreground pause has incompatible state".to_string());
+    }
+    let resumed = state
+        .clone()
+        .transition(ConductorEvent::Resume)
+        .map_err(|error| format!("cannot inspect no-ready foreground pause: {error}"))?;
+    if resumed.phase() != ConductorPhase::Select {
+        return Err("no-ready foreground pause must resume from Select".to_string());
+    }
+    Ok(true)
+}
+
 #[derive(Debug, Clone)]
 struct ForegroundSelection {
     issue: u64,
@@ -3044,7 +3080,7 @@ fn select_foreground(
     let Some(selected) = ready.batch.first() else {
         let state = state
             .transition(ConductorEvent::Pause {
-                reason: "no_ready_issue_after_review".to_string(),
+                reason: NO_READY_ISSUE_PAUSE.to_string(),
             })
             .map_err(|error| {
                 CommandFailure::diagnostic(format!("cannot pause foreground conductor: {error}"))
