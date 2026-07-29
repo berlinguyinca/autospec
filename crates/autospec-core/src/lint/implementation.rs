@@ -579,11 +579,8 @@ fn detect_out_of_scope(
     };
     let outline = section(issue_body, &["Implementation outline"])
         .or_else(|| section(issue_body, &["Implementation scope"]));
-    if outline.is_none() && !fail_closed_on_missing_outline {
-        return;
-    }
     let allowed = outline.map(path_tokens).unwrap_or_default();
-    if outline.is_some() && allowed.is_empty() {
+    if allowed.is_empty() && !fail_closed_on_missing_outline {
         return;
     }
     for file in &diff.files {
@@ -2045,6 +2042,64 @@ mod tests {
 
         assert_eq!(out_of_scope.len(), 1);
         assert_eq!(out_of_scope[0].path, "src/changed.rs");
+        assert_eq!(out_of_scope[0].severity, ImplementationLintSeverity::Error);
+        assert_eq!(result.blocking_count, 1);
+        assert_eq!(result.exit_code(), 1);
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_rejects_changed_path_with_empty_outline() {
+        let diff = parse_unified_diff(concat!(
+            "diff ",
+            "--git a/src/changed.rs b/src/changed.rs\n\
+             --- a/src/changed.rs\n\
+             +++ b/src/changed.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n"
+        ))
+        .expect("literal diff must parse");
+
+        let result = lint_issue_implementation_contract(&diff, "## Implementation outline\n\n");
+        let out_of_scope = result
+            .findings
+            .iter()
+            .filter(|finding| finding.rule == ImplementationLintRule::OutOfScope)
+            .collect::<Vec<_>>();
+
+        assert_eq!(out_of_scope.len(), 1);
+        assert_eq!(out_of_scope[0].path, "src/changed.rs");
+        assert_eq!(out_of_scope[0].severity, ImplementationLintSeverity::Error);
+        assert_eq!(result.blocking_count, 1);
+        assert_eq!(result.exit_code(), 1);
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_rejects_changed_path_with_pathless_outline() {
+        let diff = parse_unified_diff(concat!(
+            "diff ",
+            "--git a/src/changed.rs b/src/changed.rs\n\
+             --- a/src/changed.rs\n\
+             +++ b/src/changed.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n"
+        ))
+        .expect("literal diff must parse");
+        let body = "## Implementation outline\n\n- Update the shared classifier before delivery\n";
+
+        let result = lint_issue_implementation_contract(&diff, body);
+        let out_of_scope = result
+            .findings
+            .iter()
+            .filter(|finding| finding.rule == ImplementationLintRule::OutOfScope)
+            .collect::<Vec<_>>();
+
+        assert_eq!(out_of_scope.len(), 1);
+        assert_eq!(out_of_scope[0].path, "src/changed.rs");
+        assert_eq!(out_of_scope[0].severity, ImplementationLintSeverity::Error);
+        assert_eq!(result.blocking_count, 1);
+        assert_eq!(result.exit_code(), 1);
     }
 
     #[test]
