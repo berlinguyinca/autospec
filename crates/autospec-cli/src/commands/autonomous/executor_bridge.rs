@@ -11733,6 +11733,14 @@ where
         );
     }
     run_implementation_lint(state, proof, issue_body)?;
+    if state.phase == BridgePhase::DraftCleanupPending {
+        let parent = state_path.parent().ok_or_else(|| {
+            "executor draft cleanup recovery state requires a parent directory".to_string()
+        })?;
+        validate_private_directory(parent).map_err(|error| {
+            format!("executor draft cleanup recovery state parent is unsafe: {error}")
+        })?;
+    }
     refresh_patch_size_admission(state_path, state, Some(issue_body))?;
 
     if state.phase == BridgePhase::ImplementationProven {
@@ -35364,14 +35372,27 @@ exit 64
     fn autonomous_executor_bridge_cleanup_restart_rejects_public_guard_parent() {
         // Break caught: cleanup recovery silently repairing an untrusted guard directory.
         let mut prepared = cleanup_pending_transaction("draft-cleanup-public-guard-parent");
-        let parent = prepared.state_path.parent().expect("state parent");
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o755))
+        let parent = prepared
+            .state_path
+            .parent()
+            .expect("state parent")
+            .to_path_buf();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755))
             .expect("public guard parent");
 
         let error = prepared
             .publish()
             .expect_err("public guard parent must prohibit cleanup recovery");
 
+        let parent_mode = fs::metadata(&parent)
+            .expect("public guard parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            parent_mode, 0o755,
+            "rejected guard parent permissions must remain unchanged"
+        );
         assert!(
             error.contains("private") || error.contains("unsafe"),
             "{error}"
