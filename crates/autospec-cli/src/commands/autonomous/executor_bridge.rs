@@ -15029,7 +15029,8 @@ fn publish_continuation_child(
             "\n## Dependencies\n\nDepends on issue #{previous}\n"
         ));
     }
-    body.push_str(&format!("\nPart of #{umbrella}.\n"));
+    let issue = receipt.issue;
+    body.push_str(&format!("\n## Context\n\nPart of #{umbrella}.\n\n## Files to read first\n\n- `AGENTS.md`\n\n## Implementation outline\n\n- Implement continuation ordinal {ordinal} within the original issue #{issue} scope.\n\n## Tests required\n\n- smoke: verify continuation ordinal {ordinal}.\n\n### Primary smoke test (inner loop)\n\n```bash\ngit diff --check\n```\n"));
     let mut matches = continuation_gh(
         &[
             "issue".into(),
@@ -15050,13 +15051,17 @@ fn publish_continuation_child(
         "find continuation child",
     )?;
     if matches.is_empty() {
+        let title: String = format!("Continuation {ordinal}: {criterion}")
+            .chars()
+            .take(120)
+            .collect();
         let mut arguments = vec![
             "issue".into(),
             "create".into(),
             "--repo".into(),
             receipt.repository.clone(),
             "--title".into(),
-            format!("Continuation {ordinal}: {criterion}"),
+            title,
             "--body".into(),
             body.clone(),
         ];
@@ -15108,7 +15113,7 @@ fn publish_continuation_children(
                 return Err("continuation parent does not contain current child".to_string());
             }
             let start = children.len() + 1;
-            let previous = children.last().copied();
+            let previous = Some(receipt.issue);
             (parent, children, start, previous)
         }
         None => (receipt.issue, Vec::new(), 1, None),
@@ -15116,9 +15121,9 @@ fn publish_continuation_children(
     let mut criteria = receipt.unmet.clone();
     if parent.is_none() {
         let current = if receipt.status == "oversized_checkpoint" {
-            "reapply current oversized slice"
+            "reapply the current oversized slice ordinal 1"
         } else {
-            "complete the current capped slice"
+            "complete the current capped slice ordinal 1"
         };
         criteria.insert(0, current.to_string());
     }
@@ -23578,7 +23583,6 @@ mod tests {
             "{error}"
         );
     }
-
     #[test]
     fn autonomous_executor_bridge_prefers_primary_supervisor_executable() {
         let primary = std::env::current_exe().expect("current test executable");
@@ -35999,7 +36003,7 @@ esac
         state.head_oid = Some(head.clone());
         let proof = super::ImplementationProof {
             head_oid: head,
-            closeout_body: "## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice-0.txt; `git diff`\nScoped git status: slice files\nOne likely hidden failure: boundary\nCompleted criteria: [\"first current slice criterion with a reproducible command and exact artifact path\",\"second current slice criterion with a reproducible command and exact artifact path\"]\nUnmet criteria: [\"second slice\",\"third slice\"]\n".into(),
+            closeout_body: "## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice-0.txt; `git diff`\nScoped git status: slice files\nOne likely hidden failure: boundary\nCompleted criteria: [\"first current slice criterion with a reproducible command and exact artifact path\",\"second current slice criterion with a reproducible command and exact artifact path\"]\nUnmet criteria: [\"Run `scripts/continuation-second.sh` and verify the exact receipt-bound restart path with 0 duplicate issue creates\",\"Run `scripts/continuation-third.sh` once\"]\n".into(),
         };
         super::require_continuation_checkpoint(&state_path, &event_log, &state, &proof, "", true)
             .expect("proactive continuation");
@@ -36024,19 +36028,31 @@ esac
         .expect("existing parent marker");
         fs::write(
             store.join("comments/10"),
-            "<!-- autospec-parent-decomposition:begin -->\nParent issue #10 was decomposed\n- #41\n- #43\n<!-- autospec-parent-decomposition:end -->\n",
+            "<!-- autospec-parent-decomposition:begin -->\nParent issue #10 was decomposed\n- #41\n- #43\n- #45\n<!-- autospec-parent-decomposition:end -->\n",
         )
         .expect("existing order");
         let mut existing = super::load_continuation_receipt(&state_path, &state).expect("receipt");
         existing.issue = 43;
         existing.content_digest = existing.digest();
         super::publish_continuation_children(&state_path, &existing).expect("parent extension");
-        assert!(fs::read_to_string(store.join("issues/104.body"))
-            .unwrap()
-            .contains("Depends on issue #43"));
+        let first = fs::read_to_string(store.join("issues/104.body")).unwrap();
+        assert!(first.contains("Depends on issue #43"));
         assert!(fs::read_to_string(store.join("issues/105.body"))
             .unwrap()
             .contains("Depends on issue #104"));
+        assert!(fs::read_to_string(store.join("comments/43"))
+            .unwrap()
+            .contains("autospec-parent:10"));
+        let lint = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/lint-issue.sh");
+        for number in 101..=105 {
+            assert!(Command::new(&lint)
+                .arg(store.join(format!("issues/{number}.body")))
+                .status()
+                .unwrap()
+                .success());
+        }
+        let title = fs::read_to_string(store.join("issues/102.title")).unwrap();
+        assert!(title.trim().chars().count() <= 120);
         for (key, previous) in [
             ("PATH", previous_path),
             ("GH_STORE", previous_store),
