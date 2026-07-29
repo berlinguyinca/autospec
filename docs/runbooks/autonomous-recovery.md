@@ -121,3 +121,11 @@ open and closed issues: one matching marker with both publication labels is
 complete, no marker is retried, and a missing label or multiple matches fails
 closed. The Tier 2 cursor advances only after every marker from the sealed
 receipt is confirmed remotely.
+
+Before a draft can reach issue creation, the publisher synthesizes the expected
+implementation diff from its target and regression-test paths and runs the
+shared implementation contract. Blocking `OUT_OF_SCOPE` or `MISSING_TEST`
+findings reject the draft before it receives `auto-implement` or consumes an
+implementation token. Project-native regression artifacts such as
+`scripts/test-autonomous-status-panel.mjs` satisfy the test requirement; their
+paths must still appear in the draft's `## Implementation outline`.
