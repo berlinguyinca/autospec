@@ -9,6 +9,7 @@ pub struct UnifiedDiff {
 pub struct DiffFile {
     pub path: String,
     pub is_new: bool,
+    pub is_binary: bool,
     pub hunks: Vec<DiffHunk>,
 }
 
@@ -22,6 +23,18 @@ impl DiffFile {
 
     pub fn added_line_count(&self) -> usize {
         self.added_lines().count()
+    }
+
+    pub fn removed_line_count(&self) -> usize {
+        self.hunks
+            .iter()
+            .flat_map(|hunk| hunk.lines.iter())
+            .filter(|line| line.kind == DiffLineKind::Removed)
+            .count()
+    }
+
+    pub fn changed_line_count(&self) -> usize {
+        self.added_line_count() + self.removed_line_count()
     }
 }
 
@@ -78,6 +91,7 @@ pub fn parse_unified_diff(source: &str) -> Result<UnifiedDiff, String> {
             current_file = Some(DiffFile {
                 path: path.to_string(),
                 is_new: false,
+                is_binary: false,
                 hunks: Vec::new(),
             });
             continue;
@@ -89,6 +103,10 @@ pub fn parse_unified_diff(source: &str) -> Result<UnifiedDiff, String> {
 
         if raw == "new file mode 100644" || raw.starts_with("new file mode ") {
             file.is_new = true;
+            continue;
+        }
+        if raw.starts_with("Binary files ") || raw == "GIT binary patch" {
+            file.is_binary = true;
             continue;
         }
         if raw.starts_with("@@ ") {
