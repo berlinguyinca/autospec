@@ -18,18 +18,10 @@ pub mod showcase;
 pub mod status;
 pub mod validate;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandFailureKind {
-    Diagnostic,
-    Transient,
-    Status,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandFailure {
     pub message: String,
     pub exit_code: i32,
-    pub kind: CommandFailureKind,
 }
 
 impl CommandFailure {
@@ -37,15 +29,6 @@ impl CommandFailure {
         Self {
             message: message.into(),
             exit_code: 2,
-            kind: CommandFailureKind::Diagnostic,
-        }
-    }
-
-    pub fn transient(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            exit_code: 2,
-            kind: CommandFailureKind::Transient,
         }
     }
 
@@ -53,13 +36,7 @@ impl CommandFailure {
         Self {
             message: message.into(),
             exit_code,
-            kind: CommandFailureKind::Status,
         }
-    }
-
-    pub fn into_transient(mut self) -> Self {
-        self.kind = CommandFailureKind::Transient;
-        self
     }
 }
 

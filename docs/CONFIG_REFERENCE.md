@@ -222,9 +222,6 @@ they have a skill/shared canonical source.
 |---|---|---|
 | `AUTOSPEC_REVIEWER_TIER` | tier-policy default | Override the model tier for the LGTM/guardian reviewer. |
 | `AUTOSPEC_HARNESS_DISPATCHER` | auto-detected | Force a harness dispatcher (claude/opencode/codex). |
-| `AUTOSPEC_HANDOFF_DISPATCHER_KIND` | initiating session | Select the native autonomous executor (`claude`, `codex`, or `opencode`); overrides Codex, Claude, and OpenCode runtime markers. Without a marker, executors are PATH-probed in alias-table order. |
-| `AUTOSPEC_HARNESS_RUNTIME_ALIASES` | `$AUTOSPEC_CONFIG_DIR/harness-runtime-aliases.tsv`, otherwise `~/.autospec/config/harness-runtime-aliases.tsv` | Override the installed four-column TSV mapping harness kind, executable alias, approval alias, and display name. |
-| `AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER` | (unset) | Absolute proven containment adapter required before the native executor may launch OpenCode. |
 | `AUTOSPEC_NO_GUARDIAN` | (unset) | Disable the guardian RULE_ID pass (not recommended). |
 
 ## Automation lifecycle toggles
@@ -258,8 +255,7 @@ they have a skill/shared canonical source.
 | Var | Default | Effect |
 |---|---|---|
 | `AUTOSPEC_SEC_MAX_ROUNDS` | `3` | Phase 4 security gate fix/re-scan loop cap. |
-| `AUTOSPEC_REQUIRED_SYSTEM_TOOLS` | core tools + `npm` | Override required core installer commands; the immutable executor scanner set is always added and verified. |
-| `AUTOSPEC_SKIP_ENSURE_TOOL` / `_<TOOL>` | (unset) | Disable scanner auto-install (all, or one tool); required scanners remain verified and fail closed by exact name. |
+| `AUTOSPEC_SKIP_ENSURE_TOOL` / `_<TOOL>` | (unset) | Disable scanner auto-install (all, or one tool). |
 
 ## Explore (autospec-explore RSI)
 | Var | Default | Effect |

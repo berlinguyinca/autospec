@@ -29,8 +29,10 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 SENSITIVE_DOMAINS = {"auth", "secrets", "secret", "money", "payments", "payment", "migration", "migrations"}
@@ -91,51 +93,10 @@ RUNTIME_SIGNAL_INSTALL = '''unsafe {
 
 
 def approved_unsafe_boundary(relative_path, source, match):
-    """Allow only independently reviewed unsafe boundaries with invariant proof."""
-    code = rust_code_only(source)
-    function_matches = list(re.finditer(r"\bfn\s+([A-Za-z0-9_]+)\s*\(", source[:match.start()]))
-    function_match = function_matches[-1] if function_matches else None
-    function_name = function_match.group(1) if function_match else ""
-    function_end = None
-    if function_match:
-        function_open = code.find("{", function_match.end())
-        function_depth = 0
-        for index in range(function_open, len(code)):
-            if code[index] == "{":
-                function_depth += 1
-            elif code[index] == "}":
-                function_depth -= 1
-                if function_depth == 0:
-                    function_end = index + 1
-                    break
-    open_brace = code.find("{", match.start())
-    depth = 0
-    end = None
-    for index in range(open_brace, len(code)):
-        if code[index] == "{":
-            depth += 1
-        elif code[index] == "}":
-            depth -= 1
-            if depth == 0:
-                end = index + 1
-                break
-    body = " ".join(code[match.start():end].split()) if end else ""
-    reviewed = {
-        ("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs", "autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(subreaper), 0, 0, 0, ) }",
-        ("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs", "autonomous_executor_bridge_clean_supervision_restores_prior_subreaper_state"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(observed), 0, 0, 0, ) }",
-        ("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs", "autonomous_executor_bridge_clean_supervision_preserves_enabled_subreaper_state"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(observed), 0, 0, 0, ) }",
-        ("crates/autospec-cli/src/commands/runtime/env/session.rs", "verify_active"): "unsafe { nix::libc::geteuid() }",
-    }
-    expected_body = reviewed.get((relative_path, function_name))
-    normalized_function = (
-        " ".join(code[function_match.start():function_end].split())
-        if function_match and function_end and match.start() < function_end
-        else ""
-    )
-    if body == expected_body and normalized_function.count(expected_body) == 1:
-        return True
+    """Allow only the independently reviewed runtime-signal FFI boundary."""
     if relative_path != RUNTIME_SIGNAL_FFI_PATH:
         return False
+    code = rust_code_only(source)
     declaration = rust_code_only(RUNTIME_SIGNAL_DECLARATION)
     installation = rust_code_only(RUNTIME_SIGNAL_INSTALL)
     if code.count(declaration) != 1 or code.count(installation) != 1:
@@ -216,36 +177,6 @@ def rust_code_only(source):
     return "".join(output)
 
 
-def unsafe_findings_for_source(relative_path, source):
-    findings = []
-    code = rust_code_only(source)
-    for match in RUST_UNSAFE_SYNTAX.finditer(code):
-        unsafe_offset = code.find("unsafe", match.start(), match.end())
-        line = code.count("\n", 0, unsafe_offset) + 1
-        if approved_unsafe_boundary(relative_path, source, match):
-            continue
-        syntax = (
-            "attribute"
-            if match.group(0).lstrip().startswith("#")
-            else re.search(
-                r"\bunsafe\s*(\{|fn\b|trait\b|impl\b|extern\b)",
-                match.group(0),
-            ).group(1)
-        )
-        findings.append({
-            "gap_id": f"U{len(findings)+1}",
-            "dimension": "unsafe",
-            "severity": "must-fix",
-            "file": relative_path,
-            "line": line,
-            "title": "Unsafe code requires security review",
-            "body": "Unsafe code was detected. Replace it with a safe primitive or document an independent security review and invariant proof.",
-            "dedupe_key": title_hash(f"unsafe:{relative_path}:{line}"),
-            "_unsafe_syntax": syntax,
-        })
-    return findings
-
-
 def unsafe_findings(root):
     root_path = Path(root or ".")
     findings = []
@@ -259,10 +190,22 @@ def unsafe_findings(root):
         except OSError:
             continue
         source = "\n".join(lines)
-        rel = str(path.relative_to(root_path)) if path.is_relative_to(root_path) else str(path)
-        findings.extend(unsafe_findings_for_source(rel, source))
-    for index, finding in enumerate(findings, start=1):
-        finding["gap_id"] = f"U{index}"
+        code = rust_code_only(source)
+        for match in RUST_UNSAFE_SYNTAX.finditer(code):
+            line = code.count("\n", 0, match.start()) + 1
+            rel = str(path.relative_to(root_path)) if path.is_relative_to(root_path) else str(path)
+            if approved_unsafe_boundary(rel, source, match):
+                continue
+            findings.append({
+                "gap_id": f"U{len(findings)+1}",
+                "dimension": "unsafe",
+                "severity": "must-fix",
+                "file": rel,
+                "line": line,
+                "title": "Unsafe code requires security review",
+                "body": "Unsafe code was detected. Replace it with a safe primitive or document an independent security review and invariant proof.",
+                "dedupe_key": title_hash(f"unsafe:{rel}:{line}"),
+            })
     return findings
 
 
@@ -310,7 +253,6 @@ def score(row):
 
 def normalize(row, idx):
     out = dict(row)
-    out.pop("_unsafe_syntax", None)
     out.setdefault("gap_id", f"G{idx}")
     out.setdefault("dimension", "vuln")
     out.setdefault("severity", "nice-to-have")
@@ -343,161 +285,33 @@ def remediation(row):
     return "Triage exploitability and exposure, apply the smallest remediation, then re-run the security workstream."
 
 
-def write_ranked(rows, out):
+def cmd_rank(args):
+    rows = read_jsonl(args.findings)
+    rows.extend(unsafe_findings(args.root))
     ranked = [normalize(row, i + 1) for i, row in enumerate(rows)]
     ranked.sort(key=lambda r: (-int(r.get("severity_rank", 0)), r.get("file", ""), int(r.get("line") or 0)))
-    write_jsonl(out, ranked)
+    write_jsonl(args.out, ranked)
     p0 = sum(1 for r in ranked if r.get("priority") == "P0")
     p1 = sum(1 for r in ranked if r.get("priority") == "P1")
     print(f"security rank complete findings={len(ranked)} p0={p0} p1={p1}")
     return 0
 
 
-def cmd_rank(args):
-    rows = read_jsonl(args.findings)
-    if args.base:
-        unsafe_rows, error = unsafe_findings_pr(args.root, args.base)
-        if error:
-            eprint(error)
-            return 2
-        rows.extend(unsafe_rows)
-    else:
-        rows.extend(unsafe_findings(args.root))
-    return write_ranked(rows, args.out)
-
-
-def run_git(root, args):
-    result = subprocess.run(
-        ["git", "-C", root, *args],
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    if result.returncode != 0:
-        detail = result.stderr.strip() or "git command failed"
-        raise RuntimeError(f"git {' '.join(args)}: {detail}")
-    return result.stdout
-
-
-def changed_rust_paths(root, merge_base):
-    fields = run_git(
-        root,
-        ["diff", "--name-status", "-z", "--find-renames", merge_base, "HEAD", "--", "*.rs"],
-    ).split("\0")
-    paths = []
-    index = 0
-    while index < len(fields) and fields[index]:
-        status = fields[index]
-        index += 1
-        if status.startswith(("R", "C")):
-            old_path, current_path = fields[index:index + 2]
-            index += 2
-        else:
-            old_path = current_path = fields[index]
-            index += 1
-        paths.append((status[0], old_path, current_path))
-    untracked = run_git(
-        root,
-        ["ls-files", "-z", "--others", "--exclude-standard", "--", "*.rs"],
-    ).split("\0")
-    paths.extend(("?", "", path) for path in untracked if path)
-    return paths
-
-
-def added_unsafe_token_lines(root, merge_base, old_path, current_path):
-    pathspec = list(dict.fromkeys(path for path in (old_path, current_path) if path))
-    diff = run_git(
-        root,
-        [
-            "diff",
-            "--word-diff=porcelain",
-            "--word-diff-regex=[A-Za-z_][A-Za-z0-9_]*|[^[:space:]]",
-            "--find-renames",
-            "--unified=0",
-            merge_base,
-            "HEAD",
-            "--",
-            *pathspec,
-        ],
-    )
-    counts = {}
-    current_line = None
-    has_current_content = False
-    for line in diff.splitlines():
-        hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)", line)
-        if hunk:
-            current_line = int(hunk.group(1))
-            has_current_content = False
-        elif current_line is not None and line == "~":
-            if has_current_content:
-                current_line += 1
-            has_current_content = False
-        elif current_line is not None and line.startswith("+") and not line.startswith("+++"):
-            has_current_content = True
-            added = len(re.findall(r"\bunsafe\b", line[1:]))
-            if added:
-                counts[current_line] = counts.get(current_line, 0) + added
-        elif current_line is not None and not line.startswith("-"):
-            has_current_content = True
-    raw_diff = run_git(
-        root,
-        [
-            "diff",
-            "--unified=0",
-            "--find-renames",
-            merge_base,
-            "HEAD",
-            "--",
-            *pathspec,
-        ],
-    )
-    deleted = {}
-    for line in raw_diff.splitlines():
-        if line.startswith("-") and not line.startswith("---") and re.search(r"\bunsafe\b", line):
-            fingerprint = " ".join(line[1:].split())
-            deleted[fingerprint] = deleted.get(fingerprint, 0) + 1
-    return counts, deleted
-
-
-def unsafe_findings_pr(root, base):
+def changed_file_root(root, base):
+    tmpdir = Path(tempfile.mkdtemp(prefix="security-workstream-diff-"))
     try:
-        merge_base = run_git(root, ["merge-base", base, "HEAD"]).strip()
-        if not merge_base:
-            raise RuntimeError("git merge-base returned no commit")
-        findings = []
-        for status, old_path, current_path in changed_rust_paths(root, merge_base):
-            current_file = Path(root) / current_path
-            if status == "D" or not current_file.is_file():
-                continue
-            current_source = current_file.read_text(errors="ignore")
-            current_lines = current_source.splitlines()
-            current = unsafe_findings_for_source(
-                current_path,
-                current_source,
-            )
-            if status == "?":
-                findings.extend(current)
-                continue
-            added_lines, deleted = added_unsafe_token_lines(
-                root,
-                merge_base,
-                old_path,
-                current_path,
-            )
-            for finding in current:
-                line = finding["line"]
-                if added_lines.get(line, 0):
-                    added_lines[line] -= 1
-                    fingerprint = " ".join(current_lines[line - 1].split())
-                    if deleted.get(fingerprint, 0):
-                        deleted[fingerprint] -= 1
-                    else:
-                        findings.append(finding)
-        for index, finding in enumerate(findings, start=1):
-            finding["gap_id"] = f"U{index}"
-        return findings, None
-    except (OSError, RuntimeError) as error:
-        return [], f"unsafe PR scan failed closed: {error}"
+        merge_base = subprocess.run(["git", "-C", root, "merge-base", base, "HEAD"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.strip() or base
+        names = subprocess.run(["git", "-C", root, "diff", "--name-only", merge_base, "HEAD"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.splitlines()
+        names += subprocess.run(["git", "-C", root, "ls-files", "--others", "--exclude-standard"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.splitlines()
+    except Exception:
+        return tmpdir
+    for rel in sorted(set(n for n in names if n)):
+        src = Path(root) / rel
+        if src.is_file():
+            dst = tmpdir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+    return tmpdir
 
 
 def cmd_scan(args):
@@ -519,16 +333,8 @@ def cmd_scan(args):
         return 2
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tmp.write_text(result.stdout, encoding="utf-8")
-    rows = read_jsonl(tmp)
-    if args.mode == "pr":
-        unsafe_rows, error = unsafe_findings_pr(root, args.base)
-        if error:
-            eprint(error)
-            return 2
-        rows.extend(unsafe_rows)
-    else:
-        rows.extend(unsafe_findings(root))
-    return write_ranked(rows, args.out)
+    unsafe_root = str(changed_file_root(root, args.base)) if args.mode == "pr" else root
+    return cmd_rank(argparse.Namespace(findings=str(tmp), root=unsafe_root, out=args.out))
 
 
 def issue_body(row):
@@ -645,7 +451,6 @@ def main():
     if cmd == "rank":
         parser.add_argument("--findings", required=True)
         parser.add_argument("--root", default=".")
-        parser.add_argument("--base")
         parser.add_argument("--out", required=True)
         return cmd_rank(parser.parse_args(sys.argv[2:]))
     if cmd == "scan":

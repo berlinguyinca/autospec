@@ -32,8 +32,7 @@ scripts remain operational surfaces while V62+ commands mature.
 | `autospec autonomous drain --repo OWNER/REPO --repo-dir DIR [--stall-secs N] [--poll-secs N]` | yes | directly supervises the fixed `omx exec ... $autospec-run` child, preserving local/external progress and terminating only a genuinely stalled live child |
 | `autospec autonomous blast-radius --changed-files FILE [--fenced-surfaces YML] [--json]` | yes | classifies changed paths against configured fenced surfaces; fenced matches exit non-zero and report quarantine evidence |
 | `autospec autonomous main-health --repo OWNER/REPO --repo-dir DIR [--branch BRANCH] [--json]` | yes | runs the Rust repository-local mainline-health probe without dispatching work |
-| `autospec autonomous start --repo OWNER/REPO --repo-dir DIR [--max-cycles N] [--poll-interval-sec N]` | no | launches a lease-owned Rust conductor that repeats native foreground cycles until stop, park, failure, or the optional cycle cap |
-| `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR [--branch BRANCH]` | no | runs one native foreground cycle when invoked directly; a child launched by `start` inherits lifecycle ownership and repeats cycles |
+| `autospec autonomous run-foreground --repo OWNER/REPO --repo-dir DIR [--branch BRANCH]` | no | adopts its fenced native-child token or atomically acquires one before lifecycle, health, queue, claim, or foreground mutation; it launches no implementation agent |
 | `autospec autonomous lifecycle decide --repo OWNER/REPO [--claim-repo OWNER/REPO --claim-issue N --claim-worker ID --claim-branch NAME --claim-state active\|terminal] [--lease-age-sec N] [--stop graceful\|immediate] [--health continue\|wait\|halt] [--budget within\|soft\|hard] [--ready-tier 1\|1.5\|2\|3\|4\|5\|6\|7\|idle]` | yes | evaluates one pure typed lifecycle decision without filesystem, process, GitHub, shell, or `omx` effects |
 | `autospec autonomous executor-result --repo OWNER/REPO --issue N [--worker-id ID --branch NAME --outcome succeeded\|blocked\|retryable ...]` | yes | records either the exact legacy deferred receipt or one strictly validated executor outcome; it never launches work, releases a claim, or merges a PR |
 | `autospec run --run <id> --spec <id>... [--json]` | yes | creates a local persisted queue only; it does not launch an agent or validation command |
@@ -115,59 +114,18 @@ gate. Ambiguous issues receive `autospec:needs-human`; blocking issues receive
 `security:quarantined`; neither becomes reviewed-eligible. Conflicting or malformed remote
 evidence is fail-closed and counted as `conflicted`.
 
-`autospec autonomous run-foreground` is the typed Rust control-plane and executor entrypoint.
-One cycle performs bounded mainline-health admission and queue safety review, selects and claims
-at most one ready issue, and persists strict conductor state as
-`.autospec/autonomous-operator/<scope>/foreground-conductor-<scope-key>.json`, where the scope
-key distinguishes repository runs from each explicit issue slice. For a selected issue it calls
-the native executor bridge directly. The bridge resolves the configured Codex, Claude, or
-OpenCode harness from the installed runtime-alias table, creates or adopts the exact private
-issue worktree and runtime session, and launches the harness with an explicit local-only argument
-vector. It never delegates implementation to a shell, `omx`, `/autospec-run`, or a second queue
-owner.
-
-Harness output and phase changes are appended to the repository-scoped autonomous log consumed
-by `--follow`. Rust independently proves the resulting commit, Closeout report, runtime smoke,
-full resolved suite, implementation and security scans, immutable premerge decision, required
-CI, and LGTM review before it marks the draft ready or admin-merges. The harness cannot push,
-create or edit a pull request, mutate claim state, or merge; those remote actions remain inside
-the bridge and are rebound to the exact claim generation and head commit immediately before
-mutation.
-
-Bridge state is claim-generation scoped. A pending or active invocation remains non-terminal.
-After a conductor restart, exact process identity permits observation of the existing supervisor
-without launching a second harness; after process exit, the next run resumes from the last
-durable phase. A private local acquisition receipt must match the authoritative repository,
-issue, worker, branch, and claim ID before a restarted conductor adopts a live claim. Runtime
-cleanup uses the invocation's persisted environment, session, and original manifest snapshot
-even if the repository manifest later changes. Schema-1 snapshots from a pre-upgrade active
-session reattach against the validated authoritative plan and are conservatively reported as
-isolation-bypassed. Before clearing the acquisition receipt, the conductor persists an explicit
-terminal- or ownership-retirement boundary so a crash cannot replay completed or lost work.
-Transient GitHub reads after implementation retry the same claim generation and durable
-invocation; a retryable terminal result preserves
-recoverable committed or uncommitted work, advances it onto a changed base without force after
-it becomes clean, and starts a fresh claim generation. Only an observed merged pull request,
-explicit blocked result, or exhausted retry can become terminal, and no terminal result may
-retain `in-progress-by-bot`.
-
-Failure cleanup intent is persisted before runtime teardown. Ownership takeover closes only the
-old exact runtime, records the worktree HEAD and status digest under the per-issue lock, and lets
-the successor generation adopt the unchanged worktree. A pre-upgrade dispatch without a local
-acquisition receipt is migrated only when an exact private invocation or terminal receipt proves
-the authoritative claim; otherwise the conductor durably retires the stale ownership.
-Terminal claim/label observation outages retain their transient classification and replay the
-same completed invocation; an unchanged authoritative claim ref after a failed push does not
-retire ownership.
-
-The fixed `.autospec/executor-result.json` ingestion and bare
-`executor-result --repo OWNER/REPO --issue N` deferred receipt remain compatibility inputs, but
-they are no longer the default producer or a terminal conductor result. Explicit executor-result
-ingestion is described below. Direct `run-foreground` remains one-cycle for bounded use.
-Detached `autonomous start` and `restart` launch it as a direct Rust child with inherited
-lifecycle ownership; that child repeats cycles, emits each completed cycle to its scoped log,
-re-checks stop and budget admission before the next cycle, and exits only for a named terminal
-condition or `--max-cycles`. Monitor and supervisor remain separate compatibility observers.
+`autospec autonomous run-foreground` is a typed Rust control-plane entrypoint. After mainline
+health admission it performs one bounded queue safety review, selects and claims one ready issue,
+and persists strict conductor state as
+`.autospec/autonomous-operator/<scope>/foreground-conductor-<scope-key>.json`, where the
+scope key distinguishes repository runs from each explicit issue slice. Its internal
+`executor-result` child uses the current Rust executable with an explicit argument vector. That
+bare child invocation, `executor-result --repo OWNER/REPO --issue N`, returns only the exact
+successful deferred `awaiting_typed_implementation_executor` receipt. It performs no claim
+mutation. Explicit executor-result ingestion is described below. Neither form launches an
+implementation agent, invokes a shell, script, `omx`, or `/autospec-run`, releases a claim, or
+merges a PR. Detached `autonomous start` and `restart` likewise launch this foreground command as
+a direct Rust child; monitor and supervisor are separate compatibility companions.
 
 `autospec autonomous main-health` and `run-foreground` read the strict
 repository-local Rust health policy at `<repo-dir>/.autospec/autonomous.yml`.
@@ -251,9 +209,9 @@ flags exit `2`. `start`, `restart`,
 `.autospec/autonomous-operator/<scope>/lifecycle.json` decision record. Start and restart
 launch conductor, monitor, and supervisor as direct Rust executable-plus-argument-vector
 children; they do not accept command-string companion overrides or use `sh -c`. Foreground
-reads a stop flag or stored stop record before health or queue work and between launched cycles,
-returns the same JSON decision and exit class for health parks, and preflights the observed
-GitHub claim before any claim label, heartbeat, or run-state mutation.
+reads a stop flag or stored stop record before health or queue work, returns the same JSON
+decision and exit class for health parks, and preflights the observed GitHub claim before any
+claim label, heartbeat, or run-state mutation.
 
 `autospec autonomous executor-result` emits one JSON result and has two deliberately distinct
 forms. The bare compatibility form is exactly `--repo OWNER/REPO --issue N`: it is the successful
