@@ -26092,7 +26092,10 @@ exit 64
             None => std::env::remove_var("AUTOSPEC_CONFIG_DIR"),
         }
         let worktree_path = worktree.path.to_str().expect("worktree path");
-        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        git(
+            &fixture.repo,
+            &["worktree", "remove", "--force", worktree_path],
+        );
         let _ = fs::remove_dir_all(scope_root);
     }
 
@@ -26260,7 +26263,10 @@ exit 64
             "sidecar-only Pending executor was stranded before harness resolution"
         );
         let worktree_path = worktree.path.to_str().expect("worktree path");
-        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        git(
+            &fixture.repo,
+            &["worktree", "remove", "--force", worktree_path],
+        );
         let _ = fs::remove_dir_all(scope_root);
     }
 
@@ -26516,7 +26522,10 @@ exit 64
             None => std::env::remove_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM"),
         }
         let worktree_path = worktree.path.to_str().expect("worktree path");
-        git(&fixture.repo, &["worktree", "remove", worktree_path]);
+        git(
+            &fixture.repo,
+            &["worktree", "remove", "--force", worktree_path],
+        );
         let _ = fs::remove_dir_all(scope_root);
     }
 
