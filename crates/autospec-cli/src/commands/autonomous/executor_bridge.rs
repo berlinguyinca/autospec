@@ -7294,8 +7294,11 @@ fn prepare_automatic_reviewer_normalizer(
     let wc_utility = trusted_reviewer_utility("wc")?;
     let cat_utility = trusted_reviewer_utility("cat")?;
     let head_utility = trusted_reviewer_utility("head")?;
+    let kill_utility = trusted_reviewer_utility("kill")?;
     let mkfifo_utility = trusted_reviewer_utility("mkfifo")?;
+    let ps_utility = trusted_reviewer_utility("ps")?;
     let rm_utility = trusted_reviewer_utility("rm")?;
+    let setsid_utility = trusted_reviewer_utility("setsid")?;
     let mut command = format!(
         "{} -i",
         posix_shell_quote(
@@ -7388,11 +7391,20 @@ fn prepare_automatic_reviewer_normalizer(
          {head} -c {output_bytes} < {stdout_pipe} > {stdout} & stdout_reader=$!\n\
          {head} -c {output_bytes} < {stderr_pipe} > {stderr} & stderr_reader=$!\n\
          {result_setup}\
-         if {command} >{stdout_pipe} 2>{stderr_pipe}; then\n\
+         caller_pgid=$({ps} -o pgid= -p \"$$\") || exit 68\n\
+         caller_pgid=$((caller_pgid + 0))\n\
+         {setsid} {command} >{stdout_pipe} 2>{stderr_pipe} &\n\
+         harness_pid=$!\n\
+         if wait \"$harness_pid\"; then\n\
          \tstatus=0\n\
          else\n\
          \tstatus=$?\n\
          fi\n\
+         [ \"$harness_pid\" -gt 1 ] || exit 68\n\
+         [ \"$harness_pid\" -ne \"$$\" ] || exit 68\n\
+         [ \"$harness_pid\" -ne \"$caller_pgid\" ] || exit 68\n\
+         {kill} -TERM -- \"-$harness_pid\" 2>/dev/null || :\n\
+         {kill} -KILL -- \"-$harness_pid\" 2>/dev/null || :\n\
          {result_close}\
          wait \"$stdout_reader\" || exit 69\n\
          wait \"$stderr_reader\" || exit 69\n\
@@ -7420,15 +7432,30 @@ fn prepare_automatic_reviewer_normalizer(
                 .to_str()
                 .ok_or_else(|| "trusted cat path must be valid UTF-8".to_string())?
         ),
+        kill = posix_shell_quote(
+            kill_utility
+                .to_str()
+                .ok_or_else(|| "trusted kill path must be valid UTF-8".to_string())?
+        ),
         mkfifo = posix_shell_quote(
             mkfifo_utility
                 .to_str()
                 .ok_or_else(|| "trusted mkfifo path must be valid UTF-8".to_string())?
         ),
+        ps = posix_shell_quote(
+            ps_utility
+                .to_str()
+                .ok_or_else(|| "trusted ps path must be valid UTF-8".to_string())?
+        ),
         rm = posix_shell_quote(
             rm_utility
                 .to_str()
                 .ok_or_else(|| "trusted rm path must be valid UTF-8".to_string())?
+        ),
+        setsid = posix_shell_quote(
+            setsid_utility
+                .to_str()
+                .ok_or_else(|| "trusted setsid path must be valid UTF-8".to_string())?
         ),
         stdout = posix_shell_quote(
             inner_stdout
@@ -26898,6 +26925,96 @@ exit 64
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_automatic_reviewer_normalizer_reaps_inherited_output_descendants()
+    {
+        // Break caught: a detached harness descendant retaining every captured writer indefinitely.
+        let root = test_root("automatic-reviewer-inherited-output-descendant");
+        let harness = root.join("forking-reviewer");
+        let descendant_pid_path = root.join("descendant.pid");
+        let artifact_root = root.join("review-artifacts");
+        super::ensure_private_directory(&artifact_root).expect("private review artifact directory");
+        let result = artifact_root.join("harness-result.txt");
+        write_executable(
+            &harness,
+            "#!/bin/sh\n\
+             set -eu\n\
+             /bin/sh -c 'trap \"\" HUP INT TERM; printf \"%s\\n\" \"$$\" > \"$1\"; while :; do /usr/bin/sleep 1; done' descendant \"$2\" &\n\
+             while [ ! -s \"$2\" ]; do /usr/bin/sleep 0.01; done\n\
+             printf '%s\\n' LGTM > \"$1\"\n",
+        );
+        let invocation = super::ValidatedInvocation {
+            program: fs::canonicalize(&harness).expect("canonical forking reviewer"),
+            args: vec![
+                result.display().to_string(),
+                descendant_pid_path.display().to_string(),
+            ],
+            current_dir: root.clone(),
+            environment_overrides: Vec::new(),
+        };
+        let automatic = super::prepare_automatic_reviewer_normalizer(
+            super::HarnessKind::Codex,
+            &invocation,
+            &artifact_root,
+        )
+        .expect("automatic reviewer normalizer");
+        let mut normalizer = Command::new("/bin/sh")
+            .arg(&automatic.normalizer)
+            .current_dir(&root)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect("run forking reviewer");
+        let normalizer_pid = normalizer.id();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if normalizer.try_wait().expect("observe normalizer").is_some() {
+                break;
+            }
+            if Instant::now() >= deadline {
+                let _ = nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(-(normalizer_pid as i32)),
+                    Signal::SIGKILL,
+                );
+                let output = normalizer.wait_with_output().expect("reap hung normalizer");
+                panic!("normalizer waited for inherited output writers: {output:?}");
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let output = normalizer.wait_with_output().expect("reap normalizer");
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"LGTM\n");
+        let descendant_pid = fs::read_to_string(&descendant_pid_path)
+            .expect("descendant pid")
+            .trim()
+            .parse::<u32>()
+            .expect("numeric descendant pid");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Path::new(&format!("/proc/{descendant_pid}")).exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(
+            !Path::new(&format!("/proc/{descendant_pid}")).exists(),
+            "harness descendant leaked"
+        );
+        assert!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(-(normalizer_pid as i32)), None)
+                .is_err(),
+            "normalizer reader process group leaked"
+        );
+        for name in [
+            "harness.stdout.pipe",
+            "harness.stderr.pipe",
+            "harness-result.pipe",
+        ] {
+            assert!(!artifact_root.join(name).exists(), "{name} leaked");
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[cfg(unix)]
     #[test]
     fn autonomous_executor_bridge_automatic_reviewer_normalizer_rejects_each_artifact_at_limit() {
@@ -27285,7 +27402,9 @@ exit 64
         )
         .expect("automatic reviewer normalizer");
         let normalizer = fs::read_to_string(&automatic.normalizer).expect("normalizer");
-        for utility in ["env", "wc", "cat", "head", "mkfifo", "rm"] {
+        for utility in [
+            "env", "wc", "cat", "head", "kill", "mkfifo", "ps", "rm", "setsid",
+        ] {
             let trusted = super::trusted_reviewer_utility(utility).expect("trusted utility");
             assert!(
                 normalizer.contains(&format!("'{}'", trusted.display())),
