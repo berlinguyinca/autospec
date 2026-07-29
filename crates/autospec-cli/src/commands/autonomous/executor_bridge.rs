@@ -37,7 +37,8 @@ use autospec_core::claim::{
 use autospec_core::coordination::ConductorOutcome;
 use autospec_core::lint::{
     evaluate_patch_size, lint_implementation, parse_unified_diff, ImplementationLintContext,
-    ImplementationLintOptions, ImplementationLintSeverity, PatchSizeLimits, RepositoryIndex,
+    ImplementationLintOptions, ImplementationLintSeverity, PatchSizeEvaluation, PatchSizeLimits,
+    RepositoryIndex,
 };
 #[cfg(unix)]
 use nix::fcntl::OFlag;
@@ -1272,6 +1273,7 @@ fn run_executor_bridge_with_codex_probe(
         }
         Err(error) => return Err(error.into()),
     };
+    require_continuation_checkpoint(&request.state_path, &state, &proof, &request.issue_body)?;
     if matches!(
         state.phase,
         BridgePhase::ImplementationProven
@@ -9439,6 +9441,7 @@ pub(crate) fn build_implementer_prompt(
          Artifacts: <exact paths and a rerunnable command>\n\
          Scoped git status: <only files touched for this issue>\n\
          One likely hidden failure: <single most probable remaining defect>\n\
+         Optionally append both `Completed criteria: [\"...\"]` and `Unmet criteria: [\"...\"]`.\n\
          \n\
          Issue title:\n{title}\n\
          \n\
@@ -10475,6 +10478,7 @@ fn validate_closeout_report_body(body: &str) -> Result<(), String> {
         "Scoped git status:",
         "One likely hidden failure:",
     ];
+    parse_closeout_criteria(body)?;
     for field in required {
         let values = lines
             .iter()
@@ -10520,7 +10524,12 @@ fn validate_closeout_report_body(body: &str) -> Result<(), String> {
     }
     for line in &lines[headings[0].0 + 1..] {
         let line = line.trim();
-        if !line.is_empty() && !required.iter().any(|field| line.starts_with(field)) {
+        if !line.is_empty()
+            && !required.iter().any(|field| line.starts_with(field))
+            && !["Completed criteria:", "Unmet criteria:"]
+                .iter()
+                .any(|field| line.starts_with(field))
+        {
             return Err(
                 "executor Closeout report contains an unrecognized nonblank line".to_string(),
             );
@@ -10548,6 +10557,35 @@ fn validate_closeout_report_body(body: &str) -> Result<(), String> {
         );
     }
     Ok(())
+}
+
+type CloseoutCriteria = (Vec<String>, Vec<String>);
+
+fn parse_closeout_criteria(body: &str) -> Result<Option<CloseoutCriteria>, String> {
+    let field = |prefix: &str| -> Result<Option<Vec<String>>, String> {
+        let mut values = body
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix(prefix).map(str::trim));
+        let Some(value) = values.next() else {
+            return Ok(None);
+        };
+        if values.next().is_some() {
+            return Err(format!("executor Closeout report has duplicate {prefix}"));
+        }
+        let parsed: Vec<String> = serde_json::from_str(value)
+            .map_err(|_| format!("executor Closeout report {prefix} must be a string array"))?;
+        if parsed.iter().any(|value| value.trim().is_empty()) {
+            return Err(format!(
+                "executor Closeout report {prefix} has an empty item"
+            ));
+        }
+        Ok(Some(parsed))
+    };
+    match (field("Completed criteria:")?, field("Unmet criteria:")?) {
+        (None, None) => Ok(None),
+        (Some(completed), Some(unmet)) => Ok(Some((completed, unmet))),
+        _ => Err("executor Closeout report criteria arrays must appear as a pair".to_string()),
+    }
 }
 
 fn ensure_canonical_closeout_report(worktree: &Path, path: &Path) -> Result<String, String> {
@@ -14399,6 +14437,25 @@ fn patch_size_receipt_path(state_path: &Path) -> PathBuf {
     state_path.with_extension("patch-size-admission.json")
 }
 
+fn exact_patch_size(
+    state: &PersistedInvocation,
+    head_oid: &str,
+) -> Result<PatchSizeEvaluation, String> {
+    let diff = git_stdout(
+        &state.identity.worktree,
+        &[
+            "diff",
+            "--no-ext-diff",
+            "--unified=3",
+            &state.identity.base_oid,
+            head_oid,
+        ],
+    )?;
+    parse_unified_diff(&diff)
+        .map(|diff| evaluate_patch_size(&diff, PatchSizeLimits::default()))
+        .map_err(|error| format!("parse executor exact-head patch-size diff: {error}"))
+}
+
 fn evaluate_patch_size_admission(
     state: &PersistedInvocation,
     head_oid: &str,
@@ -14419,7 +14476,7 @@ fn evaluate_patch_size_admission(
     )?;
     let diff = parse_unified_diff(&diff)
         .map_err(|error| format!("parse executor patch-size diff: {error}"))?;
-    let evaluation = evaluate_patch_size(&diff, PatchSizeLimits::default());
+    let evaluation = exact_patch_size(state, head_oid)?;
     let repository = BridgeRepositoryIndex {
         repo: state.identity.worktree.clone(),
         tree_oid: head_oid.to_string(),
@@ -14511,6 +14568,172 @@ fn refresh_patch_size_admission(
     let admission = evaluate_patch_size_admission(state, head, &policy)?;
     persist_patch_size_admission(state_path, &admission)?;
     validate_patch_size_admission(state_path, state).map(|_| ())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ContinuationReceipt {
+    repository: String,
+    issue: u64,
+    base_oid: String,
+    head_oid: String,
+    status: String,
+    completed: Vec<String>,
+    unmet: Vec<String>,
+    content_digest: String,
+}
+
+impl ContinuationReceipt {
+    fn digest(&self) -> String {
+        let mut content = self.clone();
+        content.content_digest.clear();
+        sha256_hex(content.to_json().as_bytes())
+    }
+
+    fn to_json(&self) -> String {
+        serde_json::json!({
+            "schema": 1,
+            "repository": self.repository,
+            "issue": self.issue,
+            "base_oid": self.base_oid,
+            "head_oid": self.head_oid,
+            "status": self.status,
+            "completed": self.completed,
+            "unmet": self.unmet,
+            "content_digest": self.content_digest,
+        })
+        .to_string()
+    }
+
+    fn from_json(body: &str) -> Result<Self, String> {
+        let value: serde_json::Value = serde_json::from_str(body)
+            .map_err(|error| format!("parse executor continuation receipt: {error}"))?;
+        let fields =
+            "schema repository issue base_oid head_oid status completed unmet content_digest"
+                .split_whitespace()
+                .collect::<Vec<_>>();
+        let object = strict_object(value, &fields, "executor continuation receipt")?;
+        if number(&object, "schema")? != 1 {
+            return Err("executor continuation receipt schema is invalid".to_string());
+        }
+        let strings = |field| -> Result<Vec<String>, String> {
+            required(&object, field)?
+                .as_array()
+                .ok_or_else(|| format!("executor continuation receipt {field} is not an array"))?
+                .iter()
+                .map(|value| {
+                    value.as_str().map(str::to_string).ok_or_else(|| {
+                        format!("executor continuation receipt {field} is not a string array")
+                    })
+                })
+                .collect()
+        };
+        Ok(Self {
+            repository: text(&object, "repository")?,
+            issue: number(&object, "issue")?,
+            base_oid: text(&object, "base_oid")?,
+            head_oid: text(&object, "head_oid")?,
+            status: text(&object, "status")?,
+            completed: strings("completed")?,
+            unmet: strings("unmet")?,
+            content_digest: text(&object, "content_digest")?,
+        })
+    }
+}
+
+fn continuation_receipt_path(state_path: &Path, head_oid: &str) -> Result<PathBuf, String> {
+    if !canonical_git_oid(head_oid) {
+        return Err("executor continuation receipt path requires a canonical head OID".to_string());
+    }
+    Ok(state_path.with_extension(format!("continuation.{head_oid}.json")))
+}
+
+fn load_continuation_receipt(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<ContinuationReceipt, String> {
+    let path =
+        continuation_receipt_path(state_path, state.head_oid.as_deref().unwrap_or_default())?;
+    reject_symlink_path(&path)?;
+    validate_private_state_file(&path)?;
+    let receipt = ContinuationReceipt::from_json(
+        &fs::read_to_string(path)
+            .map_err(|error| format!("read executor continuation receipt: {error}"))?,
+    )?;
+    if receipt.repository != state.identity.repository
+        || receipt.issue != state.identity.issue
+        || receipt.base_oid != state.identity.base_oid
+        || receipt.head_oid.as_str() != state.head_oid.as_deref().unwrap_or_default()
+        || !canonical_git_oid(&receipt.base_oid)
+        || !canonical_git_oid(&receipt.head_oid)
+        || !matches!(receipt.status.as_str(), "planned" | "oversized_checkpoint")
+        || receipt.content_digest != receipt.digest()
+    {
+        return Err("executor continuation receipt identity or content mismatch".to_string());
+    }
+    Ok(receipt)
+}
+
+fn prepare_continuation_checkpoint(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    proof: &ImplementationProof,
+    issue_body: &str,
+) -> Result<Option<String>, String> {
+    let Some((completed, unmet)) = parse_closeout_criteria(&proof.closeout_body)? else {
+        return Ok(None);
+    };
+    if unmet.is_empty() {
+        return Ok(None);
+    }
+    let evaluation = exact_patch_size(state, &proof.head_oid)?;
+    let size = evaluation.size();
+    let admission = evaluate_patch_size_admission(state, &proof.head_oid, issue_body);
+    let status = if evaluation.is_hard() && admission.is_err() {
+        "oversized_checkpoint"
+    } else if evaluation.is_hard() || size.changed_lines < 320 {
+        return Ok(None);
+    } else {
+        "planned"
+    };
+    let mut expected = ContinuationReceipt {
+        repository: state.identity.repository.clone(),
+        issue: state.identity.issue,
+        base_oid: state.identity.base_oid.clone(),
+        head_oid: proof.head_oid.clone(),
+        status: status.to_string(),
+        completed,
+        unmet,
+        content_digest: String::new(),
+    };
+    expected.content_digest = expected.digest();
+    let path = continuation_receipt_path(state_path, &proof.head_oid)?;
+    let recovered = path.exists();
+    if recovered {
+        if load_continuation_receipt(state_path, state)? != expected {
+            return Err("executor continuation receipt exact-head content mismatch".to_string());
+        }
+    } else {
+        write_private_create_once(
+            &path,
+            format!("{}\n", expected.to_json()).as_bytes(),
+            "executor continuation receipt",
+        )?;
+    }
+    Ok(Some(expected.status))
+}
+
+fn require_continuation_checkpoint(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    proof: &ImplementationProof,
+    issue_body: &str,
+) -> Result<(), BridgeRunFailure> {
+    match prepare_continuation_checkpoint(state_path, state, proof, issue_body)?.as_deref() {
+        Some("oversized_checkpoint") => Err(BridgeRunFailure::invariant(
+            "executor preserved an oversized continuation checkpoint before remote mutation",
+        )),
+        _ => Ok(()),
+    }
 }
 
 fn implementation_lint_options() -> ImplementationLintOptions {
@@ -34956,6 +35179,162 @@ exit 64
                 .expect("ledger")
                 .is_empty());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_continuation_receipt_thresholds_and_base_drift_generation() {
+        // Break caught: capped or oversized exact-head work losing ordered continuation state.
+        assert!(super::parse_closeout_criteria("Completed criteria: []").is_err());
+        for (lines, unmet, expected) in [
+            (319, "[\"second\",\"third\"]", None),
+            (320, "[]", None),
+            (320, "[\"second\",\"third\"]", Some("planned")),
+            (401, "[\"second\",\"third\"]", Some("oversized_checkpoint")),
+        ] {
+            let (fixture, mut state, _, _) =
+                implementation_proof_fixture(&format!("continuation-{lines}"));
+            let state_path = fixture.root.join("state/invocation.json");
+            fs::write(
+                state.identity.worktree.join("slice.txt"),
+                "changed\n".repeat(lines),
+            )
+            .expect("slice");
+            git(&state.identity.worktree, &["add", "slice.txt"]);
+            git(
+                &state.identity.worktree,
+                &["commit", "-m", "test: capped slice"],
+            );
+            let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+            state.phase = super::BridgePhase::ImplementationProven;
+            state.head_oid = Some(head.clone());
+            let proof = super::ImplementationProof {
+                head_oid: head.clone(),
+                closeout_body: format!("## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice.txt; `git diff`\nScoped git status: slice.txt\nOne likely hidden failure: boundary\nCompleted criteria: [\"first\"]\nUnmet criteria: {unmet}\n"),
+            };
+
+            let checkpoint = if lines == 401 {
+                assert!(
+                    super::require_continuation_checkpoint(&state_path, &state, &proof, "")
+                        .expect_err("oversized checkpoint gate")
+                        .to_string()
+                        .contains("oversized continuation checkpoint")
+                );
+                assert!(!fixture.root.join("gh-calls").exists());
+                Some("oversized_checkpoint".to_string())
+            } else {
+                super::prepare_continuation_checkpoint(&state_path, &state, &proof, "")
+                    .expect("checkpoint evaluation")
+            };
+            assert_eq!(checkpoint.as_deref(), expected);
+            assert_eq!(
+                git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]),
+                head
+            );
+            let receipt_path =
+                super::continuation_receipt_path(&state_path, &head).expect("receipt path");
+            assert_eq!(receipt_path.exists(), expected.is_some());
+            if let Some(status) = expected {
+                let receipt =
+                    super::load_continuation_receipt(&state_path, &state).expect("typed receipt");
+                assert_eq!(receipt.status.as_str(), status);
+                assert_eq!(receipt.unmet, ["second", "third"]);
+                if lines == 320 {
+                    let first = fs::read(&receipt_path).expect("receipt");
+                    let worktree = state.identity.worktree.clone();
+                    state.identity.base_oid = head;
+                    fs::write(worktree.join("next.txt"), "next\n".repeat(320)).expect("next slice");
+                    git(&worktree, &["add", "next.txt"]);
+                    git(&worktree, &["commit", "-m", "next generation"]);
+                    let next_head = git_stdout(&worktree, &["rev-parse", "HEAD"]);
+                    state.head_oid = Some(next_head.clone());
+                    let next = super::ImplementationProof {
+                        head_oid: next_head.clone(),
+                        closeout_body: proof.closeout_body.clone(),
+                    };
+                    super::prepare_continuation_checkpoint(&state_path, &state, &next, "")
+                        .expect("new generation");
+                    let next_path = super::continuation_receipt_path(&state_path, &next_head)
+                        .expect("new receipt");
+                    let current = fs::read(&next_path).expect("current receipt");
+                    assert_eq!(
+                        super::load_continuation_receipt(&state_path, &state)
+                            .expect("current generation")
+                            .head_oid,
+                        next_head
+                    );
+                    super::prepare_continuation_checkpoint(&state_path, &state, &next, "")
+                        .expect("new restart");
+                    assert!(receipt_path != next_path);
+                    assert_eq!(fs::read(receipt_path).expect("immutable old"), first);
+                    assert_eq!(fs::read(next_path).expect("reused current"), current);
+                }
+            }
+            if lines == 401 {
+                assert!(!super::remote_head_refs(&fixture.repo)
+                    .expect("remote refs")
+                    .contains_key(&format!("refs/heads/{}", state.identity.branch)));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_continuation_receipt_exception_and_tamper_fail_closed() {
+        // Break caught: invalid exceptions or forged receipt identity bypassing checkpoint policy.
+        let (fixture, mut state, _, _) = implementation_proof_fixture("continuation-exception");
+        let state_path = fixture.root.join("state/invocation.json");
+        let migration = state.identity.worktree.join("db/migrations/001.sql");
+        fs::create_dir_all(migration.parent().unwrap()).expect("migration dir");
+        fs::write(
+            &migration,
+            format!("Generated by prisma\n{}", "changed\n".repeat(400)),
+        )
+        .expect("migration");
+        git(&state.identity.worktree, &["add", "db/migrations/001.sql"]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "test: migration"],
+        );
+        let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        state.head_oid = Some(head.clone());
+        let proof = super::ImplementationProof {
+            head_oid: head,
+            closeout_body: "## Closeout report\nResult: migration\nClaims: [verified] static generated\nProof type: static\nBefore/after: 0 to 1\nArtifacts: db/migrations/001.sql; `git diff`\nScoped git status: db/migrations/001.sql\nOne likely hidden failure: generator\nCompleted criteria: []\nUnmet criteria: [\"publish\"]\n".into(),
+        };
+        let valid = "Guardian: skip-PR_SIZE # generated migration: prisma\n";
+        assert!(
+            super::prepare_continuation_checkpoint(&state_path, &state, &proof, valid)
+                .expect("valid exception")
+                .is_none()
+        );
+        assert!(
+            !super::continuation_receipt_path(&state_path, &proof.head_oid)
+                .expect("receipt path")
+                .exists()
+        );
+        assert_eq!(
+            super::prepare_continuation_checkpoint(
+                &state_path,
+                &state,
+                &proof,
+                "Guardian: skip-PR_SIZE # generated migration: other\n",
+            )
+            .expect("invalid exception")
+            .as_deref(),
+            Some("oversized_checkpoint")
+        );
+
+        let receipt =
+            super::continuation_receipt_path(&state_path, &proof.head_oid).expect("receipt path");
+        let mut body: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&receipt).expect("receipt")).expect("json");
+        body["head_oid"] = "b".repeat(40).into();
+        fs::write(&receipt, body.to_string()).expect("tamper");
+        assert!(super::load_continuation_receipt(&state_path, &state).is_err());
+        fs::remove_file(&receipt).expect("remove receipt");
+        symlink(&state_path, &receipt).expect("receipt symlink");
+        assert!(super::load_continuation_receipt(&state_path, &state).is_err());
     }
 
     #[test]
