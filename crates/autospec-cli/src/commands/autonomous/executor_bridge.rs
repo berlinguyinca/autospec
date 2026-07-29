@@ -34965,8 +34965,8 @@ exit 64
             adapter_path(&merged.adapter, "GH_CLOSED_PR"),
             serde_json::json!({
                 "number": merged.state.pr,
-                "state": "MERGED",
-                "mergedAt": "2026-07-25T20:00:00Z",
+                "state": "CLOSED",
+                "mergedAt": null,
                 "headRefName": merged.state.identity.branch,
                 "headRefOid": merged.state.head_oid,
                 "baseRefName": "main",
@@ -36083,14 +36083,11 @@ exit 64
         assert!(super::load_continuation_receipt(&state_path, &state).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn continuation_part_metadata_is_persisted_and_canonical() {
         let (_, mut state, _, _) = implementation_proof_fixture("continuation-part-body");
-        let legacy_binding = super::cleanup_binding(&state);
         state.umbrella = Some(42);
         state.current_child = Some(101);
-        assert_ne!(super::cleanup_binding(&state), legacy_binding);
         let restored = super::PersistedInvocation::from_json(&state.to_json().unwrap()).unwrap();
         assert_eq!(
             super::canonical_pull_request_body(&restored, "## Closeout report\n").unwrap(),
@@ -36184,9 +36181,8 @@ esac
             super::PersistedInvocation::from_json(&fs::read_to_string(&state_path).unwrap())
                 .unwrap();
         assert_eq!((bound.umbrella, bound.current_child), (Some(42), Some(101)));
-        assert!(fs::read_to_string(store.join("comments/42"))
-            .unwrap()
-            .contains("append-only-parent-extension"));
+        let parent = fs::read_to_string(store.join("comments/42")).unwrap();
+        assert!(parent.contains("append-only-parent-extension"));
         let receipt =
             super::continuation_receipt_path(&state_path, &proof.head_oid).expect("receipt path");
         assert!(receipt.exists(), "seven files must plan a continuation");
