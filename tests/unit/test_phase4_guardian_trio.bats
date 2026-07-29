@@ -19,6 +19,10 @@ extract_guardian_block() {
     ' "$1"
 }
 
+line_of() {
+    grep -nF "$1" "$2" | head -n 1 | cut -d: -f1
+}
+
 # ── skills/autospec ────────────────────────────────────────────────────────────
 
 @test "autospec SKILL.md guardian block has required markers" {
@@ -80,4 +84,35 @@ extract_guardian_block() {
         <(extract_guardian_block "$REPO_ROOT/skills/autospec/SKILL.md") \
         <(extract_guardian_block "$REPO_ROOT/skills/autospec-run/SKILL.md") \
         || { echo "GUARDIAN_PASS: autospec and autospec-run SKILL.md guardian blocks diverge"; return 1; }
+}
+
+@test "PR_SIZE autospec-run gates push and final merge with exact acceptance evidence" {
+    for file in \
+        "$REPO_ROOT/skills/autospec-run/SKILL.md" \
+        "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
+        "$REPO_ROOT/skills/autospec-run/opencode/agent.md"; do
+        grep -qF '<!-- pr-size-pre-push:begin -->' "$file" \
+            || { echo "missing PR_SIZE pre-push gate in $file"; return 1; }
+        grep -qF '<!-- pr-size-final-merge:begin -->' "$file" \
+            || { echo "missing PR_SIZE final-merge gate in $file"; return 1; }
+        grep -qF '401 changed lines' "$file" \
+            || { echo "missing 401-line rejection in $file"; return 1; }
+        grep -qF '9 raw files' "$file" \
+            || { echo "missing 9-file rejection in $file"; return 1; }
+        grep -qF '4 logical units' "$file" \
+            || { echo "missing 4-unit rejection in $file"; return 1; }
+        grep -qF 'git diff --binary "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID"' "$file" \
+            || { echo "PR_SIZE does not lint the exact base-to-head diff in $file"; return 1; }
+        grep -qF "grep -qxF 'INFO:PR_SIZE: acceptance'" "$file" \
+            || { echo "PR_SIZE acceptance is not exact-line matched in $file"; return 1; }
+
+        pre_push="$(line_of '<!-- pr-size-pre-push:begin -->' "$file")"
+        push="$(line_of '> 5. Push:' "$file")"
+        final_merge="$(line_of '<!-- pr-size-final-merge:begin -->' "$file")"
+        guarded_merge="$(line_of 'if bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh"' "$file")"
+        [ "$pre_push" -lt "$push" ] \
+            || { echo "PR_SIZE pre-push gate follows push in $file"; return 1; }
+        [ "$final_merge" -lt "$guarded_merge" ] \
+            || { echo "PR_SIZE final gate follows guarded merge in $file"; return 1; }
+    done
 }
