@@ -1574,7 +1574,7 @@ copy_shared_scripts() {
 }
 
 copy_repo_scripts() {
-    # Copy repo-root scripts/*.{sh,mjs,ps1} to $AUTOSPEC_SCRIPTS_DIR preserving +x bits.
+    # Copy repo-root scripts/*.{sh,mjs,ps1,py,yml} to $AUTOSPEC_SCRIPTS_DIR preserving +x bits.
     # Globs (does not enumerate) so new repo-root helper scripts ship automatically for
     # every harness. Excludes scripts/lib/ (install-time-only helpers) and never reaches
     # per-skill target-repo gate scripts (those live under skills/, not scripts/).
@@ -1587,17 +1587,17 @@ copy_repo_scripts() {
     autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] copy_repo_scripts: would copy $repo_scripts_src/*.{sh,mjs,ps1} to $autospec_scripts_dir/"
+        info "[dry-run] copy_repo_scripts: would copy $repo_scripts_src/*.{sh,mjs,ps1,py,yml} to $autospec_scripts_dir/"
         return 0
     fi
 
     mkdir -p "$autospec_scripts_dir"
-    # Copy only top-level script files (no recursion into scripts/lib/). The yml
-    # extension ships runtime data assets that installed scripts hard-require at
-    # ${AUTOSPEC_SCRIPTS_DIR}/<name>.yml (e.g. assemble-impl-prompt.sh -> memory-tags.yml,
-    # which exit 1's if absent — a clean-install crash). Only memory-tags.yml lives at
-    # scripts/ top level today; the glob stays extension-scoped so it never sweeps subdirs.
-    for ext in sh mjs ps1 yml; do
+    # Copy only top-level script files (no recursion into scripts/lib/). The py and yml
+    # extensions ship runtime helpers and data that installed scripts hard-require
+    # (e.g. autonomous-guardrails.sh -> blast-radius-classifier.py and
+    # assemble-impl-prompt.sh -> memory-tags.yml). The glob stays extension-scoped so it
+    # never sweeps subdirectories.
+    for ext in sh mjs ps1 py yml; do
         for f in "$repo_scripts_src"/*."$ext"; do
             [ -e "$f" ] || continue
             cp "$f" "$autospec_scripts_dir/"

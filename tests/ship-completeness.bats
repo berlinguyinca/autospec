@@ -51,11 +51,12 @@ reference_scan_files() {
 # reference can be matched whether or not it carries a subdirectory prefix.
 shippable_paths() {
   {
-    # Repo-root scripts/*.{sh,mjs,ps1,yml} ship flat (basename only); exclude scripts/lib/.
-    # .yml is included because copy_repo_scripts() now also globs runtime data assets
-    # (e.g. memory-tags.yml) that installed scripts require at ${AUTOSPEC_SCRIPTS_DIR}/<x>.yml.
+    # Repo-root scripts/*.{sh,mjs,ps1,py,yml} ship flat (basename only); exclude scripts/lib/.
+    # Python helpers and yml data assets are included because installed scripts require
+    # them beside the copied shell entrypoints (e.g. blast-radius-classifier.py and
+    # memory-tags.yml).
     ls "$REPO_ROOT"/scripts/*.sh "$REPO_ROOT"/scripts/*.mjs "$REPO_ROOT"/scripts/*.ps1 \
-       "$REPO_ROOT"/scripts/*.yml 2>/dev/null \
+       "$REPO_ROOT"/scripts/*.py "$REPO_ROOT"/scripts/*.yml 2>/dev/null \
       | while read -r f; do basename "$f"; done
     # Shared scripts ship preserving their tree under ~/.autospec/scripts/.
     if [ -d "$REPO_ROOT/skills/autospec-shared/scripts" ]; then
@@ -127,6 +128,33 @@ is_shipped() {
       done | grep -q MATCH
       ;;
   esac
+}
+
+@test "copy_repo_scripts installs the guarded-merge Python classifier" {
+  helpers="$BATS_TEST_TMPDIR/copy-repo-scripts.sh"
+  install_prefix="$BATS_TEST_TMPDIR/empty-prefix"
+  {
+    printf 'DRY_RUN=0\n'
+    printf 'info() { :; }\n'
+    printf 'warn() { printf "warn: %%s\\n" "$*" >&2; }\n'
+    awk '
+      /^copy_repo_scripts\(\)/ { capture = 1 }
+      capture { print }
+      capture && /^\}$/ { exit }
+    ' "$REPO_ROOT/install.sh"
+  } > "$helpers"
+
+  export AUTOSPEC_SCRIPTS_DIR="$install_prefix/scripts"
+  # shellcheck source=/dev/null
+  source "$helpers"
+  copy_repo_scripts
+
+  run test -f "$AUTOSPEC_SCRIPTS_DIR/autospec-guarded-merge.sh"
+  [ "$status" -eq 0 ]
+  run test -f "$AUTOSPEC_SCRIPTS_DIR/autonomous-guardrails.sh"
+  [ "$status" -eq 0 ]
+  run test -f "$AUTOSPEC_SCRIPTS_DIR/blast-radius-classifier.py"
+  [ "$status" -eq 0 ]
 }
 
 @test "every \${AUTOSPEC_SCRIPTS_DIR} script reference is shipped by the installers" {
