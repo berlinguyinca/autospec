@@ -7283,6 +7283,9 @@ fn prepare_automatic_reviewer_normalizer(
     } else {
         inner_stdout.clone()
     };
+    let stdout_pipe = artifact_root.join("harness.stdout.pipe");
+    let stderr_pipe = artifact_root.join("harness.stderr.pipe");
+    let result_pipe = artifact_root.join("harness-result.pipe");
     let program = invocation
         .program
         .to_str()
@@ -7290,6 +7293,9 @@ fn prepare_automatic_reviewer_normalizer(
     let env_utility = trusted_reviewer_utility("env")?;
     let wc_utility = trusted_reviewer_utility("wc")?;
     let cat_utility = trusted_reviewer_utility("cat")?;
+    let head_utility = trusted_reviewer_utility("head")?;
+    let mkfifo_utility = trusted_reviewer_utility("mkfifo")?;
+    let rm_utility = trusted_reviewer_utility("rm")?;
     let mut command = format!(
         "{} -i",
         posix_shell_quote(
@@ -7310,30 +7316,99 @@ fn prepare_automatic_reviewer_normalizer(
     }
     command.push(' ');
     command.push_str(&posix_shell_quote(program));
+    let result_argument = result
+        .to_str()
+        .ok_or_else(|| "reviewer result path must be valid UTF-8".to_string())?;
+    let mut result_replacements = 0;
     for argument in &invocation.args {
+        let argument = if kind == HarnessKind::Codex && argument == result_argument {
+            result_replacements += 1;
+            "/dev/fd/3"
+        } else {
+            argument
+        };
         command.push(' ');
         command.push_str(&posix_shell_quote(argument));
     }
+    if kind == HarnessKind::Codex && result_replacements != 1 {
+        return Err("automatic Codex reviewer result argument is missing or ambiguous".to_string());
+    }
+    let head = posix_shell_quote(
+        head_utility
+            .to_str()
+            .ok_or_else(|| "trusted head path must be valid UTF-8".to_string())?,
+    );
+    let stdout_pipe = posix_shell_quote(
+        stdout_pipe
+            .to_str()
+            .ok_or_else(|| "reviewer stdout pipe path must be valid UTF-8".to_string())?,
+    );
+    let stderr_pipe = posix_shell_quote(
+        stderr_pipe
+            .to_str()
+            .ok_or_else(|| "reviewer stderr pipe path must be valid UTF-8".to_string())?,
+    );
+    let result_pipe = posix_shell_quote(
+        result_pipe
+            .to_str()
+            .ok_or_else(|| "reviewer result pipe path must be valid UTF-8".to_string())?,
+    );
+    let pipes = if kind == HarnessKind::Codex {
+        format!("{stdout_pipe} {stderr_pipe} {result_pipe}")
+    } else {
+        format!("{stdout_pipe} {stderr_pipe}")
+    };
+    let result_setup = if kind == HarnessKind::Codex {
+        format!(
+            "{head} -c {MAX_DIRECT_OUTPUT_BYTES} < {result_pipe} > {result} & result_reader=$!\n\
+             exec 3>{result_pipe} || exit 68\n",
+            result = posix_shell_quote(result_argument),
+        )
+    } else {
+        String::new()
+    };
+    let result_close = if kind == HarnessKind::Codex {
+        "exec 3>&-\n"
+    } else {
+        ""
+    };
+    let result_wait = if kind == HarnessKind::Codex {
+        "wait \"$result_reader\" || exit 69\n"
+    } else {
+        ""
+    };
     let body = format!(
         "#!/bin/sh\n\
          set -u\n\
          umask 077\n\
-         ulimit -f {output_blocks} || exit 68\n\
+         trap \"{rm} -f {pipes}\" EXIT HUP INT TERM\n\
+         {rm} -f {pipes} || exit 68\n\
+         {mkfifo} {pipes} || exit 68\n\
          : > {result} || exit 65\n\
-         if {command} >{stdout} 2>{stderr}; then\n\
-         \t:\n\
+         {head} -c {output_bytes} < {stdout_pipe} > {stdout} & stdout_reader=$!\n\
+         {head} -c {output_bytes} < {stderr_pipe} > {stderr} & stderr_reader=$!\n\
+         {result_setup}\
+         if {command} >{stdout_pipe} 2>{stderr_pipe}; then\n\
+         \tstatus=0\n\
          else\n\
          \tstatus=$?\n\
-         \texit \"$status\"\n\
          fi\n\
+         {result_close}\
+         wait \"$stdout_reader\" || exit 69\n\
+         wait \"$stderr_reader\" || exit 69\n\
+         {result_wait}\
+         {rm} -f {pipes} || exit 68\n\
+         trap - EXIT HUP INT TERM\n\
+         overflow=0\n\
          for artifact in {stdout} {stderr} {result}; do\n\
          \tsize=$({wc} -c < \"$artifact\") || exit 69\n\
-         \t[ \"$size\" -lt {output_bytes} ] || exit 70\n\
+         \t[ \"$size\" -lt {output_bytes} ] || overflow=1\n\
          done\n\
+         [ \"$overflow\" -eq 0 ] || exit 70\n\
+         [ \"$status\" -eq 0 ] || exit \"$status\"\n\
          result=$({cat} {result}) || exit 66\n\
          [ \"$result\" = 'LGTM' ] || exit 67\n\
          printf '%s\\n' 'LGTM'\n",
-        output_blocks = MAX_DIRECT_OUTPUT_BYTES.div_ceil(512),
         output_bytes = MAX_DIRECT_OUTPUT_BYTES,
         wc = posix_shell_quote(
             wc_utility
@@ -7344,6 +7419,16 @@ fn prepare_automatic_reviewer_normalizer(
             cat_utility
                 .to_str()
                 .ok_or_else(|| "trusted cat path must be valid UTF-8".to_string())?
+        ),
+        mkfifo = posix_shell_quote(
+            mkfifo_utility
+                .to_str()
+                .ok_or_else(|| "trusted mkfifo path must be valid UTF-8".to_string())?
+        ),
+        rm = posix_shell_quote(
+            rm_utility
+                .to_str()
+                .ok_or_else(|| "trusted rm path must be valid UTF-8".to_string())?
         ),
         stdout = posix_shell_quote(
             inner_stdout
@@ -26757,6 +26842,147 @@ exit 64
 
     #[cfg(unix)]
     #[test]
+    fn autonomous_executor_bridge_automatic_reviewer_normalizer_allows_large_private_harness_state()
+    {
+        // Break caught: a review-output limit inherited by the harness blocking private state.
+        use std::os::unix::process::ExitStatusExt;
+
+        let root = test_root("automatic-reviewer-private-state");
+        let harness = root.join("stateful-reviewer");
+        let private_state = root.join("private-state");
+        let artifact_root = root.join("review-artifacts");
+        super::ensure_private_directory(&artifact_root).expect("private review artifact directory");
+        let result = artifact_root.join("harness-result.txt");
+        write_executable(
+            &harness,
+            "#!/bin/sh\n\
+             set -eu\n\
+             head -c 2097152 /dev/zero > \"$1\"\n\
+             printf '%s\\n' LGTM > \"$2\"\n",
+        );
+        let invocation = super::ValidatedInvocation {
+            program: fs::canonicalize(&harness).expect("canonical stateful reviewer"),
+            args: vec![
+                private_state.display().to_string(),
+                result.display().to_string(),
+            ],
+            current_dir: root.clone(),
+            environment_overrides: Vec::new(),
+        };
+        let automatic = super::prepare_automatic_reviewer_normalizer(
+            super::HarnessKind::Codex,
+            &invocation,
+            &artifact_root,
+        )
+        .expect("automatic reviewer normalizer");
+
+        let output = Command::new("/bin/sh")
+            .arg(&automatic.normalizer)
+            .current_dir(&root)
+            .output()
+            .expect("run stateful reviewer");
+
+        assert_ne!(output.status.signal(), Some(25), "{output:?}");
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"LGTM\n");
+        assert_eq!(
+            fs::metadata(&private_state)
+                .expect("private harness state")
+                .len(),
+            2 * super::MAX_DIRECT_OUTPUT_BYTES
+        );
+        assert_eq!(
+            fs::read_to_string(&result).expect("review result"),
+            "LGTM\n"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_automatic_reviewer_normalizer_rejects_each_artifact_at_limit() {
+        for channel in ["stdout", "stderr", "result"] {
+            for bytes in [
+                super::MAX_DIRECT_OUTPUT_BYTES,
+                2 * super::MAX_DIRECT_OUTPUT_BYTES,
+            ] {
+                let root = test_root(&format!("automatic-reviewer-{channel}-{bytes}-limit"));
+                let harness = root.join("bounded-reviewer");
+                let artifact_root = root.join("review-artifacts");
+                super::ensure_private_directory(&artifact_root)
+                    .expect("private review artifact directory");
+                let (kind, body, args) = match channel {
+                    "stdout" => (
+                        super::HarnessKind::Claude,
+                        format!("#!/bin/sh\nhead -c {bytes} /dev/zero\n"),
+                        Vec::new(),
+                    ),
+                    "stderr" => (
+                        super::HarnessKind::Claude,
+                        format!("#!/bin/sh\nhead -c {bytes} /dev/zero >&2\nprintf '%s\\n' LGTM\n"),
+                        Vec::new(),
+                    ),
+                    "result" => (
+                        super::HarnessKind::Codex,
+                        format!("#!/bin/sh\nhead -c {bytes} /dev/zero > \"$1\"\n"),
+                        vec![artifact_root
+                            .join("harness-result.txt")
+                            .display()
+                            .to_string()],
+                    ),
+                    _ => unreachable!(),
+                };
+                write_executable(&harness, &body);
+                let invocation = super::ValidatedInvocation {
+                    program: fs::canonicalize(&harness).expect("canonical bounded reviewer"),
+                    args,
+                    current_dir: root.clone(),
+                    environment_overrides: Vec::new(),
+                };
+                let automatic =
+                    super::prepare_automatic_reviewer_normalizer(kind, &invocation, &artifact_root)
+                        .expect("automatic reviewer normalizer");
+
+                let output = Command::new("/bin/sh")
+                    .arg(&automatic.normalizer)
+                    .current_dir(&root)
+                    .output()
+                    .expect("run bounded reviewer");
+
+                assert_eq!(
+                    output.status.code(),
+                    Some(70),
+                    "{channel}/{bytes}: {output:?}"
+                );
+                for path in [
+                    &automatic.inner_stdout,
+                    &automatic.inner_stderr,
+                    &automatic.result,
+                ] {
+                    assert!(
+                        fs::metadata(path).expect("captured artifact").len()
+                            <= super::MAX_DIRECT_OUTPUT_BYTES,
+                        "{channel}/{bytes}: {} exceeded the hard bound",
+                        path.display()
+                    );
+                }
+                for name in [
+                    "harness.stdout.pipe",
+                    "harness.stderr.pipe",
+                    "harness-result.pipe",
+                ] {
+                    assert!(
+                        !artifact_root.join(name).exists(),
+                        "{channel}/{bytes}: {name}"
+                    );
+                }
+                let _ = fs::remove_dir_all(root);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn autonomous_executor_bridge_opencode_reviewer_executes_with_inline_read_only_policy() {
         // Break caught: a hostile host OpenCode config replacing the built-in plan agent's policy.
         let (fixture, mut state, _snapshot, _) =
@@ -27059,13 +27285,15 @@ exit 64
         )
         .expect("automatic reviewer normalizer");
         let normalizer = fs::read_to_string(&automatic.normalizer).expect("normalizer");
-        for utility in ["env", "wc", "cat"] {
+        for utility in ["env", "wc", "cat", "head", "mkfifo", "rm"] {
             let trusted = super::trusted_reviewer_utility(utility).expect("trusted utility");
             assert!(
                 normalizer.contains(&format!("'{}'", trusted.display())),
                 "{utility}: {normalizer}"
             );
         }
+        assert!(!normalizer.contains("ulimit -f"), "{normalizer}");
+        assert!(!normalizer.contains("truncate -s"), "{normalizer}");
         assert!(!normalizer.contains("$(wc "), "{normalizer}");
         assert!(!normalizer.contains("$(cat "), "{normalizer}");
 
