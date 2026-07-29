@@ -22271,6 +22271,10 @@ pub(crate) fn recover_invocation(
         .parent()
         .ok_or_else(|| "persisted worktree has no private root".to_string())?;
     if !invocation.identity.worktree.exists() {
+        if invocation.phase == BridgePhase::CiPassed {
+            recreate_missing_post_ci_worktree(path, &invocation, &source_repo, scope_root)?;
+            return Ok(Some(invocation));
+        }
         if invocation.phase != BridgePhase::CleanupPending {
             return Err("recovery worktree is missing before cleanup".to_string());
         }
@@ -22304,7 +22308,192 @@ pub(crate) fn recover_invocation(
                 | BridgePhase::ImplementationComplete
         ),
     )?;
+    if invocation.phase == BridgePhase::CiPassed {
+        let intent = cleanup_record_path(path, "worktree-recreate-intent");
+        if intent.exists() {
+            ensure_cleanup_record(
+                &intent,
+                &cleanup_binding(&invocation),
+                "executor post-CI worktree recreation intent",
+            )?;
+            ensure_cleanup_record(
+                &cleanup_record_path(path, "worktree-recreate-complete"),
+                &cleanup_binding(&invocation),
+                "executor post-CI worktree recreation receipt",
+            )?;
+        }
+    }
     Ok(Some(invocation))
+}
+
+fn recreate_missing_post_ci_worktree(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    repo: &Path,
+    scope_root: &Path,
+) -> Result<(), String> {
+    let expected_scope = exact_zero_effect_scope_root(state)?;
+    if expected_scope != scope_root
+        || state.identity.branch != format!("feat/autonomous-issue-{}", state.identity.issue)
+    {
+        return Err(
+            "executor post-CI worktree identity is outside its deterministic private scope"
+                .to_string(),
+        );
+    }
+    if !validate_zero_effect_scope_identity(repo, scope_root)? {
+        return Err("executor post-CI recovery private scope is missing".to_string());
+    }
+    reject_symlink_path(&state.identity.worktree)?;
+    let head = state
+        .head_oid
+        .as_deref()
+        .filter(|head| canonical_git_oid(head))
+        .ok_or_else(|| "executor post-CI recovery head is missing or invalid".to_string())?;
+    if state.pr.is_none() {
+        return Err("executor post-CI recovery pull request is missing".to_string());
+    }
+    validate_missing_worktree_branch_identity(repo, state, head)?;
+    ensure_cleanup_record(
+        &cleanup_record_path(state_path, "worktree-recreate-intent"),
+        &cleanup_binding(state),
+        "executor post-CI worktree recreation intent",
+    )?;
+    clear_exact_prunable_registration(repo, state, head)?;
+    git(
+        repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            state
+                .identity
+                .worktree
+                .to_str()
+                .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
+            &state.identity.branch,
+        ],
+    )?;
+    validate_recovery_worktree(
+        repo,
+        &state.identity.worktree,
+        &state.identity.branch,
+        scope_root,
+        state_path,
+        &ResolvedBase {
+            base_ref: state.identity.base_ref.clone(),
+            base_oid: state.identity.base_oid.clone(),
+            explore_mode: false,
+        },
+        false,
+    )?;
+    if git_stdout(
+        &state.identity.worktree,
+        &["rev-parse", "--verify", "HEAD^{commit}"],
+    )? != head
+    {
+        return Err("executor recreated post-CI worktree head mismatch".to_string());
+    }
+    ensure_cleanup_record(
+        &cleanup_record_path(state_path, "worktree-recreate-complete"),
+        &cleanup_binding(state),
+        "executor post-CI worktree recreation receipt",
+    )
+}
+
+fn validate_missing_worktree_branch_identity(
+    repo: &Path,
+    state: &PersistedInvocation,
+    head: &str,
+) -> Result<(), String> {
+    for (key, expected) in [
+        (
+            format!("branch.{}.autospecBaseOid", state.identity.branch),
+            state.identity.base_oid.as_str(),
+        ),
+        (
+            format!("branch.{}.autospecBaseRef", state.identity.branch),
+            state.identity.base_ref.as_str(),
+        ),
+        (
+            format!("branch.{}.autospecRepositoryPath", state.identity.branch),
+            repo.to_str()
+                .ok_or_else(|| "canonical repository path is not UTF-8".to_string())?,
+        ),
+    ] {
+        if git_stdout(repo, &["config", "--get", &key]).ok().as_deref() != Some(expected) {
+            return Err(format!(
+                "executor post-CI recovery branch identity mismatch for {key}"
+            ));
+        }
+    }
+    let branch_ref = format!("refs/heads/{}", state.identity.branch);
+    if !git_ref_exists(repo, &branch_ref)? {
+        return Err("executor post-CI recovery branch is missing".to_string());
+    }
+    if git_stdout(
+        repo,
+        &["rev-parse", "--verify", &format!("{branch_ref}^{{commit}}")],
+    )? != head
+    {
+        return Err("executor post-CI recovery local branch head mismatch".to_string());
+    }
+    if remote_head_refs(repo)?.get(&branch_ref).map(String::as_str) != Some(head) {
+        return Err("executor post-CI recovery remote branch head mismatch".to_string());
+    }
+    if git(
+        repo,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &state.identity.base_oid,
+            head,
+        ],
+    )
+    .is_err()
+    {
+        return Err("executor post-CI recovery head does not descend from its base".to_string());
+    }
+    Ok(())
+}
+
+fn clear_exact_prunable_registration(
+    repo: &Path,
+    state: &PersistedInvocation,
+    head: &str,
+) -> Result<(), String> {
+    let registry = git_stdout(repo, &["worktree", "list", "--porcelain"])?;
+    let path_line = format!("worktree {}", state.identity.worktree.display());
+    let branch_line = format!("branch refs/heads/{}", state.identity.branch);
+    let mut matching = registry.split("\n\n").filter(|block| {
+        block.lines().any(|line| line == path_line) || block.lines().any(|line| line == branch_line)
+    });
+    let Some(block) = matching.next() else {
+        return Ok(());
+    };
+    if matching.next().is_some()
+        || !block.lines().any(|line| line == path_line)
+        || !block.lines().any(|line| line == branch_line)
+        || !block.lines().any(|line| line == format!("HEAD {head}"))
+        || !block.lines().any(|line| line.starts_with("prunable "))
+    {
+        return Err(
+            "executor post-CI recovery worktree registration is not exact and prunable".to_string(),
+        );
+    }
+    git(
+        repo,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            state
+                .identity
+                .worktree
+                .to_str()
+                .ok_or_else(|| "executor worktree path is not UTF-8".to_string())?,
+        ],
+    )
 }
 
 fn canonical_sha256(value: &str) -> bool {
@@ -26487,6 +26676,147 @@ exit 64
                 .and_then(Path::parent)
                 .expect("scope root"),
         );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_missing_worktree_post_ci_recovery() {
+        let mut fixture = GitFixture::new("missing-post-ci-worktree");
+        let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
+        let repository = format!(
+            "owner/missing-post-ci-{}",
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let worktree = provision_issue_worktree(&fixture.repo, &repository, 42, &base)
+            .expect("provision worktree");
+        fixture.executor_scope_roots.push(
+            worktree
+                .path
+                .parent()
+                .expect("executor scope")
+                .to_path_buf(),
+        );
+        fs::write(worktree.path.join("implementation.txt"), "implemented\n")
+            .expect("write implementation");
+        git(&worktree.path, &["add", "implementation.txt"]);
+        git(&worktree.path, &["commit", "-m", "feat: implement fixture"]);
+        git(&worktree.path, &["push", "-u", "origin", &worktree.branch]);
+        let head = git_stdout(&worktree.path, &["rev-parse", "HEAD"]);
+        let state_path = fixture.root.join("state/invocation.json");
+        let state = PersistedInvocation {
+            schema: super::INVOCATION_SCHEMA,
+            identity: BridgeIdentity {
+                repository,
+                repository_path: fixture.repo.clone(),
+                issue: 42,
+                worker_id: "worker".into(),
+                branch: worktree.branch.clone(),
+                claim_id: "claim".into(),
+                invocation_id: "invocation".into(),
+                base_ref: base.base_ref.clone(),
+                base_oid: base.base_oid.clone(),
+                worktree: worktree.path.clone(),
+                runtime_environment_dir: None,
+                runtime_session_id: None,
+            },
+            harness: HarnessKind::Codex,
+            phase: BridgePhase::CiPassed,
+            supervisor: None,
+            process: None,
+            progress_at: 1,
+            pr: Some(55),
+            head_oid: Some(head.clone()),
+            closeout_path: None,
+            closeout_digest: None,
+            remote_snapshot_digest: None,
+            draft_process: None,
+            terminal_result: None,
+        };
+        write_invocation_atomic(&state_path, &state).expect("persist post-CI state");
+        let old_review = state_path
+            .parent()
+            .expect("state parent")
+            .join("review/command-000.json");
+        fs::create_dir_all(old_review.parent().expect("review parent"))
+            .expect("create old review directory");
+        fs::write(&old_review, "old review evidence\n").expect("write old review evidence");
+        git(
+            &fixture.repo,
+            &["worktree", "remove", worktree.path.to_str().unwrap()],
+        );
+
+        let mut mismatched = state.clone();
+        mismatched.head_oid = Some("a".repeat(40));
+        write_invocation_atomic(&state_path, &mismatched).expect("persist mismatched head");
+        assert!(recover_invocation(&state_path, &mismatched.identity)
+            .expect_err("mismatched durable head must fail")
+            .contains("head"));
+        assert!(!worktree.path.exists());
+
+        write_invocation_atomic(&state_path, &state).expect("restore exact state");
+        git(&fixture.repo, &["branch", "-D", &worktree.branch]);
+        assert!(recover_invocation(&state_path, &state.identity)
+            .expect_err("missing branch must fail")
+            .contains("branch"));
+        git(&fixture.repo, &["branch", &worktree.branch, &head]);
+        super::record_worktree_creation_identity(&fixture.repo, &worktree.branch, &base)
+            .expect("restore branch identity");
+        let base_key = format!("branch.{}.autospecBaseOid", worktree.branch);
+        git(&fixture.repo, &["config", &base_key, &"b".repeat(40)]);
+        assert!(recover_invocation(&state_path, &state.identity)
+            .expect_err("mismatched base identity must fail")
+            .contains("branch identity mismatch"));
+        git(&fixture.repo, &["config", &base_key, &base.base_oid]);
+
+        let mut foreign = state.clone();
+        foreign.identity.worktree = foreign.identity.worktree.with_file_name("issue-999");
+        write_invocation_atomic(&state_path, &foreign).expect("persist foreign path");
+        assert!(recover_invocation(&state_path, &foreign.identity)
+            .expect_err("foreign recovery path must fail")
+            .contains("deterministic private scope"));
+        write_invocation_atomic(&state_path, &state).expect("restore exact path");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let foreign = fixture.root.join("foreign");
+            fs::create_dir(&foreign).expect("create foreign directory");
+            symlink(&foreign, &worktree.path).expect("install worktree symlink");
+            assert!(recover_invocation(&state_path, &state.identity)
+                .expect_err("symlink replacement must fail")
+                .contains("symlink"));
+            fs::remove_file(&worktree.path).expect("remove worktree symlink");
+        }
+
+        let recovered = recover_invocation(&state_path, &state.identity)
+            .expect("recreate exact post-CI worktree")
+            .expect("recover invocation");
+        assert_eq!(recovered, state);
+        assert_eq!(git_stdout(&worktree.path, &["rev-parse", "HEAD"]), head);
+        assert_eq!(
+            fs::read_to_string(&old_review).expect("old review evidence survives"),
+            "old review evidence\n"
+        );
+        assert!(super::cleanup_record_path(&state_path, "worktree-recreate-complete").is_file());
+
+        fs::write(worktree.path.join("foreign.txt"), "dirty\n").expect("dirty replacement");
+        assert!(recover_invocation(&state_path, &state.identity)
+            .expect_err("dirty replacement must fail")
+            .contains("not clean"));
+        fs::remove_file(worktree.path.join("foreign.txt")).expect("remove dirty file");
+        assert_eq!(
+            recover_invocation(&state_path, &state.identity)
+                .expect("restart recovery")
+                .expect("restart invocation"),
+            state
+        );
+        fs::remove_dir_all(&worktree.path).expect("simulate vanished registered worktree");
+        assert_eq!(
+            recover_invocation(&state_path, &state.identity)
+                .expect("repair exact prunable registration")
+                .expect("prunable recovery invocation"),
+            state
+        );
+        assert_eq!(git_stdout(&worktree.path, &["rev-parse", "HEAD"]), head);
     }
 
     #[test]
