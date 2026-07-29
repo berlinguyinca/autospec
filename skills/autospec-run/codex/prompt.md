@@ -1410,7 +1410,14 @@ do not fall back to an inline label-swap path.
 >    # so "merge without the fence check" requires deliberately bypassing the wrapper.
 >    # exit 0 = merged (allowed/overridden); 1 = quarantined (NOT merged); 2 = fail-closed error.
 >    # This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
->    if bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo {repo}; then
+>    # pr-size-guarded-merge-exec:begin
+>    run_guarded_pr_size_merge() {
+>      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" \
+>        --pr <PR> --repo {repo} \
+>        --merge-args "--admin --squash --delete-branch --match-head-commit $PR_SIZE_HEAD_OID"
+>    }
+>    # pr-size-guarded-merge-exec:end
+>    if run_guarded_pr_size_merge; then
 >      :
 >    else
 >      _gm_rc=$?

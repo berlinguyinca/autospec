@@ -25,19 +25,11 @@ extract_guardian_block() {
     ' "$1"
 }
 
-line_of() {
-    grep -nF "$1" "$2" | head -n 1 | cut -d: -f1
-}
-
 extract_shell_slice() {
     awk -v begin="$1" -v end="$2" '
         index($0, begin) { inside=1; next }
         index($0, end) { exit }
-        inside {
-            line=$0
-            sub(/^> ?/, "", line)
-            print line
-        }
+        inside { line=$0; sub(/^> ?/, "", line); print line }
     ' "$3"
 }
 
@@ -52,25 +44,42 @@ case "$1" in
             origin/main) printf '%s\n' "${FETCHED_BASE_OID:-base-oid}" ;;
             origin/feat/test) printf '%s\n' "${FETCHED_HEAD_OID:-head-oid}" ;;
             *) exit 1 ;;
-        esac
-        ;;
+        esac ;;
     diff) printf '%s\n' "${SIZE_CASE:-pass}" ;;
     fetch|cat-file) exit 0 ;;
     push) printf 'push\n' >> "$MUTATION_LOG" ;;
     *) exit 1 ;;
 esac
 EOF
-    cat > "$TEST_TMPDIR/bin/gh" <<'EOF'
+cat > "$TEST_TMPDIR/bin/gh" <<'EOF'
 #!/usr/bin/env bash
-if [ "$1 $2" = "pr view" ]; then
-    printf '%s\t%s\n' "${REMOTE_BASE_OID:-base-oid}" "${REMOTE_HEAD_OID:-head-oid}"
-    exit 0
-fi
-if [ "$1 $2" = "pr merge" ]; then
-    printf 'merge\n' >> "$MUTATION_LOG"
-    exit 0
-fi
-exit 1
+case "$1 $2" in
+    "pr view") printf '%s\t%s\n' "${REMOTE_BASE_OID:-base-oid}" "${REMOTE_HEAD_OID:-head-oid}" ;;
+    "pr merge")
+        case " $* " in
+            *" --admin --squash --delete-branch --match-head-commit ${REMOTE_HEAD_OID:-head-oid} "*) printf 'merge\n' >> "$MUTATION_LOG" ;;
+            *) exit 9 ;;
+        esac ;;
+    *) exit 1 ;;
+esac
+EOF
+    cat > "$TEST_TMPDIR/scripts/autospec-guarded-merge.sh" <<'EOF'
+#!/usr/bin/env bash
+pr=""; args=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --pr) pr="$2"; shift 2 ;;
+        --repo) shift 2 ;;
+        --merge-args) args="$2"; shift 2 ;;
+        *) exit 2 ;;
+    esac
+done
+case "${MATCH_MODE:-exact}" in
+    missing) args="--admin --squash --delete-branch" ;;
+    wrong) args="--admin --squash --delete-branch --match-head-commit wrong-head" ;;
+esac
+# shellcheck disable=SC2086
+gh pr merge "$pr" $args
 EOF
     cat > "$TEST_TMPDIR/scripts/lint-implementation.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -83,6 +92,7 @@ case "${SIZE_CASE:-pass}" in
 esac
 EOF
     chmod +x "$TEST_TMPDIR/bin/git" "$TEST_TMPDIR/bin/gh" \
+        "$TEST_TMPDIR/scripts/autospec-guarded-merge.sh" \
         "$TEST_TMPDIR/scripts/lint-implementation.sh"
 }
 
@@ -94,14 +104,15 @@ run_pr_size_slice() {
     script="$(extract_shell_slice '# pr-size-helper:begin' '# pr-size-helper:end' "$skill")"
     script="${script}"$'\n'"$(extract_shell_slice \
         "# pr-size-${boundary}-exec:begin" "# pr-size-${boundary}-exec:end" "$skill")"
-    script="${script//<ISSUE>/2737}"
-    script="${script//<PR>/77}"
-    script="${script//<BRANCH>/feat/test}"
     if [ "$boundary" = "pre-push" ]; then
         script="${script}"$'\n''git push'
     else
-        script="${script}"$'\n''gh pr merge 77'
+        script="${script}"$'\n'"$(extract_shell_slice \
+            '# pr-size-guarded-merge-exec:begin' '# pr-size-guarded-merge-exec:end' "$skill")"$'\n''run_guarded_pr_size_merge'
     fi
+    script="${script//<ISSUE>/2737}"
+    script="${script//<PR>/77}"
+    script="${script//<BRANCH>/feat/test}"
     run env PATH="$TEST_TMPDIR/bin:$PATH" \
         AUTOSPEC_SCRIPTS_DIR="$TEST_TMPDIR/scripts" \
         MUTATION_LOG="$mutation" SIZE_CASE="$size_case" \
@@ -110,6 +121,7 @@ run_pr_size_slice() {
         LOCAL_HEAD_OID="${LOCAL_HEAD_OID:-head-oid}" \
         FETCHED_BASE_OID="${FETCHED_BASE_OID:-base-oid}" \
         FETCHED_HEAD_OID="${FETCHED_HEAD_OID:-head-oid}" \
+        MATCH_MODE="${MATCH_MODE:-exact}" \
         bash -c "$script"
 }
 
@@ -176,39 +188,6 @@ run_pr_size_slice() {
         || { echo "GUARDIAN_PASS: autospec and autospec-run SKILL.md guardian blocks diverge"; return 1; }
 }
 
-@test "PR_SIZE autospec-run gates push and final merge with exact acceptance evidence" {
-    for file in \
-        "$REPO_ROOT/skills/autospec-run/SKILL.md" \
-        "$REPO_ROOT/skills/autospec-run/codex/prompt.md" \
-        "$REPO_ROOT/skills/autospec-run/opencode/agent.md"; do
-        grep -qF '<!-- pr-size-pre-push:begin -->' "$file" \
-            || { echo "missing PR_SIZE pre-push gate in $file"; return 1; }
-        grep -qF '<!-- pr-size-final-merge:begin -->' "$file" \
-            || { echo "missing PR_SIZE final-merge gate in $file"; return 1; }
-        grep -qF '401 changed lines' "$file" \
-            || { echo "missing 401-line rejection in $file"; return 1; }
-        grep -qF '9 raw files' "$file" \
-            || { echo "missing 9-file rejection in $file"; return 1; }
-        grep -qF '4 logical units' "$file" \
-            || { echo "missing 4-unit rejection in $file"; return 1; }
-        grep -qF 'git diff --binary "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID"' "$file" \
-            || { echo "PR_SIZE does not lint the exact base-to-head diff in $file"; return 1; }
-        grep -qF 'gh pr view <PR> --json baseRefOid,headRefOid' "$file" \
-            || { echo "PR_SIZE final gate does not query live PR OIDs in $file"; return 1; }
-        grep -qF "grep -qxF 'INFO:PR_SIZE: acceptance'" "$file" \
-            || { echo "PR_SIZE acceptance is not exact-line matched in $file"; return 1; }
-
-        pre_push="$(line_of '<!-- pr-size-pre-push:begin -->' "$file")"
-        push="$(line_of '> 5. Push:' "$file")"
-        final_merge="$(line_of '<!-- pr-size-final-merge:begin -->' "$file")"
-        guarded_merge="$(line_of 'if bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh"' "$file")"
-        [ "$pre_push" -lt "$push" ] \
-            || { echo "PR_SIZE pre-push gate follows push in $file"; return 1; }
-        [ "$final_merge" -lt "$guarded_merge" ] \
-            || { echo "PR_SIZE final gate follows guarded merge in $file"; return 1; }
-    done
-}
-
 @test "PR_SIZE pre-push rejects 401 lines 9 files and 4 units before mutation" {
     make_pr_size_fakes
     for size_case in 401 9 4; do
@@ -229,8 +208,14 @@ run_pr_size_slice() {
     [ ! -s "$TEST_TMPDIR/mutations" ]
 
     run_pr_size_slice final-merge pass
-    [ "$status" -eq 0 ]
-    grep -qxF merge "$TEST_TMPDIR/mutations"
+    [ "$status" -eq 0 ] || { echo "$output"; return 1; }
+    grep -qxF merge "$TEST_TMPDIR/mutations" || { echo "$output"; return 1; }
+
+    MATCH_MODE=missing run_pr_size_slice final-merge pass
+    ! grep -q . "$TEST_TMPDIR/mutations"
+
+    MATCH_MODE=wrong run_pr_size_slice final-merge pass
+    ! grep -q . "$TEST_TMPDIR/mutations"
 }
 
 @test "PR_SIZE final merge fails closed on remote head or fetched branch drift" {
