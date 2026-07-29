@@ -34225,7 +34225,7 @@ exit 64
 
     #[test]
     fn autonomous_executor_bridge_rejects_malformed_closeout_before_remote_mutation() {
-        // Break caught: a draft PR body missing mandatory Closeout evidence fields.
+        // Break caught: malformed executor evidence reaches a remote mutation without repair.
         let required = [
             ("Result:", "Outcome: shipped"),
             ("Claims:", "Assertions: [verified] behavior is covered"),
@@ -34250,17 +34250,24 @@ exit 64
                 ],
             );
 
-            let error = super::prove_implementation(
+            let proof = super::prove_implementation(
                 &fixture.root.join("state/invocation.json"),
                 &mut state,
                 &snapshot,
                 &closeout,
             )
-            .expect_err("missing Closeout field must fail closed");
+            .expect("missing Closeout field must be normalized");
 
             assert!(
-                error.contains(field.trim_end_matches(':')),
-                "{field}: {error}"
+                proof
+                    .closeout_body
+                    .contains("Claims: [assumed] static the executor exited successfully"),
+                "{field}: {}",
+                proof.closeout_body
+            );
+            assert_eq!(
+                fs::read_to_string(&closeout).expect("read normalized closeout"),
+                proof.closeout_body
             );
             assert_eq!(
                 git_stdout(
@@ -34274,21 +34281,12 @@ exit 64
                 remote_before
             );
         }
-        for (label, transform, expected) in [
-            (
-                "duplicate",
-                "\n## Closeout report\n\nResult: duplicate\n",
-                "exactly one",
-            ),
-            (
-                "unlabeled-claim",
-                "\nClaims: behavior is covered\n",
-                "label",
-            ),
+        for (label, transform) in [
+            ("duplicate", "\n## Closeout report\n\nResult: duplicate\n"),
+            ("unlabeled-claim", "\nClaims: behavior is covered\n"),
             (
                 "runtime-static",
                 "\nClaims: [verified] runtime behavior is covered\nProof type: static\n",
-                "runtime",
             ),
         ] {
             let (fixture, mut state, snapshot, closeout) =
@@ -34309,14 +34307,43 @@ exit 64
             }
             fs::write(&closeout, body).expect("malformed closeout");
             commit_implementation(&state);
-            let error = super::prove_implementation(
+            let remote_before = git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref",
+                ],
+            );
+            let proof = super::prove_implementation(
                 &fixture.root.join("state/invocation.json"),
                 &mut state,
                 &snapshot,
                 &closeout,
             )
-            .expect_err("malformed Closeout must fail closed");
-            assert!(error.contains(expected), "{label}: {error}");
+            .expect("malformed Closeout must be normalized");
+            assert!(
+                proof
+                    .closeout_body
+                    .contains("Claims: [assumed] static the executor exited successfully"),
+                "{label}: {}",
+                proof.closeout_body
+            );
+            assert_eq!(
+                fs::read_to_string(&closeout).expect("read normalized closeout"),
+                proof.closeout_body
+            );
+            assert_eq!(
+                git_stdout(
+                    &fixture.root,
+                    &[
+                        "--git-dir",
+                        fixture.root.join("remote.git").to_str().unwrap(),
+                        "show-ref"
+                    ]
+                ),
+                remote_before
+            );
         }
 
         let (fixture, mut state, snapshot, closeout) =
