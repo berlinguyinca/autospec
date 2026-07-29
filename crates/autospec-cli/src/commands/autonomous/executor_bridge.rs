@@ -15115,15 +15115,12 @@ fn publish_continuation_children(
     };
     let mut criteria = receipt.unmet.clone();
     if parent.is_none() {
-        let completed = receipt.completed.join("; ");
-        criteria.insert(
-            0,
-            if completed.is_empty() {
-                "reapply current oversized slice".to_string()
-            } else {
-                completed
-            },
-        );
+        let current = if receipt.status == "oversized_checkpoint" {
+            "reapply current oversized slice"
+        } else {
+            "complete the current capped slice"
+        };
+        criteria.insert(0, current.to_string());
     }
     for (offset, criterion) in criteria.iter().enumerate() {
         let child =
@@ -36002,7 +35999,7 @@ esac
         state.head_oid = Some(head.clone());
         let proof = super::ImplementationProof {
             head_oid: head,
-            closeout_body: "## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice-0.txt; `git diff`\nScoped git status: slice files\nOne likely hidden failure: boundary\nCompleted criteria: [\"current slice\"]\nUnmet criteria: [\"second slice\",\"third slice\"]\n".into(),
+            closeout_body: "## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice-0.txt; `git diff`\nScoped git status: slice files\nOne likely hidden failure: boundary\nCompleted criteria: [\"first current slice criterion with a reproducible command and exact artifact path\",\"second current slice criterion with a reproducible command and exact artifact path\"]\nUnmet criteria: [\"second slice\",\"third slice\"]\n".into(),
         };
         super::require_continuation_checkpoint(&state_path, &event_log, &state, &proof, "", true)
             .expect("proactive continuation");
