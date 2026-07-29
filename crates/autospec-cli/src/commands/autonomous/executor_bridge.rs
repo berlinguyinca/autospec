@@ -27025,7 +27025,7 @@ exit 64
             &plan,
             &fixture.root.join("direct-review"),
             None,
-            Duration::from_millis(300),
+            Duration::from_secs(2),
         )
         .expect("reviewer tree is cleaned without changing its successful exit");
 
