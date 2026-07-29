@@ -1036,6 +1036,47 @@ Pass the following prompt verbatim to each background subagent:
 >    ```
 >    <!-- docs-drift-gate:end -->
 > 4. Conventional commits (feat:/fix:/test:/docs:/refactor:). NEVER bypass hooks. NEVER amend.
+> 4a. <!-- pr-size-pre-push:begin --> **Deterministic PR_SIZE pre-push gate.**
+>    Define this helper in the monitor shell and run it before any remote mutation:
+>    ```bash
+>    # pr-size-helper:begin
+>    run_pr_size_gate() {
+>      PR_SIZE_PHASE="$1"
+>      PR_SIZE_BASE_OID="$2"
+>      PR_SIZE_HEAD_OID="$3"
+>      PR_SIZE_DIFF=$(mktemp -t autospec-pr-size-XXXXXX.diff) || return 1
+>      git diff --binary "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID" >"$PR_SIZE_DIFF" || {
+>        rm -f "$PR_SIZE_DIFF"
+>        return 1
+>      }
+>      PR_SIZE_RC=0
+>      PR_SIZE_OUTPUT=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" \
+>        --diff-file "$PR_SIZE_DIFF" --issue <ISSUE>) || PR_SIZE_RC=$?
+>      rm -f "$PR_SIZE_DIFF"
+>      printf '%s\n' "$PR_SIZE_OUTPUT"
+>      if [ "$PR_SIZE_RC" -ne 0 ] || printf '%s\n' "$PR_SIZE_OUTPUT" | grep -q '^ERROR:PR_SIZE:'; then
+>        printf 'ERROR:PR_SIZE: %s rejected exact diff %s..%s\n' \
+>          "$PR_SIZE_PHASE" "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID"
+>        return 1
+>      fi
+>      printf '%s\n' 'INFO:PR_SIZE: acceptance'
+>    }
+>    # pr-size-helper:end
+>    # pr-size-pre-push-exec:begin
+>    PR_SIZE_BASE_OID=$(git merge-base "origin/${AUTOSPEC_BASE_BRANCH:-main}" HEAD) || exit 1
+>    PR_SIZE_HEAD_OID=$(git rev-parse HEAD) || exit 1
+>    PR_SIZE_EVIDENCE=$(run_pr_size_gate pre-push "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID") || {
+>      printf '%s\n' "$PR_SIZE_EVIDENCE"
+>      exit 1
+>    }
+>    printf '%s\n' "$PR_SIZE_EVIDENCE"
+>    printf '%s\n' "$PR_SIZE_EVIDENCE" | grep -qxF 'INFO:PR_SIZE: acceptance' || exit 1
+>    # pr-size-pre-push-exec:end
+>    ```
+>    The deterministic linter rejects the first over-limit values: **401 changed lines**,
+>    **9 raw files**, or **4 logical units**. On rejection, preserve the branch and do not
+>    run `git push`, `gh pr create`, `gh pr ready`, or any merge command.
+>    <!-- pr-size-pre-push:end -->
 > 5. Push: git push -u origin <BRANCH>
 >    ```bash
 >    # Stop-sentinel: abort if an immediate stop flag is present after this step.
@@ -1175,8 +1216,46 @@ Pass the following prompt verbatim to each background subagent:
 >      exit 0
 >    fi
 >    ```
-> 8. SUCCESS: Run the **Full test suite gate** one final time after the PR branch is current with `main`; if it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT run `gh pr merge`. Then run `gh pr merge <PR> --admin --squash --delete-branch`. Merge auto-closes the issue. After the merge succeeds, reconcile its linked parent. A reconciliation failure cannot undo the completed merge, so post the failure on the child and leave the parent as `complete but stale` for operator-visible retry.
+> 8. SUCCESS: Run the **Full test suite gate** one final time after the PR branch is current with `main`; if it fails, fix the failure, recommit, push, rerun the full suite and review, and do NOT merge. Revalidate PR size against GitHub's live OIDs, then guarded-merge only that validated head. Merge auto-closes the issue. After the merge succeeds, reconcile its linked parent. A reconciliation failure cannot undo the completed merge, so post the failure on the child and leave the parent as `complete but stale` for operator-visible retry.
 >    ```bash
+>    <!-- pr-size-final-merge:begin -->
+>    # Query GitHub after update-branch, review, and final local proof. The live PR
+>    # endpoints are authoritative; stale local OIDs can never create acceptance.
+>    # If the shell boundary discarded the helper, redefine it exactly as in step 4a.
+>    # pr-size-final-merge-exec:begin
+>    PR_SIZE_REMOTE_OIDS=$(gh pr view <PR> --json baseRefOid,headRefOid \
+>      --jq '[.baseRefOid, .headRefOid] | @tsv') || exit 1
+>    [ "$(printf '%s\n' "$PR_SIZE_REMOTE_OIDS" | awk -F '\t' \
+>      'NF == 2 && $1 != "" && $2 != "" { print "valid" }')" = "valid" ] || exit 1
+>    PR_SIZE_BASE_OID=$(printf '%s\n' "$PR_SIZE_REMOTE_OIDS" | cut -f1)
+>    PR_SIZE_HEAD_OID=$(printf '%s\n' "$PR_SIZE_REMOTE_OIDS" | cut -f2)
+>    git fetch --no-tags origin \
+>      "+refs/heads/${AUTOSPEC_BASE_BRANCH:-main}:refs/remotes/origin/${AUTOSPEC_BASE_BRANCH:-main}" \
+>      "+refs/heads/<BRANCH>:refs/remotes/origin/<BRANCH>" || exit 1
+>    git cat-file -e "${PR_SIZE_BASE_OID}^{commit}" || exit 1
+>    git cat-file -e "${PR_SIZE_HEAD_OID}^{commit}" || exit 1
+>    [ "$(git rev-parse "origin/${AUTOSPEC_BASE_BRANCH:-main}")" = "$PR_SIZE_BASE_OID" ] || exit 1
+>    [ "$(git rev-parse "origin/<BRANCH>")" = "$PR_SIZE_HEAD_OID" ] || exit 1
+>    [ "$(git rev-parse HEAD)" = "$PR_SIZE_HEAD_OID" ] || exit 1
+>    PR_SIZE_EVIDENCE=$(run_pr_size_gate final-pre-merge \
+>      "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID") || {
+>      printf '%s\n' "$PR_SIZE_EVIDENCE"
+>      exit 1
+>    }
+>    printf '%s\n' "$PR_SIZE_EVIDENCE"
+>    # Reviewer evidence is accepted only as this complete line; prefixes,
+>    # suffixes, summaries, and inferred approval are not acceptance.
+>    printf '%s\n' "$PR_SIZE_EVIDENCE" | grep -qxF 'INFO:PR_SIZE: acceptance' || exit 1
+>    # pr-size-final-merge-exec:end
+>    <!-- pr-size-final-merge:end -->
+>    # pr-size-guarded-merge-exec:begin
+>    run_guarded_pr_size_merge() {
+>      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" \
+>        --pr <PR> --repo {repo} \
+>        --merge-args "--admin --squash --delete-branch --match-head-commit $PR_SIZE_HEAD_OID"
+>    }
+>    # pr-size-guarded-merge-exec:end
+>    run_guarded_pr_size_merge || exit 1
 >    _parent_slug=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/repo-slug.sh" --canonical "{repo}")
 >    export AUTOSPEC_PARENT_STATE_ROOT="${AUTOSPEC_PARENT_STATE_ROOT:-$HOME/.autospec/parent-state/$_parent_slug}"
 >    if ! "${AUTOSPEC_BIN:-autospec}" parent reconcile-child --repo {repo} --child "<ISSUE>"; then
