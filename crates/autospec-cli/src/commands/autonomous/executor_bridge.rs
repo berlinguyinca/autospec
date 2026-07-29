@@ -35939,7 +35939,7 @@ exit 64
 
     #[cfg(unix)]
     #[test]
-    fn autonomous_executor_bridge_continuation_publication_is_ordered_and_restart_safe() {
+    fn hard_oversized_publication_and_continuation_publication_are_ordered_and_restart_safe() {
         // Break caught: proactive receipts existed locally but never became ordered GitHub work.
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let (fixture, mut state, _, _) = implementation_proof_fixture("continuation-publication");
@@ -36053,6 +36053,51 @@ esac
             .contains("autospec-parent:10"));
         let title = fs::read_to_string(store.join("issues/102.title")).unwrap();
         assert!(title.trim().len() <= 120);
+
+        state.identity.issue = 44;
+        let worktree = &state.identity.worktree;
+        fs::write(worktree.join("hard.txt"), "changed\n".repeat(401)).expect("hard slice");
+        git(worktree, &["add", "hard.txt"]);
+        git(worktree, &["commit", "-m", "test: hard continuation"]);
+        let hard_head = git_stdout(worktree, &["rev-parse", "HEAD"]);
+        state.head_oid = Some(hard_head.clone());
+        let hard_proof = super::ImplementationProof {
+            head_oid: hard_head,
+            closeout_body: proof.closeout_body.clone(),
+        };
+        let publish = || {
+            super::require_continuation_checkpoint(
+                &state_path,
+                &event_log,
+                &state,
+                &hard_proof,
+                "",
+                true,
+            )
+        };
+        fs::write(store.join("calls"), "").expect("clear calls");
+        let error = publish().expect_err("hard continuation invariant");
+        assert!(error
+            .to_string()
+            .contains("oversized continuation checkpoint"));
+        let children = super::continuation_child_list(&state.identity.repository, 44)
+            .expect("authoritative hard child order");
+        assert_eq!(children, [106, 107, 108]);
+        for (ordinal, child) in children.iter().enumerate() {
+            let body =
+                fs::read_to_string(store.join(format!("issues/{child}.body"))).expect("hard child");
+            assert!(body.contains(&format!("ordinal={}", ordinal + 1)));
+        }
+        let calls = fs::read_to_string(store.join("calls")).expect("hard calls");
+        assert_eq!(calls.matches("issue create").count(), 3);
+        assert!(!calls.contains("pr create"));
+        let refs = super::remote_head_refs(&fixture.repo).expect("remote refs");
+        assert!(!refs.contains_key(&format!("refs/heads/{}", state.identity.branch)));
+        fs::write(store.join("calls"), "").expect("clear calls");
+        assert!(publish().is_err());
+        assert!(!fs::read_to_string(store.join("calls"))
+            .expect("hard restart calls")
+            .contains("issue create"));
         for (key, previous) in [
             ("PATH", previous_path),
             ("GH_STORE", previous_store),
