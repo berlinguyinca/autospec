@@ -17,7 +17,9 @@ normal operation:
 The resolved reviewer executable must be external to both the source repository
 and its issue worktree. Automatic reviewers run with a sanitized allowlist
 environment rather than inheriting the conductor environment. Codex uses its
-read-only sandbox; Claude receives only `Read`, `Glob`, and `Grep` in plan mode;
+read-only sandbox and ignores user config plus execpolicy rules while retaining
+`CODEX_HOME` authentication; Claude receives only `Read`, `Glob`, and `Grep` in
+plan mode;
 OpenCode selects a dedicated `autospec-reviewer` agent whose inline agent-level
 policy denies every tool except read, glob, grep, list, and LSP. Its config root
 is a private executor artifact directory, host and Claude-compatible config

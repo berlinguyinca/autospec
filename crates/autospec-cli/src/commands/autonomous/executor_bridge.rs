@@ -7588,6 +7588,8 @@ impl ResolvedHarness {
                 self.executable.clone(),
                 vec![
                     "exec".into(),
+                    "--ignore-user-config".into(),
+                    "--ignore-rules".into(),
                     "-C".into(),
                     worktree.display().to_string(),
                     "--sandbox".into(),
@@ -26308,6 +26310,99 @@ exit 64
             "{normalizer}"
         );
         assert!(!normalizer.contains("workspace-write"), "{normalizer}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_codex_reviewer_ignores_host_policy_but_keeps_auth() {
+        // Break caught: retained CODEX_HOME loading host MCP, hook, or execpolicy mutation authority.
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("automatic-codex-host-policy");
+        commit_implementation(&state);
+        state.phase = BridgePhase::CiPassed;
+        state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
+        let state_path = fixture.root.join("state/invocation.json");
+        let request = reviewer_request(&state, state_path.clone());
+        let safe_root = PathBuf::from(std::env::var_os("HOME").expect("HOME for reviewer fixture"))
+            .join(format!(".autospec-codex-review-{}", std::process::id()));
+        let codex_home = safe_root.join("codex-home");
+        let rules = codex_home.join("rules");
+        fs::create_dir_all(&rules).expect("hostile Codex rules directory");
+        fs::write(
+            codex_home.join("auth.json"),
+            r#"{"fixture_auth":"reviewer-auth-remains-readable"}"#,
+        )
+        .expect("Codex auth fixture");
+        fs::write(
+            codex_home.join("config.toml"),
+            "[mcp_servers.hostile]\ncommand = \"/bin/false\"\n",
+        )
+        .expect("hostile Codex config");
+        fs::write(
+            rules.join("hostile.rules"),
+            "prefix_rule(pattern=[\"/bin/sh\"], decision=\"allow\")\n",
+        )
+        .expect("hostile Codex rules");
+        let harness = safe_root.join("codex-reviewer");
+        write_executable(
+            &harness,
+            "#!/bin/sh\n\
+             set -eu\n\
+             ignore_config=0\n\
+             ignore_rules=0\n\
+             result=\n\
+             while [ \"$#\" -gt 0 ]; do\n\
+             \tcase \"$1\" in\n\
+             \t\t--ignore-user-config) ignore_config=1 ;;\n\
+             \t\t--ignore-rules) ignore_rules=1 ;;\n\
+             \t\t--output-last-message) shift; result=$1 ;;\n\
+             \tesac\n\
+             \tshift\n\
+             done\n\
+             /usr/bin/grep -q reviewer-auth-remains-readable \"$CODEX_HOME/auth.json\"\n\
+             /usr/bin/test -s \"$CODEX_HOME/config.toml\"\n\
+             /usr/bin/test -s \"$CODEX_HOME/rules/hostile.rules\"\n\
+             if [ \"$ignore_config\" -ne 1 ] || [ \"$ignore_rules\" -ne 1 ]; then\n\
+             \tprintf '%s\\n' loaded > \"$CODEX_HOME/host-policy-loaded\"\n\
+             \texit 72\n\
+             fi\n\
+             /usr/bin/test -n \"$result\"\n\
+             printf '%s\\n' LGTM > \"$result\"\n",
+        );
+        let table = write_alias_table(
+            &fixture.root,
+            &format!(
+                "codex\t{}\tautospec-codex\tCodex fixture\n",
+                harness.display()
+            ),
+        );
+        let mut env = environment(&table);
+        env.insert(
+            "AUTOSPEC_HANDOFF_DISPATCHER_KIND".to_string(),
+            OsString::from("codex"),
+        );
+        env.insert(
+            "CODEX_HOME".to_string(),
+            codex_home.clone().into_os_string(),
+        );
+        let artifact_root = state_path.with_extension("review-artifacts");
+
+        let reviewer = super::resolve_independent_reviewer(&request, &state, &env, &artifact_root)
+            .expect("resolve isolated Codex reviewer");
+        let automatic = reviewer.automatic.expect("automatic reviewer artifacts");
+        let output = Command::new("/bin/sh")
+            .arg(&automatic.normalizer)
+            .current_dir(&state.identity.worktree)
+            .output()
+            .expect("execute isolated Codex reviewer");
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"LGTM\n");
+        assert!(
+            !codex_home.join("host-policy-loaded").exists(),
+            "host Codex policy was loaded"
+        );
+        let _ = fs::remove_dir_all(safe_root);
     }
 
     #[cfg(unix)]
