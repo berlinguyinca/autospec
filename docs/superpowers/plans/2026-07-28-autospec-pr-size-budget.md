@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - Hard limits: 400 additions-plus-deletions, 8 raw files, and 3 logical units.
-- Proactive limits: 320 changed lines, 7 raw files, or 3 logical units while criteria remain.
+- Proactive limits: 320 changed lines or 7 raw files while criteria remain.
 - A skill adapter trio and its derived goldens count as one logical unit.
 - Binary diffs are hard-oversized because their line count cannot be proved.
 - Oversized work is never pushed, drafted, readied, or merged; local commits remain intact.
@@ -19,9 +19,10 @@
 - Allowed categories: generated migration, dependency-solver lockfile, mandatory lock-step artifacts.
 - Manual implementation and test code are never exempt; valid exceptions emit `INFO:PR_SIZE`.
 - Children use `Depends on issue #N`; part PRs use `Part of #N` and close only their child.
-- Only existing `autospec parent` reconciliation closes the umbrella after every child is terminal.
+- Parent reconciliation closes the umbrella only after every child has an observed merged PR.
 - Publication and session notifications are durable, restart-safe, idempotent, and desktop-free.
-- Each task uses TDD, adds no dependency, and stays within this same PR-size contract.
+- Each task uses TDD, adds no dependency, and stays within this PR-size contract or its validated lock-step exception.
+- A child touching an inherited file over 400 LOC carries `Guardian: skip-COMPLEXITY # surgical change in legacy <path>; changed functions remain capped`.
 
 ---
 
@@ -46,10 +47,9 @@ assert_eq!(evaluate(400, 9, 3).hard_dimensions(), &[PatchSizeDimension::RawFiles
 assert_eq!(evaluate(400, 8, 4).hard_dimensions(), &[PatchSizeDimension::LogicalUnits]);
 assert!(evaluate(320, 1, 1).is_proactive());
 assert!(evaluate(1, 7, 1).is_proactive());
-assert!(evaluate(1, 1, 3).is_proactive());
 ```
 
-Also prove one adapter trio plus its golden is one unit and a binary diff is hard.
+Register `mod pr_size` before the red run; also prove one adapter trio plus its golden is one unit and a binary diff is hard.
 
 - [ ] **Step 2: Capture red**
 
@@ -74,10 +74,11 @@ Add `removed_line_count` and `changed_line_count`; recognize `Binary files` and 
 pub const DEFAULT_MAX_CHANGED_LINES: usize = 400;
 pub const DEFAULT_MAX_RAW_FILES: usize = 8;
 pub const DEFAULT_MAX_LOGICAL_UNITS: usize = 3;
-pub const PROACTIVE_PERCENT: usize = 80;
+pub const PROACTIVE_CHANGED_LINES: usize = 320;
+pub const PROACTIVE_RAW_FILES: usize = 7;
 ```
 
-Use `value.saturating_mul(100) >= limit.saturating_mul(80)` for proactive and `>` for hard.
+Proactive means changed lines `>= 320` or raw files `>= 7`; hard means any numeric value is `>` its maximum.
 
 - [ ] **Step 5: Remove logical-unit drift**
 
@@ -244,24 +245,24 @@ Run fmt, receipt tests, CLI clippy, and diff check; commit `feat: preserve auton
 **Files:**
 - Modify: `crates/autospec-core/src/state/mod.rs`
 - Modify: `crates/autospec-cli/src/commands/parent.rs`
-- Modify: `crates/autospec-cli/src/commands/options.rs`
+- Modify: `crates/autospec-cli/src/commands/parent/options.rs`
 - Test: inline parent/state tests
 
 **Interfaces:**
 - Consumes: immutable trusted parent records.
-- Produces: `extend_parent_decomposition(parent, children)` and `autospec parent extend --parent N --children A,B`.
+- Produces: `extend_parent_decomposition(parent, children)`, merged-PR terminal evidence, and `autospec parent extend --parent N --children A,B`.
 
 - [ ] **Step 1: Write failing extension tests**
 
-Prove ordered-superset append, prior terminal-state preservation, idempotent repeat, and rejection of removal, duplicate, other-parent, and parent-self children.
+Prove ordered-superset append, prior merged state preservation, idempotent repeat, and rejection of removal, duplicate, other-parent, and parent-self children. A manually closed child without a merged PR remains pending.
 
 - [ ] **Step 2: Capture red**
 
-Run parent tests in core and CLI; expect missing extension API/subcommand.
+Run `cargo test -p autospec-core state::tests::parent_extend -- --nocapture` and `cargo test -p autospec-cli commands::parent::tests::extend -- --nocapture`; expect missing extension API/subcommand.
 
 - [ ] **Step 3: Implement append-only core behavior**
 
-Load the latest trusted full list, validate ownership, post one new full-list marker only when changed, and return an explicit `changed` boolean.
+Load the latest trusted full list, validate ownership, post one new full-list marker only when changed, and return an explicit `changed` boolean. Record terminal state only from authoritative merged-PR evidence, never issue closure alone.
 
 - [ ] **Step 4: Add CLI parsing**
 
@@ -283,7 +284,7 @@ Run fmt, core/CLI parent tests, core+CLI clippy, and diff check; commit `feat: e
 
 - [ ] **Step 1: Write failing publication tests**
 
-Two unmet slices create two children; child 2 depends on child 1. Restart creates none. Existing parent is extended; otherwise create a tracker containing current issue plus children. Umbrella closes only after both child PRs merge.
+Without a parent, the original issue becomes the umbrella: child 1 represents the capped current slice and child 2 depends on child 1. With an existing parent, append continuations after the current issue. Restart creates none, and manual child closure cannot complete the umbrella.
 
 - [ ] **Step 2: Capture red**
 
@@ -291,7 +292,7 @@ Run `cargo test -p autospec-cli executor_bridge::tests::continuation_publication
 
 - [ ] **Step 3: Build exact child bodies**
 
-Include concrete goal, remaining checkbox criteria, paths, tests, one-line smoke command, `Part of #<umbrella>`, and dependency except on child 1.
+Include concrete goal, checkbox criteria, paths, tests, one-line smoke command, and `Part of #<umbrella>`. The current slice PR closes child 1; every continuation depends on its preceding merged child and starts from a clean isolated worktree.
 
 - [ ] **Step 4: Publish idempotently**
 
@@ -308,21 +309,27 @@ Notify create/recovery/umbrella completion. Run fmt, publisher tests, CLI clippy
 ### Task 8: Multi-harness proactive behavior
 
 **Files:**
-- Modify: both `skills/autospec-run` and `skills/autospec` adapter trios
-- Modify: the existing Phase 4 linter/merge wording validator
-- Test: that validator and skill goldens
+- Modify: `skills/autospec-run/{SKILL.md,codex/prompt.md,opencode/agent.md}`
+- Modify: `skills/autospec/{SKILL.md,codex/prompt.md,opencode/agent.md}`
+- Modify: `tests/unit/test_phase4_guardian_trio.bats`
+- Modify: `tests/fixtures/skill-goldens/autospec-run.SKILL.md.sha256`
+- Modify: `tests/fixtures/skill-goldens/autospec-run.codex.prompt.md.sha256`
+- Modify: `tests/fixtures/skill-goldens/autospec-run.opencode.agent.md.sha256`
+- Modify: `tests/fixtures/skill-goldens/autospec.SKILL.md.sha256`
+- Modify: `tests/fixtures/skill-goldens/autospec.codex.prompt.md.sha256`
+- Modify: `tests/fixtures/skill-goldens/autospec.opencode.agent.md.sha256`
 
 **Interfaces:**
-- Consumes: shell/Rust gates, receipt publisher, parent extension, and 320/7/3 thresholds.
+- Consumes: shell/Rust gates, receipt publisher, parent extension, and 320/7 thresholds.
 - Produces: lock-step instructions for pre-push checkpoint, continuation, and final exact-head gate.
 
 - [ ] **Step 1: Write failing contract assertions**
 
-Require all adapters to contain `320 changed lines`, `7 raw files`, `3 logical units`, exception grammar, `Part of #<umbrella>`, and `Depends on issue #N`; require checkpoint/lint before push and final lint before merge.
+Require all adapters to contain `320 changed lines`, `7 raw files`, exception grammar, `Part of #<umbrella>`, and `Depends on issue #N`; require checkpoint/lint before push and final lint before merge.
 
 - [ ] **Step 2: Capture red**
 
-Run the selected validator; expect missing proactive and pre-push requirements.
+Run `bats tests/unit/test_phase4_guardian_trio.bats --filter PR_SIZE`; expect missing proactive and pre-push requirements.
 
 - [ ] **Step 3: Update canonical bodies**
 
@@ -330,7 +337,7 @@ At each checkpoint run exact base..HEAD policy. Proactive status freezes a compl
 
 - [ ] **Step 4: Mirror and verify**
 
-Mirror bodies with harness-only frontmatter, regenerate goldens, run lock-step validation, then `cargo run -p autospec-cli -- validate --json`; require zero required failures.
+Use `Guardian: skip-PR_SIZE # mandatory lock-step artifacts: autospec and autospec-run adapter trios plus derived goldens`; prove the normalized two canonical bodies plus validator remain within 400/8/3, mirror bodies, regenerate only their six goldens, run lock-step validation, then run the full JSON validator with zero required failures.
 
 - [ ] **Step 5: Commit**
 
@@ -341,4 +348,4 @@ Commit `feat: continue large autonomous work in capped parts`.
 - [ ] Rebase each child on latest `origin/main`; run focused tests and prove its diff is within 400/8/3.
 - [ ] Run the full JSON validator sequentially on the final child with zero required failures.
 - [ ] Obtain independent whole-feature review against this plan and its design.
-- [ ] Merge in dependency order, sweep after each merge, and confirm issue `#2699` closes only after the final child is terminal.
+- [ ] Merge in dependency order, sweep after each merge, and confirm issue `#2699` closes only after the final child PR is observed merged.
