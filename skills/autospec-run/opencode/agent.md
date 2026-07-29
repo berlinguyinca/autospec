@@ -1055,6 +1055,47 @@ do not fall back to an inline label-swap path.
 >    fi
 >    ```
 >    <!-- RETRY-LOOP:end -->
+> 4a. <!-- pr-size-pre-push:begin --> **Deterministic PR_SIZE pre-push gate.**
+>    Define this helper in the monitor shell and run it before any remote mutation:
+>    ```bash
+>    # pr-size-helper:begin
+>    run_pr_size_gate() {
+>      PR_SIZE_PHASE="$1"
+>      PR_SIZE_BASE_OID="$2"
+>      PR_SIZE_HEAD_OID="$3"
+>      PR_SIZE_DIFF=$(mktemp -t autospec-pr-size-XXXXXX.diff) || return 1
+>      git diff --binary "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID" >"$PR_SIZE_DIFF" || {
+>        rm -f "$PR_SIZE_DIFF"
+>        return 1
+>      }
+>      PR_SIZE_RC=0
+>      PR_SIZE_OUTPUT=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" \
+>        --diff-file "$PR_SIZE_DIFF" --issue <ISSUE>) || PR_SIZE_RC=$?
+>      rm -f "$PR_SIZE_DIFF"
+>      printf '%s\n' "$PR_SIZE_OUTPUT"
+>      if [ "$PR_SIZE_RC" -ne 0 ] || printf '%s\n' "$PR_SIZE_OUTPUT" | grep -q '^ERROR:PR_SIZE:'; then
+>        printf 'ERROR:PR_SIZE: %s rejected exact diff %s..%s\n' \
+>          "$PR_SIZE_PHASE" "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID"
+>        return 1
+>      fi
+>      printf '%s\n' 'INFO:PR_SIZE: acceptance'
+>    }
+>    # pr-size-helper:end
+>    # pr-size-pre-push-exec:begin
+>    PR_SIZE_BASE_OID=$(git merge-base "origin/${AUTOSPEC_BASE_BRANCH:-main}" HEAD) || exit 1
+>    PR_SIZE_HEAD_OID=$(git rev-parse HEAD) || exit 1
+>    PR_SIZE_EVIDENCE=$(run_pr_size_gate pre-push "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID") || {
+>      printf '%s\n' "$PR_SIZE_EVIDENCE"
+>      exit 1
+>    }
+>    printf '%s\n' "$PR_SIZE_EVIDENCE"
+>    printf '%s\n' "$PR_SIZE_EVIDENCE" | grep -qxF 'INFO:PR_SIZE: acceptance' || exit 1
+>    # pr-size-pre-push-exec:end
+>    ```
+>    The deterministic linter rejects the first over-limit values: **401 changed lines**,
+>    **9 raw files**, or **4 logical units**. On rejection, preserve the branch and do not
+>    run `git push`, `gh pr create`, `gh pr ready`, or any merge command.
+>    <!-- pr-size-pre-push:end -->
 > 5. Push: git push -u origin <BRANCH>
 >    ```bash
 >    # Stop-sentinel: abort if an immediate stop flag is present after this step.
@@ -1334,6 +1375,36 @@ do not fall back to an inline label-swap path.
 >        exit 1
 >      fi
 >    fi
+>    <!-- pr-size-final-merge:begin -->
+>    # Query GitHub after update-branch, review, and final local proof. The live PR
+>    # endpoints are authoritative; stale local OIDs can never create acceptance.
+>    # If the shell boundary discarded the helper, redefine it exactly as in step 4a.
+>    # pr-size-final-merge-exec:begin
+>    PR_SIZE_REMOTE_OIDS=$(gh pr view <PR> --json baseRefOid,headRefOid \
+>      --jq '[.baseRefOid, .headRefOid] | @tsv') || exit 1
+>    [ "$(printf '%s\n' "$PR_SIZE_REMOTE_OIDS" | awk -F '\t' \
+>      'NF == 2 && $1 != "" && $2 != "" { print "valid" }')" = "valid" ] || exit 1
+>    PR_SIZE_BASE_OID=$(printf '%s\n' "$PR_SIZE_REMOTE_OIDS" | cut -f1)
+>    PR_SIZE_HEAD_OID=$(printf '%s\n' "$PR_SIZE_REMOTE_OIDS" | cut -f2)
+>    git fetch --no-tags origin \
+>      "+refs/heads/${AUTOSPEC_BASE_BRANCH:-main}:refs/remotes/origin/${AUTOSPEC_BASE_BRANCH:-main}" \
+>      "+refs/heads/<BRANCH>:refs/remotes/origin/<BRANCH>" || exit 1
+>    git cat-file -e "${PR_SIZE_BASE_OID}^{commit}" || exit 1
+>    git cat-file -e "${PR_SIZE_HEAD_OID}^{commit}" || exit 1
+>    [ "$(git rev-parse "origin/${AUTOSPEC_BASE_BRANCH:-main}")" = "$PR_SIZE_BASE_OID" ] || exit 1
+>    [ "$(git rev-parse "origin/<BRANCH>")" = "$PR_SIZE_HEAD_OID" ] || exit 1
+>    [ "$(git rev-parse HEAD)" = "$PR_SIZE_HEAD_OID" ] || exit 1
+>    PR_SIZE_EVIDENCE=$(run_pr_size_gate final-pre-merge \
+>      "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID") || {
+>      printf '%s\n' "$PR_SIZE_EVIDENCE"
+>      exit 1
+>    }
+>    printf '%s\n' "$PR_SIZE_EVIDENCE"
+>    # Reviewer evidence is accepted only as this complete line; prefixes,
+>    # suffixes, summaries, and inferred approval are not acceptance.
+>    printf '%s\n' "$PR_SIZE_EVIDENCE" | grep -qxF 'INFO:PR_SIZE: acceptance' || exit 1
+>    # pr-size-final-merge-exec:end
+>    <!-- pr-size-final-merge:end -->
 >    # Blast-radius domain fence at the merge chokepoint (issue #1732). The guarded-merge
 >    # wrapper classifies the PR's ACTUAL changed files against the repo's fenced_surfaces
 >    # registry and refuses to merge a fenced-surface diff (the wrapper applies the
@@ -1343,7 +1414,14 @@ do not fall back to an inline label-swap path.
 >    # so "merge without the fence check" requires deliberately bypassing the wrapper.
 >    # exit 0 = merged (allowed/overridden); 1 = quarantined (NOT merged); 2 = fail-closed error.
 >    # This replaces the historical bare `gh pr merge <PR> --admin --squash --delete-branch`.
->    if bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" --pr <PR> --repo {repo}; then
+>    # pr-size-guarded-merge-exec:begin
+>    run_guarded_pr_size_merge() {
+>      bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-guarded-merge.sh" \
+>        --pr <PR> --repo {repo} \
+>        --merge-args "--admin --squash --delete-branch --match-head-commit $PR_SIZE_HEAD_OID"
+>    }
+>    # pr-size-guarded-merge-exec:end
+>    if run_guarded_pr_size_merge; then
 >      :
 >    else
 >      _gm_rc=$?

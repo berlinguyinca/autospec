@@ -143,6 +143,15 @@ pub struct ParentIssueUpdate {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentDecompositionExtension {
+    pub parent_issue: u64,
+    pub child_issues: Vec<u64>,
+    pub added_children: Vec<u64>,
+    pub comment_body: String,
+    pub changed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParentIssueTerminalAction {
     pub parent_issue: u64,
     pub completion_summary: String,
@@ -328,6 +337,79 @@ impl SpecStateStore {
                 Err(error)
             }
         }
+    }
+
+    pub fn extend_parent_decomposition(
+        &mut self,
+        parent_issue: u64,
+        child_issues: Vec<u64>,
+    ) -> Result<ParentDecompositionExtension, String> {
+        let record = self
+            .parent_issues
+            .get(&parent_issue)
+            .ok_or_else(|| format!("parent issue #{parent_issue} is not tracked"))?;
+        let existing = record.child_numbers();
+        if child_issues.len() < existing.len() || !child_issues.starts_with(&existing) {
+            return Err(format!(
+                "parent issue #{parent_issue} extension must preserve the ordered child prefix"
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for issue in &child_issues {
+            if *issue == 0 {
+                return Err("child issue number must be positive".to_string());
+            }
+            if *issue == parent_issue {
+                return Err(format!(
+                    "parent issue #{parent_issue} cannot be its own child"
+                ));
+            }
+            if !seen.insert(*issue) {
+                return Err(format!("duplicate child issue #{issue}"));
+            }
+        }
+        let added_children = child_issues[existing.len()..].to_vec();
+        for issue in &added_children {
+            if let Some(owner) = self.parent_issues.values().find(|candidate| {
+                candidate.parent_issue != parent_issue
+                    && candidate
+                        .child_issues
+                        .iter()
+                        .any(|child| child.issue == *issue)
+            }) {
+                return Err(format!(
+                    "child issue #{issue} is already linked to parent #{}",
+                    owner.parent_issue
+                ));
+            }
+        }
+        let changed = !added_children.is_empty();
+        if changed {
+            let record = self
+                .parent_issues
+                .get_mut(&parent_issue)
+                .expect("validated parent remains tracked");
+            record
+                .child_issues
+                .extend(added_children.iter().map(|issue| ChildIssueRecord {
+                    issue: *issue,
+                    terminal: false,
+                }));
+            record.parent_closed = false;
+            validate_parent_record(record)?;
+        }
+        let quarantined = self
+            .parent_issues
+            .get(&parent_issue)
+            .expect("validated parent remains tracked")
+            .quarantined_parent;
+        Ok(ParentDecompositionExtension {
+            parent_issue,
+            child_issues: child_issues.clone(),
+            added_children,
+            comment_body: extension_decomposition_comment(parent_issue, &child_issues, quarantined),
+            changed,
+        })
     }
 
     pub fn record_child_terminal(
@@ -846,6 +928,17 @@ Parent issue #{parent_issue} was decomposed into child implementation issues:
     )
 }
 
+fn extension_decomposition_comment(
+    parent_issue: u64,
+    child_issues: &[u64],
+    quarantined_parent: bool,
+) -> String {
+    decomposition_comment(parent_issue, child_issues, quarantined_parent).replace(
+        "\n<!-- autospec-parent-decomposition:end -->",
+        "\nState: `append-only-parent-extension`.\n<!-- autospec-parent-decomposition:end -->",
+    )
+}
+
 fn completion_summary(parent_issue: u64, child_issues: &[u64]) -> String {
     let children = format_bullet_issue_list(child_issues);
     format!(
@@ -976,4 +1069,69 @@ fn escape_json_string(value: &str) -> String {
         }
     }
     escaped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ParentIssueStatus, SpecStateStore};
+
+    #[test]
+    fn extend_parent_decomposition_preserves_terminal_children_and_is_idempotent() {
+        let mut store = SpecStateStore::new();
+        store
+            .record_parent_decomposition(10, vec![11, 12], false)
+            .expect("initial decomposition");
+        store.record_child_terminal(11).expect("merged child");
+        let extended = store
+            .extend_parent_decomposition(10, vec![11, 12, 13])
+            .expect("ordered extension");
+        assert!(extended.changed);
+        assert_eq!(extended.added_children, vec![13]);
+        assert!(extended
+            .comment_body
+            .contains("append-only-parent-extension"));
+
+        let repeated = store
+            .extend_parent_decomposition(10, vec![11, 12, 13])
+            .expect("same full list");
+        assert!(!repeated.changed);
+        store
+            .record_child_terminal(12)
+            .expect("second merged child");
+        store
+            .record_child_terminal(13)
+            .expect("extension merged child");
+        assert_eq!(
+            store.parent_issue_status(10),
+            Some(ParentIssueStatus::CompleteButStale)
+        );
+    }
+
+    #[test]
+    fn extend_parent_decomposition_rejects_non_append_and_owned_children() {
+        let mut store = SpecStateStore::new();
+        store
+            .record_parent_decomposition(10, vec![11, 12], false)
+            .expect("initial decomposition");
+        store
+            .record_parent_decomposition(20, vec![21], false)
+            .expect("other decomposition");
+
+        for children in [
+            vec![11],
+            vec![12, 11, 13],
+            vec![11, 12, 10],
+            vec![11, 12, 13, 13],
+        ] {
+            assert!(
+                store.extend_parent_decomposition(10, children).is_err(),
+                "invalid full list must fail closed"
+            );
+        }
+        assert!(store
+            .extend_parent_decomposition(10, vec![11, 12, 21])
+            .expect_err("child owned by another parent")
+            .contains("parent #20"));
+        assert_eq!(store.parent_issue_children(10), Some(vec![11, 12]));
+    }
 }

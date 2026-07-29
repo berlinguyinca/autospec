@@ -442,6 +442,87 @@ fn foreground_empty_repository_queue_records_tier_one_without_remote_mutation() 
 }
 
 #[test]
+fn foreground_resumes_no_ready_pause() {
+    let fixture = ForegroundFixture::new();
+    let paused = no_ready_paused_state();
+    seed_foreground_state(&fixture, &paused);
+    fs::write(&fixture.mode, "reviewed\n").expect("make issue queue-ready");
+
+    let output = fixture.run_foreground();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let resumed = fixture.read_state();
+    assert_ne!(resumed, paused, "ready work left the conductor parked");
+    assert_eq!(resumed.selected_issue(), Some(42));
+    assert_ne!(resumed.pause_reason(), Some("no_ready_issue_after_review"));
+}
+
+#[test]
+fn foreground_still_empty_pause_polls_without_process_churn() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let paused = no_ready_paused_state();
+    seed_foreground_state(&fixture, &paused);
+    let output = fixture
+        .detached_command("start")
+        .args(["--detach", "--branch", "main", "--poll-interval-sec", "1"])
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_EMPTY_QUEUE", "1")
+        .output()
+        .expect("start parked foreground conductor");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_for_file_contents(&fixture.calls, "labels=auto-implement");
+    let conductor_pid = fixture
+        .recorded_conductor_pid()
+        .expect("recorded conductor pid");
+
+    std::thread::sleep(std::time::Duration::from_millis(250));
+    let same_process = fixture.recorded_conductor_pid() == Some(conductor_pid)
+        && process_is_running(conductor_pid);
+    let retained = fixture.read_state();
+    fixture.terminate_recorded_conductor();
+
+    assert!(
+        same_process,
+        "empty paused conductor exited instead of polling in process"
+    );
+    assert_eq!(retained, paused);
+}
+
+#[test]
+fn foreground_rejects_ambiguous_no_ready_pause_resume_phase() {
+    let fixture = ForegroundFixture::new();
+    let ambiguous = ConductorState::new("test/repo", ConductorScope::Repository, 3)
+        .expect("state")
+        .transition(ConductorEvent::Pause {
+            reason: "no_ready_issue_after_review".to_string(),
+        })
+        .expect("ambiguous pause");
+    seed_foreground_state(&fixture, &ambiguous);
+
+    let output = fixture.run_foreground();
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("no-ready foreground pause must resume from Select"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.read_state(), ambiguous);
+}
+
+#[test]
 fn foreground_rejects_tampered_tier_one_evidence_during_receipt_replay() {
     let fixture = ForegroundFixture::new();
     let first = fixture
@@ -563,6 +644,7 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
+    let review_launches = bridge.safe_root.join("review-launches");
     let mut command = fixture.command();
     command
         .env("PATH", path_with(&bridge.bin))
@@ -572,7 +654,8 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+        .env("AUTOSPEC_BRIDGE_REVIEW_LAUNCHES", &review_launches)
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND");
 
     let first = command.output().expect("execute selected issue");
     assert!(
@@ -624,6 +707,14 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
     assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
     assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
     assert!(calls.lines().any(|line| line == "--match-head-commit"));
+    assert_eq!(
+        fs::read_to_string(&review_launches)
+            .expect("configured reviewer launch")
+            .lines()
+            .count(),
+        1,
+        "unset review override must invoke exactly one configured external harness"
+    );
     let receipt = fs::read_to_string(&terminal).expect("terminal bridge receipt");
     assert!(receipt.contains("\"status\":\"merged\""));
     assert!(receipt.contains("\"claim_released\":true"));
@@ -1157,6 +1248,25 @@ fn selected_foreground_state() -> ConductorState {
             serialization_reasons: Vec::new(),
         })
         .unwrap()
+}
+
+fn no_ready_paused_state() -> ConductorState {
+    ConductorState::new("test/repo", ConductorScope::Repository, 3)
+        .expect("state")
+        .transition(ConductorEvent::ScanFoundWork)
+        .expect("scan")
+        .transition(ConductorEvent::SafetyReviewed)
+        .expect("review")
+        .transition(ConductorEvent::Pause {
+            reason: "no_ready_issue_after_review".to_string(),
+        })
+        .expect("no-ready pause")
+}
+
+fn seed_foreground_state(fixture: &ForegroundFixture, state: &ConductorState) {
+    fs::create_dir_all(fixture.state_path().parent().expect("state parent"))
+        .expect("create foreground state directory");
+    fs::write(fixture.state_path(), state.to_json()).expect("seed foreground state");
 }
 
 fn legacy_executor_pending_state() -> ConductorState {
@@ -5308,20 +5418,35 @@ exit 1
         fs::copy(self.bin.join("gh"), bin.join("gh")).expect("copy bridge gh fixture");
         fs::set_permissions(bin.join("gh"), fs::Permissions::from_mode(0o755))
             .expect("make bridge gh executable");
+        let review_launches = safe_root.join("review-launches");
         write_executable(
             &bin.join("codex-bridge-fixture"),
-            r#"#!/bin/sh
+            &r#"#!/bin/sh
 set -eu
-case " $* " in
-  *"sandbox"*) exit 0 ;;
-esac
+[ "${1:-}" = "sandbox" ] && exit 0
 artifact=""
 previous=""
+prompt=""
 for value in "$@"; do
   if [ "$previous" = "--output-last-message" ]; then artifact="$value"; fi
   previous="$value"
+  prompt="$value"
 done
 test -n "$artifact"
+case "$prompt" in
+  *"Return exactly LGTM"*)
+    printf '%s\n' 'LGTM'
+    printf '%s\n' 'LGTM' > "$artifact"
+    chmod 600 "$artifact"
+    i=0
+    while [ "$i" -lt 64 ]; do
+      printf '%s\n' 'codex startup/tool trace: normal non-verdict diagnostic output' >&2
+      i=$((i + 1))
+    done
+    printf '%s\n' "$$" >> '__AUTOSPEC_BRIDGE_REVIEW_LAUNCHES__'
+    exit 0
+    ;;
+esac
 mkdir -p tests/smoke "$(dirname "$artifact")"
 if [ -n "${AUTOSPEC_BRIDGE_HARNESS_LAUNCHES:-}" ]; then
   printf '%s\n' "$$" >> "$AUTOSPEC_BRIDGE_HARNESS_LAUNCHES"
@@ -5375,11 +5500,18 @@ chmod 600 "$artifact"
 if [ -n "${AUTOSPEC_BRIDGE_HARNESS_DONE:-}" ]; then
   : > "$AUTOSPEC_BRIDGE_HARNESS_DONE"
 fi
-"#,
+"#
+            .replace(
+                "__AUTOSPEC_BRIDGE_REVIEW_LAUNCHES__",
+                &review_launches.display().to_string(),
+            ),
         );
         for (scanner, output) in [
-            ("semgrep", r#"{"results":[],"errors":[]}"#),
-            ("trivy", r#"{"Results":[]}"#),
+            (
+                "semgrep",
+                r#"{"results":[],"errors":[],"paths":{"scanned":["tests/smoke/generation.sh"],"skipped":[]}}"#,
+            ),
+            ("trivy", r#"{"Results":[{"Target":"."}]}"#),
             ("license-checker", r#"{"fixture@1.0.0":{"licenses":"MIT"}}"#),
         ] {
             write_executable(

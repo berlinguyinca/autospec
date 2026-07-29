@@ -16,6 +16,15 @@ the issue-safety `trusted_actors` policy. Repeating the command with the same
 relationship is safe; a conflicting child list fails closed. Child issue bodies
 are never rewritten.
 
+Append newly discovered children with the complete ordered list:
+
+```bash
+autospec parent extend --repo owner/repo --parent 10 --children 11,12,13
+```
+
+Extensions reject removal, reordering, duplicates, and conflicting ownership.
+For extended umbrellas, only a merged child PR is terminal; manual closure remains pending.
+
 After a child PR merges, the run workflow executes:
 
 ```bash

@@ -56,6 +56,7 @@ Skip Part 1 entirely if `AUTOSPEC_NO_GUARDIAN=1` (log
 | `REPEATED_STRUCTURE_AS_CODE` | LLM | semantic | ≥5 branches in the same function/method sharing identical structural shape (same return shape, predicate signature, side-effect line) |
 | `DOC_OUT_OF_SYNC` | hybrid | det+LLM | det: any change to public surface (CLI flag, env var, exported function, config key) WITHOUT a touched doc file (`README*`, `AGENTS.md`, `docs/**`, `SKILL.md`); LLM: judges semantic accuracy when a doc IS touched |
 | `INVENTED_CONFIG` | LLM | semantic | flag/env-var/config-key introduced in diff not present in issue body or referenced spec |
+| `PR_SIZE` | det | git diff/numstat | hard above 400 additions+deletions, 8 raw files, or 3 normalized logical units; binary rows are always hard |
 
 ### Corrective directive map
 
@@ -76,6 +77,7 @@ so the implementer knows the fix on retry:
 | `REPEATED_STRUCTURE_AS_CODE` | "Extract the N branches into a table + single dispatcher loop." |
 | `DOC_OUT_OF_SYNC` | "Update the doc file(s) covering the changed public surface in this same PR." |
 | `INVENTED_CONFIG` | "Remove the invented flag/env/key, or amend the issue body to introduce it as scope." |
+| `PR_SIZE` | "Freeze the completed capped slice and move unmet acceptance criteria to ordered continuation issues; never push or merge this oversized diff." |
 
 ## Per-issue opt-out grammar
 

@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::diff::{DiffFile, UnifiedDiff};
+use super::pr_size::{evaluate_patch_size, PatchSizeDimension, PatchSizeLimits};
 
 const RULE_EMIT_CAP: usize = 10;
 const DEFAULT_AGGREGATE_HARD_CAP: usize = 200;
@@ -10,6 +11,7 @@ const EXIT_CAP: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImplementationLintRule {
+    PrSize,
     OutOfScope,
     MissingTest,
     Complexity,
@@ -32,6 +34,7 @@ pub enum ImplementationLintRule {
 impl ImplementationLintRule {
     pub fn id(self) -> &'static str {
         match self {
+            Self::PrSize => "PR_SIZE",
             Self::OutOfScope => "OUT_OF_SCOPE",
             Self::MissingTest => "MISSING_TEST",
             Self::Complexity => "COMPLEXITY",
@@ -109,6 +112,7 @@ pub trait RepositoryIndex {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImplementationLintOptions {
+    pub patch_size_limits: PatchSizeLimits,
     pub enable_vacuous_assertions: bool,
     pub enable_assertion_density: bool,
     pub pre_commit_mode: bool,
@@ -124,6 +128,7 @@ pub struct ImplementationLintOptions {
 impl Default for ImplementationLintOptions {
     fn default() -> Self {
         Self {
+            patch_size_limits: PatchSizeLimits::default(),
             enable_vacuous_assertions: false,
             enable_assertion_density: false,
             pre_commit_mode: false,
@@ -148,12 +153,19 @@ pub fn lint_implementation(
     diff: &UnifiedDiff,
     context: ImplementationLintContext<'_>,
 ) -> ImplementationLintResult {
-    let skipped_rules = context
+    let mut skipped_rules = context
         .issue_body
         .map(parse_guardian_skips)
         .unwrap_or_default();
+    skipped_rules.remove(ImplementationLintRule::PrSize.id());
     let mut collector = FindingCollector::new(skipped_rules, context.options.aggregate_hard_cap);
 
+    detect_pr_size(
+        diff,
+        context.issue_body,
+        context.options.patch_size_limits,
+        &mut collector,
+    );
     detect_out_of_scope(diff, context.issue_body, &mut collector);
     detect_missing_test(diff, context.issue_body, &mut collector);
     detect_complexity(diff, context.repository, &context.options, &mut collector);
@@ -177,6 +189,9 @@ pub fn lint_implementation(
 
 pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
     match rule {
+        ImplementationLintRule::PrSize => {
+            "Freeze the completed capped slice and move unmet acceptance criteria to ordered continuation issues; never push or merge this oversized diff."
+        }
         ImplementationLintRule::OutOfScope => {
             "Restrict diff to files listed in the issue ## Implementation outline; revert or amend the issue body for any extra files."
         }
@@ -227,6 +242,213 @@ pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
             "Inline this abstraction — with only one caller, the named wrapper adds indirection without value."
         }
     }
+}
+
+#[derive(Debug, Clone)]
+enum PrSizeException {
+    GeneratedMigration(String),
+    DependencyLockfile(String),
+    LockStep(String),
+}
+
+impl PrSizeException {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::GeneratedMigration(_) => "generated migration",
+            Self::DependencyLockfile(_) => "dependency-solver lockfile",
+            Self::LockStep(_) => "mandatory lock-step artifacts",
+        }
+    }
+}
+
+fn detect_pr_size(
+    diff: &UnifiedDiff,
+    issue_body: Option<&str>,
+    limits: PatchSizeLimits,
+    collector: &mut FindingCollector,
+) {
+    let evaluation = evaluate_patch_size(diff, limits);
+    if !evaluation.is_hard() {
+        return;
+    }
+    let exception = issue_body.and_then(parse_pr_size_exception);
+    let exempt = exception
+        .as_ref()
+        .is_some_and(|exception| validate_pr_size_exception(diff, exception));
+    let size = evaluation.size();
+    let exceeded = evaluation
+        .hard_dimensions()
+        .iter()
+        .map(|dimension| match dimension {
+            PatchSizeDimension::ChangedLines => "changed_lines",
+            PatchSizeDimension::RawFiles => "raw_files",
+            PatchSizeDimension::LogicalUnits => "logical_units",
+            PatchSizeDimension::Binary => "binary",
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let category = exception
+        .as_ref()
+        .filter(|_| exempt)
+        .map(|value| format!(" category={}", value.label()))
+        .unwrap_or_default();
+    let message = format!(
+        "changed_lines={}/{} raw_files={}/{} logical_units={}/{} binary={} exceeded={}{}",
+        size.changed_lines,
+        limits.max_changed_lines,
+        size.raw_files,
+        limits.max_raw_files,
+        size.logical_units,
+        limits.max_logical_units,
+        size.has_binary,
+        exceeded,
+        category,
+    );
+    if exempt {
+        collector.info(ImplementationLintRule::PrSize, "-", None, message);
+    } else {
+        collector.emit(ImplementationLintRule::PrSize, "-", None, message);
+    }
+}
+
+fn parse_pr_size_exception(body: &str) -> Option<PrSizeException> {
+    let reason = body
+        .lines()
+        .find_map(|line| line.strip_prefix("Guardian: skip-PR_SIZE # "))?;
+    let (category, detail) = reason.split_once(':')?;
+    if detail.trim().is_empty() {
+        return None;
+    }
+    match category {
+        "generated migration" => Some(PrSizeException::GeneratedMigration(
+            detail.trim().to_ascii_lowercase(),
+        )),
+        "dependency-solver lockfile" => Some(PrSizeException::DependencyLockfile(
+            detail.trim().to_ascii_lowercase(),
+        )),
+        "mandatory lock-step artifacts" => {
+            Some(PrSizeException::LockStep(detail.trim().to_string()))
+        }
+        _ => None,
+    }
+}
+
+fn validate_pr_size_exception(diff: &UnifiedDiff, exception: &PrSizeException) -> bool {
+    if diff.files.iter().any(|file| file.is_binary) {
+        return false;
+    }
+    match exception {
+        PrSizeException::GeneratedMigration(generator) => diff.files.iter().all(|file| {
+            file.path
+                .split('/')
+                .any(|part| matches!(part, "migration" | "migrations" | "migrate"))
+                && file.added_lines().any(|line| {
+                    let line = line.content.to_ascii_lowercase();
+                    line.contains("generated") && line.contains(generator)
+                })
+        }),
+        PrSizeException::DependencyLockfile(solver) => diff
+            .files
+            .iter()
+            .all(|file| is_solver_lockfile(solver, &file.path)),
+        PrSizeException::LockStep(identity) => validate_lock_step_exception(diff, identity),
+    }
+}
+
+fn is_solver_lockfile(solver: &str, path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    match solver {
+        "bundler" => name == "Gemfile.lock",
+        "cargo" => name == "Cargo.lock",
+        "composer" => name == "composer.lock",
+        "go" => name == "go.sum",
+        "gradle" => name == "gradle.lockfile",
+        "npm" => matches!(name, "package-lock.json" | "npm-shrinkwrap.json"),
+        "pipenv" => name == "Pipfile.lock",
+        "pnpm" => name == "pnpm-lock.yaml",
+        "poetry" => name == "poetry.lock",
+        "yarn" => name == "yarn.lock",
+        _ => false,
+    }
+}
+
+fn validate_lock_step_exception(diff: &UnifiedDiff, identity: &str) -> bool {
+    let mut mirrors = BTreeMap::<String, Vec<&DiffFile>>::new();
+    let mut goldens = Vec::new();
+    let mut manual = Vec::new();
+    for file in &diff.files {
+        if let Some(skill) = golden_skill(&file.path) {
+            goldens.push(skill);
+            continue;
+        }
+        if let Some(skill) = lock_step_skill(&file.path) {
+            mirrors.entry(skill.to_string()).or_default().push(file);
+        } else {
+            manual.push(file.clone());
+        }
+    }
+    let skills = mirrors.keys().map(String::as_str).collect::<Vec<_>>();
+    if skills.is_empty()
+        || !lock_step_identity_matches(identity, &skills)
+        || goldens.iter().any(|golden| !mirrors.contains_key(*golden))
+        || mirrors.values().any(|files| {
+            files.len() != 3
+                || files
+                    .windows(2)
+                    .any(|pair| lock_step_fingerprint(pair[0]) != lock_step_fingerprint(pair[1]))
+        })
+        || manual
+            .iter()
+            .any(|file| is_code_file(&file.path) || is_test_file(&file.path))
+    {
+        return false;
+    }
+    manual.extend(mirrors.values().map(|files| files[0].clone()));
+    !evaluate_patch_size(&UnifiedDiff { files: manual }, PatchSizeLimits::default()).is_hard()
+}
+
+fn lock_step_skill(path: &str) -> Option<&str> {
+    let (skill, adapter) = path.strip_prefix("skills/")?.split_once('/')?;
+    ["SKILL.md", "codex/prompt.md", "opencode/agent.md"]
+        .contains(&adapter)
+        .then_some(skill)
+}
+
+fn golden_skill(path: &str) -> Option<&str> {
+    let name = path.strip_prefix("tests/fixtures/skill-goldens/")?;
+    [
+        ".SKILL.md.sha256",
+        ".codex.prompt.md.sha256",
+        ".opencode.agent.md.sha256",
+    ]
+    .into_iter()
+    .find_map(|suffix| name.strip_suffix(suffix))
+    .filter(|skill| !skill.is_empty() && !skill.contains('/'))
+}
+
+fn lock_step_identity_matches(identity: &str, skills: &[&str]) -> bool {
+    if skills.len() > 1 {
+        let expected = format!(
+            "{} adapter trios plus derived goldens",
+            skills.join(" and ")
+        );
+        return identity == expected;
+    }
+    let skill = skills[0];
+    let identity = identity.strip_suffix(" adapters").unwrap_or(identity);
+    identity.strip_prefix("skills/").unwrap_or(identity) == skill
+}
+
+fn lock_step_fingerprint(file: &DiffFile) -> Vec<Vec<(u8, &str)>> {
+    file.hunks
+        .iter()
+        .map(|hunk| {
+            hunk.lines
+                .iter()
+                .map(|line| (line.kind as u8, line.content.as_str()))
+                .collect()
+        })
+        .collect()
 }
 
 struct FindingCollector {
@@ -1175,7 +1397,7 @@ fn parse_guardian_skips(body: &str) -> BTreeSet<String> {
 }
 
 fn is_test_file(path: &str) -> bool {
-    path.starts_with("tests/")
+    path.starts_with("tests/") || path.contains("/tests/")
 }
 fn is_doc_file(path: &str) -> bool {
     path.starts_with("README")
@@ -1545,4 +1767,170 @@ fn is_abstraction_path(path: &str) -> bool {
     ]
     .iter()
     .any(|word| stem.contains(word))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lint::{DiffHunk, DiffLine, DiffLineKind};
+
+    struct EmptyRepository;
+    impl RepositoryIndex for EmptyRepository {}
+
+    fn file(path: &str, changed_lines: usize) -> DiffFile {
+        let line = DiffLine {
+            kind: DiffLineKind::Added,
+            content: "line".to_string(),
+            old_line: None,
+            new_line: Some(1),
+        };
+        DiffFile {
+            path: path.to_string(),
+            is_new: false,
+            is_binary: false,
+            hunks: vec![DiffHunk {
+                old_start: 1,
+                new_start: 1,
+                lines: vec![line; changed_lines],
+            }],
+        }
+    }
+
+    fn findings(files: Vec<DiffFile>, issue_body: Option<&str>) -> Vec<ImplementationLintFinding> {
+        lint_implementation(
+            &UnifiedDiff { files },
+            ImplementationLintContext {
+                issue_body,
+                repository: &EmptyRepository,
+                options: ImplementationLintOptions::default(),
+            },
+        )
+        .findings
+        .into_iter()
+        .filter(|finding| finding.rule == ImplementationLintRule::PrSize)
+        .collect()
+    }
+
+    fn trio(skill: &str, lines: usize) -> Vec<DiffFile> {
+        ["SKILL.md", "codex/prompt.md", "opencode/agent.md"]
+            .map(|adapter| file(&format!("skills/{skill}/{adapter}"), lines))
+            .to_vec()
+    }
+
+    fn severity(files: Vec<DiffFile>, body: Option<&str>) -> ImplementationLintSeverity {
+        findings(files, body).remove(0).severity
+    }
+
+    fn rejects(files: Vec<DiffFile>, body: Option<&str>) {
+        assert_eq!(severity(files, body), ImplementationLintSeverity::Error);
+    }
+
+    fn accepts(files: Vec<DiffFile>, body: &str) {
+        assert_eq!(
+            severity(files, Some(body)),
+            ImplementationLintSeverity::Info
+        );
+    }
+
+    #[test]
+    fn pr_size_enforces_every_hard_boundary_in_order() {
+        let mut boundary = (0..8).map(|_| file("docs/a.md", 50)).collect::<Vec<_>>();
+        boundary[1].path = "docs/b.md".to_string();
+        boundary[2].path = "docs/c.md".to_string();
+        assert!(findings(boundary, None).is_empty());
+
+        let mut combined = (0..9)
+            .map(|index| file(&format!("area-{index}/file.rs"), 45))
+            .collect::<Vec<_>>();
+        combined[0].is_binary = true;
+        let findings = findings(combined, None);
+        assert!(findings[0].message.contains(
+            "changed_lines=405/400 raw_files=9/8 logical_units=9/3 binary=true \
+             exceeded=changed_lines,raw_files,logical_units,binary"
+        ));
+
+        assert_eq!(
+            directive_for(ImplementationLintRule::PrSize),
+            "Freeze the completed capped slice and move unmet acceptance criteria to ordered \
+             continuation issues; never push or merge this oversized diff."
+        );
+    }
+
+    #[test]
+    fn pr_size_validates_generated_and_lockfile_exceptions() {
+        let generated = "Guardian: skip-PR_SIZE # generated migration: prisma\n";
+        let mut migration = file("db/migrations/001_create.sql", 401);
+        migration.hunks[0].lines[0].content = "Generated by prisma".to_string();
+        let finding = findings(vec![migration.clone()], Some(generated)).remove(0);
+        assert!(finding.message.contains("category=generated migration"));
+
+        let lockfile = "Guardian: skip-PR_SIZE # dependency-solver lockfile: npm\n";
+        accepts(vec![file("package-lock.json", 401)], lockfile);
+        let test = file("nested/tests/manual.json", 1);
+        rejects(vec![migration, test.clone()], Some(generated));
+        rejects(vec![file("package-lock.json", 400), test], Some(lockfile));
+
+        for suffix in ["", " # generated migration:", " # unknown: tool"] {
+            let invalid = format!("Guardian: skip-PR_SIZE{suffix}\n");
+            rejects(vec![file("src/manual.rs", 401)], Some(&invalid));
+        }
+    }
+
+    #[test]
+    fn pr_size_validates_lock_step_shape_and_manual_budget() {
+        let reason = "Guardian: skip-PR_SIZE # mandatory lock-step artifacts: autospec adapters\n";
+        let mut adapters = trio("autospec", 140);
+        adapters.push(file(
+            "tests/fixtures/skill-goldens/autospec.SKILL.md.sha256",
+            1,
+        ));
+        accepts(adapters.clone(), reason);
+
+        adapters[1].hunks[0].lines[0].content = "divergent".to_string();
+        rejects(adapters, Some(reason));
+
+        let lock_step = "Guardian: skip-PR_SIZE # mandatory lock-step artifacts: autospec\n";
+        let mut mirrors = trio("autospec", 200);
+        mirrors.push(file("docs/manual.md", 300));
+        rejects(mirrors, Some(lock_step));
+
+        for (extra, reason) in [
+            ("tests/fixtures/skill-goldens/other.sha256", lock_step),
+            (
+                "tests/fixtures/skill-goldens/autospec.sha256",
+                "Guardian: skip-PR_SIZE # mandatory lock-step artifacts: other\n",
+            ),
+        ] {
+            let mut trio = trio("autospec", 140);
+            trio.push(file(extra, 1));
+            rejects(trio, Some(reason));
+        }
+
+        rejects(
+            vec![file("Cargo.lock", 401)],
+            Some("Guardian: skip-PR_SIZE # dependency-solver lockfile: npm\n"),
+        );
+        rejects(
+            (0..4).map(|n| file(&format!("unit-{n}.md"), 1)).collect(),
+            None,
+        );
+
+        let mut nested = trio("autospec", 140);
+        nested.push(file("nested/tests/manual.yaml", 1));
+        rejects(nested, Some(lock_step));
+
+        let mut files = Vec::new();
+        for skill in ["autospec", "autospec-run"] {
+            files.extend(trio(skill, 60));
+            for artifact in ["SKILL.md", "codex.prompt.md", "opencode.agent.md"] {
+                let path = format!("tests/fixtures/skill-goldens/{skill}.{artifact}.sha256");
+                files.push(file(&path, 1));
+            }
+        }
+        accepts(
+            files,
+            "Guardian: skip-PR_SIZE # mandatory lock-step artifacts: autospec and \
+             autospec-run adapter trios plus derived goldens\n",
+        );
+    }
 }
