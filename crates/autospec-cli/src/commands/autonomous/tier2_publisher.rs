@@ -6,7 +6,10 @@ use std::process::{Command, Output};
 use autospec_core::autonomous::no_work::NoWorkTier;
 use autospec_core::autonomous::waterfall::{sha256_hex, TierReceipt, TierStatus};
 use autospec_core::coordination::RemoteIssue;
-use autospec_core::lint::lint_issue_body;
+use autospec_core::lint::{
+    lint_issue_body, lint_issue_implementation_contract, DiffFile, ImplementationLintSeverity,
+    UnifiedDiff,
+};
 use serde_json::Value;
 
 use super::resilience::{with_current_lifecycle_lease, ConductorLease};
@@ -328,7 +331,7 @@ fn render_draft(
         receipt.digest()
     );
     let body = format!(
-        "{marker}\n{receipt_marker}\n\n## Goal\n\nImplement `{key}` for `{target}`.\n\n## Acceptance criteria\n\n- [ ] `{key}` has `1` passing behavior scenario.\n- [ ] `{test_path}` covers the verified proposal.\n- [ ] `{test_command}` exits with status `0`.\n\n## Files to read first\n\n- `{target}`\n\n## Implementation outline\n\n- Read `{target}` to preserve its current behavior contract.\n- Add `{test_path}` using the project test conventions.\n\n## Tests required\n\n- project-native behavior\n\n### Primary smoke test (inner loop)\n\n```bash\n{test_command}\n```\n\n## Files touched\n\n- `{target}`\n- `{test_path}`\n\n## Dependencies\n\nnone\n\n## Discovery evidence\n\n- Stable key: `{key}`\n- Source proposal: {title}\n",
+        "{marker}\n{receipt_marker}\n\n## Goal\n\nImplement `{key}` for `{target}`.\n\n## Acceptance criteria\n\n- [ ] `{key}` has `1` passing behavior scenario.\n- [ ] `{test_path}` covers the verified proposal.\n- [ ] `{test_command}` exits with status `0`.\n\n## Files to read first\n\n- `{target}`\n\n## Implementation outline\n\n- Read `{target}` to preserve its current behavior contract.\n- Add `{test_path}` using the project test conventions.\n\n## Tests required\n\n- project-native behavior\n\n## Test execution\n\n### Primary smoke test (inner loop)\n\n```bash\n{test_command}\n```\n\n## Files touched\n\n- `{target}`\n- `{test_path}`\n\n## Dependencies\n\nnone\n\n## Discovery evidence\n\n- Stable key: `{key}`\n- Source proposal: {title}\n",
         key = proposal.stable_key,
         target = proposal.target_path,
         title = proposal.title,
@@ -344,6 +347,7 @@ fn render_draft(
             "Tier 2 proposal failed the issue-quality contract: {summary}"
         ));
     }
+    admit_expected_implementation_contract(&body, &proposal.target_path, &test_path)?;
     Ok(PublicationDraft {
         stable_key: proposal.stable_key,
         title: proposal.title,
@@ -355,6 +359,48 @@ fn render_draft(
             "reasoning:medium",
         ],
     })
+}
+
+fn admit_expected_implementation_contract(
+    body: &str,
+    target_path: &str,
+    test_path: &str,
+) -> Result<(), String> {
+    let paths = [target_path, test_path]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let expected = UnifiedDiff {
+        files: paths
+            .into_iter()
+            .map(|path| DiffFile {
+                path: path.to_string(),
+                is_new: false,
+                is_binary: false,
+                hunks: Vec::new(),
+            })
+            .collect(),
+    };
+    let result = lint_issue_implementation_contract(&expected, body);
+    if result.blocking_count == 0 {
+        return Ok(());
+    }
+    let summary = result
+        .findings
+        .iter()
+        .filter(|finding| finding.severity == ImplementationLintSeverity::Error)
+        .map(|finding| {
+            format!(
+                "{}:{}: {}",
+                finding.rule_id(),
+                finding.path,
+                finding.message
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Err(format!(
+        "Tier 2 proposal failed the implementation contract: {summary}"
+    ))
 }
 
 fn required_labels(drafts: &[PublicationDraft]) -> BTreeSet<&'static str> {
@@ -473,5 +519,81 @@ fn store_error(error: WaterfallStoreError) -> String {
         WaterfallStoreError::Diagnostic(reason)
         | WaterfallStoreError::InvalidReceipt(reason)
         | WaterfallStoreError::InvalidState(reason) => reason,
+    }
+}
+
+#[cfg(test)]
+mod implementation_contract_tests {
+    use autospec_core::autonomous::no_work::NoWorkTier;
+    use autospec_core::autonomous::waterfall::{
+        FunnelCounts, SealedEvidence, TierReceipt, TierStatus,
+    };
+
+    use super::{admit_expected_implementation_contract, render_draft, ProposalDraft};
+
+    #[test]
+    fn autonomous_discovery_issue_matches_implementation_lint() {
+        let target_path = "src/status-panel.rs";
+        let regression_path = "scripts/test-autonomous-status-panel.mjs";
+        let malformed = format!(
+            "## Goal\n\nFix the autonomous status panel.\n\n\
+             ## Implementation outline\n\n- Update `{target_path}` for the status panel behavior.\n\n\
+             ## Tests required\n\n- smoke\n\n\
+             ## Files touched\n\n- `{target_path}`\n- `{regression_path}`\n"
+        );
+
+        let error =
+            admit_expected_implementation_contract(&malformed, target_path, regression_path)
+                .expect_err(
+                    "an omitted project-native regression path must fail before publication",
+                );
+        assert!(error.contains("OUT_OF_SCOPE"), "{error}");
+        assert!(
+            !error.contains("MISSING_TEST"),
+            "project-native regression evidence was misclassified: {error}"
+        );
+
+        let corrected = malformed.replace(
+            &format!("- Update `{target_path}` for the status panel behavior."),
+            &format!(
+                "- Update `{target_path}` for the status panel behavior.\n- Verify `{regression_path}`."
+            ),
+        );
+        admit_expected_implementation_contract(&corrected, target_path, regression_path)
+            .expect("corrected outline and project-native regression evidence must publish");
+    }
+
+    #[test]
+    fn render_draft_rejects_contract_failure_before_publication_draft() {
+        let receipt = TierReceipt::new(
+            "owner/repo",
+            1,
+            NoWorkTier::Tier2,
+            "tier2-test",
+            1,
+            1,
+            TierStatus::Produced { count: 1 },
+            FunnelCounts::new(1, 1, 1, 1, 1).expect("valid funnel"),
+            vec![
+                SealedEvidence::new("evidence/tier2.json", "a".repeat(64)).expect("valid evidence")
+            ],
+        )
+        .expect("valid receipt");
+        let proposal = ProposalDraft {
+            stable_key: "proposal-key".to_string(),
+            title: "Proposal title".to_string(),
+            target_path: "status-panel".to_string(),
+        };
+
+        let error = render_draft(
+            proposal,
+            "<!-- marker -->".to_string(),
+            &receipt,
+            &(std::path::PathBuf::from("tests"), "rs".to_string()),
+            "cargo test",
+        )
+        .expect_err("an out-of-scope target must not produce a PublicationDraft");
+
+        assert!(error.contains("OUT_OF_SCOPE"), "{error}");
     }
 }
