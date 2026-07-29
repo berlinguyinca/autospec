@@ -39,6 +39,8 @@ Flags:
 RULE_IDs enforced (deterministic detectors):
 
   OUT_OF_SCOPE      Files touched are not listed in issue's ## Implementation outline.
+  PR_SIZE           Patch exceeds 400 changed lines, 8 files, 3 logical units,
+                    or contains binary diff evidence.
   MISSING_TEST      Required test type from ## Tests required absent in diff.
   COMPLEXITY        Function >50 LOC, file >500 LOC, or nesting depth >4.
   SECURITY          eval(, exec(, --no-verify, git reset --hard, rm -rf /,
@@ -192,6 +194,17 @@ emit_info() {
     # INFO lines do NOT increment blocking count
 }
 
+# emit_error RULE_ID PATH LINE DESC (explicit severity for hard admission gates)
+emit_error() {
+    local rule_id="$1" path="$2" line="$3" desc="$4"
+    printf 'ERROR:%s:%s:%s: %s\n' "$rule_id" "$path" "$line" "$desc"
+    FINDINGS_COUNT=$((FINDINGS_COUNT + 1))
+    if [ "$FINDINGS_COUNT" -ge "$FINDINGS_HARD_CAP" ]; then
+        printf 'OUT_OF_SCOPE:-:-: too many findings — likely scope explosion\n'
+        exit 200
+    fi
+}
+
 # ── skip-directive parsing ─────────────────────────────────────────────────────
 
 # SKIPPED_RULES is a space-separated list of RULE_IDs that are opted out.
@@ -327,13 +340,231 @@ get_diff_files() {
     grep -E '^diff --git ' "$TMP_DIFF" | sed 's|^diff --git a/[^ ]* b/||' || true
 }
 
+# ── PR_SIZE detector ─────────────────────────────────────────────────────────
+
+PR_SIZE_MAX_LINES=400
+PR_SIZE_MAX_FILES=8
+PR_SIZE_MAX_UNITS=3
+
+pr_size_file_stat() {
+    local numstat
+    numstat="$(mktemp -t lint-pr-size-numstat.XXXXXX)"
+    if git apply --numstat "$TMP_DIFF" > "$numstat" 2>/dev/null; then
+        awk -F '\t' '{
+            binary=($1 == "-" || $2 == "-") ? 1 : 0
+            added=binary ? 0 : $1
+            removed=binary ? 0 : $2
+            print added, removed, binary, $3
+        }' "$numstat"
+        rm -f "$numstat"
+        return
+    fi
+    rm -f "$numstat"
+    # Git rejects abbreviated synthetic binary fixtures; retain fail-closed
+    # parsing for an explicit binary marker even when no full patch is present.
+    awk '
+        /^diff --git / {
+            if (path != "") print added, removed, binary, path
+            path=$0; sub(/^diff --git a\/[^ ]* b\//, "", path)
+            added=0; removed=0; binary=0; hunk=0; next
+        }
+        /^Binary files / || /^GIT binary patch$/ { binary=1; next }
+        /^@@ / { hunk=1; next }
+        hunk && /^\+\+\+ / { next }
+        hunk && /^--- / { next }
+        hunk && /^\+/ { added++; next }
+        hunk && /^-/ { removed++; next }
+        END { if (path != "") print added, removed, binary, path }
+    ' "$TMP_DIFF"
+}
+
+pr_size_unit() {
+    local path="$1"
+    case "$path" in
+        tests/fixtures/skill-goldens/*.sha256) return ;;
+        skills/*/SKILL.md|skills/*/codex/prompt.md|skills/*/opencode/agent.md)
+            printf 'skills/%s/<trio>\n' "$(printf '%s' "$path" | cut -d/ -f2)"
+            ;;
+        *) printf '%s\n' "$path" ;;
+    esac
+}
+
+pr_size_golden_skill() {
+    local name="${1#tests/fixtures/skill-goldens/}"
+    case "$name" in
+        *.SKILL.md.sha256) printf '%s\n' "${name%.SKILL.md.sha256}" ;;
+        *.codex.prompt.md.sha256) printf '%s\n' "${name%.codex.prompt.md.sha256}" ;;
+        *.opencode.agent.md.sha256) printf '%s\n' "${name%.opencode.agent.md.sha256}" ;;
+        *) return 1 ;;
+    esac
+}
+
+pr_size_lock_skill() {
+    case "$1" in
+        skills/*/SKILL.md|skills/*/codex/prompt.md|skills/*/opencode/agent.md)
+            printf '%s\n' "$(printf '%s' "$1" | cut -d/ -f2)"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+pr_size_fingerprint() {
+    local target="$1"
+    awk -v target="$target" '
+        /^diff --git / {
+            path=$0; sub(/^diff --git a\/[^ ]* b\//, "", path)
+            inside=(path == target); hunk=0; next
+        }
+        inside && /^@@ / { hunk=1; print "@@"; next }
+        inside && hunk && /^[ +\-]/ {
+            if ($0 !~ /^\+\+\+ / && $0 !~ /^--- /) print
+        }
+    ' "$TMP_DIFF"
+}
+
+pr_size_is_code_or_test() {
+    case "$1" in
+        tests/*|*/tests/*) return 0 ;;
+        *.md|*.txt|*.diff|*.json|*.yaml|*.yml) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+pr_size_validate_lock_step() {
+    local identity="$1" stats="$2" mirrors goldens manual skills skill expected
+    mirrors="$(mktemp -t lint-pr-size-mirrors.XXXXXX)"
+    goldens="$(mktemp -t lint-pr-size-goldens.XXXXXX)"
+    manual="$(mktemp -t lint-pr-size-manual.XXXXXX)"
+    while read -r added removed binary path; do
+        if skill="$(pr_size_lock_skill "$path")"; then
+            printf '%s %s %s %s %s\n' "$skill" "$added" "$removed" "$binary" "$path" >> "$mirrors"
+        elif skill="$(pr_size_golden_skill "$path" 2>/dev/null)"; then
+            printf '%s\n' "$skill" >> "$goldens"
+        else
+            printf '%s %s %s %s\n' "$added" "$removed" "$binary" "$path" >> "$manual"
+        fi
+    done < "$stats"
+    skills="$(awk '{print $1}' "$mirrors" | sort -u)"
+    [ -n "$skills" ] || { rm -f "$mirrors" "$goldens" "$manual"; return 1; }
+    if [ "$(printf '%s\n' "$skills" | wc -l | tr -d ' ')" -gt 1 ]; then
+        expected="$(printf '%s\n' "$skills" | paste -sd ' ' - | sed 's/ / and /g') adapter trios plus derived goldens"
+        [ "$identity" = "$expected" ] || { rm -f "$mirrors" "$goldens" "$manual"; return 1; }
+    else
+        skill="$skills"
+        identity="${identity% adapters}"
+        identity="${identity#skills/}"
+        [ "$identity" = "$skill" ] || { rm -f "$mirrors" "$goldens" "$manual"; return 1; }
+    fi
+    while IFS= read -r skill; do
+        [ -z "$skill" ] && continue
+        awk -v skill="$skill" '$1 == skill {found=1} END {exit !found}' "$mirrors" \
+            || { rm -f "$mirrors" "$goldens" "$manual"; return 1; }
+    done < "$goldens"
+    while IFS= read -r skill; do
+        local group first fp
+        group="$(awk -v skill="$skill" '$1 == skill {print $5}' "$mirrors")"
+        [ "$(printf '%s\n' "$group" | wc -l | tr -d ' ')" -eq 3 ] \
+            || { rm -f "$mirrors" "$goldens" "$manual"; return 1; }
+        for expected in "skills/$skill/SKILL.md" "skills/$skill/codex/prompt.md" "skills/$skill/opencode/agent.md"; do
+            printf '%s\n' "$group" | grep -qxF "$expected" \
+                || { rm -f "$mirrors" "$goldens" "$manual"; return 1; }
+        done
+        first="$(printf '%s\n' "$group" | head -1)"
+        fp="$(mktemp -t lint-pr-size-fp.XXXXXX)"
+        pr_size_fingerprint "$first" > "$fp"
+        while IFS= read -r path; do
+            cmp -s "$fp" <(pr_size_fingerprint "$path") \
+                || { rm -f "$fp" "$mirrors" "$goldens" "$manual"; return 1; }
+        done <<< "$group"
+        rm -f "$fp"
+    done <<< "$skills"
+    while read -r _ _ _ path; do
+        pr_size_is_code_or_test "$path" \
+            && { rm -f "$mirrors" "$goldens" "$manual"; return 1; }
+    done < "$manual"
+    local lines files units unit unit_file
+    lines="$(awk '{sum += $1 + $2} END {print sum + 0}' "$manual")"
+    files="$(wc -l < "$manual" | tr -d ' ')"
+    unit_file="$(mktemp -t lint-pr-size-units.XXXXXX)"
+    while read -r _ _ _ path; do pr_size_unit "$path" >> "$unit_file"; done < "$manual"
+    while IFS= read -r skill; do
+        read -r added removed _ _ < <(awk -v skill="$skill" '$1 == skill {print $2, $3, $4, $5; exit}' "$mirrors")
+        lines=$((lines + added + removed)); files=$((files + 1))
+        printf 'skills/%s/<trio>\n' "$skill" >> "$unit_file"
+    done <<< "$skills"
+    units="$(sort -u "$unit_file" | sed '/^$/d' | wc -l | tr -d ' ')"
+    rm -f "$unit_file" "$mirrors" "$goldens" "$manual"
+    [ "$lines" -le "$PR_SIZE_MAX_LINES" ] && [ "$files" -le "$PR_SIZE_MAX_FILES" ] \
+        && [ "$units" -le "$PR_SIZE_MAX_UNITS" ]
+}
+
+pr_size_validate_exception() {
+    local category="$1" detail="$2" stats="$3" path
+    awk '$3 == 1 {found=1} END {exit !found}' "$stats" && return 1
+    case "$category" in
+        "generated migration")
+            while read -r _ _ _ path; do
+                printf '%s\n' "$path" | grep -qE '(^|/)(migration|migrations|migrate)(/|$)' || return 1
+                get_added_lines_for_file "$path" | tr '[:upper:]' '[:lower:]' \
+                    | grep -F "generated" | grep -Fq "$(printf '%s' "$detail" | tr '[:upper:]' '[:lower:]')" \
+                    || return 1
+            done < "$stats"
+            ;;
+        "dependency-solver lockfile")
+            while read -r _ _ _ path; do
+                local name="${path##*/}"
+                case "$detail:$name" in
+                    bundler:Gemfile.lock|cargo:Cargo.lock|composer:composer.lock|go:go.sum|\
+                    gradle:gradle.lockfile|npm:package-lock.json|npm:npm-shrinkwrap.json|\
+                    pipenv:Pipfile.lock|pnpm:pnpm-lock.yaml|poetry:poetry.lock|yarn:yarn.lock) ;;
+                    *) return 1 ;;
+                esac
+            done < "$stats"
+            ;;
+        "mandatory lock-step artifacts") pr_size_validate_lock_step "$detail" "$stats" ;;
+        *) return 1 ;;
+    esac
+}
+
+detect_pr_size() {
+    local stats lines files units binary exceeded="" unit_file category="" detail="" exception=""
+    stats="$(mktemp -t lint-pr-size-stats.XXXXXX)"
+    unit_file="$(mktemp -t lint-pr-size-units.XXXXXX)"
+    pr_size_file_stat > "$stats"
+    lines="$(awk '{sum += $1 + $2} END {print sum + 0}' "$stats")"
+    files="$(wc -l < "$stats" | tr -d ' ')"
+    while read -r _ _ _ path; do pr_size_unit "$path" >> "$unit_file"; done < "$stats"
+    units="$(sort -u "$unit_file" | sed '/^$/d' | wc -l | tr -d ' ')"
+    binary=false
+    awk '$3 == 1 {found=1} END {exit !found}' "$stats" && binary=true
+    [ "$lines" -gt "$PR_SIZE_MAX_LINES" ] && exceeded="changed_lines"
+    [ "$files" -gt "$PR_SIZE_MAX_FILES" ] && exceeded="${exceeded:+$exceeded,}raw_files"
+    [ "$units" -gt "$PR_SIZE_MAX_UNITS" ] && exceeded="${exceeded:+$exceeded,}logical_units"
+    [ "$binary" = true ] && exceeded="${exceeded:+$exceeded,}binary"
+    rm -f "$unit_file"
+    [ -n "$exceeded" ] || { rm -f "$stats"; return; }
+    if [ -s "$TMP_ISSUE" ]; then
+        exception="$(grep -m1 '^Guardian: skip-PR_SIZE # ' "$TMP_ISSUE" || true)"
+        exception="${exception#Guardian: skip-PR_SIZE # }"
+        category="${exception%%:*}"
+        [ "$category" != "$exception" ] && detail="${exception#*:}" && detail="${detail#"${detail%%[![:space:]]*}"}" && detail="${detail%"${detail##*[![:space:]]}"}"
+    fi
+    local message="changed_lines=$lines/$PR_SIZE_MAX_LINES raw_files=$files/$PR_SIZE_MAX_FILES logical_units=$units/$PR_SIZE_MAX_UNITS binary=$binary exceeded=$exceeded"
+    if [ -n "$detail" ] && pr_size_validate_exception "$category" "$detail" "$stats"; then
+        emit_info "PR_SIZE" "-" "-" "$message category=$category"
+    else
+        emit_error "PR_SIZE" "-" "-" "$message"
+    fi
+    rm -f "$stats"
+}
+
 # get_added_lines_for_file FILE — print added lines (without leading +) for a file
 # Scans the diff hunk by hunk, limiting to the given file section.
 get_added_lines_for_file() {
     local target="$1"
     awk -v tgt="$target" '
         /^diff --git / {
-            in_file = ($0 ~ " b/" tgt "$")
+            path=substr($0, 12); sub(/^a\/.* b\//, "", path); in_file=(path == tgt)
             next
         }
         in_file && /^\+\+\+ / { next }
@@ -1381,6 +1612,7 @@ detect_new_abstraction_single_caller() {
 rule_directive() {
     local rule_id="$1"
     case "$rule_id" in
+        PR_SIZE)        printf 'Freeze the completed capped slice and move unmet acceptance criteria to ordered continuation issues; never push or merge this oversized diff.' ;;
         OUT_OF_SCOPE)    printf 'Restrict diff to files listed in the issue ## Implementation outline; revert or amend the issue body for any extra files.' ;;
         MISSING_TEST)    printf 'Add a test under tests/<tier>/ for the missing required test type before re-pushing.' ;;
         COMPLEXITY)      printf 'Split functions >50 LOC, files >500 LOC, or nesting >4 — no copy-paste branches.' ;;
@@ -1414,6 +1646,7 @@ if [ "$DIRECTIVES" -eq 1 ]; then
 
     # Run detectors with stdout going to TMP_FINDINGS
     {
+        detect_pr_size
         detect_out_of_scope
         detect_missing_test
         detect_complexity
@@ -1449,10 +1682,14 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         if [ "$rule_id" = "INFO" ]; then
             continue
         fi
+        if [ "$rule_id" = "ERROR" ]; then
+            rule_id="$(printf '%s' "$finding" | cut -d: -f2)"
+        fi
         directive="$(rule_directive "$rule_id")"
         printf 'Fix %s: %s\n' "$rule_id" "$directive"
     done < "$TMP_FINDINGS"
 else
+    detect_pr_size
     detect_out_of_scope
     detect_missing_test
     detect_complexity
