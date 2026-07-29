@@ -24,11 +24,6 @@ EOF
 
     export AUTOSPEC_RESEARCH_DIR="$TMP/fake-research"
     mkdir -p "$AUTOSPEC_RESEARCH_DIR"
-    for source in spec-vs-code prior-reports codebase-signals open-issues \
-        source-analysis dependency-health internet quality-resilience dogfooding \
-        self-leverage style-normalization; do
-        make_fake_researcher "$source" "{\"source\":\"$source\",\"proposals\":[]}"
-    done
 }
 
 teardown() {
@@ -147,8 +142,8 @@ assert titles[0] == 'feat: high score feature', titles
     # named_consumer is exempt and survives.
     make_fake_researcher spec-vs-code '{"source":"spec-vs-code","proposals":[{"title":"feat: legacy keeps","evidence":"e1","estimated_complexity":"small","confidence":0.9}]}'
     make_fake_researcher quality-resilience '{"source":"quality-resilience","proposals":[
-      {"title":"feat: new no consumer","evidence":"e2","estimated_complexity":"small","confidence":0.9,"severity":"correctness","track":"product"},
-      {"title":"feat: new with consumer","evidence":"e3","estimated_complexity":"small","confidence":0.9,"severity":"correctness","named_consumer":"validate.sh","track":"product"}
+      {"title":"feat: new no consumer","evidence":"e2","estimated_complexity":"small","confidence":0.9,"severity":"correctness"},
+      {"title":"feat: new with consumer","evidence":"e3","estimated_complexity":"small","confidence":0.9,"severity":"correctness","named_consumer":"validate.sh"}
     ]}'
     make_fake_researcher prior-reports '{"source":"prior-reports","proposals":[]}'
     make_fake_researcher codebase-signals '{"source":"codebase-signals","proposals":[]}'

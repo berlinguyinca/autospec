@@ -278,9 +278,9 @@ impl WaterfallStore {
                     completed.reference
                 )));
             }
-            if !is_advancing_completed_receipt(&receipt) {
+            if !is_advancing_completed_status(completed.tier, receipt.status()) {
                 return Err(WaterfallStoreError::InvalidState(format!(
-                    "completed {} receipt has a non-advancing status",
+                    "completed {} receipt has a non-advancing exhausted status",
                     completed.tier.as_str()
                 )));
             }
@@ -329,9 +329,9 @@ pub(super) fn retry_transient_lock<T>(
     }
 }
 
-fn is_advancing_completed_receipt(receipt: &TierReceipt) -> bool {
+fn is_advancing_completed_status(tier: NoWorkTier, status: &TierStatus) -> bool {
     matches!(
-        (receipt.tier(), receipt.status()),
+        (tier, status),
         (
             NoWorkTier::Tier1 | NoWorkTier::Tier1_5,
             TierStatus::Exhausted {
@@ -350,27 +350,6 @@ fn is_advancing_completed_receipt(receipt: &TierReceipt) -> bool {
                 reason: DryReason::NoMetadataFindings,
             },
         )
-    ) || matches!(
-        (receipt.tier(), receipt.producer_version(), receipt.status()),
-        (
-            NoWorkTier::Tier2,
-            "rust-tier2-local-receipts-v1",
-            TierStatus::Produced { count },
-        ) if *count > 0
-    ) || matches!(
-        (receipt.tier(), receipt.producer_version(), receipt.status()),
-        (
-            NoWorkTier::Tier3,
-            "rust-tier3-disabled-policy-v1",
-            TierStatus::NotRun { reason },
-        ) if reason == autospec_core::autonomous::tier3::DISABLED_REASON
-    ) || matches!(
-        (receipt.tier(), receipt.producer_version(), receipt.status()),
-        (
-            NoWorkTier::Tier4,
-            "rust-tier4-disabled-policy-v1",
-            TierStatus::NotRun { reason },
-        ) if reason == autospec_core::autonomous::tier4::DISABLED_REASON
     )
 }
 

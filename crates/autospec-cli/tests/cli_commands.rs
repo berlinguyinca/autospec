@@ -1,4 +1,3 @@
-use autospec_core::claim::RunStateRecord;
 use std::io::Write;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::symlink;
@@ -1890,7 +1889,7 @@ fn autonomous_status_all_json_aliases_list_with_conductors_key() {
 }
 
 #[test]
-fn autonomous_immediate_stop_drains_only_the_target_repo_conductor() {
+fn autonomous_stop_kills_only_the_target_repo_scope() {
     let temp = temp_dir("autospec-autonomous-stop");
     let operator_dir = temp.join("operator");
     let log_dir = temp.join("logs");
@@ -1934,19 +1933,15 @@ fn autonomous_immediate_stop_drains_only_the_target_repo_conductor() {
     assert!(output.status.success());
     assert!(stdout.contains("\"subcommand\":\"stop\""));
     assert!(stdout.contains("\"repo\":\"berlinguyinca/autospec\""));
-    assert!(stdout.contains("\"stopped\":2"));
-    assert!(stdout.contains("\"draining\":true"));
+    assert!(stdout.contains("\"stopped\":3"));
 
     let target_status = autonomous_status(&operator_dir, &log_dir, "berlinguyinca/autospec");
-    assert!(target_status.contains("\"conductor\":{\"running\":true"));
-    assert!(target_status.contains("\"monitor\":{\"running\":false"));
-    assert!(target_status.contains("\"supervisor\":{\"running\":false"));
+    assert!(target_status.contains("\"conductor\":{\"running\":false"));
     let other_status = autonomous_status(&operator_dir, &log_dir, "metabolomics-us/go-modules");
     assert!(other_status.contains("\"conductor\":{\"running\":true"));
     assert!(other_status.contains("\"monitor\":{\"running\":true"));
     assert!(other_status.contains("\"supervisor\":{\"running\":true"));
 
-    cleanup_pids(&operator_dir.join("berlinguyinca_autospec"));
     cleanup_pids(&operator_dir.join("metabolomics-us_go-modules"));
 }
 
@@ -2664,17 +2659,6 @@ fn autonomous_start_records_argv_and_passthrough_options_in_launch_provenance() 
     assert!(launch.contains("\"budget_issues\":\"4\""));
     assert!(launch.contains("\"no_digest\":true"));
     assert!(launch.contains("\"poll_interval_sec\":\"15\""));
-    let launch: serde_json::Value = serde_json::from_str(&launch).expect("parse launch json");
-    let conductor = launch["conductor_argv"].as_array().expect("conductor argv");
-    let supervisor = launch["supervisor_argv"]
-        .as_array()
-        .expect("supervisor argv");
-    assert!(conductor.windows(2).any(|values| {
-        values[0].as_str() == Some("--poll-interval-sec") && values[1].as_str() == Some("15")
-    }));
-    assert!(supervisor.windows(2).any(|values| {
-        values[0].as_str() == Some("--repair-interval-sec") && values[1].as_str() == Some("5")
-    }));
     cleanup_pids(&operator_dir.join("berlinguyinca_autospec"));
 }
 
@@ -3123,535 +3107,6 @@ fn autonomous_supervise_reports_stale_metadata_action_for_dead_recorded_pid() {
 }
 
 #[test]
-fn autonomous_supervise_relaunches_a_dead_conductor_with_a_fresh_lease() {
-    let temp = temp_dir("autospec-autonomous-supervise-relaunch");
-    let operator_dir = temp.join("operator");
-    let log_dir = temp.join("logs");
-    let state_dir = temp.join("state");
-    let repo_dir = temp.join("repo");
-    make_git_repo(&repo_dir, None);
-    let scope = operator_dir.join("berlinguyinca_autospec");
-
-    let start = autospec()
-        .args([
-            "autonomous",
-            "start",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--max-cycles",
-            "7",
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
-        .env("PATH", hermetic_autonomous_path(&temp))
-        .output()
-        .expect("autospec autonomous start runs");
-    assert!(start.status.success());
-    let old_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("conductor pid");
-    let observe_live = autospec()
-        .args([
-            "autonomous",
-            "supervise",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--max-cycles",
-            "7",
-            "--once",
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("PATH", hermetic_autonomous_path(&temp))
-        .output()
-        .expect("autospec autonomous supervise observes live conductor");
-    assert!(String::from_utf8_lossy(&observe_live.stdout).contains("\"action\":\"none\""));
-    assert_eq!(
-        cleanup_pid(&read_pid(&scope, "conductor")).as_deref(),
-        Some(old_pid.as_str())
-    );
-    let launch = std::fs::read_to_string(scope.join("launch.json")).expect("launch manifest");
-    assert!(launch.contains("\"supervisor_argv\""));
-    assert!(launch.contains("\"--max-cycles\",\"7\""));
-    terminate_fixture_process(&old_pid);
-
-    let repair = autospec()
-        .args([
-            "autonomous",
-            "supervise",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--max-cycles",
-            "7",
-            "--once",
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("PATH", hermetic_autonomous_path(&temp))
-        .output()
-        .expect("autospec autonomous supervise runs");
-    let stdout = String::from_utf8_lossy(&repair.stdout);
-    let new_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("replacement pid");
-
-    assert!(
-        repair.status.success(),
-        "{}",
-        String::from_utf8_lossy(&repair.stderr)
-    );
-    assert!(
-        stdout.contains("\"action\":\"restarted-conductor\""),
-        "stdout={stdout} stderr={}",
-        String::from_utf8_lossy(&repair.stderr)
-    );
-    assert_ne!(old_pid, new_pid);
-    assert!(process_is_alive(&new_pid));
-    cleanup_pids(&scope);
-}
-
-#[test]
-fn autonomous_supervise_releases_a_fresh_lease_when_relaunch_preparation_fails() {
-    let temp = temp_dir("autospec-autonomous-supervise-retry");
-    let operator_dir = temp.join("operator");
-    let log_dir = temp.join("logs");
-    let state_dir = temp.join("state");
-    let repo_dir = temp.join("repo");
-    make_git_repo(&repo_dir, None);
-    let scope = operator_dir.join("berlinguyinca_autospec");
-
-    let start = autospec()
-        .args([
-            "autonomous",
-            "start",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
-        .env("PATH", hermetic_autonomous_path(&temp))
-        .output()
-        .expect("autospec autonomous start runs");
-    assert!(start.status.success());
-    let old_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("conductor pid");
-    terminate_fixture_process(&old_pid);
-    std::fs::remove_dir_all(&log_dir).expect("remove log directory");
-    std::fs::write(&log_dir, "blocks log directory creation").expect("obstruct log directory");
-
-    let failed_repair = autospec()
-        .args([
-            "autonomous",
-            "supervise",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--once",
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("PATH", hermetic_autonomous_path(&temp))
-        .output()
-        .expect("autospec autonomous supervise reports deferred repair");
-    assert!(failed_repair.status.success());
-    assert!(
-        String::from_utf8_lossy(&failed_repair.stdout).contains("\"action\":\"repair-deferred\"")
-    );
-
-    std::fs::remove_file(&log_dir).expect("remove log obstruction");
-    std::fs::create_dir_all(&log_dir).expect("restore log directory");
-    let retry = autospec()
-        .args([
-            "autonomous",
-            "supervise",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--once",
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("PATH", hermetic_autonomous_path(&temp))
-        .output()
-        .expect("autospec autonomous supervise retries");
-    let stdout = String::from_utf8_lossy(&retry.stdout);
-    let new_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("replacement pid");
-
-    assert!(
-        retry.status.success(),
-        "{}",
-        String::from_utf8_lossy(&retry.stderr)
-    );
-    assert!(
-        stdout.contains("\"action\":\"restarted-conductor\""),
-        "stdout={stdout} stderr={}",
-        String::from_utf8_lossy(&retry.stderr)
-    );
-    assert!(process_is_alive(&new_pid));
-    cleanup_pids(&scope);
-}
-
-#[test]
-fn autonomous_supervise_contention_tracks_exactly_one_replacement_conductor() {
-    let temp = temp_dir("autospec-autonomous-supervise-contention");
-    let operator_dir = temp.join("operator");
-    let log_dir = temp.join("logs");
-    let state_dir = temp.join("state");
-    let repo_dir = temp.join("repo");
-    make_git_repo(&repo_dir, None);
-    let scope = operator_dir.join("berlinguyinca_autospec");
-    let path = hermetic_autonomous_path(&temp);
-
-    let start = autospec()
-        .args([
-            "autonomous",
-            "start",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
-        .env("PATH", &path)
-        .output()
-        .expect("autospec autonomous start runs");
-    assert!(start.status.success());
-    let old_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("conductor pid");
-    terminate_fixture_process(&old_pid);
-
-    let supervisor = || {
-        let mut command = autospec();
-        command
-            .args([
-                "autonomous",
-                "supervise",
-                "--repo",
-                "berlinguyinca/autospec",
-                "--repo-dir",
-                repo_dir.to_str().unwrap(),
-                "--once",
-                "--json",
-            ])
-            .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-            .env("AUTOSPEC_STATE_DIR", &state_dir)
-            .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-            .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-            .env("PATH", &path)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        command
-    };
-    let supervisors = (0..4)
-        .map(|_| supervisor().spawn().expect("contending supervisor starts"))
-        .collect::<Vec<_>>();
-    let outputs = supervisors
-        .into_iter()
-        .map(|child| child.wait_with_output().expect("supervisor exits"))
-        .collect::<Vec<_>>();
-    let restarted = outputs
-        .iter()
-        .filter(|output| {
-            String::from_utf8_lossy(&output.stdout).contains("\"action\":\"restarted-conductor\"")
-        })
-        .count();
-    let tracked_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("tracked replacement pid");
-
-    assert!(outputs.iter().all(|output| output.status.success()));
-    assert_eq!(restarted, 1, "outputs={outputs:?}");
-    assert!(process_is_alive(&tracked_pid));
-    let lock = std::fs::symlink_metadata(scope.join("supervisor-repair.lock"))
-        .expect("supervisor repair lock metadata");
-    assert!(lock.is_file());
-    #[cfg(unix)]
-    assert_eq!(lock.permissions().mode() & 0o777, 0o600);
-    cleanup_pids(&scope);
-}
-
-#[test]
-fn autonomous_supervise_repair_lock_keeps_ambiguous_metadata_fail_closed() {
-    let temp = temp_dir("autospec-autonomous-supervise-ambiguous");
-    let operator_dir = temp.join("operator");
-    let log_dir = temp.join("logs");
-    let repo_dir = temp.join("repo");
-    make_git_repo(&repo_dir, None);
-    let scope = operator_dir.join("berlinguyinca_autospec");
-    std::fs::create_dir_all(&scope).expect("create operator scope");
-    std::fs::write(scope.join("launch.json"), "{}\n").expect("write launch evidence");
-    std::fs::write(scope.join("conductor.pid"), "not-process-metadata\n")
-        .expect("write ambiguous conductor metadata");
-
-    let output = autospec()
-        .args([
-            "autonomous",
-            "supervise",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--once",
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("PATH", hermetic_autonomous_path(&temp))
-        .output()
-        .expect("supervise ambiguous metadata");
-
-    assert!(output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("\"action\":\"repair-deferred\""),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(
-        std::fs::read_to_string(scope.join("conductor.pid")).expect("ambiguous metadata remains"),
-        "not-process-metadata\n"
-    );
-    assert!(scope.join("supervisor-repair.lock").is_file());
-}
-
-#[test]
-fn autonomous_supervise_rechecks_stop_after_waiting_for_repair_lock() {
-    let temp = temp_dir("autospec-autonomous-supervise-stop-race");
-    let operator_dir = temp.join("operator");
-    let log_dir = temp.join("logs");
-    let state_dir = temp.join("state");
-    let repo_dir = temp.join("repo");
-    make_git_repo(&repo_dir, None);
-    let scope = operator_dir.join("berlinguyinca_autospec");
-    let path = hermetic_autonomous_path(&temp);
-    let start = autospec()
-        .args([
-            "autonomous",
-            "start",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
-        .env("PATH", &path)
-        .output()
-        .expect("start conductor");
-    assert!(start.status.success());
-    let old_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("conductor pid");
-    terminate_fixture_process(&old_pid);
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(scope.join("supervisor-repair.lock"))
-        .expect("open repair lock");
-    lock.lock().expect("hold repair lock");
-
-    let child = autospec()
-        .args([
-            "autonomous",
-            "supervise",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--once",
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("PATH", &path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start waiting supervisor");
-    std::thread::sleep(std::time::Duration::from_millis(100));
-    assert!(process_is_alive(&child.id().to_string()));
-    std::fs::write(scope.join("stop.flag"), "immediate\noperator@test\n").expect("request stop");
-    drop(lock);
-    let output = child.wait_with_output().expect("waiting supervisor exits");
-
-    assert!(output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stdout).contains("\"action\":\"stop-requested\""),
-        "stdout={} stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(read_pid(&scope, "conductor"), old_pid);
-}
-
-#[test]
-fn autonomous_supervise_reaps_and_relaunches_two_finite_conductors() {
-    let temp = temp_dir("autospec-autonomous-supervise-reap");
-    let operator_dir = temp.join("operator");
-    let log_dir = temp.join("logs");
-    let state_dir = temp.join("state");
-    let repo_dir = temp.join("repo");
-    make_git_repo(&repo_dir, None);
-    let scope = operator_dir.join("berlinguyinca_autospec");
-    let bin = fake_bin(&temp, None, Some("#!/bin/sh\nexit 1\n"));
-    let path = path_with(&bin);
-
-    let start = autospec()
-        .args([
-            "autonomous",
-            "start",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--max-cycles",
-            "1",
-            "--interval-sec",
-            "1",
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("PATH", path)
-        .output()
-        .expect("autospec autonomous start runs");
-    assert!(
-        start.status.success(),
-        "{}",
-        String::from_utf8_lossy(&start.stderr)
-    );
-    let supervisor_log =
-        std::fs::read_to_string(scope.join("supervisor.logpath")).expect("supervisor logpath");
-    let supervisor_log = std::path::PathBuf::from(supervisor_log.trim());
-    let mut restarted = 0;
-    for _ in 0..80 {
-        restarted = std::fs::read_to_string(&supervisor_log)
-            .unwrap_or_default()
-            .matches("action=restarted-conductor")
-            .count();
-        if restarted >= 2 {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
-    assert!(
-        restarted >= 2,
-        "supervisor log={}",
-        std::fs::read_to_string(&supervisor_log).unwrap_or_default()
-    );
-    let tracked_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("tracked conductor pid");
-    assert!(
-        process_is_alive(&tracked_pid) || process_is_zombie(&tracked_pid),
-        "latest replacement must still be tracked until the next supervisor tick"
-    );
-    cleanup_pids(&scope);
-}
-
-#[test]
-fn autonomous_supervise_does_not_relaunch_after_a_stop_request() {
-    let temp = temp_dir("autospec-autonomous-supervise-stop");
-    let operator_dir = temp.join("operator");
-    let log_dir = temp.join("logs");
-    let state_dir = temp.join("state");
-    let repo_dir = temp.join("repo");
-    make_git_repo(&repo_dir, None);
-    let scope = operator_dir.join("berlinguyinca_autospec");
-
-    let start = autospec()
-        .args([
-            "autonomous",
-            "start",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
-        .env("PATH", hermetic_autonomous_path(&temp))
-        .output()
-        .expect("autospec autonomous start runs");
-    assert!(start.status.success());
-    let old_pid = cleanup_pid(&read_pid(&scope, "conductor")).expect("conductor pid");
-    terminate_fixture_process(&old_pid);
-    std::fs::write(scope.join("stop.flag"), "graceful\noperator@test\n").expect("stop flag");
-
-    let repair = autospec()
-        .args([
-            "autonomous",
-            "supervise",
-            "--repo",
-            "berlinguyinca/autospec",
-            "--repo-dir",
-            repo_dir.to_str().unwrap(),
-            "--once",
-            "--json",
-        ])
-        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
-        .env("AUTOSPEC_STATE_DIR", &state_dir)
-        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
-        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", &log_dir)
-        .env("PATH", hermetic_autonomous_path(&temp))
-        .output()
-        .expect("autospec autonomous supervise runs");
-    let stdout = String::from_utf8_lossy(&repair.stdout);
-
-    assert!(repair.status.success());
-    assert!(
-        stdout.contains("\"action\":\"stop-requested\""),
-        "stdout={stdout} stderr={}",
-        String::from_utf8_lossy(&repair.stderr)
-    );
-    assert!(!process_is_alive(&old_pid));
-    assert_eq!(
-        cleanup_pid(&read_pid(&scope, "conductor")).as_deref(),
-        Some(old_pid.as_str())
-    );
-}
-
-#[test]
 fn autonomous_restart_rejects_a_fresh_existing_lease_without_killing_conductor_or_clearing_stop() {
     let temp = temp_dir("autospec-autonomous-restart");
     let operator_dir = temp.join("operator");
@@ -3695,7 +3150,7 @@ fn autonomous_restart_rejects_a_fresh_existing_lease_without_killing_conductor_o
 
     assert_lease_held(&output);
     assert_eq!(read_pid(&scope, "conductor"), old_conductor);
-    assert!(process_starts(&old_conductor));
+    assert!(process_is_alive(&old_conductor));
     assert_eq!(
         std::fs::read_to_string(&stop_flag).expect("preserved stop flag"),
         "graceful\nexisting\n"
@@ -3738,27 +3193,11 @@ fn autonomous_restart_replaces_unleased_legacy_conductor_metadata() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let new_conductor = read_pid(&scope, "conductor");
 
-    assert!(
-        output.status.success(),
-        "stdout={} stderr={}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success());
     assert!(stdout.contains("\"subcommand\":\"restart\""));
     assert_ne!(old_conductor, new_conductor);
-    assert!(process_stops(&old_conductor));
-    assert!(
-        process_starts(&new_conductor),
-        "stdout={} stderr={} conductor_log={}",
-        stdout,
-        String::from_utf8_lossy(&output.stderr),
-        std::fs::read_to_string(
-            std::fs::read_to_string(scope.join("conductor.logpath"))
-                .unwrap_or_default()
-                .trim()
-        )
-        .unwrap_or_default()
-    );
+    assert!(!process_is_alive(&old_conductor));
+    assert!(process_is_alive(&new_conductor));
     let launch = std::fs::read_to_string(scope.join("launch.json")).expect("launch json");
     assert!(launch.contains("\"max_cycles\":\"7\""));
 
@@ -3935,14 +3374,10 @@ fn autonomous_status(
 }
 
 fn read_pid(scope: &std::path::Path, name: &str) -> String {
-    let metadata = std::fs::read_to_string(scope.join(format!("{name}.pid")))
+    std::fs::read_to_string(scope.join(format!("{name}.pid")))
         .unwrap()
         .trim()
-        .to_string();
-    serde_json::from_str::<serde_json::Value>(&metadata)
-        .ok()
-        .and_then(|value| value.get("pid").and_then(serde_json::Value::as_u64))
-        .map_or(metadata, |pid| pid.to_string())
+        .to_string()
 }
 
 fn process_is_alive(pid: &str) -> bool {
@@ -3952,43 +3387,6 @@ fn process_is_alive(pid: &str) -> bool {
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
-}
-
-fn process_starts(pid: &str) -> bool {
-    for _ in 0..20 {
-        if process_is_alive(pid) {
-            return true;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    false
-}
-
-fn process_is_zombie(pid: &str) -> bool {
-    std::fs::read_to_string(format!("/proc/{pid}/stat"))
-        .ok()
-        .and_then(|stat| stat.rsplit_once(") ").map(|(_, fields)| fields.to_string()))
-        .and_then(|fields| fields.split_whitespace().next().map(str::to_string))
-        .as_deref()
-        == Some("Z")
-}
-
-fn terminate_fixture_process(pid: &str) {
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", &format!("-{pid}")])
-        .stderr(Stdio::null())
-        .status();
-    let _ = Command::new("kill")
-        .args(["-KILL", "--", pid])
-        .stderr(Stdio::null())
-        .status();
-    for _ in 0..50 {
-        if !process_is_alive(pid) {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    panic!("fixture process {pid} did not stop");
 }
 
 fn assert_lease_held(output: &Output) {
@@ -4008,20 +3406,18 @@ fn fresh_lease_state_path(state_dir: &std::path::Path) -> std::path::PathBuf {
 
 fn seed_unleased_legacy_conductor(scope: &std::path::Path) -> String {
     std::fs::create_dir_all(scope).expect("legacy conductor scope");
-    let legacy_launcher = scope.join("autospec-autonomous.sh");
-    write_executable(&legacy_launcher, "#!/bin/sh\nsleep 20\n");
-    let mut command = Command::new(&legacy_launcher);
-    command
-        .arg("run-foreground")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
-    let mut child = command.spawn().expect("legacy conductor process");
-    let pid = child.id().to_string();
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
+    let output = Command::new("sh")
+        .args([
+            "-c",
+            "sleep 20 </dev/null >/dev/null 2>&1 & printf '%s\\n' \"$!\"",
+        ])
+        .output()
+        .expect("legacy conductor process");
+    assert!(output.status.success());
+    let pid = String::from_utf8(output.stdout)
+        .expect("legacy conductor pid")
+        .trim()
+        .to_string();
     std::fs::write(scope.join("conductor.pid"), format!("{pid}\n"))
         .expect("legacy conductor pid metadata");
     std::fs::write(scope.join("conductor.logpath"), "legacy-conductor.log\n")
@@ -4535,13 +3931,6 @@ fn autonomous_implementer_wait_failure_requeues_exact_owner_with_bounded_comment
         wait_failure_comments("worker-a", "feat/test", "claimed"),
     )
     .unwrap();
-    seed_wait_claim_ref(
-        &root,
-        "worker-a",
-        "feat/test",
-        "claimed",
-        "claim-generation-a",
-    );
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
     let github_pat = ["github", "_pat_11AA22BB33CC44DD55EE66FF77GG88HH99"].concat();
     let github_oauth = ["gh", "o_123456789012345678901234567890123456"].concat();
@@ -4593,8 +3982,6 @@ fn autonomous_implementer_wait_failure_requeues_exact_owner_with_bounded_comment
         )
         .env("AUTOSPEC_WAIT_STATE", &state)
         .env("AUTOSPEC_WAIT_LOG", &log)
-        .env("AUTOSPEC_CLAIM_GIT_REMOTE", root.join("claim-remote.git"))
-        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", root.join("claim-state"))
         .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
         .output()
         .unwrap();
@@ -4617,7 +4004,7 @@ fn autonomous_implementer_wait_failure_requeues_exact_owner_with_bounded_comment
         assert!(!remote.contains(secret), "leaked {secret}: {remote}");
     }
     assert!(!remote.contains(&"x".repeat(513)));
-    let calls = std::fs::read_to_string(log).unwrap_or_default();
+    let calls = std::fs::read_to_string(log).unwrap();
     assert!(calls.contains("--remove-label\nin-progress-by-bot\n--add-label\nauto-implement"));
 }
 
@@ -4636,13 +4023,6 @@ fn autonomous_implementer_wait_failed_requeue_allows_a_new_worker_to_acquire() {
     )
     .unwrap();
     std::fs::write(&labels, "active\n").unwrap();
-    seed_wait_claim_ref(
-        &root,
-        "worker-a",
-        "feat/test",
-        "claimed",
-        "claim-generation-a",
-    );
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
 
     let recovered = wait_failure_command(&bin, &state, &log)
@@ -4674,8 +4054,6 @@ fn autonomous_implementer_wait_failed_requeue_allows_a_new_worker_to_acquire() {
         .env("AUTOSPEC_WAIT_LABELS", &labels)
         .env("AUTOSPEC_WAIT_LOG", &log)
         .env("AUTOSPEC_WAIT_ISSUE_BODY", issue_body)
-        .env("AUTOSPEC_CLAIM_GIT_REMOTE", root.join("claim-remote.git"))
-        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", root.join("claim-state"))
         .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
         .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
         .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
@@ -4711,13 +4089,6 @@ fn wait_failure_evidence_cannot_release_same_second_successor_generation() {
     )
     .unwrap();
     std::fs::write(&labels, "active\n").unwrap();
-    seed_wait_claim_ref(
-        &root,
-        "worker-a",
-        "feat/test",
-        "claimed",
-        "claim-generation-a",
-    );
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
 
     let recovered = wait_failure_command(&bin, &state, &log)
@@ -4743,8 +4114,6 @@ fn wait_failure_evidence_cannot_release_same_second_successor_generation() {
     std::fs::write(&state, remote).unwrap();
 
     std::fs::write(&labels, "ready\n").unwrap();
-    let successor_oid = wait_claim_ref_oid(&root);
-    let calls_before = std::fs::read_to_string(&log).unwrap().len();
     let third = wait_claim_acquire(
         &bin,
         &state,
@@ -4762,12 +4131,7 @@ fn wait_failure_evidence_cannot_release_same_second_successor_generation() {
     let remote = std::fs::read_to_string(&state).unwrap();
     assert!(remote.contains("\\\"worker_id\\\":\\\"worker-a\\\""));
     assert!(!remote.contains("\\\"worker_id\\\":\\\"worker-c\\\""));
-    assert_eq!(wait_claim_ref_oid(&root), successor_oid);
-    assert_eq!(std::fs::read_to_string(&labels).unwrap().trim(), "ready");
-    let calls = std::fs::read_to_string(&log).unwrap();
-    let rejected_calls = &calls[calls_before..];
-    assert!(!rejected_calls.contains("issue\nedit"));
-    assert!(!rejected_calls.contains("issue\ncomment"));
+    assert_eq!(std::fs::read_to_string(&labels).unwrap().trim(), "active");
 }
 
 #[test]
@@ -4782,18 +4146,11 @@ fn autonomous_implementer_wait_failed_does_not_touch_successor_claim() {
         wait_failure_comments("worker-b", "feat/next", "claimed"),
     )
     .unwrap();
-    seed_wait_claim_ref(
-        &root,
-        "worker-b",
-        "feat/next",
-        "claimed",
-        "claim-generation-a",
-    );
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
     let output = wait_failure_command(&bin, &state, &log).output().unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""));
-    let calls = std::fs::read_to_string(log).unwrap_or_default();
+    let calls = std::fs::read_to_string(log).unwrap();
     assert!(!calls.contains("issue\nedit"));
     assert!(!calls.contains("issue\ncomment"));
     assert!(!calls.contains("-X\nPATCH"));
@@ -4816,13 +4173,6 @@ fn autonomous_implementer_wait_failed_rejects_delayed_same_owner_command_for_new
         ),
     )
     .unwrap();
-    seed_wait_claim_ref(
-        &root,
-        "worker-a",
-        "feat/test",
-        "claimed",
-        "claim-generation-new",
-    );
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
 
     let output = wait_failure_command_with_claim_id(&bin, &state, &log, "claim-generation-old")
@@ -4831,7 +4181,7 @@ fn autonomous_implementer_wait_failed_rejects_delayed_same_owner_command_for_new
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""));
-    let calls = std::fs::read_to_string(log).unwrap_or_default();
+    let calls = std::fs::read_to_string(log).unwrap();
     assert!(!calls.contains("issue\nedit"));
     assert!(!calls.contains("issue\ncomment"));
     assert!(!calls.contains("-X\nPATCH"));
@@ -4849,55 +4199,38 @@ fn autonomous_implementer_wait_failed_does_not_requeue_successor_won_during_reco
         wait_failure_comments("worker-a", "feat/test", "claimed"),
     )
     .unwrap();
-    seed_wait_claim_ref(
-        &root,
-        "worker-a",
-        "feat/test",
-        "claimed",
-        "claim-generation-a",
-    );
-    seed_wait_claim_ref(
-        &root,
-        "worker-b",
-        "feat/next",
-        "claimed",
-        "claim-generation-b",
-    );
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
 
-    let output = wait_failure_command(&bin, &state, &log).output().unwrap();
+    let output = wait_failure_command(&bin, &state, &log)
+        .env("AUTOSPEC_WAIT_RACE_SUCCESSOR", "1")
+        .output()
+        .unwrap();
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"outcome\":\"ownership_lost\""));
-    let remote = wait_claim_ref_message(&root);
+    let remote = std::fs::read_to_string(&state).unwrap();
     assert!(remote.contains("worker-b"));
     assert!(remote.contains("feat/next"));
-    let calls = std::fs::read_to_string(log).unwrap_or_default();
+    let calls = std::fs::read_to_string(log).unwrap();
     assert!(!calls.contains("issue\nedit"));
     assert!(!calls.contains("issues/comments/100"));
 }
 
 #[test]
 fn autonomous_implementer_wait_failed_rejects_stale_and_terminal_claims() {
-    for (name, comments, claim_state, updated_at) in [
+    for (name, comments) in [
         (
             "stale",
             wait_failure_comments("worker-a", "feat/test", "claimed")
                 .replace("2099-07-19T00:00:00Z", "2000-01-01T00:00:00Z"),
-            "claimed",
-            "2000-01-01T00:00:00Z",
         ),
         (
             "failed-state",
             wait_failure_comments("worker-a", "feat/test", "failed"),
-            "failed",
-            "2099-07-19T00:00:00Z",
         ),
         (
             "terminal",
             wait_failure_terminal_comments("worker-a", "feat/test"),
-            "merged",
-            "2099-07-19T00:00:00Z",
         ),
     ] {
         let root = temp_dir(&format!("autospec-wait-{name}"));
@@ -4906,14 +4239,6 @@ fn autonomous_implementer_wait_failed_rejects_stale_and_terminal_claims() {
         let log = root.join("gh.log");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(&state, comments).unwrap();
-        seed_wait_claim_ref_at(
-            &root,
-            "worker-a",
-            "feat/test",
-            claim_state,
-            "claim-generation-a",
-            updated_at,
-        );
         write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
 
         let output = wait_failure_command(&bin, &state, &log).output().unwrap();
@@ -4924,7 +4249,7 @@ fn autonomous_implementer_wait_failed_rejects_stale_and_terminal_claims() {
             "{name}: {}",
             String::from_utf8_lossy(&output.stdout)
         );
-        let calls = std::fs::read_to_string(log).unwrap_or_default();
+        let calls = std::fs::read_to_string(log).unwrap();
         assert!(!calls.contains("issue\nedit"), "{name}");
         assert!(!calls.contains("issue\ncomment"), "{name}");
         assert!(!calls.contains("-X\nPATCH"), "{name}");
@@ -4943,13 +4268,6 @@ fn autonomous_implementer_wait_failed_is_idempotent_and_surfaces_comment_failure
         wait_failure_comments("worker-a", "feat/test", "claimed"),
     )
     .unwrap();
-    seed_wait_claim_ref(
-        &root,
-        "worker-a",
-        "feat/test",
-        "claimed",
-        "claim-generation-a",
-    );
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
     assert!(wait_failure_command(&bin, &state, &log)
         .output()
@@ -4974,13 +4292,6 @@ fn autonomous_implementer_wait_failed_is_idempotent_and_surfaces_comment_failure
         wait_failure_comments("worker-a", "feat/test", "claimed"),
     )
     .unwrap();
-    seed_wait_claim_ref(
-        &root,
-        "worker-a",
-        "feat/test",
-        "claimed",
-        "claim-generation-a",
-    );
     let failed = wait_failure_command(&bin, &state, &log)
         .env("AUTOSPEC_WAIT_COMMENT_FAIL", "1")
         .env("AUTOSPEC_GH_API_RETRIES", "1")
@@ -4998,159 +4309,6 @@ fn autonomous_implementer_wait_failed_is_idempotent_and_surfaces_comment_failure
 }
 
 #[test]
-fn autonomous_implementer_wait_failed_retries_converge_after_each_projection_boundary() {
-    for failpoint in [
-        "after_claim_cas",
-        "after_ref_projection",
-        "after_evidence_projection",
-        "after_label_requeue",
-    ] {
-        let root = temp_dir(&format!("autospec-wait-crash-{failpoint}"));
-        let bin = root.join("bin");
-        let state = root.join("comments.json");
-        let labels = root.join("labels.mode");
-        let log = root.join("gh.log");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::write(
-            &state,
-            wait_failure_comments("worker-a", "feat/test", "claimed"),
-        )
-        .unwrap();
-        std::fs::write(&labels, "active\n").unwrap();
-        seed_wait_claim_ref(
-            &root,
-            "worker-a",
-            "feat/test",
-            "claimed",
-            "claim-generation-a",
-        );
-        write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
-        let original_oid = wait_claim_ref_oid(&root);
-
-        let crashed = wait_failure_command(&bin, &state, &log)
-            .env("AUTOSPEC_WAIT_LABELS", &labels)
-            .env("AUTOSPEC_WAIT_RECOVERY_FAILPOINT", failpoint)
-            .output()
-            .unwrap();
-        assert!(!crashed.status.success(), "{failpoint}");
-        let transitioned_oid = wait_claim_ref_oid(&root);
-        assert_ne!(transitioned_oid, original_oid, "{failpoint}");
-
-        let retried = wait_failure_command(&bin, &state, &log)
-            .env("AUTOSPEC_WAIT_LABELS", &labels)
-            .output()
-            .unwrap();
-        assert!(
-            retried.status.success(),
-            "{failpoint}: stderr={}",
-            String::from_utf8_lossy(&retried.stderr)
-        );
-        assert_eq!(wait_claim_ref_oid(&root), transitioned_oid, "{failpoint}");
-        assert_eq!(
-            std::fs::read_to_string(&labels).unwrap().trim(),
-            "ready",
-            "{failpoint}"
-        );
-        let remote = std::fs::read_to_string(&state).unwrap();
-        assert_eq!(
-            remote.matches("autospec-run-state-link").count(),
-            1,
-            "{failpoint}"
-        );
-        assert_eq!(
-            remote.matches("autospec-executor-result:begin").count(),
-            1,
-            "{failpoint}"
-        );
-        assert_eq!(
-            remote.matches("autospec-implementer-wait-failed").count(),
-            1,
-            "{failpoint}"
-        );
-    }
-}
-
-#[test]
-fn autonomous_implementer_wait_failed_repairs_forged_matching_generation_projection() {
-    let root = temp_dir("autospec-wait-forged-projection");
-    let bin = root.join("bin");
-    let state = root.join("comments.json");
-    let labels = root.join("labels.mode");
-    let log = root.join("gh.log");
-    std::fs::create_dir_all(&bin).unwrap();
-    std::fs::write(
-        &state,
-        wait_failure_comments("worker-a", "feat/test", "claimed"),
-    )
-    .unwrap();
-    std::fs::write(&labels, "active\n").unwrap();
-    seed_wait_claim_ref(
-        &root,
-        "worker-a",
-        "feat/test",
-        "claimed",
-        "claim-generation-a",
-    );
-    write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
-
-    let crashed = wait_failure_command(&bin, &state, &log)
-        .env("AUTOSPEC_WAIT_LABELS", &labels)
-        .env("AUTOSPEC_WAIT_RECOVERY_FAILPOINT", "after_claim_cas")
-        .output()
-        .unwrap();
-    assert!(!crashed.status.success());
-    let transitioned_oid = wait_claim_ref_oid(&root);
-    let generation = wait_claim_ref_generation(&root);
-    let forged_record = RunStateRecord::new(
-        "testorg/testrepo",
-        42,
-        "worker-b",
-        "claimed",
-        "feat/forged",
-        "",
-        "claimed",
-        Vec::new(),
-        "2099-07-19T00:00:00Z",
-        "2099-07-19T00:00:00Z",
-        10_800,
-    )
-    .with_claim_id("claim-generation-b");
-    let forged_body = format!(
-        "<!-- autospec-run-state-link parent=100 parent_generation=legacy generation={generation} -->\n{}",
-        forged_record.to_marked_comment()
-    );
-    let forged_json = format!(
-        r#"[{{"id":100,"updated_at":"2099-07-19T00:00:00Z","body":{}}}]"#,
-        serde_json::to_string(&forged_body).unwrap()
-    );
-    std::fs::write(&state, forged_json).unwrap();
-
-    let retried = wait_failure_command(&bin, &state, &log)
-        .env("AUTOSPEC_WAIT_LABELS", &labels)
-        .output()
-        .unwrap();
-    assert!(
-        retried.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&retried.stderr)
-    );
-    assert_eq!(wait_claim_ref_oid(&root), transitioned_oid);
-    let projected = std::fs::read_to_string(&state).unwrap();
-    let comments: serde_json::Value = serde_json::from_str(&projected).unwrap();
-    let available = comments
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|comment| comment.get("body").and_then(serde_json::Value::as_str))
-        .filter(|body| body.contains(r#""state":"available""#))
-        .collect::<Vec<_>>();
-    assert_eq!(available.len(), 1);
-    assert!(available[0].contains(r#""worker_id":"worker-a""#));
-    assert!(available[0].contains(r#""branch":"feat/test""#));
-    assert!(available[0].contains(r#""claim_id":"claim-generation-a""#));
-}
-
-#[test]
 fn autonomous_implementer_wait_failed_does_not_requeue_until_failure_evidence_is_confirmed() {
     let root = temp_dir("autospec-wait-unconfirmed");
     let bin = root.join("bin");
@@ -5162,13 +4320,6 @@ fn autonomous_implementer_wait_failed_does_not_requeue_until_failure_evidence_is
         wait_failure_comments("worker-a", "feat/test", "claimed"),
     )
     .unwrap();
-    seed_wait_claim_ref(
-        &root,
-        "worker-a",
-        "feat/test",
-        "claimed",
-        "claim-generation-a",
-    );
     write_executable(&bin.join("gh"), WAIT_FAILURE_GH);
     let output = wait_failure_command(&bin, &state, &log)
         .env("AUTOSPEC_WAIT_EVIDENCE_NOOP", "1")
@@ -5179,7 +4330,7 @@ fn autonomous_implementer_wait_failed_does_not_requeue_until_failure_evidence_is
         .contains("implementer wait-failure evidence was not persisted"));
     let calls = std::fs::read_to_string(log).unwrap();
     assert!(!calls.contains("issue\nedit"));
-    assert_eq!(calls.matches("autospec-executor-result:begin").count(), 1);
+    assert_eq!(calls.matches("issue\ncomment").count(), 1);
     assert!(!calls.contains("autospec-implementer-wait-failed"));
 }
 
@@ -5223,168 +4374,8 @@ fn wait_failure_command_with_claim_id(
         )
         .env("AUTOSPEC_WAIT_STATE", state)
         .env("AUTOSPEC_WAIT_LOG", log)
-        .env(
-            "AUTOSPEC_CLAIM_GIT_REMOTE",
-            state.parent().unwrap().join("claim-remote.git"),
-        )
-        .env(
-            "AUTOSPEC_CLAIM_GIT_STATE_DIR",
-            state.parent().unwrap().join("claim-state"),
-        )
         .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0");
     command
-}
-
-fn wait_git(directory: &std::path::Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(directory)
-        .output()
-        .expect("run wait-failure git fixture command");
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).trim().to_string()
-}
-
-fn seed_wait_claim_ref(
-    root: &std::path::Path,
-    worker: &str,
-    branch: &str,
-    state: &str,
-    claim_id: &str,
-) -> std::path::PathBuf {
-    seed_wait_claim_ref_at(
-        root,
-        worker,
-        branch,
-        state,
-        claim_id,
-        "2099-07-19T00:00:00Z",
-    )
-}
-
-fn seed_wait_claim_ref_at(
-    root: &std::path::Path,
-    worker: &str,
-    branch: &str,
-    state: &str,
-    claim_id: &str,
-    updated_at: &str,
-) -> std::path::PathBuf {
-    let remote = root.join("claim-remote.git");
-    let repo = root.join("claim-repo");
-    if !remote.exists() {
-        wait_git(root, &["init", "--bare", remote.to_str().unwrap()]);
-    }
-    if !repo.exists() {
-        wait_git(root, &["init", repo.to_str().unwrap()]);
-    }
-    let reference = "refs/autospec/claims/issue-42";
-    let current = Command::new("git")
-        .args([
-            "--git-dir",
-            remote.to_str().unwrap(),
-            "rev-parse",
-            "--verify",
-            reference,
-        ])
-        .output()
-        .expect("inspect wait-failure claim ref");
-    let parent = current
-        .status
-        .success()
-        .then(|| String::from_utf8_lossy(&current.stdout).trim().to_string());
-    if parent.is_some() {
-        wait_git(
-            &repo,
-            &["fetch", "--no-tags", remote.to_str().unwrap(), reference],
-        );
-    }
-    let tree = wait_git(&repo, &["mktree"]);
-    let record = RunStateRecord::new(
-        "testorg/testrepo",
-        42,
-        worker,
-        state,
-        branch,
-        "",
-        state,
-        Vec::new(),
-        updated_at,
-        updated_at,
-        10_800,
-    )
-    .with_claim_id(claim_id);
-    let mut command = Command::new("git");
-    command
-        .arg("commit-tree")
-        .arg(tree)
-        .current_dir(&repo)
-        .env("GIT_AUTHOR_NAME", "Autospec Wait Test")
-        .env("GIT_AUTHOR_EMAIL", "autospec-wait-test@localhost")
-        .env("GIT_COMMITTER_NAME", "Autospec Wait Test")
-        .env("GIT_COMMITTER_EMAIL", "autospec-wait-test@localhost")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped());
-    if let Some(parent) = parent.as_deref() {
-        command.args(["-p", parent]);
-    }
-    let mut child = command.spawn().expect("create wait-failure claim commit");
-    write!(
-        child.stdin.take().expect("claim commit stdin"),
-        "autospec-claim-ledger-v1\ngeneration=wait-fixture\n\n{}\n",
-        record.to_marked_comment()
-    )
-    .expect("write wait-failure claim commit");
-    let output = child.wait_with_output().expect("claim commit output");
-    assert!(output.status.success());
-    let oid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    wait_git(
-        &repo,
-        &[
-            "push",
-            remote.to_str().unwrap(),
-            &format!("{oid}:{reference}"),
-        ],
-    );
-    remote
-}
-
-fn wait_claim_ref_oid(root: &std::path::Path) -> String {
-    wait_git(
-        root,
-        &[
-            "--git-dir",
-            root.join("claim-remote.git").to_str().unwrap(),
-            "rev-parse",
-            "refs/autospec/claims/issue-42",
-        ],
-    )
-}
-
-fn wait_claim_ref_message(root: &std::path::Path) -> String {
-    wait_git(
-        root,
-        &[
-            "--git-dir",
-            root.join("claim-remote.git").to_str().unwrap(),
-            "show",
-            "-s",
-            "--format=%B",
-            "refs/autospec/claims/issue-42",
-        ],
-    )
-}
-
-fn wait_claim_ref_generation(root: &std::path::Path) -> String {
-    wait_claim_ref_message(root)
-        .lines()
-        .find_map(|line| line.strip_prefix("generation="))
-        .expect("claim ref generation")
-        .to_string()
 }
 
 fn wait_claim_acquire(
@@ -5419,14 +4410,6 @@ fn wait_claim_acquire(
         .env("AUTOSPEC_WAIT_LABELS", labels)
         .env("AUTOSPEC_WAIT_LOG", log)
         .env("AUTOSPEC_WAIT_ISSUE_BODY", issue_body)
-        .env(
-            "AUTOSPEC_CLAIM_GIT_REMOTE",
-            state.parent().unwrap().join("claim-remote.git"),
-        )
-        .env(
-            "AUTOSPEC_CLAIM_GIT_STATE_DIR",
-            state.parent().unwrap().join("claim-state"),
-        )
         .env("AUTOSPEC_HEARTBEAT_DIR", heartbeats)
         .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
         .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")

@@ -89,10 +89,7 @@ fn concurrent_tier4_fixture_owners_use_distinct_integer_tagged_roots() {
             roots_ready.wait();
             assert!(root.path().is_dir(), "owner {owner} lost its fixture root");
             let path = root.path().to_path_buf();
-            assert!(
-                path.is_absolute(),
-                "fixture owner {owner} must use an isolated absolute root"
-            );
+            assert!(path.is_absolute(), "fixture owner {owner} must use an isolated absolute root");
             let integer_tag = path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -110,14 +107,8 @@ fn concurrent_tier4_fixture_owners_use_distinct_integer_tagged_roots() {
 
     start.wait();
     let [first, second] = owners.map(|owner| owner.join().expect("fixture owner"));
-    assert_ne!(
-        first.0, second.0,
-        "concurrent owners shared one fixture root"
-    );
-    assert_ne!(
-        first.1, second.1,
-        "concurrent owners reused one integer tag"
-    );
+    assert_ne!(first.0, second.0, "concurrent owners shared one fixture root");
+    assert_ne!(first.1, second.1, "concurrent owners reused one integer tag");
 }
 
 fn alternate_source_policy() -> Tier4SourcePolicy {
@@ -316,7 +307,7 @@ fn fully_sealed_alternate_policy_dry_evidence_is_rejected_by_trusted_policy() {
 }
 
 #[test]
-fn tier4_disabled_policy_receipt_advances_waterfall() {
+fn tier4_disabled_policy_seals_only_checked_in_policy_and_retains_cursor() {
     let root = TempRoot::new();
     seed_tier_four_cursor(&root);
     let config = AutonomousConfig::parse(
@@ -339,7 +330,7 @@ fn tier4_disabled_policy_receipt_advances_waterfall() {
             disabled_by_checked_in_policy(&config.tier4),
         )
         .expect("disabled Tier 4 receipt"),
-        Tier4Progress::Advanced
+        Tier4Progress::NotRun(DISABLED_REASON.to_string())
     );
     let mut evidence_files = fs::read_dir(&tier4_dir)
         .expect("read Tier 4 evidence directory")
@@ -384,66 +375,15 @@ fn tier4_disabled_policy_receipt_advances_waterfall() {
             && !evidence.reference.contains("roi_rank")
             && !evidence.reference.contains("failure")
     }));
-    let state = store.load_state().expect("state").expect("cursor");
     assert_eq!(
-        (state.next_pass_id(), state.current_tier()),
-        (2, NoWorkTier::Tier1)
-    );
-    assert_eq!(
-        state
-            .completed_receipts()
-            .last()
-            .map(|completed| (completed.tier, completed.digest.as_str())),
-        Some((NoWorkTier::Tier4, receipt.digest()))
+        store
+            .load_state()
+            .expect("state")
+            .expect("cursor")
+            .current_tier(),
+        NoWorkTier::Tier4
     );
     assert_ne!(TIER3_DISABLED_REASON, DISABLED_REASON);
-}
-
-#[test]
-fn disabled_tier3_and_tier4_receipts_retain_both_audit_digests() {
-    let root = TempRoot::new();
-    seed_tier_three_cursor(&root);
-    assert_eq!(
-        record_tier3(root.path(), REPO, Tier3Scan::NotRun).expect("disabled Tier 3 receipt"),
-        Tier3Progress::Advanced
-    );
-    let receipt_store = store(&root);
-    let tier3 = receipt_store
-        .load_receipt(1, NoWorkTier::Tier3)
-        .expect("Tier 3 receipt")
-        .expect("sealed Tier 3 receipt");
-    drop(receipt_store);
-
-    assert_eq!(
-        record_tier4(root.path(), REPO, Tier4Scan::NotRun).expect("disabled Tier 4 receipt"),
-        Tier4Progress::Advanced
-    );
-    let receipt_store = store(&root);
-    let tier4 = receipt_store
-        .load_receipt(1, NoWorkTier::Tier4)
-        .expect("Tier 4 receipt")
-        .expect("sealed Tier 4 receipt");
-    let state = receipt_store
-        .load_state()
-        .expect("verified state")
-        .expect("pass 2 cursor");
-
-    assert_eq!(
-        (state.next_pass_id(), state.current_tier()),
-        (2, NoWorkTier::Tier1)
-    );
-    assert_eq!(
-        state
-            .completed_receipts()
-            .iter()
-            .skip(3)
-            .map(|completed| (completed.tier, completed.digest.as_str()))
-            .collect::<Vec<_>>(),
-        vec![
-            (NoWorkTier::Tier3, tier3.digest()),
-            (NoWorkTier::Tier4, tier4.digest()),
-        ]
-    );
 }
 
 #[test]

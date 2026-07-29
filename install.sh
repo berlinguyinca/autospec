@@ -49,33 +49,13 @@ SUPERPOWERS_REMOTE="${SUPERPOWERS_REMOTE:-https://github.com/obra/superpowers.gi
 SUPERPOWERS_CODEX_SKILLS_DIR="${SUPERPOWERS_CODEX_SKILLS_DIR:-$HOME/.agents/skills}"
 SUPERPOWERS_OPENCODE_PLUGIN="${SUPERPOWERS_OPENCODE_PLUGIN:-superpowers@git+https://github.com/obra/superpowers.git}"
 OPENCODE_CONFIG_ROOT="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
-if [ -z "${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-}" ]; then
-    AUTOSPEC_REQUIRED_SYSTEM_TOOLS="git bash curl cargo python3 gh jq npm"
-fi
-AUTOSPEC_EXECUTOR_SCANNERS="gitleaks semgrep trivy license-checker"
-readonly AUTOSPEC_EXECUTOR_SCANNERS
-
-required_system_tools() {
-    local required_tools=""
-    local tool=""
-    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS $AUTOSPEC_EXECUTOR_SCANNERS; do
-        case " $required_tools " in
-            *" $tool "*) ;;
-            *) required_tools="${required_tools:+$required_tools }$tool" ;;
-        esac
-    done
-    printf '%s\n' "$required_tools"
-}
-
-AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS="$(required_system_tools)"
-readonly AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS
+AUTOSPEC_REQUIRED_SYSTEM_TOOLS="${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-git bash curl cargo python3 gh jq}"
 AUTOSPEC_HARNESS_TOOLS="${AUTOSPEC_HARNESS_TOOLS:-codex claude opencode}"
 AUTOSPEC_SYSTEM_TOOLS="${AUTOSPEC_SYSTEM_TOOLS:-yq node npm bun bats omx omc oh-my-opencode mempalace ajv}"
 OH_MY_CODEX_PACKAGE="${OH_MY_CODEX_PACKAGE:-oh-my-codex}"
 OH_MY_OPENCODE_PACKAGE="${OH_MY_OPENCODE_PACKAGE:-oh-my-opencode}"
 OH_MY_CLAUDE_PACKAGE="${OH_MY_CLAUDE_PACKAGE:-oh-my-claude-sisyphus}"
 ENSURE_TOOL_SCRIPT="$REPO_ROOT/skills/autospec-shared/scripts/ensure-tool.sh"
-CODEX_SANDBOX_HELPER="$REPO_ROOT/scripts/ensure-codex-sandbox.sh"
 DEPENDENCIES_PRESENT=""
 DEPENDENCIES_INSTALLED=""
 DEPENDENCIES_OPTIONAL_MISSING=""
@@ -700,7 +680,7 @@ report_dependency_install_context() {
 
 verify_required_system_tools() {
     missing_required=""
-    for tool in $AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS; do
+    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
         if ! command_present "$tool"; then
             missing_required="${missing_required:+$missing_required }$tool"
         fi
@@ -723,10 +703,10 @@ verify_required_system_tools() {
 
 ensure_required_system_tools() {
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] ensure_required_system_tools: would ensure and verify $AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS"
+        info "[dry-run] ensure_required_system_tools: would ensure and verify $AUTOSPEC_REQUIRED_SYSTEM_TOOLS"
         return 0
     fi
-    for tool in $AUTOSPEC_EFFECTIVE_REQUIRED_SYSTEM_TOOLS; do
+    for tool in $AUTOSPEC_REQUIRED_SYSTEM_TOOLS; do
         attempt_tool_install "$tool" ""
     done
     verify_required_system_tools
@@ -757,27 +737,6 @@ verify_harness_tools() {
     err "required harness missing: $AUTOSPEC_HARNESS_TOOLS"
     err "install at least one supported harness and rerun: bash install.sh --skill $SKILL_ARG --harness $HARNESS_ARG"
     return 1
-}
-
-ensure_codex_sandbox_dependency() {
-    case " $HARNESSES_TO_RUN " in
-        *" codex "*) ;;
-        *) return 0 ;;
-    esac
-    if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] ensure_codex_sandbox_dependency: would run $CODEX_SANDBOX_HELPER"
-        return 0
-    fi
-    if ! command_present codex; then
-        info "ensure_codex_sandbox_dependency: codex CLI unavailable; skipping host probe"
-        return 0
-    fi
-    if [ ! -f "$CODEX_SANDBOX_HELPER" ]; then
-        err "ensure_codex_sandbox_dependency: missing $CODEX_SANDBOX_HELPER"
-        return 1
-    fi
-    info "ensure_codex_sandbox_dependency: probing Codex permission-profile support"
-    bash "$CODEX_SANDBOX_HELPER"
 }
 
 print_dependency_summary() {
@@ -1656,7 +1615,6 @@ skills/autospec-harmonize/scripts/extract-runtime.mjs::extract-runtime.mjs \
 skills/autospec-harmonize/scripts/fetch-vendor.sh::fetch-vendor.sh \
 skills/autospec-harmonize/scripts/lib/color.mjs::lib/color.mjs \
 skills/autospec-qa/scripts/qa-visual-findings.sh::qa-visual-findings.sh \
-skills/autospec-ui-audit/scripts/route-inventory.mjs::autospec-ui-route-inventory.mjs \
 skills/autospec-sweep/scripts/run.sh::autospec-sweep-run.sh \
 skills/autospec-sweep/scripts/wizard.sh::autospec-sweep-wizard.sh"
 
@@ -1879,7 +1837,6 @@ verify_harness_tools
 bootstrap_peer_ecosystems
 bootstrap_turbo
 check_codex
-ensure_codex_sandbox_dependency
 merge_claude_md
 offer_gitignore
 

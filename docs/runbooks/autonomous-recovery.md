@@ -8,36 +8,13 @@ different recovery window; active workers refresh their claims as they run.
 The conductor also defaults `AUTOSPEC_RESCAN_INTERVAL` to `300` seconds after
 an empty backlog, while an explicit environment value remains authoritative.
 
-When selection records `phase: paused`, `selected_issue: null`, and
-`pause_reason: no_ready_issue_after_review`, a continuous foreground conductor
-stays alive and polls at its configured interval. A later ready-queue snapshot
-with an eligible issue durably resets that exact pause to `Scan` before the
-normal scan, review, and selection path runs. An empty snapshot retains the
-pause without exiting for the supervisor to relaunch every five seconds.
-Paused states with another reason, a selected issue, or a resume phase other
-than `Select` are not reset; incompatible no-ready state fails closed.
-
 Tier-2 explore drains default `AUTOSPEC_AUTONOMOUS_EXPLORE_STALL_SECS` to `600`
 seconds without observable output; set the variable explicitly for slower
 repositories or remote research providers.
 
-`autospec autonomous stop --immediate` and `autospec autonomous restart --force`
-signal each verified conductor, monitor, and supervisor process group. Restart
-releases the terminated conductor's matching lease before acquiring replacement
-ownership, so legacy wrapper children cannot revive a stale conductor during
-the handoff. New unit metadata binds the PID to its process-group ID and start
-time; mismatched live identities fail closed instead of signaling a reused PID.
-
-Detached conductors intentionally exit after finite claim and executor
-boundaries. The supervisor treats a verified stopped conductor as recoverable:
-unless a stop flag is present, it releases only that terminated owner's lease,
-acquires a fresh lease, and relaunches the persisted `run-foreground` options.
-Live or ambiguous metadata never starts a second conductor. Supervisor output
-reports `restarted-conductor` only after replacement process identity is
-verified. On Linux, an exited child in process state `Z` is stopped rather than
-live: the owning supervisor reaps that exact PID before releasing its lease,
-while non-child zombies are treated as terminated without attempting to reap a
-foreign process.
+`autospec-autonomous restart --force` now signals the detached conductor's
+entire process group, cleaning up active drains and harness children before the
+replacement lifecycle starts.
 
 Explore drains export an inherited recursion marker; a nested drain request
 returns a dry suppression result instead of launching another harness tree.
@@ -47,11 +24,10 @@ They also enforce a 900-second absolute runtime cap via
 The drain exports `AUTOSPEC_EXPLORE_PARENT_PID`; detached explore scripts watch
 that owner and terminate when it disappears.
 
-The explore drain dispatches directly through the active Codex, Claude, or
-OpenCode harness. `AUTOSPEC_HANDOFF_DISPATCHER_KIND` is authoritative; when it
-is unset, active runtime markers are preferred over installed skill homes. The
-verifier command is exported to that child so a mixed-harness installation
-cannot silently select an unrelated provider.
+The verifier command is also embedded as a quoted environment assignment in the
+harness command because `omx exec` may not preserve the caller's exported
+environment. This prevents an otherwise healthy discovery pass from being
+mistaken for a no-verifier fail-closed cycle.
 
 If the skeptic itself times out, the verifier uses a deterministic fallback: it
 survives only candidates whose evidence names an existing repository path and
@@ -64,19 +40,15 @@ This keeps filing functional in detached sessions whose PATH does not include
 the installed command shim.
 
 Each researcher is bounded by `AUTOSPEC_RESEARCHER_TIMEOUT_SECS` (default 120
-seconds). The cycle records selected, successful, and failed sources in
-`researcher_health`; timeout, missing-script, non-zero, and malformed-output
-failures make the cycle non-zero even when another source produced candidates.
-Only a completed zero-candidate scan is clean dry. Timed-out groups are
-terminated as a process group to clean up detached researcher children as well.
+seconds). A timed-out source is recorded as `researcher_failed` while other
+sources continue, so one provider cannot stall the autonomous discovery loop.
+Timed-out groups are terminated as a process group to clean up detached
+researcher children as well.
 
 The outer explore harness is isolated with `setsid` and receives the same
-process-group cleanup, preventing a detached model process from holding a cycle.
+process-group cleanup, preventing a detached `omx exec` from holding a cycle.
 The default no-output stall bound is 120 seconds and the absolute runtime bound
 is 300 seconds; both remain configurable through `AUTOSPEC_AUTONOMOUS_EXPLORE_*`.
-Missing dispatchers, authentication failures, non-zero exits, and watchdog
-timeouts return non-zero with `dry:false`; they are never counted as repository
-exhaustion.
 
 If a harness reports `AUTOSPEC_EXPLORE_VERIFY_CMD_not_executed`, the drain runs
 the local explore entrypoint directly with the verifier command and uses its
@@ -94,30 +66,3 @@ verifier; no candidate is filed without an explicit survivor verdict.
 If a skeptic returns successfully but emits no recoverable verdict JSON, the
 bridge applies the same deterministic evidence fallback used for timed-out
 skeptics instead of discarding the entire discovery cycle.
-
-## Native Tier 2 discovery
-
-The Rust foreground conductor runs Tier 2 after a completed empty Tier 1.5
-scan. It collects bounded repository-local evidence before launching separate
-generator and verifier model children. Each child receives only serialized
-evidence in one argument, runs in an isolated scratch directory, has no GitHub
-mutation authority, and is killed with its process group after 120 seconds.
-
-Codex runs with a read-only ephemeral sandbox and Claude runs in plan mode with
-no tools. OpenCode fails closed because its pure mode still permits built-in
-mutation tools; native Tier 2 must not run there until a no-tools mode is
-proven. Child output is written to a private file, capped while the child is
-live, and removed on every exit path. Invalid JSON, non-zero exits, missing
-binaries, oversized output, and timeouts produce sealed failure receipts; they
-are not clean dry outcomes. Successful empty generation still requires a
-successful empty verifier result before Tier 2 advances.
-
-Ranked Tier 2 survivors are local receipt evidence only. A separate publisher
-owns idempotent `auto-implement` issue creation, so generator or verifier
-children can never mutate GitHub or the worktree. The conductor publishes each
-survivor with `auto-implement` and `origin:self`, plus a repository-scoped
-publication marker derived from the proposal stable key. Recovery scans both
-open and closed issues: one matching marker with both publication labels is
-complete, no marker is retried, and a missing label or multiple matches fails
-closed. The Tier 2 cursor advances only after every marker from the sealed
-receipt is confirmed remotely.

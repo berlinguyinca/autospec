@@ -225,49 +225,6 @@ pub(super) fn clear_unreferenced_tier4(
     Ok(())
 }
 
-pub(super) fn clear_obsolete_tier2_policy(
-    root: &Path,
-    pass_id: u64,
-    expected: &str,
-) -> Result<(), WaterfallStoreError> {
-    let reference =
-        WaterfallEvidenceArtifact::Tier2(Tier2EvidenceArtifact::Policy).reference(pass_id)?;
-    let path = root.join(reference);
-    match fs::read_to_string(&path) {
-        Ok(contents) if contents == expected => fs::remove_file(&path).map_err(|error| {
-            WaterfallStoreError::Diagnostic(format!(
-                "cannot clear obsolete Tier 2 policy evidence {}: {error}",
-                path.display()
-            ))
-        }),
-        Ok(_) => Err(WaterfallStoreError::InvalidReceipt(
-            "unreferenced Tier 2 policy evidence does not match the obsolete policy".to_string(),
-        )),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(WaterfallStoreError::Diagnostic(format!(
-            "cannot inspect obsolete Tier 2 policy evidence {}: {error}",
-            path.display()
-        ))),
-    }
-}
-
-pub(super) fn remove_obsolete_tier2_receipt(
-    receipt_path: &Path,
-) -> Result<(), WaterfallStoreError> {
-    match fs::remove_file(receipt_path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            Err(WaterfallStoreError::InvalidReceipt(
-                "obsolete Tier 2 receipt disappeared during rotation".to_string(),
-            ))
-        }
-        Err(error) => Err(WaterfallStoreError::Diagnostic(format!(
-            "cannot remove obsolete Tier 2 receipt {}: {error}",
-            receipt_path.display()
-        ))),
-    }
-}
-
 fn clear_tier4_temporaries(
     root: &Path,
     pass_id: u64,

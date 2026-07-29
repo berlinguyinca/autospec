@@ -371,13 +371,8 @@ fn queue_ready_fails_closed_when_a_later_github_page_is_malformed() {
         .expect("queue command starts");
 
     assert!(!output.status.success());
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains("could not fetch GitHub auto-implement issue page 2 after 3 attempts"),
-        "stderr={} stdout={}",
-        String::from_utf8_lossy(&output.stderr),
-        String::from_utf8_lossy(&output.stdout)
-    );
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("could not parse GitHub auto-implement issue page 2"));
 }
 
 #[test]
@@ -428,18 +423,8 @@ fn queue_ready_fails_closed_per_candidate_when_pull_request_evidence_is_malforme
 }
 
 #[test]
-fn queue_ready_observes_legacy_stale_claim_without_mutating_remote_state() {
+fn queue_ready_recovers_an_evidenceless_stale_claim_before_counting_worker_capacity() {
     let fixture = QueueFixture::new();
-    let claim_remote = fixture.root.join("claim-remote.git");
-    let init = Command::new("git")
-        .args(["init", "--bare", claim_remote.to_str().unwrap()])
-        .output()
-        .expect("initialize claim remote");
-    assert!(
-        init.status.success(),
-        "stderr={}",
-        String::from_utf8_lossy(&init.stderr)
-    );
     fs::write(
         &fixture.auto,
         format!("[{}]", passing_issue(20, "src/a.rs")),
@@ -452,21 +437,13 @@ fn queue_ready_observes_legacy_stale_claim_without_mutating_remote_state() {
     .expect("write active fixture");
     fs::write(
         &fixture.comments,
-        r#"[{"id":100,"updated_at":"2000-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"test/repo\",\"issue\":99,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2000-01-01T00:00:00Z\",\"updated_at\":\"2000-01-01T00:00:00Z\",\"ttl_seconds\":10800,\"claim_id\":\"claim-generation-a\"}\n<!-- autospec-run-state:end -->"}]"#,
+        r#"[{"id":100,"updated_at":"2000-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{\"schema\":1,\"repo\":\"test/repo\",\"issue\":99,\"worker_id\":\"worker-a\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2000-01-01T00:00:00Z\",\"updated_at\":\"2000-01-01T00:00:00Z\",\"ttl_seconds\":10800}\n<!-- autospec-run-state:end -->"}]"#,
     )
     .expect("write stale state fixture");
-    let active_before = fs::read(&fixture.active).expect("read active state before planning");
-    let comments_before = fs::read(&fixture.comments).expect("read comments before planning");
 
-    let mut command = fixture.command();
-    let output = command
+    let output = fixture
+        .command()
         .args(["queue", "ready", "--repo", "test/repo", "--batch-size", "1"])
-        .env("AUTOSPEC_MAX_CONCURRENT_REPO_WORKERS", "1")
-        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &claim_remote)
-        .env(
-            "AUTOSPEC_CLAIM_GIT_STATE_DIR",
-            fixture.root.join("claim-state"),
-        )
         .output()
         .expect("queue command starts");
 
@@ -476,30 +453,14 @@ fn queue_ready_observes_legacy_stale_claim_without_mutating_remote_state() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"active_count\":1"));
-    assert_eq!(
-        fs::read(&fixture.active).expect("read active state after planning"),
-        active_before
-    );
-    assert_eq!(
-        fs::read(&fixture.comments).expect("read comments after planning"),
-        comments_before
-    );
+    assert!(stdout.contains("\"active_count\":0"));
+    assert!(stdout.contains("\"number\":20"));
     let calls = fs::read_to_string(&fixture.calls).expect("read gh calls");
-    assert!(!calls.contains("issue\nedit\n99"));
-    assert!(!calls.contains("repos/test/repo/issues/comments/100\n-X\nDELETE"));
-    let refs = Command::new("git")
-        .args([
-            "--git-dir",
-            claim_remote.to_str().unwrap(),
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/autospec/claims/",
-        ])
-        .output()
-        .expect("inspect claim refs");
-    assert!(refs.status.success());
-    assert!(refs.stdout.is_empty());
+    let labels = calls.find("issue\nedit\n99").expect("stale label release");
+    let clear = calls
+        .find("repos/test/repo/issues/comments/100\n-X\nDELETE")
+        .expect("stale state clear");
+    assert!(labels < clear);
 }
 
 #[test]

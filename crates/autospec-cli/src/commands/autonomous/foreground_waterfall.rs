@@ -46,17 +46,9 @@ struct CursorRead {
     trusted: bool,
 }
 
-#[derive(Clone, Copy)]
-struct RepositoryScan<'a> {
-    state_root: &'a Path,
-    repo: &'a str,
-    repo_dir: &'a Path,
-}
-
 pub(super) fn run_one_tier(
     state_root: &Path,
     repo: &str,
-    repo_dir: &Path,
     lease: &ConductorLease,
     config: &AutonomousConfig,
     policy: &WaterfallPolicy,
@@ -72,11 +64,8 @@ pub(super) fn run_one_tier(
         |tier| {
             dispatch_tier(
                 tier,
-                RepositoryScan {
-                    state_root,
-                    repo,
-                    repo_dir,
-                },
+                state_root,
+                repo,
                 lease,
                 config,
                 policy,
@@ -92,7 +81,8 @@ pub(super) fn run_one_tier(
 
 fn dispatch_tier(
     tier: NoWorkTier,
-    scan: RepositoryScan<'_>,
+    state_root: &Path,
+    repo: &str,
     lease: &ConductorLease,
     config: &AutonomousConfig,
     policy: &WaterfallPolicy,
@@ -100,47 +90,43 @@ fn dispatch_tier(
 ) -> Result<DispatchProgress, String> {
     match tier {
         NoWorkTier::Tier1 => {
-            record_tier_one(scan.state_root, scan.repo, lease, policy, tier1_evidence)
-                .map(map_tier1)
+            record_tier_one(state_root, repo, lease, policy, tier1_evidence).map(map_tier1)
         }
-        NoWorkTier::Tier1_5 => collect_after_preflight(
-            replay_tier15_with_lease(scan.state_root, scan.repo, lease)?,
-            || {
-                let observation = tier15::scan(scan.repo, TIER15_OBSERVATION_BUDGET);
-                record_tier15_with_lease(scan.state_root, scan.repo, lease, observation)
-            },
-        )
-        .map(map_tier15),
-        NoWorkTier::Tier2 => collect_after_preflight(
-            replay_tier2_with_lease(scan.state_root, scan.repo, lease)?,
-            || {
+        NoWorkTier::Tier1_5 => {
+            collect_after_preflight(replay_tier15_with_lease(state_root, repo, lease)?, || {
+                let scan = tier15::scan(repo, TIER15_OBSERVATION_BUDGET);
+                record_tier15_with_lease(state_root, repo, lease, scan)
+            })
+            .map(map_tier15)
+        }
+        NoWorkTier::Tier2 => {
+            collect_after_preflight(replay_tier2_with_lease(state_root, repo, lease)?, || {
                 record_tier2_with_lease(
-                    scan.state_root,
-                    scan.repo,
+                    state_root,
+                    repo,
                     lease,
-                    tier2::scan_native(scan.repo_dir),
+                    tier2::disabled_by_checked_in_policy(),
                 )
-            },
-        )
-        .map(map_tier2),
-        NoWorkTier::Tier3 => collect_after_preflight(
-            replay_tier3_with_lease(scan.state_root, scan.repo, lease)?,
-            || {
+            })
+            .map(map_tier2)
+        }
+        NoWorkTier::Tier3 => {
+            collect_after_preflight(replay_tier3_with_lease(state_root, repo, lease)?, || {
                 record_tier3_with_lease(
-                    scan.state_root,
-                    scan.repo,
+                    state_root,
+                    repo,
                     lease,
                     tier3::disabled_by_checked_in_policy(),
                 )
-            },
-        )
-        .map(map_tier3),
+            })
+            .map(map_tier3)
+        }
         NoWorkTier::Tier4 => collect_after_preflight(
-            replay_tier4_with_lease(scan.state_root, scan.repo, lease, policy)?,
+            replay_tier4_with_lease(state_root, repo, lease, policy)?,
             || {
                 record_tier4_with_lease(
-                    scan.state_root,
-                    scan.repo,
+                    state_root,
+                    repo,
                     lease,
                     policy,
                     tier4::disabled_by_checked_in_policy(&config.tier4),
