@@ -12,7 +12,8 @@ pub use implementation::{
 };
 pub use pr_size::{
     evaluate_patch_size, PatchSize, PatchSizeDimension, PatchSizeEvaluation, PatchSizeLimits,
-    DEFAULT_MAX_CHANGED_LINES, DEFAULT_MAX_LOGICAL_UNITS, DEFAULT_MAX_RAW_FILES, PROACTIVE_PERCENT,
+    DEFAULT_MAX_CHANGED_LINES, DEFAULT_MAX_LOGICAL_UNITS, DEFAULT_MAX_RAW_FILES,
+    PROACTIVE_CHANGED_LINES, PROACTIVE_RAW_FILES,
 };
 
 use std::collections::BTreeSet;

@@ -5,7 +5,8 @@ use super::{normalize_logical_unit, UnifiedDiff};
 pub const DEFAULT_MAX_CHANGED_LINES: usize = 400;
 pub const DEFAULT_MAX_RAW_FILES: usize = 8;
 pub const DEFAULT_MAX_LOGICAL_UNITS: usize = 3;
-pub const PROACTIVE_PERCENT: usize = 80;
+pub const PROACTIVE_CHANGED_LINES: usize = 320;
+pub const PROACTIVE_RAW_FILES: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PatchSizeLimits {
@@ -114,13 +115,19 @@ fn evaluate_size(size: PatchSize, limits: PatchSizeLimits) -> PatchSizeEvaluatio
     if size.has_binary {
         hard_dimensions.push(PatchSizeDimension::Binary);
     }
-    let proactive_dimensions = dimensions
-        .iter()
-        .filter_map(|(dimension, value, limit)| {
-            (value.saturating_mul(100) >= limit.saturating_mul(PROACTIVE_PERCENT))
-                .then_some(*dimension)
-        })
-        .collect();
+    let proactive_dimensions = [
+        (
+            PatchSizeDimension::ChangedLines,
+            size.changed_lines >= PROACTIVE_CHANGED_LINES,
+        ),
+        (
+            PatchSizeDimension::RawFiles,
+            size.raw_files >= PROACTIVE_RAW_FILES,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(dimension, reached)| reached.then_some(dimension))
+    .collect();
 
     PatchSizeEvaluation {
         size,
@@ -170,10 +177,14 @@ mod tests {
     }
 
     #[test]
-    fn proactive_limits_start_at_eighty_percent() {
+    fn proactive_limits_ignore_logical_units() {
         assert!(evaluate(320, 1, 1).is_proactive());
         assert!(evaluate(1, 7, 1).is_proactive());
-        assert!(evaluate(1, 1, 3).is_proactive());
+        assert!(!evaluate(1, 1, 3).is_proactive());
+        assert_eq!(
+            evaluate(1, 1, 4).hard_dimensions(),
+            &[PatchSizeDimension::LogicalUnits]
+        );
         assert!(!evaluate(319, 6, 2).is_proactive());
     }
 
