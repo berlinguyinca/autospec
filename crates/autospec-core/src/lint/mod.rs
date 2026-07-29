@@ -6,9 +6,9 @@ pub mod pr_size;
 
 pub use diff::{parse_unified_diff, DiffFile, DiffHunk, DiffLine, DiffLineKind, UnifiedDiff};
 pub use implementation::{
-    directive_for, lint_implementation, ImplementationLintContext, ImplementationLintFinding,
-    ImplementationLintOptions, ImplementationLintResult, ImplementationLintRule,
-    ImplementationLintSeverity, RepositoryIndex,
+    directive_for, lint_implementation, lint_issue_implementation_contract,
+    ImplementationLintContext, ImplementationLintFinding, ImplementationLintOptions,
+    ImplementationLintResult, ImplementationLintRule, ImplementationLintSeverity, RepositoryIndex,
 };
 pub use pr_size::{
     evaluate_patch_size, PatchSize, PatchSizeDimension, PatchSizeEvaluation, PatchSizeLimits,
