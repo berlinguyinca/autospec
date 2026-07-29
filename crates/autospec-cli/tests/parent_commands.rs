@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn autospec() -> Command {
@@ -47,6 +47,235 @@ fn path_with(bin: &Path) -> String {
 
 fn has(text: &str, needle: &str) -> bool {
     text.find(needle).is_some()
+}
+
+const BASE_DECOMPOSITION: &str = "\
+<!-- autospec-parent-decomposition:begin -->
+Parent issue #10 was decomposed into child implementation issues:
+- #11
+- #12
+<!-- autospec-parent-decomposition:end -->";
+
+const EXTENDED_DECOMPOSITION: &str = "\
+<!-- autospec-parent-decomposition:begin -->
+Parent issue #10 was decomposed into child implementation issues:
+- #11
+- #12
+- #13
+- #14
+State: `append-only-parent-extension`.
+<!-- autospec-parent-decomposition:end -->";
+
+fn write_remote(root: &Path, issue: u64, field: &str, value: &str) {
+    fs::write(root.join("remote").join(format!("{issue}.{field}")), value)
+        .expect("remote issue field");
+}
+
+fn stateful_parent_fixture(name: &str) -> PathBuf {
+    let root = fixture(name);
+    fs::create_dir(root.join("remote")).expect("remote fixture directory");
+    write_remote(&root, 10, "comments", BASE_DECOMPOSITION);
+    write_remote(&root, 10, "state", "OPEN\n");
+    write_gh(
+        &root.join("bin"),
+        r#"#!/bin/sh
+remote=$AUTOSPEC_PARENT_REMOTE
+if [ "$1 $2" = "issue view" ]; then
+  case "$7" in
+    comments|state) cat "$remote/$3.$7" 2>/dev/null || true ;;
+  esac
+  exit 0
+fi
+if [ "$1 $2" = "issue comment" ]; then
+  printf 'comment:%s\n' "$3" >> "$AUTOSPEC_PARENT_GH_LOG"
+  printf '%s\n' "$7" > "$remote/$3.comments"
+  exit 0
+fi
+if [ "$1 $2" = "issue reopen" ]; then
+  printf 'reopen:%s\n' "$3" >> "$AUTOSPEC_PARENT_GH_LOG"
+  printf 'OPEN\n' > "$remote/$3.state"
+  exit 0
+fi
+if [ "$1 $2" = "issue close" ]; then
+  printf 'close:%s\n' "$3" >> "$AUTOSPEC_PARENT_GH_LOG"
+  printf 'CLOSED\n' > "$remote/$3.state"
+  exit 0
+fi
+if [ "$1 $2" = "api graphql" ]; then
+  for argument in "$@"; do
+    case "$argument" in number=*) number=${argument#number=} ;; esac
+  done
+  cat "$remote/$number.graphql"
+  exit 0
+fi
+exit 0
+"#,
+    );
+    root
+}
+
+fn parent_command(root: &Path, arguments: &[&str]) -> Output {
+    autospec()
+        .args(arguments)
+        .current_dir(root)
+        .env("PATH", path_with(&root.join("bin")))
+        .env("AUTOSPEC_PARENT_GH_LOG", root.join("gh.log"))
+        .env("AUTOSPEC_PARENT_REMOTE", root.join("remote"))
+        .output()
+        .expect("parent command starts")
+}
+
+fn extend(root: &Path, children: &str) -> Output {
+    parent_command(
+        root,
+        &[
+            "parent",
+            "extend",
+            "--repo",
+            "testorg/testrepo",
+            "--parent",
+            "10",
+            "--children",
+            children,
+        ],
+    )
+}
+
+fn mutation_log(root: &Path) -> String {
+    fs::read_to_string(root.join("gh.log")).unwrap_or_default()
+}
+
+fn assert_success(output: &Output) {
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn parent_extend_publishes_exact_markers_full_list_and_typed_output() {
+    let root = stateful_parent_fixture("extend-first");
+
+    let output = extend(&root, "11,12,13,14");
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"changed\":true,\"parent\":10,\"children\":[11,12,13,14],\"added\":[13,14]}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("remote/13.comments")).expect("child 13 marker"),
+        "<!-- autospec-parent:10 -->\nChild issue #13 belongs to parent issue #10.\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("remote/14.comments")).expect("child 14 marker"),
+        "<!-- autospec-parent:10 -->\nChild issue #14 belongs to parent issue #10.\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("remote/10.comments")).expect("parent ledger"),
+        format!("{EXTENDED_DECOMPOSITION}\n")
+    );
+    assert_eq!(mutation_log(&root), "comment:13\ncomment:14\ncomment:10\n");
+}
+
+#[test]
+fn parent_extend_repeat_is_a_zero_mutation_noop() {
+    let root = stateful_parent_fixture("extend-repeat");
+    assert_success(&extend(&root, "11,12,13,14"));
+    fs::write(root.join("gh.log"), "").expect("reset mutation log");
+
+    let output = extend(&root, "11,12,13,14");
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"changed\":false,\"parent\":10,\"children\":[11,12,13,14],\"added\":[]}\n"
+    );
+    assert_eq!(mutation_log(&root), "");
+}
+
+#[test]
+fn parent_extend_prevalidates_every_new_child_before_mutation() {
+    let root = stateful_parent_fixture("extend-conflict");
+    write_remote(&root, 14, "comments", "<!-- autospec-parent:9 -->\n");
+
+    let output = extend(&root, "11,12,13,14");
+
+    assert!(!output.status.success());
+    assert!(has(
+        &String::from_utf8_lossy(&output.stderr),
+        "child issue #14 is already linked to parent #9"
+    ));
+    assert_eq!(mutation_log(&root), "");
+}
+
+#[test]
+fn parent_extend_recovers_a_preexisting_marker_without_reposting_it() {
+    let root = stateful_parent_fixture("extend-recovery");
+    write_remote(
+        &root,
+        13,
+        "comments",
+        "<!-- autospec-parent:10 -->\nChild issue #13 belongs to parent issue #10.\n",
+    );
+
+    let output = extend(&root, "11,12,13");
+
+    assert_success(&output);
+    assert_eq!(mutation_log(&root), "comment:10\n");
+    assert!(has(
+        &fs::read_to_string(root.join("remote/10.comments")).expect("parent ledger"),
+        "append-only-parent-extension"
+    ));
+}
+
+#[test]
+fn parent_extend_reconciliation_keeps_manual_closure_pending() {
+    let root = stateful_parent_fixture("extend-manual-close");
+    write_remote(&root, 10, "comments", EXTENDED_DECOMPOSITION);
+    write_remote(
+        &root,
+        13,
+        "comments",
+        "<!-- autospec-parent:10 -->\nChild issue #13 belongs to parent issue #10.\n",
+    );
+    for issue in [11, 12, 14] {
+        write_remote(
+            &root,
+            issue,
+            "graphql",
+            &format!(
+                r#"{{"data":{{"repository":{{"issue":{{"number":{issue},"state":"CLOSED","closedByPullRequestsReferences":{{"nodes":[{{"mergedAt":"2026-07-29T10:00:00Z"}}]}}}}}}}}}}"#
+            ),
+        );
+    }
+    write_remote(
+        &root,
+        13,
+        "graphql",
+        r#"{"data":{"repository":{"issue":{"number":13,"state":"CLOSED","closedByPullRequestsReferences":{"nodes":[]}}}}}"#,
+    );
+
+    let output = parent_command(
+        &root,
+        &[
+            "parent",
+            "reconcile-child",
+            "--repo",
+            "testorg/testrepo",
+            "--child",
+            "13",
+        ],
+    );
+
+    assert_success(&output);
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"reconciled\":true,\"parent\":10,\"closed\":false,\"terminal\":3,\"total\":4}\n"
+    );
+    assert_eq!(mutation_log(&root), "");
 }
 
 #[test]
