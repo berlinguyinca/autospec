@@ -1273,7 +1273,13 @@ fn run_executor_bridge_with_codex_probe(
         }
         Err(error) => return Err(error.into()),
     };
-    require_continuation_checkpoint(&request.state_path, &state, &proof, &request.issue_body)?;
+    require_continuation_checkpoint(
+        &request.state_path,
+        &request.event_log,
+        &state,
+        &proof,
+        &request.issue_body,
+    )?;
     if matches!(
         state.phase,
         BridgePhase::ImplementationProven
@@ -14673,12 +14679,20 @@ fn load_continuation_receipt(
     Ok(receipt)
 }
 
+struct ContinuationCheckpoint {
+    receipt: ContinuationReceipt,
+    receipt_path: PathBuf,
+    recovered: bool,
+    evaluation: PatchSizeEvaluation,
+    invalid_exception: bool,
+}
+
 fn prepare_continuation_checkpoint(
     state_path: &Path,
     state: &PersistedInvocation,
     proof: &ImplementationProof,
     issue_body: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<ContinuationCheckpoint>, String> {
     let Some((completed, unmet)) = parse_closeout_criteria(&proof.closeout_body)? else {
         return Ok(None);
     };
@@ -14688,7 +14702,8 @@ fn prepare_continuation_checkpoint(
     let evaluation = exact_patch_size(state, &proof.head_oid)?;
     let size = evaluation.size();
     let admission = evaluate_patch_size_admission(state, &proof.head_oid, issue_body);
-    let status = if evaluation.is_hard() && admission.is_err() {
+    let rejected = admission.is_err();
+    let status = if evaluation.is_hard() && rejected {
         "oversized_checkpoint"
     } else if evaluation.is_hard() || size.changed_lines < 320 {
         return Ok(None);
@@ -14719,17 +14734,212 @@ fn prepare_continuation_checkpoint(
             "executor continuation receipt",
         )?;
     }
-    Ok(Some(expected.status))
+    let invalid_exception =
+        evaluation.is_hard() && rejected && guardian_pr_size_attempt(issue_body);
+    Ok(Some(ContinuationCheckpoint {
+        receipt: expected,
+        receipt_path: path,
+        recovered,
+        evaluation,
+        invalid_exception,
+    }))
+}
+
+fn continuation_event_marker_path(state_path: &Path, binding: &str, stage: &str) -> PathBuf {
+    state_path.with_extension(format!("continuation-event.{binding}.{stage}.json"))
+}
+
+fn guardian_pr_size_attempt(issue_body: &str) -> bool {
+    issue_body.lines().any(|line| {
+        line.strip_prefix("Guardian: ")
+            .and_then(|body| body.split_once(" # "))
+            .is_some_and(|(skips, reason)| {
+                !reason.trim().is_empty() && skips.split(", ").any(|skip| skip == "skip-PR_SIZE")
+            })
+    })
+}
+
+fn normalized_event_log(path: &Path) -> Result<(PathBuf, String), String> {
+    reject_symlink_path(path)?;
+    let absolute = std::path::absolute(path)
+        .map_err(|error| format!("normalize executor event log: {error}"))?;
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component),
+        }
+    }
+    let text = normalized
+        .to_str()
+        .ok_or_else(|| "executor event log path must be UTF-8".to_string())?;
+    Ok((normalized.clone(), sha256_hex(text.as_bytes())))
+}
+
+fn acquire_continuation_event_lease(path: &Path) -> Result<File, String> {
+    reject_symlink_path(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options
+        .open(path)
+        .map_err(|error| format!("open executor continuation event lock: {error}"))?;
+    validate_private_state_file(path)?;
+    file.try_lock()
+        .map_err(|error| format!("lock executor continuation event: {error}"))?;
+    Ok(file)
+}
+
+fn continuation_event_logged(path: &Path, binding: &str) -> Result<bool, String> {
+    for segment in [path.to_path_buf(), path.with_extension("jsonl.1")] {
+        reject_symlink_path(&segment)?;
+        let body = match fs::read_to_string(&segment) {
+            Ok(body) => body,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(format!("read executor continuation event log: {error}")),
+        };
+        for line in body.lines() {
+            let event: serde_json::Value = serde_json::from_str(line)
+                .map_err(|error| format!("parse executor continuation event: {error}"))?;
+            if event
+                .get("continuation_binding")
+                .and_then(serde_json::Value::as_str)
+                == Some(binding)
+            {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+fn emit_continuation_event_once(
+    state_path: &Path,
+    event_log: &Path,
+    state: &PersistedInvocation,
+    checkpoint: &ContinuationCheckpoint,
+    event: &str,
+) -> Result<(), String> {
+    let (event_log, session_digest) = normalized_event_log(event_log)?;
+    let session = serde_json::json!({
+        "path": event_log,
+        "digest": session_digest,
+    });
+    write_private_create_once(
+        &state_path.with_extension("continuation-session.json"),
+        session.to_string().as_bytes(),
+        "executor continuation initiating session",
+    )?;
+    let binding = sha256_hex(
+        serde_json::json!([
+            state.identity.repository,
+            state.identity.issue,
+            checkpoint.receipt.base_oid,
+            checkpoint.receipt.head_oid,
+            checkpoint.receipt.content_digest,
+            session_digest,
+            event,
+        ])
+        .to_string()
+        .as_bytes(),
+    );
+    let size = checkpoint.evaluation.size();
+    let details = serde_json::json!({
+        "continuation_binding": binding,
+        "continuation_event": event,
+        "receipt_path": checkpoint.receipt_path,
+        "receipt_digest": checkpoint.receipt.content_digest,
+        "base_oid": checkpoint.receipt.base_oid,
+        "head_oid": checkpoint.receipt.head_oid,
+        "unmet": checkpoint.receipt.unmet,
+        "changed_lines": size.changed_lines,
+        "raw_files": size.raw_files,
+        "logical_units": size.logical_units,
+        "has_binary": size.has_binary,
+        "initiating_session_path": event_log,
+        "initiating_session_digest": session_digest,
+    });
+    let intent = continuation_event_marker_path(state_path, &binding, "intent");
+    let complete = continuation_event_marker_path(state_path, &binding, "complete");
+    write_private_create_once(
+        &intent,
+        details.to_string().as_bytes(),
+        "executor continuation event intent",
+    )?;
+    let _lease = acquire_continuation_event_lease(&continuation_event_marker_path(
+        state_path, &binding, "lock",
+    ))?;
+    reject_symlink_path(&complete)?;
+    if complete.exists() {
+        return validate_cleanup_record(
+            &complete,
+            &binding,
+            "executor continuation event complete",
+        );
+    }
+    if !continuation_event_logged(&event_log, &binding)? {
+        append_executor_event(&event_log, state, event, Some(details))?;
+        File::open(
+            event_log
+                .parent()
+                .ok_or_else(|| "executor continuation event log has no parent".to_string())?,
+        )
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync executor continuation event log parent: {error}"))?;
+    }
+    ensure_cleanup_record(&complete, &binding, "executor continuation event complete")
+}
+
+fn emit_continuation_events(
+    state_path: &Path,
+    event_log: &Path,
+    state: &PersistedInvocation,
+    checkpoint: &ContinuationCheckpoint,
+) -> Result<(), String> {
+    let primary = match checkpoint.receipt.status.as_str() {
+        "planned" => "continuation_planned",
+        _ => "continuation_oversized_checkpoint",
+    };
+    emit_continuation_event_once(state_path, event_log, state, checkpoint, primary)?;
+    if checkpoint.invalid_exception {
+        emit_continuation_event_once(
+            state_path,
+            event_log,
+            state,
+            checkpoint,
+            "continuation_invalid_exception",
+        )?;
+    }
+    if checkpoint.recovered {
+        emit_continuation_event_once(
+            state_path,
+            event_log,
+            state,
+            checkpoint,
+            "continuation_recovered",
+        )?;
+    }
+    Ok(())
 }
 
 fn require_continuation_checkpoint(
     state_path: &Path,
+    event_log: &Path,
     state: &PersistedInvocation,
     proof: &ImplementationProof,
     issue_body: &str,
 ) -> Result<(), BridgeRunFailure> {
-    match prepare_continuation_checkpoint(state_path, state, proof, issue_body)?.as_deref() {
-        Some("oversized_checkpoint") => Err(BridgeRunFailure::invariant(
+    let Some(checkpoint) = prepare_continuation_checkpoint(state_path, state, proof, issue_body)?
+    else {
+        return Ok(());
+    };
+    emit_continuation_events(state_path, event_log, state, &checkpoint)?;
+    match checkpoint.receipt.status.as_str() {
+        "oversized_checkpoint" => Err(BridgeRunFailure::invariant(
             "executor preserved an oversized continuation checkpoint before remote mutation",
         )),
         _ => Ok(()),
@@ -35183,7 +35393,7 @@ exit 64
 
     #[cfg(unix)]
     #[test]
-    fn autonomous_executor_bridge_continuation_receipt_thresholds_and_base_drift_generation() {
+    fn autonomous_executor_bridge_continuation_event_thresholds_and_base_drift_generation() {
         // Break caught: capped or oversized exact-head work losing ordered continuation state.
         assert!(super::parse_closeout_criteria("Completed criteria: []").is_err());
         for (lines, unmet, expected) in [
@@ -35195,6 +35405,8 @@ exit 64
             let (fixture, mut state, _, _) =
                 implementation_proof_fixture(&format!("continuation-{lines}"));
             let state_path = fixture.root.join("state/invocation.json");
+            let event_log = fixture.root.join("logs/../logs/executor.jsonl");
+            let normalized_log = fixture.root.join("logs/executor.jsonl");
             fs::write(
                 state.identity.worktree.join("slice.txt"),
                 "changed\n".repeat(lines),
@@ -35213,20 +35425,17 @@ exit 64
                 closeout_body: format!("## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice.txt; `git diff`\nScoped git status: slice.txt\nOne likely hidden failure: boundary\nCompleted criteria: [\"first\"]\nUnmet criteria: {unmet}\n"),
             };
 
-            let checkpoint = if lines == 401 {
-                assert!(
-                    super::require_continuation_checkpoint(&state_path, &state, &proof, "")
-                        .expect_err("oversized checkpoint gate")
-                        .to_string()
-                        .contains("oversized continuation checkpoint")
-                );
+            let checkpoint =
+                super::require_continuation_checkpoint(&state_path, &event_log, &state, &proof, "");
+            if lines == 401 {
+                assert!(checkpoint
+                    .expect_err("oversized checkpoint gate")
+                    .to_string()
+                    .contains("oversized continuation checkpoint"));
                 assert!(!fixture.root.join("gh-calls").exists());
-                Some("oversized_checkpoint".to_string())
             } else {
-                super::prepare_continuation_checkpoint(&state_path, &state, &proof, "")
-                    .expect("checkpoint evaluation")
-            };
-            assert_eq!(checkpoint.as_deref(), expected);
+                checkpoint.expect("checkpoint evaluation");
+            }
             assert_eq!(
                 git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]),
                 head
@@ -35240,6 +35449,120 @@ exit 64
                 assert_eq!(receipt.status.as_str(), status);
                 assert_eq!(receipt.unmet, ["second", "third"]);
                 if lines == 320 {
+                    let initial: serde_json::Value = serde_json::from_str(
+                        fs::read_to_string(&event_log)
+                            .expect("planned event")
+                            .trim(),
+                    )
+                    .expect("planned JSON");
+                    assert_eq!(initial["event"], "continuation_planned");
+                    assert_eq!(initial["unmet"], serde_json::json!(["second", "third"]));
+                    assert_eq!(
+                        [
+                            initial["changed_lines"].as_u64(),
+                            initial["raw_files"].as_u64(),
+                            initial["logical_units"].as_u64()
+                        ],
+                        [Some(320), Some(1), Some(1)]
+                    );
+                    assert_eq!(initial["receipt_digest"], receipt.content_digest);
+                    assert_eq!(initial["receipt_path"], receipt_path.to_str().unwrap());
+                    assert_eq!(initial["base_oid"], state.identity.base_oid);
+                    assert_eq!(initial["head_oid"], proof.head_oid);
+                    assert_eq!(
+                        initial["initiating_session_path"],
+                        normalized_log.to_str().unwrap()
+                    );
+                    assert_eq!(
+                        initial["initiating_session_digest"],
+                        super::sha256_hex(normalized_log.to_str().unwrap().as_bytes())
+                    );
+                    let binding = initial["continuation_binding"].as_str().unwrap();
+                    let intent =
+                        super::continuation_event_marker_path(&state_path, binding, "intent");
+                    let intent_doc: serde_json::Value =
+                        serde_json::from_slice(&fs::read(&intent).expect("event intent"))
+                            .expect("intent JSON");
+                    assert_eq!(
+                        intent_doc["initiating_session_path"],
+                        initial["initiating_session_path"]
+                    );
+                    assert_eq!(
+                        intent_doc["initiating_session_digest"],
+                        initial["initiating_session_digest"]
+                    );
+                    let complete =
+                        super::continuation_event_marker_path(&state_path, binding, "complete");
+                    let lock = super::continuation_event_marker_path(&state_path, binding, "lock");
+                    let lease =
+                        super::acquire_continuation_event_lease(&lock).expect("first event lease");
+                    assert!(super::acquire_continuation_event_lease(&lock).is_err());
+                    drop(lease);
+                    assert!(super::require_continuation_checkpoint(
+                        &state_path,
+                        &fixture.root.join("logs/other.jsonl"),
+                        &state,
+                        &proof,
+                        "",
+                    )
+                    .is_err());
+                    fs::remove_file(&complete).expect("simulate append-before-complete");
+                    fs::rename(&event_log, event_log.with_extension("jsonl.1"))
+                        .expect("rotate planned event");
+                    super::require_continuation_checkpoint(
+                        &state_path,
+                        &event_log,
+                        &state,
+                        &proof,
+                        "",
+                    )
+                    .expect("recover rotated event");
+                    super::require_continuation_checkpoint(
+                        &state_path,
+                        &event_log,
+                        &state,
+                        &proof,
+                        "",
+                    )
+                    .expect("second restart");
+                    let retained = format!(
+                        "{}{}",
+                        fs::read_to_string(event_log.with_extension("jsonl.1")).unwrap(),
+                        fs::read_to_string(&event_log).unwrap()
+                    );
+                    assert_eq!(
+                        retained
+                            .matches("\"event\":\"continuation_planned\"")
+                            .count(),
+                        1
+                    );
+                    assert_eq!(
+                        retained
+                            .matches("\"event\":\"continuation_recovered\"")
+                            .count(),
+                        1
+                    );
+                    let complete_body = fs::read(&complete).expect("complete marker");
+                    fs::write(&complete, "tampered").expect("tamper complete");
+                    assert!(super::require_continuation_checkpoint(
+                        &state_path,
+                        &event_log,
+                        &state,
+                        &proof,
+                        "",
+                    )
+                    .is_err());
+                    fs::write(&complete, complete_body).expect("restore complete");
+                    fs::remove_file(&intent).expect("remove intent");
+                    symlink(&state_path, &intent).expect("symlink intent");
+                    assert!(super::require_continuation_checkpoint(
+                        &state_path,
+                        &event_log,
+                        &state,
+                        &proof,
+                        "",
+                    )
+                    .is_err());
                     let first = fs::read(&receipt_path).expect("receipt");
                     let worktree = state.identity.worktree.clone();
                     state.identity.base_oid = head;
@@ -35280,10 +35603,11 @@ exit 64
 
     #[cfg(unix)]
     #[test]
-    fn autonomous_executor_bridge_continuation_receipt_exception_and_tamper_fail_closed() {
+    fn autonomous_executor_bridge_continuation_event_exception_and_tamper_fail_closed() {
         // Break caught: invalid exceptions or forged receipt identity bypassing checkpoint policy.
         let (fixture, mut state, _, _) = implementation_proof_fixture("continuation-exception");
         let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("logs/executor.jsonl");
         let migration = state.identity.worktree.join("db/migrations/001.sql");
         fs::create_dir_all(migration.parent().unwrap()).expect("migration dir");
         fs::write(
@@ -35303,6 +35627,9 @@ exit 64
             closeout_body: "## Closeout report\nResult: migration\nClaims: [verified] static generated\nProof type: static\nBefore/after: 0 to 1\nArtifacts: db/migrations/001.sql; `git diff`\nScoped git status: db/migrations/001.sql\nOne likely hidden failure: generator\nCompleted criteria: []\nUnmet criteria: [\"publish\"]\n".into(),
         };
         let valid = "Guardian: skip-PR_SIZE # generated migration: prisma\n";
+        assert!(!super::guardian_pr_size_attempt(
+            "Docs mention skip-PR_SIZE."
+        ));
         assert!(
             super::prepare_continuation_checkpoint(&state_path, &state, &proof, valid)
                 .expect("valid exception")
@@ -35313,17 +35640,28 @@ exit 64
                 .expect("receipt path")
                 .exists()
         );
-        assert_eq!(
-            super::prepare_continuation_checkpoint(
-                &state_path,
-                &state,
-                &proof,
-                "Guardian: skip-PR_SIZE # generated migration: other\n",
-            )
-            .expect("invalid exception")
-            .as_deref(),
-            Some("oversized_checkpoint")
-        );
+        assert!(super::require_continuation_checkpoint(
+            &state_path,
+            &event_log,
+            &state,
+            &proof,
+            "Guardian: skip-PR_SIZE # generated migration: other\n",
+        )
+        .expect_err("invalid exception")
+        .to_string()
+        .contains("oversized continuation checkpoint"));
+        let events = fs::read_to_string(&event_log).expect("oversized events");
+        let oversized = events
+            .find("\"event\":\"continuation_oversized_checkpoint\"")
+            .expect("oversized event");
+        let invalid = events
+            .find("\"event\":\"continuation_invalid_exception\"")
+            .expect("invalid exception event");
+        assert!(oversized < invalid);
+        assert!(!super::remote_head_refs(&fixture.repo)
+            .expect("remote refs")
+            .contains_key(&format!("refs/heads/{}", state.identity.branch)));
+        assert!(!fixture.root.join("gh-calls").exists());
 
         let receipt =
             super::continuation_receipt_path(&state_path, &proof.head_oid).expect("receipt path");
