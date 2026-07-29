@@ -533,17 +533,20 @@ mod implementation_contract_tests {
 
     #[test]
     fn autonomous_discovery_issue_matches_implementation_lint() {
+        let target_path = "src/status-panel.rs";
         let regression_path = "scripts/test-autonomous-status-panel.mjs";
         let malformed = format!(
             "## Goal\n\nFix the autonomous status panel.\n\n\
-             ## Implementation outline\n\n- Update the status panel behavior.\n\n\
+             ## Implementation outline\n\n- Update `{target_path}` for the status panel behavior.\n\n\
              ## Tests required\n\n- smoke\n\n\
-             ## Files touched\n\n- `{regression_path}`\n"
+             ## Files touched\n\n- `{target_path}`\n- `{regression_path}`\n"
         );
 
         let error =
-            admit_expected_implementation_contract(&malformed, regression_path, regression_path)
-                .expect_err("autospec-gui#39 shape must fail before publication");
+            admit_expected_implementation_contract(&malformed, target_path, regression_path)
+                .expect_err(
+                    "an omitted project-native regression path must fail before publication",
+                );
         assert!(error.contains("OUT_OF_SCOPE"), "{error}");
         assert!(
             !error.contains("MISSING_TEST"),
@@ -551,10 +554,12 @@ mod implementation_contract_tests {
         );
 
         let corrected = malformed.replace(
-            "- Update the status panel behavior.",
-            &format!("- Update `{regression_path}` to cover the status panel behavior."),
+            &format!("- Update `{target_path}` for the status panel behavior."),
+            &format!(
+                "- Update `{target_path}` for the status panel behavior.\n- Verify `{regression_path}`."
+            ),
         );
-        admit_expected_implementation_contract(&corrected, regression_path, regression_path)
+        admit_expected_implementation_contract(&corrected, target_path, regression_path)
             .expect("corrected outline and project-native regression evidence must publish");
     }
 
