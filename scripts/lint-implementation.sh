@@ -500,7 +500,7 @@ pr_size_validate_lock_step() {
 
 pr_size_validate_exception() {
     local category="$1" detail="$2" stats="$3" path
-    grep -q ' 1 ' "$stats" && return 1
+    awk '$3 == 1 {found=1} END {exit !found}' "$stats" && return 1
     case "$category" in
         "generated migration")
             while read -r _ _ _ path; do
@@ -547,7 +547,7 @@ detect_pr_size() {
         exception="$(grep -m1 '^Guardian: skip-PR_SIZE # ' "$TMP_ISSUE" || true)"
         exception="${exception#Guardian: skip-PR_SIZE # }"
         category="${exception%%:*}"
-        [ "$category" != "$exception" ] && detail="${exception#*:}" && detail="${detail#"${detail%%[![:space:]]*}"}"
+        [ "$category" != "$exception" ] && detail="${exception#*:}" && detail="${detail#"${detail%%[![:space:]]*}"}" && detail="${detail%"${detail##*[![:space:]]}"}"
     fi
     local message="changed_lines=$lines/$PR_SIZE_MAX_LINES raw_files=$files/$PR_SIZE_MAX_FILES logical_units=$units/$PR_SIZE_MAX_UNITS binary=$binary exceeded=$exceeded"
     if [ -n "$detail" ] && pr_size_validate_exception "$category" "$detail" "$stats"; then
@@ -564,7 +564,7 @@ get_added_lines_for_file() {
     local target="$1"
     awk -v tgt="$target" '
         /^diff --git / {
-            in_file = ($0 ~ " b/" tgt "$")
+            path=substr($0, 12); sub(/^a\/.* b\//, "", path); in_file=(path == tgt)
             next
         }
         in_file && /^\+\+\+ / { next }
