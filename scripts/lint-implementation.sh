@@ -20,6 +20,9 @@
 # If findings exceed 200, exits 200 with a scope-explosion message.
 
 set -eu
+# Keep operational diagnostics visible when directive mode captures detector output.
+exec 3>&2
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
 HELP_TEXT="Usage: scripts/lint-implementation.sh <PR> --issue <N>
        scripts/lint-implementation.sh --diff-file <path>
@@ -273,7 +276,9 @@ is_line_allowed() {
 
 TMP_DIFF="$(mktemp -t lint-impl-diff.XXXXXX)"
 TMP_ISSUE="$(mktemp -t lint-impl-issue.XXXXXX)"
-trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE"' EXIT INT TERM
+TMP_CONTRACT_OUT="$(mktemp -t lint-impl-contract-out.XXXXXX)"
+TMP_CONTRACT_ERR="$(mktemp -t lint-impl-contract-err.XXXXXX)"
+trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE" "$TMP_CONTRACT_OUT" "$TMP_CONTRACT_ERR"' EXIT INT TERM
 
 if [ -n "$DIFF_FILE" ]; then
     cp "$DIFF_FILE" "$TMP_DIFF"
@@ -618,97 +623,119 @@ is_doc_file() {
     esac
 }
 
-# ── §3.1 OUT_OF_SCOPE detector ────────────────────────────────────────────────
-# Files touched ∉ issue body ## Implementation outline paths.
-# Only active when ISSUE_NUMBER is set (needs issue body).
+# ── §3.1 issue implementation-contract adapter ────────────────────────────────
+# Delegates only OUT_OF_SCOPE and MISSING_TEST classification to the Rust CLI,
+# then re-emits through the shell accumulator so ordering, skips, and caps remain
+# owned by this process.
 
-detect_out_of_scope() {
-    # Requires issue body; skip if not available
-    if [ ! -s "$TMP_ISSUE" ]; then
-        return 0
+contract_cli_failure() {
+    if [ "$DIRECTIVES" -eq 1 ]; then
+        printf 'lint-implementation.sh: %s\n' "$1" >&3
+    else
+        printf 'lint-implementation.sh: %s\n' "$1" >&2
     fi
-
-    # Extract ## Implementation outline section from issue body
-    local outline
-    outline="$(awk '
-        /^## Implementation (outline|scope)/ { in_section=1; next }
-        in_section && /^## / { exit }
-        in_section { print }
-    ' "$TMP_ISSUE")"
-
-    if [ -z "$outline" ]; then
-        return 0
-    fi
-
-    # Extract all path-shaped tokens from the outline (backtick-quoted or bare path-like)
-    local allowed_paths
-    allowed_paths="$(printf '%s\n' "$outline" | grep -oE '`[^`]+`' | tr -d '`' | grep -E '[/.]' || true)"
-    allowed_paths="$allowed_paths
-$(printf '%s\n' "$outline" | grep -oE '[A-Za-z0-9_./\-]+\.[A-Za-z0-9]+' || true)"
-
-    if [ -z "$(printf '%s' "$allowed_paths" | tr -d '[:space:]')" ]; then
-        return 0
-    fi
-
-    # For each file in the diff, check if it matches any allowed path
-    while IFS= read -r diff_file; do
-        [ -z "$diff_file" ] && continue
-        local matched=0
-        while IFS= read -r allowed; do
-            [ -z "$allowed" ] && continue
-            # Match: diff_file ends with allowed, or allowed is a prefix/substring
-            case "$diff_file" in
-                *"$allowed"*) matched=1; break ;;
-            esac
-            # Also check if allowed contains diff_file base
-            local base
-            base="$(basename "$diff_file")"
-            case "$allowed" in
-                *"$base"*) matched=1; break ;;
-            esac
-        done <<EOF
-$allowed_paths
-EOF
-        if [ "$matched" -eq 0 ]; then
-            emit_capped "OUT_OF_SCOPE" "$diff_file" "-" "file not listed in ## Implementation outline"
-        fi
-    done <<EOF
-$(get_diff_files)
-EOF
+    exit 1
 }
 
-# ── §3.1 MISSING_TEST detector ────────────────────────────────────────────────
-# Required test tier from ## Tests required not present in diff.
+resolve_implementation_contract_cli() {
+    local configured="${AUTOSPEC_BIN:-}"
+    if [ -n "$configured" ]; then
+        [ -f "$configured" ] && [ -x "$configured" ] || return 1
+        printf '%s\n' "$configured"
+        return 0
+    fi
 
-detect_missing_test() {
+    local candidate="$SCRIPT_DIR/../target/debug/autospec"
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    candidate="$(command -v autospec 2>/dev/null || true)"
+    if [ -n "$candidate" ] && [ -f "$candidate" ] && [ -x "$candidate" ]; then
+        printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    if [ -n "${HOME:-}" ]; then
+        candidate="$HOME/.autospec/bin/autospec"
+        if [ -f "$candidate" ] && [ -x "$candidate" ]; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+detect_implementation_contract() {
     if [ ! -s "$TMP_ISSUE" ]; then
         return 0
     fi
 
-    # Extract ## Tests required section
-    local tests_section
-    tests_section="$(awk '
-        /^## Tests required/ { in_section=1; next }
-        in_section && /^## / { exit }
-        in_section { print }
-    ' "$TMP_ISSUE" | tr '[:upper:]' '[:lower:]')"
-
-    if [ -z "$tests_section" ]; then
-        return 0
+    local contract_cli=""
+    contract_cli="$(resolve_implementation_contract_cli || true)"
+    if [ -z "$contract_cli" ]; then
+        contract_cli_failure "implementation-contract CLI is unavailable: autospec"
     fi
 
-    # Get list of test paths in the diff
-    local diff_test_paths
-    diff_test_paths="$(get_diff_files | grep '^tests/' || true)"
+    : > "$TMP_CONTRACT_OUT"
+    : > "$TMP_CONTRACT_ERR"
+    local cli_status=0
+    "$contract_cli" lint implementation-contract \
+        --issue-body-file "$TMP_ISSUE" \
+        --diff-file "$TMP_DIFF" \
+        > "$TMP_CONTRACT_OUT" 2> "$TMP_CONTRACT_ERR" || cli_status=$?
 
-    # Check each tier mentioned in the tests section
-    for tier in unit integration smoke e2e; do
-        if printf '%s' "$tests_section" | grep -qiE "\b${tier}\b"; then
-            if ! printf '%s\n' "$diff_test_paths" | grep -q "^tests/${tier}/"; then
-                emit_capped "MISSING_TEST" "tests/${tier}/" "-" "required test tier '${tier}' not present in diff"
-            fi
+    validate_implementation_contract_output "$cli_status"
+    while IFS= read -r finding; do
+        [ -z "$finding" ] && continue
+        local payload="${finding#INFO:}"
+        local rule_id="${payload%%:*}"
+        payload="${payload#*:}"
+        local path="${payload%%:*}"
+        payload="${payload#*:}"
+        local line="${payload%%:*}"
+        local desc="${payload#*: }"
+        emit_capped "$rule_id" "$path" "$line" "$desc"
+    done < "$TMP_CONTRACT_OUT"
+}
+
+validate_implementation_contract_output() {
+    local cli_status="$1"
+    local blocking_count=0
+    local output_count=0
+    while IFS= read -r finding; do
+        [ -z "$finding" ] && continue
+        output_count=$((output_count + 1))
+        if ! printf '%s\n' "$finding" \
+            | grep -qE '^(INFO:)?(OUT_OF_SCOPE|MISSING_TEST):[^:]+:(-|[0-9]+): .+'; then
+            contract_cli_failure "malformed implementation-contract CLI output: $finding"
         fi
-    done
+        case "$finding" in
+            INFO:*)
+                local info_rule="${finding#INFO:}"
+                info_rule="${info_rule%%:*}"
+                if ! is_skipped "$info_rule"; then
+                    contract_cli_failure "unexpected INFO finding from implementation-contract CLI: $finding"
+                fi
+                ;;
+            *) blocking_count=$((blocking_count + 1)) ;;
+        esac
+    done < "$TMP_CONTRACT_OUT"
+
+    if [ "$cli_status" -ne 0 ] && [ "$output_count" -eq 0 ]; then
+        local detail="no diagnostic"
+        if [ -s "$TMP_CONTRACT_ERR" ]; then
+            detail="$(cat "$TMP_CONTRACT_ERR")"
+        fi
+        contract_cli_failure "implementation-contract CLI failed without findings (exit ${cli_status}): ${detail}"
+    fi
+    if [ -s "$TMP_CONTRACT_ERR" ]; then
+        contract_cli_failure "implementation-contract CLI failed: $(cat "$TMP_CONTRACT_ERR")"
+    fi
+    if [ "$cli_status" -ne "$blocking_count" ]; then
+        contract_cli_failure "implementation-contract CLI exit ${cli_status} disagrees with ${blocking_count} blocking finding(s)"
+    fi
 }
 
 # ── §3.1 COMPLEXITY detector ──────────────────────────────────────────────────
@@ -1642,13 +1669,12 @@ rule_directive() {
 if [ "$DIRECTIVES" -eq 1 ]; then
     # Capture findings to a temp file, then reformat as directives
     TMP_FINDINGS="$(mktemp -t lint-impl-findings.XXXXXX)"
-    trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE" "$TMP_FINDINGS"' EXIT INT TERM
+    trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE" "$TMP_CONTRACT_OUT" "$TMP_CONTRACT_ERR" "$TMP_FINDINGS"' EXIT INT TERM
 
     # Run detectors with stdout going to TMP_FINDINGS
     {
         detect_pr_size
-        detect_out_of_scope
-        detect_missing_test
+        detect_implementation_contract
         detect_complexity
         check_file_loc
         check_function_loc
@@ -1690,8 +1716,7 @@ if [ "$DIRECTIVES" -eq 1 ]; then
     done < "$TMP_FINDINGS"
 else
     detect_pr_size
-    detect_out_of_scope
-    detect_missing_test
+    detect_implementation_contract
     detect_complexity
     check_file_loc
     check_function_loc
