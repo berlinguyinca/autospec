@@ -71,14 +71,7 @@ fn write_remote(root: &Path, issue: u64, field: &str, value: &str) {
         .expect("remote issue field");
 }
 
-fn stateful_parent_fixture(name: &str) -> PathBuf {
-    let root = fixture(name);
-    fs::create_dir(root.join("remote")).expect("remote fixture directory");
-    write_remote(&root, 10, "comments", BASE_DECOMPOSITION);
-    write_remote(&root, 10, "state", "OPEN\n");
-    write_gh(
-        &root.join("bin"),
-        r#"#!/bin/sh
+const STATEFUL_PARENT_GH: &str = r#"#!/bin/sh
 remote=$AUTOSPEC_PARENT_REMOTE
 unexpected() {
   kind=$1
@@ -148,8 +141,14 @@ if [ "$1 $2" = "api graphql" ]; then
 fi
 case "$1" in issue|api) unexpected unexpected-mutation "$@" ;; esac
 unexpected unexpected-command "$@"
-"#,
-    );
+"#;
+
+fn stateful_parent_fixture(name: &str) -> PathBuf {
+    let root = fixture(name);
+    fs::create_dir(root.join("remote")).expect("remote fixture directory");
+    write_remote(&root, 10, "comments", BASE_DECOMPOSITION);
+    write_remote(&root, 10, "state", "OPEN\n");
+    write_gh(&root.join("bin"), STATEFUL_PARENT_GH);
     root
 }
 
