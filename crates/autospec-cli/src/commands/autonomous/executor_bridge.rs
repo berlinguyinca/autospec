@@ -99,6 +99,8 @@ static METADATA_WIP_SYNC_EVENTS: std::sync::Mutex<Vec<&'static str>> =
 #[cfg(test)]
 static WORKTREE_REPAIR_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
+static POST_CI_RECREATE_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
 static PRUNABLE_RECLAIM_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static ZERO_EFFECT_RECOVERY_FAILPOINT: AtomicU8 = AtomicU8::new(0);
@@ -22394,6 +22396,10 @@ fn recreate_missing_post_ci_worktree(
     {
         return Err("executor recreated post-CI worktree head mismatch".to_string());
     }
+    #[cfg(test)]
+    if POST_CI_RECREATE_FAILPOINT.swap(0, Ordering::SeqCst) == 1 {
+        return Err("injected executor post-CI crash after worktree recreation".to_string());
+    }
     ensure_cleanup_record(
         &cleanup_record_path(state_path, "worktree-recreate-complete"),
         &cleanup_binding(state),
@@ -26688,13 +26694,9 @@ exit 64
         );
         let worktree = provision_issue_worktree(&fixture.repo, &repository, 42, &base)
             .expect("provision worktree");
-        fixture.executor_scope_roots.push(
-            worktree
-                .path
-                .parent()
-                .expect("executor scope")
-                .to_path_buf(),
-        );
+        fixture
+            .executor_scope_roots
+            .push(worktree.path.parent().unwrap().to_path_buf());
         fs::write(worktree.path.join("implementation.txt"), "implemented\n")
             .expect("write implementation");
         git(&worktree.path, &["add", "implementation.txt"]);
@@ -26702,43 +26704,42 @@ exit 64
         git(&worktree.path, &["push", "-u", "origin", &worktree.branch]);
         let head = git_stdout(&worktree.path, &["rev-parse", "HEAD"]);
         let state_path = fixture.root.join("state/invocation.json");
-        let state = PersistedInvocation {
-            schema: super::INVOCATION_SCHEMA,
-            identity: BridgeIdentity {
-                repository,
-                repository_path: fixture.repo.clone(),
-                issue: 42,
-                worker_id: "worker".into(),
-                branch: worktree.branch.clone(),
-                claim_id: "claim".into(),
-                invocation_id: "invocation".into(),
-                base_ref: base.base_ref.clone(),
-                base_oid: base.base_oid.clone(),
-                worktree: worktree.path.clone(),
-                runtime_environment_dir: None,
-                runtime_session_id: None,
-            },
-            harness: HarnessKind::Codex,
-            phase: BridgePhase::CiPassed,
-            supervisor: None,
-            process: None,
-            progress_at: 1,
-            pr: Some(55),
-            head_oid: Some(head.clone()),
-            closeout_path: None,
-            closeout_digest: None,
-            remote_snapshot_digest: None,
-            draft_process: None,
-            terminal_result: None,
-        };
+        let mut state = supervision_state(&fixture);
+        state.identity.repository = repository;
+        state.identity.worktree = worktree.path.clone();
+        state.identity.branch = worktree.branch.clone();
+        state.identity.base_ref = base.base_ref.clone();
+        state.identity.base_oid = base.base_oid.clone();
+        state.phase = BridgePhase::CiPassed;
+        state.pr = Some(55);
+        state.head_oid = Some(head.clone());
         write_invocation_atomic(&state_path, &state).expect("persist post-CI state");
-        let old_review = state_path
-            .parent()
-            .expect("state parent")
-            .join("review/command-000.json");
-        fs::create_dir_all(old_review.parent().expect("review parent"))
-            .expect("create old review directory");
-        fs::write(&old_review, "old review evidence\n").expect("write old review evidence");
+        let review_artifacts = state_path.with_extension("review-artifacts");
+        let review_capture = fixture.root.join("review-capture");
+        let reviewer = fixture.root.join("reviewer");
+        let repaired = fixture.root.join("reviewer-repaired");
+        write_executable(
+            &reviewer,
+            &format!("#!/bin/sh\n[ -f '{}' ] || exit 1\n", repaired.display()),
+        );
+        let review_plan = |identity: &str| super::DirectCommandPlan {
+            commands: vec![automatic_review_command(
+                &reviewer,
+                &review_capture,
+                identity,
+            )],
+        };
+        super::execute_direct_plan(
+            &worktree.path,
+            &review_plan(&"a".repeat(64)),
+            &review_artifacts,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("persist old automatic review failure");
+        rewrite_direct_terminal_as_signal(&review_artifacts, 25);
+        let old_review = fs::read(super::direct_attempt_paths(&review_artifacts, 0).record)
+            .expect("read old review record");
         git(
             &fixture.repo,
             &["worktree", "remove", worktree.path.to_str().unwrap()],
@@ -26750,7 +26751,6 @@ exit 64
         assert!(recover_invocation(&state_path, &mismatched.identity)
             .expect_err("mismatched durable head must fail")
             .contains("head"));
-        assert!(!worktree.path.exists());
 
         write_invocation_atomic(&state_path, &state).expect("restore exact state");
         git(&fixture.repo, &["branch", "-D", &worktree.branch]);
@@ -26761,11 +26761,37 @@ exit 64
         super::record_worktree_creation_identity(&fixture.repo, &worktree.branch, &base)
             .expect("restore branch identity");
         let base_key = format!("branch.{}.autospecBaseOid", worktree.branch);
-        git(&fixture.repo, &["config", &base_key, &"b".repeat(40)]);
+        let branch_ref = format!("refs/heads/{}", worktree.branch);
+        git(
+            &fixture.repo,
+            &[
+                "push",
+                "--force",
+                "origin",
+                &format!("{}:{branch_ref}", base.base_oid),
+            ],
+        );
         assert!(recover_invocation(&state_path, &state.identity)
-            .expect_err("mismatched base identity must fail")
-            .contains("branch identity mismatch"));
+            .expect_err("diverged remote head must fail")
+            .contains("remote branch head mismatch"));
+        git(
+            &fixture.repo,
+            &["push", "--force", "origin", &format!("{head}:{branch_ref}")],
+        );
+        let tree = git_stdout(
+            &fixture.repo,
+            &["rev-parse", &format!("{}^{{tree}}", base.base_oid)],
+        );
+        let unrelated = git_stdout(&fixture.repo, &["commit-tree", &tree, "-m", "unrelated"]);
+        let mut unrelated_base = state.clone();
+        unrelated_base.identity.base_oid = unrelated.clone();
+        write_invocation_atomic(&state_path, &unrelated_base).expect("persist unrelated base");
+        git(&fixture.repo, &["config", &base_key, &unrelated]);
+        assert!(recover_invocation(&state_path, &unrelated_base.identity)
+            .expect_err("unrelated base ancestry must fail")
+            .contains("does not descend"));
         git(&fixture.repo, &["config", &base_key, &base.base_oid]);
+        write_invocation_atomic(&state_path, &state).expect("restore exact base");
 
         let mut foreign = state.clone();
         foreign.identity.worktree = foreign.identity.worktree.with_file_name("issue-999");
@@ -26787,16 +26813,34 @@ exit 64
             fs::remove_file(&worktree.path).expect("remove worktree symlink");
         }
 
-        let recovered = recover_invocation(&state_path, &state.identity)
-            .expect("recreate exact post-CI worktree")
-            .expect("recover invocation");
-        assert_eq!(recovered, state);
+        super::POST_CI_RECREATE_FAILPOINT.store(1, Ordering::SeqCst);
+        let interrupted = recover_invocation(&state_path, &state.identity)
+            .expect_err("crash after durable worktree recreation");
+        assert!(
+            interrupted.contains("after worktree recreation"),
+            "{interrupted}"
+        );
+        let complete = super::cleanup_record_path(&state_path, "worktree-recreate-complete");
+        assert!(!complete.exists());
         assert_eq!(git_stdout(&worktree.path, &["rev-parse", "HEAD"]), head);
         assert_eq!(
-            fs::read_to_string(&old_review).expect("old review evidence survives"),
-            "old review evidence\n"
+            fs::read(super::direct_attempt_paths(&review_artifacts, 0).record)
+                .expect("old review evidence survives"),
+            old_review
         );
-        assert!(super::cleanup_record_path(&state_path, "worktree-recreate-complete").is_file());
+        assert_eq!(
+            super::registered_worktree_paths(&fixture.repo)
+                .expect("registered worktrees")
+                .iter()
+                .filter(|path| *path == &worktree.path)
+                .count(),
+            1
+        );
+        assert_eq!(
+            recover_invocation(&state_path, &state.identity).unwrap(),
+            Some(state.clone())
+        );
+        assert!(complete.is_file());
 
         fs::write(worktree.path.join("foreign.txt"), "dirty\n").expect("dirty replacement");
         assert!(recover_invocation(&state_path, &state.identity)
@@ -26817,6 +26861,32 @@ exit 64
             state
         );
         assert_eq!(git_stdout(&worktree.path, &["rev-parse", "HEAD"]), head);
+        fs::write(&repaired, "repaired\n").expect("repair automatic reviewer");
+        let retried = super::execute_direct_plan(
+            &worktree.path,
+            &review_plan(&"b".repeat(64)),
+            &review_artifacts,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("recreated worktree reaches one identity-aware review retry");
+        assert_eq!(retried[0].terminal, super::AttemptTerminal::Exited(0));
+        let paths = super::direct_attempt_paths(&review_artifacts, 0);
+        assert_eq!(direct_failure_archive_count(&review_artifacts), 1);
+        assert!(!super::changed_automatic_reviewer_failure(
+            &worktree.path,
+            &paths,
+            &automatic_review_command(&reviewer, &review_capture, &"b".repeat(64)),
+            None,
+        )
+        .expect("restart must not reserve another review"));
+        assert_eq!(direct_failure_archive_count(&review_artifacts), 1);
+        assert_eq!(
+            fs::read_dir(super::direct_attempt_reservation_directory(&paths))
+                .expect("review reservations")
+                .count(),
+            2
+        );
     }
 
     #[test]
