@@ -130,6 +130,7 @@ fn implementation_lint_reports_complexity_security_todo_mock_and_docs() {
     assert_eq!(
         rules(&result),
         [
+            "PR_SIZE",
             "COMPLEXITY",
             "SECURITY",
             "TODO_LEFT",
@@ -238,6 +239,7 @@ fn implementation_lint_reports_every_vacuous_test_rule() {
     assert_eq!(
         rules(&result),
         [
+            "PR_SIZE",
             "VACUOUS_GREP_INVERSE_OR_TRUE",
             "VACUOUS_OR_TRUE",
             "VACUOUS_TAUTOLOGY",
@@ -766,7 +768,10 @@ fn implementation_lint_matches_manifest_tautology_and_cli_flag_boundaries() {
             ..ImplementationLintOptions::default()
         },
     );
-    assert_eq!(rules(&dependency_result), vec!["NEW_DEP_UNJUSTIFIED"; 6]);
+    assert_eq!(
+        rules(&dependency_result),
+        [vec!["PR_SIZE"], vec!["NEW_DEP_UNJUSTIFIED"; 6],].concat()
+    );
 
     let tautology = new_file(
         "tests/unit/test_tautology.js",
@@ -825,7 +830,7 @@ fn implementation_lint_rejects_near_miss_manifest_and_public_surface_patterns() 
             ..ImplementationLintOptions::default()
         },
     );
-    assert!(dependency_result.findings.is_empty());
+    assert_eq!(rules(&dependency_result), ["PR_SIZE"]);
 
     let flags = new_file(
         "src/flags.sh",
