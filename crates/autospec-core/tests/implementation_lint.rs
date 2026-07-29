@@ -768,10 +768,9 @@ fn implementation_lint_matches_manifest_tautology_and_cli_flag_boundaries() {
             ..ImplementationLintOptions::default()
         },
     );
-    assert_eq!(
-        rules(&dependency_result),
-        [vec!["PR_SIZE"], vec!["NEW_DEP_UNJUSTIFIED"; 6],].concat()
-    );
+    let dependency_rules = rules(&dependency_result);
+    assert_eq!(dependency_rules[0], "PR_SIZE");
+    assert_eq!(&dependency_rules[1..], vec!["NEW_DEP_UNJUSTIFIED"; 6]);
 
     let tautology = new_file(
         "tests/unit/test_tautology.js",
