@@ -14999,13 +14999,13 @@ fn continuation_child_list(repository: &str, parent: u64) -> Result<Vec<u64>, St
     }
     Ok(children)
 }
-fn publish_continuation_child(
+fn continuation_child_document(
     receipt: &ContinuationReceipt,
     umbrella: u64,
     ordinal: usize,
     criterion: &str,
     dependency: Option<u64>,
-) -> Result<u64, String> {
+) -> Result<(String, String, String), String> {
     let criterion = criterion.trim();
     if criterion.len() > 120 || criterion.lines().count() != 1 {
         return Err("continuation criterion must be one line of at most 120 bytes".to_string());
@@ -15031,6 +15031,24 @@ fn publish_continuation_child(
     }
     let issue = receipt.issue;
     body.push_str(&format!("\n## Context\n\nPart of #{umbrella}.\n\n## Files to read first\n\n- `AGENTS.md`\n\n## Implementation outline\n\n- Implement continuation ordinal {ordinal} within the original issue #{issue} scope.\n\n## Tests required\n\n- smoke: verify continuation ordinal {ordinal}.\n\n### Primary smoke test (inner loop)\n\n```bash\ngit diff --check\n```\n"));
+    if !autospec_core::lint::lint_issue_body(&body).is_empty() {
+        return Err("continuation issue body failed the issue-quality contract".to_string());
+    }
+    let mut title = format!("Continuation {ordinal}: {criterion}");
+    while title.len() > 120 {
+        title.pop();
+    }
+    Ok((marker, title, body))
+}
+fn publish_continuation_child(
+    receipt: &ContinuationReceipt,
+    umbrella: u64,
+    ordinal: usize,
+    criterion: &str,
+    dependency: Option<u64>,
+) -> Result<u64, String> {
+    let (marker, title, body) =
+        continuation_child_document(receipt, umbrella, ordinal, criterion, dependency)?;
     let mut matches = continuation_gh(
         &[
             "issue".into(),
@@ -15051,10 +15069,6 @@ fn publish_continuation_child(
         "find continuation child",
     )?;
     if matches.is_empty() {
-        let title: String = format!("Continuation {ordinal}: {criterion}")
-            .chars()
-            .take(120)
-            .collect();
         let mut arguments = vec![
             "issue".into(),
             "create".into(),
@@ -15126,6 +15140,10 @@ fn publish_continuation_children(
             "complete the current capped slice ordinal 1"
         };
         criteria.insert(0, current.to_string());
+    }
+    for (offset, criterion) in criteria.iter().enumerate() {
+        let dependency = (parent.is_some() || offset > 0).then_some(receipt.issue);
+        continuation_child_document(receipt, umbrella, start + offset, criterion, dependency)?;
     }
     for (offset, criterion) in criteria.iter().enumerate() {
         let child =
@@ -35936,40 +35954,22 @@ exit 64
         write_executable(
             &bin.join("gh"),
             r#"#!/bin/sh
-set -eu
-printf '%s\n' "$*" >> "$GH_CALLS"
+set -eu; printf '%s\n' "$*" >> "$GH_CALLS"
 case "$1 $2" in
-"issue view")
-  issue=$3
-  case "$*" in
+"issue view") issue=$3; case "$*" in
     *"--json comments"*) test ! -f "$GH_STORE/comments/$issue" || cat "$GH_STORE/comments/$issue";;
     *"--json body"*) cat "$GH_STORE/issues/$issue.body";;
     *"--json state"*) printf 'OPEN\n';;
     *) exit 64;;
   esac;;
-"issue list")
-  marker=
-  while [ "$#" -gt 0 ]; do [ "$1" != "--search" ] || marker=$2; shift; done
-  marker=${marker% in:body}
-  for body in "$GH_STORE"/issues/*.body; do
-    [ -f "$body" ] || continue
-    if grep -Fq "$marker" "$body"; then basename "$body" .body; fi
-  done;;
-"issue create")
-  body= title=
-  while [ "$#" -gt 0 ]; do
-    case "$1" in --body) body=$2; shift;; --title) title=$2; shift;; esac
-    shift
-  done
-  number=$(cat "$GH_STORE/next"); number=$((number + 1))
-  printf '%s' "$number" > "$GH_STORE/next"
-  printf '%s\n' "$body" > "$GH_STORE/issues/$number.body"
-  printf '%s\n' "$title" > "$GH_STORE/issues/$number.title"
-  printf 'https://example.invalid/issues/%s\n' "$number";;
-"issue comment")
-  issue=$3; body=
-  while [ "$#" -gt 0 ]; do [ "$1" != "--body" ] || { body=$2; shift; }; shift; done
-  printf '%s\n' "$body" > "$GH_STORE/comments/$issue";;
+"issue list") marker=
+  while [ "$#" -gt 0 ]; do [ "$1" != "--search" ] || marker=$2; shift; done; marker=${marker% in:body}
+  for body in "$GH_STORE"/issues/*.body; do if [ -f "$body" ] && grep -Fq "$marker" "$body"; then basename "$body" .body; fi; done;;
+"issue create") body= title=; while [ "$#" -gt 0 ]; do case "$1" in --body) body=$2; shift;; --title) title=$2; shift;; esac; shift; done
+  number=$(cat "$GH_STORE/next"); number=$((number + 1)); printf '%s' "$number" > "$GH_STORE/next"
+  printf '%s\n' "$body" > "$GH_STORE/issues/$number.body"; printf '%s\n' "$title" > "$GH_STORE/issues/$number.title"; printf 'https://example.invalid/issues/%s\n' "$number";;
+"issue comment") issue=$3; body=
+  while [ "$#" -gt 0 ]; do [ "$1" != "--body" ] || { body=$2; shift; }; shift; done; printf '%s\n' "$body" > "$GH_STORE/comments/$issue";;
 "api user") printf 'berlinguyinca\n';;
 *) exit 64;;
 esac
@@ -36003,7 +36003,7 @@ esac
         state.head_oid = Some(head.clone());
         let proof = super::ImplementationProof {
             head_oid: head,
-            closeout_body: "## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice-0.txt; `git diff`\nScoped git status: slice files\nOne likely hidden failure: boundary\nCompleted criteria: [\"first current slice criterion with a reproducible command and exact artifact path\",\"second current slice criterion with a reproducible command and exact artifact path\"]\nUnmet criteria: [\"Run `scripts/continuation-second.sh` and verify the exact receipt-bound restart path with 0 duplicate issue creates\",\"Run `scripts/continuation-third.sh` once\"]\n".into(),
+            closeout_body: "## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice-0.txt; `git diff`\nScoped git status: slice files\nOne likely hidden failure: boundary\nCompleted criteria: [\"first current slice criterion with a reproducible command and exact artifact path\",\"second current slice criterion with a reproducible command and exact artifact path\"]\nUnmet criteria: [\"Run `scripts/continuation-second.sh` and verify café café café café café café café café café café café\",\"Run `scripts/continuation-third.sh` once\"]\n".into(),
         };
         super::require_continuation_checkpoint(&state_path, &event_log, &state, &proof, "", true)
             .expect("proactive continuation");
@@ -36020,6 +36020,14 @@ esac
             .expect("publication restart");
         assert!(!fs::read_to_string(store.join("calls"))
             .expect("restart calls")
+            .contains("issue create"));
+        let mut adverse = super::load_continuation_receipt(&state_path, &state).expect("receipt");
+        adverse.unmet = vec!["Improve quality should feel nice".into()];
+        adverse.content_digest = adverse.digest();
+        fs::write(store.join("calls"), "").expect("clear calls");
+        assert!(super::publish_continuation_children(&state_path, &adverse).is_err());
+        assert!(!fs::read_to_string(store.join("calls"))
+            .unwrap()
             .contains("issue create"));
         fs::write(
             store.join("comments/43"),
@@ -36043,16 +36051,8 @@ esac
         assert!(fs::read_to_string(store.join("comments/43"))
             .unwrap()
             .contains("autospec-parent:10"));
-        let lint = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/lint-issue.sh");
-        for number in 101..=105 {
-            assert!(Command::new(&lint)
-                .arg(store.join(format!("issues/{number}.body")))
-                .status()
-                .unwrap()
-                .success());
-        }
         let title = fs::read_to_string(store.join("issues/102.title")).unwrap();
-        assert!(title.trim().chars().count() <= 120);
+        assert!(title.trim().len() <= 120);
         for (key, previous) in [
             ("PATH", previous_path),
             ("GH_STORE", previous_store),
