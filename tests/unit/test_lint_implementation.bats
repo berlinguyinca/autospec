@@ -2,9 +2,15 @@
 # tests/unit/test_lint_implementation.bats — one @test per fixture row.
 # Exercises scripts/lint-implementation.sh exit code and stdout findings.
 
+bats_require_minimum_version 1.5.0
+
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     LINT="$REPO_ROOT/scripts/lint-implementation.sh"
+    AUTOSPEC="$REPO_ROOT/target/debug/autospec"
+    if [ ! -x "$AUTOSPEC" ]; then
+        cargo build --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -p autospec-cli --bin autospec
+    fi
     FIX="$REPO_ROOT/tests/fixtures/implementation-quality"
     PR_SIZE_TMP="$(mktemp -d)"
 }
@@ -66,16 +72,33 @@ EOF
 }
 
 install_real_contract_cli() {
-    local cli="$REPO_ROOT/target/debug/autospec"
-    [ -x "$cli" ]
-    CONTRACT_AUTOSPEC_BIN="$cli"
+    CONTRACT_AUTOSPEC_BIN="$AUTOSPEC"
 }
 
 run_contract_shell() {
     env PATH="$PR_SIZE_TMP/bin:/usr/bin:/bin" \
         AUTOSPEC_BIN="${CONTRACT_AUTOSPEC_BIN:-}" \
         CONTRACT_ISSUE_BODY="$PR_SIZE_TMP/issue.md" \
-        bash "$LINT" --diff-file "$PR_SIZE_TMP/change.diff" --issue 2764
+        bash "$LINT" --diff-file "$PR_SIZE_TMP/change.diff" --issue 2764 "$@"
+}
+
+install_many_findings_contract_cli() {
+    cat > "$PR_SIZE_TMP/bin/autospec" <<'EOF'
+#!/usr/bin/env bash
+i=1
+while [ "$i" -le 12 ]; do
+    printf 'OUT_OF_SCOPE:src/out-%s.rs:-: delegated scope finding %s\n' "$i" "$i"
+    i=$((i + 1))
+done
+i=1
+while [ "$i" -le 12 ]; do
+    printf 'MISSING_TEST:tests/integration/test-%s.rs:-: delegated test finding %s\n' "$i" "$i"
+    i=$((i + 1))
+done
+exit 24
+EOF
+    chmod +x "$PR_SIZE_TMP/bin/autospec"
+    CONTRACT_AUTOSPEC_BIN="$PR_SIZE_TMP/bin/autospec"
 }
 
 # ── syntax check ─────────────────────────────────────────────────────────────
@@ -134,17 +157,17 @@ run_contract_shell() {
 - integration: real shell regression
 
 Guardian: skip-OUT_OF_SCOPE # fixture proves delegated INFO rendering"
-    cat > "$PR_SIZE_TMP/change.diff" <<'EOF'
-diff --git a/scripts/unlisted.sh b/scripts/unlisted.sh
-new file mode 100755
---- /dev/null
-+++ b/scripts/unlisted.sh
-@@ -0,0 +1 @@
-+eval(input)
-EOF
+    printf '%s\n' \
+        'diff --git a/scripts/unlisted.sh b/scripts/unlisted.sh' \
+        'new file mode 100755' \
+        '--- /dev/null' \
+        '+++ b/scripts/unlisted.sh' \
+        '@@ -0,0 +1 @@' \
+        '+eval(input)' \
+        > "$PR_SIZE_TMP/change.diff"
     install_real_contract_cli
 
-    run "$REPO_ROOT/target/debug/autospec" lint implementation-contract \
+    run "$AUTOSPEC" lint implementation-contract \
         --issue-body-file "$PR_SIZE_TMP/issue.md" \
         --diff-file "$PR_SIZE_TMP/change.diff"
     [ "$status" -eq 1 ]
@@ -202,9 +225,11 @@ EOF
             printf '#!/usr/bin/env bash\nexit 0\n' > "$PR_SIZE_TMP/bin/autospec"
             chmod 0644 "$PR_SIZE_TMP/bin/autospec"
         fi
-        run run_contract_shell
-        [ "$status" -ne 0 ]
-        [[ "$output" == *"implementation-contract CLI is unavailable"* ]]
+        run --separate-stderr run_contract_shell
+        [ "$status" -eq 1 ]
+        [ -z "$output" ]
+        [ "$stderr" = \
+            "lint-implementation.sh: implementation-contract CLI is unavailable: autospec" ]
     done
 }
 
@@ -228,9 +253,17 @@ exit 1
 EOF
     chmod +x "$PR_SIZE_TMP/bin/autospec"
     CONTRACT_AUTOSPEC_BIN="$PR_SIZE_TMP/bin/autospec"
-    run run_contract_shell
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"malformed implementation-contract CLI output"* ]]
+    run --separate-stderr run_contract_shell
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [ "$stderr" = \
+        "lint-implementation.sh: malformed implementation-contract CLI output: NOT_A_FINDING" ]
+
+    run --separate-stderr run_contract_shell --directives
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [ "$stderr" = \
+        "lint-implementation.sh: malformed implementation-contract CLI output: NOT_A_FINDING" ]
 
     cat > "$PR_SIZE_TMP/bin/autospec" <<'EOF'
 #!/usr/bin/env bash
@@ -239,10 +272,36 @@ exit 7
 EOF
     chmod +x "$PR_SIZE_TMP/bin/autospec"
     CONTRACT_AUTOSPEC_BIN="$PR_SIZE_TMP/bin/autospec"
-    run run_contract_shell
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"implementation-contract CLI failed without findings"* ]]
-    [[ "$output" == *"transport failed"* ]]
+    run --separate-stderr run_contract_shell
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+    [ "$stderr" = \
+        "lint-implementation.sh: implementation-contract CLI failed without findings (exit 7): transport failed" ]
+}
+
+@test "implementation contract caps each delegated rule before cumulative shell accounting" {
+    contract_issue "## Implementation outline
+
+- \`src/allowed.rs\`"
+    printf '%s\n' \
+        'diff --git a/scripts/unlisted.sh b/scripts/unlisted.sh' \
+        'new file mode 100755' \
+        '--- /dev/null' \
+        '+++ b/scripts/unlisted.sh' \
+        '@@ -0,0 +1 @@' \
+        '+eval(input)' \
+        > "$PR_SIZE_TMP/change.diff"
+    install_many_findings_contract_cli
+
+    run --separate-stderr run_contract_shell
+    [ "$status" -eq 23 ]
+    [ "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 23 ]
+    [ "$(printf '%s\n' "$output" | sed -n '11p')" = \
+        "OUT_OF_SCOPE:src/out-11.rs:-: + more (truncated)" ]
+    [ "$(printf '%s\n' "$output" | sed -n '22p')" = \
+        "MISSING_TEST:tests/integration/test-11.rs:-: + more (truncated)" ]
+    [ "$(printf '%s\n' "$output" | sed -n '23p')" = \
+        "SECURITY:scripts/unlisted.sh:2: eval() usage — potential code injection" ]
 }
 
 # ── PR_SIZE detector ─────────────────────────────────────────────────────────
