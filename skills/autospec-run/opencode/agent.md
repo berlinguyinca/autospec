@@ -1058,10 +1058,11 @@ do not fall back to an inline label-swap path.
 > 4a. <!-- pr-size-pre-push:begin --> **Deterministic PR_SIZE pre-push gate.**
 >    Define this helper in the monitor shell and run it before any remote mutation:
 >    ```bash
+>    # pr-size-helper:begin
 >    run_pr_size_gate() {
 >      PR_SIZE_PHASE="$1"
->      PR_SIZE_BASE_OID=$(git merge-base "origin/${AUTOSPEC_BASE_BRANCH:-main}" HEAD) || return 1
->      PR_SIZE_HEAD_OID=$(git rev-parse HEAD) || return 1
+>      PR_SIZE_BASE_OID="$2"
+>      PR_SIZE_HEAD_OID="$3"
 >      PR_SIZE_DIFF=$(mktemp -t autospec-pr-size-XXXXXX.diff) || return 1
 >      git diff --binary "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID" >"$PR_SIZE_DIFF" || {
 >        rm -f "$PR_SIZE_DIFF"
@@ -1079,12 +1080,17 @@ do not fall back to an inline label-swap path.
 >      fi
 >      printf '%s\n' 'INFO:PR_SIZE: acceptance'
 >    }
->    PR_SIZE_EVIDENCE=$(run_pr_size_gate pre-push) || {
+>    # pr-size-helper:end
+>    # pr-size-pre-push-exec:begin
+>    PR_SIZE_BASE_OID=$(git merge-base "origin/${AUTOSPEC_BASE_BRANCH:-main}" HEAD) || exit 1
+>    PR_SIZE_HEAD_OID=$(git rev-parse HEAD) || exit 1
+>    PR_SIZE_EVIDENCE=$(run_pr_size_gate pre-push "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID") || {
 >      printf '%s\n' "$PR_SIZE_EVIDENCE"
 >      exit 1
 >    }
 >    printf '%s\n' "$PR_SIZE_EVIDENCE"
 >    printf '%s\n' "$PR_SIZE_EVIDENCE" | grep -qxF 'INFO:PR_SIZE: acceptance' || exit 1
+>    # pr-size-pre-push-exec:end
 >    ```
 >    The deterministic linter rejects the first over-limit values: **401 changed lines**,
 >    **9 raw files**, or **4 logical units**. On rejection, preserve the branch and do not
@@ -1370,10 +1376,26 @@ do not fall back to an inline label-swap path.
 >      fi
 >    fi
 >    <!-- pr-size-final-merge:begin -->
->    # Recompute both OIDs after the final update/retest cycle and lint that exact
->    # base-to-head diff again. If the shell boundary discarded the helper, redefine
->    # run_pr_size_gate exactly as in step 4a before continuing.
->    PR_SIZE_EVIDENCE=$(run_pr_size_gate final-pre-merge) || {
+>    # Query GitHub after update-branch, review, and final local proof. The live PR
+>    # endpoints are authoritative; stale local OIDs can never create acceptance.
+>    # If the shell boundary discarded the helper, redefine it exactly as in step 4a.
+>    # pr-size-final-merge-exec:begin
+>    PR_SIZE_REMOTE_OIDS=$(gh pr view <PR> --json baseRefOid,headRefOid \
+>      --jq '[.baseRefOid, .headRefOid] | @tsv') || exit 1
+>    [ "$(printf '%s\n' "$PR_SIZE_REMOTE_OIDS" | awk -F '\t' \
+>      'NF == 2 && $1 != "" && $2 != "" { print "valid" }')" = "valid" ] || exit 1
+>    PR_SIZE_BASE_OID=$(printf '%s\n' "$PR_SIZE_REMOTE_OIDS" | cut -f1)
+>    PR_SIZE_HEAD_OID=$(printf '%s\n' "$PR_SIZE_REMOTE_OIDS" | cut -f2)
+>    git fetch --no-tags origin \
+>      "+refs/heads/${AUTOSPEC_BASE_BRANCH:-main}:refs/remotes/origin/${AUTOSPEC_BASE_BRANCH:-main}" \
+>      "+refs/heads/<BRANCH>:refs/remotes/origin/<BRANCH>" || exit 1
+>    git cat-file -e "${PR_SIZE_BASE_OID}^{commit}" || exit 1
+>    git cat-file -e "${PR_SIZE_HEAD_OID}^{commit}" || exit 1
+>    [ "$(git rev-parse "origin/${AUTOSPEC_BASE_BRANCH:-main}")" = "$PR_SIZE_BASE_OID" ] || exit 1
+>    [ "$(git rev-parse "origin/<BRANCH>")" = "$PR_SIZE_HEAD_OID" ] || exit 1
+>    [ "$(git rev-parse HEAD)" = "$PR_SIZE_HEAD_OID" ] || exit 1
+>    PR_SIZE_EVIDENCE=$(run_pr_size_gate final-pre-merge \
+>      "$PR_SIZE_BASE_OID" "$PR_SIZE_HEAD_OID") || {
 >      printf '%s\n' "$PR_SIZE_EVIDENCE"
 >      exit 1
 >    }
@@ -1381,6 +1403,7 @@ do not fall back to an inline label-swap path.
 >    # Reviewer evidence is accepted only as this complete line; prefixes,
 >    # suffixes, summaries, and inferred approval are not acceptance.
 >    printf '%s\n' "$PR_SIZE_EVIDENCE" | grep -qxF 'INFO:PR_SIZE: acceptance' || exit 1
+>    # pr-size-final-merge-exec:end
 >    <!-- pr-size-final-merge:end -->
 >    # Blast-radius domain fence at the merge chokepoint (issue #1732). The guarded-merge
 >    # wrapper classifies the PR's ACTUAL changed files against the repo's fenced_surfaces
