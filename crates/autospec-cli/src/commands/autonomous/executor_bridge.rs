@@ -36,9 +36,9 @@ use autospec_core::claim::{
 };
 use autospec_core::coordination::ConductorOutcome;
 use autospec_core::lint::{
-    evaluate_patch_size, lint_implementation, parse_unified_diff, ImplementationLintContext,
-    ImplementationLintOptions, ImplementationLintSeverity, PatchSizeEvaluation, PatchSizeLimits,
-    RepositoryIndex,
+    evaluate_patch_size, lint_implementation, lint_issue_implementation_contract,
+    parse_unified_diff, ImplementationLintContext, ImplementationLintOptions,
+    ImplementationLintSeverity, PatchSizeEvaluation, PatchSizeLimits, RepositoryIndex,
 };
 #[cfg(unix)]
 use nix::fcntl::OFlag;
@@ -14391,19 +14391,24 @@ fn run_implementation_lint(
     )?;
     let diff = parse_unified_diff(&diff)
         .map_err(|error| format!("parse executor implementation diff for lint: {error}"))?;
-    let repository = BridgeRepositoryIndex {
-        repo: state.identity.worktree.clone(),
-        tree_oid: proof.head_oid.clone(),
+    let focused = lint_issue_implementation_contract(&diff, issue_body);
+    let result = if focused.blocking_count != 0 || focused.scope_exploded {
+        focused
+    } else {
+        let repository = BridgeRepositoryIndex {
+            repo: state.identity.worktree.clone(),
+            tree_oid: proof.head_oid.clone(),
+        };
+        let options = implementation_lint_options();
+        lint_implementation(
+            &diff,
+            ImplementationLintContext {
+                issue_body: (!issue_body.is_empty()).then_some(issue_body),
+                repository: &repository,
+                options,
+            },
+        )
     };
-    let options = implementation_lint_options();
-    let result = lint_implementation(
-        &diff,
-        ImplementationLintContext {
-            issue_body: (!issue_body.is_empty()).then_some(issue_body),
-            repository: &repository,
-            options,
-        },
-    );
     if result.blocking_count == 0 && !result.scope_exploded {
         Ok(())
     } else {
@@ -35664,6 +35669,57 @@ exit 64
 
     #[cfg(unix)]
     #[test]
+    fn autonomous_executor_bridge_issue_contract_blocks_missing_and_pathless_outlines_before_remote_mutation(
+    ) {
+        // Break caught: compatibility lint treating a missing/pathless outline as unrestricted.
+        for (case, issue_body) in [
+            ("missing", "## Goal\n\nImplement the executor behavior.\n"),
+            (
+                "pathless",
+                "## Goal\n\nImplement the executor behavior.\n\n\
+                 ## Implementation outline\n\n- Update the executor behavior.\n",
+            ),
+        ] {
+            let (fixture, mut state, snapshot, closeout) =
+                implementation_proof_fixture(&format!("issue-contract-{case}"));
+            let state_path = fixture.root.join("state/invocation.json");
+            let adapter = draft_pr_adapter_fixture(&fixture, &state_path, "[]");
+            state.phase = BridgePhase::Pending;
+            super::write_invocation_atomic(&state_path, &state).expect("pending invocation");
+            super::RemoteMutationSnapshot::capture_and_persist(&state_path, &mut state, &adapter)
+                .expect("prelaunch remote");
+            state.phase = BridgePhase::ImplementationComplete;
+            commit_implementation(&state);
+            let proof = super::prove_implementation(&state_path, &mut state, &snapshot, &closeout)
+                .expect("prove implementation");
+
+            let error = super::push_and_create_draft(
+                &state_path,
+                &mut state,
+                &proof,
+                "Implement issue contract",
+                issue_body,
+                &adapter,
+            )
+            .expect_err("missing or pathless outline must block before remote mutation");
+
+            assert!(error.contains("OUT_OF_SCOPE"), "{case}: {error}");
+            assert!(!git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref",
+                ],
+            )
+            .contains(&state.identity.branch));
+            let calls = fs::read_to_string(fixture.root.join("gh-calls")).expect("gh calls");
+            assert_eq!(calls.matches("pr create").count(), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn autonomous_executor_bridge_lint_blocks_before_git_or_gh_mutation() {
         // Break caught: a deterministic unfinished-work finding reaching a remote boundary.
         let (fixture, mut state, snapshot, closeout) =
@@ -35689,12 +35745,12 @@ exit 64
             &mut state,
             &proof,
             "Implement issue",
-            "## Implementation outline\n\n- implementation.txt\n- unsafe.rs\n- .autospec/closeout.md\n",
+            "## Implementation outline\n\n- implementation.txt\n- unsafe.rs\n- .autospec/executor-closeout.md\n",
             &adapter,
         )
         .expect_err("lint must block");
 
-        assert!(error.contains("lint"), "{error}");
+        assert!(error.contains("TODO_LEFT"), "{error}");
         assert!(git_stdout(
             &fixture.root,
             &[
