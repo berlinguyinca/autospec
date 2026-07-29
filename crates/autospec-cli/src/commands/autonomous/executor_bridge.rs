@@ -1279,6 +1279,7 @@ fn run_executor_bridge_with_codex_probe(
         &state,
         &proof,
         &request.issue_body,
+        true,
     )?;
     if matches!(
         state.phase,
@@ -14700,12 +14701,11 @@ fn prepare_continuation_checkpoint(
         return Ok(None);
     }
     let evaluation = exact_patch_size(state, &proof.head_oid)?;
-    let size = evaluation.size();
     let admission = evaluate_patch_size_admission(state, &proof.head_oid, issue_body);
     let rejected = admission.is_err();
     let status = if evaluation.is_hard() && rejected {
         "oversized_checkpoint"
-    } else if evaluation.is_hard() || size.changed_lines < 320 {
+    } else if evaluation.is_hard() || !evaluation.is_proactive() {
         return Ok(None);
     } else {
         "planned"
@@ -14926,18 +14926,269 @@ fn emit_continuation_events(
     Ok(())
 }
 
+fn continuation_gh(arguments: &[String], action: &str) -> Result<String, String> {
+    let output = Command::new("gh")
+        .args(arguments)
+        .output()
+        .map_err(|error| format!("{action}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{action}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+fn trusted_continuation_comment(
+    repository: &str,
+    issue: u64,
+    marker: &str,
+) -> Result<String, String> {
+    let actors =
+        crate::commands::lint::configured_safety_trusted_actors().map_err(|error| error.message)?;
+    let predicates = actors
+        .iter()
+        .map(|actor| format!(".author.login == {actor:?}"))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let marker = serde_json::to_string(marker).map_err(|error| error.to_string())?;
+    continuation_gh(
+        &[
+            "issue".into(),
+            "view".into(),
+            issue.to_string(),
+            "--repo".into(),
+            repository.into(),
+            "--json".into(),
+            "comments".into(),
+            "--jq".into(),
+            format!(
+                "[.comments[] | select(({}) and (.body | contains({marker})))] | last | .body // \"\"",
+                predicates
+            ),
+        ],
+        "read continuation parent metadata",
+    )
+}
+fn continuation_parent(repository: &str, issue: u64) -> Result<Option<u64>, String> {
+    let body = trusted_continuation_comment(repository, issue, "<!-- autospec-parent:")?;
+    body.lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("<!-- autospec-parent:")
+                .and_then(|value| value.strip_suffix(" -->"))
+                .map(str::parse::<u64>)
+        })
+        .transpose()
+        .map_err(|_| "continuation parent marker is malformed".to_string())
+}
+fn continuation_child_list(repository: &str, parent: u64) -> Result<Vec<u64>, String> {
+    let body = trusted_continuation_comment(
+        repository,
+        parent,
+        "<!-- autospec-parent-decomposition:begin -->",
+    )?;
+    let children = body
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("- #"))
+        .map(|value| value.parse::<u64>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "continuation parent child order is malformed".to_string())?;
+    if children.is_empty() {
+        return Err("continuation parent has no authoritative child order".to_string());
+    }
+    Ok(children)
+}
+fn continuation_child_document(
+    receipt: &ContinuationReceipt,
+    umbrella: u64,
+    ordinal: usize,
+    criterion: &str,
+    dependency: Option<u64>,
+) -> Result<(String, String, String), String> {
+    let criterion = criterion.trim();
+    if criterion.len() > 120 || criterion.lines().count() != 1 {
+        return Err("continuation criterion must be one line of at most 120 bytes".to_string());
+    }
+    let marker = format!(
+        "<!-- autospec-continuation:v1:repo={}:issue={}:base={}:head={}:receipt={}:ordinal={} -->",
+        receipt.repository,
+        receipt.issue,
+        receipt.base_oid,
+        receipt.head_oid,
+        receipt.content_digest,
+        ordinal
+    );
+    let mut body = format!(
+        "{marker}\n\n## Goal\n\n{}.\n\n## Acceptance criteria\n\n- [ ] {}\n",
+        criterion.trim_end_matches(['.', '?', '!']),
+        criterion
+    );
+    if let Some(previous) = dependency {
+        body.push_str(&format!(
+            "\n## Dependencies\n\nDepends on issue #{previous}\n"
+        ));
+    }
+    let issue = receipt.issue;
+    body.push_str(&format!("\n## Context\n\nPart of #{umbrella}.\n\n## Files to read first\n\n- `AGENTS.md`\n\n## Implementation outline\n\n- Implement continuation ordinal {ordinal} within the original issue #{issue} scope.\n\n## Tests required\n\n- smoke: verify continuation ordinal {ordinal}.\n\n### Primary smoke test (inner loop)\n\n```bash\ngit diff --check\n```\n"));
+    if !autospec_core::lint::lint_issue_body(&body).is_empty() {
+        return Err("continuation issue body failed the issue-quality contract".to_string());
+    }
+    let mut title = format!("Continuation {ordinal}: {criterion}");
+    while title.len() > 120 {
+        title.pop();
+    }
+    Ok((marker, title, body))
+}
+fn publish_continuation_child(
+    receipt: &ContinuationReceipt,
+    umbrella: u64,
+    ordinal: usize,
+    criterion: &str,
+    dependency: Option<u64>,
+) -> Result<u64, String> {
+    let (marker, title, body) =
+        continuation_child_document(receipt, umbrella, ordinal, criterion, dependency)?;
+    let mut matches = continuation_gh(
+        &[
+            "issue".into(),
+            "list".into(),
+            "--repo".into(),
+            receipt.repository.clone(),
+            "--state".into(),
+            "all".into(),
+            "--search".into(),
+            format!("{marker} in:body"),
+            "--limit".into(),
+            "2".into(),
+            "--json".into(),
+            "number,body".into(),
+            "--jq".into(),
+            format!(".[] | select(.body | contains({marker:?})) | .number"),
+        ],
+        "find continuation child",
+    )?;
+    if matches.is_empty() {
+        let mut arguments = vec![
+            "issue".into(),
+            "create".into(),
+            "--repo".into(),
+            receipt.repository.clone(),
+            "--title".into(),
+            title,
+            "--body".into(),
+            body.clone(),
+        ];
+        if dependency.is_some() || receipt.status == "oversized_checkpoint" {
+            arguments.extend(["--label".into(), "auto-implement".into()]);
+        }
+        matches = continuation_gh(&arguments, "create continuation child")?
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+    }
+    let numbers = matches
+        .lines()
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "continuation child identity is malformed".to_string())?;
+    let [number] = numbers.as_slice() else {
+        return Err("continuation child marker is missing or ambiguous".to_string());
+    };
+    let observed = continuation_gh(
+        &[
+            "issue".into(),
+            "view".into(),
+            number.to_string(),
+            "--repo".into(),
+            receipt.repository.clone(),
+            "--json".into(),
+            "body".into(),
+            "--jq".into(),
+            ".body".into(),
+        ],
+        "reread continuation child",
+    )?;
+    if observed != body.trim() {
+        return Err("continuation child body changed after publication".to_string());
+    }
+    Ok(*number)
+}
+fn publish_continuation_children(
+    state_path: &Path,
+    receipt: &ContinuationReceipt,
+) -> Result<(), String> {
+    let parent = continuation_parent(&receipt.repository, receipt.issue)?;
+    let (umbrella, mut children, start, mut previous) = match parent {
+        Some(parent) => {
+            let children = continuation_child_list(&receipt.repository, parent)?;
+            if !children.contains(&receipt.issue) {
+                return Err("continuation parent does not contain current child".to_string());
+            }
+            let start = children.len() + 1;
+            let previous = Some(receipt.issue);
+            (parent, children, start, previous)
+        }
+        None => (receipt.issue, Vec::new(), 1, None),
+    };
+    let mut criteria = receipt.unmet.clone();
+    if parent.is_none() {
+        let current = if receipt.status == "oversized_checkpoint" {
+            "reapply the current oversized slice ordinal 1"
+        } else {
+            "complete the current capped slice ordinal 1"
+        };
+        criteria.insert(0, current.to_string());
+    }
+    for (offset, criterion) in criteria.iter().enumerate() {
+        let dependency = (parent.is_some() || offset > 0).then_some(receipt.issue);
+        continuation_child_document(receipt, umbrella, start + offset, criterion, dependency)?;
+    }
+    for (offset, criterion) in criteria.iter().enumerate() {
+        let child =
+            publish_continuation_child(receipt, umbrella, start + offset, criterion, previous)?;
+        children.push(child);
+        previous = Some(child);
+    }
+    let arguments = vec![
+        if parent.is_some() { "extend" } else { "record" }.to_string(),
+        "--repo".into(),
+        receipt.repository.clone(),
+        "--parent".into(),
+        umbrella.to_string(),
+        "--children".into(),
+        children
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(","),
+        "--state-root".into(),
+        state_path
+            .parent()
+            .ok_or_else(|| "continuation state has no parent".to_string())?
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    crate::commands::parent::run(&arguments).map_err(|error| error.message)?;
+    Ok(())
+}
 fn require_continuation_checkpoint(
     state_path: &Path,
     event_log: &Path,
     state: &PersistedInvocation,
     proof: &ImplementationProof,
     issue_body: &str,
+    publish_children: bool,
 ) -> Result<(), BridgeRunFailure> {
     let Some(checkpoint) = prepare_continuation_checkpoint(state_path, state, proof, issue_body)?
     else {
         return Ok(());
     };
     emit_continuation_events(state_path, event_log, state, &checkpoint)?;
+    if publish_children {
+        publish_continuation_children(state_path, &checkpoint.receipt)?;
+    }
     match checkpoint.receipt.status.as_str() {
         "oversized_checkpoint" => Err(BridgeRunFailure::invariant(
             "executor preserved an oversized continuation checkpoint before remote mutation",
@@ -23350,7 +23601,6 @@ mod tests {
             "{error}"
         );
     }
-
     #[test]
     fn autonomous_executor_bridge_prefers_primary_supervisor_executable() {
         let primary = std::env::current_exe().expect("current test executable");
@@ -35425,8 +35675,14 @@ exit 64
                 closeout_body: format!("## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice.txt; `git diff`\nScoped git status: slice.txt\nOne likely hidden failure: boundary\nCompleted criteria: [\"first\"]\nUnmet criteria: {unmet}\n"),
             };
 
-            let checkpoint =
-                super::require_continuation_checkpoint(&state_path, &event_log, &state, &proof, "");
+            let checkpoint = super::require_continuation_checkpoint(
+                &state_path,
+                &event_log,
+                &state,
+                &proof,
+                "",
+                false,
+            );
             if lines == 401 {
                 assert!(checkpoint
                     .expect_err("oversized checkpoint gate")
@@ -35504,6 +35760,7 @@ exit 64
                         &state,
                         &proof,
                         "",
+                        false,
                     )
                     .is_err());
                     fs::remove_file(&complete).expect("simulate append-before-complete");
@@ -35515,6 +35772,7 @@ exit 64
                         &state,
                         &proof,
                         "",
+                        false,
                     )
                     .expect("recover rotated event");
                     super::require_continuation_checkpoint(
@@ -35523,6 +35781,7 @@ exit 64
                         &state,
                         &proof,
                         "",
+                        false,
                     )
                     .expect("second restart");
                     let retained = format!(
@@ -35550,6 +35809,7 @@ exit 64
                         &state,
                         &proof,
                         "",
+                        false,
                     )
                     .is_err());
                     fs::write(&complete, complete_body).expect("restore complete");
@@ -35561,6 +35821,7 @@ exit 64
                         &state,
                         &proof,
                         "",
+                        false,
                     )
                     .is_err());
                     let first = fs::read(&receipt_path).expect("receipt");
@@ -35646,6 +35907,7 @@ exit 64
             &state,
             &proof,
             "Guardian: skip-PR_SIZE # generated migration: other\n",
+            false,
         )
         .expect_err("invalid exception")
         .to_string()
@@ -35673,6 +35935,134 @@ exit 64
         fs::remove_file(&receipt).expect("remove receipt");
         symlink(&state_path, &receipt).expect("receipt symlink");
         assert!(super::load_continuation_receipt(&state_path, &state).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_continuation_publication_is_ordered_and_restart_safe() {
+        // Break caught: proactive receipts existed locally but never became ordered GitHub work.
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let (fixture, mut state, _, _) = implementation_proof_fixture("continuation-publication");
+        let state_path = fixture.root.join("state/invocation.json");
+        let event_log = fixture.root.join("events.jsonl");
+        let store = fixture.root.join("continuation-gh");
+        let bin = fixture.root.join("continuation-bin");
+        fs::create_dir_all(store.join("issues")).expect("issue store");
+        fs::create_dir_all(store.join("comments")).expect("comment store");
+        fs::create_dir_all(&bin).expect("fake gh bin");
+        fs::write(store.join("next"), "100").expect("issue sequence");
+        write_executable(
+            &bin.join("gh"),
+            r#"#!/bin/sh
+set -eu; printf '%s\n' "$*" >> "$GH_CALLS"
+case "$1 $2" in
+"issue view") issue=$3; case "$*" in
+    *"--json comments"*) test ! -f "$GH_STORE/comments/$issue" || cat "$GH_STORE/comments/$issue";;
+    *"--json body"*) cat "$GH_STORE/issues/$issue.body";;
+    *"--json state"*) printf 'OPEN\n';;
+    *) exit 64;;
+  esac;;
+"issue list") marker=
+  while [ "$#" -gt 0 ]; do [ "$1" != "--search" ] || marker=$2; shift; done; marker=${marker% in:body}
+  for body in "$GH_STORE"/issues/*.body; do if [ -f "$body" ] && grep -Fq "$marker" "$body"; then basename "$body" .body; fi; done;;
+"issue create") body= title=; while [ "$#" -gt 0 ]; do case "$1" in --body) body=$2; shift;; --title) title=$2; shift;; esac; shift; done
+  number=$(cat "$GH_STORE/next"); number=$((number + 1)); printf '%s' "$number" > "$GH_STORE/next"
+  printf '%s\n' "$body" > "$GH_STORE/issues/$number.body"; printf '%s\n' "$title" > "$GH_STORE/issues/$number.title"; printf 'https://example.invalid/issues/%s\n' "$number";;
+"issue comment") issue=$3; body=
+  while [ "$#" -gt 0 ]; do [ "$1" != "--body" ] || { body=$2; shift; }; shift; done; printf '%s\n' "$body" > "$GH_STORE/comments/$issue";;
+"api user") printf 'berlinguyinca\n';;
+*) exit 64;;
+esac
+"#,
+        );
+        let previous_path = std::env::var_os("PATH");
+        let previous_store = std::env::var_os("GH_STORE");
+        let previous_calls = std::env::var_os("GH_CALLS");
+        std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        std::env::set_var("GH_STORE", &store);
+        std::env::set_var("GH_CALLS", store.join("calls"));
+        for name in [
+            "skills/a/SKILL.md",
+            "skills/a/codex/prompt.md",
+            "skills/a/opencode/agent.md",
+            "skills/b/SKILL.md",
+            "skills/b/codex/prompt.md",
+            "skills/b/opencode/agent.md",
+            "slice.txt",
+        ] {
+            fs::create_dir_all(state.identity.worktree.join(name).parent().unwrap())
+                .expect("proactive directory");
+            fs::write(state.identity.worktree.join(name), "changed\n").expect("proactive file");
+            git(&state.identity.worktree, &["add", name]);
+        }
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "test: proactive continuation"],
+        );
+        let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        state.head_oid = Some(head.clone());
+        let proof = super::ImplementationProof {
+            head_oid: head,
+            closeout_body: "## Closeout report\nResult: slice\nClaims: [verified] static slice\nProof type: static\nBefore/after: 0 to 1\nArtifacts: slice-0.txt; `git diff`\nScoped git status: slice files\nOne likely hidden failure: boundary\nCompleted criteria: [\"first current slice criterion with a reproducible command and exact artifact path\",\"second current slice criterion with a reproducible command and exact artifact path\"]\nUnmet criteria: [\"Run `scripts/continuation-second.sh` and verify café café café café café café café café café café café\",\"Run `scripts/continuation-third.sh` once\"]\n".into(),
+        };
+        super::require_continuation_checkpoint(&state_path, &event_log, &state, &proof, "", true)
+            .expect("proactive continuation");
+        let receipt =
+            super::continuation_receipt_path(&state_path, &proof.head_oid).expect("receipt path");
+        assert!(receipt.exists(), "seven files must plan a continuation");
+        let bodies = [101, 102, 103]
+            .map(|number| fs::read_to_string(store.join(format!("issues/{number}.body"))).unwrap());
+        assert!(bodies[0].contains("ordinal=1"));
+        assert!(bodies[1].contains("Depends on issue #101"));
+        assert!(bodies[2].contains("Depends on issue #102"));
+        fs::write(store.join("calls"), "").expect("clear calls");
+        super::require_continuation_checkpoint(&state_path, &event_log, &state, &proof, "", true)
+            .expect("publication restart");
+        assert!(!fs::read_to_string(store.join("calls"))
+            .expect("restart calls")
+            .contains("issue create"));
+        let mut adverse = super::load_continuation_receipt(&state_path, &state).expect("receipt");
+        adverse.unmet = vec!["Improve quality should feel nice".into()];
+        adverse.content_digest = adverse.digest();
+        fs::write(store.join("calls"), "").expect("clear calls");
+        assert!(super::publish_continuation_children(&state_path, &adverse).is_err());
+        assert!(!fs::read_to_string(store.join("calls"))
+            .unwrap()
+            .contains("issue create"));
+        fs::write(
+            store.join("comments/43"),
+            "<!-- autospec-parent:10 -->\nChild issue #43 belongs to parent issue #10.\n",
+        )
+        .expect("existing parent marker");
+        fs::write(
+            store.join("comments/10"),
+            "<!-- autospec-parent-decomposition:begin -->\nParent issue #10 was decomposed\n- #41\n- #43\n- #45\n<!-- autospec-parent-decomposition:end -->\n",
+        )
+        .expect("existing order");
+        let mut existing = super::load_continuation_receipt(&state_path, &state).expect("receipt");
+        existing.issue = 43;
+        existing.content_digest = existing.digest();
+        super::publish_continuation_children(&state_path, &existing).expect("parent extension");
+        let first = fs::read_to_string(store.join("issues/104.body")).unwrap();
+        assert!(first.contains("Depends on issue #43"));
+        assert!(fs::read_to_string(store.join("issues/105.body"))
+            .unwrap()
+            .contains("Depends on issue #104"));
+        assert!(fs::read_to_string(store.join("comments/43"))
+            .unwrap()
+            .contains("autospec-parent:10"));
+        let title = fs::read_to_string(store.join("issues/102.title")).unwrap();
+        assert!(title.trim().len() <= 120);
+        for (key, previous) in [
+            ("PATH", previous_path),
+            ("GH_STORE", previous_store),
+            ("GH_CALLS", previous_calls),
+        ] {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 
     #[test]
