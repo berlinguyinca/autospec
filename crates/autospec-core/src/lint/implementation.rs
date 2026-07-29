@@ -187,6 +187,18 @@ pub fn lint_implementation(
     collector.finish()
 }
 
+/// Check only the issue-defined path scope and required regression evidence.
+pub fn lint_issue_implementation_contract(
+    diff: &UnifiedDiff,
+    issue_body: &str,
+) -> ImplementationLintResult {
+    let mut collector =
+        FindingCollector::new(parse_guardian_skips(issue_body), DEFAULT_AGGREGATE_HARD_CAP);
+    detect_out_of_scope(diff, Some(issue_body), &mut collector);
+    detect_missing_test(diff, Some(issue_body), &mut collector);
+    collector.finish()
+}
+
 pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
     match rule {
         ImplementationLintRule::PrSize => {
@@ -598,7 +610,7 @@ fn detect_missing_test(
             && !diff
                 .files
                 .iter()
-                .any(|file| file.path.starts_with(&format!("tests/{tier}/")))
+                .any(|file| is_regression_artifact(&file.path, tier))
         {
             collector.emit(
                 ImplementationLintRule::MissingTest,
@@ -608,6 +620,10 @@ fn detect_missing_test(
             );
         }
     }
+}
+
+fn is_regression_artifact(path: &str, tier: &str) -> bool {
+    path.starts_with(&format!("tests/{tier}/")) || path.starts_with("scripts/test-")
 }
 
 fn detect_complexity(
@@ -1932,5 +1948,40 @@ mod tests {
             "Guardian: skip-PR_SIZE # mandatory lock-step artifacts: autospec and \
              autospec-run adapter trios plus derived goldens\n",
         );
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_classifies_scope_and_regression_artifacts() {
+        let body = "## Implementation outline\n\n- `src/allowed.rs`\n\
+                    \n## Tests required\n\n- unit: regression artifact\n";
+
+        for path in [
+            "tests/unit/allowed.rs",
+            "scripts/test-autonomous-status-panel.mjs",
+        ] {
+            let result = lint_issue_implementation_contract(
+                &UnifiedDiff {
+                    files: vec![file(path, 1)],
+                },
+                body,
+            );
+            assert!(
+                result
+                    .findings
+                    .iter()
+                    .all(|finding| finding.rule != ImplementationLintRule::MissingTest),
+                "{path} must satisfy the regression-artifact contract"
+            );
+        }
+
+        let result = lint_issue_implementation_contract(
+            &UnifiedDiff {
+                files: vec![file("src/omitted.rs", 1)],
+            },
+            body,
+        );
+        assert!(result.findings.iter().any(|finding| {
+            finding.rule == ImplementationLintRule::OutOfScope && finding.path == "src/omitted.rs"
+        }));
     }
 }
