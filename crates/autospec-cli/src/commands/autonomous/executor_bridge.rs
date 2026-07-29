@@ -1275,9 +1275,7 @@ fn run_executor_bridge_with_codex_probe(
         }
         Err(error) => return Err(error.into()),
     };
-    if request.issue_body.contains("Part of #") {
-        let parent = continuation_parent(&state.identity.repository, state.identity.issue)?
-            .ok_or_else(|| "continuation child has no trusted parent binding".to_string())?;
+    if let Some(parent) = continuation_parent(&state.identity.repository, state.identity.issue)? {
         let child = state.identity.issue;
         bind_continuation_part(&request.state_path, &mut state, (parent, child))?;
     }
@@ -1440,6 +1438,9 @@ fn publish_complete_receipt(
             reason: reason.to_string(),
         }
     } else if canonical_git_oid(terminal) {
+        if state.current_child.is_some() {
+            revalidate_live_canonical_pull_request(state, &DraftPrAdapter::github_cli())?;
+        }
         BridgeRunStatus::Merged {
             pull_request: state
                 .pr
@@ -1560,7 +1561,12 @@ pub(crate) fn verify_completed_terminal_receipt(
             merge_oid,
         } if state.pr == Some(*pull_request)
             && state.head_oid.as_deref() == Some(head_oid)
-            && state.terminal_result.as_deref() == Some(merge_oid) => {}
+            && state.terminal_result.as_deref() == Some(merge_oid) =>
+        {
+            if state.current_child.is_some() {
+                revalidate_live_canonical_pull_request(&state, &DraftPrAdapter::github_cli())?;
+            }
+        }
         BridgeRunStatus::Retryable { reason }
             if state.terminal_result.as_deref() == Some(format!("retryable:{reason}").as_str()) => {
         }
@@ -8929,6 +8935,14 @@ fn observed_pull_request_body_matches(
         .ok_or_else(|| "observed pull request body is not canonical".to_string())
 }
 
+fn revalidate_live_canonical_pull_request(
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<(), BridgeRunFailure> {
+    observed_pull_request_body_matches(&observe_pull_request(state, adapter)?, state)
+        .map_err(BridgeRunFailure::invariant)
+}
+
 pub(crate) fn parse_observed_merge(
     document: &str,
     expected_pull_request: u64,
@@ -12529,6 +12543,7 @@ fn validate_merged_reconciliation_record(
         })?)?;
     if snapshot.identity != state.identity
         || snapshot.pr != state.pr
+        || (snapshot.umbrella, snapshot.current_child) != (state.umbrella, state.current_child)
         || snapshot.head_oid.as_deref() != Some(persisted_head.as_str())
         || !matches!(
             snapshot.phase,
@@ -13083,9 +13098,13 @@ fn bridge_claim_identity(state: &PersistedInvocation) -> ClaimMutationIdentity<'
 }
 
 fn cleanup_binding(state: &PersistedInvocation) -> String {
+    let part = match (state.umbrella, state.current_child) {
+        (Some(umbrella), Some(child)) => format!("\0{umbrella}\0{child}"),
+        _ => String::new(),
+    };
     sha256_hex(
         format!(
-            "{}\0{}\0{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}{part}",
             state.identity.repository,
             state.identity.issue,
             state.identity.worker_id,
@@ -13551,6 +13570,9 @@ pub(crate) fn finalize_merged_executor(
     state: &mut PersistedInvocation,
     mut runtime: Option<RuntimeSessionAdapter>,
 ) -> Result<(), BridgeRunFailure> {
+    if state.current_child.is_some() {
+        revalidate_live_canonical_pull_request(state, &DraftPrAdapter::github_cli())?;
+    }
     if state.phase == BridgePhase::Complete {
         return Ok(());
     }
@@ -13888,7 +13910,7 @@ fn observe_exact_closed_retryable_pull_request(
             "--repo",
             &state.identity.repository,
             "--json",
-            "number,state,mergedAt,headRefName,headRefOid,baseRefName",
+            "number,state,mergedAt,headRefName,headRefOid,baseRefName,body",
         ])
         .envs(&adapter.environment)
         .output()
@@ -13917,6 +13939,7 @@ fn observe_exact_closed_retryable_pull_request(
             "headRefName",
             "headRefOid",
             "baseRefName",
+            "body",
         ],
         "retryable executor pull request closure",
     )?;
@@ -13933,6 +13956,7 @@ fn observe_exact_closed_retryable_pull_request(
                 .base_ref
                 .strip_prefix("origin/")
                 .unwrap_or_default()
+        || !pull_request_body_matches_state(&text(&object, "body")?, state)
     {
         return Err(
             "executor retryable PR cleanup did not observe exact CLOSED non-merged state"
@@ -34510,6 +34534,7 @@ exit 64
                     "headRefName": pull_request["headRefName"],
                     "headRefOid": pull_request["headRefOid"],
                     "baseRefName": pull_request["baseRefName"],
+                    "body": pull_request["body"],
                 })
             })
             .unwrap_or_else(|| serde_json::json!({}));
@@ -34581,13 +34606,10 @@ exit 64
             self.state.current_child = Some(101);
             super::write_invocation_atomic(&self.state_path, &self.state).unwrap();
             let path = adapter_path(&self.adapter, "GH_CREATED_PR");
-            let mut created: serde_json::Value =
-                serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-            created[0]["body"] =
-                super::canonical_pull_request_body(&self.state, &self.proof.closeout_body)
-                    .unwrap()
-                    .into();
-            fs::write(path, created.to_string()).unwrap();
+            let created = fs::read_to_string(&path)
+                .unwrap()
+                .replace("Closes #42", "Part of #42\\n\\nCloses #101");
+            fs::write(path, created).unwrap();
         }
 
         fn push_exact_at_intent(&mut self) {
@@ -34681,7 +34703,7 @@ exit 64
 
     #[cfg(unix)]
     #[test]
-    fn continuation_part_metadata_restarts_without_a_replacement_draft() {
+    fn autonomous_executor_bridge_pushes_exact_oid_and_creates_one_draft_pr() {
         // Break caught: Rust pushing before lint/proof or creating a PR before DraftCreating is durable.
         let mut prepared = prepared_draft_transaction("draft-create");
         prepared.bind_continuation();
@@ -34948,6 +34970,7 @@ exit 64
                 "headRefName": merged.state.identity.branch,
                 "headRefOid": merged.state.head_oid,
                 "baseRefName": "main",
+                "body": "Closes #999\n\n## Closeout report\n",
             })
             .to_string(),
         )
@@ -36063,11 +36086,12 @@ exit 64
     #[cfg(unix)]
     #[test]
     fn continuation_part_metadata_is_persisted_and_canonical() {
-        let (fixture, mut state, _, _) = implementation_proof_fixture("continuation-part-body");
+        let (_, mut state, _, _) = implementation_proof_fixture("continuation-part-body");
+        let legacy_binding = super::cleanup_binding(&state);
         state.umbrella = Some(42);
         state.current_child = Some(101);
+        assert_ne!(super::cleanup_binding(&state), legacy_binding);
         let restored = super::PersistedInvocation::from_json(&state.to_json().unwrap()).unwrap();
-        assert_eq!(restored.identity.issue, 42);
         assert_eq!(
             super::canonical_pull_request_body(&restored, "## Closeout report\n").unwrap(),
             "Part of #42\n\nCloses #101\n\n## Closeout report\n"
@@ -36080,14 +36104,6 @@ exit 64
         object.remove("umbrella");
         object.remove("current_child");
         assert!(super::PersistedInvocation::from_json(&invalid.to_string()).is_ok());
-        state.phase = super::BridgePhase::DraftCreated;
-        assert!(super::finalize_merged_executor(
-            &fixture.root.join("state/manual-close.json"),
-            &mut state,
-            None,
-        )
-        .unwrap_err()
-        .contains("observed merged"));
     }
 
     #[cfg(unix)]
@@ -36134,6 +36150,10 @@ esac
         std::env::set_var("PATH", format!("{}:/usr/bin:/bin", bin.display()));
         std::env::set_var("GH_STORE", &store);
         std::env::set_var("GH_CALLS", store.join("calls"));
+        let quoted = store.join("comments/42");
+        fs::write(&quoted, "Ordinary issue quoting Part of #9").unwrap();
+        assert_eq!(super::continuation_parent("owner/repo", 42).unwrap(), None);
+        fs::remove_file(quoted).unwrap();
         for name in [
             "skills/a/SKILL.md",
             "skills/a/codex/prompt.md",
@@ -36160,10 +36180,9 @@ esac
         };
         super::require_continuation_checkpoint(&state_path, &event_log, &state, &proof, "", true)
             .expect("proactive continuation");
-        let bound = super::PersistedInvocation::from_json(
-            &fs::read_to_string(&state_path).expect("bound invocation"),
-        )
-        .expect("valid binding");
+        let bound =
+            super::PersistedInvocation::from_json(&fs::read_to_string(&state_path).unwrap())
+                .unwrap();
         assert_eq!((bound.umbrella, bound.current_child), (Some(42), Some(101)));
         assert!(fs::read_to_string(store.join("comments/42"))
             .unwrap()
@@ -42477,7 +42496,7 @@ exit 19
 
     #[cfg(unix)]
     #[test]
-    fn continuation_part_metadata_ready_requires_the_exact_body() {
+    fn autonomous_executor_bridge_observes_exact_draft_becoming_ready() {
         let mut prepared = prepared_draft_transaction("ready-success");
         prepared.bind_continuation();
         prepared.publish().expect("draft");
@@ -42985,7 +43004,7 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
     }
 
     #[test]
-    fn continuation_part_metadata_preserves_claim_identity_during_result_admission() {
+    fn autonomous_executor_bridge_ingests_only_exact_open_executor_result() {
         let (_fixture, mut state, _snapshot, _) = implementation_proof_fixture("result-binding");
         let head = "a".repeat(40);
         let receipt = "b".repeat(64);
@@ -43032,7 +43051,7 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
 
     #[cfg(unix)]
     #[test]
-    fn continuation_part_metadata_merge_revalidates_the_exact_body() {
+    fn autonomous_executor_bridge_merge_revalidates_result_ci_and_review() {
         let (fixture, mut state, _snapshot, _) =
             implementation_proof_fixture("merge-revalidate-gates");
         commit_implementation(&state);
@@ -43328,7 +43347,7 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
 
     #[cfg(unix)]
     #[test]
-    fn continuation_part_metadata_merged_recovery_requires_the_exact_body() {
+    fn autonomous_executor_bridge_merged_reconciliation_is_exact_and_fail_closed() {
         let (fixture, mut state, _snapshot, _) =
             implementation_proof_fixture("merged-reconciliation-exact");
         commit_implementation(&state);
@@ -43377,6 +43396,21 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
             "mergeCommit": {"oid": "b".repeat(40)},
             "body": super::canonical_pull_request_body(&state, closeout).unwrap(),
         });
+        for phase in [
+            super::BridgePhase::Merged,
+            super::BridgePhase::CleanupPending,
+            super::BridgePhase::Complete,
+        ] {
+            state.phase = phase;
+            for (body, accepted) in [("Closes #101", true), ("Closes #42", false)] {
+                fs::write(&observation, exact.to_string().replace("Closes #101", body)).unwrap();
+                assert_eq!(
+                    super::revalidate_live_canonical_pull_request(&state, &adapter).is_ok(),
+                    accepted
+                );
+            }
+        }
+        state.phase = super::BridgePhase::DraftCreated;
         fs::write(&observation, exact.to_string()).expect("exact observation");
         let state_path = fixture.root.join("state/exact.json");
         super::write_invocation_atomic(&state_path, &state).expect("persist pre-reconciliation");
@@ -43396,6 +43430,9 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         );
         super::validate_merged_reconciliation_record(&state_path, &reconciled)
             .expect("bound reconciliation record");
+        let mut rebound = reconciled.clone();
+        rebound.current_child = Some(102);
+        assert!(super::validate_merged_reconciliation_record(&state_path, &rebound).is_err());
 
         for (name, mutated) in [
             ("open", serde_json::json!({"state": "OPEN"})),
