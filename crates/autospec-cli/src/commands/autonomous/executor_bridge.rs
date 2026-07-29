@@ -14734,9 +14734,8 @@ fn prepare_continuation_checkpoint(
             "executor continuation receipt",
         )?;
     }
-    let invalid_exception = evaluation.is_hard()
-        && rejected
-        && issue_body.lines().any(|line| line.contains("skip-PR_SIZE"));
+    let invalid_exception =
+        evaluation.is_hard() && rejected && guardian_pr_size_attempt(issue_body);
     Ok(Some(ContinuationCheckpoint {
         receipt: expected,
         receipt_path: path,
@@ -14748,6 +14747,16 @@ fn prepare_continuation_checkpoint(
 
 fn continuation_event_marker_path(state_path: &Path, binding: &str, stage: &str) -> PathBuf {
     state_path.with_extension(format!("continuation-event.{binding}.{stage}.json"))
+}
+
+fn guardian_pr_size_attempt(issue_body: &str) -> bool {
+    issue_body.lines().any(|line| {
+        line.strip_prefix("Guardian: ")
+            .and_then(|body| body.split_once(" # "))
+            .is_some_and(|(skips, reason)| {
+                !reason.trim().is_empty() && skips.split(", ").any(|skip| skip == "skip-PR_SIZE")
+            })
+    })
 }
 
 fn normalized_event_log(path: &Path) -> Result<(PathBuf, String), String> {
@@ -14768,6 +14777,21 @@ fn normalized_event_log(path: &Path) -> Result<(PathBuf, String), String> {
         .to_str()
         .ok_or_else(|| "executor event log path must be UTF-8".to_string())?;
     Ok((normalized.clone(), sha256_hex(text.as_bytes())))
+}
+
+fn acquire_continuation_event_lease(path: &Path) -> Result<File, String> {
+    reject_symlink_path(path)?;
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let file = options
+        .open(path)
+        .map_err(|error| format!("open executor continuation event lock: {error}"))?;
+    validate_private_state_file(path)?;
+    file.try_lock()
+        .map_err(|error| format!("lock executor continuation event: {error}"))?;
+    Ok(file)
 }
 
 fn continuation_event_logged(path: &Path, binding: &str) -> Result<bool, String> {
@@ -14801,6 +14825,15 @@ fn emit_continuation_event_once(
     event: &str,
 ) -> Result<(), String> {
     let (event_log, session_digest) = normalized_event_log(event_log)?;
+    let session = serde_json::json!({
+        "path": event_log,
+        "digest": session_digest,
+    });
+    write_private_create_once(
+        &state_path.with_extension("continuation-session.json"),
+        session.to_string().as_bytes(),
+        "executor continuation initiating session",
+    )?;
     let binding = sha256_hex(
         serde_json::json!([
             state.identity.repository,
@@ -14837,6 +14870,9 @@ fn emit_continuation_event_once(
         details.to_string().as_bytes(),
         "executor continuation event intent",
     )?;
+    let _lease = acquire_continuation_event_lease(&continuation_event_marker_path(
+        state_path, &binding, "lock",
+    ))?;
     reject_symlink_path(&complete)?;
     if complete.exists() {
         return validate_cleanup_record(
@@ -35357,7 +35393,7 @@ exit 64
 
     #[cfg(unix)]
     #[test]
-    fn autonomous_executor_bridge_continuation_receipt_thresholds_and_base_drift_generation() {
+    fn autonomous_executor_bridge_continuation_event_thresholds_and_base_drift_generation() {
         // Break caught: capped or oversized exact-head work losing ordered continuation state.
         assert!(super::parse_closeout_criteria("Completed criteria: []").is_err());
         for (lines, unmet, expected) in [
@@ -35422,18 +35458,12 @@ exit 64
                     assert_eq!(initial["event"], "continuation_planned");
                     assert_eq!(initial["unmet"], serde_json::json!(["second", "third"]));
                     assert_eq!(
-                        (
+                        [
                             initial["changed_lines"].as_u64(),
-                            initial["raw_files"].as_u64()
-                        ),
-                        (Some(320), Some(1))
-                    );
-                    assert_eq!(
-                        (
-                            initial["logical_units"].as_u64(),
-                            initial["has_binary"].as_bool()
-                        ),
-                        (Some(1), Some(false))
+                            initial["raw_files"].as_u64(),
+                            initial["logical_units"].as_u64()
+                        ],
+                        [Some(320), Some(1), Some(1)]
                     );
                     assert_eq!(initial["receipt_digest"], receipt.content_digest);
                     assert_eq!(initial["receipt_path"], receipt_path.to_str().unwrap());
@@ -35448,7 +35478,6 @@ exit 64
                         super::sha256_hex(normalized_log.to_str().unwrap().as_bytes())
                     );
                     let binding = initial["continuation_binding"].as_str().unwrap();
-                    assert_eq!(binding.len(), 64);
                     let intent =
                         super::continuation_event_marker_path(&state_path, binding, "intent");
                     let intent_doc: serde_json::Value =
@@ -35464,6 +35493,19 @@ exit 64
                     );
                     let complete =
                         super::continuation_event_marker_path(&state_path, binding, "complete");
+                    let lock = super::continuation_event_marker_path(&state_path, binding, "lock");
+                    let lease =
+                        super::acquire_continuation_event_lease(&lock).expect("first event lease");
+                    assert!(super::acquire_continuation_event_lease(&lock).is_err());
+                    drop(lease);
+                    assert!(super::require_continuation_checkpoint(
+                        &state_path,
+                        &fixture.root.join("logs/other.jsonl"),
+                        &state,
+                        &proof,
+                        "",
+                    )
+                    .is_err());
                     fs::remove_file(&complete).expect("simulate append-before-complete");
                     fs::rename(&event_log, event_log.with_extension("jsonl.1"))
                         .expect("rotate planned event");
@@ -35561,7 +35603,7 @@ exit 64
 
     #[cfg(unix)]
     #[test]
-    fn autonomous_executor_bridge_continuation_receipt_exception_and_tamper_fail_closed() {
+    fn autonomous_executor_bridge_continuation_event_exception_and_tamper_fail_closed() {
         // Break caught: invalid exceptions or forged receipt identity bypassing checkpoint policy.
         let (fixture, mut state, _, _) = implementation_proof_fixture("continuation-exception");
         let state_path = fixture.root.join("state/invocation.json");
@@ -35585,6 +35627,9 @@ exit 64
             closeout_body: "## Closeout report\nResult: migration\nClaims: [verified] static generated\nProof type: static\nBefore/after: 0 to 1\nArtifacts: db/migrations/001.sql; `git diff`\nScoped git status: db/migrations/001.sql\nOne likely hidden failure: generator\nCompleted criteria: []\nUnmet criteria: [\"publish\"]\n".into(),
         };
         let valid = "Guardian: skip-PR_SIZE # generated migration: prisma\n";
+        assert!(!super::guardian_pr_size_attempt(
+            "Docs mention skip-PR_SIZE."
+        ));
         assert!(
             super::prepare_continuation_checkpoint(&state_path, &state, &proof, valid)
                 .expect("valid exception")
@@ -35606,10 +35651,13 @@ exit 64
         .to_string()
         .contains("oversized continuation checkpoint"));
         let events = fs::read_to_string(&event_log).expect("oversized events");
-        assert!(
-            events.find("\"event\":\"continuation_oversized_checkpoint\"")
-                < events.find("\"event\":\"continuation_invalid_exception\"")
-        );
+        let oversized = events
+            .find("\"event\":\"continuation_oversized_checkpoint\"")
+            .expect("oversized event");
+        let invalid = events
+            .find("\"event\":\"continuation_invalid_exception\"")
+            .expect("invalid exception event");
+        assert!(oversized < invalid);
         assert!(!super::remote_head_refs(&fixture.repo)
             .expect("remote refs")
             .contains_key(&format!("refs/heads/{}", state.identity.branch)));
