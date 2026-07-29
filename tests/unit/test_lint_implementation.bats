@@ -39,7 +39,9 @@ pr_size_replacement() {
 }
 
 pr_size_issue() {
-    printf '%s\n' "$1" > "$PR_SIZE_TMP/issue.md"
+    printf '%s\n\n%s\n' "$1" \
+        "Guardian: skip-OUT_OF_SCOPE # PR_SIZE fixture intentionally omits implementation outline" \
+        > "$PR_SIZE_TMP/issue.md"
     mkdir -p "$PR_SIZE_TMP/bin"
     cat > "$PR_SIZE_TMP/bin/gh" <<'EOF'
 #!/usr/bin/env bash
@@ -51,6 +53,29 @@ EOF
 run_pr_size() {
     run env PATH="$PR_SIZE_TMP/bin:$PATH" PR_SIZE_ISSUE_BODY="$PR_SIZE_TMP/issue.md" \
         bash "$LINT" --diff-file "$PR_SIZE_TMP/change.diff" --issue 2702 "$@"
+}
+
+contract_issue() {
+    printf '%s\n' "$1" > "$PR_SIZE_TMP/issue.md"
+    mkdir -p "$PR_SIZE_TMP/bin"
+    cat > "$PR_SIZE_TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+cat "$CONTRACT_ISSUE_BODY"
+EOF
+    chmod +x "$PR_SIZE_TMP/bin/gh"
+}
+
+install_real_contract_cli() {
+    local cli="$REPO_ROOT/target/debug/autospec"
+    [ -x "$cli" ]
+    CONTRACT_AUTOSPEC_BIN="$cli"
+}
+
+run_contract_shell() {
+    env PATH="$PR_SIZE_TMP/bin:/usr/bin:/bin" \
+        AUTOSPEC_BIN="${CONTRACT_AUTOSPEC_BIN:-}" \
+        CONTRACT_ISSUE_BODY="$PR_SIZE_TMP/issue.md" \
+        bash "$LINT" --diff-file "$PR_SIZE_TMP/change.diff" --issue 2764
 }
 
 # ── syntax check ─────────────────────────────────────────────────────────────
@@ -95,6 +120,129 @@ run_pr_size() {
     # No blocking RULE_ID lines (no OUT_OF_SCOPE etc.)
     echo "$output" | grep -vq "^INFO:" || true
     ! echo "$output" | grep -qE "^(OUT_OF_SCOPE|MISSING_TEST|COMPLEXITY|SECURITY|TODO_LEFT|MOCK_DB|DOC_OUT_OF_SYNC):"
+}
+
+# ── core implementation-contract delegation ──────────────────────────────────
+
+@test "implementation contract delegates ordered scope and test findings before shell detectors" {
+    contract_issue "## Implementation outline
+
+- \`src/allowed.rs\`
+
+## Tests required
+
+- integration: real shell regression
+
+Guardian: skip-OUT_OF_SCOPE # fixture proves delegated INFO rendering"
+    cat > "$PR_SIZE_TMP/change.diff" <<'EOF'
+diff --git a/scripts/unlisted.sh b/scripts/unlisted.sh
+new file mode 100755
+--- /dev/null
++++ b/scripts/unlisted.sh
+@@ -0,0 +1 @@
++eval(input)
+EOF
+    install_real_contract_cli
+
+    run "$REPO_ROOT/target/debug/autospec" lint implementation-contract \
+        --issue-body-file "$PR_SIZE_TMP/issue.md" \
+        --diff-file "$PR_SIZE_TMP/change.diff"
+    [ "$status" -eq 1 ]
+    local cli_output="$output"
+
+    run run_contract_shell
+    [ "$status" -eq 2 ]
+    local delegated
+    delegated="$(printf '%s\n' "$output" | grep -E '^(INFO:)?(OUT_OF_SCOPE|MISSING_TEST):')"
+    [ "$delegated" = "$cli_output" ]
+    [ "$(printf '%s\n' "$output" | sed -n '3p')" = \
+        "SECURITY:scripts/unlisted.sh:2: eval() usage — potential code injection" ]
+}
+
+@test "implementation contract accepts project-native scripts test regression evidence" {
+    contract_issue "## Implementation outline
+
+- \`scripts/test-autonomous-status-panel.mjs\`
+
+## Tests required
+
+- integration: real shell regression"
+    cat > "$PR_SIZE_TMP/change.diff" <<'EOF'
+diff --git a/scripts/test-autonomous-status-panel.mjs b/scripts/test-autonomous-status-panel.mjs
+new file mode 100644
+--- /dev/null
++++ b/scripts/test-autonomous-status-panel.mjs
+@@ -0,0 +1 @@
++export const status = "covered";
+EOF
+    install_real_contract_cli
+
+    run run_contract_shell
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "implementation contract fails loudly when the CLI is missing or unreadable" {
+    contract_issue "## Implementation outline
+
+- \`src/allowed.rs\`"
+    cat > "$PR_SIZE_TMP/change.diff" <<'EOF'
+diff --git a/src/allowed.rs b/src/allowed.rs
+new file mode 100644
+--- /dev/null
++++ b/src/allowed.rs
+@@ -0,0 +1 @@
++value
+EOF
+
+    for mode in missing unreadable; do
+        rm -f "$PR_SIZE_TMP/bin/autospec"
+        CONTRACT_AUTOSPEC_BIN="$PR_SIZE_TMP/bin/autospec"
+        if [ "$mode" = unreadable ]; then
+            printf '#!/usr/bin/env bash\nexit 0\n' > "$PR_SIZE_TMP/bin/autospec"
+            chmod 0644 "$PR_SIZE_TMP/bin/autospec"
+        fi
+        run run_contract_shell
+        [ "$status" -ne 0 ]
+        [[ "$output" == *"implementation-contract CLI is unavailable"* ]]
+    done
+}
+
+@test "implementation contract rejects malformed output and non-finding CLI failures" {
+    contract_issue "## Implementation outline
+
+- \`src/allowed.rs\`"
+    cat > "$PR_SIZE_TMP/change.diff" <<'EOF'
+diff --git a/src/allowed.rs b/src/allowed.rs
+new file mode 100644
+--- /dev/null
++++ b/src/allowed.rs
+@@ -0,0 +1 @@
++value
+EOF
+
+    cat > "$PR_SIZE_TMP/bin/autospec" <<'EOF'
+#!/usr/bin/env bash
+printf 'NOT_A_FINDING\n'
+exit 1
+EOF
+    chmod +x "$PR_SIZE_TMP/bin/autospec"
+    CONTRACT_AUTOSPEC_BIN="$PR_SIZE_TMP/bin/autospec"
+    run run_contract_shell
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"malformed implementation-contract CLI output"* ]]
+
+    cat > "$PR_SIZE_TMP/bin/autospec" <<'EOF'
+#!/usr/bin/env bash
+printf 'transport failed\n' >&2
+exit 7
+EOF
+    chmod +x "$PR_SIZE_TMP/bin/autospec"
+    CONTRACT_AUTOSPEC_BIN="$PR_SIZE_TMP/bin/autospec"
+    run run_contract_shell
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"implementation-contract CLI failed without findings"* ]]
+    [[ "$output" == *"transport failed"* ]]
 }
 
 # ── PR_SIZE detector ─────────────────────────────────────────────────────────
