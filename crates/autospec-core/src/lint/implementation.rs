@@ -166,8 +166,7 @@ pub fn lint_implementation(
         context.options.patch_size_limits,
         &mut collector,
     );
-    detect_out_of_scope(diff, context.issue_body, &mut collector);
-    detect_missing_test(diff, context.issue_body, &mut collector);
+    collect_issue_implementation_contract(diff, context.issue_body, &mut collector);
     detect_complexity(diff, context.repository, &context.options, &mut collector);
     detect_security(diff, &mut collector);
     detect_todo_left(diff, &mut collector);
@@ -194,9 +193,17 @@ pub fn lint_issue_implementation_contract(
 ) -> ImplementationLintResult {
     let mut collector =
         FindingCollector::new(parse_guardian_skips(issue_body), DEFAULT_AGGREGATE_HARD_CAP);
-    detect_out_of_scope(diff, Some(issue_body), &mut collector);
-    detect_missing_test(diff, Some(issue_body), &mut collector);
+    collect_issue_implementation_contract(diff, Some(issue_body), &mut collector);
     collector.finish()
+}
+
+fn collect_issue_implementation_contract(
+    diff: &UnifiedDiff,
+    issue_body: Option<&str>,
+    collector: &mut FindingCollector,
+) {
+    detect_out_of_scope(diff, issue_body, collector);
+    detect_missing_test(diff, issue_body, collector);
 }
 
 pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
@@ -208,7 +215,7 @@ pub fn directive_for(rule: ImplementationLintRule) -> &'static str {
             "Restrict diff to files listed in the issue ## Implementation outline; revert or amend the issue body for any extra files."
         }
         ImplementationLintRule::MissingTest => {
-            "Add a test under tests/<tier>/ for the missing required test type before re-pushing."
+            "Add a test under tests/<tier>/ or a project-native scripts/test-* regression artifact before re-pushing."
         }
         ImplementationLintRule::Complexity => {
             "Split functions >50 LOC, files >500 LOC, or nesting >4 — no copy-paste branches."
@@ -1952,7 +1959,7 @@ mod tests {
 
     #[test]
     fn lint_issue_implementation_contract_classifies_scope_and_regression_artifacts() {
-        let body = "## Implementation outline\n\n- `src/allowed.rs`\n\
+        let body = "## Implementation outline\n\n- `src/allowed.rs`\n- `scripts/test-autonomous-status-panel.mjs`\n\
                     \n## Tests required\n\n- unit: regression artifact\n";
 
         for path in [
@@ -1983,5 +1990,41 @@ mod tests {
         assert!(result.findings.iter().any(|finding| {
             finding.rule == ImplementationLintRule::OutOfScope && finding.path == "src/omitted.rs"
         }));
+
+        for path in ["src/allowed.rs", "scripts/helper.mjs"] {
+            let result = lint_issue_implementation_contract(
+                &UnifiedDiff {
+                    files: vec![file(path, 1)],
+                },
+                body,
+            );
+            assert!(
+                result
+                    .findings
+                    .iter()
+                    .any(|finding| finding.rule == ImplementationLintRule::MissingTest),
+                "{path} must not satisfy the regression-artifact contract"
+            );
+        }
+
+        let in_scope = lint_issue_implementation_contract(
+            &UnifiedDiff {
+                files: vec![file("src/allowed.rs", 1)],
+            },
+            body,
+        );
+        assert!(in_scope
+            .findings
+            .iter()
+            .all(|finding| finding.rule != ImplementationLintRule::OutOfScope));
+    }
+
+    #[test]
+    fn missing_test_directive_mentions_every_accepted_artifact_shape() {
+        assert_eq!(
+            directive_for(ImplementationLintRule::MissingTest),
+            "Add a test under tests/<tier>/ or a project-native scripts/test-* regression artifact \
+             before re-pushing."
+        );
     }
 }
