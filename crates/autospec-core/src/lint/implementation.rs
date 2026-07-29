@@ -166,7 +166,7 @@ pub fn lint_implementation(
         context.options.patch_size_limits,
         &mut collector,
     );
-    collect_issue_implementation_contract(diff, context.issue_body, &mut collector);
+    collect_issue_implementation_contract(diff, context.issue_body, false, &mut collector);
     detect_complexity(diff, context.repository, &context.options, &mut collector);
     detect_security(diff, &mut collector);
     detect_todo_left(diff, &mut collector);
@@ -193,16 +193,17 @@ pub fn lint_issue_implementation_contract(
 ) -> ImplementationLintResult {
     let mut collector =
         FindingCollector::new(parse_guardian_skips(issue_body), DEFAULT_AGGREGATE_HARD_CAP);
-    collect_issue_implementation_contract(diff, Some(issue_body), &mut collector);
+    collect_issue_implementation_contract(diff, Some(issue_body), true, &mut collector);
     collector.finish()
 }
 
 fn collect_issue_implementation_contract(
     diff: &UnifiedDiff,
     issue_body: Option<&str>,
+    fail_closed_on_missing_outline: bool,
     collector: &mut FindingCollector,
 ) {
-    detect_out_of_scope(diff, issue_body, collector);
+    detect_out_of_scope(diff, issue_body, fail_closed_on_missing_outline, collector);
     detect_missing_test(diff, issue_body, collector);
 }
 
@@ -570,16 +571,19 @@ impl FindingCollector {
 fn detect_out_of_scope(
     diff: &UnifiedDiff,
     issue_body: Option<&str>,
+    fail_closed_on_missing_outline: bool,
     collector: &mut FindingCollector,
 ) {
-    let Some(outline) = issue_body.and_then(|body| {
-        section(body, &["Implementation outline"])
-            .or_else(|| section(body, &["Implementation scope"]))
-    }) else {
+    let Some(issue_body) = issue_body else {
         return;
     };
-    let allowed = path_tokens(outline);
-    if allowed.is_empty() {
+    let outline = section(issue_body, &["Implementation outline"])
+        .or_else(|| section(issue_body, &["Implementation scope"]));
+    if outline.is_none() && !fail_closed_on_missing_outline {
+        return;
+    }
+    let allowed = outline.map(path_tokens).unwrap_or_default();
+    if outline.is_some() && allowed.is_empty() {
         return;
     }
     for file in &diff.files {
@@ -1795,7 +1799,7 @@ fn is_abstraction_path(path: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lint::{DiffHunk, DiffLine, DiffLineKind};
+    use crate::lint::{parse_unified_diff, DiffHunk, DiffLine, DiffLineKind};
 
     struct EmptyRepository;
     impl RepositoryIndex for EmptyRepository {}
@@ -2014,6 +2018,52 @@ mod tests {
             body,
         );
         assert!(in_scope
+            .findings
+            .iter()
+            .all(|finding| finding.rule != ImplementationLintRule::OutOfScope));
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_rejects_changed_path_without_outline() {
+        let diff = parse_unified_diff(concat!(
+            "diff ",
+            "--git a/src/changed.rs b/src/changed.rs\n\
+             --- a/src/changed.rs\n\
+             +++ b/src/changed.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n"
+        ))
+        .expect("literal diff must parse");
+
+        let result = lint_issue_implementation_contract(&diff, "## Goal\n\nChange behavior.\n");
+        let out_of_scope = result
+            .findings
+            .iter()
+            .filter(|finding| finding.rule == ImplementationLintRule::OutOfScope)
+            .collect::<Vec<_>>();
+
+        assert_eq!(out_of_scope.len(), 1);
+        assert_eq!(out_of_scope[0].path, "src/changed.rs");
+    }
+
+    #[test]
+    fn lint_issue_implementation_contract_accepts_matching_outline_path() {
+        let diff = parse_unified_diff(concat!(
+            "diff ",
+            "--git a/src/changed.rs b/src/changed.rs\n\
+             --- a/src/changed.rs\n\
+             +++ b/src/changed.rs\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n"
+        ))
+        .expect("literal diff must parse");
+        let body = "## Implementation outline\n\n- `src/changed.rs`\n";
+
+        let result = lint_issue_implementation_contract(&diff, body);
+
+        assert!(result
             .findings
             .iter()
             .all(|finding| finding.rule != ImplementationLintRule::OutOfScope));
