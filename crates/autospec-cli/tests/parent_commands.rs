@@ -80,35 +80,74 @@ fn stateful_parent_fixture(name: &str) -> PathBuf {
         &root.join("bin"),
         r#"#!/bin/sh
 remote=$AUTOSPEC_PARENT_REMOTE
+unexpected() {
+  kind=$1
+  shift
+  printf '%s:' "$kind" >> "$AUTOSPEC_PARENT_GH_LOG"
+  separator=
+  for argument in "$@"; do
+    printf '%s%s' "$separator" "$argument" >> "$AUTOSPEC_PARENT_GH_LOG"
+    separator=' '
+  done
+  printf '\n' >> "$AUTOSPEC_PARENT_GH_LOG"
+  printf 'unexpected gh command\n' >&2
+  exit 64
+}
 if [ "$1 $2" = "issue view" ]; then
+  if [ "$#" -ne 9 ] || [ "$4" != "--repo" ] || [ "$5" != "testorg/testrepo" ] ||
+     [ "$6" != "--json" ] || [ "$8" != "--jq" ] || [ -z "$9" ]; then
+    unexpected unexpected-command "$@"
+  fi
+  case "$3" in 10|11|12|13|14) ;; *) unexpected unexpected-command "$@" ;; esac
   case "$7" in
     comments|state) cat "$remote/$3.$7" 2>/dev/null || true ;;
+    *) unexpected unexpected-command "$@" ;;
   esac
   exit 0
 fi
 if [ "$1 $2" = "issue comment" ]; then
+  if [ "$#" -ne 7 ] || [ "$4" != "--repo" ] || [ "$5" != "testorg/testrepo" ] ||
+     [ "$6" != "--body" ]; then
+    unexpected unexpected-mutation "$@"
+  fi
+  case "$3" in 10|11|12|13|14) ;; *) unexpected unexpected-mutation "$@" ;; esac
   printf 'comment:%s\n' "$3" >> "$AUTOSPEC_PARENT_GH_LOG"
   printf '%s\n' "$7" > "$remote/$3.comments"
   exit 0
 fi
 if [ "$1 $2" = "issue reopen" ]; then
+  if [ "$#" -ne 5 ] || [ "$4" != "--repo" ] || [ "$5" != "testorg/testrepo" ]; then
+    unexpected unexpected-mutation "$@"
+  fi
+  case "$3" in 10|11|12|13|14) ;; *) unexpected unexpected-mutation "$@" ;; esac
   printf 'reopen:%s\n' "$3" >> "$AUTOSPEC_PARENT_GH_LOG"
   printf 'OPEN\n' > "$remote/$3.state"
   exit 0
 fi
 if [ "$1 $2" = "issue close" ]; then
+  if [ "$#" -ne 5 ] || [ "$4" != "--repo" ] || [ "$5" != "testorg/testrepo" ]; then
+    unexpected unexpected-mutation "$@"
+  fi
+  case "$3" in 10|11|12|13|14) ;; *) unexpected unexpected-mutation "$@" ;; esac
   printf 'close:%s\n' "$3" >> "$AUTOSPEC_PARENT_GH_LOG"
   printf 'CLOSED\n' > "$remote/$3.state"
   exit 0
 fi
 if [ "$1 $2" = "api graphql" ]; then
-  for argument in "$@"; do
-    case "$argument" in number=*) number=${argument#number=} ;; esac
-  done
+  case "$*" in *mutation*) unexpected unexpected-mutation "$@" ;; esac
+  if [ "$#" -ne 10 ] || [ "$3" != "-f" ] || [ "$5" != "-F" ] ||
+     [ "$6" != "owner=testorg" ] || [ "$7" != "-F" ] ||
+     [ "$8" != "name=testrepo" ] || [ "$9" != "-F" ]; then
+    unexpected unexpected-command "$@"
+  fi
+  case "$4" in query=query*) ;; *) unexpected unexpected-command "$@" ;; esac
+  case "${10}" in number=*) number=${10#number=} ;; *) unexpected unexpected-command "$@" ;; esac
+  case "$number" in 11|12|13|14) ;; *) unexpected unexpected-command "$@" ;; esac
   cat "$remote/$number.graphql"
   exit 0
 fi
-exit 0
+case "$1" in issue|api) unexpected unexpected-mutation "$@" ;; esac
+unexpected unexpected-command "$@"
 "#,
     );
     root
@@ -151,6 +190,37 @@ fn assert_success(output: &Output) {
         "stdout={} stderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn parent_extend_fake_gh_rejects_unexpected_mutations() {
+    let root = stateful_parent_fixture("extend-harness-guard");
+    let issue_edit = Command::new(root.join("bin/gh"))
+        .args(["issue", "edit", "13"])
+        .env("AUTOSPEC_PARENT_GH_LOG", root.join("gh.log"))
+        .env("AUTOSPEC_PARENT_REMOTE", root.join("remote"))
+        .output()
+        .expect("unexpected gh mutation starts");
+    let graphql_mutation = Command::new(root.join("bin/gh"))
+        .args([
+            "api",
+            "graphql",
+            "-f",
+            "query=mutation{deleteIssue(input:{}){clientMutationId}}",
+        ])
+        .env("AUTOSPEC_PARENT_GH_LOG", root.join("gh.log"))
+        .env("AUTOSPEC_PARENT_REMOTE", root.join("remote"))
+        .output()
+        .expect("unexpected GraphQL mutation starts");
+
+    assert!(!issue_edit.status.success());
+    assert!(!graphql_mutation.status.success());
+    assert_eq!(
+        mutation_log(&root),
+        "unexpected-mutation:issue edit 13\n\
+         unexpected-mutation:api graphql -f \
+         query=mutation{deleteIssue(input:{}){clientMutationId}}\n"
     );
 }
 
