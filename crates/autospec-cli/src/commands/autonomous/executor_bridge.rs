@@ -1818,6 +1818,7 @@ pub(crate) struct DirectCommand {
     pub(crate) argv: Vec<String>,
     accepted_exit_codes: Vec<i32>,
     identity_digest: Option<String>,
+    review_capture: Option<ReviewerCapturePolicy>,
 }
 
 impl DirectCommand {
@@ -1826,7 +1827,40 @@ impl DirectCommand {
             argv,
             accepted_exit_codes: vec![0],
             identity_digest: None,
+            review_capture: None,
         }
+    }
+
+    fn automatic_reviewer(
+        argv: Vec<String>,
+        artifacts: &AutomaticReviewerArtifacts,
+    ) -> Result<Self, String> {
+        let review_capture = ReviewerCapturePolicy {
+            artifacts: [
+                artifacts.inner_stdout.clone(),
+                artifacts.inner_stderr.clone(),
+                artifacts.result.clone(),
+            ],
+        };
+        let normalizer_digest = sha256_hex(
+            &fs::read(&artifacts.normalizer)
+                .map_err(|error| format!("read automatic reviewer normalizer: {error}"))?,
+        );
+        let identity_digest = sha256_hex(
+            format!(
+                "review-capture-v1\0{normalizer_digest}\0{}\0{}\0{}",
+                review_capture.artifacts[0].display(),
+                review_capture.artifacts[1].display(),
+                review_capture.artifacts[2].display()
+            )
+            .as_bytes(),
+        );
+        Ok(Self {
+            argv,
+            accepted_exit_codes: vec![0],
+            identity_digest: Some(identity_digest),
+            review_capture: Some(review_capture),
+        })
     }
 
     fn accepts(&self, terminal: &AttemptTerminal) -> bool {
@@ -1834,6 +1868,75 @@ impl DirectCommand {
             terminal,
             AttemptTerminal::Exited(code) if self.accepted_exit_codes.contains(code)
         )
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReviewerCapturePolicy {
+    artifacts: [PathBuf; 3],
+}
+
+#[cfg(unix)]
+struct ActiveReviewerCapture {
+    artifacts: Vec<(PathBuf, File, u64, u64)>,
+}
+
+#[cfg(unix)]
+impl ActiveReviewerCapture {
+    fn open(policy: &ReviewerCapturePolicy) -> Result<Self, String> {
+        let mut artifacts = Vec::new();
+        for path in &policy.artifacts {
+            reject_symlink_path(path)?;
+            validate_private_state_file(path)?;
+            let file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .custom_flags(OFlag::O_NOFOLLOW.bits())
+                .open(path)
+                .map_err(|error| format!("open reviewer capture {}: {error}", path.display()))?;
+            let metadata = file
+                .metadata()
+                .map_err(|error| format!("inspect reviewer capture: {error}"))?;
+            let current = fs::metadata(path)
+                .map_err(|error| format!("reinspect reviewer capture: {error}"))?;
+            if metadata.dev() != current.dev() || metadata.ino() != current.ino() {
+                return Err("reviewer capture identity changed while opening".to_string());
+            }
+            artifacts.push((path.clone(), file, metadata.dev(), metadata.ino()));
+        }
+        Ok(Self { artifacts })
+    }
+
+    fn at_limit(&self) -> Result<bool, String> {
+        self.artifacts.iter().try_fold(false, |overflow, item| {
+            item.1
+                .metadata()
+                .map(|metadata| overflow || metadata.len() >= MAX_DIRECT_OUTPUT_BYTES)
+                .map_err(|error| format!("inspect reviewer capture length: {error}"))
+        })
+    }
+
+    fn finalize(&self) -> Result<bool, String> {
+        let mut overflow = false;
+        for (path, file, device, inode) in &self.artifacts {
+            validate_private_state_file(path)?;
+            let current = fs::metadata(path)
+                .map_err(|error| format!("reinspect reviewer capture: {error}"))?;
+            if current.dev() != *device || current.ino() != *inode {
+                return Err("reviewer capture identity changed during execution".to_string());
+            }
+            let length = file
+                .metadata()
+                .map_err(|error| format!("inspect reviewer capture length: {error}"))?
+                .len();
+            overflow |= length >= MAX_DIRECT_OUTPUT_BYTES;
+            if length > MAX_DIRECT_OUTPUT_BYTES {
+                file.set_len(MAX_DIRECT_OUTPUT_BYTES)
+                    .and_then(|()| file.sync_all())
+                    .map_err(|error| format!("bound reviewer capture: {error}"))?;
+            }
+        }
+        Ok(overflow)
     }
 }
 
@@ -6084,6 +6187,15 @@ fn execute_supervised_direct_attempt(
     intent_digest: &str,
     stall_timeout: Duration,
 ) -> AttemptTerminal {
+    let reviewer_capture = match command
+        .review_capture
+        .as_ref()
+        .map(ActiveReviewerCapture::open)
+        .transpose()
+    {
+        Ok(capture) => capture,
+        Err(error) => return AttemptTerminal::InfrastructureFailed(error),
+    };
     let invocation = ValidatedInvocation {
         program: PathBuf::from(&command.argv[0]),
         args: command.argv[1..].to_vec(),
@@ -6160,8 +6272,56 @@ fn execute_supervised_direct_attempt(
                 Err(cleanup) => AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}")),
             };
         }
+        if let Some(capture) = reviewer_capture.as_ref() {
+            match capture.at_limit() {
+                Ok(true) => {
+                    let cleanup = child.terminate();
+                    let bounded = capture.finalize();
+                    let _ = copy_direct_ring(
+                        &paths.sinks.stdout,
+                        &paths.sinks.stdout_writer_cursor,
+                        stdout,
+                    );
+                    let _ = copy_direct_ring(
+                        &paths.sinks.stderr,
+                        &paths.sinks.stderr_writer_cursor,
+                        stderr,
+                    );
+                    if let Err(error) = cleanup {
+                        return AttemptTerminal::CleanupFailed(error);
+                    }
+                    if let Err(error) = bounded {
+                        return AttemptTerminal::InfrastructureFailed(error);
+                    }
+                    return AttemptTerminal::Exited(70);
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    return match child.terminate() {
+                        Ok(()) => AttemptTerminal::InfrastructureFailed(error),
+                        Err(cleanup) => {
+                            AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}"))
+                        }
+                    }
+                }
+            }
+        }
         match child.try_wait() {
             Ok(Some(exit)) => {
+                if reviewer_capture.is_some() {
+                    if let Err(error) = child.terminate_descendants_preserving_supervisor() {
+                        let cleanup = child.terminate();
+                        let _ = reviewer_capture
+                            .as_ref()
+                            .map(ActiveReviewerCapture::finalize);
+                        return match cleanup {
+                            Ok(()) => AttemptTerminal::CleanupFailed(error),
+                            Err(cleanup) => {
+                                AttemptTerminal::CleanupFailed(format!("{error}; {cleanup}"))
+                            }
+                        };
+                    }
+                }
                 if let Err(completion) = child.wait_output_complete() {
                     let surviving_descendants = child.live_descendants();
                     let cleanup = child.terminate();
@@ -6177,6 +6337,13 @@ fn execute_supervised_direct_attempt(
                     );
                     if let Err(error) = cleanup {
                         return AttemptTerminal::CleanupFailed(format!("{completion}; {error}"));
+                    }
+                    if let Some(capture) = reviewer_capture.as_ref() {
+                        if let Err(error) = capture.finalize() {
+                            return AttemptTerminal::CleanupFailed(format!(
+                                "{completion}; {error}"
+                            ));
+                        }
                     }
                     return match surviving_descendants {
                         Ok(true) => AttemptTerminal::CleanupFailed(format!(
@@ -6276,6 +6443,13 @@ fn execute_supervised_direct_attempt(
                 };
                 if sizes.0 > MAX_DIRECT_OUTPUT_BYTES || sizes.1 > MAX_DIRECT_OUTPUT_BYTES {
                     return AttemptTerminal::OutputOverflow;
+                }
+                if let Some(capture) = reviewer_capture.as_ref() {
+                    match capture.finalize() {
+                        Ok(true) => return AttemptTerminal::Exited(70),
+                        Ok(false) => {}
+                        Err(error) => return AttemptTerminal::InfrastructureFailed(error),
+                    }
                 }
                 return if exit.code >= 128 {
                     AttemptTerminal::Signaled(exit.code - 128)
@@ -7038,10 +7212,10 @@ fn resolve_independent_reviewer(
     validate_external_reviewer_executable(state, &automatic.normalizer)?;
     Ok(IndependentReviewer {
         plan: DirectCommandPlan {
-            commands: vec![DirectCommand::success(vec![automatic
-                .normalizer
-                .display()
-                .to_string()])],
+            commands: vec![DirectCommand::automatic_reviewer(
+                vec![automatic.normalizer.display().to_string()],
+                &automatic,
+            )?],
         },
         automatic: Some(automatic),
     })
@@ -7283,9 +7457,6 @@ fn prepare_automatic_reviewer_normalizer(
     } else {
         inner_stdout.clone()
     };
-    let stdout_pipe = artifact_root.join("harness.stdout.pipe");
-    let stderr_pipe = artifact_root.join("harness.stderr.pipe");
-    let result_pipe = artifact_root.join("harness-result.pipe");
     let program = invocation
         .program
         .to_str()
@@ -7293,12 +7464,7 @@ fn prepare_automatic_reviewer_normalizer(
     let env_utility = trusted_reviewer_utility("env")?;
     let wc_utility = trusted_reviewer_utility("wc")?;
     let cat_utility = trusted_reviewer_utility("cat")?;
-    let head_utility = trusted_reviewer_utility("head")?;
-    let kill_utility = trusted_reviewer_utility("kill")?;
-    let mkfifo_utility = trusted_reviewer_utility("mkfifo")?;
-    let ps_utility = trusted_reviewer_utility("ps")?;
-    let rm_utility = trusted_reviewer_utility("rm")?;
-    let setsid_utility = trusted_reviewer_utility("setsid")?;
+    let truncate_utility = trusted_reviewer_utility("truncate")?;
     let mut command = format!(
         "{} -i",
         posix_shell_quote(
@@ -7322,99 +7488,32 @@ fn prepare_automatic_reviewer_normalizer(
     let result_argument = result
         .to_str()
         .ok_or_else(|| "reviewer result path must be valid UTF-8".to_string())?;
-    let mut result_replacements = 0;
+    let mut result_arguments = 0;
     for argument in &invocation.args {
-        let argument = if kind == HarnessKind::Codex && argument == result_argument {
-            result_replacements += 1;
-            "/dev/fd/3"
-        } else {
-            argument
-        };
+        result_arguments += usize::from(kind == HarnessKind::Codex && argument == result_argument);
         command.push(' ');
         command.push_str(&posix_shell_quote(argument));
     }
-    if kind == HarnessKind::Codex && result_replacements != 1 {
+    if kind == HarnessKind::Codex && result_arguments != 1 {
         return Err("automatic Codex reviewer result argument is missing or ambiguous".to_string());
     }
-    let head = posix_shell_quote(
-        head_utility
-            .to_str()
-            .ok_or_else(|| "trusted head path must be valid UTF-8".to_string())?,
-    );
-    let stdout_pipe = posix_shell_quote(
-        stdout_pipe
-            .to_str()
-            .ok_or_else(|| "reviewer stdout pipe path must be valid UTF-8".to_string())?,
-    );
-    let stderr_pipe = posix_shell_quote(
-        stderr_pipe
-            .to_str()
-            .ok_or_else(|| "reviewer stderr pipe path must be valid UTF-8".to_string())?,
-    );
-    let result_pipe = posix_shell_quote(
-        result_pipe
-            .to_str()
-            .ok_or_else(|| "reviewer result pipe path must be valid UTF-8".to_string())?,
-    );
-    let pipes = if kind == HarnessKind::Codex {
-        format!("{stdout_pipe} {stderr_pipe} {result_pipe}")
-    } else {
-        format!("{stdout_pipe} {stderr_pipe}")
-    };
-    let result_setup = if kind == HarnessKind::Codex {
-        format!(
-            "{head} -c {MAX_DIRECT_OUTPUT_BYTES} < {result_pipe} > {result} & result_reader=$!\n\
-             exec 3>{result_pipe} || exit 68\n",
-            result = posix_shell_quote(result_argument),
-        )
-    } else {
-        String::new()
-    };
-    let result_close = if kind == HarnessKind::Codex {
-        "exec 3>&-\n"
-    } else {
-        ""
-    };
-    let result_wait = if kind == HarnessKind::Codex {
-        "wait \"$result_reader\" || exit 69\n"
-    } else {
-        ""
-    };
     let body = format!(
         "#!/bin/sh\n\
          set -u\n\
          umask 077\n\
-         trap \"{rm} -f {pipes}\" EXIT HUP INT TERM\n\
-         {rm} -f {pipes} || exit 68\n\
-         {mkfifo} {pipes} || exit 68\n\
          : > {result} || exit 65\n\
-         {head} -c {output_bytes} < {stdout_pipe} > {stdout} & stdout_reader=$!\n\
-         {head} -c {output_bytes} < {stderr_pipe} > {stderr} & stderr_reader=$!\n\
-         {result_setup}\
-         caller_pgid=$({ps} -o pgid= -p \"$$\") || exit 68\n\
-         caller_pgid=$((caller_pgid + 0))\n\
-         {setsid} {command} >{stdout_pipe} 2>{stderr_pipe} &\n\
-         harness_pid=$!\n\
-         if wait \"$harness_pid\"; then\n\
+         if {command} >{stdout} 2>{stderr}; then\n\
          \tstatus=0\n\
          else\n\
          \tstatus=$?\n\
          fi\n\
-         [ \"$harness_pid\" -gt 1 ] || exit 68\n\
-         [ \"$harness_pid\" -ne \"$$\" ] || exit 68\n\
-         [ \"$harness_pid\" -ne \"$caller_pgid\" ] || exit 68\n\
-         {kill} -TERM -- \"-$harness_pid\" 2>/dev/null || :\n\
-         {kill} -KILL -- \"-$harness_pid\" 2>/dev/null || :\n\
-         {result_close}\
-         wait \"$stdout_reader\" || exit 69\n\
-         wait \"$stderr_reader\" || exit 69\n\
-         {result_wait}\
-         {rm} -f {pipes} || exit 68\n\
-         trap - EXIT HUP INT TERM\n\
          overflow=0\n\
          for artifact in {stdout} {stderr} {result}; do\n\
          \tsize=$({wc} -c < \"$artifact\") || exit 69\n\
-         \t[ \"$size\" -lt {output_bytes} ] || overflow=1\n\
+         \tif [ \"$size\" -ge {output_bytes} ]; then\n\
+         \t\toverflow=1\n\
+         \t\t{truncate} -s {output_bytes} \"$artifact\" || exit 69\n\
+         \tfi\n\
          done\n\
          [ \"$overflow\" -eq 0 ] || exit 70\n\
          [ \"$status\" -eq 0 ] || exit \"$status\"\n\
@@ -7432,30 +7531,10 @@ fn prepare_automatic_reviewer_normalizer(
                 .to_str()
                 .ok_or_else(|| "trusted cat path must be valid UTF-8".to_string())?
         ),
-        kill = posix_shell_quote(
-            kill_utility
+        truncate = posix_shell_quote(
+            truncate_utility
                 .to_str()
-                .ok_or_else(|| "trusted kill path must be valid UTF-8".to_string())?
-        ),
-        mkfifo = posix_shell_quote(
-            mkfifo_utility
-                .to_str()
-                .ok_or_else(|| "trusted mkfifo path must be valid UTF-8".to_string())?
-        ),
-        ps = posix_shell_quote(
-            ps_utility
-                .to_str()
-                .ok_or_else(|| "trusted ps path must be valid UTF-8".to_string())?
-        ),
-        rm = posix_shell_quote(
-            rm_utility
-                .to_str()
-                .ok_or_else(|| "trusted rm path must be valid UTF-8".to_string())?
-        ),
-        setsid = posix_shell_quote(
-            setsid_utility
-                .to_str()
-                .ok_or_else(|| "trusted setsid path must be valid UTF-8".to_string())?
+                .ok_or_else(|| "trusted truncate path must be valid UTF-8".to_string())?
         ),
         stdout = posix_shell_quote(
             inner_stdout
@@ -8519,8 +8598,8 @@ fn private_reviewer_artifact_digest(path: &Path) -> Result<String, String> {
         .map_err(|error| format!("executor reviewer artifact must be private: {error}"))?;
     let bytes =
         fs::read(path).map_err(|error| format!("read executor reviewer artifact: {error}"))?;
-    if bytes.len() as u64 > MAX_DIRECT_OUTPUT_BYTES {
-        return Err("executor reviewer artifact exceeded the output limit".to_string());
+    if bytes.len() as u64 >= MAX_DIRECT_OUTPUT_BYTES {
+        return Err("executor reviewer artifact reached the output limit".to_string());
     }
     Ok(sha256_hex(&bytes))
 }
@@ -17274,6 +17353,19 @@ impl OwnedProcessSet {
         }
         Err("executor supervisor survived frozen pidfd cleanup".to_string())
     }
+
+    fn terminate_descendants_preserving_leader(&mut self) -> Result<(), String> {
+        let cleanup = self
+            .freeze_stable_tree()
+            .and_then(|()| self.kill_frozen_descendants());
+        let resume = self.leader.signal(Signal::SIGCONT);
+        match (cleanup, resume) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(cleanup), Ok(())) => Err(cleanup),
+            (Ok(()), Err(resume)) => Err(resume),
+            (Err(cleanup), Err(resume)) => Err(format!("{cleanup}; {resume}")),
+        }
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -17418,6 +17510,10 @@ impl ForkedChild {
             Err(error) => return Err(format!("reap executor supervisor: {error}")),
         }
         Ok(())
+    }
+
+    fn terminate_descendants_preserving_supervisor(&mut self) -> Result<(), String> {
+        self.processes.terminate_descendants_preserving_leader()
     }
 
     fn release_launch_barrier(&mut self) -> Result<(), String> {
@@ -26867,90 +26963,41 @@ exit 64
         let _ = fs::remove_dir_all(root);
     }
 
-    #[cfg(unix)]
-    #[test]
-    fn autonomous_executor_bridge_automatic_reviewer_normalizer_allows_large_private_harness_state()
-    {
-        // Break caught: a review-output limit inherited by the harness blocking private state.
-        use std::os::unix::process::ExitStatusExt;
-
-        let root = test_root("automatic-reviewer-private-state");
-        let harness = root.join("stateful-reviewer");
-        let private_state = root.join("private-state");
-        let artifact_root = root.join("review-artifacts");
-        super::ensure_private_directory(&artifact_root).expect("private review artifact directory");
-        let result = artifact_root.join("harness-result.txt");
-        write_executable(
-            &harness,
-            "#!/bin/sh\n\
-             set -eu\n\
-             head -c 2097152 /dev/zero > \"$1\"\n\
-             printf '%s\\n' LGTM > \"$2\"\n",
-        );
-        let invocation = super::ValidatedInvocation {
-            program: fs::canonicalize(&harness).expect("canonical stateful reviewer"),
-            args: vec![
-                private_state.display().to_string(),
-                result.display().to_string(),
-            ],
-            current_dir: root.clone(),
-            environment_overrides: Vec::new(),
-        };
-        let automatic = super::prepare_automatic_reviewer_normalizer(
-            super::HarnessKind::Codex,
-            &invocation,
-            &artifact_root,
-        )
-        .expect("automatic reviewer normalizer");
-
-        let output = Command::new("/bin/sh")
-            .arg(&automatic.normalizer)
-            .current_dir(&root)
-            .output()
-            .expect("run stateful reviewer");
-
-        assert_ne!(output.status.signal(), Some(25), "{output:?}");
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(output.stdout, b"LGTM\n");
-        assert_eq!(
-            fs::metadata(&private_state)
-                .expect("private harness state")
-                .len(),
-            2 * super::MAX_DIRECT_OUTPUT_BYTES
-        );
-        assert_eq!(
-            fs::read_to_string(&result).expect("review result"),
-            "LGTM\n"
-        );
-        let _ = fs::remove_dir_all(root);
-    }
-
     #[cfg(target_os = "linux")]
     #[test]
-    fn autonomous_executor_bridge_automatic_reviewer_normalizer_reaps_inherited_output_descendants()
-    {
-        // Break caught: a detached harness descendant retaining every captured writer indefinitely.
-        let root = test_root("automatic-reviewer-inherited-output-descendant");
-        let harness = root.join("forking-reviewer");
-        let descendant_pid_path = root.join("descendant.pid");
-        let artifact_root = root.join("review-artifacts");
+    fn autonomous_executor_bridge_automatic_reviewer_normalizer_reaps_setsid_descendant_by_identity(
+    ) {
+        // Break caught: numeric group cleanup missing a session escape or killing an unrelated PID.
+        let fixture = GitFixture::new("automatic-reviewer-setsid-descendant");
+        let harness = fixture.root.join("forking-reviewer");
+        let descendant_identity_path = fixture.root.join("descendant.identity");
+        let private_state = fixture.root.join("private-state");
+        let artifact_root = fixture.root.join("review-artifacts");
         super::ensure_private_directory(&artifact_root).expect("private review artifact directory");
         let result = artifact_root.join("harness-result.txt");
+        let setsid = super::trusted_reviewer_utility("setsid").expect("trusted setsid");
         write_executable(
             &harness,
-            "#!/bin/sh\n\
+            &format!(
+                "#!/bin/sh\n\
              set -eu\n\
-             /bin/sh -c 'trap \"\" HUP INT TERM; printf \"%s\\n\" \"$$\" > \"$1\"; while :; do /usr/bin/sleep 1; done' descendant \"$2\" &\n\
+             head -c 2097152 /dev/zero > \"$3\"\n\
+             exec 3>>\"$1\"\n\
+             '{}' -f /bin/sh -c 'trap \"\" HUP INT TERM; sid=$(/usr/bin/ps -o sid= -p \"$$\"); printf \"%s %s\\n\" \"$$\" \"$sid\" > \"$1\"; while :; do /usr/bin/sleep 1; done' descendant \"$2\" &\n\
              while [ ! -s \"$2\" ]; do /usr/bin/sleep 0.01; done\n\
+             /usr/bin/sleep 0.1\n\
              printf '%s\\n' LGTM > \"$1\"\n",
+                setsid.display()
+            ),
         );
         let invocation = super::ValidatedInvocation {
             program: fs::canonicalize(&harness).expect("canonical forking reviewer"),
             args: vec![
                 result.display().to_string(),
-                descendant_pid_path.display().to_string(),
+                descendant_identity_path.display().to_string(),
+                private_state.display().to_string(),
             ],
-            current_dir: root.clone(),
+            current_dir: fixture.repo.clone(),
             environment_overrides: Vec::new(),
         };
         let automatic = super::prepare_automatic_reviewer_normalizer(
@@ -26959,39 +27006,43 @@ exit 64
             &artifact_root,
         )
         .expect("automatic reviewer normalizer");
-        let mut normalizer = Command::new("/bin/sh")
-            .arg(&automatic.normalizer)
-            .current_dir(&root)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+        let mut unrelated = Command::new("/usr/bin/sleep")
+            .arg("30")
             .process_group(0)
             .spawn()
-            .expect("run forking reviewer");
-        let normalizer_pid = normalizer.id();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if normalizer.try_wait().expect("observe normalizer").is_some() {
-                break;
-            }
-            if Instant::now() >= deadline {
-                let _ = nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(-(normalizer_pid as i32)),
-                    Signal::SIGKILL,
-                );
-                let output = normalizer.wait_with_output().expect("reap hung normalizer");
-                panic!("normalizer waited for inherited output writers: {output:?}");
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        let output = normalizer.wait_with_output().expect("reap normalizer");
+            .expect("spawn unrelated process");
+        let _unrelated_cleanup =
+            DetachedForkedCleanup::new(unrelated.id()).expect("arm unrelated cleanup");
+        let plan = super::DirectCommandPlan {
+            commands: vec![super::DirectCommand::automatic_reviewer(
+                vec![automatic.normalizer.display().to_string()],
+                &automatic,
+            )
+            .expect("reviewer capture policy")],
+        };
+        let observations = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &fixture.root.join("direct-review"),
+            None,
+            Duration::from_millis(300),
+        )
+        .expect("reviewer tree is cleaned without changing its successful exit");
 
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(output.stdout, b"LGTM\n");
-        let descendant_pid = fs::read_to_string(&descendant_pid_path)
-            .expect("descendant pid")
-            .trim()
-            .parse::<u32>()
-            .expect("numeric descendant pid");
+        assert_eq!(observations[0].exit_code(), Some(0));
+        assert_eq!(
+            fs::metadata(private_state).expect("private state").len(),
+            2 * super::MAX_DIRECT_OUTPUT_BYTES
+        );
+        super::validate_automatic_reviewer_artifacts(&automatic)
+            .expect("bounded strict reviewer artifacts");
+        let identity = fs::read_to_string(&descendant_identity_path)
+            .expect("descendant identity")
+            .split_whitespace()
+            .map(|value| value.parse::<u32>().expect("numeric identity"))
+            .collect::<Vec<_>>();
+        let descendant_pid = identity[0];
+        assert_eq!(descendant_pid, identity[1], "setsid was not effective");
         let deadline = Instant::now() + Duration::from_secs(2);
         while Path::new(&format!("/proc/{descendant_pid}")).exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(1));
@@ -27001,100 +27052,75 @@ exit 64
             "harness descendant leaked"
         );
         assert!(
-            nix::sys::signal::kill(nix::unistd::Pid::from_raw(-(normalizer_pid as i32)), None)
-                .is_err(),
-            "normalizer reader process group leaked"
+            unrelated.try_wait().expect("observe unrelated").is_none(),
+            "identity-safe cleanup killed an unrelated process"
         );
-        for name in [
-            "harness.stdout.pipe",
-            "harness.stderr.pipe",
-            "harness-result.pipe",
-        ] {
-            assert!(!artifact_root.join(name).exists(), "{name} leaked");
-        }
-        let _ = fs::remove_dir_all(root);
     }
 
     #[cfg(unix)]
     #[test]
     fn autonomous_executor_bridge_automatic_reviewer_normalizer_rejects_each_artifact_at_limit() {
-        for channel in ["stdout", "stderr", "result"] {
-            for bytes in [
-                super::MAX_DIRECT_OUTPUT_BYTES,
-                2 * super::MAX_DIRECT_OUTPUT_BYTES,
+        for (channel, bytes) in [
+            ("stdout", super::MAX_DIRECT_OUTPUT_BYTES),
+            ("stderr", super::MAX_DIRECT_OUTPUT_BYTES),
+            ("result", 2 * super::MAX_DIRECT_OUTPUT_BYTES),
+        ] {
+            let root = test_root(&format!("automatic-reviewer-{channel}-{bytes}-limit"));
+            let harness = root.join("bounded-reviewer");
+            let artifact_root = root.join("review-artifacts");
+            super::ensure_private_directory(&artifact_root)
+                .expect("private review artifact directory");
+            let (kind, body, args) = match channel {
+                "stdout" => (
+                    super::HarnessKind::Claude,
+                    format!("#!/bin/sh\nhead -c {bytes} /dev/zero\n"),
+                    Vec::new(),
+                ),
+                "stderr" => (
+                    super::HarnessKind::Claude,
+                    format!("#!/bin/sh\nhead -c {bytes} /dev/zero >&2\nprintf 'LGTM\\\\n'\n"),
+                    Vec::new(),
+                ),
+                "result" => (
+                    super::HarnessKind::Codex,
+                    format!("#!/bin/sh\nhead -c {bytes} /dev/zero > \"$1\"\n"),
+                    vec![artifact_root
+                        .join("harness-result.txt")
+                        .display()
+                        .to_string()],
+                ),
+                _ => unreachable!(),
+            };
+            write_executable(&harness, &body);
+            let invocation = super::ValidatedInvocation {
+                program: fs::canonicalize(&harness).expect("canonical bounded reviewer"),
+                args,
+                current_dir: root.clone(),
+                environment_overrides: Vec::new(),
+            };
+            let automatic =
+                super::prepare_automatic_reviewer_normalizer(kind, &invocation, &artifact_root)
+                    .expect("automatic reviewer normalizer");
+            let output = Command::new("/bin/sh")
+                .arg(&automatic.normalizer)
+                .current_dir(&root)
+                .output()
+                .expect("run bounded reviewer");
+
+            assert_eq!(output.status.code(), Some(70), "{channel}: {output:?}");
+            for path in [
+                &automatic.inner_stdout,
+                &automatic.inner_stderr,
+                &automatic.result,
             ] {
-                let root = test_root(&format!("automatic-reviewer-{channel}-{bytes}-limit"));
-                let harness = root.join("bounded-reviewer");
-                let artifact_root = root.join("review-artifacts");
-                super::ensure_private_directory(&artifact_root)
-                    .expect("private review artifact directory");
-                let (kind, body, args) = match channel {
-                    "stdout" => (
-                        super::HarnessKind::Claude,
-                        format!("#!/bin/sh\nhead -c {bytes} /dev/zero\n"),
-                        Vec::new(),
-                    ),
-                    "stderr" => (
-                        super::HarnessKind::Claude,
-                        format!("#!/bin/sh\nhead -c {bytes} /dev/zero >&2\nprintf '%s\\n' LGTM\n"),
-                        Vec::new(),
-                    ),
-                    "result" => (
-                        super::HarnessKind::Codex,
-                        format!("#!/bin/sh\nhead -c {bytes} /dev/zero > \"$1\"\n"),
-                        vec![artifact_root
-                            .join("harness-result.txt")
-                            .display()
-                            .to_string()],
-                    ),
-                    _ => unreachable!(),
-                };
-                write_executable(&harness, &body);
-                let invocation = super::ValidatedInvocation {
-                    program: fs::canonicalize(&harness).expect("canonical bounded reviewer"),
-                    args,
-                    current_dir: root.clone(),
-                    environment_overrides: Vec::new(),
-                };
-                let automatic =
-                    super::prepare_automatic_reviewer_normalizer(kind, &invocation, &artifact_root)
-                        .expect("automatic reviewer normalizer");
-
-                let output = Command::new("/bin/sh")
-                    .arg(&automatic.normalizer)
-                    .current_dir(&root)
-                    .output()
-                    .expect("run bounded reviewer");
-
-                assert_eq!(
-                    output.status.code(),
-                    Some(70),
-                    "{channel}/{bytes}: {output:?}"
+                assert!(
+                    fs::metadata(path).expect("captured artifact").len()
+                        <= super::MAX_DIRECT_OUTPUT_BYTES,
+                    "{channel}: {} exceeded the hard bound",
+                    path.display()
                 );
-                for path in [
-                    &automatic.inner_stdout,
-                    &automatic.inner_stderr,
-                    &automatic.result,
-                ] {
-                    assert!(
-                        fs::metadata(path).expect("captured artifact").len()
-                            <= super::MAX_DIRECT_OUTPUT_BYTES,
-                        "{channel}/{bytes}: {} exceeded the hard bound",
-                        path.display()
-                    );
-                }
-                for name in [
-                    "harness.stdout.pipe",
-                    "harness.stderr.pipe",
-                    "harness-result.pipe",
-                ] {
-                    assert!(
-                        !artifact_root.join(name).exists(),
-                        "{channel}/{bytes}: {name}"
-                    );
-                }
-                let _ = fs::remove_dir_all(root);
             }
+            let _ = fs::remove_dir_all(root);
         }
     }
 
@@ -27402,9 +27428,7 @@ exit 64
         )
         .expect("automatic reviewer normalizer");
         let normalizer = fs::read_to_string(&automatic.normalizer).expect("normalizer");
-        for utility in [
-            "env", "wc", "cat", "head", "kill", "mkfifo", "ps", "rm", "setsid",
-        ] {
+        for utility in ["env", "wc", "cat", "truncate"] {
             let trusted = super::trusted_reviewer_utility(utility).expect("trusted utility");
             assert!(
                 normalizer.contains(&format!("'{}'", trusted.display())),
@@ -27412,7 +27436,6 @@ exit 64
             );
         }
         assert!(!normalizer.contains("ulimit -f"), "{normalizer}");
-        assert!(!normalizer.contains("truncate -s"), "{normalizer}");
         assert!(!normalizer.contains("$(wc "), "{normalizer}");
         assert!(!normalizer.contains("$(cat "), "{normalizer}");
 
