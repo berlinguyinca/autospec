@@ -26,7 +26,7 @@ fn write_gh(bin: &Path, script: &str) {
     let path = bin.join("gh");
     let script = script.replacen(
         "#!/bin/sh",
-        "#!/bin/sh\nif [ \"$1 $2\" = \"api user\" ]; then printf '%s\\n' \"${AUTOSPEC_PARENT_TEST_WRITER:-berlinguyinca}\"; exit 0; fi",
+        "#!/bin/sh\nif [ \"$#\" -eq 4 ] && [ \"$1 $2 $3 $4\" = \"api user --jq .login\" ]; then printf '%s\\n' \"${AUTOSPEC_PARENT_TEST_WRITER:-berlinguyinca}\"; exit 0; fi",
         1,
     );
     let mut file = fs::File::create(&path).expect("fake gh");
@@ -213,14 +213,32 @@ fn parent_extend_fake_gh_rejects_unexpected_mutations() {
         .env("AUTOSPEC_PARENT_REMOTE", root.join("remote"))
         .output()
         .expect("unexpected GraphQL mutation starts");
+    let rest_mutation = Command::new(root.join("bin/gh"))
+        .args([
+            "api",
+            "user",
+            concat!("--", "method"),
+            "PATCH",
+            "-f",
+            "name=x",
+        ])
+        .env("AUTOSPEC_PARENT_GH_LOG", root.join("gh.log"))
+        .env("AUTOSPEC_PARENT_REMOTE", root.join("remote"))
+        .output()
+        .expect("unexpected REST mutation starts");
 
     assert!(!issue_edit.status.success());
     assert!(!graphql_mutation.status.success());
+    assert!(!rest_mutation.status.success());
     assert_eq!(
         mutation_log(&root),
-        "unexpected-mutation:issue edit 13\n\
-         unexpected-mutation:api graphql -f \
-         query=mutation{deleteIssue(input:{}){clientMutationId}}\n"
+        concat!(
+            "unexpected-mutation:issue edit 13\n",
+            "unexpected-mutation:api graphql -f ",
+            "query=mutation{deleteIssue(input:{}){clientMutationId}}\n",
+            "unexpected-mutation:api user --",
+            "method PATCH -f name=x\n"
+        )
     );
 }
 
