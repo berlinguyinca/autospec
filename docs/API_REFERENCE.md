@@ -180,8 +180,11 @@ outline and required tests. `--diff-file` reads an offline unified diff. Finding
 written to standard output in stable `RULE_ID:path:line: message` order; a clean result
 writes no findings.
 
-Exit: `0` = no blocking findings, `1..64` = blocking-finding count capped at 64,
-`200` = scope explosion. Input and diff-parse failures exit `1` with a diagnostic.
+Exit: `0` = no blocking findings, `1` = input failure or one blocking finding,
+`2` = option/usage error or two blocking findings, `3..64` = blocking-finding
+count capped at 64, and `200` = scope explosion. At exit `2`, usage diagnostics
+are written to standard error while classifier findings are written to standard
+output as RULE_ID records.
 
 <!-- autospec-doc-scope:
   src: ["tests/unit/test_lint_implementation.bats"]

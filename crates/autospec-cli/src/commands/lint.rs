@@ -1190,7 +1190,7 @@ fn print_implementation_help() {
 
 fn print_implementation_contract_help() {
     println!(
-        "autospec lint implementation-contract\n\nUSAGE:\n    autospec lint implementation-contract --issue-body-file <PATH> --diff-file <PATH>\n\nINPUTS:\n    --issue-body-file <PATH>  Read issue policy from a literal body file\n    --diff-file <PATH>        Read an offline unified-diff file\n\nOPTIONS:\n    -h, --help                Print help\n\nEXIT STATUS:\n    0                         No blocking findings\n    1                         Input failure or one blocking finding\n    2..64                     Blocking-finding count, capped at 64\n    200                       Scope explosion"
+        "autospec lint implementation-contract\n\nUSAGE:\n    autospec lint implementation-contract --issue-body-file <PATH> --diff-file <PATH>\n\nINPUTS:\n    --issue-body-file <PATH>  Read issue policy from a literal body file\n    --diff-file <PATH>        Read an offline unified-diff file\n\nOPTIONS:\n    -h, --help                Print help\n\nEXIT STATUS:\n    0                         No blocking findings\n    1                         Input failure or one blocking finding\n    2                         Option/usage error or two blocking findings\n    3..64                     Blocking-finding count, capped at 64\n    200                       Scope explosion"
     );
 }
 
