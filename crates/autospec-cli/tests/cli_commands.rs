@@ -230,6 +230,197 @@ fn lint_implementation_reads_an_offline_diff_file_and_streams_findings() {
 }
 
 #[test]
+fn lint_implementation_contract_blocks_unlisted_paths_and_missing_regression_evidence() {
+    let issue = write_issue_body(
+        "autospec-lint-implementation-contract-blocking",
+        "## Implementation outline\n\n- `src/allowed.rs`\n\n## Tests required\n\n- integration: real CLI regression\n",
+    );
+    let diff = write_implementation_diff(
+        "autospec-lint-implementation-contract-blocking",
+        &new_diff("scripts/unlisted.mjs", &["export const value = 1;"]),
+    );
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation-contract",
+            "--issue-body-file",
+            issue.to_str().unwrap(),
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .output()
+        .expect("autospec lint implementation-contract runs");
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stderr.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "OUT_OF_SCOPE:scripts/unlisted.mjs:-: file not listed in ## Implementation outline\n\
+MISSING_TEST:tests/integration/:-: required test tier 'integration' not present in diff\n"
+    );
+}
+
+#[test]
+fn lint_implementation_contract_accepts_an_outlined_project_native_regression_artifact() {
+    let path = "scripts/test-autonomous-status-panel.mjs";
+    let issue = write_issue_body(
+        "autospec-lint-implementation-contract-passing",
+        &format!(
+            "## Implementation outline\n\n- `{path}`\n\n## Tests required\n\n- integration: real CLI regression\n"
+        ),
+    );
+    let diff = write_implementation_diff(
+        "autospec-lint-implementation-contract-passing",
+        &new_diff(path, &["export const value = 1;"]),
+    );
+
+    let output = autospec()
+        .args([
+            "lint",
+            "implementation-contract",
+            "--issue-body-file",
+            issue.to_str().unwrap(),
+            "--diff-file",
+            diff.to_str().unwrap(),
+        ])
+        .output()
+        .expect("autospec lint implementation-contract runs");
+
+    assert!(output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn lint_implementation_contract_blocks_missing_or_pathless_outlines() {
+    let path = "scripts/test-autonomous-status-panel.mjs";
+    let bodies = [
+        "## Tests required\n\n- integration: real CLI regression\n",
+        "## Implementation outline\n\n## Tests required\n\n- integration: real CLI regression\n",
+        "## Implementation outline\n\n- Implement command behavior.\n\n## Tests required\n\n- integration: real CLI regression\n",
+    ];
+
+    for (index, body) in bodies.iter().enumerate() {
+        let issue = write_issue_body(
+            &format!("autospec-lint-implementation-contract-missing-outline-{index}"),
+            body,
+        );
+        let diff = write_implementation_diff(
+            &format!("autospec-lint-implementation-contract-missing-outline-{index}"),
+            &new_diff(path, &["export const value = 1;"]),
+        );
+
+        let output = autospec()
+            .args([
+                "lint",
+                "implementation-contract",
+                "--issue-body-file",
+                issue.to_str().unwrap(),
+                "--diff-file",
+                diff.to_str().unwrap(),
+            ])
+            .output()
+            .expect("autospec lint implementation-contract runs");
+
+        assert_eq!(output.status.code(), Some(1), "body fixture {index}");
+        assert!(output.stderr.is_empty(), "body fixture {index}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "OUT_OF_SCOPE:scripts/test-autonomous-status-panel.mjs:-: file not listed in ## Implementation outline\n",
+            "body fixture {index}"
+        );
+    }
+}
+
+#[test]
+fn lint_implementation_contract_reports_usage_errors_at_exit_two() {
+    let cases: &[(&[&str], &str)] = &[
+        (
+            &[],
+            "autospec lint implementation-contract: requires --issue-body-file <PATH> and --diff-file <PATH>\n",
+        ),
+        (
+            &["--issue-body-file", "--diff-file", "change.diff", "extra"],
+            "autospec lint implementation-contract: --issue-body-file requires an argument\n",
+        ),
+        (
+            &["--issue-body-file", "issue.md", "--unknown", "change.diff"],
+            "autospec lint implementation-contract: unknown option: --unknown\n",
+        ),
+        (
+            &["--diff-file", "first.diff", "--diff-file", "second.diff"],
+            "autospec lint implementation-contract: --diff-file accepts exactly one path\n",
+        ),
+    ];
+
+    for (args, expected_stderr) in cases {
+        let output = autospec()
+            .args(["lint", "implementation-contract"])
+            .args(args.iter().copied())
+            .output()
+            .expect("autospec lint implementation-contract starts");
+
+        assert_eq!(output.status.code(), Some(2), "args: {args:?}");
+        assert!(output.stdout.is_empty(), "args: {args:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            *expected_stderr,
+            "args: {args:?}"
+        );
+    }
+}
+
+#[test]
+fn lint_implementation_contract_reports_unreadable_and_malformed_inputs() {
+    let fixture = temp_dir("autospec-lint-implementation-contract-input-errors");
+    let missing_issue = fixture.join("missing-issue.md");
+    let valid_diff = write_implementation_diff(
+        "autospec-lint-implementation-contract-unreadable",
+        &new_diff("src/allowed.rs", &["pub const VALUE: usize = 1;"]),
+    );
+    let unreadable = autospec()
+        .args([
+            "lint",
+            "implementation-contract",
+            "--issue-body-file",
+            missing_issue.to_str().unwrap(),
+            "--diff-file",
+            valid_diff.to_str().unwrap(),
+        ])
+        .output()
+        .expect("autospec lint implementation-contract starts");
+
+    assert_eq!(unreadable.status.code(), Some(1));
+    assert!(unreadable.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&unreadable.stderr).contains("could not read issue body file"));
+
+    let issue = write_issue_body(
+        "autospec-lint-implementation-contract-malformed-diff",
+        "## Implementation outline\n\n- `src/allowed.rs`\n",
+    );
+    let malformed_diff = write_implementation_diff(
+        "autospec-lint-implementation-contract-malformed-diff",
+        "diff --git a/src/allowed.rs b/src/allowed.rs\n--- a/src/allowed.rs\n+++ b/src/allowed.rs\n@@ broken @@\n+value\n",
+    );
+    let malformed = autospec()
+        .args([
+            "lint",
+            "implementation-contract",
+            "--issue-body-file",
+            issue.to_str().unwrap(),
+            "--diff-file",
+            malformed_diff.to_str().unwrap(),
+        ])
+        .output()
+        .expect("autospec lint implementation-contract starts");
+
+    assert_eq!(malformed.status.code(), Some(1));
+    assert!(malformed.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&malformed.stderr).contains("could not parse unified diff"));
+}
+
+#[test]
 fn lint_implementation_pre_commit_reads_only_staged_diff_and_enables_both_test_gates() {
     let fixture = temp_dir("autospec-lint-implementation-pre-commit");
     let log = fixture.join("git.log");

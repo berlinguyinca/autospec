@@ -167,6 +167,25 @@ Usage: bash lint-implementation.sh <pr-number> [--repo <owner/repo>]
 
 Exit: 0 = pass, non-zero = at least one rule triggered.
 
+### `autospec lint implementation-contract`
+
+Runs the core `OUT_OF_SCOPE` and `MISSING_TEST` contract for non-Rust callers.
+
+```
+Usage: autospec lint implementation-contract --issue-body-file <BODY> --diff-file <DIFF>
+```
+
+`--issue-body-file` reads the literal issue Markdown that defines the implementation
+outline and required tests. `--diff-file` reads an offline unified diff. Findings are
+written to standard output in stable `RULE_ID:path:line: message` order; a clean result
+writes no findings.
+
+Exit: `0` = no blocking findings, `1` = input failure or one blocking finding,
+`2` = option/usage error or two blocking findings, `3..64` = blocking-finding
+count capped at 64, and `200` = scope explosion. At exit `2`, usage diagnostics
+are written to standard error while classifier findings are written to standard
+output as RULE_ID records.
+
 <!-- autospec-doc-scope:
   src: ["tests/unit/test_lint_implementation.bats"]
   reason: "Bats unit tests for lint-implementation.sh rule detectors including vacuous-assertions"

@@ -11,9 +11,10 @@ use autospec_core::claim::{
     IssueIntentFinding, SafetyReviewVerdict,
 };
 use autospec_core::lint::{
-    directive_for, lint_implementation, lint_issue_body, parse_unified_diff,
-    ImplementationLintContext, ImplementationLintFinding, ImplementationLintOptions,
-    ImplementationLintSeverity, IssueLintFinding, RepositoryIndex, UnifiedDiff,
+    directive_for, lint_implementation, lint_issue_body, lint_issue_implementation_contract,
+    parse_unified_diff, ImplementationLintContext, ImplementationLintFinding,
+    ImplementationLintOptions, ImplementationLintSeverity, IssueLintFinding, RepositoryIndex,
+    UnifiedDiff,
 };
 use yaml_edit::Document;
 
@@ -30,10 +31,92 @@ pub fn run(args: &[String]) -> Result<(), CommandFailure> {
         }
         [command, rest @ ..] if command == "issue" => run_issue(rest),
         [command, rest @ ..] if command == "implementation" => run_implementation(rest),
+        [command, rest @ ..] if command == "implementation-contract" => {
+            run_implementation_contract(rest)
+        }
         [command, ..] => Err(CommandFailure::diagnostic(format!(
             "unknown autospec lint command: {command}"
         ))),
     }
+}
+
+fn run_implementation_contract(args: &[String]) -> Result<(), CommandFailure> {
+    if args.len() == 1 && matches!(args[0].as_str(), "--help" | "-h") {
+        print_implementation_contract_help();
+        return Ok(());
+    }
+    let (issue_body_path, diff_path) = parse_implementation_contract_options(args)?;
+    let issue_body = read_implementation_contract_file(&issue_body_path, "issue body")?;
+    let diff_source = read_implementation_contract_file(&diff_path, "diff")?;
+    let diff = parse_unified_diff(&diff_source).map_err(|error| {
+        implementation_contract_failure(format!("could not parse unified diff: {error}"))
+    })?;
+    let result = lint_issue_implementation_contract(&diff, &issue_body);
+    print_implementation_findings(&result.findings);
+
+    let exit_code = result.exit_code();
+    if exit_code == 0 {
+        Ok(())
+    } else {
+        Err(CommandFailure::status(String::new(), exit_code))
+    }
+}
+
+fn parse_implementation_contract_options(
+    args: &[String],
+) -> Result<(PathBuf, PathBuf), CommandFailure> {
+    if args.len() != 4 {
+        return Err(implementation_contract_diagnostic(
+            "requires --issue-body-file <PATH> and --diff-file <PATH>",
+            2,
+        ));
+    }
+    let mut issue_body_file = None;
+    let mut diff_file = None;
+    for pair in args.chunks_exact(2) {
+        let option = pair[0].as_str();
+        let slot = match option {
+            "--issue-body-file" => &mut issue_body_file,
+            "--diff-file" => &mut diff_file,
+            _ => {
+                return Err(implementation_contract_diagnostic(
+                    &format!("unknown option: {option}"),
+                    2,
+                ));
+            }
+        };
+        if pair[1].starts_with('-') {
+            return Err(implementation_contract_diagnostic(
+                &format!("{option} requires an argument"),
+                2,
+            ));
+        }
+        if slot.replace(PathBuf::from(&pair[1])).is_some() {
+            return Err(implementation_contract_diagnostic(
+                &format!("{option} accepts exactly one path"),
+                2,
+            ));
+        }
+    }
+    match (issue_body_file, diff_file) {
+        (Some(issue_body_file), Some(diff_file)) => Ok((issue_body_file, diff_file)),
+        _ => Err(implementation_contract_diagnostic(
+            "requires --issue-body-file <PATH> and --diff-file <PATH>",
+            2,
+        )),
+    }
+}
+
+fn read_implementation_contract_file(
+    path: &Path,
+    description: &str,
+) -> Result<String, CommandFailure> {
+    fs::read_to_string(path).map_err(|error| {
+        implementation_contract_failure(format!(
+            "could not read {description} file {}: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn run_implementation(args: &[String]) -> Result<(), CommandFailure> {
@@ -351,6 +434,17 @@ fn implementation_failure(message: String) -> CommandFailure {
 fn implementation_diagnostic(message: &str, exit_code: i32) -> CommandFailure {
     CommandFailure::status(
         format!("autospec lint implementation: {message}"),
+        exit_code,
+    )
+}
+
+fn implementation_contract_failure(message: String) -> CommandFailure {
+    implementation_contract_diagnostic(&message, 1)
+}
+
+fn implementation_contract_diagnostic(message: &str, exit_code: i32) -> CommandFailure {
+    CommandFailure::status(
+        format!("autospec lint implementation-contract: {message}"),
         exit_code,
     )
 }
@@ -1072,7 +1166,7 @@ fn escape_json(value: &str) -> String {
 
 fn print_help() {
     println!(
-        "autospec lint\n\nUSAGE:\n    autospec lint <COMMAND>\n\nCOMMANDS:\n    issue            Lint an issue body\n    implementation   Lint an implementation diff"
+        "autospec lint\n\nUSAGE:\n    autospec lint <COMMAND>\n\nCOMMANDS:\n    issue                    Lint an issue body\n    implementation           Lint an implementation diff\n    implementation-contract  Lint issue-defined scope and regression evidence"
     );
 }
 
@@ -1091,6 +1185,12 @@ fn print_issue_safety_help() {
 fn print_implementation_help() {
     println!(
         "autospec lint implementation\n\nUSAGE:\n    autospec lint implementation <PR> [--issue <N>] [OPTIONS]\n    autospec lint implementation --diff-file <PATH> [OPTIONS]\n    autospec lint implementation --pre-commit --staged [OPTIONS]\n\nINPUTS:\n    <PR>                         Read a pull-request diff with `gh pr diff`\n    --diff-file <PATH>           Read an offline unified-diff file\n    --staged                      Read `git diff --cached`\n\nOPTIONS:\n    --issue <N>                  Read Guardian skip directives for a remote PR only\n    --pre-commit                 Enable vacuous and assertion-density checks; implies --staged\n    --directives                 Render `Fix RULE_ID: ...` records\n    --vacuous-assertions         Enable VACUOUS_* checks\n    --assertion-density          Enable ASSERTION_DENSITY checks\n    -h, --help                   Print help\n\nEXIT STATUS:\n    0                            No blocking findings\n    1                            Input or remote-command failure\n    1..64                        Blocking-finding count, capped at 64\n    200                          Scope explosion"
+    );
+}
+
+fn print_implementation_contract_help() {
+    println!(
+        "autospec lint implementation-contract\n\nUSAGE:\n    autospec lint implementation-contract --issue-body-file <PATH> --diff-file <PATH>\n\nINPUTS:\n    --issue-body-file <PATH>  Read issue policy from a literal body file\n    --diff-file <PATH>        Read an offline unified-diff file\n\nOPTIONS:\n    -h, --help                Print help\n\nEXIT STATUS:\n    0                         No blocking findings\n    1                         Input failure or one blocking finding\n    2                         Option/usage error or two blocking findings\n    3..64                     Blocking-finding count, capped at 64\n    200                       Scope explosion"
     );
 }
 
