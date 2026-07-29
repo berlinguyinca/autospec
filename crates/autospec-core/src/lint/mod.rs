@@ -2,12 +2,18 @@
 
 pub mod diff;
 pub mod implementation;
+pub mod pr_size;
 
 pub use diff::{parse_unified_diff, DiffFile, DiffHunk, DiffLine, DiffLineKind, UnifiedDiff};
 pub use implementation::{
     directive_for, lint_implementation, ImplementationLintContext, ImplementationLintFinding,
     ImplementationLintOptions, ImplementationLintResult, ImplementationLintRule,
     ImplementationLintSeverity, RepositoryIndex,
+};
+pub use pr_size::{
+    evaluate_patch_size, PatchSize, PatchSizeDimension, PatchSizeEvaluation, PatchSizeLimits,
+    DEFAULT_MAX_CHANGED_LINES, DEFAULT_MAX_LOGICAL_UNITS, DEFAULT_MAX_RAW_FILES,
+    PROACTIVE_CHANGED_LINES, PROACTIVE_RAW_FILES,
 };
 
 use std::collections::BTreeSet;
@@ -371,18 +377,18 @@ fn check_files_touched(document: &IssueDocument<'_>, findings: &mut Vec<IssueLin
         let Some(path) = normalize_file_token(line) else {
             continue;
         };
-        if is_derived_skill_golden(&path) {
-            continue;
+        if let Some(unit) = normalize_logical_unit(&path) {
+            units.insert(unit);
         }
-        units.insert(logical_file_unit(path));
     }
 
-    if units.len() > 3 {
+    if units.len() > DEFAULT_MAX_LOGICAL_UNITS {
         findings.push(IssueLintFinding::new(
             IssueQualityRule::TooManyFiles,
             format!(
-                "Files touched lists {} logical units (max 3; trio members + derived goldens count as one); split the issue to stay small-LLM-sized",
-                units.len()
+                "Files touched lists {} logical units (max {}; trio members + derived goldens count as one); split the issue to stay small-LLM-sized",
+                units.len(),
+                DEFAULT_MAX_LOGICAL_UNITS
             ),
         ));
     }
@@ -678,21 +684,20 @@ fn normalize_file_token(line: &str) -> Option<String> {
     (!path.is_empty() && path.bytes().all(is_path_character)).then_some(path)
 }
 
-fn is_derived_skill_golden(path: &str) -> bool {
-    path.starts_with("tests/fixtures/skill-goldens/") && path.ends_with(".sha256")
-}
-
-fn logical_file_unit(path: String) -> String {
+pub(crate) fn normalize_logical_unit(path: &str) -> Option<String> {
+    if path.starts_with("tests/fixtures/skill-goldens/") && path.ends_with(".sha256") {
+        return None;
+    }
     if path.starts_with("skills/")
         && (path.ends_with("/SKILL.md")
             || path.ends_with("/codex/prompt.md")
             || path.ends_with("/opencode/agent.md"))
     {
         if let Some(skill) = path.split('/').nth(1) {
-            return format!("skills/{skill}/<trio>");
+            return Some(format!("skills/{skill}/<trio>"));
         }
     }
-    path
+    Some(path.to_string())
 }
 
 fn is_ui_feature_marker(line: &str) -> bool {
