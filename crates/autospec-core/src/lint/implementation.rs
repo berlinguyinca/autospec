@@ -387,43 +387,54 @@ fn validate_lock_step_exception(diff: &UnifiedDiff, identity: &str) -> bool {
             manual.push(file.clone());
         }
     }
-    let Some((skill, files)) = mirrors.iter().next() else {
-        return false;
-    };
-    if mirrors.len() != 1
-        || !lock_step_identity_matches(identity, skill)
-        || goldens.iter().any(|golden| *golden != skill)
-        || files.len() != 3
-        || files
-            .windows(2)
-            .any(|pair| lock_step_fingerprint(pair[0]) != lock_step_fingerprint(pair[1]))
+    let skills = mirrors.keys().map(String::as_str).collect::<Vec<_>>();
+    if skills.is_empty()
+        || !lock_step_identity_matches(identity, &skills)
+        || goldens.iter().any(|golden| !mirrors.contains_key(*golden))
+        || mirrors.values().any(|files| {
+            files.len() != 3
+                || files
+                    .windows(2)
+                    .any(|pair| lock_step_fingerprint(pair[0]) != lock_step_fingerprint(pair[1]))
+        })
         || manual
             .iter()
             .any(|file| is_code_file(&file.path) || is_test_file(&file.path))
     {
         return false;
     }
-    manual.push((*files[0]).clone());
+    manual.extend(mirrors.values().map(|files| files[0].clone()));
     !evaluate_patch_size(&UnifiedDiff { files: manual }, PatchSizeLimits::default()).is_hard()
 }
 
 fn lock_step_skill(path: &str) -> Option<&str> {
     let (skill, adapter) = path.strip_prefix("skills/")?.split_once('/')?;
-    matches!(
-        adapter,
-        "SKILL.md" | "codex/prompt.md" | "opencode/agent.md"
-    )
-    .then_some(skill)
+    ["SKILL.md", "codex/prompt.md", "opencode/agent.md"]
+        .contains(&adapter)
+        .then_some(skill)
 }
 
 fn golden_skill(path: &str) -> Option<&str> {
-    let skill = path
-        .strip_prefix("tests/fixtures/skill-goldens/")?
-        .strip_suffix(".sha256")?;
-    (!skill.is_empty() && !skill.contains('/')).then_some(skill)
+    let name = path.strip_prefix("tests/fixtures/skill-goldens/")?;
+    [
+        ".SKILL.md.sha256",
+        ".codex.prompt.md.sha256",
+        ".opencode.agent.md.sha256",
+    ]
+    .into_iter()
+    .find_map(|suffix| name.strip_suffix(suffix))
+    .filter(|skill| !skill.is_empty() && !skill.contains('/'))
 }
 
-fn lock_step_identity_matches(identity: &str, skill: &str) -> bool {
+fn lock_step_identity_matches(identity: &str, skills: &[&str]) -> bool {
+    if skills.len() > 1 {
+        let expected = format!(
+            "{} adapter trios plus derived goldens",
+            skills.join(" and ")
+        );
+        return identity == expected;
+    }
+    let skill = skills[0];
     let identity = identity.strip_suffix(" adapters").unwrap_or(identity);
     identity.strip_prefix("skills/").unwrap_or(identity) == skill
 }
@@ -1785,7 +1796,7 @@ mod tests {
         }
     }
 
-    fn lint(files: Vec<DiffFile>, issue_body: Option<&str>) -> ImplementationLintResult {
+    fn findings(files: Vec<DiffFile>, issue_body: Option<&str>) -> Vec<ImplementationLintFinding> {
         lint_implementation(
             &UnifiedDiff { files },
             ImplementationLintContext {
@@ -1794,57 +1805,45 @@ mod tests {
                 options: ImplementationLintOptions::default(),
             },
         )
+        .findings
+        .into_iter()
+        .filter(|finding| finding.rule == ImplementationLintRule::PrSize)
+        .collect()
     }
 
-    fn pr_size(result: &ImplementationLintResult) -> Vec<ImplementationLintFinding> {
-        result
-            .findings
-            .iter()
-            .filter(|finding| finding.rule == ImplementationLintRule::PrSize)
-            .cloned()
-            .collect()
-    }
-
-    fn trio(lines: usize) -> Vec<DiffFile> {
-        [
-            "skills/autospec/SKILL.md",
-            "skills/autospec/codex/prompt.md",
-            "skills/autospec/opencode/agent.md",
-        ]
-        .map(|path| file(path, lines))
-        .to_vec()
+    fn trio(skill: &str, lines: usize) -> Vec<DiffFile> {
+        ["SKILL.md", "codex/prompt.md", "opencode/agent.md"]
+            .map(|adapter| file(&format!("skills/{skill}/{adapter}"), lines))
+            .to_vec()
     }
 
     fn severity(files: Vec<DiffFile>, body: Option<&str>) -> ImplementationLintSeverity {
-        pr_size(&lint(files, body)).remove(0).severity
+        findings(files, body).remove(0).severity
     }
 
     fn rejects(files: Vec<DiffFile>, body: Option<&str>) {
         assert_eq!(severity(files, body), ImplementationLintSeverity::Error);
     }
 
+    fn accepts(files: Vec<DiffFile>, body: &str) {
+        assert_eq!(
+            severity(files, Some(body)),
+            ImplementationLintSeverity::Info
+        );
+    }
+
     #[test]
     fn pr_size_enforces_every_hard_boundary_in_order() {
-        let boundary = [
-            "skills/autospec/SKILL.md",
-            "skills/autospec/codex/prompt.md",
-            "skills/autospec/opencode/agent.md",
-            "tests/fixtures/skill-goldens/a.sha256",
-            "tests/fixtures/skill-goldens/b.sha256",
-            "tests/fixtures/skill-goldens/c.sha256",
-            "docs/a.md",
-            "docs/b.md",
-        ]
-        .map(|path| file(path, 50))
-        .to_vec();
-        assert!(pr_size(&lint(boundary, None)).is_empty());
+        let mut boundary = (0..8).map(|_| file("docs/a.md", 50)).collect::<Vec<_>>();
+        boundary[1].path = "docs/b.md".to_string();
+        boundary[2].path = "docs/c.md".to_string();
+        assert!(findings(boundary, None).is_empty());
 
         let mut combined = (0..9)
             .map(|index| file(&format!("area-{index}/file.rs"), 45))
             .collect::<Vec<_>>();
         combined[0].is_binary = true;
-        let findings = pr_size(&lint(combined, None));
-        assert_eq!(findings[0].severity, ImplementationLintSeverity::Error);
+        let findings = findings(combined, None);
         assert!(findings[0].message.contains(
             "changed_lines=405/400 raw_files=9/8 logical_units=9/3 binary=true \
              exceeded=changed_lines,raw_files,logical_units,binary"
@@ -1862,47 +1861,36 @@ mod tests {
         let generated = "Guardian: skip-PR_SIZE # generated migration: prisma\n";
         let mut migration = file("db/migrations/001_create.sql", 401);
         migration.hunks[0].lines[0].content = "Generated by prisma".to_string();
-        let finding = pr_size(&lint(vec![migration.clone()], Some(generated))).remove(0);
-        assert_eq!(finding.severity, ImplementationLintSeverity::Info);
+        let finding = findings(vec![migration.clone()], Some(generated)).remove(0);
         assert!(finding.message.contains("category=generated migration"));
 
         let lockfile = "Guardian: skip-PR_SIZE # dependency-solver lockfile: npm\n";
-        assert_eq!(
-            severity(vec![file("package-lock.json", 401)], Some(lockfile)),
-            ImplementationLintSeverity::Info
-        );
-        let test = file("nested/tests/manual.rs", 1);
+        accepts(vec![file("package-lock.json", 401)], lockfile);
+        let test = file("nested/tests/manual.json", 1);
         rejects(vec![migration, test.clone()], Some(generated));
         rejects(vec![file("package-lock.json", 400), test], Some(lockfile));
 
-        for invalid in [
-            "Guardian: skip-PR_SIZE\n",
-            "Guardian: skip-PR_SIZE # generated migration:\n",
-            "Guardian: skip-PR_SIZE # unknown: tool\n",
-            "Guardian: skip-PR_SIZE # dependency-solver lockfile: npm\n",
-        ] {
-            rejects(vec![file("src/manual.rs", 401)], Some(invalid));
+        for suffix in ["", " # generated migration:", " # unknown: tool"] {
+            let invalid = format!("Guardian: skip-PR_SIZE{suffix}\n");
+            rejects(vec![file("src/manual.rs", 401)], Some(&invalid));
         }
     }
 
     #[test]
     fn pr_size_validates_lock_step_shape_and_manual_budget() {
         let reason = "Guardian: skip-PR_SIZE # mandatory lock-step artifacts: autospec adapters\n";
-        let mut trio = trio(140);
-        trio.push(file("tests/fixtures/skill-goldens/autospec.sha256", 1));
-        assert_eq!(
-            severity(trio.clone(), Some(reason)),
-            ImplementationLintSeverity::Info
-        );
+        let mut adapters = trio("autospec", 140);
+        adapters.push(file(
+            "tests/fixtures/skill-goldens/autospec.SKILL.md.sha256",
+            1,
+        ));
+        accepts(adapters.clone(), reason);
 
-        trio[1].hunks[0].lines[0].content = "divergent".to_string();
-        rejects(trio, Some(reason));
-    }
+        adapters[1].hunks[0].lines[0].content = "divergent".to_string();
+        rejects(adapters, Some(reason));
 
-    #[test]
-    fn pr_size_rejects_mismatched_and_oversized_exception_shapes() {
         let lock_step = "Guardian: skip-PR_SIZE # mandatory lock-step artifacts: autospec\n";
-        let mut mirrors = trio(200);
+        let mut mirrors = trio("autospec", 200);
         mirrors.push(file("docs/manual.md", 300));
         rejects(mirrors, Some(lock_step));
 
@@ -1913,7 +1901,7 @@ mod tests {
                 "Guardian: skip-PR_SIZE # mandatory lock-step artifacts: other\n",
             ),
         ] {
-            let mut trio = trio(140);
+            let mut trio = trio("autospec", 140);
             trio.push(file(extra, 1));
             rejects(trio, Some(reason));
         }
@@ -1927,8 +1915,22 @@ mod tests {
             None,
         );
 
-        let mut trio = trio(140);
-        trio.push(file("nested/tests/manual.rs", 1));
-        rejects(trio, Some(lock_step));
+        let mut nested = trio("autospec", 140);
+        nested.push(file("nested/tests/manual.yaml", 1));
+        rejects(nested, Some(lock_step));
+
+        let mut files = Vec::new();
+        for skill in ["autospec", "autospec-run"] {
+            files.extend(trio(skill, 60));
+            for artifact in ["SKILL.md", "codex.prompt.md", "opencode.agent.md"] {
+                let path = format!("tests/fixtures/skill-goldens/{skill}.{artifact}.sha256");
+                files.push(file(&path, 1));
+            }
+        }
+        accepts(
+            files,
+            "Guardian: skip-PR_SIZE # mandatory lock-step artifacts: autospec and \
+             autospec-run adapter trios plus derived goldens\n",
+        );
     }
 }
