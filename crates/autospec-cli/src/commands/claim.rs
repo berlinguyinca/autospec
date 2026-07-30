@@ -4099,6 +4099,238 @@ fn classify_startup_heartbeat(
         evidence,
     }))
 }
+
+// These descriptor-only primitives remain inert until guarded recovery integrates them.
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatReceiptDecision {
+    Absent,
+    Blocking,
+    Pending,
+    Completed,
+}
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatReceiptEntry {
+    Missing,
+    Exact,
+    Unsafe,
+}
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+struct HeartbeatReceiptTransaction {
+    handoff: fs::File,
+    pending: String,
+    completed: String,
+}
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn heartbeat_receipt_names(expected: StartupHeartbeatExpectation<'_>) -> (String, String) {
+    let issue = expected.issue.to_string();
+    let mut identity = Vec::new();
+    for field in [
+        expected.repo,
+        &issue,
+        expected.worker_id,
+        expected.branch,
+        expected.pull_request,
+        expected.claim_id,
+        expected.step,
+    ] {
+        identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        identity.extend_from_slice(field.as_bytes());
+    }
+    let digest = autospec_core::autonomous::waterfall::sha256_hex(&identity);
+    (
+        format!("pending-{}-{digest}.receipt", expected.issue),
+        format!("completed-{}-{digest}.receipt", expected.issue),
+    )
+}
+#[cfg(target_os = "linux")]
+fn open_receipt_anchors_with_hook(
+    trusted_repo: &fs::File,
+    mut after_open: impl FnMut(&str),
+) -> Result<fs::File, CommandFailure> {
+    let identity = private_heartbeat_directory_identity(trusted_repo, "receipt repo")?;
+    after_open("repo");
+    if private_heartbeat_directory_identity(trusted_repo, "receipt repo")? != identity {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat receipt repo descriptor identity drift",
+        ));
+    }
+    let quarantine = open_heartbeat_directory_beneath(trusted_repo, Path::new("quarantine"))?;
+    after_open("quarantine");
+    let handoff =
+        open_heartbeat_directory_beneath(&quarantine, Path::new("startup-heartbeat-handoffs"))?;
+    after_open("handoff");
+    private_heartbeat_directory_identity(trusted_repo, "receipt repo")?;
+    private_heartbeat_directory_identity(&quarantine, "receipt quarantine")?;
+    private_heartbeat_directory_identity(&handoff, "receipt handoff")?;
+    Ok(handoff)
+}
+#[cfg(target_os = "linux")]
+fn ensure_receipt_directory(parent: &fs::File, name: &str) -> Result<fs::File, CommandFailure> {
+    use nix::sys::stat::{mkdirat, Mode};
+    let created = match mkdirat(parent, name, Mode::from_bits_truncate(0o700)) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::EEXIST) => false,
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not create heartbeat receipt directory: {error}"
+            )))
+        }
+    };
+    let directory = open_heartbeat_directory_beneath(parent, Path::new(name))?;
+    if created {
+        nix::unistd::fsync(parent).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not sync heartbeat receipt ancestry: {error}"
+            ))
+        })?;
+    }
+    Ok(directory)
+}
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn inspect_heartbeat_receipt(
+    directory: &fs::File,
+    name: &std::ffi::OsStr,
+) -> HeartbeatReceiptEntry {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::{fstatat, SFlag};
+
+    let stat = match fstatat(directory, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(nix::errno::Errno::ENOENT) => return HeartbeatReceiptEntry::Missing,
+        Err(_) => return HeartbeatReceiptEntry::Unsafe,
+    };
+    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT == SFlag::S_IFREG
+        && stat.st_uid == nix::unistd::geteuid().as_raw()
+        && stat.st_mode & 0o7777 == 0o600
+        && stat.st_nlink == 1
+        && stat.st_size == 0
+    {
+        HeartbeatReceiptEntry::Exact
+    } else {
+        HeartbeatReceiptEntry::Unsafe
+    }
+}
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn heartbeat_receipt_retry_decision(
+    trusted_repo: &fs::File,
+    expected: StartupHeartbeatExpectation<'_>,
+) -> HeartbeatReceiptDecision {
+    heartbeat_receipt_retry_decision_with_hook(trusted_repo, expected, |_| {})
+}
+#[cfg(target_os = "linux")]
+fn heartbeat_receipt_retry_decision_with_hook(
+    trusted_repo: &fs::File,
+    expected: StartupHeartbeatExpectation<'_>,
+    after_open: impl FnMut(&str),
+) -> HeartbeatReceiptDecision {
+    let Ok(handoff) = open_receipt_anchors_with_hook(trusted_repo, after_open) else {
+        return HeartbeatReceiptDecision::Blocking;
+    };
+    let (pending, completed) = heartbeat_receipt_names(expected);
+    match (
+        inspect_heartbeat_receipt(&handoff, pending.as_ref()),
+        inspect_heartbeat_receipt(&handoff, completed.as_ref()),
+    ) {
+        (HeartbeatReceiptEntry::Missing, HeartbeatReceiptEntry::Missing) => {
+            HeartbeatReceiptDecision::Absent
+        }
+        (HeartbeatReceiptEntry::Exact, HeartbeatReceiptEntry::Missing) => {
+            HeartbeatReceiptDecision::Pending
+        }
+        (HeartbeatReceiptEntry::Missing, HeartbeatReceiptEntry::Exact) => {
+            HeartbeatReceiptDecision::Completed
+        }
+        _ => HeartbeatReceiptDecision::Blocking,
+    }
+}
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn begin_heartbeat_receipt(
+    trusted_repo: &fs::File,
+    expected: StartupHeartbeatExpectation<'_>,
+) -> Result<HeartbeatReceiptTransaction, CommandFailure> {
+    begin_heartbeat_receipt_with_hook(trusted_repo, expected, || {})
+}
+#[cfg(target_os = "linux")]
+fn begin_heartbeat_receipt_with_hook(
+    trusted_repo: &fs::File,
+    expected: StartupHeartbeatExpectation<'_>,
+    after_pending_create: impl FnOnce(),
+) -> Result<HeartbeatReceiptTransaction, CommandFailure> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::{fchmod, Mode};
+
+    private_heartbeat_directory_identity(trusted_repo, "receipt repo")?;
+    let quarantine = ensure_receipt_directory(trusted_repo, "quarantine")?;
+    let handoff = ensure_receipt_directory(&quarantine, "startup-heartbeat-handoffs")?;
+    private_heartbeat_directory_identity(trusted_repo, "receipt repo")?;
+    private_heartbeat_directory_identity(&quarantine, "receipt quarantine")?;
+    private_heartbeat_directory_identity(&handoff, "receipt handoff")?;
+    let (pending, completed) = heartbeat_receipt_names(expected);
+    if inspect_heartbeat_receipt(&handoff, completed.as_ref()) != HeartbeatReceiptEntry::Missing {
+        return Err(CommandFailure::diagnostic(
+            "completed heartbeat receipt blocks pending creation",
+        ));
+    }
+    let descriptor = openat(
+        &handoff,
+        pending.as_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| {
+        CommandFailure::diagnostic(format!("could not create pending receipt: {error}"))
+    })?;
+    fchmod(&descriptor, Mode::from_bits_truncate(0o600)).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not protect pending receipt: {error}"))
+    })?;
+    fs::File::from(descriptor).sync_all().map_err(|error| {
+        CommandFailure::diagnostic(format!("could not sync pending receipt: {error}"))
+    })?;
+    after_pending_create();
+    private_heartbeat_directory_identity(trusted_repo, "receipt repo")?;
+    private_heartbeat_directory_identity(&quarantine, "receipt quarantine")?;
+    private_heartbeat_directory_identity(&handoff, "receipt handoff")?;
+    if inspect_heartbeat_receipt(&handoff, completed.as_ref()) != HeartbeatReceiptEntry::Missing {
+        return Err(CommandFailure::diagnostic(
+            "completed heartbeat receipt won pending creation",
+        ));
+    }
+    nix::unistd::fsync(&handoff).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not sync pending receipt directory: {error}"))
+    })?;
+    Ok(HeartbeatReceiptTransaction {
+        handoff,
+        pending,
+        completed,
+    })
+}
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn retire_heartbeat_receipt_with_sync(
+    transaction: HeartbeatReceiptTransaction,
+    sync: impl FnOnce(&fs::File) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    nix::fcntl::renameat2(
+        &transaction.handoff,
+        transaction.pending.as_str(),
+        &transaction.handoff,
+        transaction.completed.as_str(),
+        nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+    )
+    .map_err(|error| {
+        CommandFailure::diagnostic(format!("could not retire heartbeat receipt: {error}"))
+    })?;
+    sync(&transaction.handoff)
+}
 #[cfg(unix)]
 #[allow(dead_code)]
 fn revalidate_heartbeat_snapshot(
@@ -5008,6 +5240,152 @@ mod tests {
         );
         assert_eq!(classified, super::StartupHeartbeatClassification::Absent);
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stale_heartbeat_receipt_transaction() {
+        use super::HeartbeatReceiptDecision::{Absent, Blocking, Completed, Pending};
+        use nix::fcntl::{open, OFlag};
+        use nix::sys::stat::Mode;
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
+        use std::os::unix::prelude::AsRawFd;
+        use std::time::{Duration, Instant};
+        let expected = expected_startup_heartbeat("host:user:rust:4242:nonce-a");
+        let open_parent = |path: &Path| {
+            std::fs::File::from(
+                open(path, OFlag::O_PATH | OFlag::O_DIRECTORY, Mode::empty()).unwrap(),
+            )
+        };
+        let (parent_path, _) = startup_heartbeat_fixture("receipt-red");
+        let repo_path = parent_path.join("repo");
+        std::fs::create_dir(&repo_path).expect("repo directory");
+        std::fs::set_permissions(&repo_path, std::fs::Permissions::from_mode(0o700))
+            .expect("private repo");
+        let parent = open_parent(&parent_path);
+        let repo =
+            super::open_heartbeat_directory_beneath(&parent, Path::new("repo")).expect("repo fd");
+        let decision = || super::heartbeat_receipt_retry_decision(&repo, expected);
+        let transaction = super::begin_heartbeat_receipt(&repo, expected).expect("begin receipt");
+        assert_eq!(decision(), Pending);
+        let mut unrelated = expected;
+        unrelated.issue += 1;
+        assert_eq!(
+            super::heartbeat_receipt_retry_decision(&repo, unrelated),
+            Absent
+        );
+        super::retire_heartbeat_receipt_with_sync(transaction, |_| {
+            Err(super::CommandFailure::diagnostic("injected sync failure"))
+        })
+        .expect_err("sync failure");
+        assert_eq!(decision(), Completed);
+        assert!(super::begin_heartbeat_receipt(&repo, expected).is_err());
+        let (pending, completed) = super::heartbeat_receipt_names(expected);
+        let handoff = repo_path.join("quarantine/startup-heartbeat-handoffs");
+        let pending_path = handoff.join(&pending);
+        let completed_path = handoff.join(&completed);
+        std::fs::remove_file(&completed_path).unwrap();
+        super::begin_heartbeat_receipt_with_hook(&repo, expected, || {
+            std::fs::write(&completed_path, b"").unwrap();
+            std::fs::set_permissions(&completed_path, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        })
+        .err()
+        .expect("completed wins");
+        assert_eq!(decision(), Blocking);
+        assert!(pending_path.exists() && completed_path.exists());
+        std::fs::remove_file(&pending_path).unwrap();
+        std::fs::remove_file(&completed_path).unwrap();
+        let mut transaction = super::begin_heartbeat_receipt(&repo, expected).unwrap();
+        transaction.pending.push_str("-missing");
+        super::retire_heartbeat_receipt_with_sync(transaction, |_| Ok(()))
+            .expect_err("rename failure");
+        assert_eq!(decision(), Pending);
+        let (pending, completed) = super::heartbeat_receipt_names(expected);
+        let handoff_fd = std::fs::File::open(&handoff).unwrap();
+        let socket_root = PathBuf::from(format!("/proc/self/fd/{}", handoff_fd.as_raw_fd()));
+        let drift =
+            super::heartbeat_receipt_retry_decision_with_hook(&repo, expected, |boundary| {
+                if boundary == "handoff" {
+                    std::fs::set_permissions(&handoff, std::fs::Permissions::from_mode(0o755))
+                        .unwrap();
+                }
+            });
+        assert_eq!(drift, Blocking);
+        std::fs::set_permissions(&handoff, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let pending_path = handoff.join(&pending);
+        let completed_path = handoff.join(&completed);
+        std::fs::write(&completed_path, b"").unwrap();
+        std::fs::set_permissions(&completed_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(decision(), Blocking);
+        std::fs::remove_file(&completed_path).unwrap();
+        for unsafe_kind in ["fifo", "symlink", "socket", "size", "mode"] {
+            std::fs::remove_file(&pending_path).unwrap();
+            match unsafe_kind {
+                "fifo" => {
+                    nix::unistd::mkfifo(&pending_path, Mode::from_bits_truncate(0o600)).unwrap()
+                }
+                "symlink" => symlink("/dev/null", &pending_path).unwrap(),
+                "socket" => {
+                    drop(UnixListener::bind(socket_root.join(&pending)).unwrap());
+                    std::fs::set_permissions(&pending_path, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                }
+                "size" => std::fs::write(&pending_path, b"x").unwrap(),
+                _ => std::fs::write(&pending_path, b"").unwrap(),
+            }
+            if unsafe_kind == "mode" {
+                std::fs::set_permissions(&pending_path, std::fs::Permissions::from_mode(0o644))
+                    .unwrap();
+            }
+            let started = Instant::now();
+            assert_eq!(decision(), Blocking);
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+        std::fs::remove_file(&pending_path).unwrap();
+        drop(UnixListener::bind(socket_root.join(&completed)).unwrap());
+        std::fs::set_permissions(&completed_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let started = Instant::now();
+        assert_eq!(decision(), Blocking);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let dev = std::fs::File::open("/dev").unwrap();
+        assert_eq!(
+            super::inspect_heartbeat_receipt(&dev, std::ffi::OsStr::new("null")),
+            super::HeartbeatReceiptEntry::Unsafe
+        );
+        std::fs::remove_dir_all(parent_path).expect("remove failure fixture");
+        let (parent_path, _) = startup_heartbeat_fixture("receipt-renames");
+        let repo_path = parent_path.join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        std::fs::set_permissions(&repo_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let parent = open_parent(&parent_path);
+        let repo = super::open_heartbeat_directory_beneath(&parent, Path::new("repo")).unwrap();
+        drop(super::begin_heartbeat_receipt(&repo, expected).unwrap());
+        let replace = |path: &Path, moved: &Path| {
+            std::fs::rename(path, moved).unwrap();
+            std::fs::create_dir(path).unwrap();
+        };
+        let decision =
+            super::heartbeat_receipt_retry_decision_with_hook(&repo, expected, |boundary| {
+                match boundary {
+                    "repo" => replace(&repo_path, &parent_path.join("repo-old")),
+                    "quarantine" => {
+                        let old = parent_path.join("repo-old");
+                        replace(&old.join("quarantine"), &old.join("quarantine-old"));
+                    }
+                    "handoff" => {
+                        let old = parent_path.join("repo-old/quarantine-old");
+                        replace(
+                            &old.join("startup-heartbeat-handoffs"),
+                            &old.join("handoff-old"),
+                        );
+                    }
+                    _ => unreachable!(),
+                }
+            });
+        assert_eq!(decision, Pending);
+        std::fs::remove_dir_all(parent_path).expect("remove rename fixture");
     }
 
     #[test]
