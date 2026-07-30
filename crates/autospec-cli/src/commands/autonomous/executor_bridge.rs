@@ -34458,6 +34458,8 @@ exit 64
         sibling.head_oid = Some("b".repeat(40));
         sibling.pr = Some(43);
         sibling.phase = BridgePhase::DraftCreated;
+        let closeout = "## Closeout report\n";
+        sibling.closeout_digest = Some(super::sha256_hex(closeout.as_bytes()));
         super::write_invocation_atomic(&state_dir.join("issue-43-1111111111111111.json"), &sibling)
             .expect("persist sibling remote invocation");
         let baseline = super::RemoteMutationSnapshot {
@@ -34466,7 +34468,8 @@ exit 64
         };
         let sibling_pr = super::OpenPullRequest {
             number: 43,
-            body: "Closes #43".to_string(),
+            body: super::canonical_pull_request_body(&sibling, closeout)
+                .expect("canonical sibling PR body"),
             head_ref_name: sibling.identity.branch.clone(),
             head_ref_oid: "b".repeat(40),
             is_draft: true,
