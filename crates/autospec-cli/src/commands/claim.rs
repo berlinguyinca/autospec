@@ -3979,7 +3979,7 @@ fn read_regular_file_no_follow(path: &Path) -> std::io::Result<RegularFileSnapsh
     let mut options = OpenOptions::new();
     options
         .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC | nix::libc::O_NONBLOCK);
     read_regular_file(options.open(path)?)
 }
 #[cfg(unix)]
@@ -3993,7 +3993,7 @@ fn read_regular_file_at_no_follow(
     let descriptor = openat(
         directory,
         name,
-        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
         Mode::empty(),
     )
     .map_err(std::io::Error::from)?;
@@ -4468,7 +4468,7 @@ fn persist_heartbeat_copy_with_hooks(
     let root_stat = fstat(&root).map_err(|error| {
         CommandFailure::diagnostic(format!("could not inspect private state root: {error}"))
     })?;
-    if root_stat.st_uid != unsafe { nix::libc::geteuid() } || root_stat.st_mode & 0o7777 != 0o700 {
+    if root_stat.st_uid != nix::unistd::geteuid().as_raw() || root_stat.st_mode & 0o7777 != 0o700 {
         return Err(CommandFailure::diagnostic(
             "heartbeat private state root must be owned by the effective user with mode 0700",
         ));
@@ -4803,7 +4803,7 @@ fn handoff_stale_heartbeat_path_with_hooks(
     let stat = fstat(&root).map_err(|error| {
         CommandFailure::diagnostic(format!("could not inspect private state root: {error}"))
     })?;
-    if stat.st_uid != unsafe { nix::libc::geteuid() } || stat.st_mode & 0o7777 != 0o700 {
+    if stat.st_uid != nix::unistd::geteuid().as_raw() || stat.st_mode & 0o7777 != 0o700 {
         return Err(CommandFailure::diagnostic(
             "heartbeat private state root must be owned by the effective user with mode 0700",
         ));
@@ -5278,6 +5278,37 @@ mod tests {
         (directory, path)
     }
 
+    #[cfg(unix)]
+    fn assert_fifo_reader_nonblocking(
+        fifo: &Path,
+        reader: impl FnOnce() -> std::io::Result<super::RegularFileSnapshot> + Send + 'static,
+    ) {
+        let (send, receive) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _ = send.send(reader());
+        });
+        match receive.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(result) => assert!(result.is_err(), "FIFO was accepted as a regular file"),
+            Err(error) => {
+                if let Ok(writer) = nix::fcntl::open(
+                    fifo,
+                    nix::fcntl::OFlag::O_WRONLY | nix::fcntl::OFlag::O_NONBLOCK,
+                    nix::sys::stat::Mode::empty(),
+                ) {
+                    drop(writer);
+                }
+                if receive
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_ok()
+                {
+                    let _ = reader.join();
+                }
+                panic!("heartbeat FIFO reader blocked: {error}");
+            }
+        }
+        reader.join().unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     fn anchored_startup_heartbeat_fixture(
         label: &str,
@@ -5717,6 +5748,67 @@ claimed|review
         );
         assert_eq!(classify(&remote_worker), (Blocking, true));
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_heartbeat_fifo_path_reader_is_nonblocking() {
+        let (directory, fifo) = startup_heartbeat_fixture("fifo-path");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let read_path = fifo.clone();
+        assert_fifo_reader_nonblocking(&fifo, move || {
+            super::read_regular_file_no_follow(&read_path)
+        });
+        assert_eq!(
+            super::classify_startup_heartbeat(
+                &fifo,
+                expected_startup_heartbeat("host:user:rust:4242:nonce-a"),
+                200,
+                |_, _| super::StartupPidLiveness::Dead,
+            ),
+            super::StartupHeartbeatClassification::Blocking
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_heartbeat_fifo_at_reader_is_nonblocking() {
+        let (directory, fifo) = startup_heartbeat_fixture("fifo-at");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let root = std::fs::File::open(&directory).unwrap();
+        let name = fifo.file_name().unwrap().to_owned();
+        assert_fifo_reader_nonblocking(&fifo, move || {
+            super::read_regular_file_at_no_follow(&root, &name)
+        });
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_heartbeat_fifo_timeout_recovery_is_bounded() {
+        let (directory, fifo) = startup_heartbeat_fixture("fifo-timeout-recovery");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let read_path = fifo.clone();
+        let panic = std::panic::catch_unwind(|| {
+            assert_fifo_reader_nonblocking(&fifo, move || {
+                let mut file = std::fs::File::open(read_path)?;
+                let mut payload = Vec::new();
+                std::io::Read::read_to_end(&mut file, &mut payload)?;
+                Err(std::io::Error::other("payload reader completed"))
+            });
+        })
+        .expect_err("timeout recovery must retain the original failure");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("timeout recovery panic message");
+        assert!(
+            message.contains("heartbeat FIFO reader blocked: timed out waiting on channel"),
+            "unexpected timeout recovery diagnostic: {message}"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(unix)]
