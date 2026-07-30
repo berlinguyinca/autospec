@@ -3664,7 +3664,7 @@ fn protect_heartbeat_directory(path: &Path, existed: bool) -> Result<(), Command
         let metadata = fs::symlink_metadata(path).map_err(|error| {
             CommandFailure::diagnostic(format!("could not inspect heartbeat directory: {error}"))
         })?;
-        if !metadata.is_dir() || metadata.uid() != unsafe { nix::libc::geteuid() } {
+        if !metadata.is_dir() || metadata.uid() != effective_user_id()? {
             return Err(CommandFailure::diagnostic(
                 "heartbeat directory must be a real directory owned by the effective user",
             ));
@@ -3679,6 +3679,25 @@ fn protect_heartbeat_directory(path: &Path, existed: bool) -> Result<(), Command
         })?;
     }
     Ok(())
+}
+
+#[cfg(unix)]
+fn effective_user_id() -> Result<u32, CommandFailure> {
+    let status = fs::read_to_string("/proc/self/status").map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not inspect effective user identity: {error}"
+        ))
+    })?;
+    status
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Uid:")?
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()
+        })
+        .ok_or_else(|| CommandFailure::diagnostic("effective user identity is malformed"))
 }
 
 fn write_private_heartbeat(path: &Path, document: &str) -> std::io::Result<()> {
