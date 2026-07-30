@@ -39,6 +39,7 @@ IFS= read -r line && printf "%s\n" "$line" > "$AUTOSPEC_TEST_CALLER_READ""#,
         .env("AUTOSPEC_TEST_HARNESS_READ", &harness_read)
         .env("AUTOSPEC_TEST_CALLER_READ", &caller_read)
         .env("AGENT_ENV_STATE_ROOT", &state_root)
+        .env("SHELL", "/bin/sh")
         .stdin(Stdio::piped())
         .stdout(Stdio::from(log.try_clone().expect("clone session log")))
         .stderr(Stdio::from(log));
@@ -81,6 +82,7 @@ fn session_cleanup_reaps_nested_process_groups_after_timeout() {
             "trap '' TERM; python3 -c 'import os, signal, time; os.setpgid(0, 0); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)' & while :; do sleep 1; done",
             "/dev/null",
         ])
+        .env("SHELL", "/bin/sh")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
