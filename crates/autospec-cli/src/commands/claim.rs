@@ -5851,11 +5851,15 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     #[test]
     fn startup_heartbeat_atomic_publication() {
+        use super::HeartbeatPublicationDurability::{DirectorySyncPending, Durable};
+        use super::HeartbeatPublicationFailure::{PostCommit, PreCommit};
         use nix::fcntl::{open, OFlag};
         use nix::sys::stat::{umask, Mode};
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         const CHILD: &str = "AUTOSPEC_TEST_ATOMIC_HEARTBEAT_CHILD";
@@ -5902,69 +5906,87 @@ mod tests {
                 },
             )
         };
-        for failed in ["chmod", "write", "fsync", "inspect"] {
-            assert!(attempt("42.json", Some(failed)).is_err());
+        for name in ["", ".", "..", "/tmp/x", "a/b", "a/", "./a"] {
+            assert!(matches!(attempt(name, None), Err(PreCommit(_))));
+            assert_eq!(std::fs::read_dir(&fixture).unwrap().count(), 0);
+        }
+        for failed in ["chmod", "write", "file-fsync", "before-link"] {
+            assert!(matches!(
+                attempt("42.json", Some(failed)),
+                Err(PreCommit(_))
+            ));
             assert!(!issue.exists());
         }
-        let cleanup = super::publish_private_heartbeat_file(
-            &directory,
-            "42.json",
-            b"heartbeat\n",
-            "test",
-            &mut |_, boundary| {
-                if matches!(boundary, "write" | "cleanup") {
-                    Err(super::CommandFailure::diagnostic(
-                        "injected cleanup failure",
-                    ))
-                } else {
-                    Ok(())
-                }
-            },
-        )
-        .unwrap_err();
-        assert!(cleanup.message.contains("stage cleanup failed"));
-        let stage = std::fs::read_dir(&fixture)
-            .unwrap()
-            .find(|entry| {
-                entry
-                    .as_ref()
-                    .unwrap()
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(".heartbeat-stage-")
-            })
-            .unwrap()
-            .unwrap()
-            .path();
-        std::fs::remove_file(stage).unwrap();
         let outside = fixture.join("outside");
         std::fs::write(&outside, b"caller-owned").unwrap();
         std::fs::hard_link(&outside, &issue).unwrap();
-        assert!(attempt("42.json", None).is_err());
+        assert!(matches!(attempt("42.json", None), Err(PreCommit(_))));
         assert_eq!(std::fs::read(&outside).unwrap(), b"caller-owned");
         assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 2);
         std::fs::remove_file(&issue).unwrap();
         nix::unistd::mkfifo(&issue, Mode::from_bits_truncate(0o600)).unwrap();
-        assert!(attempt("42.json", None).is_err());
+        let fifo_directory = std::fs::File::from(directory.try_clone().unwrap());
+        let (send, receive) = std::sync::mpsc::channel();
+        let publisher = std::thread::spawn(move || {
+            let result = super::publish_private_heartbeat_file(
+                &fifo_directory,
+                "42.json",
+                b"heartbeat\n",
+                "test",
+                &mut |_, _| Ok(()),
+            );
+            send.send(result).unwrap();
+        });
+        assert!(matches!(
+            receive.recv_timeout(std::time::Duration::from_secs(2)),
+            Ok(Err(PreCommit(_)))
+        ));
+        publisher.join().unwrap();
         assert!(std::os::unix::fs::FileTypeExt::is_fifo(
             &std::fs::symlink_metadata(&issue).unwrap().file_type()
         ));
+        let mut fifo = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(OFlag::O_NONBLOCK.bits())
+            .open(&issue)
+            .unwrap();
+        assert_eq!(fifo.read(&mut [0]).unwrap(), 0);
         std::fs::remove_file(&issue).unwrap();
         let session = fixture.join("session.json");
-        attempt("42.json", None).unwrap();
-        attempt("session.json", None).unwrap();
+        let issue_publication = attempt("42.json", None).unwrap();
+        let session_publication = attempt("session.json", None).unwrap();
         umask(previous);
-        for path in [&issue, &session] {
+        for (path, publication) in [(&issue, issue_publication), (&session, session_publication)] {
+            assert_eq!(publication.durability, Durable);
+            let metadata = std::fs::metadata(path).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
             assert_eq!(
-                std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
-                0o600
+                (metadata.dev(), metadata.ino()),
+                (publication.device, publication.inode)
+            );
+            let held = publication.file.metadata().unwrap();
+            assert_eq!((held.dev(), held.ino()), (metadata.dev(), metadata.ino()));
+        }
+
+        for (name, failed, expected) in [
+            ("pending.json", "directory-fsync", DirectorySyncPending),
+            ("durable-error.json", "revalidate", Durable),
+        ] {
+            let error = attempt(name, Some(failed)).unwrap_err();
+            let PostCommit {
+                publication,
+                error: _,
+            } = error
+            else {
+                panic!("post-link failure was reported as pre-commit");
+            };
+            assert_eq!(publication.durability, expected);
+            let metadata = std::fs::metadata(fixture.join(name)).unwrap();
+            assert_eq!(
+                (metadata.dev(), metadata.ino()),
+                (publication.device, publication.inode)
             );
         }
-        assert!(std::fs::read_dir(&fixture).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .starts_with(".heartbeat-stage-")));
     }
 
     #[cfg(target_os = "linux")]
