@@ -58,6 +58,12 @@ impl RuntimeFixture {
         )
     }
 
+    fn deferred() -> Self {
+        Self::with_manifest(
+            "version: 1\nmodes:\n  local:\n    command: sh -c 'echo up >> up-count.txt'\n    down: sh -c 'echo down >> down-count.txt'\n    readiness: deferred\n",
+        )
+    }
+
     fn with_manifest(manifest: &str) -> Self {
         let suffix = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
         let root = std::env::temp_dir().join(format!(
@@ -104,6 +110,25 @@ fn up_reconciles_same_plan_empty_inventory_without_running_down() {
     );
     assert_eq!(line_count(&fixture.root.join("up-count.txt")), 2);
     assert_eq!(line_count(&fixture.root.join("down-count.txt")), 0);
+}
+
+#[test]
+fn up_rejects_resource_empty_cleanup_failed_state_without_rerunning_setup() {
+    let fixture = RuntimeFixture::deferred();
+    assert!(runtime(&fixture, "up").status.success());
+    let environment = environment_dir(&fixture);
+    let mut owner: EnvironmentOwner =
+        autospec_core::runtime_env::read_json(&environment.join("owner.json")).unwrap();
+    owner.lifecycle = EnvironmentLifecycle::CleanupFailed;
+    write_json_atomic(&environment.join("owner.json"), &owner).unwrap();
+
+    let second = runtime(&fixture, "up");
+
+    assert_eq!(second.status.code(), Some(2));
+    assert!(stderr_has(&second, "RUNTIME_LIFECYCLE_MISMATCH"));
+    assert_eq!(line_count(&fixture.root.join("up-count.txt")), 1);
+    assert_eq!(line_count(&fixture.root.join("down-count.txt")), 0);
+    assert_authoritative_state_retained(&fixture, &environment);
 }
 
 #[test]

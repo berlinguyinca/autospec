@@ -1027,6 +1027,44 @@ fn direct_server_requires_frontend_bind_before_active() {
 }
 
 #[test]
+fn deferred_direct_runtime_activates_after_one_successful_setup() {
+    let fixture = RuntimeFixture::with_manifest(
+        "version: 1\nmodes:\n  local:\n    command: sh -c 'printf x >> attempts'\n    readiness: deferred\n",
+    );
+
+    let output = fixture
+        .command()
+        .args(["runtime", "env", "up", "--repo"])
+        .arg(&fixture.root)
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("attempts")).unwrap(),
+        "x"
+    );
+    let directory = environment_directory(&fixture);
+    let owner: EnvironmentOwner = read_json(&directory.join("owner.json")).unwrap();
+    assert_eq!(owner.lifecycle, EnvironmentLifecycle::Active);
+    let inventory: ResourceInventory = read_json(&directory.join("inventory.json")).unwrap();
+    let registry: autospec_core::runtime_env::PortRegistry =
+        read_json(&fixture.state_root.join("ports/registry.json")).unwrap();
+    assert_eq!(
+        registry.owner(inventory.frontend_port.unwrap()),
+        Some(owner.identity.environment_id.as_str())
+    );
+    assert_eq!(
+        registry.owner(inventory.backend_port.unwrap()),
+        Some(owner.identity.environment_id.as_str())
+    );
+}
+
+#[test]
 fn direct_server_becomes_active_after_real_frontend_bind() {
     let fixture = RuntimeFixture::empty();
     std::fs::create_dir_all(fixture.root.join(".autospec")).unwrap();
