@@ -32,6 +32,26 @@ pub struct RuntimeMode {
     pub(super) command: Option<String>,
     pub(super) down: Option<String>,
     pub(super) env: Vec<(String, String)>,
+    pub(super) readiness: RuntimeReadiness,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) enum RuntimeReadiness {
+    #[default]
+    Bound,
+    Deferred,
+}
+
+impl RuntimeReadiness {
+    pub(super) fn parse(value: &str) -> Result<Self, RuntimeEnvError> {
+        match value {
+            "bound" => Ok(Self::Bound),
+            "deferred" => Ok(Self::Deferred),
+            value => Err(RuntimeEnvError::new(format!(
+                "unsupported runtime readiness: {value}"
+            ))),
+        }
+    }
 }
 
 impl RuntimeMode {
@@ -49,6 +69,10 @@ impl RuntimeMode {
 
     pub fn env(&self) -> &[(String, String)] {
         &self.env
+    }
+
+    pub fn requires_frontend_bind(&self) -> bool {
+        self.readiness == RuntimeReadiness::Bound
     }
 }
 
@@ -269,7 +293,7 @@ fn parse_legacy_fields(
         let Some(mode_index) = state.current_mode else {
             continue;
         };
-        if set_mode_field(content, indent, &mut modes[mode_index], &mut state.in_env) {
+        if set_mode_field(content, indent, &mut modes[mode_index], &mut state.in_env)? {
             continue;
         }
         add_environment_entry(content, indent, state.in_env, &mut modes[mode_index])?;
@@ -302,28 +326,35 @@ fn add_mode(
         command: None,
         down: None,
         env: Vec::new(),
+        readiness: RuntimeReadiness::Bound,
     });
     Ok(Some(modes.len() - 1))
 }
 
-fn set_mode_field(content: &str, indent: usize, mode: &mut RuntimeMode, in_env: &mut bool) -> bool {
+fn set_mode_field(
+    content: &str,
+    indent: usize,
+    mode: &mut RuntimeMode,
+    in_env: &mut bool,
+) -> Result<bool, RuntimeEnvError> {
     if indent != 4 {
-        return false;
+        return Ok(false);
     }
     if content == "env:" {
         *in_env = true;
-        return true;
+        return Ok(true);
     }
     *in_env = false;
     let Some((key, value)) = split_mapping(content) else {
-        return true;
+        return Ok(true);
     };
     match key {
         "command" => mode.command = Some(unquote(value)),
         "down" => mode.down = Some(unquote(value)),
+        "readiness" => mode.readiness = RuntimeReadiness::parse(&unquote(value))?,
         _ => {}
     }
-    true
+    Ok(true)
 }
 
 fn add_environment_entry(
@@ -396,5 +427,43 @@ fn unquote(value: &str) -> String {
         value[1..value.len() - 1].to_string()
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::RuntimeManifest;
+
+    #[test]
+    fn readiness_defaults_to_bound_and_accepts_deferred_in_both_versions() {
+        let legacy =
+            RuntimeManifest::parse("version: 1\nmodes:\n  local:\n    command: sh -c 'true'\n")
+                .unwrap();
+        assert!(legacy
+            .selected_mode("local")
+            .unwrap()
+            .requires_frontend_bind());
+
+        for version in ["1", "2"] {
+            let source = format!(
+                "version: {version}\nmodes:\n  local:\n    command: sh -c 'true'\n    readiness: deferred\n"
+            );
+            let manifest = RuntimeManifest::parse(&source).unwrap();
+            assert!(!manifest
+                .selected_mode("local")
+                .unwrap()
+                .requires_frontend_bind());
+        }
+    }
+
+    #[test]
+    fn unsupported_readiness_is_rejected_in_both_versions() {
+        for version in ["1", "2"] {
+            let source = format!(
+                "version: {version}\nmodes:\n  local:\n    command: sh -c 'true'\n    readiness: eventual\n"
+            );
+            let error = RuntimeManifest::parse(&source).unwrap_err();
+            assert_eq!(error.to_string(), "unsupported runtime readiness: eventual");
+        }
     }
 }
