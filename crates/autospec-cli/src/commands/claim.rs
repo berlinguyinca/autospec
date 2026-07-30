@@ -3781,7 +3781,6 @@ struct StartupHeartbeatExpectation<'a> {
     claim_id: &'a str,
     step: &'a str,
 }
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupHeartbeatEvidence {
@@ -3798,7 +3797,6 @@ struct StartupHeartbeatEvidence {
     nonce: String,
     session_id: Option<String>,
 }
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RegularFileIdentity {
@@ -3808,21 +3806,18 @@ struct RegularFileIdentity {
     modified_seconds: i64,
     modified_nanos: i64,
 }
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RegularFileSnapshot {
     document: Vec<u8>,
     identity: RegularFileIdentity,
 }
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StartupHeartbeatSnapshot {
     file: RegularFileSnapshot,
     evidence: StartupHeartbeatEvidence,
 }
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StartupPidLiveness {
@@ -3830,7 +3825,6 @@ enum StartupPidLiveness {
     Dead,
     Unknown,
 }
-
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum StartupHeartbeatClassification {
@@ -3838,7 +3832,6 @@ enum StartupHeartbeatClassification {
     Blocking,
     ExpiredDead(Box<StartupHeartbeatSnapshot>),
 }
-
 #[cfg(unix)]
 #[allow(dead_code)]
 fn file_identity(metadata: &fs::Metadata) -> RegularFileIdentity {
@@ -3850,7 +3843,6 @@ fn file_identity(metadata: &fs::Metadata) -> RegularFileIdentity {
         modified_nanos: metadata.mtime_nsec(),
     }
 }
-
 #[cfg(unix)]
 #[allow(dead_code)]
 fn read_regular_file_no_follow(path: &Path) -> std::io::Result<RegularFileSnapshot> {
@@ -3877,7 +3869,6 @@ fn read_regular_file_no_follow(path: &Path) -> std::io::Result<RegularFileSnapsh
         identity: after,
     })
 }
-
 #[cfg(not(unix))]
 #[allow(dead_code)]
 fn read_regular_file_no_follow(path: &Path) -> std::io::Result<RegularFileSnapshot> {
@@ -3886,7 +3877,6 @@ fn read_regular_file_no_follow(path: &Path) -> std::io::Result<RegularFileSnapsh
         Ok(_) => Err(std::io::Error::other("heartbeat snapshots require Unix")),
     }
 }
-
 #[allow(dead_code)]
 fn parse_startup_heartbeat(document: &[u8]) -> Option<StartupHeartbeatEvidence> {
     let mut fields = JsonParser::new(std::str::from_utf8(document).ok()?)
@@ -3935,7 +3925,6 @@ fn parse_startup_heartbeat(document: &[u8]) -> Option<StartupHeartbeatEvidence> 
         session_id,
     })
 }
-
 #[allow(dead_code)]
 fn classify_startup_heartbeat(
     path: &Path,
@@ -3953,6 +3942,7 @@ fn classify_startup_heartbeat(
     let Some(evidence) = parse_startup_heartbeat(&file.document) else {
         return StartupHeartbeatClassification::Blocking;
     };
+    let worker_fields = evidence.worker_id.rsplitn(5, ':').collect::<Vec<_>>();
     let exact = evidence.repo == expected.repo
         && evidence.issue == expected.issue.to_string()
         && evidence.worker_id == expected.worker_id
@@ -3963,7 +3953,10 @@ fn classify_startup_heartbeat(
         && evidence.ttl_seconds > 0
         && evidence.pid > 0
         && evidence.pid <= i32::MAX as u32
-        && !evidence.nonce.is_empty();
+        && worker_fields.len() == 5
+        && worker_fields[0] == evidence.nonce
+        && worker_fields[1].parse::<u32>() == Ok(evidence.pid)
+        && worker_fields[2] == "rust";
     let expired = now.saturating_sub(evidence.ts) > evidence.ttl_seconds && now >= evidence.ts;
     if !exact || !expired || !cfg!(unix) {
         return StartupHeartbeatClassification::Blocking;
@@ -3976,7 +3969,6 @@ fn classify_startup_heartbeat(
         evidence,
     }))
 }
-
 #[cfg(unix)]
 #[allow(dead_code)]
 fn observe_local_startup_pid(worker_id: &str, pid: u32) -> StartupPidLiveness {
@@ -4393,18 +4385,15 @@ mod tests {
             step: "claimed",
         }
     }
-
     #[test]
     fn classify_startup_heartbeat_marks_missing_evidence_absent() {
         let (directory, path) = startup_heartbeat_fixture("absent");
-
         let classified = super::classify_startup_heartbeat(
             &path,
             expected_startup_heartbeat("worker-a"),
             200,
             |_, _| super::StartupPidLiveness::Dead,
         );
-
         assert_eq!(classified, super::StartupHeartbeatClassification::Absent);
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
     }
@@ -4412,26 +4401,28 @@ mod tests {
     #[test]
     fn classify_startup_heartbeat_blocks_fresh_live_malformed_mismatched_and_remote_evidence() {
         use super::StartupPidLiveness::{Dead, Live, Unknown};
-
         let (directory, path) = startup_heartbeat_fixture("blocking");
-        let exact = startup_heartbeat_document("worker-a", 4242);
+        let worker = "host:user:rust:4242:nonce-a";
+        let exact = startup_heartbeat_document(worker, 4242);
         let changed = |from, to| exact.replace(from, to);
         let mut cases = vec![
-            ("fresh", exact.clone(), 105, Dead),
-            ("live", exact.clone(), 200, Live),
-            ("remote", exact.clone(), 200, Unknown),
+            ("fresh", exact.clone(), 105, Dead, false),
+            ("live", exact.clone(), 200, Live, true),
+            ("remote", exact.clone(), 200, Unknown, true),
         ];
         let mutations = r#"malformed|not-json
 owner/repo|other/repo
 "42"|"43"
-worker-a|worker-b
+host:user|other:user
 feat/worker|feat/other
 "pr":""|"pr":"17"
 claim-a|claim-b
 claimed|review
 "ttl_seconds":10|"ttl_seconds":0
 "pid":4242|"pid":0
-nonce-a|"#;
+"nonce":"nonce-a"|"nonce":"nonce-b"
+:nonce-a"|:nonce-b"
+"nonce":"nonce-a"|"nonce":"""#;
         cases.extend(mutations.lines().map(|row| {
             let (from, to) = row.split_once('|').expect("mutation row");
             let document = if from == "malformed" {
@@ -4439,20 +4430,25 @@ nonce-a|"#;
             } else {
                 changed(from, to)
             };
-            ("malformed or mismatch", document, 200, Dead)
+            ("malformed or mismatch", document, 200, Dead, false)
         }));
-        for (label, document, now, liveness) in cases {
+        for (label, document, now, liveness, should_observe) in cases {
             std::fs::write(&path, document).expect("write heartbeat fixture");
+            let mut observed = false;
             assert_eq!(
                 super::classify_startup_heartbeat(
                     &path,
-                    expected_startup_heartbeat("worker-a"),
+                    expected_startup_heartbeat(worker),
                     now,
-                    |_, _| liveness,
+                    |_, _| {
+                        observed = true;
+                        liveness
+                    },
                 ),
                 super::StartupHeartbeatClassification::Blocking,
                 "{label}"
             );
+            assert_eq!(observed, should_observe, "{label} liveness call");
         }
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
     }
@@ -4461,17 +4457,16 @@ nonce-a|"#;
     #[test]
     fn classify_startup_heartbeat_returns_snapshot_only_for_expired_dead_local_pid() {
         use std::os::unix::fs::MetadataExt;
-
         let (directory, path) = startup_heartbeat_fixture("expired-dead");
-        let document = startup_heartbeat_document("worker-a", 4242);
+        let worker = "host:user:rust:4242:nonce-a";
+        let document = startup_heartbeat_document(worker, 4242);
         std::fs::write(&path, &document).expect("write heartbeat fixture");
-
         let classified = super::classify_startup_heartbeat(
             &path,
-            expected_startup_heartbeat("worker-a"),
+            expected_startup_heartbeat(worker),
             200,
             |worker, pid| {
-                assert_eq!((worker, pid), ("worker-a", 4242));
+                assert_eq!((worker, pid), ("host:user:rust:4242:nonce-a", 4242));
                 super::StartupPidLiveness::Dead
             },
         );
