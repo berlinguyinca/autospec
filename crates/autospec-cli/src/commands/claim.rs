@@ -4772,34 +4772,33 @@ claimed|review
         assert_mode(&directory.join("quarantine"), 0o700);
         assert_mode(&directory.join("quarantine/startup-heartbeats"), 0o700);
         assert_mode(&target, 0o600);
-        assert!(
-            super::persist_heartbeat_copy(&directory, &source, &snapshot)
-                .expect_err("copy target must be create-new")
-                .to_string()
-                .contains("already exists")
-        );
-        std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+        let duplicate = super::persist_heartbeat_copy(&directory, &source, &snapshot)
+            .expect_err("copy target must be create-new");
+        assert!(duplicate.to_string().contains("already exists"));
+        let flags = nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_DIRECTORY;
+        let directory_fd =
+            nix::fcntl::open(&directory, flags, nix::sys::stat::Mode::empty()).expect("open root");
+        let (pipe, _writer) = nix::unistd::pipe().expect("file-sync pipe");
+        let error =
+            super::sync_heartbeat_copy(&std::fs::File::from(pipe), &directory_fd, &mut |_| {
+                panic!("boundary emitted after failed file sync")
+            })
+            .expect_err("pipe file cannot sync");
+        assert!(error.to_string().contains("sync heartbeat quarantine copy"));
 
-        let (failure_root, failure_source) = startup_heartbeat_fixture("copy-sync-failure");
-        let failure_snapshot = expired_heartbeat_snapshot(&failure_source);
-        let error = super::persist_heartbeat_copy_with_hooks(
-            &failure_root,
-            &failure_source,
-            &failure_snapshot,
-            |_| {},
-            |boundary| {
-                (boundary != super::HeartbeatCopySyncBoundary::File)
-                    .then_some(())
-                    .ok_or_else(|| super::CommandFailure::diagnostic("injected sync failure"))
-            },
-        )
-        .expect_err("sync boundary failure");
-        assert!(error.to_string().contains("injected sync failure"));
-        assert_eq!(
-            std::fs::read(&failure_source).expect("source survives sync failure"),
-            failure_snapshot.file.document
-        );
-        std::fs::remove_dir_all(failure_root).expect("remove sync failure fixture");
+        let file = std::fs::File::options().write(true).open(&source).unwrap();
+        let (pipe, _writer) = nix::unistd::pipe().expect("directory-sync pipe");
+        let mut boundaries = Vec::new();
+        let error = super::sync_heartbeat_copy(&file, &pipe, &mut |boundary| {
+            boundaries.push(boundary);
+            Ok(())
+        })
+        .expect_err("pipe directory cannot sync");
+        assert!(error
+            .to_string()
+            .contains("sync heartbeat quarantine directory"));
+        assert_eq!(boundaries, [super::HeartbeatCopySyncBoundary::File]);
+        std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
     }
 
     #[cfg(unix)]
