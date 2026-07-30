@@ -3845,12 +3845,7 @@ fn file_identity(metadata: &fs::Metadata) -> RegularFileIdentity {
 }
 #[cfg(unix)]
 #[allow(dead_code)]
-fn read_regular_file_no_follow(path: &Path) -> std::io::Result<RegularFileSnapshot> {
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
-    let mut file = options.open(path)?;
+fn read_regular_file(mut file: fs::File) -> std::io::Result<RegularFileSnapshot> {
     let before = file.metadata()?;
     if !before.is_file() {
         return Err(std::io::Error::other("heartbeat is not a regular file"));
@@ -3868,6 +3863,32 @@ fn read_regular_file_no_follow(path: &Path) -> std::io::Result<RegularFileSnapsh
         document,
         identity: after,
     })
+}
+#[cfg(unix)]
+#[allow(dead_code)]
+fn read_regular_file_no_follow(path: &Path) -> std::io::Result<RegularFileSnapshot> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    read_regular_file(options.open(path)?)
+}
+#[cfg(unix)]
+#[allow(dead_code)]
+fn read_regular_file_at_no_follow(
+    directory: &std::os::fd::OwnedFd,
+    name: &std::ffi::OsStr,
+) -> std::io::Result<RegularFileSnapshot> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::Mode;
+    let descriptor = openat(
+        directory,
+        name,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(std::io::Error::from)?;
+    read_regular_file(fs::File::from(descriptor))
 }
 #[cfg(not(unix))]
 #[allow(dead_code)]
@@ -4151,6 +4172,199 @@ fn persist_heartbeat_copy_with_hooks(
     })?;
     sync_heartbeat_copy(&file, &copies, &mut after_sync)?;
     Ok(target)
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatHandoffSyncBoundary {
+    Source,
+    Handoff,
+    Cleanup,
+}
+
+#[cfg(unix)]
+fn rename_heartbeat_no_clobber(
+    source: &std::os::fd::OwnedFd,
+    source_name: &std::ffi::OsStr,
+    target: &std::os::fd::OwnedFd,
+    target_name: &str,
+) -> Result<(), CommandFailure> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        nix::fcntl::renameat2(
+            source,
+            source_name,
+            target,
+            target_name,
+            nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+        )
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("could not hand off startup heartbeat: {error}"))
+        })
+    }
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    {
+        let _ = (source, source_name, target, target_name);
+        Err(CommandFailure::diagnostic(
+            "identity-bound heartbeat handoff is unavailable on this platform",
+        ))
+    }
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn restore_moved_heartbeat(
+    root: &std::os::fd::OwnedFd,
+    live_name: &std::ffi::OsStr,
+    handoff: &std::os::fd::OwnedFd,
+    moved_name: &str,
+) -> Result<(), CommandFailure> {
+    use nix::fcntl::AtFlags;
+    use nix::unistd::{linkat, unlinkat, UnlinkatFlags};
+    match linkat(handoff, moved_name, root, live_name, AtFlags::empty()) {
+        Err(nix::errno::Errno::EEXIST) => Ok(()),
+        Err(error) => Err(CommandFailure::diagnostic(format!(
+            "could not restore moved startup heartbeat: {error}"
+        ))),
+        Ok(()) => {
+            nix::unistd::fsync(root).map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "could not sync restored startup heartbeat: {error}"
+                ))
+            })?;
+            unlinkat(handoff, moved_name, UnlinkatFlags::NoRemoveDir).map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "could not remove restored heartbeat handoff: {error}"
+                ))
+            })?;
+            nix::unistd::fsync(handoff).map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "could not sync restored heartbeat handoff: {error}"
+                ))
+            })
+        }
+    }
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn handoff_stale_heartbeat(
+    state_root: &Path,
+    source: &Path,
+    snapshot: &StartupHeartbeatSnapshot,
+) -> Result<std::path::PathBuf, CommandFailure> {
+    handoff_stale_heartbeat_with_hooks(
+        state_root,
+        source,
+        snapshot,
+        || {},
+        |_, _, _| {},
+        |_| Ok(()),
+    )
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn handoff_stale_heartbeat_with_hooks(
+    state_root: &Path,
+    source: &Path,
+    snapshot: &StartupHeartbeatSnapshot,
+    mut before_move: impl FnMut(),
+    mut after_move: impl FnMut(&std::os::fd::OwnedFd, &std::os::fd::OwnedFd, &str),
+    mut after_sync: impl FnMut(HeartbeatHandoffSyncBoundary) -> Result<(), CommandFailure>,
+) -> Result<std::path::PathBuf, CommandFailure> {
+    use nix::fcntl::{open, AtFlags, OFlag};
+    use nix::sys::stat::{fstat, fstatat, Mode};
+    use nix::unistd::{fsync, unlinkat, UnlinkatFlags};
+
+    let live_name = source
+        .file_name()
+        .ok_or_else(|| CommandFailure::diagnostic("startup heartbeat source has no filename"))?;
+    if source.parent() != Some(state_root) {
+        return Err(CommandFailure::diagnostic(
+            "startup heartbeat source is outside the private state root",
+        ));
+    }
+    let copy = persist_heartbeat_copy(state_root, source, snapshot)?;
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let root = open(state_root, flags, Mode::empty()).map_err(|_| {
+        CommandFailure::diagnostic("heartbeat private state root is not a safe directory")
+    })?;
+    let stat = fstat(&root).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not inspect private state root: {error}"))
+    })?;
+    if stat.st_uid != unsafe { nix::libc::geteuid() } || stat.st_mode & 0o7777 != 0o700 {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat private state root must be owned by the effective user with mode 0700",
+        ));
+    }
+    fn ignore_component(_: &str) {}
+    let quarantine = open_private_quarantine_component(&root, "quarantine", &mut ignore_component)?;
+    let handoff = open_private_quarantine_component(
+        &quarantine,
+        "startup-heartbeat-handoffs",
+        &mut ignore_component,
+    )?;
+    let observed = read_regular_file_at_no_follow(&root, live_name).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not revalidate startup heartbeat: {error}"))
+    })?;
+    revalidate_heartbeat_snapshot(&observed, &snapshot.file)?;
+    let moved_name = format!(
+        "{}-{}-{}.json",
+        snapshot.evidence.issue,
+        heartbeat_session_key(&snapshot.evidence.nonce),
+        unique_operation_id("handoff")?
+    );
+    before_move();
+    rename_heartbeat_no_clobber(&root, live_name, &handoff, &moved_name)?;
+    fsync(&root).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not sync heartbeat source directory: {error}"
+        ))
+    })?;
+    after_sync(HeartbeatHandoffSyncBoundary::Source)?;
+    fsync(&handoff).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not sync heartbeat handoff directory: {error}"
+        ))
+    })?;
+    after_sync(HeartbeatHandoffSyncBoundary::Handoff)?;
+    after_move(&root, &handoff, &moved_name);
+    let moved = read_regular_file_at_no_follow(&handoff, std::ffi::OsStr::new(&moved_name))
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("could not validate moved heartbeat: {error}"))
+        });
+    let validation = moved.and_then(|moved| {
+        revalidate_heartbeat_snapshot(&moved, &snapshot.file)?;
+        if parse_startup_heartbeat(&moved.document).as_ref() != Some(&snapshot.evidence) {
+            return Err(CommandFailure::diagnostic(
+                "startup heartbeat JSON drift after handoff",
+            ));
+        }
+        Ok(())
+    });
+    if let Err(error) = validation {
+        restore_moved_heartbeat(&root, live_name, &handoff, &moved_name)?;
+        return Err(error);
+    }
+    match fstatat(&root, live_name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Err(nix::errno::Errno::ENOENT) => {}
+        _ => {
+            restore_moved_heartbeat(&root, live_name, &handoff, &moved_name)?;
+            return Err(CommandFailure::diagnostic(
+                "startup heartbeat live name reappeared during handoff",
+            ));
+        }
+    }
+    unlinkat(&handoff, moved_name.as_str(), UnlinkatFlags::NoRemoveDir).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not remove moved startup heartbeat: {error}"))
+    })?;
+    after_sync(HeartbeatHandoffSyncBoundary::Cleanup)?;
+    fsync(&handoff).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not sync heartbeat cleanup: {error}"))
+    })?;
+    Ok(copy)
 }
 
 #[cfg(unix)]
@@ -4532,6 +4746,8 @@ mod tests {
     };
     use autospec_core::claim::{ExecutorResultEvidence, RemoteComment, RunStateRecord};
     #[cfg(unix)]
+    use std::io::Write;
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -4729,6 +4945,35 @@ claimed|review
     }
 
     #[cfg(unix)]
+    fn heartbeat_copy_path(root: &Path) -> PathBuf {
+        root.join(format!(
+            "quarantine/startup-heartbeats/42-{}.json",
+            super::heartbeat_session_key("nonce-a")
+        ))
+    }
+
+    #[cfg(unix)]
+    fn heartbeat_handoff_count(root: &Path) -> usize {
+        std::fs::read_dir(root.join("quarantine/startup-heartbeat-handoffs"))
+            .expect("handoff directory")
+            .count()
+    }
+
+    #[cfg(unix)]
+    fn write_new_heartbeat_at(directory: &std::os::fd::OwnedFd, document: &[u8]) {
+        let fd = nix::fcntl::openat(
+            directory,
+            "42.json",
+            nix::fcntl::OFlag::O_WRONLY | nix::fcntl::OFlag::O_CREAT | nix::fcntl::OFlag::O_EXCL,
+            nix::sys::stat::Mode::from_bits_truncate(0o600),
+        )
+        .expect("publish live replacement");
+        std::fs::File::from(fd)
+            .write_all(document)
+            .expect("write replacement");
+    }
+
+    #[cfg(unix)]
     fn assert_mode(path: &Path, expected: u32) {
         let permissions = std::fs::metadata(path)
             .expect("private path metadata")
@@ -4920,6 +5165,149 @@ claimed|review
         std::fs::remove_dir_all(preexisting_root).expect("remove preexisting fixture");
         std::fs::remove_dir_all(swapped_root).expect("remove swapped fixture");
         std::fs::remove_dir_all(outside).expect("remove outside fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_heartbeat_quarantine_aborts_for_replacement_before_handoff() {
+        let (directory, source) = startup_heartbeat_fixture("handoff-replacement");
+        let snapshot = expired_heartbeat_snapshot(&source);
+        let replacement = b"new live heartbeat".to_vec();
+        let displaced = directory.join("classified.json");
+        let result = super::handoff_stale_heartbeat_with_hooks(
+            &directory,
+            &source,
+            &snapshot,
+            || {
+                std::fs::rename(&source, &displaced).expect("displace classified heartbeat");
+                std::fs::write(&source, &replacement).expect("publish replacement heartbeat");
+            },
+            |_, _, _| {},
+            |_| Ok(()),
+        );
+
+        assert!(result
+            .expect_err("replacement must abort")
+            .to_string()
+            .contains("drift"));
+        assert_eq!(
+            std::fs::read(&source).expect("replacement survives"),
+            replacement
+        );
+        let copy = heartbeat_copy_path(&directory);
+        assert_eq!(
+            std::fs::read(copy).expect("durable copy"),
+            snapshot.file.document
+        );
+        std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_heartbeat_handoff_restores_drift_or_preserves_it_beside_live_replacement() {
+        use nix::fcntl::{openat, OFlag};
+        use nix::sys::stat::Mode;
+
+        for occupied in [false, true] {
+            let (directory, source) = startup_heartbeat_fixture(if occupied {
+                "handoff-occupied"
+            } else {
+                "handoff-restore"
+            });
+            let snapshot = expired_heartbeat_snapshot(&source);
+            let result = super::handoff_stale_heartbeat_with_hooks(
+                &directory,
+                &source,
+                &snapshot,
+                || {},
+                |root, handoff, moved| {
+                    let fd = openat(
+                        handoff,
+                        moved,
+                        OFlag::O_WRONLY | OFlag::O_TRUNC | OFlag::O_NOFOLLOW,
+                        Mode::empty(),
+                    )
+                    .expect("open moved heartbeat");
+                    std::fs::File::from(fd)
+                        .write_all(b"drift")
+                        .expect("drift moved inode");
+                    if occupied {
+                        write_new_heartbeat_at(root, b"replacement");
+                    }
+                },
+                |_| Ok(()),
+            );
+            assert!(result
+                .expect_err("drift must abort")
+                .to_string()
+                .contains("drift"));
+            assert_eq!(
+                std::fs::read(&source).expect("live name survives"),
+                if occupied {
+                    b"replacement".as_slice()
+                } else {
+                    b"drift".as_slice()
+                }
+            );
+            if !occupied {
+                let live = std::fs::metadata(&source).expect("restored heartbeat metadata");
+                assert_eq!(
+                    std::os::unix::fs::MetadataExt::ino(&live),
+                    snapshot.file.identity.inode
+                );
+            }
+            assert_eq!(heartbeat_handoff_count(&directory), usize::from(occupied));
+            std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_heartbeat_handoff_preserves_replacement_before_and_after_cleanup() {
+        for mode in 0..3 {
+            let (directory, source) = startup_heartbeat_fixture("handoff-sync");
+            let snapshot = expired_heartbeat_snapshot(&source);
+            let result = super::handoff_stale_heartbeat_with_hooks(
+                &directory,
+                &source,
+                &snapshot,
+                || {},
+                |root, _, _| {
+                    if mode == 2 {
+                        nix::unistd::mkfifo(
+                            &source,
+                            nix::sys::stat::Mode::from_bits_truncate(0o600),
+                        )
+                        .expect("publish live FIFO");
+                    } else if mode != 1 {
+                        write_new_heartbeat_at(root, &snapshot.file.document);
+                    }
+                },
+                |boundary| {
+                    if mode == 1 && boundary == super::HeartbeatHandoffSyncBoundary::Cleanup {
+                        std::fs::write(&source, &snapshot.file.document)
+                            .expect("publish post-unlink replacement");
+                        return Err(super::CommandFailure::diagnostic(
+                            "injected cleanup failure",
+                        ));
+                    }
+                    Ok(())
+                },
+            );
+
+            assert!(result.is_err());
+            if mode == 2 {
+                let kind = std::fs::symlink_metadata(&source)
+                    .expect("FIFO metadata")
+                    .file_type();
+                assert!(std::os::unix::fs::FileTypeExt::is_fifo(&kind));
+            } else {
+                assert_eq!(std::fs::read(&source).unwrap(), snapshot.file.document);
+            }
+            assert!(heartbeat_copy_path(&directory).is_file());
+            assert_eq!(heartbeat_handoff_count(&directory), usize::from(mode != 1));
+            std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+        }
     }
 
     #[test]
