@@ -3780,11 +3780,9 @@ fn prepare_heartbeat_root_parent_with_hook(
     root: &Path,
     mut after_sync: impl FnMut(&'static str) -> Result<(), CommandFailure>,
 ) -> Result<(), CommandFailure> {
-    use nix::fcntl::{open, openat, AtFlags, OFlag};
-    use nix::sys::stat::{fchmod, fstat, fstatat, mkdirat, Mode, SFlag};
+    use nix::fcntl::{open, openat, renameat2, AtFlags, OFlag, RenameFlags};
+    use nix::sys::stat::{fstatat, mkdirat, Mode};
     use nix::unistd::{unlinkat, UnlinkatFlags};
-    use std::os::fd::AsRawFd;
-    use std::os::unix::fs::PermissionsExt;
 
     let invalid = || CommandFailure::diagnostic("heartbeat root must have a named parent");
     let parent_path = root.parent().ok_or_else(&invalid)?;
@@ -3794,70 +3792,65 @@ fn prepare_heartbeat_root_parent_with_hook(
     let ancestor = open(ancestor_path, flags, Mode::empty()).map_err(|error| {
         CommandFailure::diagnostic(format!("could not open heartbeat parent ancestor: {error}"))
     })?;
-    let created = match mkdirat(&ancestor, component, Mode::from_bits_truncate(0o700)) {
-        Ok(()) => true,
-        Err(nix::errno::Errno::EEXIST) => false,
+    let anchor_flags = OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    match openat(&ancestor, component, anchor_flags, Mode::empty()) {
+        Ok(anchor) => {
+            let expected = normalize_heartbeat_root_parent(&anchor, false, &mut after_sync)?;
+            let current =
+                fstatat(&ancestor, component, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+                    CommandFailure::diagnostic(format!(
+                        "could not revalidate heartbeat root parent: {error}"
+                    ))
+                })?;
+            if (current.st_dev, current.st_ino) != (expected.device, expected.inode) {
+                return Err(CommandFailure::diagnostic(
+                    "heartbeat root parent identity changed during preparation",
+                ));
+            }
+            return Ok(());
+        }
+        Err(nix::errno::Errno::ENOENT) => {}
         Err(error) => {
             return Err(CommandFailure::diagnostic(format!(
-                "could not create heartbeat root parent: {error}"
+                "could not open heartbeat root parent: {error}"
             )))
         }
+    }
+
+    let staging = format!(
+        ".autospec-heartbeat-stage-{}-{}",
+        std::process::id(),
+        UNIQUE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    mkdirat(&ancestor, staging.as_str(), Mode::from_bits_truncate(0o700)).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not stage heartbeat root parent: {error}"))
+    })?;
+    let anchor = match openat(&ancestor, staging.as_str(), anchor_flags, Mode::empty()) {
+        Ok(anchor) => anchor,
+        Err(error) => {
+            let _ = unlinkat(&ancestor, staging.as_str(), UnlinkatFlags::RemoveDir);
+            return Err(CommandFailure::diagnostic(format!(
+                "could not open staged heartbeat root parent: {error}"
+            )));
+        }
     };
-    let anchor = openat(
-        &ancestor,
-        component,
-        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|error| {
-        CommandFailure::diagnostic(format!("could not open heartbeat root parent: {error}"))
-    })?;
-    let before = fstat(&anchor).map_err(|error| {
-        CommandFailure::diagnostic(format!("could not inspect heartbeat root parent: {error}"))
-    })?;
-    let created_identity = (before.st_dev, before.st_ino);
     let prepared = (|| {
-        if !SFlag::from_bits_truncate(before.st_mode).contains(SFlag::S_IFDIR)
-            || before.st_uid != nix::unistd::geteuid().as_raw()
-        {
-            return Err(CommandFailure::diagnostic(
-                "heartbeat root parent must be owned by the effective user",
-            ));
-        }
-        if created || before.st_mode & 0o7777 != 0o700 {
-            fs::set_permissions(
-                format!("/proc/self/fd/{}", anchor.as_raw_fd()),
-                fs::Permissions::from_mode(0o700),
-            )
-            .map_err(|error| {
-                CommandFailure::diagnostic(format!(
-                    "could not make heartbeat root parent accessible: {error}"
-                ))
-            })?;
-        }
-        let parent = openat(&anchor, ".", flags, Mode::empty()).map_err(|error| {
-            CommandFailure::diagnostic(format!("could not reopen heartbeat root parent: {error}"))
+        let expected = normalize_heartbeat_root_parent(&anchor, true, &mut after_sync)?;
+        after_sync("before-publish")?;
+        renameat2(
+            &ancestor,
+            staging.as_str(),
+            &ancestor,
+            component,
+            RenameFlags::RENAME_NOREPLACE,
+        )
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("could not publish heartbeat root parent: {error}"))
         })?;
-        if created || before.st_mode & 0o7777 != 0o700 {
-            fchmod(&parent, Mode::from_bits_truncate(0o700)).map_err(|error| {
-                CommandFailure::diagnostic(format!(
-                    "could not protect heartbeat root parent: {error}"
-                ))
-            })?;
-            nix::unistd::fsync(&parent).map_err(|error| {
-                CommandFailure::diagnostic(format!("could not sync heartbeat root parent: {error}"))
-            })?;
-            after_sync("parent")?;
-        }
-        if created {
-            nix::unistd::fsync(&ancestor).map_err(|error| {
-                CommandFailure::diagnostic(format!(
-                    "could not sync heartbeat parent ancestor: {error}"
-                ))
-            })?;
-            after_sync("ancestor")?;
-        }
-        let expected = private_heartbeat_directory_identity(&parent, "root parent")?;
+        nix::unistd::fsync(&ancestor).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not sync heartbeat parent ancestor: {error}"))
+        })?;
+        after_sync("ancestor")?;
         let current =
             fstatat(&ancestor, component, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
                 CommandFailure::diagnostic(format!(
@@ -3866,22 +3859,70 @@ fn prepare_heartbeat_root_parent_with_hook(
             })?;
         if (current.st_dev, current.st_ino) != (expected.device, expected.inode) {
             return Err(CommandFailure::diagnostic(
-                "heartbeat root parent identity changed during preparation",
+                "heartbeat root parent identity changed during publication",
             ));
         }
         Ok(())
     })();
-    if prepared.is_err() && created {
+    if prepared.is_err() {
         drop(anchor);
-        if let Ok(current) = fstatat(&ancestor, component, AtFlags::AT_SYMLINK_NOFOLLOW) {
-            if (current.st_dev, current.st_ino) == created_identity
-                && unlinkat(&ancestor, component, UnlinkatFlags::RemoveDir).is_ok()
-            {
-                let _ = nix::unistd::fsync(&ancestor);
-            }
-        }
+        let _ = unlinkat(&ancestor, staging.as_str(), UnlinkatFlags::RemoveDir);
     }
     prepared
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_heartbeat_root_parent(
+    anchor: &impl std::os::fd::AsFd,
+    created: bool,
+    boundary: &mut impl FnMut(&'static str) -> Result<(), CommandFailure>,
+) -> Result<HeartbeatDirectoryIdentity, CommandFailure> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::{fchmod, fstat, Mode, SFlag};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::PermissionsExt;
+
+    let before = fstat(anchor).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not inspect heartbeat root parent: {error}"))
+    })?;
+    if !SFlag::from_bits_truncate(before.st_mode).contains(SFlag::S_IFDIR)
+        || before.st_uid != nix::unistd::geteuid().as_raw()
+    {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat root parent must be owned by the effective user",
+        ));
+    }
+    if created || before.st_mode & 0o7777 != 0o700 {
+        boundary("chmod")?;
+        fs::set_permissions(
+            format!("/proc/self/fd/{}", anchor.as_fd().as_raw_fd()),
+            fs::Permissions::from_mode(0o700),
+        )
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not make heartbeat root parent accessible: {error}"
+            ))
+        })?;
+    }
+    let parent = openat(
+        anchor,
+        ".",
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| {
+        CommandFailure::diagnostic(format!("could not reopen heartbeat root parent: {error}"))
+    })?;
+    if created || before.st_mode & 0o7777 != 0o700 {
+        fchmod(&parent, Mode::from_bits_truncate(0o700)).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not protect heartbeat root parent: {error}"))
+        })?;
+        nix::unistd::fsync(&parent).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not sync heartbeat root parent: {error}"))
+        })?;
+        boundary("parent")?;
+    }
+    private_heartbeat_directory_identity(&parent, "root parent")
 }
 
 #[allow(dead_code)]
@@ -5499,7 +5540,7 @@ mod tests {
             std::fs::metadata(&parent).unwrap().permissions().mode() & 0o7777,
             0o700
         );
-        assert_eq!(syncs, ["parent", "ancestor"]);
+        assert_eq!(syncs, ["chmod", "parent", "before-publish", "ancestor"]);
 
         std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o775)).unwrap();
         syncs.clear();
@@ -5512,7 +5553,7 @@ mod tests {
             std::fs::metadata(&parent).unwrap().permissions().mode() & 0o7777,
             0o700
         );
-        assert_eq!(syncs, ["parent"]);
+        assert_eq!(syncs, ["chmod", "parent"]);
 
         std::fs::remove_dir(&parent).unwrap();
         let outside = fixture.join("outside");
@@ -5530,6 +5571,7 @@ mod tests {
     #[test]
     fn startup_heartbeat_restrictive_umask() {
         use nix::sys::stat::{umask, Mode};
+        use std::os::unix::fs::MetadataExt;
 
         const CHILD: &str = "AUTOSPEC_TEST_RESTRICTIVE_UMASK_CHILD";
         if std::env::var_os(CHILD).is_none() {
@@ -5552,12 +5594,19 @@ mod tests {
         let (fixture, _) = startup_heartbeat_fixture("restrictive-umask");
         let parent = fixture.join(".autospec");
         let root = parent.join("process-heartbeats");
+        let assert_no_staging = || {
+            assert!(std::fs::read_dir(&fixture).unwrap().all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".autospec-heartbeat-stage-")
+            }));
+        };
         let previous = umask(Mode::from_bits_truncate(0o777));
         let failed = super::prepare_heartbeat_root_parent_with_hook(&root, |boundary| {
-            if boundary == "parent" {
-                return Err(super::CommandFailure::diagnostic(
-                    "injected durability failure",
-                ));
+            if boundary == "chmod" {
+                return Err(super::CommandFailure::diagnostic("injected chmod failure"));
             }
             Ok(())
         });
@@ -5565,6 +5614,16 @@ mod tests {
 
         assert!(failed.is_err());
         assert!(!parent.exists());
+        assert_no_staging();
+        let failed = super::prepare_heartbeat_root_parent_with_hook(&root, |boundary| {
+            if boundary == "parent" {
+                return Err(super::CommandFailure::diagnostic("injected fsync failure"));
+            }
+            Ok(())
+        });
+        assert!(failed.is_err());
+        assert!(!parent.exists());
+        assert_no_staging();
         super::prepare_heartbeat_root_parent_with_hook(&root, |_| Ok(())).unwrap();
         assert_eq!(
             std::fs::metadata(&parent).unwrap().permissions().mode() & 0o7777,
@@ -5572,21 +5631,23 @@ mod tests {
         );
 
         std::fs::remove_dir(&parent).unwrap();
-        let displaced = fixture.join("displaced-parent");
+        let replacement_identity = std::cell::Cell::new((0, 0));
         let raced = super::prepare_heartbeat_root_parent_with_hook(&root, |boundary| {
-            if boundary == "parent" {
-                std::fs::rename(&parent, &displaced).unwrap();
+            if boundary == "before-publish" {
                 std::fs::create_dir(&parent).unwrap();
-                return Err(super::CommandFailure::diagnostic("injected identity race"));
+                std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o750)).unwrap();
+                let metadata = std::fs::metadata(&parent).unwrap();
+                replacement_identity.set((metadata.ino(), metadata.mode()));
             }
             Ok(())
         });
         assert!(raced.is_err());
-        assert!(parent.is_dir(), "replacement must not be removed");
-        assert!(
-            displaced.is_dir(),
-            "created inode remains recoverable by owner"
+        let replacement = std::fs::metadata(&parent).unwrap();
+        assert_eq!(
+            (replacement.ino(), replacement.mode()),
+            replacement_identity.get()
         );
+        assert_no_staging();
     }
 
     #[cfg(target_os = "linux")]
