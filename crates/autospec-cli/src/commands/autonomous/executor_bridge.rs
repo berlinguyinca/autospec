@@ -39698,7 +39698,7 @@ exit 19
         )
         .expect_err("foreign terminal attempt must not authorize recovery");
 
-        assert!(error.contains("durable invocation intent"), "{error}");
+        assert!(error.contains("resolved invocation intent"), "{error}");
     }
 
     #[test]
