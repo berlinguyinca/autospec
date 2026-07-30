@@ -3990,6 +3990,285 @@ fn classify_startup_heartbeat(
         evidence,
     }))
 }
+
+#[cfg(unix)]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatReceiptDecision {
+    Absent,
+    Blocking,
+    Pending,
+    Completed,
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatReceiptEntry {
+    Missing,
+    Exact,
+    Unsafe,
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+struct HeartbeatReceiptAnchors {
+    _root: std::os::fd::OwnedFd,
+    _quarantine: std::os::fd::OwnedFd,
+    handoff: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+struct HeartbeatReceiptTransaction {
+    anchors: HeartbeatReceiptAnchors,
+    pending: String,
+    completed: String,
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn heartbeat_receipt_names(expected: StartupHeartbeatExpectation<'_>) -> (String, String) {
+    let issue = expected.issue.to_string();
+    let mut identity = Vec::new();
+    for field in [
+        expected.repo,
+        issue.as_str(),
+        expected.worker_id,
+        expected.branch,
+        expected.pull_request,
+        expected.claim_id,
+        expected.step,
+    ] {
+        identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        identity.extend_from_slice(field.as_bytes());
+    }
+    let digest = autospec_core::autonomous::waterfall::sha256_hex(&identity);
+    (
+        format!("pending-{}-{digest}.receipt", expected.issue),
+        format!("completed-{}-{digest}.receipt", expected.issue),
+    )
+}
+
+#[cfg(unix)]
+fn validate_receipt_directory(
+    directory: &std::os::fd::OwnedFd,
+    component: &str,
+) -> Result<(), CommandFailure> {
+    use nix::sys::stat::{fstat, SFlag};
+
+    let stat = fstat(directory).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not inspect receipt {component}: {error}"))
+    })?;
+    let kind = SFlag::from_bits_truncate(stat.st_mode);
+    if !kind.contains(SFlag::S_IFDIR)
+        || stat.st_uid != unsafe { nix::libc::geteuid() }
+        || stat.st_mode & 0o7777 != 0o700
+    {
+        return Err(CommandFailure::diagnostic(format!(
+            "receipt {component} must be an owner-only directory"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_receipt_anchors(
+    state_root: &Path,
+) -> Result<Option<HeartbeatReceiptAnchors>, CommandFailure> {
+    use nix::fcntl::{open, openat, OFlag};
+    use nix::sys::stat::Mode;
+
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let root = match open(state_root, flags, Mode::empty()) {
+        Ok(root) => root,
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not open receipt state root: {error}"
+            )))
+        }
+    };
+    validate_receipt_directory(&root, "state root")?;
+    let quarantine = match openat(&root, "quarantine", flags, Mode::empty()) {
+        Ok(directory) => directory,
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not open receipt quarantine: {error}"
+            )))
+        }
+    };
+    validate_receipt_directory(&quarantine, "quarantine")?;
+    let handoff = match openat(
+        &quarantine,
+        "startup-heartbeat-handoffs",
+        flags,
+        Mode::empty(),
+    ) {
+        Ok(directory) => directory,
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not open receipt handoff: {error}"
+            )))
+        }
+    };
+    validate_receipt_directory(&handoff, "handoff")?;
+    Ok(Some(HeartbeatReceiptAnchors {
+        _root: root,
+        _quarantine: quarantine,
+        handoff,
+    }))
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn inspect_heartbeat_receipt(
+    directory: &std::os::fd::OwnedFd,
+    name: &std::ffi::OsStr,
+) -> HeartbeatReceiptEntry {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::{fstatat, SFlag};
+
+    let stat = match fstatat(directory, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(nix::errno::Errno::ENOENT) => return HeartbeatReceiptEntry::Missing,
+        Err(_) => return HeartbeatReceiptEntry::Unsafe,
+    };
+    let kind = SFlag::from_bits_truncate(stat.st_mode);
+    if kind.contains(SFlag::S_IFREG)
+        && stat.st_uid == unsafe { nix::libc::geteuid() }
+        && stat.st_mode & 0o7777 == 0o600
+        && stat.st_nlink == 1
+        && stat.st_size == 0
+    {
+        HeartbeatReceiptEntry::Exact
+    } else {
+        HeartbeatReceiptEntry::Unsafe
+    }
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn heartbeat_receipt_retry_decision(
+    state_root: &Path,
+    expected: StartupHeartbeatExpectation<'_>,
+) -> HeartbeatReceiptDecision {
+    heartbeat_receipt_retry_decision_with_hook(state_root, expected, || {})
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn heartbeat_receipt_retry_decision_with_hook(
+    state_root: &Path,
+    expected: StartupHeartbeatExpectation<'_>,
+    after_open: impl FnOnce(),
+) -> HeartbeatReceiptDecision {
+    let anchors = match open_receipt_anchors(state_root) {
+        Ok(Some(anchors)) => anchors,
+        Ok(None) => return HeartbeatReceiptDecision::Absent,
+        Err(_) => return HeartbeatReceiptDecision::Blocking,
+    };
+    after_open();
+    let (pending, completed) = heartbeat_receipt_names(expected);
+    match (
+        inspect_heartbeat_receipt(&anchors.handoff, pending.as_ref()),
+        inspect_heartbeat_receipt(&anchors.handoff, completed.as_ref()),
+    ) {
+        (HeartbeatReceiptEntry::Missing, HeartbeatReceiptEntry::Missing) => {
+            HeartbeatReceiptDecision::Absent
+        }
+        (HeartbeatReceiptEntry::Exact, HeartbeatReceiptEntry::Missing) => {
+            HeartbeatReceiptDecision::Pending
+        }
+        (HeartbeatReceiptEntry::Missing, HeartbeatReceiptEntry::Exact) => {
+            HeartbeatReceiptDecision::Completed
+        }
+        _ => HeartbeatReceiptDecision::Blocking,
+    }
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn begin_heartbeat_receipt(
+    state_root: &Path,
+    expected: StartupHeartbeatExpectation<'_>,
+) -> Result<HeartbeatReceiptTransaction, CommandFailure> {
+    use nix::fcntl::{open, openat, OFlag};
+    use nix::sys::stat::{fchmod, Mode};
+
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let root = open(state_root, flags, Mode::empty()).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not open receipt root: {error}"))
+    })?;
+    validate_receipt_directory(&root, "state root")?;
+    fn ignore_component(_: &str) {}
+    let quarantine = open_private_quarantine_component(&root, "quarantine", &mut ignore_component)?;
+    validate_receipt_directory(&quarantine, "quarantine")?;
+    let handoff = open_private_quarantine_component(
+        &quarantine,
+        "startup-heartbeat-handoffs",
+        &mut ignore_component,
+    )?;
+    validate_receipt_directory(&handoff, "handoff")?;
+    let (pending, completed) = heartbeat_receipt_names(expected);
+    let descriptor = openat(
+        &handoff,
+        pending.as_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| {
+        CommandFailure::diagnostic(format!("could not create pending receipt: {error}"))
+    })?;
+    fchmod(&descriptor, Mode::from_bits_truncate(0o600)).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not protect pending receipt: {error}"))
+    })?;
+    fs::File::from(descriptor).sync_all().map_err(|error| {
+        CommandFailure::diagnostic(format!("could not sync pending receipt: {error}"))
+    })?;
+    nix::unistd::fsync(&handoff).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not sync pending receipt directory: {error}"))
+    })?;
+    Ok(HeartbeatReceiptTransaction {
+        anchors: HeartbeatReceiptAnchors {
+            _root: root,
+            _quarantine: quarantine,
+            handoff,
+        },
+        pending,
+        completed,
+    })
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn retire_heartbeat_receipt_with_sync(
+    transaction: HeartbeatReceiptTransaction,
+    sync_directory: impl FnOnce(&std::os::fd::OwnedFd) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    rename_heartbeat_no_clobber(
+        &transaction.anchors.handoff,
+        transaction.pending.as_ref(),
+        &transaction.anchors.handoff,
+        &transaction.completed,
+    )?;
+    sync_directory(&transaction.anchors.handoff)
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn retire_heartbeat_receipt(
+    transaction: HeartbeatReceiptTransaction,
+) -> Result<(), CommandFailure> {
+    retire_heartbeat_receipt_with_sync(transaction, |directory| {
+        nix::unistd::fsync(directory).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not sync completed receipt: {error}"))
+        })
+    })
+}
+
 #[cfg(unix)]
 #[allow(dead_code)]
 fn revalidate_heartbeat_snapshot(
@@ -4979,6 +5258,103 @@ claimed|review
             .expect("private path metadata")
             .permissions();
         assert_eq!(permissions.mode() & 0o777, expected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_heartbeat_receipt_transaction() {
+        use super::HeartbeatReceiptDecision::{Absent, Blocking, Completed, Pending};
+        use nix::fcntl::{open, OFlag};
+        use nix::sys::stat::Mode;
+        use std::time::{Duration, Instant};
+
+        let worker = "host:user:rust:4242:nonce-a";
+        let expected = expected_startup_heartbeat(worker);
+        let (root, _) = startup_heartbeat_fixture("receipt-retire");
+        let transaction =
+            super::begin_heartbeat_receipt(&root, expected).expect("begin receipt transaction");
+        assert_eq!(
+            super::heartbeat_receipt_retry_decision(&root, expected),
+            Pending
+        );
+        let mut unrelated = expected;
+        unrelated.issue = 43;
+        assert_eq!(
+            super::heartbeat_receipt_retry_decision(&root, unrelated),
+            Absent
+        );
+        let (pipe, _writer) = nix::unistd::pipe().expect("unsyncable directory substitute");
+        super::retire_heartbeat_receipt_with_sync(transaction, |_| {
+            nix::unistd::fsync(&pipe)
+                .map_err(|error| super::CommandFailure::diagnostic(error.to_string()))
+        })
+        .expect_err("directory sync failure");
+        assert_eq!(
+            super::heartbeat_receipt_retry_decision(&root, expected),
+            Completed
+        );
+        std::fs::remove_dir_all(root).expect("remove retirement fixture");
+
+        let (root, _) = startup_heartbeat_fixture("receipt-unsafe");
+        drop(super::begin_heartbeat_receipt(&root, expected).expect("begin unsafe fixture"));
+        let (pending, _) = super::heartbeat_receipt_names(expected);
+        let handoff = root.join("quarantine/startup-heartbeat-handoffs");
+        let exact = handoff.join(&pending);
+        std::fs::remove_file(&exact).expect("remove regular pending receipt");
+        nix::unistd::mkfifo(&exact, Mode::from_bits_truncate(0o600)).expect("pending FIFO");
+        let started = Instant::now();
+        assert_eq!(
+            super::heartbeat_receipt_retry_decision(&root, expected),
+            Blocking
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        std::fs::remove_file(&exact).expect("remove FIFO");
+        std::os::unix::fs::symlink("/dev/null", &exact).expect("pending symlink");
+        assert_eq!(
+            super::heartbeat_receipt_retry_decision(&root, expected),
+            Blocking
+        );
+        std::fs::remove_file(&exact).expect("remove symlink");
+        std::fs::write(&exact, b"malformed").expect("malformed receipt");
+        assert_eq!(
+            super::heartbeat_receipt_retry_decision(&root, expected),
+            Blocking
+        );
+        std::fs::set_permissions(&handoff, std::fs::Permissions::from_mode(0o000))
+            .expect("make receipt directory unreadable");
+        assert_eq!(
+            super::heartbeat_receipt_retry_decision(&root, expected),
+            Blocking
+        );
+        std::fs::set_permissions(&handoff, std::fs::Permissions::from_mode(0o700))
+            .expect("restore receipt directory");
+        let dev = open(
+            "/dev",
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .expect("open device directory");
+        assert_eq!(
+            super::inspect_heartbeat_receipt(&dev, std::ffi::OsStr::new("null")),
+            super::HeartbeatReceiptEntry::Unsafe
+        );
+        std::fs::remove_dir_all(root).expect("remove unsafe fixture");
+
+        let (root, _) = startup_heartbeat_fixture("receipt-ancestor-swap");
+        drop(super::begin_heartbeat_receipt(&root, expected).expect("begin swap fixture"));
+        let outside = startup_heartbeat_fixture("receipt-swap-outside").0;
+        let decision = super::heartbeat_receipt_retry_decision_with_hook(&root, expected, || {
+            std::fs::rename(root.join("quarantine"), root.join("anchored"))
+                .expect("displace anchored quarantine");
+            std::os::unix::fs::symlink(&outside, root.join("quarantine"))
+                .expect("swap quarantine symlink");
+        });
+        assert_eq!(decision, Pending);
+        std::fs::remove_file(root.join("quarantine")).expect("remove swapped symlink");
+        std::fs::rename(root.join("anchored"), root.join("quarantine"))
+            .expect("restore quarantine");
+        std::fs::remove_dir_all(root).expect("remove swap fixture");
+        std::fs::remove_dir_all(outside).expect("remove outside fixture");
     }
 
     #[cfg(unix)]
