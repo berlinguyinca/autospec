@@ -4053,19 +4053,46 @@ fn persist_heartbeat_copy(
     source: &Path,
     snapshot: &StartupHeartbeatSnapshot,
 ) -> Result<std::path::PathBuf, CommandFailure> {
-    persist_heartbeat_copy_with_hook(state_root, source, snapshot, |_| {})
+    persist_heartbeat_copy_with_hooks(state_root, source, snapshot, |_| {}, |_| Ok(()))
 }
 
 #[cfg(unix)]
 #[allow(dead_code)]
-fn persist_heartbeat_copy_with_hook(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatCopySyncBoundary {
+    File,
+    Directory,
+}
+
+#[cfg(unix)]
+fn sync_heartbeat_copy(
+    file: &fs::File,
+    directory: &std::os::fd::OwnedFd,
+    after_sync: &mut impl FnMut(HeartbeatCopySyncBoundary) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    file.sync_all().map_err(|error| {
+        CommandFailure::diagnostic(format!("could not sync heartbeat quarantine copy: {error}"))
+    })?;
+    after_sync(HeartbeatCopySyncBoundary::File)?;
+    nix::unistd::fsync(directory).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not sync heartbeat quarantine directory: {error}"
+        ))
+    })?;
+    after_sync(HeartbeatCopySyncBoundary::Directory)
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn persist_heartbeat_copy_with_hooks(
     state_root: &Path,
     source: &Path,
     snapshot: &StartupHeartbeatSnapshot,
     mut after_open: impl FnMut(&str),
+    mut after_sync: impl FnMut(HeartbeatCopySyncBoundary) -> Result<(), CommandFailure>,
 ) -> Result<std::path::PathBuf, CommandFailure> {
     use nix::fcntl::{open, openat, OFlag};
-    use nix::sys::stat::{fchmod, Mode};
+    use nix::sys::stat::{fchmod, fstat, Mode};
 
     let observed = read_regular_file_no_follow(source).map_err(|error| {
         CommandFailure::diagnostic(format!("could not revalidate startup heartbeat: {error}"))
@@ -4076,6 +4103,14 @@ fn persist_heartbeat_copy_with_hook(
     let root = open(state_root, directory_flags, Mode::empty()).map_err(|_| {
         CommandFailure::diagnostic("heartbeat private state root is not a safe directory")
     })?;
+    let root_stat = fstat(&root).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not inspect private state root: {error}"))
+    })?;
+    if root_stat.st_uid != unsafe { nix::libc::geteuid() } || root_stat.st_mode & 0o7777 != 0o700 {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat private state root must be owned by the effective user with mode 0700",
+        ));
+    }
     let quarantine = open_private_quarantine_component(&root, "quarantine", &mut after_open)?;
     let copies =
         open_private_quarantine_component(&quarantine, "startup-heartbeats", &mut after_open)?;
@@ -4109,18 +4144,12 @@ fn persist_heartbeat_copy_with_hook(
         ))
     })?;
     let mut file = fs::File::from(descriptor);
-    file.write_all(&snapshot.file.document)
-        .and_then(|()| file.sync_all())
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "could not persist heartbeat quarantine copy: {error}"
-            ))
-        })?;
-    nix::unistd::fsync(&copies).map_err(|error| {
+    file.write_all(&snapshot.file.document).map_err(|error| {
         CommandFailure::diagnostic(format!(
-            "could not sync heartbeat quarantine directory: {error}"
+            "could not persist heartbeat quarantine copy: {error}"
         ))
     })?;
+    sync_heartbeat_copy(&file, &copies, &mut after_sync)?;
     Ok(target)
 }
 
@@ -4517,6 +4546,9 @@ mod tests {
             super::UNIQUE_ID_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&directory).expect("startup heartbeat fixture");
+        #[cfg(unix)]
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+            .expect("private startup heartbeat fixture");
         let path = directory.join("42.json");
         (directory, path)
     }
@@ -4697,14 +4729,38 @@ claimed|review
     }
 
     #[cfg(unix)]
+    fn assert_mode(path: &Path, expected: u32) {
+        let permissions = std::fs::metadata(path)
+            .expect("private path metadata")
+            .permissions();
+        assert_eq!(permissions.mode() & 0o777, expected);
+    }
+
+    #[cfg(unix)]
     #[test]
     fn heartbeat_quarantine_copy_is_private_exact_and_create_new() {
         let (directory, source) = startup_heartbeat_fixture("copy-success");
         let snapshot = expired_heartbeat_snapshot(&source);
+        let mut sync_order = Vec::new();
+        let target = super::persist_heartbeat_copy_with_hooks(
+            &directory,
+            &source,
+            &snapshot,
+            |_| {},
+            |boundary| {
+                sync_order.push(boundary);
+                Ok(())
+            },
+        )
+        .expect("persist quarantine copy");
 
-        let target = super::persist_heartbeat_copy(&directory, &source, &snapshot)
-            .expect("persist quarantine copy");
-
+        assert_eq!(
+            sync_order,
+            [
+                super::HeartbeatCopySyncBoundary::File,
+                super::HeartbeatCopySyncBoundary::Directory,
+            ]
+        );
         assert_eq!(
             std::fs::read(&target).expect("read copy"),
             snapshot.file.document
@@ -4713,30 +4769,9 @@ claimed|review
             std::fs::read(&source).expect("read source"),
             snapshot.file.document
         );
-        assert_eq!(
-            std::fs::metadata(directory.join("quarantine"))
-                .expect("quarantine metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(directory.join("quarantine/startup-heartbeats"))
-                .expect("copy directory metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o700
-        );
-        assert_eq!(
-            std::fs::metadata(&target)
-                .expect("copy metadata")
-                .permissions()
-                .mode()
-                & 0o777,
-            0o600
-        );
+        assert_mode(&directory.join("quarantine"), 0o700);
+        assert_mode(&directory.join("quarantine/startup-heartbeats"), 0o700);
+        assert_mode(&target, 0o600);
         assert!(
             super::persist_heartbeat_copy(&directory, &source, &snapshot)
                 .expect_err("copy target must be create-new")
@@ -4744,6 +4779,27 @@ claimed|review
                 .contains("already exists")
         );
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+
+        let (failure_root, failure_source) = startup_heartbeat_fixture("copy-sync-failure");
+        let failure_snapshot = expired_heartbeat_snapshot(&failure_source);
+        let error = super::persist_heartbeat_copy_with_hooks(
+            &failure_root,
+            &failure_source,
+            &failure_snapshot,
+            |_| {},
+            |boundary| {
+                (boundary != super::HeartbeatCopySyncBoundary::File)
+                    .then_some(())
+                    .ok_or_else(|| super::CommandFailure::diagnostic("injected sync failure"))
+            },
+        )
+        .expect_err("sync boundary failure");
+        assert!(error.to_string().contains("injected sync failure"));
+        assert_eq!(
+            std::fs::read(&failure_source).expect("source survives sync failure"),
+            failure_snapshot.file.document
+        );
+        std::fs::remove_dir_all(failure_root).expect("remove sync failure fixture");
     }
 
     #[cfg(unix)]
@@ -4761,8 +4817,10 @@ claimed|review
         );
         observed = snapshot.file.clone();
         observed.document[0] = b'[';
+        let mut document_drift = (*snapshot).clone();
+        document_drift.file = observed.clone();
         assert!(
-            super::revalidate_heartbeat_snapshot(&observed, &snapshot.file)
+            super::persist_heartbeat_copy(&directory, &source, &document_drift)
                 .expect_err("document drift")
                 .to_string()
                 .contains("document drift")
@@ -4790,6 +4848,27 @@ claimed|review
             startup_heartbeat_fixture("copy-preexisting-symlink");
         let preexisting_snapshot = expired_heartbeat_snapshot(&preexisting_source);
         let outside = startup_heartbeat_fixture("copy-outside").0;
+        std::fs::set_permissions(&preexisting_root, std::fs::Permissions::from_mode(0o755))
+            .expect("make state root non-private");
+        assert!(super::persist_heartbeat_copy(
+            &preexisting_root,
+            &preexisting_source,
+            &preexisting_snapshot,
+        )
+        .expect_err("non-private root")
+        .to_string()
+        .contains("private state root"));
+        std::fs::set_permissions(&preexisting_root, std::fs::Permissions::from_mode(0o700))
+            .expect("restore private state root");
+        let root_link = preexisting_root.with_extension("root-link");
+        std::os::unix::fs::symlink(&preexisting_root, &root_link).expect("state root symlink");
+        assert!(super::persist_heartbeat_copy(
+            &root_link,
+            &preexisting_source,
+            &preexisting_snapshot
+        )
+        .is_err());
+        std::fs::remove_file(root_link).expect("remove state root symlink");
         std::os::unix::fs::symlink(&outside, preexisting_root.join("quarantine"))
             .expect("preexisting quarantine symlink");
         assert!(super::persist_heartbeat_copy(
@@ -4808,7 +4887,7 @@ claimed|review
         let (swapped_root, swapped_source) = startup_heartbeat_fixture("copy-swapped-symlink");
         let swapped_snapshot = expired_heartbeat_snapshot(&swapped_source);
         let mut swapped = false;
-        let result = super::persist_heartbeat_copy_with_hook(
+        let result = super::persist_heartbeat_copy_with_hooks(
             &swapped_root,
             &swapped_source,
             &swapped_snapshot,
@@ -4824,6 +4903,7 @@ claimed|review
                     swapped = true;
                 }
             },
+            |_| Ok(()),
         );
         assert!(swapped);
         assert!(result.is_err());
