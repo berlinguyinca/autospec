@@ -3945,6 +3945,8 @@ fn open_heartbeat_directory_beneath_with_hook(
         ));
     }
     let parent_identity = private_heartbeat_directory_identity(trusted_parent, "parent")?;
+    let expected_binding =
+        private_heartbeat_name_identity(trusted_parent, descendant, "descendant binding")?;
     before_open();
     if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
         return Err(CommandFailure::diagnostic(
@@ -3964,7 +3966,15 @@ fn open_heartbeat_directory_beneath_with_hook(
             "heartbeat parent descriptor identity drift after descendant open",
         ));
     }
-    private_heartbeat_directory_identity(&directory, "descendant")?;
+    let opened = private_heartbeat_directory_identity(&directory, "descendant")?;
+    if opened != expected_binding
+        || private_heartbeat_name_identity(trusted_parent, descendant, "descendant binding")?
+            != opened
+    {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat descendant name binding changed during open",
+        ));
+    }
     Ok(fs::File::from(directory))
 }
 
@@ -5664,6 +5674,21 @@ mod tests {
         assert_ne!(opened_inode, replacement_inode);
         std::fs::rename(&replaceable, &replacement).expect("remove replacement directory");
         std::fs::rename(&anchored, &replaceable).expect("restore trusted directory");
+
+        let displaced_child = replaceable.join("displaced");
+        let swapped_child = super::open_heartbeat_directory_beneath_with_hook(
+            &anchored_parent,
+            Path::new("heartbeat"),
+            || {
+                std::fs::rename(&replaceable_child, &displaced_child)
+                    .expect("displace trusted child");
+                std::fs::rename(&replacement_child, &replaceable_child)
+                    .expect("install replacement child");
+            },
+        );
+        assert!(swapped_child.is_err(), "changed child binding was accepted");
+        std::fs::rename(&replaceable_child, &replacement_child).expect("remove replacement child");
+        std::fs::rename(&displaced_child, &replaceable_child).expect("restore trusted child");
 
         std::fs::remove_dir_all(trusted).expect("remove trusted fixture");
         std::fs::remove_dir_all(outside).expect("remove outside fixture");
