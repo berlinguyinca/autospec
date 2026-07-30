@@ -5,6 +5,27 @@ an abandoned edit lease does not pause the perpetual worker for the longer
 interactive default. Set the variable explicitly when a deployment needs a
 different recovery window; active workers refresh their claims as they run.
 
+## Startup heartbeat audit
+
+Authoritative recovery reads
+`~/.autospec/process-heartbeats/<repo-key>/<issue>.json`. Fresh, live,
+malformed, mismatched, non-regular, or ambiguous evidence blocks recovery.
+Only exact expired evidence for a dead local PID is retained before release at:
+
+- `<repo-key>/quarantine/startup-heartbeats/<issue>-<nonce-hex>.json`
+- `<repo-key>/quarantine/startup-heartbeat-handoffs/completed-<issue>-<digest>.receipt`
+
+Heartbeat roots, repository directories, sessions, and quarantine directories
+use mode `0700`; live, session, retained, and receipt files use mode `0600`.
+Inspect evidence without changing it:
+
+```bash
+repo_dir="$HOME/.autospec/process-heartbeats/<repo-key>"; find "$repo_dir" -maxdepth 3 -printf '%m %u %p\n'
+```
+
+Do not delete audit files. A pending or unsafe receipt blocks automatic
+recovery; completed receipts resume only when the live heartbeat name is absent.
+
 The conductor also defaults `AUTOSPEC_RESCAN_INTERVAL` to `300` seconds after
 an empty backlog, while an explicit environment value remains authoritative.
 
