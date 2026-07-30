@@ -40,6 +40,7 @@ modes:
   local:
     command: sh -c 'start-local' # required when provisioning a new environment
     down: sh -c 'stop-local'     # optional teardown command
+    readiness: bound             # optional; bound (default) or deferred
     env:
       E2E_USE_HARNESS: "1"
       FEATURE_FLAG: enabled
@@ -48,6 +49,22 @@ modes:
 `init` also emits `ports` and `public_url_env` compatibility declarations. They are retained
 in v1 manifests for interoperability, but v1 runtime allocation derives frontend and backend
 ports itself. Unknown top-level and mode keys are ignored by the constrained v1 parser.
+
+Direct modes default to `readiness: bound`: after `command` succeeds, the broker requires the
+generated `AGENT_FRONTEND_PORT` to bind before the environment becomes active. Use explicit
+deferred readiness only when the session child starts the server later:
+
+```yaml
+modes:
+  playwright:
+    command: sh -c 'true'
+    readiness: deferred
+```
+
+Deferred readiness runs `command` once and activates the environment without proving that a
+listener exists. It is intended for child-owned startup that consumes the generated runtime
+environment; it must not replace bound readiness for a command that claims to start a server.
+Both manifest versions reject readiness values other than `bound` and `deferred`.
 
 ## V2 resource grammar and ownership
 
