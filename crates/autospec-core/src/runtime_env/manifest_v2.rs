@@ -7,6 +7,7 @@ use yaml_edit::{Document, Mapping};
 use super::is_valid_environment_name;
 use super::manifest::RuntimeEnvError;
 use super::manifest::RuntimeMode;
+use super::manifest::RuntimeReadiness;
 use super::resources::{
     reject_duplicates, validate_logical_keys, ComposeExport, ComposeIsolation,
     ComposeResourceConfig, ExportProtocol, ExportValue, MavenIsolation, MavenResourceConfig,
@@ -84,12 +85,22 @@ fn parse_modes(root: &Mapping) -> Result<Vec<RuntimeMode>, RuntimeEnvError> {
         let fields = value.as_mapping().ok_or_else(|| {
             RuntimeEnvError::new(format!("runtime mode {name} must be a mapping"))
         })?;
-        validate_allowed_keys(fields, &["command", "down", "env"], "runtime mode")?;
+        validate_allowed_keys(
+            fields,
+            &["command", "down", "env", "readiness"],
+            "runtime mode",
+        )?;
+        let readiness = optional_scalar(fields, "readiness", "runtime mode readiness")?
+            .as_deref()
+            .map(RuntimeReadiness::parse)
+            .transpose()?
+            .unwrap_or_default();
         modes.push(RuntimeMode {
             name,
             command: optional_scalar(fields, "command", "runtime mode command")?,
             down: optional_scalar(fields, "down", "runtime mode down command")?,
             env: parse_mode_environment(fields)?,
+            readiness,
         });
     }
     Ok(modes)
