@@ -1015,17 +1015,36 @@ fn resumable_heartbeat_phase(
         .find(|phase| head.record.step == heartbeat_claim_step(*phase, session_id))
 }
 
+fn heartbeat_resume_record(head: &ClaimRefHead, now: &str) -> RunStateRecord {
+    let mut record = head.record.clone();
+    record.updated_at = now.to_string();
+    record
+}
+
 #[derive(Debug)]
 enum HeartbeatWriteFailure {
     NoPublication(CommandFailure),
     Unconfirmed(CommandFailure),
 }
 
-fn heartbeat_failure_state(failure: &HeartbeatWriteFailure) -> Option<&'static str> {
-    match failure {
-        HeartbeatWriteFailure::NoPublication(_) => Some("available"),
-        HeartbeatWriteFailure::Unconfirmed(_) => None,
-    }
+fn heartbeat_can_rollback(failure: &HeartbeatWriteFailure, targets_absent: bool) -> bool {
+    targets_absent && matches!(failure, HeartbeatWriteFailure::NoPublication(_))
+}
+
+fn startup_heartbeat_targets_absent_in(
+    directory: &Path,
+    issue: u64,
+    session_id: Option<&str>,
+) -> bool {
+    let absent = |path| matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+    absent(directory.join(format!("{issue}.json")))
+        && session_id.is_none_or(|id| {
+            absent(
+                directory
+                    .join("sessions")
+                    .join(format!("{}.json", heartbeat_session_key(id))),
+            )
+        })
 }
 
 fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimError> {
@@ -1070,13 +1089,25 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     }
 
     let (claim_id, mut head, phase) = if let Some(phase) = resume {
-        let head = prior.clone().expect("resume requires a claim ref");
-        let claim_id = head
+        let prior = prior.as_ref().expect("resume requires a claim ref");
+        let claim_id = prior
             .record
             .claim_id
             .clone()
             .expect("resumable claim has an ID");
-        (claim_id, Box::new(head), phase)
+        let refreshed = heartbeat_resume_record(prior, &utc_now_iso()?);
+        let head = match advance_claim_ref(&repo, options.issue, Some(prior), &refreshed)? {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => {
+                return unavailable_claim(
+                    options.issue,
+                    &repo,
+                    Some(&worker_id),
+                    "heartbeat_resume_transition_lost",
+                )
+            }
+        };
+        (claim_id, head, phase)
     } else {
         let claim_id = claim_generation_id()?;
         let now = utc_now_iso()?;
@@ -1121,7 +1152,14 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             &claim_id,
             options.session_id.as_deref(),
         ) {
-            let rollback = heartbeat_failure_state(&failure).is_some();
+            let targets_absent = heartbeat_root().ok().is_some_and(|root| {
+                startup_heartbeat_targets_absent_in(
+                    &root.join(super::autonomous::drain::repository_progress_key(&repo)),
+                    options.issue,
+                    options.session_id.as_deref(),
+                )
+            });
+            let rollback = heartbeat_can_rollback(&failure, targets_absent);
             let reason = match failure {
                 HeartbeatWriteFailure::NoPublication(error) => {
                     drop(error);
@@ -8843,16 +8881,16 @@ claimed|review
                 )
                 .unwrap()
             };
+        let won = |result| match result {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => panic!("expected exact transition winner"),
+        };
         let mut pending = claim_record("worker-a", "claim-a", "claimed");
         pending.step =
             super::heartbeat_claim_step(super::HeartbeatClaimPhase::Pending, Some("session-a"));
-        let ClaimRefAdvance::Won(seed) = advance(0, None, &pending) else {
-            panic!("seed pending claim");
-        };
+        let seed = won(advance(0, None, &pending));
         let retry = super::heartbeat_resume_record(&seed, "2026-07-30T00:00:01Z");
-        let ClaimRefAdvance::Won(winner) = advance(0, Some(&seed), &retry) else {
-            panic!("first exact resume must win");
-        };
+        let winner = won(advance(0, Some(&seed), &retry));
         assert_eq!(advance(1, Some(&seed), &retry), ClaimRefAdvance::Lost);
         assert_eq!(winner.record.claim_id.as_deref(), Some("claim-a"));
         for (worker, branch, session) in [
@@ -8869,52 +8907,26 @@ claimed|review
         let mut ready = super::heartbeat_resume_record(&winner, "2026-07-30T00:00:02Z");
         ready.step =
             super::heartbeat_claim_step(super::HeartbeatClaimPhase::Ready, Some("session-a"));
-        let ClaimRefAdvance::Won(ready) = advance(0, Some(&winner), &ready) else {
-            panic!("ready transition");
-        };
+        let ready = won(advance(0, Some(&winner), &ready));
         let retry = super::heartbeat_resume_record(&ready, "2026-07-30T00:00:03Z");
-        let ClaimRefAdvance::Won(resumed) = advance(0, Some(&ready), &retry) else {
-            panic!("ready retry");
-        };
+        let resumed = won(advance(0, Some(&ready), &retry));
         let mut claimed = super::heartbeat_resume_record(&resumed, "2026-07-30T00:00:04Z");
         claimed.step = "claimed".to_string();
-        let ClaimRefAdvance::Won(claimed) = advance(0, Some(&resumed), &claimed) else {
-            panic!("confirmation transition");
-        };
+        let claimed = won(advance(0, Some(&resumed), &claimed));
         assert_eq!(claimed.record.claim_id, ready.record.claim_id);
 
         let residue = startup_heartbeat_fixture("lifecycle-residue").0;
         std::fs::create_dir_all(residue.join("sessions")).unwrap();
         let failure =
             super::HeartbeatWriteFailure::NoPublication(super::CommandFailure::diagnostic("fail"));
-        assert_eq!(
-            super::heartbeat_failure_state(
-                &failure,
-                super::startup_heartbeat_targets_absent_in(&residue, 42, Some("session-a"))
-            ),
-            Some("available")
-        );
+        let absent = || super::startup_heartbeat_targets_absent_in(&residue, 42, Some("session-a"));
+        assert!(super::heartbeat_can_rollback(&failure, absent()));
         std::fs::write(residue.join("42.json"), b"prior attempt").unwrap();
-        assert_eq!(
-            super::heartbeat_failure_state(
-                &failure,
-                super::startup_heartbeat_targets_absent_in(&residue, 42, Some("session-a"))
-            ),
-            None
-        );
+        assert!(!super::heartbeat_can_rollback(&failure, absent()));
         std::fs::remove_file(residue.join("42.json")).unwrap();
-        std::fs::write(
-            residue
-                .join("sessions")
-                .join(super::heartbeat_session_key("session-a")),
-            b"prior attempt",
-        )
-        .unwrap();
-        assert!(!super::startup_heartbeat_targets_absent_in(
-            &residue,
-            42,
-            Some("session-a")
-        ));
+        let session = format!("{}.json", super::heartbeat_session_key("session-a"));
+        std::fs::write(residue.join("sessions").join(session), b"prior attempt").unwrap();
+        assert!(!absent());
     }
 
     #[test]
