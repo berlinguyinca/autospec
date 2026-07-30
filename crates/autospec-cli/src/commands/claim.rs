@@ -8728,6 +8728,69 @@ claimed|review
     }
 
     #[test]
+    fn startup_heartbeat_claim_lifecycle() {
+        let pending =
+            super::heartbeat_claim_step(super::HeartbeatClaimPhase::Pending, Some("session-a"));
+        let ready =
+            super::heartbeat_claim_step(super::HeartbeatClaimPhase::Ready, Some("session-a"));
+        assert_ne!(pending, ready);
+
+        let now = "2026-07-30T00:00:00Z";
+        let record = RunStateRecord::new(
+            "owner/repo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/a",
+            "",
+            &pending,
+            Vec::new(),
+            now,
+            now,
+            300,
+        )
+        .with_claim_id("claim-a".to_string());
+        let head = super::ClaimRefHead {
+            oid: "a".repeat(40),
+            generation: "generation-a".to_string(),
+            record,
+        };
+        assert_eq!(
+            super::resumable_heartbeat_phase(&head, "worker-a", "feat/a", Some("session-a")),
+            Some(super::HeartbeatClaimPhase::Pending)
+        );
+        for (worker, branch, session) in [
+            ("worker-b", "feat/a", Some("session-a")),
+            ("worker-a", "feat/b", Some("session-a")),
+            ("worker-a", "feat/a", Some("session-b")),
+            ("worker-a", "feat/a", None),
+        ] {
+            assert_eq!(
+                super::resumable_heartbeat_phase(&head, worker, branch, session),
+                None
+            );
+        }
+        let failure = super::CommandFailure::diagnostic("injected heartbeat failure");
+        assert_eq!(
+            super::heartbeat_failure_state(&super::HeartbeatWriteFailure::NoPublication(failure)),
+            Some("available")
+        );
+        let failure = super::CommandFailure::diagnostic("ambiguous heartbeat failure");
+        assert_eq!(
+            super::heartbeat_failure_state(&super::HeartbeatWriteFailure::Unconfirmed(failure)),
+            None
+        );
+
+        let acquire = source_function(include_str!("claim.rs"), "acquire_record");
+        assert!(
+            acquire.find("advance_claim_ref").unwrap()
+                < acquire.find("write_startup_heartbeat").unwrap()
+        );
+        assert!(!acquire.contains("cleanup_startup_heartbeat"));
+        assert!(acquire.contains("HeartbeatClaimPhase::Ready"));
+    }
+
+    #[test]
     fn prepared_recovery_counts_toward_capacity_until_labels_converge() {
         let record = RunStateRecord::new(
             "owner/repo",
