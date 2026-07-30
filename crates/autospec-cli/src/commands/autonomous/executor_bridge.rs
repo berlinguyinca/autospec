@@ -2346,6 +2346,74 @@ fn changed_paths_since_base(worktree: &Path, base_oid: &str) -> Result<ChangedPa
     parse_changed_paths(&output)
 }
 
+fn npm_dependency_inputs(value: &serde_json::Value) -> serde_json::Value {
+    let mut object = value
+        .as_object()
+        .expect("package.json was validated as an object")
+        .clone();
+    object.remove("scripts");
+    serde_json::Value::Object(object)
+}
+
+fn parse_package_json(body: &[u8], source: &str) -> Result<serde_json::Value, String> {
+    let value = serde_json::from_slice::<serde_json::Value>(body)
+        .map_err(|error| format!("parse {source}: {error}"))?;
+    if !value.is_object() {
+        return Err(format!("{source} is not a JSON object"));
+    }
+    Ok(value)
+}
+
+fn npm_dependency_inputs_changed(
+    worktree: &Path,
+    base_oid: &str,
+    changed_paths: &ChangedPaths,
+) -> Result<bool, String> {
+    for path in &changed_paths.all {
+        let name = Path::new(path).file_name().and_then(|name| name.to_str());
+        if matches!(
+            name,
+            Some("package-lock.json" | "npm-shrinkwrap.json" | "pnpm-lock.yaml" | "yarn.lock")
+        ) {
+            return Ok(true);
+        }
+        if name != Some("package.json") {
+            continue;
+        }
+        let current = if changed_paths.deleted.contains(path) {
+            None
+        } else {
+            let current_path = worktree.join(path);
+            reject_symlink_path(&current_path)
+                .map_err(|error| format!("current {path} is unsafe: {error}"))?;
+            if !fs::metadata(&current_path)
+                .map_err(|error| format!("inspect current {path}: {error}"))?
+                .is_file()
+            {
+                return Err(format!("current {path} is not a regular file"));
+            }
+            let body =
+                fs::read(&current_path).map_err(|error| format!("read current {path}: {error}"))?;
+            Some(parse_package_json(&body, &format!("current {path}"))?)
+        };
+        if changed_paths.type_changed.contains(path) {
+            return Ok(true);
+        }
+        let base = if changed_paths.added.contains(path) {
+            None
+        } else {
+            let spec = format!("{base_oid}:{path}");
+            let body = git_bytes(worktree, &["show", &spec])
+                .map_err(|error| format!("read base {path}: {error}"))?;
+            Some(parse_package_json(&body, &format!("base {path}"))?)
+        };
+        if current.as_ref().map(npm_dependency_inputs) != base.as_ref().map(npm_dependency_inputs) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn trivy_relative_target(worktree: &Path, target: &str) -> Result<String, String> {
     let target = Path::new(target);
     let relative = if target.is_absolute() {
@@ -41524,6 +41592,245 @@ exit 19
                 .expect_err("malformed Git name-status output must fail");
             assert!(error.contains(expected), "{error}");
         }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_npm_dependency_inputs_follow_manifest_policy() {
+        // Break caught: treating scripts as graph input, or treating any other top-level
+        // manifest field as irrelevant, weakens the conservative npm classification policy.
+        let fixture = GitFixture::new("npm-dependency-inputs-manifest-policy");
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"scripts":{"test":"old"}}"#,
+        )
+        .expect("baseline manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline manifest"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+
+        for (field, current, expected) in [
+            ("scripts", r#"{"scripts":{"test":"new"}}"#, false),
+            (
+                "dependencies",
+                r#"{"scripts":{"test":"old"},"dependencies":{"fixture":"1"}}"#,
+                true,
+            ),
+            (
+                "devDependencies",
+                r#"{"scripts":{"test":"old"},"devDependencies":{"fixture":"1"}}"#,
+                true,
+            ),
+            (
+                "optionalDependencies",
+                r#"{"scripts":{"test":"old"},"optionalDependencies":{"fixture":"1"}}"#,
+                true,
+            ),
+            (
+                "peerDependencies",
+                r#"{"scripts":{"test":"old"},"peerDependencies":{"fixture":"1"}}"#,
+                true,
+            ),
+            (
+                "peerDependenciesMeta",
+                r#"{"scripts":{"test":"old"},"peerDependenciesMeta":{"fixture":{"optional":true}}}"#,
+                true,
+            ),
+            (
+                "overrides",
+                r#"{"scripts":{"test":"old"},"overrides":{"fixture":"2"}}"#,
+                true,
+            ),
+            (
+                "version",
+                r#"{"scripts":{"test":"old"},"version":"2.0.0"}"#,
+                true,
+            ),
+            (
+                "unknown",
+                r#"{"scripts":{"test":"old"},"autospecUnknown":true}"#,
+                true,
+            ),
+        ] {
+            fs::write(fixture.repo.join("package.json"), current).expect("current manifest");
+            git(&fixture.repo, &["add", "package.json"]);
+            git(&fixture.repo, &["commit", "-m", field]);
+            let changed = super::changed_paths_since_base(&fixture.repo, &base_oid)
+                .expect("changed manifest paths");
+
+            assert_eq!(
+                super::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+                    .expect("manifest classification"),
+                expected,
+                "{field}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_npm_dependency_inputs_preserve_git_status_classes() {
+        // Break caught: dropping a lockfile identity on modify, delete, rename, copy, or
+        // type change can misclassify a runtime dependency graph change as irrelevant.
+        for lockfile in [
+            "package-lock.json",
+            "npm-shrinkwrap.json",
+            "pnpm-lock.yaml",
+            "yarn.lock",
+        ] {
+            let fixture = GitFixture::new(&format!("npm-dependency-inputs-{lockfile}"));
+            fs::write(fixture.repo.join(lockfile), "baseline\n").expect("baseline lockfile");
+            git(&fixture.repo, &["add", lockfile]);
+            git(&fixture.repo, &["commit", "-m", "baseline lockfile"]);
+            let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+            fs::write(fixture.repo.join(lockfile), "changed\n").expect("changed lockfile");
+            git(&fixture.repo, &["add", lockfile]);
+            git(&fixture.repo, &["commit", "-m", "change lockfile"]);
+            let changed = super::changed_paths_since_base(&fixture.repo, &base_oid)
+                .expect("changed lockfile paths");
+
+            assert!(
+                super::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+                    .expect("lockfile classification"),
+                "{lockfile}"
+            );
+        }
+
+        let deleted = GitFixture::new("npm-dependency-inputs-deleted");
+        fs::write(deleted.repo.join("package.json"), r#"{"name":"fixture"}"#)
+            .expect("baseline manifest");
+        git(&deleted.repo, &["add", "package.json"]);
+        git(&deleted.repo, &["commit", "-m", "baseline manifest"]);
+        let base_oid = git_stdout(&deleted.repo, &["rev-parse", "HEAD"]);
+        git(&deleted.repo, &["rm", "package.json"]);
+        git(&deleted.repo, &["commit", "-m", "delete manifest"]);
+        let changed = super::changed_paths_since_base(&deleted.repo, &base_oid)
+            .expect("deleted manifest paths");
+        assert!(
+            super::npm_dependency_inputs_changed(&deleted.repo, &base_oid, &changed)
+                .expect("deleted manifest classification")
+        );
+
+        let renamed = GitFixture::new("npm-dependency-inputs-renamed");
+        fs::write(renamed.repo.join("package-lock.json"), "{}\n").expect("baseline lockfile");
+        git(&renamed.repo, &["add", "package-lock.json"]);
+        git(&renamed.repo, &["commit", "-m", "baseline lockfile"]);
+        let base_oid = git_stdout(&renamed.repo, &["rev-parse", "HEAD"]);
+        git(
+            &renamed.repo,
+            &["mv", "package-lock.json", "archived-lock.json"],
+        );
+        git(&renamed.repo, &["commit", "-m", "rename lockfile"]);
+        let changed = super::changed_paths_since_base(&renamed.repo, &base_oid)
+            .expect("renamed lockfile paths");
+        assert!(
+            super::npm_dependency_inputs_changed(&renamed.repo, &base_oid, &changed)
+                .expect("renamed lockfile classification")
+        );
+
+        let copied = GitFixture::new("npm-dependency-inputs-copied");
+        fs::write(copied.repo.join("source-lock.json"), "{}\n").expect("baseline source");
+        git(&copied.repo, &["add", "source-lock.json"]);
+        git(&copied.repo, &["commit", "-m", "baseline source"]);
+        let base_oid = git_stdout(&copied.repo, &["rev-parse", "HEAD"]);
+        fs::copy(
+            copied.repo.join("source-lock.json"),
+            copied.repo.join("package-lock.json"),
+        )
+        .expect("copy lockfile");
+        git(&copied.repo, &["add", "package-lock.json"]);
+        git(&copied.repo, &["commit", "-m", "copy lockfile"]);
+        let changed = super::changed_paths_since_base(&copied.repo, &base_oid)
+            .expect("copied lockfile paths");
+        assert!(
+            super::npm_dependency_inputs_changed(&copied.repo, &base_oid, &changed)
+                .expect("copied lockfile classification")
+        );
+
+        let typed = GitFixture::new("npm-dependency-inputs-type-changed");
+        fs::write(typed.repo.join("package-lock.json"), "{}\n").expect("baseline lockfile");
+        git(&typed.repo, &["add", "package-lock.json"]);
+        git(&typed.repo, &["commit", "-m", "baseline lockfile"]);
+        let base_oid = git_stdout(&typed.repo, &["rev-parse", "HEAD"]);
+        fs::remove_file(typed.repo.join("package-lock.json")).expect("remove lockfile");
+        symlink("README.md", typed.repo.join("package-lock.json")).expect("symlink lockfile");
+        git(&typed.repo, &["add", "package-lock.json"]);
+        git(&typed.repo, &["commit", "-m", "type change lockfile"]);
+        let changed = super::changed_paths_since_base(&typed.repo, &base_oid)
+            .expect("type-changed lockfile paths");
+        assert!(changed.type_changed.contains("package-lock.json"));
+        assert!(
+            super::npm_dependency_inputs_changed(&typed.repo, &base_oid, &changed)
+                .expect("type-changed lockfile classification")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_npm_dependency_inputs_fail_closed_on_bad_evidence() {
+        // Break caught: malformed, unsafe, unreadable, or unattributable package.json
+        // evidence silently becoming an absent manifest and weakening classification.
+        let fixture = GitFixture::new("npm-dependency-inputs-bad-evidence");
+        fs::write(fixture.repo.join("package.json"), r#"{"name":"fixture"}"#)
+            .expect("baseline manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline manifest"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+
+        fs::write(fixture.repo.join("package.json"), b"{").expect("malformed manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "malformed manifest"]);
+        let changed = super::changed_paths_since_base(&fixture.repo, &base_oid)
+            .expect("malformed manifest paths");
+        let error = super::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+            .expect_err("malformed JSON must fail closed");
+        assert!(error.contains("parse current package.json:"), "{error}");
+
+        fs::write(fixture.repo.join("package.json"), "[]\n").expect("non-object manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "non-object manifest"]);
+        let changed = super::changed_paths_since_base(&fixture.repo, &base_oid)
+            .expect("non-object manifest paths");
+        assert_eq!(
+            super::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+                .expect_err("non-object JSON must fail closed"),
+            "current package.json is not a JSON object"
+        );
+
+        fs::write(fixture.repo.join("package.json"), r#"{"name":"changed"}"#)
+            .expect("changed manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "changed manifest"]);
+        let changed = super::changed_paths_since_base(&fixture.repo, &base_oid)
+            .expect("changed manifest paths");
+        let manifest = fixture.repo.join("package.json");
+        let mut permissions = fs::metadata(&manifest)
+            .expect("manifest metadata")
+            .permissions();
+        permissions.set_mode(0o000);
+        fs::set_permissions(&manifest, permissions).expect("make manifest unreadable");
+        let result = super::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed);
+        let mut permissions = fs::metadata(&manifest)
+            .expect("manifest metadata")
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&manifest, permissions).expect("restore manifest permissions");
+        let error = result.expect_err("unreadable current manifest must fail closed");
+        assert!(error.contains("read current package.json:"), "{error}");
+
+        let error = super::npm_dependency_inputs_changed(&fixture.repo, "missing-base", &changed)
+            .expect_err("missing base evidence must fail closed");
+        assert!(error.contains("read base package.json:"), "{error}");
+
+        fs::remove_file(&manifest).expect("remove regular manifest");
+        symlink("README.md", &manifest).expect("unsafe manifest symlink");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "symlink manifest"]);
+        let changed = super::changed_paths_since_base(&fixture.repo, &base_oid)
+            .expect("symlink manifest paths");
+        let error = super::npm_dependency_inputs_changed(&fixture.repo, &base_oid, &changed)
+            .expect_err("unsafe manifest symlink must fail closed");
+        assert!(error.contains("current package.json is unsafe:"), "{error}");
+        assert!(error.contains("path contains a symlink"), "{error}");
     }
 
     #[test]
