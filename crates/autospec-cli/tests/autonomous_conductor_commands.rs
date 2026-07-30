@@ -5292,6 +5292,7 @@ if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = 
 fi
 if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = view ]; then
   head=$(jq -r '.[0].headRefOid' "$AUTOSPEC_FOREGROUND_PULL_REQUESTS")
+  body=$(jq -c '.[0].body' "$AUTOSPEC_FOREGROUND_PULL_REQUESTS")
   base="${AUTOSPEC_BRIDGE_BASE_REF:-main}"
   case " $* " in
     *" headRefOid,statusCheckRollup "*)
@@ -5300,17 +5301,17 @@ if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ] && [ "$1" = pr ] && [ "$2" = 
       if [ -e "$AUTOSPEC_BRIDGE_MERGED" ]; then
         merge=$(cat "$AUTOSPEC_BRIDGE_MERGED")
         case " $* " in
-          *" number,state,isDraft,headRefName,headRefOid,baseRefName,mergeCommit "*)
-            printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":{\"oid\":\"$merge\"}}" ;;
+          *" number,state,isDraft,headRefName,headRefOid,baseRefName,mergeCommit"*)
+            printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":{\"oid\":\"$merge\"},\"body\":$body}" ;;
           *)
-            printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":{\"oid\":\"$merge\"}}" ;;
+            printf '%s\n' "{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":{\"oid\":\"$merge\"},\"body\":$body}" ;;
         esac
       else
         case " $* " in
-          *" number,state,isDraft,headRefName,headRefOid,baseRefName,mergeCommit "*)
-            printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":null}" ;;
+          *" number,state,isDraft,headRefName,headRefOid,baseRefName,mergeCommit"*)
+            printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefName\":\"feat/autonomous-issue-42\",\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":null,\"body\":$body}" ;;
           *)
-            printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":null}" ;;
+            printf '%s\n' "{\"number\":17,\"state\":\"OPEN\",\"isDraft\":false,\"headRefOid\":\"$head\",\"baseRefName\":\"$base\",\"mergeCommit\":null,\"body\":$body}" ;;
         esac
       fi ;;
   esac
