@@ -317,6 +317,9 @@ fn provision_direct(
         }
         let (frontend, backend) = ports.release_for_launch();
         match super::run_mode_command(command, context, Some(&state), bypassed) {
+            Ok(()) if !context.mode.requires_frontend_bind() => {
+                return activate_direct(layout, &mut owner, ports, state);
+            }
             Ok(()) if wait_for_loopback_bind(frontend, DIRECT_BIND_TIMEOUT) => {
                 return activate_direct(layout, &mut owner, ports, state);
             }
