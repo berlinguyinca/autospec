@@ -111,6 +111,8 @@ static ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 static EXECUTOR_ROOT_HARDEN_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static IMPLEMENTATION_COMMIT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static NPM_MANIFEST_OPEN_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Clone, Copy)]
 enum ZeroEffectRecoveryFailpoint {
@@ -2386,14 +2388,39 @@ fn npm_dependency_inputs_changed(
             let current_path = worktree.join(path);
             reject_symlink_path(&current_path)
                 .map_err(|error| format!("current {path} is unsafe: {error}"))?;
-            if !fs::metadata(&current_path)
-                .map_err(|error| format!("inspect current {path}: {error}"))?
-                .is_file()
-            {
-                return Err(format!("current {path} is not a regular file"));
+            #[cfg(test)]
+            if NPM_MANIFEST_OPEN_FAILPOINT.load(Ordering::SeqCst) == 1 {
+                NPM_MANIFEST_OPEN_FAILPOINT.store(2, Ordering::SeqCst);
+                while NPM_MANIFEST_OPEN_FAILPOINT.load(Ordering::SeqCst) == 2 {
+                    thread::yield_now();
+                }
             }
-            let body =
-                fs::read(&current_path).map_err(|error| format!("read current {path}: {error}"))?;
+            #[cfg(not(unix))]
+            let body: Vec<u8> =
+                return Err(format!("open current {path}: no-follow reads require Unix"));
+            #[cfg(unix)]
+            let body = {
+                let mut file = OpenOptions::new()
+                    .read(true)
+                    .custom_flags(OFlag::O_NOFOLLOW.bits())
+                    .open(&current_path)
+                    .map_err(|error| format!("read current {path}: secure open failed: {error}"))?;
+                let opened = file
+                    .metadata()
+                    .map_err(|error| format!("inspect opened current {path}: {error}"))?;
+                if !opened.is_file() {
+                    return Err(format!("current {path} is not a regular file"));
+                }
+                let current = fs::metadata(&current_path)
+                    .map_err(|error| format!("reinspect current {path}: {error}"))?;
+                if opened.dev() != current.dev() || opened.ino() != current.ino() {
+                    return Err(format!("current {path} identity changed while opening"));
+                }
+                let mut body = Vec::new();
+                file.read_to_end(&mut body)
+                    .map_err(|error| format!("read current {path}: {error}"))?;
+                body
+            };
             Some(parse_package_json(&body, &format!("current {path}"))?)
         };
         if changed_paths.type_changed.contains(path) {
@@ -23826,6 +23853,7 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
+    use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use autospec_core::runtime_env::{EnvironmentLifecycle, EnvironmentOwner};
@@ -41831,6 +41859,57 @@ exit 19
             .expect_err("unsafe manifest symlink must fail closed");
         assert!(error.contains("current package.json is unsafe:"), "{error}");
         assert!(error.contains("path contains a symlink"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_npm_dependency_inputs_reject_manifest_swap_before_open() {
+        // Break caught: validating package.json by path and reopening it lets a symlink swap
+        // redirect the classifier to attacker-controlled dependency data.
+        let fixture = GitFixture::new("npm-dependency-inputs-open-swap");
+        let manifest = fixture.repo.join("package.json");
+        fs::write(
+            &manifest,
+            r#"{"dependencies":{"fixture":"1"},"scripts":{"test":"old"}}"#,
+        )
+        .expect("baseline manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline manifest"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        fs::write(
+            &manifest,
+            r#"{"dependencies":{"fixture":"1"},"scripts":{"test":"new"}}"#,
+        )
+        .expect("scripts-only manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "scripts-only change"]);
+        let changed = super::changed_paths_since_base(&fixture.repo, &base_oid)
+            .expect("changed manifest paths");
+        super::NPM_MANIFEST_OPEN_FAILPOINT.store(1, Ordering::SeqCst);
+        let repo = fixture.repo.clone();
+        let classifier =
+            thread::spawn(move || super::npm_dependency_inputs_changed(&repo, &base_oid, &changed));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while super::NPM_MANIFEST_OPEN_FAILPOINT.load(Ordering::SeqCst) != 2 {
+            assert!(
+                Instant::now() < deadline,
+                "classifier did not reach open boundary"
+            );
+            thread::yield_now();
+        }
+        fs::rename(&manifest, fixture.repo.join("package.original.json"))
+            .expect("move validated manifest");
+        let attacker = fixture.root.join("attacker-package.json");
+        fs::write(&attacker, r#"{"dependencies":{"fixture":"2"}}"#).expect("attacker manifest");
+        symlink(&attacker, &manifest).expect("replace manifest with symlink");
+        super::NPM_MANIFEST_OPEN_FAILPOINT.store(3, Ordering::SeqCst);
+
+        let error = classifier
+            .join()
+            .expect("classifier thread")
+            .expect_err("manifest swap must fail closed");
+        assert!(error.contains("current package.json"), "{error}");
+        super::NPM_MANIFEST_OPEN_FAILPOINT.store(0, Ordering::SeqCst);
     }
 
     #[test]
