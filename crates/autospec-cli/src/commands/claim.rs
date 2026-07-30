@@ -4400,7 +4400,7 @@ mod tests {
 
     #[test]
     fn classify_startup_heartbeat_blocks_fresh_live_malformed_mismatched_and_remote_evidence() {
-        use super::StartupPidLiveness::{Dead, Live, Unknown};
+        use super::StartupPidLiveness::{Dead, Live};
         let (directory, path) = startup_heartbeat_fixture("blocking");
         let worker = "host:user:rust:4242:nonce-a";
         let exact = startup_heartbeat_document(worker, 4242);
@@ -4408,7 +4408,6 @@ mod tests {
         let mut cases = vec![
             ("fresh", exact.clone(), 105, Dead, false),
             ("live", exact.clone(), 200, Live, true),
-            ("remote", exact.clone(), 200, Unknown, true),
         ];
         let mutations = r#"malformed|not-json
 owner/repo|other/repo
@@ -4486,36 +4485,42 @@ claimed|review
     #[cfg(unix)]
     #[test]
     fn classify_startup_heartbeat_rejects_symlink_and_observes_current_pid_as_live() {
+        use super::StartupHeartbeatClassification::Blocking;
+
         let (directory, path) = startup_heartbeat_fixture("symlink-live");
         let target = directory.join("target.json");
         let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".into());
         let user = std::env::var("USER").unwrap_or_else(|_| "unknown-user".into());
         let pid = std::process::id();
-        let worker = format!("{host}:{user}:rust:{pid}:1");
+        let worker = format!("{host}:{user}:rust:{pid}:nonce-a");
         let document = startup_heartbeat_document(&worker, pid);
         std::fs::write(&target, &document).expect("write target heartbeat");
         std::os::unix::fs::symlink(&target, &path).expect("symlink heartbeat");
-        assert_eq!(
-            super::classify_startup_heartbeat(
+        let classify = |worker: &str| {
+            let mut observed = false;
+            let result = super::classify_startup_heartbeat(
                 &path,
-                expected_startup_heartbeat(&worker),
+                expected_startup_heartbeat(worker),
                 200,
-                super::observe_local_startup_pid,
-            ),
-            super::StartupHeartbeatClassification::Blocking
-        );
-
+                |worker, pid| {
+                    observed = true;
+                    super::observe_local_startup_pid(worker, pid)
+                },
+            );
+            (result, observed)
+        };
+        assert_eq!(classify(&worker), (Blocking, false));
         std::fs::remove_file(&path).expect("remove symlink");
         std::fs::rename(&target, &path).expect("publish regular heartbeat");
+        assert_eq!(classify(&worker), (Blocking, true));
+        let remote_worker = format!("remote-{host}:{user}:rust:{pid}:nonce-a");
+        std::fs::write(&path, startup_heartbeat_document(&remote_worker, pid))
+            .expect("write remote heartbeat");
         assert_eq!(
-            super::classify_startup_heartbeat(
-                &path,
-                expected_startup_heartbeat(&worker),
-                200,
-                super::observe_local_startup_pid,
-            ),
-            super::StartupHeartbeatClassification::Blocking
+            super::observe_local_startup_pid(&remote_worker, pid),
+            super::StartupPidLiveness::Unknown
         );
+        assert_eq!(classify(&remote_worker), (Blocking, true));
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
     }
 
