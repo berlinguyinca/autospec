@@ -2248,27 +2248,102 @@ fn validate_trivy_transport(exit_status: i32, stdout: &[u8], stderr: &[u8]) -> R
     }
 }
 
-fn changed_paths_since_base(worktree: &Path, base_oid: &str) -> Result<BTreeSet<String>, String> {
+#[derive(Debug, Default)]
+struct ChangedPaths {
+    all: BTreeSet<String>,
+    added: BTreeSet<String>,
+    deleted: BTreeSet<String>,
+    type_changed: BTreeSet<String>,
+}
+
+fn parse_changed_paths(output: &[u8]) -> Result<ChangedPaths, String> {
+    fn take_field<'a>(output: &'a [u8], cursor: &mut usize) -> Result<&'a [u8], String> {
+        let end = output[*cursor..]
+            .iter()
+            .position(|byte| *byte == 0)
+            .map(|offset| *cursor + offset)
+            .ok_or_else(|| "git changed path output is truncated".to_string())?;
+        let field = &output[*cursor..end];
+        *cursor = end + 1;
+        Ok(field)
+    }
+
+    fn take_path(output: &[u8], cursor: &mut usize) -> Result<String, String> {
+        std::str::from_utf8(take_field(output, cursor)?)
+            .map(str::to_owned)
+            .map_err(|_| "git changed path is not valid UTF-8".to_string())
+    }
+
+    let mut changed = ChangedPaths::default();
+    let mut cursor = 0;
+    while cursor < output.len() {
+        let status = take_field(output, &mut cursor)?;
+        if status.is_empty() {
+            return Err("git changed path contains empty status".to_string());
+        }
+        let status = std::str::from_utf8(status)
+            .map_err(|_| "git changed path status is not valid UTF-8".to_string())?;
+        match status {
+            "A" => {
+                let path = take_path(output, &mut cursor)?;
+                changed.all.insert(path.clone());
+                changed.added.insert(path);
+            }
+            "D" => {
+                let path = take_path(output, &mut cursor)?;
+                changed.all.insert(path.clone());
+                changed.deleted.insert(path);
+            }
+            "M" => {
+                changed.all.insert(take_path(output, &mut cursor)?);
+            }
+            "T" => {
+                let path = take_path(output, &mut cursor)?;
+                changed.all.insert(path.clone());
+                changed.type_changed.insert(path);
+            }
+            rename
+                if rename.starts_with('R')
+                    && rename.len() > 1
+                    && rename[1..].bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                let old = take_path(output, &mut cursor)?;
+                let new = take_path(output, &mut cursor)?;
+                changed.all.insert(old.clone());
+                changed.all.insert(new.clone());
+                changed.deleted.insert(old);
+                changed.added.insert(new);
+            }
+            copy if copy.starts_with('C')
+                && copy.len() > 1
+                && copy[1..].bytes().all(|byte| byte.is_ascii_digit()) =>
+            {
+                let _source = take_path(output, &mut cursor)?;
+                let destination = take_path(output, &mut cursor)?;
+                changed.all.insert(destination.clone());
+                changed.added.insert(destination);
+            }
+            _ => return Err(format!("git changed path status is unsupported: {status}")),
+        }
+    }
+    Ok(changed)
+}
+
+fn changed_paths_since_base(worktree: &Path, base_oid: &str) -> Result<ChangedPaths, String> {
     let range = format!("{base_oid}..HEAD");
-    let paths = git_bytes(
+    let output = git_bytes(
         worktree,
         &[
             "diff",
-            "--name-only",
+            "--name-status",
             "-z",
-            "--diff-filter=ACMRT",
+            "--find-renames",
+            "--diff-filter=ACMRTD",
             &range,
             "--",
         ],
     )?;
-    paths
-        .split(|byte| *byte == 0)
-        .filter(|path| !path.is_empty())
-        .map(|path| {
-            String::from_utf8(path.to_vec())
-                .map_err(|_| "git changed path is not valid UTF-8".to_string())
-        })
-        .collect()
+    parse_changed_paths(&output)
 }
 
 fn trivy_relative_target(worktree: &Path, target: &str) -> Result<String, String> {
@@ -2324,7 +2399,7 @@ fn require_trivy_attributable_target(worktree: &Path, relative: &str) -> Result<
 fn filter_trivy_result_for_changes(
     value: &serde_json::Value,
     worktree: &Path,
-    changed_paths: &BTreeSet<String>,
+    changed_paths: &ChangedPaths,
 ) -> Result<serde_json::Value, String> {
     let mut filtered = value.clone();
     let object = filtered.as_object_mut().ok_or_else(|| {
@@ -2366,7 +2441,7 @@ fn filter_trivy_result_for_changes(
                 "executor required scanner trivy finding has no target path".to_string()
             })?;
         let relative = trivy_relative_target(worktree, target)?;
-        if changed_paths.contains(&relative) {
+        if changed_paths.all.contains(&relative) {
             kept.push(result);
         } else {
             require_trivy_attributable_target(worktree, &relative)?;
@@ -41408,6 +41483,46 @@ exit 19
             let error = super::validate_scanner_result(scanner, 0, output, b"")
                 .expect_err("another tool's JSON shape must not be accepted");
             assert!(error.contains(scanner), "{scanner}: {error}");
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_changed_paths_preserve_git_status_classes() {
+        let changed = super::parse_changed_paths(
+            b"A\0added\0D\0deleted\0M\0modified\0R100\0old\0new\0C100\0source\0copy\0T\0typed\0",
+        )
+        .expect("parse Git name-status output");
+
+        for path in [
+            "added", "deleted", "modified", "old", "new", "copy", "typed",
+        ] {
+            assert!(changed.all.contains(path), "missing changed path {path}");
+        }
+        for path in ["added", "new", "copy"] {
+            assert!(changed.added.contains(path), "missing added path {path}");
+        }
+        for path in ["deleted", "old"] {
+            assert!(
+                changed.deleted.contains(path),
+                "missing deleted path {path}"
+            );
+        }
+        assert!(changed.type_changed.contains("typed"));
+        assert!(!changed.all.contains("source"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_changed_paths_reject_malformed_name_status() {
+        for (output, expected) in [
+            (b"X\0path\0".as_slice(), "status is unsupported"),
+            (b"R100\0old\0".as_slice(), "output is truncated"),
+            (b"\0path\0".as_slice(), "empty status"),
+            (b"\xff\0path\0".as_slice(), "status is not valid UTF-8"),
+            (b"M\0\xff\0".as_slice(), "path is not valid UTF-8"),
+        ] {
+            let error = super::parse_changed_paths(output)
+                .expect_err("malformed Git name-status output must fail");
+            assert!(error.contains(expected), "{error}");
         }
     }
 
