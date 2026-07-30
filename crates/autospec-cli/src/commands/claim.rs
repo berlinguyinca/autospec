@@ -4266,8 +4266,7 @@ fn begin_heartbeat_receipt_with_hook(
     after_pending_create: impl FnOnce(),
 ) -> Result<HeartbeatReceiptTransaction, CommandFailure> {
     use nix::fcntl::{openat, OFlag};
-    use nix::sys::stat::{fchmod, fstat, fstatat, Mode};
-    use nix::unistd::{unlinkat, UnlinkatFlags};
+    use nix::sys::stat::{fchmod, Mode};
 
     private_heartbeat_directory_identity(trusted_repo, "receipt repo")?;
     let quarantine = ensure_receipt_directory(trusted_repo, "quarantine")?;
@@ -4293,8 +4292,7 @@ fn begin_heartbeat_receipt_with_hook(
     fchmod(&descriptor, Mode::from_bits_truncate(0o600)).map_err(|error| {
         CommandFailure::diagnostic(format!("could not protect pending receipt: {error}"))
     })?;
-    let file = fs::File::from(descriptor);
-    file.sync_all().map_err(|error| {
+    fs::File::from(descriptor).sync_all().map_err(|error| {
         CommandFailure::diagnostic(format!("could not sync pending receipt: {error}"))
     })?;
     after_pending_create();
@@ -4302,21 +4300,6 @@ fn begin_heartbeat_receipt_with_hook(
     private_heartbeat_directory_identity(&quarantine, "receipt quarantine")?;
     private_heartbeat_directory_identity(&handoff, "receipt handoff")?;
     if inspect_heartbeat_receipt(&handoff, completed.as_ref()) != HeartbeatReceiptEntry::Missing {
-        let ambiguous =
-            || CommandFailure::diagnostic("pending receipt cleanup identity is ambiguous");
-        let opened = fstat(&file).map_err(|_| ambiguous())?;
-        let named = fstatat(
-            &handoff,
-            pending.as_str(),
-            nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
-        )
-        .map_err(|_| ambiguous())?;
-        if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino) {
-            return Err(ambiguous());
-        }
-        unlinkat(&handoff, pending.as_str(), UnlinkatFlags::NoRemoveDir)
-            .map_err(|_| ambiguous())?;
-        nix::unistd::fsync(&handoff).map_err(|_| ambiguous())?;
         return Err(CommandFailure::diagnostic(
             "completed heartbeat receipt won pending creation",
         ));
@@ -5298,8 +5281,9 @@ mod tests {
         .expect_err("sync failure");
         assert_eq!(decision(), Completed);
         assert!(super::begin_heartbeat_receipt(&repo, expected).is_err());
-        let (_, completed) = super::heartbeat_receipt_names(expected);
+        let (pending, completed) = super::heartbeat_receipt_names(expected);
         let handoff = repo_path.join("quarantine/startup-heartbeat-handoffs");
+        let pending_path = handoff.join(&pending);
         let completed_path = handoff.join(&completed);
         std::fs::remove_file(&completed_path).unwrap();
         super::begin_heartbeat_receipt_with_hook(&repo, expected, || {
@@ -5309,7 +5293,9 @@ mod tests {
         })
         .err()
         .expect("completed wins");
-        assert_eq!(decision(), Completed);
+        assert_eq!(decision(), Blocking);
+        assert!(pending_path.exists() && completed_path.exists());
+        std::fs::remove_file(&pending_path).unwrap();
         std::fs::remove_file(&completed_path).unwrap();
         let mut transaction = super::begin_heartbeat_receipt(&repo, expected).unwrap();
         transaction.pending.push_str("-missing");
