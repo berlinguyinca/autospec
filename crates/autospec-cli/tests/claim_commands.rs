@@ -1,6 +1,6 @@
 use autospec_core::claim::RunStateRecord;
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::io::{Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,7 +25,24 @@ fn temp_dir(prefix: &str) -> std::path::PathBuf {
         .as_nanos();
     let dir = std::env::temp_dir().join(format!("{prefix}-{}-{suffix}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("fixture directory");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .expect("private fixture directory");
     dir
+}
+
+fn canonical_worker_id() -> String {
+    format!("host:user:rust:{}:nonce-security", std::process::id())
+}
+
+fn private_heartbeat_repo(root: &std::path::Path, repo: &std::path::Path) {
+    std::fs::create_dir_all(repo).unwrap();
+    for path in [root, repo] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+fn mode(path: &std::path::Path) -> u32 {
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
 fn write_executable(path: &std::path::Path, contents: &str) {
@@ -1817,14 +1834,15 @@ fn claim_acquire_refuses_an_unreviewed_issue_before_label_mutation() {
         .contains("issue\nedit"));
 }
 
-#[test]
-fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
-    let fixture = temp_dir("autospec-claim-acquire");
+fn run_heartbeat_writer_acquire(
+    fixture: &std::path::Path,
+    heartbeats: &std::path::Path,
+    worker: &str,
+) -> std::process::Output {
     let bin = fixture.join("bin");
     let log = fixture.join("gh.log");
     let comments = fixture.join("comments.json");
     let mode = fixture.join("labels.mode");
-    let heartbeats = fixture.join("heartbeats");
     std::fs::create_dir_all(&bin).expect("fake bin directory");
     std::fs::write(&comments, "[]\n").expect("comments fixture");
     std::fs::write(&mode, "ready\n").expect("label mode fixture");
@@ -1834,7 +1852,7 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     );
     let body = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Goal\nAdd the Rust implementation.";
 
-    let output = autospec()
+    autospec()
         .args([
             "claim",
             "acquire",
@@ -1843,7 +1861,7 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
             "--repo",
             "testorg/testrepo",
             "--worker-id",
-            "worker-a",
+            worker,
             "--branch",
             "feat/test",
             "--session-id",
@@ -1854,11 +1872,20 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
         .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
         .env("AUTOSPEC_CLAIM_MODE", &mode)
         .env("AUTOSPEC_CLAIM_ISSUE_BODY", body)
-        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .env("AUTOSPEC_HEARTBEAT_DIR", heartbeats)
+        .env("AUTOSPEC_CLAIM_LEASE_SECONDS", "77")
         .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
         .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
         .output()
-        .expect("autospec claim acquire starts");
+        .expect("autospec claim acquire starts")
+}
+
+#[test]
+fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
+    let fixture = temp_dir("autospec-claim-acquire");
+    let heartbeats = fixture.join("heartbeats");
+    let worker = canonical_worker_id();
+    let output = run_heartbeat_writer_acquire(&fixture, &heartbeats, &worker);
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
@@ -1869,19 +1896,72 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     assert!(heartbeats.join("o7_testorg_r8_testrepo/42.json").exists());
     let heartbeat = std::fs::read_to_string(heartbeats.join("o7_testorg_r8_testrepo/42.json"))
         .expect("claim heartbeat");
-    assert!(heartbeat.contains("\"worker_id\":\"worker-a\""));
+    assert!(heartbeat.contains(&format!("\"worker_id\":\"{worker}\"")));
     assert!(heartbeat.contains("\"claim_id\":\"claim-"));
     assert!(heartbeat.contains("\"session_id\":\"session-real-7\""));
+    assert!(heartbeat.contains("\"ttl_seconds\":77"));
+    assert!(heartbeat.contains(&format!("\"pid\":{}", std::process::id())));
+    assert!(heartbeat.contains("\"nonce\":\"nonce-security\""));
     assert!(heartbeats
         .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d7265616c2d37.json")
         .exists());
-    assert!(std::fs::read_to_string(&comments)
+    let repo = heartbeats.join("o7_testorg_r8_testrepo");
+    let sessions = repo.join("sessions");
+    let binding = sessions.join("73657373696f6e2d7265616c2d37.json");
+    for path in [&heartbeats, &repo, &sessions] {
+        assert_eq!(mode(path), 0o700);
+    }
+    for path in [repo.join("42.json"), binding] {
+        assert_eq!(mode(&path), 0o600);
+    }
+    assert!(std::fs::read_to_string(fixture.join("comments.json"))
         .expect("claim comments")
-        .contains("worker-a"));
-    let calls = std::fs::read_to_string(log).expect("gh call log");
+        .contains(&worker));
+    let calls = std::fs::read_to_string(fixture.join("gh.log")).expect("gh call log");
     let label_edit = calls.find("issue\nedit\n42").expect("label edit");
     let create_comment = calls.find("issue\ncomment\n42").expect("claim comment");
     assert!(create_comment < label_edit);
+}
+
+#[test]
+fn claim_startup_heartbeat_writer_security() {
+    let worker = canonical_worker_id();
+    let repo_key = "o7_testorg_r8_testrepo";
+    let fixture = temp_dir("autospec-heartbeat-hardlink");
+    let root = fixture.join("heartbeats");
+    let repo = root.join(repo_key);
+    private_heartbeat_repo(&root, &repo);
+    let outside = fixture.join("outside");
+    std::fs::write(&outside, b"do-not-truncate").expect("outside sentinel");
+    std::fs::hard_link(&outside, repo.join("42.json")).expect("hard-linked heartbeat");
+    let output = run_heartbeat_writer_acquire(&fixture, &root, &worker);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("heartbeat_write_failed"));
+    assert_eq!(std::fs::read(&outside).unwrap(), b"do-not-truncate");
+    assert_eq!(
+        std::fs::read(repo.join("42.json")).unwrap(),
+        b"do-not-truncate"
+    );
+
+    let fixture = temp_dir("autospec-heartbeat-fifo");
+    let root = fixture.join("heartbeats");
+    let repo = root.join(repo_key);
+    private_heartbeat_repo(&root, &repo);
+    let fifo = repo.join("42.json");
+    nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600))
+        .expect("heartbeat FIFO");
+    let mut reader = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(&fifo)
+        .expect("nonblocking FIFO reader");
+    let started = std::time::Instant::now();
+    let output = run_heartbeat_writer_acquire(&fixture, &root, &worker);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert_eq!(output.status.code(), Some(2));
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).expect("read FIFO payload");
+    assert!(bytes.is_empty());
 }
 
 #[test]
