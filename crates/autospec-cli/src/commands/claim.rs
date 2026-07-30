@@ -5943,12 +5943,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn startup_heartbeat_atomic_publication() {
-        use super::HeartbeatPublicationDurability::{DirectorySyncPending, Durable};
+        use super::HeartbeatPublicationDurability::{Durable, Unconfirmed};
         use super::HeartbeatPublicationFailure::{PostCommit, PreCommit};
         use nix::fcntl::{open, OFlag};
         use nix::sys::stat::{umask, Mode};
         use std::io::Read;
-        use std::os::unix::fs::OpenOptionsExt;
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         const CHILD: &str = "AUTOSPEC_TEST_ATOMIC_HEARTBEAT_CHILD";
@@ -5985,7 +5984,11 @@ mod tests {
                 b"heartbeat\n",
                 "test",
                 &mut |_, boundary| {
-                    if failed == Some(boundary) {
+                    if failed == Some("hardlink") && boundary == "revalidate" {
+                        let peer = fixture.join(format!("{name}.peer"));
+                        std::fs::hard_link(fixture.join(name), peer).unwrap();
+                        Ok(())
+                    } else if failed == Some(boundary) {
                         Err(super::CommandFailure::diagnostic(
                             "injected persistence failure",
                         ))
@@ -6014,6 +6017,10 @@ mod tests {
         assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 2);
         std::fs::remove_file(&issue).unwrap();
         nix::unistd::mkfifo(&issue, Mode::from_bits_truncate(0o600)).unwrap();
+        let mut fifo = std::fs::File::from(
+            open(&issue, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty()).unwrap(),
+        );
+        let before = fifo.metadata().unwrap();
         let fifo_directory = std::fs::File::from(directory.try_clone().unwrap());
         let (send, receive) = std::sync::mpsc::channel();
         let publisher = std::thread::spawn(move || {
@@ -6031,14 +6038,9 @@ mod tests {
             Ok(Err(PreCommit(_)))
         ));
         publisher.join().unwrap();
-        assert!(std::os::unix::fs::FileTypeExt::is_fifo(
-            &std::fs::symlink_metadata(&issue).unwrap().file_type()
-        ));
-        let mut fifo = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(OFlag::O_NONBLOCK.bits())
-            .open(&issue)
-            .unwrap();
+        let after = std::fs::symlink_metadata(&issue).unwrap();
+        let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino(), meta.mode());
+        assert_eq!(identity(&before), identity(&after));
         assert_eq!(fifo.read(&mut [0]).unwrap(), 0);
         std::fs::remove_file(&issue).unwrap();
         let session = fixture.join("session.json");
@@ -6055,11 +6057,13 @@ mod tests {
             );
             let held = publication.file.metadata().unwrap();
             assert_eq!((held.dev(), held.ino()), (metadata.dev(), metadata.ino()));
+            assert_eq!(held.nlink(), 1);
         }
 
         for (name, failed, expected) in [
-            ("pending.json", "directory-fsync", DirectorySyncPending),
-            ("durable-error.json", "revalidate", Durable),
+            ("pending.json", "directory-fsync", Unconfirmed),
+            ("revalidate-error.json", "revalidate", Unconfirmed),
+            ("extra-link.json", "hardlink", Unconfirmed),
         ] {
             let error = attempt(name, Some(failed)).unwrap_err();
             let PostCommit {
