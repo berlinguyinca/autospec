@@ -3769,6 +3769,115 @@ pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
         .join("process-heartbeats"))
 }
 
+#[allow(dead_code)]
+fn open_heartbeat_directory_beneath(
+    trusted_parent: &fs::File,
+    descendant: &Path,
+) -> Result<fs::File, CommandFailure> {
+    open_heartbeat_directory_beneath_with_hook(trusted_parent, descendant, || {})
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeartbeatDirectoryIdentity {
+    device: u64,
+    inode: u64,
+    owner: u32,
+    mode: u32,
+}
+
+#[cfg(target_os = "linux")]
+fn private_heartbeat_directory_identity(
+    directory: &impl std::os::fd::AsFd,
+    role: &str,
+) -> Result<HeartbeatDirectoryIdentity, CommandFailure> {
+    use nix::sys::stat::{fstat, SFlag};
+
+    let stat = fstat(directory).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not inspect heartbeat {role}: {error}"))
+    })?;
+    if !SFlag::from_bits_truncate(stat.st_mode).contains(SFlag::S_IFDIR)
+        || stat.st_uid != nix::unistd::geteuid().as_raw()
+        || stat.st_mode & 0o7777 != 0o700
+    {
+        return Err(CommandFailure::diagnostic(format!(
+            "heartbeat {role} must be owned by the effective user with mode 0700"
+        )));
+    }
+    Ok(HeartbeatDirectoryIdentity {
+        device: stat.st_dev,
+        inode: stat.st_ino,
+        owner: stat.st_uid,
+        mode: stat.st_mode & 0o7777,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn heartbeat_openat2_resolve_flags() -> nix::fcntl::ResolveFlag {
+    use nix::fcntl::ResolveFlag;
+
+    ResolveFlag::RESOLVE_BENEATH
+        | ResolveFlag::RESOLVE_NO_SYMLINKS
+        | ResolveFlag::RESOLVE_NO_MAGICLINKS
+        | ResolveFlag::RESOLVE_NO_XDEV
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn open_heartbeat_directory_beneath_with_hook(
+    trusted_parent: &fs::File,
+    descendant: &Path,
+    before_open: impl FnOnce(),
+) -> Result<fs::File, CommandFailure> {
+    use nix::fcntl::{openat2, OFlag, OpenHow};
+    use std::path::Component;
+
+    if descendant.as_os_str().is_empty()
+        || descendant.is_absolute()
+        || descendant
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat descendant must be relative, non-empty, and contain no '..'",
+        ));
+    }
+    let parent_identity = private_heartbeat_directory_identity(trusted_parent, "parent")?;
+    before_open();
+    if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat parent descriptor identity drift before descendant open",
+        ));
+    }
+    let how = OpenHow::new()
+        .flags(OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC)
+        .resolve(heartbeat_openat2_resolve_flags());
+    let directory = openat2(trusted_parent, descendant, how).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "heartbeat directory secure resolution failed: {error}"
+        ))
+    })?;
+    if private_heartbeat_directory_identity(trusted_parent, "parent")? != parent_identity {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat parent descriptor identity drift after descendant open",
+        ));
+    }
+    private_heartbeat_directory_identity(&directory, "descendant")?;
+    Ok(fs::File::from(directory))
+}
+
+#[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
+fn open_heartbeat_directory_beneath_with_hook(
+    _trusted_parent: &fs::File,
+    _descendant: &Path,
+    _before_open: impl FnOnce(),
+) -> Result<fs::File, CommandFailure> {
+    Err(CommandFailure::diagnostic(
+        "secure heartbeat directory resolution requires Linux openat2",
+    ))
+}
+
 // These primitives remain inert until the guarded recovery activation slice.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
@@ -4788,6 +4897,106 @@ mod tests {
             step: "claimed",
         }
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn heartbeat_directory_openat2() {
+        use nix::fcntl::{open, OFlag, ResolveFlag};
+        use nix::sys::stat::fstat;
+        use std::os::unix::fs::{symlink, MetadataExt};
+
+        let open_parent = |path: &Path| {
+            std::fs::File::from(
+                open(
+                    path,
+                    OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                    nix::sys::stat::Mode::empty(),
+                )
+                .expect("open trusted parent"),
+            )
+        };
+        let make_child = |parent: &Path| {
+            let child = parent.join("heartbeat");
+            std::fs::create_dir(&child).expect("heartbeat child");
+            std::fs::set_permissions(&child, std::fs::Permissions::from_mode(0o700))
+                .expect("private heartbeat child");
+            child
+        };
+
+        let (trusted, _) = startup_heartbeat_fixture("openat2-trusted");
+        let trusted_child = make_child(&trusted);
+        let parent = open_parent(&trusted);
+        let opened = super::open_heartbeat_directory_beneath(&parent, Path::new("heartbeat"))
+            .expect("open descendant");
+        let expected = std::fs::metadata(&trusted_child).expect("descendant metadata");
+        let observed = fstat(&opened).expect("opened metadata");
+        assert_eq!(
+            (observed.st_dev, observed.st_ino),
+            (expected.dev(), expected.ino())
+        );
+
+        let (outside, _) = startup_heartbeat_fixture("openat2-outside");
+        make_child(&outside);
+        symlink(&outside, trusted.join("parent-link")).expect("descendant parent symlink");
+        assert!(super::open_heartbeat_directory_beneath(
+            &parent,
+            Path::new("parent-link/heartbeat")
+        )
+        .is_err());
+        assert!(super::open_heartbeat_directory_beneath(&parent, Path::new("")).is_err());
+        assert!(super::open_heartbeat_directory_beneath(&parent, &trusted_child).is_err());
+        assert!(super::open_heartbeat_directory_beneath(&parent, Path::new("../escape")).is_err());
+        assert!(super::heartbeat_openat2_resolve_flags().contains(ResolveFlag::RESOLVE_NO_XDEV));
+
+        let (drifting, _) = startup_heartbeat_fixture("openat2-drifting");
+        make_child(&drifting);
+        let drifting_parent = open_parent(&drifting);
+        let drift = super::open_heartbeat_directory_beneath_with_hook(
+            &drifting_parent,
+            Path::new("heartbeat"),
+            || {
+                std::fs::set_permissions(&drifting, std::fs::Permissions::from_mode(0o755))
+                    .expect("drift parent mode");
+            },
+        );
+        assert!(drift.is_err());
+        std::fs::set_permissions(&drifting, std::fs::Permissions::from_mode(0o700))
+            .expect("restore parent mode");
+
+        let (replaceable, _) = startup_heartbeat_fixture("openat2-replaceable");
+        let replaceable_child = make_child(&replaceable);
+        let original_inode = std::fs::metadata(&replaceable_child)
+            .expect("original child metadata")
+            .ino();
+        let (replacement, _) = startup_heartbeat_fixture("openat2-replacement");
+        let replacement_child = make_child(&replacement);
+        let replacement_inode = std::fs::metadata(&replacement_child)
+            .expect("replacement child metadata")
+            .ino();
+        let anchored_parent = open_parent(&replaceable);
+        let anchored = replaceable.with_extension("anchored");
+        let opened = super::open_heartbeat_directory_beneath_with_hook(
+            &anchored_parent,
+            Path::new("heartbeat"),
+            || {
+                std::fs::rename(&replaceable, &anchored).expect("move trusted directory");
+                std::fs::rename(&replacement, &replaceable).expect("install replacement directory");
+            },
+        )
+        .expect("open anchored original child");
+        let opened_inode = fstat(&opened).expect("opened child metadata").st_ino;
+        assert_eq!(opened_inode, original_inode);
+        assert_ne!(opened_inode, replacement_inode);
+        std::fs::rename(&replaceable, &replacement).expect("remove replacement directory");
+        std::fs::rename(&anchored, &replaceable).expect("restore trusted directory");
+
+        std::fs::remove_dir_all(trusted).expect("remove trusted fixture");
+        std::fs::remove_dir_all(outside).expect("remove outside fixture");
+        std::fs::remove_dir_all(drifting).expect("remove drift fixture");
+        std::fs::remove_dir_all(replaceable).expect("remove replacement fixture");
+        std::fs::remove_dir_all(replacement).expect("remove rename-in fixture");
+    }
+
     #[test]
     fn classify_startup_heartbeat_marks_missing_evidence_absent() {
         let (directory, path) = startup_heartbeat_fixture("absent");
