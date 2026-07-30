@@ -3727,6 +3727,255 @@ fn publish_session_binding(
     Ok(true)
 }
 
+#[cfg(unix)]
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatPublicationDurability {
+    Unconfirmed,
+    Durable,
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+#[derive(Debug)]
+struct HeartbeatPublication {
+    file: fs::File,
+    device: u64,
+    inode: u64,
+    durability: HeartbeatPublicationDurability,
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+#[derive(Debug)]
+enum HeartbeatPublicationFailure {
+    PreCommit(CommandFailure),
+    PostCommit {
+        publication: HeartbeatPublication,
+        error: CommandFailure,
+    },
+}
+
+#[cfg(unix)]
+fn validate_heartbeat_final_name(final_name: &str) -> Result<(), HeartbeatPublicationFailure> {
+    use std::path::Component;
+
+    let mut components = Path::new(final_name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) if name == std::ffi::OsStr::new(final_name) => Ok(()),
+        _ => Err(HeartbeatPublicationFailure::PreCommit(
+            CommandFailure::diagnostic("heartbeat final name must be one normal component"),
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatFinalBinding {
+    Missing,
+    Exact,
+    Other,
+}
+
+#[cfg(target_os = "linux")]
+fn heartbeat_final_binding(
+    file: &fs::File,
+    directory: &impl std::os::fd::AsFd,
+    final_name: &str,
+    identity: (u64, u64),
+) -> Result<(HeartbeatFinalBinding, u64), CommandFailure> {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::{fstat, fstatat};
+
+    let links = fstat(file)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat fstat: {error}")))?
+        .st_nlink;
+    let binding = match fstatat(directory, final_name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Err(nix::errno::Errno::ENOENT) => HeartbeatFinalBinding::Missing,
+        Ok(stat) if (stat.st_dev, stat.st_ino) == identity => HeartbeatFinalBinding::Exact,
+        Ok(_) => HeartbeatFinalBinding::Other,
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not inspect heartbeat final binding: {error}"
+            )))
+        }
+    };
+    Ok((binding, links))
+}
+
+#[cfg(target_os = "linux")]
+fn post_commit_failure(
+    file: fs::File,
+    identity: (u64, u64),
+    durability: HeartbeatPublicationDurability,
+    error: CommandFailure,
+) -> HeartbeatPublicationFailure {
+    HeartbeatPublicationFailure::PostCommit {
+        publication: HeartbeatPublication {
+            file,
+            device: identity.0,
+            inode: identity.1,
+            durability,
+        },
+        error,
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn publish_private_heartbeat_file(
+    directory: &impl std::os::fd::AsFd,
+    final_name: &str,
+    document: &[u8],
+    role: &str,
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<HeartbeatPublication, HeartbeatPublicationFailure> {
+    use nix::fcntl::{openat, AtFlags, OFlag, AT_FDCWD};
+    use nix::sys::stat::{fchmod, fstat, Mode};
+    use nix::unistd::{fsync, linkat};
+    use std::os::fd::AsRawFd;
+
+    let pre = HeartbeatPublicationFailure::PreCommit;
+    validate_heartbeat_final_name(final_name)?;
+    private_heartbeat_directory_identity(directory, "publication").map_err(pre)?;
+    let descriptor = openat(
+        directory,
+        ".",
+        OFlag::O_TMPFILE | OFlag::O_RDWR | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| {
+        pre(CommandFailure::diagnostic(format!(
+            "anonymous heartbeat staging is unavailable: {error}"
+        )))
+    })?;
+    let mut file = fs::File::from(descriptor);
+    let fail = |message| pre(CommandFailure::diagnostic(message));
+    boundary(role, "chmod").map_err(pre)?;
+    fchmod(&file, Mode::from_bits_truncate(0o600))
+        .map_err(|error| fail(format!("heartbeat chmod: {error}")))?;
+    boundary(role, "write").map_err(pre)?;
+    file.write_all(document)
+        .map_err(|error| fail(format!("heartbeat write: {error}")))?;
+    boundary(role, "file-fsync").map_err(pre)?;
+    file.sync_all()
+        .map_err(|error| fail(format!("heartbeat fsync: {error}")))?;
+    let stat = fstat(&file).map_err(|error| fail(format!("heartbeat fstat: {error}")))?;
+    let identity = (stat.st_dev as u64, stat.st_ino as u64);
+    boundary(role, "before-link").map_err(pre)?;
+
+    let mut link_error = linkat(&file, "", directory, final_name, AtFlags::AT_EMPTY_PATH).err();
+    let (mut binding, mut link_count) =
+        match heartbeat_final_binding(&file, directory, final_name, identity) {
+            Ok(state) => state,
+            Err(error) => {
+                return Err(post_commit_failure(
+                    file,
+                    identity,
+                    HeartbeatPublicationDurability::Unconfirmed,
+                    error,
+                ))
+            }
+        };
+    let unavailable = matches!(
+        link_error,
+        Some(
+            nix::errno::Errno::EPERM
+                | nix::errno::Errno::EINVAL
+                | nix::errno::Errno::ENOENT
+                | nix::errno::Errno::EOPNOTSUPP
+        )
+    );
+    if unavailable && binding == HeartbeatFinalBinding::Missing && link_count == 0 {
+        let proc_path = format!("/proc/self/fd/{}", file.as_raw_fd());
+        link_error = linkat(
+            AT_FDCWD,
+            proc_path.as_str(),
+            directory,
+            final_name,
+            AtFlags::AT_SYMLINK_FOLLOW,
+        )
+        .err();
+        (binding, link_count) =
+            match heartbeat_final_binding(&file, directory, final_name, identity) {
+                Ok(state) => state,
+                Err(error) => {
+                    return Err(post_commit_failure(
+                        file,
+                        identity,
+                        HeartbeatPublicationDurability::Unconfirmed,
+                        error,
+                    ))
+                }
+            };
+    }
+    if (binding, link_count) != (HeartbeatFinalBinding::Exact, 1) {
+        let error = CommandFailure::diagnostic(format!(
+            "heartbeat link failed or lost identity: {}",
+            link_error.map_or_else(
+                || "final binding changed".to_string(),
+                |error| error.to_string()
+            )
+        ));
+        if link_error.is_none() || binding == HeartbeatFinalBinding::Exact || link_count > 0 {
+            return Err(post_commit_failure(
+                file,
+                identity,
+                HeartbeatPublicationDurability::Unconfirmed,
+                error,
+            ));
+        }
+        return Err(pre(error));
+    }
+
+    if let Err(error) = boundary(role, "directory-fsync").and_then(|()| {
+        fsync(directory).map_err(|error| CommandFailure::diagnostic(error.to_string()))
+    }) {
+        return Err(post_commit_failure(
+            file,
+            identity,
+            HeartbeatPublicationDurability::Unconfirmed,
+            error,
+        ));
+    }
+    if let Err(error) = boundary(role, "revalidate").and_then(|()| {
+        (heartbeat_final_binding(&file, directory, final_name, identity)?
+            == (HeartbeatFinalBinding::Exact, 1))
+            .then_some(())
+            .ok_or_else(|| CommandFailure::diagnostic("heartbeat final identity changed"))
+    }) {
+        return Err(post_commit_failure(
+            file,
+            identity,
+            HeartbeatPublicationDurability::Unconfirmed,
+            error,
+        ));
+    }
+    Ok(HeartbeatPublication {
+        file,
+        device: identity.0,
+        inode: identity.1,
+        durability: HeartbeatPublicationDurability::Durable,
+    })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+#[allow(dead_code)]
+fn publish_private_heartbeat_file(
+    _directory: &impl std::os::fd::AsFd,
+    final_name: &str,
+    _document: &[u8],
+    _role: &str,
+    _boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<HeartbeatPublication, HeartbeatPublicationFailure> {
+    validate_heartbeat_final_name(final_name)?;
+    Err(HeartbeatPublicationFailure::PreCommit(
+        CommandFailure::diagnostic(
+            "identity-bound heartbeat publication is unavailable on this platform",
+        ),
+    ))
+}
+
 fn heartbeat_session_key(session_id: &str) -> String {
     session_id
         .as_bytes()
@@ -5686,6 +5935,148 @@ mod tests {
             Err(super::CommandFailure::diagnostic(message))
         } else {
             Ok(())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_heartbeat_atomic_publication() {
+        use super::HeartbeatPublicationDurability::{Durable, Unconfirmed};
+        use super::HeartbeatPublicationFailure::{PostCommit, PreCommit};
+        use nix::fcntl::{open, OFlag};
+        use nix::sys::stat::{umask, Mode};
+        use std::io::Read;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        const CHILD: &str = "AUTOSPEC_TEST_ATOMIC_HEARTBEAT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    concat!(module_path!(), "::startup_heartbeat_atomic_publication"),
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let (fixture, issue) = startup_heartbeat_fixture("atomic-publication");
+        let directory = open(
+            &fixture,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .unwrap();
+        let previous = umask(Mode::from_bits_truncate(0o777));
+        let attempt = |name: &str, failed: Option<&str>| {
+            super::publish_private_heartbeat_file(
+                &directory,
+                name,
+                b"heartbeat\n",
+                "test",
+                &mut |_, boundary| {
+                    if failed == Some("hardlink") && boundary == "revalidate" {
+                        let peer = fixture.join(format!("{name}.peer"));
+                        std::fs::hard_link(fixture.join(name), peer).unwrap();
+                        Ok(())
+                    } else if failed == Some(boundary) {
+                        Err(super::CommandFailure::diagnostic(
+                            "injected persistence failure",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+        };
+        for name in ["", ".", "..", "/tmp/x", "a/b", "a/", "./a"] {
+            assert!(matches!(attempt(name, None), Err(PreCommit(_))));
+            assert_eq!(std::fs::read_dir(&fixture).unwrap().count(), 0);
+        }
+        for failed in ["chmod", "write", "file-fsync", "before-link"] {
+            assert!(matches!(
+                attempt("42.json", Some(failed)),
+                Err(PreCommit(_))
+            ));
+            assert!(!issue.exists());
+        }
+        let outside = fixture.join("outside");
+        std::fs::write(&outside, b"caller-owned").unwrap();
+        std::fs::hard_link(&outside, &issue).unwrap();
+        assert!(matches!(attempt("42.json", None), Err(PreCommit(_))));
+        assert_eq!(std::fs::read(&outside).unwrap(), b"caller-owned");
+        assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 2);
+        std::fs::remove_file(&issue).unwrap();
+        nix::unistd::mkfifo(&issue, Mode::from_bits_truncate(0o600)).unwrap();
+        let mut fifo = std::fs::File::from(
+            open(&issue, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty()).unwrap(),
+        );
+        let before = fifo.metadata().unwrap();
+        let fifo_directory = std::fs::File::from(directory.try_clone().unwrap());
+        let (send, receive) = std::sync::mpsc::channel();
+        let publisher = std::thread::spawn(move || {
+            let result = super::publish_private_heartbeat_file(
+                &fifo_directory,
+                "42.json",
+                b"heartbeat\n",
+                "test",
+                &mut |_, _| Ok(()),
+            );
+            send.send(result).unwrap();
+        });
+        assert!(matches!(
+            receive.recv_timeout(std::time::Duration::from_secs(2)),
+            Ok(Err(PreCommit(_)))
+        ));
+        publisher.join().unwrap();
+        let after = std::fs::symlink_metadata(&issue).unwrap();
+        let identity = |meta: &std::fs::Metadata| (meta.dev(), meta.ino(), meta.mode());
+        assert_eq!(identity(&before), identity(&after));
+        assert_eq!(fifo.read(&mut [0]).unwrap(), 0);
+        std::fs::remove_file(&issue).unwrap();
+        let session = fixture.join("session.json");
+        let issue_publication = attempt("42.json", None).unwrap();
+        let session_publication = attempt("session.json", None).unwrap();
+        umask(previous);
+        for (path, publication) in [(&issue, issue_publication), (&session, session_publication)] {
+            assert_eq!(publication.durability, Durable);
+            let metadata = std::fs::metadata(path).unwrap();
+            assert_eq!(metadata.permissions().mode() & 0o7777, 0o600);
+            assert_eq!(
+                (metadata.dev(), metadata.ino()),
+                (publication.device, publication.inode)
+            );
+            let held = publication.file.metadata().unwrap();
+            assert_eq!((held.dev(), held.ino()), (metadata.dev(), metadata.ino()));
+            assert_eq!(held.nlink(), 1);
+        }
+
+        for (name, failed, expected) in [
+            ("pending.json", "directory-fsync", Unconfirmed),
+            ("revalidate-error.json", "revalidate", Unconfirmed),
+            ("extra-link.json", "hardlink", Unconfirmed),
+        ] {
+            let error = attempt(name, Some(failed)).unwrap_err();
+            let PostCommit {
+                publication,
+                error: _,
+            } = error
+            else {
+                panic!("post-link failure was reported as pre-commit");
+            };
+            assert_eq!(publication.durability, expected);
+            let metadata = std::fs::metadata(fixture.join(name)).unwrap();
+            assert_eq!(
+                (metadata.dev(), metadata.ino()),
+                (publication.device, publication.inode)
+            );
         }
     }
 
