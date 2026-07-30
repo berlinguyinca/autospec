@@ -560,7 +560,7 @@ fn validate_complete_bundle(
     }
     let observed: serde_json::Value = serde_json::from_str(&observed_body)
         .map_err(|error| format!("parse observed bundle manifest: {error}"))?;
-    if observed.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+    if observed.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
         || observed
             .get("lane_digest")
             .and_then(serde_json::Value::as_str)

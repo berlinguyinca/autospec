@@ -2006,7 +2006,7 @@ pub(crate) struct ResolvedFullSuite {
 const REQUIRED_SCANNERS: [&str; 4] = ["gitleaks", "semgrep", "trivy", "license-checker"];
 const GITLEAKS_NEXT_PATH_ALLOWLIST: &str = r"(^|/)\.next(/|$)";
 const REQUIRED_SCANNER_POLICY_SCHEMA: &str =
-    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-diff-v2;license-checker-v1";
+    "gitleaks-next-v1;semgrep-p-default-baseline-complete-v2;trivy-diff-v2;license-checker-diff-v2";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ScannerExecutables {
@@ -2016,6 +2016,7 @@ pub(crate) struct ScannerExecutables {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ObservedScanner {
     pub(crate) name: String,
+    pub(crate) base_oid: String,
     pub(crate) command: ObservedDirectCommand,
     pub(crate) result_path: PathBuf,
     pub(crate) result_digest: String,
@@ -2090,6 +2091,16 @@ fn validate_scanner_result(
     stdout: &[u8],
     stderr: &[u8],
 ) -> Result<(), String> {
+    validate_scanner_result_with_license_policy(scanner, exit_status, stdout, stderr, false)
+}
+
+fn validate_scanner_result_with_license_policy(
+    scanner: &str,
+    exit_status: i32,
+    stdout: &[u8],
+    stderr: &[u8],
+    allow_preexisting_forbidden: bool,
+) -> Result<(), String> {
     if !REQUIRED_SCANNERS.contains(&scanner) {
         return Err(format!("executor scanner identity is unknown: {scanner}"));
     }
@@ -2135,7 +2146,7 @@ fn validate_scanner_result(
         }
         "semgrep" => validate_semgrep_result(&value, exit_status),
         "trivy" => validate_trivy_result(&value, exit_status),
-        "license-checker" => validate_license_checker_result(&value),
+        "license-checker" => validate_license_checker_result(&value, allow_preexisting_forbidden),
         _ => unreachable!("scanner identity checked above"),
     }
 }
@@ -2563,7 +2574,10 @@ fn publish_trivy_diff_report(
     fs::read(durable).map_err(|error| format!("read durable Trivy report: {error}"))
 }
 
-fn validate_license_checker_result(value: &serde_json::Value) -> Result<(), String> {
+fn validate_license_checker_result(
+    value: &serde_json::Value,
+    allow_preexisting_forbidden: bool,
+) -> Result<(), String> {
     let packages = value.as_object().ok_or_else(|| {
         "executor required scanner license-checker output does not match its JSON object schema"
             .to_string()
@@ -2585,9 +2599,10 @@ fn validate_license_checker_result(value: &serde_json::Value) -> Result<(), Stri
                 )
             })?
             .to_ascii_uppercase();
-        if ["GPL", "AGPL", "LGPL"]
-            .iter()
-            .any(|forbidden| license.contains(forbidden))
+        if !allow_preexisting_forbidden
+            && ["GPL", "AGPL", "LGPL"]
+                .iter()
+                .any(|forbidden| license.contains(forbidden))
         {
             return Err(format!(
                 "executor required scanner license-checker reported forbidden license for {package}"
@@ -2672,16 +2687,9 @@ fn scanner_command(
             .map(str::to_string),
         ),
         "license-checker" => argv.extend(
-            [
-                "--json",
-                "--production",
-                "--start",
-                worktree,
-                "--failOn",
-                "GPL;AGPL;LGPL",
-            ]
-            .into_iter()
-            .map(str::to_string),
+            ["--json", "--production", "--start", worktree]
+                .into_iter()
+                .map(str::to_string),
         ),
         _ => return Err(format!("executor scanner identity is unknown: {scanner}")),
     }
@@ -2807,6 +2815,12 @@ pub(crate) fn run_required_scanners(
     stall_timeout: Duration,
 ) -> Result<Vec<ObservedScanner>, String> {
     ensure_private_directory(artifact_root)?;
+    if !canonical_git_oid(base_oid) {
+        return Err("executor required scanner base OID is not canonical".to_string());
+    }
+    let changed_paths = changed_paths_since_base(worktree, base_oid)?;
+    let allow_preexisting_forbidden =
+        !npm_dependency_inputs_changed(worktree, base_oid, &changed_paths)?;
     let mut observations = Vec::new();
     for scanner in REQUIRED_SCANNERS {
         let scanner_root = artifact_root.join(scanner);
@@ -2874,21 +2888,29 @@ pub(crate) fn run_required_scanners(
             validate_trivy_transport(exit_status, &raw, &stderr)?;
             validate_scanner_result(scanner, 0, &result, &stderr)?;
         } else {
-            validate_scanner_result(scanner, exit_status, &result, &stderr)?;
+            validate_scanner_result_with_license_policy(
+                scanner,
+                exit_status,
+                &result,
+                &stderr,
+                scanner == "license-checker" && allow_preexisting_forbidden,
+            )?;
         }
         observations.push(ObservedScanner {
             name: scanner.to_string(),
+            base_oid: base_oid.to_string(),
             command,
             result_path,
             result_digest: sha256_hex(&result),
         });
     }
-    validate_observed_scanners(worktree, &observations)?;
+    validate_observed_scanners(worktree, base_oid, &observations)?;
     Ok(observations)
 }
 
 fn typed_evidence_from_observed(
     worktree: &Path,
+    expected_base_oid: &str,
     lane: &PremergeLaneIdentity,
     qa_commands: Result<&[ObservedDirectCommand], &str>,
     scanners: Result<&[ObservedScanner], &str>,
@@ -2921,10 +2943,11 @@ fn typed_evidence_from_observed(
         Err(reason) => EvidenceVerdict::Failed {
             reason: reason.to_string(),
         },
-        Ok(observed) => validate_observed_scanners(worktree, observed).map_or_else(
-            |reason| EvidenceVerdict::Failed { reason },
-            |()| EvidenceVerdict::Pass,
-        ),
+        Ok(observed) => validate_observed_scanners(worktree, expected_base_oid, observed)
+            .map_or_else(
+                |reason| EvidenceVerdict::Failed { reason },
+                |()| EvidenceVerdict::Pass,
+            ),
     };
     if matches!(security_verdict, EvidenceVerdict::Pass) {
         if let Some(output) = model_output
@@ -2956,7 +2979,11 @@ fn typed_evidence_from_observed(
     )
 }
 
-fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> Result<(), String> {
+fn validate_observed_scanners(
+    worktree: &Path,
+    expected_base_oid: &str,
+    scanners: &[ObservedScanner],
+) -> Result<(), String> {
     let names = scanners
         .iter()
         .map(|scanner| scanner.name.as_str())
@@ -2967,6 +2994,16 @@ fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> 
             "observed security evidence is missing or duplicates a required scanner".to_string(),
         );
     }
+    if !canonical_git_oid(expected_base_oid)
+        || scanners
+            .iter()
+            .any(|scanner| scanner.base_oid != expected_base_oid)
+    {
+        return Err("observed scanner differs from canonical expected base OID".to_string());
+    }
+    let changed_paths = changed_paths_since_base(worktree, expected_base_oid)?;
+    let allow_preexisting_forbidden =
+        !npm_dependency_inputs_changed(worktree, expected_base_oid, &changed_paths)?;
     for scanner in scanners {
         validate_observed_command(worktree, &scanner.command)?;
         reject_symlink_path(&scanner.result_path)?;
@@ -3001,7 +3038,13 @@ fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> 
             validate_trivy_transport(exit_status, &raw, &stderr)?;
             validate_scanner_result(&scanner.name, 0, &result, &stderr)?;
         } else {
-            validate_scanner_result(&scanner.name, exit_status, &result, &stderr)?;
+            validate_scanner_result_with_license_policy(
+                &scanner.name,
+                exit_status,
+                &result,
+                &stderr,
+                scanner.name == "license-checker" && allow_preexisting_forbidden,
+            )?;
         }
     }
     Ok(())
@@ -3056,6 +3099,8 @@ fn scanner_evidence_run_id(lane: &PremergeLaneIdentity, scanners: &[ObservedScan
     for scanner in scanners {
         body.push('\0');
         body.push_str(&scanner.name);
+        body.push('\0');
+        body.push_str(&scanner.base_oid);
         body.push('\0');
         body.push_str(&scanner.result_digest);
     }
@@ -3166,6 +3211,7 @@ impl ObservedEvidenceBundle {
 struct EvidenceIntent {
     completed_at: u64,
     digest: String,
+    base_oid: String,
     runtime_session_id: Option<String>,
     runtime_environment_dir: Option<PathBuf>,
     attempt_root: PathBuf,
@@ -3186,9 +3232,11 @@ fn load_or_create_evidence_intent(
             fs::read_to_string(&path).map_err(|error| format!("read evidence intent: {error}"))?;
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| format!("parse evidence intent: {error}"))?;
-        if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+        if value.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
             || value.get("lane_digest").and_then(serde_json::Value::as_str)
                 != Some(lane.lane_digest().as_str())
+            || value.get("base_oid").and_then(serde_json::Value::as_str)
+                != Some(request.state.identity.base_oid.as_str())
             || value
                 .get("semantic_input_digest")
                 .and_then(serde_json::Value::as_str)
@@ -3222,6 +3270,7 @@ fn load_or_create_evidence_intent(
         return Ok(EvidenceIntent {
             completed_at,
             digest: sha256_hex(body.as_bytes()),
+            base_oid: request.state.identity.base_oid.clone(),
             runtime_session_id: value
                 .get("runtime_session_id")
                 .and_then(serde_json::Value::as_str)
@@ -3236,8 +3285,9 @@ fn load_or_create_evidence_intent(
     let completed_at = unix_now()?;
     let run_id = format!("evidence-{}", sha256_hex(input_digest.as_bytes()));
     let body = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "lane_digest": lane.lane_digest(),
+        "base_oid": request.state.identity.base_oid,
         "semantic_input_digest": semantic_input_digest,
         "input_digest": input_digest,
         "run_id": run_id,
@@ -3250,6 +3300,7 @@ fn load_or_create_evidence_intent(
     Ok(EvidenceIntent {
         completed_at,
         digest: sha256_hex(body.as_bytes()),
+        base_oid: request.state.identity.base_oid.clone(),
         runtime_session_id: request
             .runtime
             .map(DirectRuntimeAdapter::session_id)
@@ -3844,7 +3895,10 @@ fn observed_evidence_bundle(
             return Err("observed QA argv differs from the canonical declared plan".to_string());
         }
     }
-    validate_observed_scanners(worktree, scanners)?;
+    if intent.base_oid != base_oid {
+        return Err("observed bundle base differs from durable intent".to_string());
+    }
+    validate_observed_scanners(worktree, base_oid, scanners)?;
     for scanner in scanners {
         if scanner.command.origin != ObservationOrigin::Live {
             return Err(format!(
@@ -3965,6 +4019,7 @@ fn observed_evidence_bundle(
         .map(|scanner| {
             Ok(serde_json::json!({
                 "name": scanner.name,
+                "base_oid": scanner.base_oid,
                 "command_record": scanner.command.record_path
                     .strip_prefix(artifact_root)
                     .map_err(|_| "scanner command record escapes the lane root".to_string())?,
@@ -3976,8 +4031,9 @@ fn observed_evidence_bundle(
         })
         .collect::<Result<Vec<_>, String>>()?;
     let manifest_body = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "lane_digest": qa.lane.lane_digest(),
+        "base_oid": base_oid,
         "intent_digest": intent.digest,
         "qa_run_id": qa.run_id,
         "security_run_id": security.run_id,
@@ -4018,7 +4074,8 @@ pub(super) fn validate_persisted_observed_manifest(
     expected_intent_digest: &str,
 ) -> Result<(), String> {
     let lane_digest = qa.lane.lane_digest();
-    if qa.lane != security.lane
+    if manifest.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
+        || qa.lane != security.lane
         || !matches!(qa.verdict, EvidenceVerdict::Pass)
         || !matches!(security.verdict, EvidenceVerdict::Pass)
         || manifest
@@ -4042,17 +4099,24 @@ pub(super) fn validate_persisted_observed_manifest(
     }
     let intent: serde_json::Value = serde_json::from_str(&intent_body)
         .map_err(|error| format!("parse evidence intent: {error}"))?;
-    if intent
-        .get("lane_digest")
+    let expected_base_oid = intent
+        .get("base_oid")
         .and_then(serde_json::Value::as_str)
-        != Some(lane_digest.as_str())
+        .ok_or_else(|| "persisted evidence intent base OID is missing".to_string())?;
+    if intent.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
+        || !canonical_git_oid(expected_base_oid)
+        || manifest.get("base_oid").and_then(serde_json::Value::as_str) != Some(expected_base_oid)
+        || intent
+            .get("lane_digest")
+            .and_then(serde_json::Value::as_str)
+            != Some(lane_digest.as_str())
         || intent
             .get("completed_at")
             .and_then(serde_json::Value::as_u64)
             != Some(qa.completed_at)
         || qa.completed_at != security.completed_at
     {
-        return Err("persisted evidence intent time or lane changed".to_string());
+        return Err("persisted evidence intent base, time, or lane changed".to_string());
     }
     let intended_session = intent
         .get("runtime_session_id")
@@ -4113,6 +4177,10 @@ pub(super) fn validate_persisted_observed_manifest(
             .get("name")
             .and_then(serde_json::Value::as_str)
             .ok_or_else(|| "persisted scanner name is missing".to_string())?;
+        let base_oid = entry
+            .get("base_oid")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "persisted scanner base OID is missing".to_string())?;
         let command_path = resolve_relative(entry, "command_record")?;
         let command = read_observed_command_record(worktree, &command_path)?;
         if !scanner_terminal_is_accepted(name, &command.terminal) {
@@ -4133,12 +4201,13 @@ pub(super) fn validate_persisted_observed_manifest(
             .to_string();
         scanners.push(ObservedScanner {
             name: name.to_string(),
+            base_oid: base_oid.to_string(),
             command,
             result_path,
             result_digest,
         });
     }
-    validate_observed_scanners(worktree, &scanners)?;
+    validate_observed_scanners(worktree, expected_base_oid, &scanners)?;
     if scanner_evidence_run_id(&qa.lane, &scanners) != security.run_id
         || manifest
             .get("security_run_id")
@@ -4342,6 +4411,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
         )?;
         let (qa, security) = typed_evidence_from_observed(
             &request.state.identity.worktree,
+            &request.state.identity.base_oid,
             &lane,
             Ok(&observations),
             Ok(&scanners),
@@ -24153,6 +24223,41 @@ mod tests {
         }
     }
 
+    fn scanner_fixtures_with_license(
+        root: &Path,
+        license_report: &str,
+    ) -> super::ScannerExecutables {
+        let bin = root.join("license-scanner-bin");
+        fs::create_dir_all(&bin).expect("scanner bin");
+        let gitleaks = bin.join("gitleaks");
+        write_executable(
+            &gitleaks,
+            "#!/bin/sh\nset -eu\nreport=''\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = --report-path ]; then report=\"$2\"; shift 2; else shift; fi\ndone\nprintf '%s' '[]' > \"$report\"\n",
+        );
+        let semgrep = bin.join("semgrep");
+        write_executable(
+            &semgrep,
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' '{\"results\":[],\"errors\":[],\"paths\":{\"scanned\":[\"package.json\"],\"skipped\":[]}}'\n",
+        );
+        let trivy = bin.join("trivy");
+        write_executable(
+            &trivy,
+            "#!/bin/sh\nset -eu\nprintf '%s\\n' '{\"Results\":[{\"Target\":\".\"}]}'\n",
+        );
+        let license_checker = bin.join("license-checker");
+        write_executable(
+            &license_checker,
+            &format!("#!/bin/sh\nset -eu\nprintf '%s\\n' '{license_report}'\n"),
+        );
+        super::ScannerExecutables::from_paths(BTreeMap::from([
+            ("gitleaks".to_string(), gitleaks),
+            ("semgrep".to_string(), semgrep),
+            ("trivy".to_string(), trivy),
+            ("license-checker".to_string(), license_checker),
+        ]))
+        .expect("scanner paths")
+    }
+
     fn environment(table: &Path) -> BTreeMap<String, OsString> {
         BTreeMap::from([
             (
@@ -40396,9 +40501,11 @@ exit 19
         );
         let attempt_root = lane_root.join("attempts").join(&input_digest[..24]);
         super::ensure_private_directory(&attempt_root).expect("attempt root");
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
         let intent_body = serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "lane_digest": lane.lane_digest(),
+            "base_oid": base_oid,
             "semantic_input_digest": "test-semantic-input",
             "input_digest": input_digest,
             "run_id": format!("test-run-{generation}"),
@@ -40416,6 +40523,7 @@ exit 19
         let intent = super::EvidenceIntent {
             completed_at: 1_800_000_000 + generation,
             digest: autospec_core::autonomous::waterfall::sha256_hex(intent_body.as_bytes()),
+            base_oid: base_oid.clone(),
             runtime_session_id: None,
             runtime_environment_dir: None,
             attempt_root: attempt_root.clone(),
@@ -40452,7 +40560,7 @@ exit 19
         };
         let scanners = super::run_required_scanners(
             &fixture.repo,
-            "HEAD",
+            &base_oid,
             &attempt_root.join("security"),
             &scanner_executables,
             None,
@@ -40461,6 +40569,7 @@ exit 19
         .expect("live scanner observations");
         let (qa_evidence, security_evidence) = super::typed_evidence_from_observed(
             &fixture.repo,
+            &base_oid,
             lane,
             Ok(&qa),
             Ok(&scanners),
@@ -40469,7 +40578,7 @@ exit 19
         );
         let mut bundle = super::observed_evidence_bundle(
             &fixture.repo,
-            "HEAD",
+            &base_oid,
             lane_root,
             &intent,
             qa_evidence,
@@ -42061,6 +42170,199 @@ exit 19
     }
 
     #[test]
+    fn autonomous_executor_bridge_license_checker_admits_only_unchanged_graph_findings() {
+        let fixture = GitFixture::new("license-unchanged-graph");
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"dependencies":{"fixture":"1.0.0"},"scripts":{"test":"old"}}"#,
+        )
+        .expect("baseline manifest");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline manifest"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        fs::write(
+            fixture.repo.join("package.json"),
+            r#"{"dependencies":{"fixture":"1.0.0"},"scripts":{"test":"new"}}"#,
+        )
+        .expect("script-only manifest change");
+        git(&fixture.repo, &["add", "package.json"]);
+        git(&fixture.repo, &["commit", "-m", "change script"]);
+        let scanners = scanner_fixtures_with_license(
+            &fixture.root,
+            r#"{"fixture@1.0.0":{"licenses":"LGPL-3.0"}}"#,
+        );
+
+        let error = super::run_required_scanners(
+            &fixture.repo,
+            "HEAD",
+            &fixture.root.join("symbolic-security"),
+            &scanners,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("symbolic scanner base must fail closed");
+        assert!(error.contains("canonical"), "{error}");
+        let observed = super::run_required_scanners(
+            &fixture.repo,
+            &base_oid,
+            &fixture.root.join("security"),
+            &scanners,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("pre-existing forbidden license with unchanged graph");
+        let license = observed
+            .iter()
+            .find(|scanner| scanner.name == "license-checker")
+            .expect("license-checker observation");
+
+        assert_eq!(license.result_path, license.command.stdout_path);
+        assert_eq!(
+            license
+                .result_path
+                .strip_prefix(&fixture.root)
+                .expect("fixture-relative result"),
+            Path::new("security/license-checker/process/command-000.stdout")
+        );
+        let result: serde_json::Value = serde_json::from_slice(
+            &fs::read(&license.result_path).expect("private license result"),
+        )
+        .expect("native license-checker JSON");
+        assert_eq!(result["fixture@1.0.0"]["licenses"], "LGPL-3.0");
+        let mut wrong_base = observed.clone();
+        let head_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        wrong_base
+            .iter_mut()
+            .for_each(|scanner| scanner.base_oid = head_oid.clone());
+        let error = super::validate_observed_scanners(&fixture.repo, &base_oid, &wrong_base)
+            .expect_err("uniform wrong scanner base must fail closed");
+        assert!(error.contains("expected base"), "{error}");
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(&license.result_path)
+                .expect("license result metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_license_checker_rejects_changed_graph_finding() {
+        let fixture = GitFixture::new("license-changed-graph");
+        fs::write(fixture.repo.join("package-lock.json"), "{}\n").expect("baseline lockfile");
+        git(&fixture.repo, &["add", "package-lock.json"]);
+        git(&fixture.repo, &["commit", "-m", "baseline lockfile"]);
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        fs::write(
+            fixture.repo.join("package-lock.json"),
+            "{\"changed\":true}\n",
+        )
+        .expect("changed lockfile");
+        git(&fixture.repo, &["add", "package-lock.json"]);
+        git(&fixture.repo, &["commit", "-m", "change lockfile"]);
+        let scanners = scanner_fixtures_with_license(
+            &fixture.root,
+            r#"{"fixture@1.0.0":{"licenses":"LGPL-3.0"}}"#,
+        );
+
+        let error = super::run_required_scanners(
+            &fixture.repo,
+            &base_oid,
+            &fixture.root.join("security"),
+            &scanners,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("changed dependency graph must enforce forbidden-license policy");
+
+        assert!(error.contains("forbidden license"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_license_checker_rejects_malformed_preexisting_record() {
+        let fixture = GitFixture::new("license-malformed-record");
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        let scanners =
+            scanner_fixtures_with_license(&fixture.root, r#"{"fixture@1.0.0":{"licenses":null}}"#);
+
+        let error = super::run_required_scanners(
+            &fixture.repo,
+            &base_oid,
+            &fixture.root.join("security"),
+            &scanners,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("malformed record must fail closed on an unchanged graph");
+
+        assert!(error.contains("missing licenses"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_license_checker_persisted_base_identity_fails_closed() {
+        let fixture = GitFixture::new("license-persisted-base");
+        git(
+            &fixture.repo,
+            &["commit", "--allow-empty", "-m", "expected base"],
+        );
+        let wrong_base = git_stdout(&fixture.repo, &["rev-parse", "HEAD^"]);
+        let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        let lane =
+            super::PremergeLaneIdentity::new("test/repo", 42, "worker", "claim", "main", commit)
+                .expect("lane");
+        let lane_root = fixture.root.join("lane");
+        super::ensure_private_directory(&lane_root).expect("lane root");
+        let bundle = completed_generation_bundle(
+            &fixture,
+            &lane,
+            &lane_root,
+            1,
+            &fixture.root.join("count"),
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(bundle.manifest_body()).expect("observed manifest");
+
+        for mutation in ["manifest", "missing", "mixed", "uniform"] {
+            let mut malformed = manifest.clone();
+            if mutation == "manifest" {
+                malformed
+                    .as_object_mut()
+                    .expect("manifest")
+                    .remove("base_oid");
+            } else {
+                let scanners = malformed["scanners"]
+                    .as_array_mut()
+                    .expect("mutable scanners");
+                if mutation == "missing" {
+                    scanners[0]
+                        .as_object_mut()
+                        .expect("scanner object")
+                        .remove("base_oid");
+                } else if mutation == "mixed" {
+                    scanners[0]["base_oid"] = serde_json::Value::String("foreign-base".to_string());
+                } else {
+                    for scanner in scanners {
+                        scanner["base_oid"] = serde_json::Value::String(wrong_base.clone());
+                    }
+                }
+            }
+            let error = super::validate_persisted_observed_manifest(
+                &fixture.repo,
+                &bundle.artifact_root,
+                &bundle.attempt_root,
+                &malformed,
+                &bundle.qa,
+                &bundle.security,
+                &bundle.intent_digest,
+            )
+            .expect_err("missing or mixed persisted base identity must fail closed");
+            assert!(error.contains("base"), "{mutation}: {error}");
+        }
+    }
+
+    #[test]
     fn autonomous_executor_bridge_gitleaks_ignores_only_next_generated_output() {
         // Break caught: generated Next.js bundles replaying source-like test secrets into the
         // required scan while an equivalent finding in a source fixture must still block.
@@ -42095,7 +42397,7 @@ exit 19
 
         let error = super::run_required_scanners(
             &fixture.repo,
-            "HEAD",
+            &git_stdout(&fixture.repo, &["rev-parse", "HEAD"]),
             &artifact_root,
             &scanners,
             None,
@@ -42180,7 +42482,7 @@ exit 19
 
         super::run_required_scanners(
             &fixture.repo,
-            "HEAD",
+            &git_stdout(&fixture.repo, &["rev-parse", "HEAD"]),
             &artifact_root,
             &scanners,
             None,
@@ -42255,7 +42557,7 @@ exit 19
 
         let first = super::run_required_scanners(
             &fixture.repo,
-            "HEAD",
+            &git_stdout(&fixture.repo, &["rev-parse", "HEAD"]),
             &artifact_root,
             &scanners,
             None,
@@ -42264,7 +42566,7 @@ exit 19
         .expect("first scanner pass");
         let second = super::run_required_scanners(
             &fixture.repo,
-            "HEAD",
+            &git_stdout(&fixture.repo, &["rev-parse", "HEAD"]),
             &artifact_root,
             &scanners,
             None,
@@ -42384,8 +42686,6 @@ exit 19
                     "--production",
                     "--start",
                     "/safe/worktree",
-                    "--failOn",
-                    "GPL;AGPL;LGPL",
                 ],
             ),
         ];
@@ -42594,7 +42894,7 @@ exit 19
             "worker-42",
             "claim-42",
             "main",
-            commit,
+            commit.clone(),
         )
         .expect("typed lane");
         let mut qa = Vec::new();
@@ -42627,6 +42927,7 @@ exit 19
             }
             scanners.push(super::ObservedScanner {
                 name: scanner.to_string(),
+                base_oid: git_stdout(&fixture.repo, &["rev-parse", "HEAD"]),
                 command: records[0].clone(),
                 result_path: records[0].stdout_path.clone(),
                 result_digest: records[0].stdout_digest.clone(),
@@ -42635,6 +42936,7 @@ exit 19
 
         let complete = super::typed_evidence_from_observed(
             &fixture.repo,
+            &commit,
             &lane,
             Ok(&qa),
             Ok(&scanners),
@@ -42646,6 +42948,7 @@ exit 19
 
         let missing = super::typed_evidence_from_observed(
             &fixture.repo,
+            &commit,
             &lane,
             Ok(&qa),
             Ok(&scanners[..3]),
@@ -42659,6 +42962,7 @@ exit 19
 
         let failed = super::typed_evidence_from_observed(
             &fixture.repo,
+            &commit,
             &lane,
             Err("full suite failed"),
             Ok(&scanners),
@@ -42671,6 +42975,7 @@ exit 19
         );
         let lint_failed = super::typed_evidence_from_observed(
             &fixture.repo,
+            &commit,
             &lane,
             Ok(&qa),
             Err("implementation lint failed"),
