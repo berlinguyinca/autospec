@@ -255,7 +255,7 @@ pub(super) fn run_session_command(
     keep_alive: bool,
     bypassed: bool,
 ) -> Result<(), CommandFailure> {
-    let child = match super::worker::spawn_direct_command(
+    let spawned = match super::worker::spawn_direct_command(
         command,
         &context.repo,
         Some((context, state)),
@@ -268,7 +268,7 @@ pub(super) fn run_session_command(
             return session_result(Err(error), cleanup);
         }
     };
-    let mut child = ChildGuard::new(child, cfg!(unix));
+    let mut child = ChildGuard::new(spawned.child, cfg!(unix));
     let mut result = wait_for_session_child(child.child(), &mut session_lease);
     if matches!(result, Ok(SessionWait::Exited(_))) {
         child.disarm();
@@ -279,6 +279,13 @@ pub(super) fn run_session_command(
             error,
         ));
         child.wait_for_natural_group_exit();
+    }
+    if let Err(error) = spawned.foreground.restore() {
+        result = Err(add_secondary_failure(
+            result.err(),
+            "runtime terminal foreground restoration also failed",
+            error,
+        ));
     }
     let should_teardown = matches!(&result, Ok(SessionWait::Interrupted(_))) || !keep_alive;
     let cleanup = cleanup_session(context, state, plan, session_lease, should_teardown);
