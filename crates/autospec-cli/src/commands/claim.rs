@@ -3792,9 +3792,7 @@ fn heartbeat_final_binding(
         .st_nlink;
     let binding = match fstatat(directory, final_name, AtFlags::AT_SYMLINK_NOFOLLOW) {
         Err(nix::errno::Errno::ENOENT) => HeartbeatFinalBinding::Missing,
-        Ok(stat) if (stat.st_dev as u64, stat.st_ino as u64) == identity => {
-            HeartbeatFinalBinding::Exact
-        }
+        Ok(stat) if (stat.st_dev, stat.st_ino) == identity => HeartbeatFinalBinding::Exact,
         Ok(_) => HeartbeatFinalBinding::Other,
         Err(error) => {
             return Err(CommandFailure::diagnostic(format!(
