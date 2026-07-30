@@ -125,6 +125,9 @@ def approved_unsafe_boundary(relative_path, source, match):
         ("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs", "autonomous_executor_bridge_clean_supervision_restores_prior_subreaper_state"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(observed), 0, 0, 0, ) }",
         ("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs", "autonomous_executor_bridge_clean_supervision_preserves_enabled_subreaper_state"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(observed), 0, 0, 0, ) }",
         ("crates/autospec-cli/src/commands/runtime/env/session.rs", "verify_active"): "unsafe { nix::libc::geteuid() }",
+        ("crates/autospec-cli/src/commands/runtime/env/worker.rs", "capture"): "unsafe { nix::libc::tcgetpgrp(nix::libc::STDIN_FILENO) }",
+        ("crates/autospec-cli/src/commands/runtime/env/worker.rs", "configure_process_group"): "unsafe { command.pre_exec(setup_foreground_child); }",
+        ("crates/autospec-cli/src/commands/runtime/env/worker.rs", "set_terminal_foreground"): "unsafe { nix::libc::tcsetpgrp(nix::libc::STDIN_FILENO, process_group) }",
     }
     expected_body = reviewed.get((relative_path, function_name))
     normalized_function = (
