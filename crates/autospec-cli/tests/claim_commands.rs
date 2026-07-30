@@ -1885,6 +1885,53 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
 }
 
 #[test]
+fn claim_acquire_prelink_failure_keeps_pending_ref() {
+    let fixture = temp_dir("autospec-claim-acquire-prelink");
+    let bin = fixture.join("bin");
+    let repo = claim_git_repo(&fixture);
+    let heartbeats = fixture.join("heartbeats");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::create_dir(&heartbeats).unwrap();
+    std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o500)).unwrap();
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; fi\n",
+    );
+    let issue = r###"{"labels":["auto-implement","safety:reviewed"],"title":"claim","body":"## Safety review\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","author":"agent"}"###;
+    let output = autospec()
+        .args([
+            "claim",
+            "acquire",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--worker-id",
+            "worker-a",
+            "--branch",
+            "feat/test",
+            "--session-id",
+            "session-a",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .env("PATH", path_with(&bin))
+        .env("GH_ISSUE", issue)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let record = claim_ref_message(&repo, 42);
+    assert!(record.contains("\"state\":\"claimed\""), "{record}");
+    assert!(record.contains("\"step\":\"heartbeat-pending:"), "{record}");
+    assert!(!record.contains("\"state\":\"available\""), "{record}");
+}
+
+#[test]
 fn fresh_claim_blocks_same_worker_reacquire_even_with_wait_failure_comment() {
     let fixture = temp_dir("autospec-claim-acquire-same-owner");
     let bin = fixture.join("bin");
