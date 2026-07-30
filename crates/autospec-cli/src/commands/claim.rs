@@ -3779,22 +3779,95 @@ fn cleanup_startup_heartbeat(repo: &str, issue: u64, session_id: Option<&str>) {
 }
 
 pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
-    if let Ok(value) = std::env::var("AUTOSPEC_HEARTBEAT_DIR") {
-        if !value.is_empty() {
-            return Ok(value.into());
-        }
+    let root = if let Ok(value) = std::env::var("AUTOSPEC_HEARTBEAT_DIR") {
+        (!value.is_empty()).then(|| value.into())
+    } else {
+        None
     }
-    if let Ok(value) = std::env::var("AUTOSPEC_WATCHDOG_DIR") {
-        if !value.is_empty() {
-            return Ok(std::path::PathBuf::from(value).join("process-heartbeats"));
-        }
-    }
-    let home = std::env::var("HOME").map_err(|_| {
-        CommandFailure::diagnostic("could not resolve heartbeat directory: HOME is not set")
+    .or_else(|| {
+        std::env::var("AUTOSPEC_WATCHDOG_DIR")
+            .ok()
+            .filter(|value| !value.is_empty())
+            .map(|value| std::path::PathBuf::from(value).join("process-heartbeats"))
+    })
+    .map(Ok)
+    .unwrap_or_else(|| {
+        std::env::var("HOME")
+            .map(|home| std::path::PathBuf::from(home).join(".autospec/process-heartbeats"))
+            .map_err(|_| {
+                CommandFailure::diagnostic("could not resolve heartbeat directory: HOME is not set")
+            })
     })?;
-    Ok(std::path::PathBuf::from(home)
-        .join(".autospec")
-        .join("process-heartbeats"))
+    #[cfg(target_os = "linux")]
+    prepare_heartbeat_root_parent_with_hook(&root, |_| {})?;
+    Ok(root)
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_heartbeat_root_parent_with_hook(
+    root: &Path,
+    mut after_sync: impl FnMut(&'static str),
+) -> Result<(), CommandFailure> {
+    use nix::fcntl::{open, openat, AtFlags, OFlag};
+    use nix::sys::stat::{fchmod, fstat, fstatat, mkdirat, Mode, SFlag};
+
+    let invalid = || CommandFailure::diagnostic("heartbeat root must have a named parent");
+    let parent_path = root.parent().ok_or_else(&invalid)?;
+    let ancestor_path = parent_path.parent().ok_or_else(&invalid)?;
+    let component = parent_path.file_name().ok_or_else(invalid)?;
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let ancestor = open(ancestor_path, flags, Mode::empty()).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not open heartbeat parent ancestor: {error}"))
+    })?;
+    let created = match mkdirat(&ancestor, component, Mode::from_bits_truncate(0o700)) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::EEXIST) => false,
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not create heartbeat root parent: {error}"
+            )))
+        }
+    };
+    let parent = openat(&ancestor, component, flags, Mode::empty()).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not open heartbeat root parent: {error}"))
+    })?;
+    let before = fstat(&parent).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not inspect heartbeat root parent: {error}"))
+    })?;
+    if !SFlag::from_bits_truncate(before.st_mode).contains(SFlag::S_IFDIR)
+        || before.st_uid != nix::unistd::geteuid().as_raw()
+    {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat root parent must be owned by the effective user",
+        ));
+    }
+    if created || before.st_mode & 0o7777 != 0o700 {
+        fchmod(&parent, Mode::from_bits_truncate(0o700)).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not protect heartbeat root parent: {error}"))
+        })?;
+        nix::unistd::fsync(&parent).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not sync heartbeat root parent: {error}"))
+        })?;
+        after_sync("parent");
+    }
+    if created {
+        nix::unistd::fsync(&ancestor).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not sync heartbeat parent ancestor: {error}"))
+        })?;
+        after_sync("ancestor");
+    }
+    let expected = private_heartbeat_directory_identity(&parent, "root parent")?;
+    let current = fstatat(&ancestor, component, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not revalidate heartbeat root parent: {error}"
+        ))
+    })?;
+    if (current.st_dev, current.st_ino) != (expected.device, expected.inode) {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat root parent identity changed during preparation",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -3812,21 +3885,6 @@ fn open_heartbeat_writer_parent(path: &Path) -> Result<(fs::File, &str), Command
     let parent = options.open(parent).map_err(|error| {
         CommandFailure::diagnostic(format!("could not open heartbeat root parent: {error}"))
     })?;
-    let meta = parent
-        .metadata()
-        .map_err(|e| CommandFailure::diagnostic(e.to_string()))?;
-    if meta.uid() != nix::unistd::geteuid().as_raw() {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat parent not owned by euid",
-        ));
-    }
-    if meta.mode() & 0o7777 != 0o700 {
-        use std::os::unix::fs::PermissionsExt;
-        parent
-            .set_permissions(fs::Permissions::from_mode(0o700))
-            .and_then(|()| parent.sync_all())
-            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
-    }
     private_heartbeat_directory_identity(&parent, "writer parent")?;
     Ok((parent, name))
 }
@@ -5546,6 +5604,45 @@ mod tests {
             }
             assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "{role}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn heartbeat_root_parent_bootstrap_and_migration_are_durable() {
+        use std::os::unix::fs::symlink;
+
+        let (fixture, _) = startup_heartbeat_fixture("root-parent-bootstrap");
+        let parent = fixture.join(".autospec");
+        let root = parent.join("process-heartbeats");
+        let mut syncs = Vec::new();
+        super::prepare_heartbeat_root_parent_with_hook(&root, |boundary| syncs.push(boundary))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&parent).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+        assert_eq!(syncs, ["parent", "ancestor"]);
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o775)).unwrap();
+        syncs.clear();
+        super::prepare_heartbeat_root_parent_with_hook(&root, |boundary| syncs.push(boundary))
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&parent).unwrap().permissions().mode() & 0o7777,
+            0o700
+        );
+        assert_eq!(syncs, ["parent"]);
+
+        std::fs::remove_dir(&parent).unwrap();
+        let outside = fixture.join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let outside_mode = std::fs::metadata(&outside).unwrap().permissions().mode();
+        symlink(&outside, &parent).unwrap();
+        assert!(super::prepare_heartbeat_root_parent_with_hook(&root, |_| {}).is_err());
+        assert_eq!(
+            std::fs::metadata(&outside).unwrap().permissions().mode(),
+            outside_mode
+        );
     }
 
     #[cfg(target_os = "linux")]
