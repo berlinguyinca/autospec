@@ -2815,8 +2815,8 @@ pub(crate) fn run_required_scanners(
     stall_timeout: Duration,
 ) -> Result<Vec<ObservedScanner>, String> {
     ensure_private_directory(artifact_root)?;
-    if base_oid.trim().is_empty() {
-        return Err("executor required scanner base OID is empty".to_string());
+    if !canonical_git_oid(base_oid) {
+        return Err("executor required scanner base OID is not canonical".to_string());
     }
     let changed_paths = changed_paths_since_base(worktree, base_oid)?;
     let allow_preexisting_forbidden =
@@ -2904,12 +2904,13 @@ pub(crate) fn run_required_scanners(
             result_digest: sha256_hex(&result),
         });
     }
-    validate_observed_scanners(worktree, &observations)?;
+    validate_observed_scanners(worktree, base_oid, &observations)?;
     Ok(observations)
 }
 
 fn typed_evidence_from_observed(
     worktree: &Path,
+    expected_base_oid: &str,
     lane: &PremergeLaneIdentity,
     qa_commands: Result<&[ObservedDirectCommand], &str>,
     scanners: Result<&[ObservedScanner], &str>,
@@ -2942,10 +2943,11 @@ fn typed_evidence_from_observed(
         Err(reason) => EvidenceVerdict::Failed {
             reason: reason.to_string(),
         },
-        Ok(observed) => validate_observed_scanners(worktree, observed).map_or_else(
-            |reason| EvidenceVerdict::Failed { reason },
-            |()| EvidenceVerdict::Pass,
-        ),
+        Ok(observed) => validate_observed_scanners(worktree, expected_base_oid, observed)
+            .map_or_else(
+                |reason| EvidenceVerdict::Failed { reason },
+                |()| EvidenceVerdict::Pass,
+            ),
     };
     if matches!(security_verdict, EvidenceVerdict::Pass) {
         if let Some(output) = model_output
@@ -2977,7 +2979,11 @@ fn typed_evidence_from_observed(
     )
 }
 
-fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> Result<(), String> {
+fn validate_observed_scanners(
+    worktree: &Path,
+    expected_base_oid: &str,
+    scanners: &[ObservedScanner],
+) -> Result<(), String> {
     let names = scanners
         .iter()
         .map(|scanner| scanner.name.as_str())
@@ -2988,21 +2994,16 @@ fn validate_observed_scanners(worktree: &Path, scanners: &[ObservedScanner]) -> 
             "observed security evidence is missing or duplicates a required scanner".to_string(),
         );
     }
-    let base_oids = scanners
-        .iter()
-        .map(|scanner| scanner.base_oid.as_str())
-        .collect::<BTreeSet<_>>();
-    let base_oid = base_oids
-        .iter()
-        .next()
-        .copied()
-        .filter(|base_oid| base_oids.len() == 1 && !base_oid.trim().is_empty())
-        .ok_or_else(|| {
-            "observed security evidence has missing or mixed scanner base OIDs".to_string()
-        })?;
-    let changed_paths = changed_paths_since_base(worktree, base_oid)?;
+    if !canonical_git_oid(expected_base_oid)
+        || scanners
+            .iter()
+            .any(|scanner| scanner.base_oid != expected_base_oid)
+    {
+        return Err("observed scanner differs from canonical expected base OID".to_string());
+    }
+    let changed_paths = changed_paths_since_base(worktree, expected_base_oid)?;
     let allow_preexisting_forbidden =
-        !npm_dependency_inputs_changed(worktree, base_oid, &changed_paths)?;
+        !npm_dependency_inputs_changed(worktree, expected_base_oid, &changed_paths)?;
     for scanner in scanners {
         validate_observed_command(worktree, &scanner.command)?;
         reject_symlink_path(&scanner.result_path)?;
@@ -3210,6 +3211,7 @@ impl ObservedEvidenceBundle {
 struct EvidenceIntent {
     completed_at: u64,
     digest: String,
+    base_oid: String,
     runtime_session_id: Option<String>,
     runtime_environment_dir: Option<PathBuf>,
     attempt_root: PathBuf,
@@ -3230,9 +3232,11 @@ fn load_or_create_evidence_intent(
             fs::read_to_string(&path).map_err(|error| format!("read evidence intent: {error}"))?;
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| format!("parse evidence intent: {error}"))?;
-        if value.get("schema").and_then(serde_json::Value::as_u64) != Some(1)
+        if value.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
             || value.get("lane_digest").and_then(serde_json::Value::as_str)
                 != Some(lane.lane_digest().as_str())
+            || value.get("base_oid").and_then(serde_json::Value::as_str)
+                != Some(request.state.identity.base_oid.as_str())
             || value
                 .get("semantic_input_digest")
                 .and_then(serde_json::Value::as_str)
@@ -3266,6 +3270,7 @@ fn load_or_create_evidence_intent(
         return Ok(EvidenceIntent {
             completed_at,
             digest: sha256_hex(body.as_bytes()),
+            base_oid: request.state.identity.base_oid.clone(),
             runtime_session_id: value
                 .get("runtime_session_id")
                 .and_then(serde_json::Value::as_str)
@@ -3280,8 +3285,9 @@ fn load_or_create_evidence_intent(
     let completed_at = unix_now()?;
     let run_id = format!("evidence-{}", sha256_hex(input_digest.as_bytes()));
     let body = serde_json::json!({
-        "schema": 1,
+        "schema": 2,
         "lane_digest": lane.lane_digest(),
+        "base_oid": request.state.identity.base_oid,
         "semantic_input_digest": semantic_input_digest,
         "input_digest": input_digest,
         "run_id": run_id,
@@ -3294,6 +3300,7 @@ fn load_or_create_evidence_intent(
     Ok(EvidenceIntent {
         completed_at,
         digest: sha256_hex(body.as_bytes()),
+        base_oid: request.state.identity.base_oid.clone(),
         runtime_session_id: request
             .runtime
             .map(DirectRuntimeAdapter::session_id)
@@ -3888,7 +3895,10 @@ fn observed_evidence_bundle(
             return Err("observed QA argv differs from the canonical declared plan".to_string());
         }
     }
-    validate_observed_scanners(worktree, scanners)?;
+    if intent.base_oid != base_oid {
+        return Err("observed bundle base differs from durable intent".to_string());
+    }
+    validate_observed_scanners(worktree, base_oid, scanners)?;
     for scanner in scanners {
         if scanner.command.origin != ObservationOrigin::Live {
             return Err(format!(
@@ -4023,6 +4033,7 @@ fn observed_evidence_bundle(
     let manifest_body = serde_json::json!({
         "schema": 2,
         "lane_digest": qa.lane.lane_digest(),
+        "base_oid": base_oid,
         "intent_digest": intent.digest,
         "qa_run_id": qa.run_id,
         "security_run_id": security.run_id,
@@ -4088,17 +4099,24 @@ pub(super) fn validate_persisted_observed_manifest(
     }
     let intent: serde_json::Value = serde_json::from_str(&intent_body)
         .map_err(|error| format!("parse evidence intent: {error}"))?;
-    if intent
-        .get("lane_digest")
+    let expected_base_oid = intent
+        .get("base_oid")
         .and_then(serde_json::Value::as_str)
-        != Some(lane_digest.as_str())
+        .ok_or_else(|| "persisted evidence intent base OID is missing".to_string())?;
+    if intent.get("schema").and_then(serde_json::Value::as_u64) != Some(2)
+        || !canonical_git_oid(expected_base_oid)
+        || manifest.get("base_oid").and_then(serde_json::Value::as_str) != Some(expected_base_oid)
+        || intent
+            .get("lane_digest")
+            .and_then(serde_json::Value::as_str)
+            != Some(lane_digest.as_str())
         || intent
             .get("completed_at")
             .and_then(serde_json::Value::as_u64)
             != Some(qa.completed_at)
         || qa.completed_at != security.completed_at
     {
-        return Err("persisted evidence intent time or lane changed".to_string());
+        return Err("persisted evidence intent base, time, or lane changed".to_string());
     }
     let intended_session = intent
         .get("runtime_session_id")
@@ -4189,7 +4207,7 @@ pub(super) fn validate_persisted_observed_manifest(
             result_digest,
         });
     }
-    validate_observed_scanners(worktree, &scanners)?;
+    validate_observed_scanners(worktree, expected_base_oid, &scanners)?;
     if scanner_evidence_run_id(&qa.lane, &scanners) != security.run_id
         || manifest
             .get("security_run_id")
@@ -4393,6 +4411,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
         )?;
         let (qa, security) = typed_evidence_from_observed(
             &request.state.identity.worktree,
+            &request.state.identity.base_oid,
             &lane,
             Ok(&observations),
             Ok(&scanners),
@@ -40482,9 +40501,11 @@ exit 19
         );
         let attempt_root = lane_root.join("attempts").join(&input_digest[..24]);
         super::ensure_private_directory(&attempt_root).expect("attempt root");
+        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
         let intent_body = serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "lane_digest": lane.lane_digest(),
+            "base_oid": base_oid,
             "semantic_input_digest": "test-semantic-input",
             "input_digest": input_digest,
             "run_id": format!("test-run-{generation}"),
@@ -40502,6 +40523,7 @@ exit 19
         let intent = super::EvidenceIntent {
             completed_at: 1_800_000_000 + generation,
             digest: autospec_core::autonomous::waterfall::sha256_hex(intent_body.as_bytes()),
+            base_oid: base_oid.clone(),
             runtime_session_id: None,
             runtime_environment_dir: None,
             attempt_root: attempt_root.clone(),
@@ -40536,7 +40558,6 @@ exit 19
         let scanner_executables = super::ScannerExecutables {
             paths: scanner_paths,
         };
-        let base_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
         let scanners = super::run_required_scanners(
             &fixture.repo,
             &base_oid,
@@ -40548,6 +40569,7 @@ exit 19
         .expect("live scanner observations");
         let (qa_evidence, security_evidence) = super::typed_evidence_from_observed(
             &fixture.repo,
+            &base_oid,
             lane,
             Ok(&qa),
             Ok(&scanners),
@@ -42170,6 +42192,16 @@ exit 19
             r#"{"fixture@1.0.0":{"licenses":"LGPL-3.0"}}"#,
         );
 
+        let error = super::run_required_scanners(
+            &fixture.repo,
+            "HEAD",
+            &fixture.root.join("symbolic-security"),
+            &scanners,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect_err("symbolic scanner base must fail closed");
+        assert!(error.contains("canonical"), "{error}");
         let observed = super::run_required_scanners(
             &fixture.repo,
             &base_oid,
@@ -42192,20 +42224,19 @@ exit 19
                 .expect("fixture-relative result"),
             Path::new("security/license-checker/process/command-000.stdout")
         );
-        assert!(
-            !license
-                .command
-                .argv
-                .iter()
-                .any(|argument| argument == "--failOn"),
-            "{:?}",
-            license.command.argv
-        );
         let result: serde_json::Value = serde_json::from_slice(
             &fs::read(&license.result_path).expect("private license result"),
         )
         .expect("native license-checker JSON");
         assert_eq!(result["fixture@1.0.0"]["licenses"], "LGPL-3.0");
+        let mut wrong_base = observed.clone();
+        let head_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        wrong_base
+            .iter_mut()
+            .for_each(|scanner| scanner.base_oid = head_oid.clone());
+        let error = super::validate_observed_scanners(&fixture.repo, &base_oid, &wrong_base)
+            .expect_err("uniform wrong scanner base must fail closed");
+        assert!(error.contains("expected base"), "{error}");
         #[cfg(unix)]
         assert_eq!(
             fs::metadata(&license.result_path)
@@ -42272,6 +42303,11 @@ exit 19
     #[test]
     fn autonomous_executor_bridge_license_checker_persisted_base_identity_fails_closed() {
         let fixture = GitFixture::new("license-persisted-base");
+        git(
+            &fixture.repo,
+            &["commit", "--allow-empty", "-m", "expected base"],
+        );
+        let wrong_base = git_stdout(&fixture.repo, &["rev-parse", "HEAD^"]);
         let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
         let lane =
             super::PremergeLaneIdentity::new("test/repo", 42, "worker", "claim", "main", commit)
@@ -42287,25 +42323,30 @@ exit 19
         );
         let manifest: serde_json::Value =
             serde_json::from_str(bundle.manifest_body()).expect("observed manifest");
-        let expected_base = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
 
-        assert_eq!(manifest["schema"], 2);
-        for scanner in manifest["scanners"].as_array().expect("scanner entries") {
-            assert_eq!(scanner["base_oid"].as_str(), Some(expected_base.as_str()));
-        }
-
-        for mutation in ["missing", "mixed"] {
+        for mutation in ["manifest", "missing", "mixed", "uniform"] {
             let mut malformed = manifest.clone();
-            let scanners = malformed["scanners"]
-                .as_array_mut()
-                .expect("mutable scanners");
-            if mutation == "missing" {
-                scanners[0]
+            if mutation == "manifest" {
+                malformed
                     .as_object_mut()
-                    .expect("scanner object")
+                    .expect("manifest")
                     .remove("base_oid");
             } else {
-                scanners[0]["base_oid"] = serde_json::Value::String("foreign-base".to_string());
+                let scanners = malformed["scanners"]
+                    .as_array_mut()
+                    .expect("mutable scanners");
+                if mutation == "missing" {
+                    scanners[0]
+                        .as_object_mut()
+                        .expect("scanner object")
+                        .remove("base_oid");
+                } else if mutation == "mixed" {
+                    scanners[0]["base_oid"] = serde_json::Value::String("foreign-base".to_string());
+                } else {
+                    for scanner in scanners {
+                        scanner["base_oid"] = serde_json::Value::String(wrong_base.clone());
+                    }
+                }
             }
             let error = super::validate_persisted_observed_manifest(
                 &fixture.repo,
@@ -42356,7 +42397,7 @@ exit 19
 
         let error = super::run_required_scanners(
             &fixture.repo,
-            "HEAD",
+            &git_stdout(&fixture.repo, &["rev-parse", "HEAD"]),
             &artifact_root,
             &scanners,
             None,
@@ -42441,7 +42482,7 @@ exit 19
 
         super::run_required_scanners(
             &fixture.repo,
-            "HEAD",
+            &git_stdout(&fixture.repo, &["rev-parse", "HEAD"]),
             &artifact_root,
             &scanners,
             None,
@@ -42516,7 +42557,7 @@ exit 19
 
         let first = super::run_required_scanners(
             &fixture.repo,
-            "HEAD",
+            &git_stdout(&fixture.repo, &["rev-parse", "HEAD"]),
             &artifact_root,
             &scanners,
             None,
@@ -42525,7 +42566,7 @@ exit 19
         .expect("first scanner pass");
         let second = super::run_required_scanners(
             &fixture.repo,
-            "HEAD",
+            &git_stdout(&fixture.repo, &["rev-parse", "HEAD"]),
             &artifact_root,
             &scanners,
             None,
@@ -42853,7 +42894,7 @@ exit 19
             "worker-42",
             "claim-42",
             "main",
-            commit,
+            commit.clone(),
         )
         .expect("typed lane");
         let mut qa = Vec::new();
@@ -42895,6 +42936,7 @@ exit 19
 
         let complete = super::typed_evidence_from_observed(
             &fixture.repo,
+            &commit,
             &lane,
             Ok(&qa),
             Ok(&scanners),
@@ -42906,6 +42948,7 @@ exit 19
 
         let missing = super::typed_evidence_from_observed(
             &fixture.repo,
+            &commit,
             &lane,
             Ok(&qa),
             Ok(&scanners[..3]),
@@ -42919,6 +42962,7 @@ exit 19
 
         let failed = super::typed_evidence_from_observed(
             &fixture.repo,
+            &commit,
             &lane,
             Err("full suite failed"),
             Ok(&scanners),
@@ -42931,6 +42975,7 @@ exit 19
         );
         let lint_failed = super::typed_evidence_from_observed(
             &fixture.repo,
+            &commit,
             &lane,
             Ok(&qa),
             Err("implementation lint failed"),
