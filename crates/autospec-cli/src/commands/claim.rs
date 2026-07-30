@@ -3729,40 +3729,101 @@ fn publish_session_binding(
 
 #[cfg(unix)]
 #[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatPublicationDurability {
+    DirectorySyncPending,
+    Durable,
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
 #[derive(Debug)]
 struct HeartbeatPublication {
-    final_name: String,
+    file: fs::File,
     device: u64,
     inode: u64,
+    durability: HeartbeatPublicationDurability,
 }
 
 #[cfg(unix)]
-fn cleanup_private_heartbeat_stage(
+#[allow(dead_code)]
+#[derive(Debug)]
+enum HeartbeatPublicationFailure {
+    PreCommit(CommandFailure),
+    PostCommit {
+        publication: HeartbeatPublication,
+        error: CommandFailure,
+    },
+}
+
+#[cfg(unix)]
+fn validate_heartbeat_final_name(final_name: &str) -> Result<(), HeartbeatPublicationFailure> {
+    use std::path::Component;
+
+    let mut components = Path::new(final_name).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(name)), None) if name == std::ffi::OsStr::new(final_name) => Ok(()),
+        _ => Err(HeartbeatPublicationFailure::PreCommit(
+            CommandFailure::diagnostic("heartbeat final name must be one normal component"),
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatFinalBinding {
+    Missing,
+    Exact,
+    Other,
+}
+
+#[cfg(target_os = "linux")]
+fn heartbeat_final_binding(
+    file: &fs::File,
     directory: &impl std::os::fd::AsFd,
-    stage: &str,
-    role: &str,
-    original: CommandFailure,
-    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
-) -> CommandFailure {
-    use nix::unistd::{fsync, unlinkat, UnlinkatFlags};
+    final_name: &str,
+    identity: (u64, u64),
+) -> Result<(HeartbeatFinalBinding, u64), CommandFailure> {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::{fstat, fstatat};
 
-    if let Err(error) = boundary(role, "cleanup") {
-        return CommandFailure::diagnostic(format!("{original}; stage cleanup failed: {error}"));
-    }
-    if let Err(error) = unlinkat(directory, stage, UnlinkatFlags::NoRemoveDir) {
-        return CommandFailure::diagnostic(format!(
-            "{original}; could not remove private stage {stage}: {error}"
-        ));
-    }
-    if let Err(error) = fsync(directory) {
-        return CommandFailure::diagnostic(format!(
-            "{original}; could not sync private stage cleanup: {error}"
-        ));
-    }
-    original
+    let links = fstat(file)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat fstat: {error}")))?
+        .st_nlink;
+    let binding = match fstatat(directory, final_name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Err(nix::errno::Errno::ENOENT) => HeartbeatFinalBinding::Missing,
+        Ok(stat) if (stat.st_dev as u64, stat.st_ino as u64) == identity => {
+            HeartbeatFinalBinding::Exact
+        }
+        Ok(_) => HeartbeatFinalBinding::Other,
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not inspect heartbeat final binding: {error}"
+            )))
+        }
+    };
+    Ok((binding, links))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+fn post_commit_failure(
+    file: fs::File,
+    identity: (u64, u64),
+    durability: HeartbeatPublicationDurability,
+    error: CommandFailure,
+) -> HeartbeatPublicationFailure {
+    HeartbeatPublicationFailure::PostCommit {
+        publication: HeartbeatPublication {
+            file,
+            device: identity.0,
+            inode: identity.1,
+            durability,
+        },
+        error,
+    }
+}
+
+#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 fn publish_private_heartbeat_file(
     directory: &impl std::os::fd::AsFd,
@@ -3770,123 +3831,151 @@ fn publish_private_heartbeat_file(
     document: &[u8],
     role: &str,
     boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
-) -> Result<HeartbeatPublication, CommandFailure> {
-    use nix::fcntl::{openat, AtFlags, OFlag};
-    use nix::sys::stat::{fchmod, fstat, fstatat, Mode};
-    use nix::unistd::{fsync, linkat, unlinkat, UnlinkatFlags};
+) -> Result<HeartbeatPublication, HeartbeatPublicationFailure> {
+    use nix::fcntl::{openat, AtFlags, OFlag, AT_FDCWD};
+    use nix::sys::stat::{fchmod, fstat, Mode};
+    use nix::unistd::{fsync, linkat};
+    use std::os::fd::AsRawFd;
 
-    private_heartbeat_directory_identity(directory, "publication")?;
-    let stage = format!(
-        ".heartbeat-stage-{}-{}",
-        std::process::id(),
-        UNIQUE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-    );
+    let pre = HeartbeatPublicationFailure::PreCommit;
+    validate_heartbeat_final_name(final_name)?;
+    private_heartbeat_directory_identity(directory, "publication").map_err(pre)?;
     let descriptor = openat(
         directory,
-        stage.as_str(),
-        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        ".",
+        OFlag::O_TMPFILE | OFlag::O_RDWR | OFlag::O_CLOEXEC,
         Mode::from_bits_truncate(0o600),
     )
     .map_err(|error| {
-        CommandFailure::diagnostic(format!("could not stage {role} heartbeat: {error}"))
+        pre(CommandFailure::diagnostic(format!(
+            "anonymous heartbeat staging is unavailable: {error}"
+        )))
     })?;
     let mut file = fs::File::from(descriptor);
-    let prepared = (|| {
-        boundary(role, "chmod")?;
-        fchmod(&file, Mode::from_bits_truncate(0o600)).map_err(|error| {
-            CommandFailure::diagnostic(format!("could not protect {role} heartbeat: {error}"))
-        })?;
-        boundary(role, "write")?;
-        file.write_all(document).map_err(|error| {
-            CommandFailure::diagnostic(format!("could not write {role} heartbeat: {error}"))
-        })?;
-        boundary(role, "fsync")?;
-        file.sync_all().map_err(|error| {
-            CommandFailure::diagnostic(format!("could not persist {role} heartbeat: {error}"))
-        })?;
-        boundary(role, "publish")
-    })();
-    if let Err(error) = prepared {
-        drop(file);
-        return Err(cleanup_private_heartbeat_stage(
-            directory, &stage, role, error, boundary,
-        ));
+    let fail = |message| pre(CommandFailure::diagnostic(message));
+    boundary(role, "chmod").map_err(pre)?;
+    fchmod(&file, Mode::from_bits_truncate(0o600))
+        .map_err(|error| fail(format!("heartbeat chmod: {error}")))?;
+    boundary(role, "write").map_err(pre)?;
+    file.write_all(document)
+        .map_err(|error| fail(format!("heartbeat write: {error}")))?;
+    boundary(role, "file-fsync").map_err(pre)?;
+    file.sync_all()
+        .map_err(|error| fail(format!("heartbeat fsync: {error}")))?;
+    let stat = fstat(&file).map_err(|error| fail(format!("heartbeat fstat: {error}")))?;
+    let identity = (stat.st_dev as u64, stat.st_ino as u64);
+    boundary(role, "before-link").map_err(pre)?;
+
+    let mut link_error = linkat(&file, "", directory, final_name, AtFlags::AT_EMPTY_PATH).err();
+    let (mut binding, mut link_count) =
+        match heartbeat_final_binding(&file, directory, final_name, identity) {
+            Ok(state) => state,
+            Err(error) => {
+                return Err(post_commit_failure(
+                    file,
+                    identity,
+                    HeartbeatPublicationDurability::DirectorySyncPending,
+                    error,
+                ))
+            }
+        };
+    let unavailable = matches!(
+        link_error,
+        Some(
+            nix::errno::Errno::EPERM
+                | nix::errno::Errno::EINVAL
+                | nix::errno::Errno::ENOENT
+                | nix::errno::Errno::EOPNOTSUPP
+        )
+    );
+    if unavailable && binding == HeartbeatFinalBinding::Missing && link_count == 0 {
+        let proc_path = format!("/proc/self/fd/{}", file.as_raw_fd());
+        link_error = linkat(
+            AT_FDCWD,
+            proc_path.as_str(),
+            directory,
+            final_name,
+            AtFlags::AT_SYMLINK_FOLLOW,
+        )
+        .err();
+        (binding, link_count) =
+            match heartbeat_final_binding(&file, directory, final_name, identity) {
+                Ok(state) => state,
+                Err(error) => {
+                    return Err(post_commit_failure(
+                        file,
+                        identity,
+                        HeartbeatPublicationDurability::DirectorySyncPending,
+                        error,
+                    ))
+                }
+            };
     }
-    let identity = boundary(role, "inspect").and_then(|()| {
-        fstat(&file).map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "could not inspect staged {role} heartbeat: {error}"
-            ))
-        })
-    });
-    let identity = match identity {
-        Ok(identity) => identity,
-        Err(error) => {
-            drop(file);
-            return Err(cleanup_private_heartbeat_stage(
-                directory, &stage, role, error, boundary,
+    if binding != HeartbeatFinalBinding::Exact {
+        let error = CommandFailure::diagnostic(format!(
+            "heartbeat link failed or lost identity: {}",
+            link_error.map_or_else(
+                || "final binding changed".to_string(),
+                |error| error.to_string()
+            )
+        ));
+        if link_count > 0 {
+            return Err(post_commit_failure(
+                file,
+                identity,
+                HeartbeatPublicationDurability::DirectorySyncPending,
+                error,
             ));
         }
-    };
-    if let Err(error) = linkat(
-        directory,
-        stage.as_str(),
-        directory,
-        final_name,
-        AtFlags::empty(),
-    ) {
-        drop(file);
-        return Err(cleanup_private_heartbeat_stage(
-            directory,
-            &stage,
-            role,
-            CommandFailure::diagnostic(format!("could not publish {role} heartbeat: {error}")),
-            boundary,
+        return Err(pre(error));
+    }
+
+    if let Err(error) = boundary(role, "directory-fsync").and_then(|()| {
+        fsync(directory).map_err(|error| CommandFailure::diagnostic(error.to_string()))
+    }) {
+        return Err(post_commit_failure(
+            file,
+            identity,
+            HeartbeatPublicationDurability::DirectorySyncPending,
+            error,
         ));
     }
-    let verified = fstatat(directory, final_name, AtFlags::AT_SYMLINK_NOFOLLOW)
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not verify {role} heartbeat: {error}"))
-        })
-        .and_then(|published| {
-            ((published.st_dev, published.st_ino) == (identity.st_dev, identity.st_ino))
-                .then_some(())
-                .ok_or_else(|| {
-                    CommandFailure::diagnostic(format!(
-                        "{role} heartbeat final identity changed during publication"
-                    ))
-                })
-        });
-    if let Err(error) = verified {
-        drop(file);
-        return Err(cleanup_private_heartbeat_stage(
-            directory, &stage, role, error, boundary,
+    if let Err(error) = boundary(role, "revalidate").and_then(|()| {
+        (heartbeat_final_binding(&file, directory, final_name, identity)?.0
+            == HeartbeatFinalBinding::Exact)
+            .then_some(())
+            .ok_or_else(|| CommandFailure::diagnostic("heartbeat final identity changed"))
+    }) {
+        return Err(post_commit_failure(
+            file,
+            identity,
+            HeartbeatPublicationDurability::Durable,
+            error,
         ));
-    }
-    unlinkat(directory, stage.as_str(), UnlinkatFlags::NoRemoveDir).map_err(|error| {
-        CommandFailure::diagnostic(format!("could not retire private stage {stage}: {error}"))
-    })?;
-    fsync(directory).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not sync published {role} heartbeat: {error}"
-        ))
-    })?;
-    let published =
-        fstatat(directory, final_name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
-            CommandFailure::diagnostic(format!("could not recheck {role} heartbeat: {error}"))
-        })?;
-    if (published.st_dev, published.st_ino, published.st_nlink)
-        != (identity.st_dev, identity.st_ino, 1)
-    {
-        return Err(CommandFailure::diagnostic(format!(
-            "{role} heartbeat identity changed after publication"
-        )));
     }
     Ok(HeartbeatPublication {
-        final_name: final_name.to_string(),
-        device: identity.st_dev as u64,
-        inode: identity.st_ino as u64,
+        file,
+        device: identity.0,
+        inode: identity.1,
+        durability: HeartbeatPublicationDurability::Durable,
     })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+#[allow(dead_code)]
+fn publish_private_heartbeat_file(
+    _directory: &impl std::os::fd::AsFd,
+    final_name: &str,
+    _document: &[u8],
+    _role: &str,
+    _boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<HeartbeatPublication, HeartbeatPublicationFailure> {
+    validate_heartbeat_final_name(final_name)?;
+    Err(HeartbeatPublicationFailure::PreCommit(
+        CommandFailure::diagnostic(
+            "identity-bound heartbeat publication is unavailable on this platform",
+        ),
+    ))
 }
 
 fn heartbeat_session_key(session_id: &str) -> String {
