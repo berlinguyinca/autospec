@@ -5284,18 +5284,25 @@ mod tests {
         reader: impl FnOnce() -> std::io::Result<super::RegularFileSnapshot> + Send + 'static,
     ) {
         let (send, receive) = std::sync::mpsc::channel();
-        let reader = std::thread::spawn(move || send.send(reader()).unwrap());
+        let reader = std::thread::spawn(move || {
+            let _ = send.send(reader());
+        });
         match receive.recv_timeout(std::time::Duration::from_secs(2)) {
             Ok(result) => assert!(result.is_err(), "FIFO was accepted as a regular file"),
             Err(error) => {
-                let writer = nix::fcntl::open(
+                if let Ok(writer) = nix::fcntl::open(
                     fifo,
                     nix::fcntl::OFlag::O_WRONLY | nix::fcntl::OFlag::O_NONBLOCK,
                     nix::sys::stat::Mode::empty(),
-                )
-                .expect("release blocked FIFO reader without writing payload");
-                reader.join().unwrap();
-                drop(writer);
+                ) {
+                    drop(writer);
+                }
+                if receive
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .is_ok()
+                {
+                    let _ = reader.join();
+                }
                 panic!("heartbeat FIFO reader blocked: {error}");
             }
         }
@@ -5774,6 +5781,33 @@ claimed|review
         assert_fifo_reader_nonblocking(&fifo, move || {
             super::read_regular_file_at_no_follow(&root, &name)
         });
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_heartbeat_fifo_timeout_recovery_is_bounded() {
+        let (directory, fifo) = startup_heartbeat_fixture("fifo-timeout-recovery");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::from_bits_truncate(0o600)).unwrap();
+        let read_path = fifo.clone();
+        let panic = std::panic::catch_unwind(|| {
+            assert_fifo_reader_nonblocking(&fifo, move || {
+                let mut file = std::fs::File::open(read_path)?;
+                let mut payload = Vec::new();
+                std::io::Read::read_to_end(&mut file, &mut payload)?;
+                Err(std::io::Error::other("payload reader completed"))
+            });
+        })
+        .expect_err("timeout recovery must retain the original failure");
+        let message = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .expect("timeout recovery panic message");
+        assert!(
+            message.contains("heartbeat FIFO reader blocked: timed out waiting on channel"),
+            "unexpected timeout recovery diagnostic: {message}"
+        );
         std::fs::remove_dir_all(directory).unwrap();
     }
 
