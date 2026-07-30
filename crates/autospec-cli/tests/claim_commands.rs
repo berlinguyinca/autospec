@@ -1412,6 +1412,211 @@ exit 17
 }
 
 #[test]
+fn claim_stale_heartbeat_recovery() {
+    let fixture = temp_dir("autospec-claim-stale-heartbeat-recovery");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    let comments = fixture.join("comments.json");
+    let heartbeats = fixture.join("heartbeats/o7_testorg_r8_testrepo");
+    let repo = claim_git_repo(&fixture);
+    let worker = "test-host:test-user:rust:2147483647:nonce-a";
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            worker,
+            "claimed",
+            "",
+            "",
+            "claimed",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-a"),
+    );
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    std::fs::create_dir_all(&heartbeats).expect("heartbeat directory");
+    std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o700))
+        .expect("private heartbeat directory");
+    std::fs::write(&comments, "[]\n").expect("comments fixture");
+    std::fs::write(
+        heartbeats.join("42.json"),
+        format!(
+            r#"{{"repo":"testorg/testrepo","issue":"42","worker_id":"{worker}","branch":"","pr":"","claim_id":"claim-a","step":"claimed","ts":1,"ttl_seconds":1,"pid":2147483647,"nonce":"nonce-a"}}"#
+        ),
+    )
+    .expect("expired heartbeat");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" >> "$AUTOSPEC_CLAIM_LOG"
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/42/comments ]; then
+  cat "$AUTOSPEC_CLAIM_COMMENTS"
+  exit 0
+fi
+if { [ "$1" = issue ] && [ "$2" = comment ]; } || { [ "$1" = issue ] && [ "$2" = edit ]; }; then
+  exit 0
+fi
+if [ "$1" = api ] && [ "$2" = repos/testorg/testrepo/issues/comments/100 ]; then exit 0; fi
+exit 17
+"#,
+    );
+
+    let output = autospec()
+        .args([
+            "claim",
+            "state",
+            "recover-stale-startup",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--timeout-seconds",
+            "1",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+        .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+        .env("HOSTNAME", "test-host")
+        .env("USER", "test-user")
+        .output()
+        .expect("autospec stale heartbeat recovery starts");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":true"));
+    assert!(!heartbeats.join("42.json").exists());
+    assert!(heartbeats
+        .join("quarantine/startup-heartbeats/42-6e6f6e63652d61.json")
+        .is_file());
+    assert!(claim_ref_message(&repo, 42).contains("\"state\":\"available\""));
+
+    let live_pid = std::process::id();
+    let live_worker = format!("test-host:test-user:rust:{live_pid}:nonce-live");
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            &live_worker,
+            "claimed",
+            "",
+            "",
+            "claimed",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-live"),
+    );
+    let claimed_oid = claim_ref_oid(&repo, 42);
+    std::fs::write(
+        heartbeats.join("42.json"),
+        format!(
+            r#"{{"repo":"testorg/testrepo","issue":"42","worker_id":"{live_worker}","branch":"","pr":"","claim_id":"claim-live","step":"claimed","ts":1,"ttl_seconds":1,"pid":{live_pid},"nonce":"nonce-live"}}"#
+        ),
+    )
+    .expect("live heartbeat");
+    std::fs::write(&log, "").expect("reset gh log");
+    let blocked = autospec()
+        .args([
+            "claim",
+            "state",
+            "recover-stale-startup",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--timeout-seconds",
+            "1",
+        ])
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+        .env("HOSTNAME", "test-host")
+        .env("USER", "test-user")
+        .output()
+        .expect("autospec live heartbeat recovery starts");
+    assert!(String::from_utf8_lossy(&blocked.stdout).contains("\"recovered\":false"));
+    assert_eq!(claim_ref_oid(&repo, 42), claimed_oid);
+    assert!(heartbeats.join("42.json").is_file());
+    assert!(!std::fs::read_to_string(&log)
+        .expect("blocked gh log")
+        .contains("issue\nedit"));
+
+    let legacy_worker = "test-host:test-user:rust:2147483647:nonce-legacy";
+    std::fs::write(
+        &comments,
+        format!(
+            r#"[{{"id":100,"updated_at":"2000-01-01T00:00:00Z","body":"<!-- autospec-run-state:begin -->\n{{\"schema\":1,\"repo\":\"testorg/testrepo\",\"issue\":42,\"worker_id\":\"{legacy_worker}\",\"state\":\"claimed\",\"branch\":\"\",\"pr\":\"\",\"step\":\"claimed\",\"paths\":[],\"claimed_at\":\"2000-01-01T00:00:00Z\",\"updated_at\":\"2000-01-01T00:00:00Z\",\"ttl_seconds\":1,\"claim_id\":\"claim-legacy\"}}\n<!-- autospec-run-state:end -->"}}]"#
+        ),
+    )
+    .expect("legacy comments");
+    std::fs::write(
+        heartbeats.join("42.json"),
+        format!(
+            r#"{{"repo":"testorg/testrepo","issue":"42","worker_id":"{legacy_worker}","branch":"","pr":"","claim_id":"claim-legacy","step":"claimed","ts":1,"ttl_seconds":1,"pid":2147483647,"nonce":"nonce-legacy"}}"#
+        ),
+    )
+    .expect("legacy heartbeat");
+    std::fs::write(&log, "").expect("reset legacy gh log");
+    let legacy = autospec()
+        .args([
+            "claim",
+            "state",
+            "recover-stale-startup",
+            "--issue",
+            "42",
+            "--repo",
+            "testorg/testrepo",
+            "--timeout-seconds",
+            "1",
+        ])
+        .env("PATH", path_with(&bin))
+        .env("AUTOSPEC_CLAIM_LOG", &log)
+        .env("AUTOSPEC_CLAIM_COMMENTS", &comments)
+        .env("AUTOSPEC_HEARTBEAT_DIR", fixture.join("heartbeats"))
+        .env("HOSTNAME", "test-host")
+        .env("USER", "test-user")
+        .output()
+        .expect("autospec legacy heartbeat recovery starts");
+    assert!(
+        String::from_utf8_lossy(&legacy.stdout).contains("\"recovered\":true"),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&legacy.stdout),
+        String::from_utf8_lossy(&legacy.stderr)
+    );
+    assert!(!heartbeats.join("42.json").exists());
+    let legacy_calls = std::fs::read_to_string(log).expect("legacy gh log");
+    assert!(legacy_calls.contains("issue\nedit\n42"));
+    assert!(legacy_calls.contains("issues/comments/100\n-X\nDELETE"));
+}
+
+#[test]
 fn stale_startup_recovery_retries_a_prepared_label_transition() {
     let fixture = temp_dir("autospec-claim-recover-prepared-ref");
     let bin = fixture.join("bin");
@@ -1872,9 +2077,36 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     assert!(heartbeat.contains("\"worker_id\":\"worker-a\""));
     assert!(heartbeat.contains("\"claim_id\":\"claim-"));
     assert!(heartbeat.contains("\"session_id\":\"session-real-7\""));
-    assert!(heartbeats
-        .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d7265616c2d37.json")
-        .exists());
+    assert!(heartbeat.contains("\"ttl_seconds\":10800"));
+    assert!(heartbeat.contains("\"pid\":"));
+    assert!(heartbeat.contains("\"nonce\":\"claim-"));
+    let repo_heartbeats = heartbeats.join("o7_testorg_r8_testrepo");
+    let session = repo_heartbeats.join("sessions/73657373696f6e2d7265616c2d37.json");
+    assert!(session.exists());
+    assert_eq!(
+        std::fs::metadata(&repo_heartbeats)
+            .expect("heartbeat directory metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        std::fs::metadata(repo_heartbeats.join("42.json"))
+            .expect("heartbeat metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        std::fs::metadata(session)
+            .expect("session metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
     assert!(std::fs::read_to_string(&comments)
         .expect("claim comments")
         .contains("worker-a"));

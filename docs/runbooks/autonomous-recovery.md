@@ -5,6 +5,33 @@ an abandoned edit lease does not pause the perpetual worker for the longer
 interactive default. Set the variable explicitly when a deployment needs a
 different recovery window; active workers refresh their claims as they run.
 
+## Startup heartbeat recovery
+
+Claim recovery treats `~/.autospec/process-heartbeats/<repo-key>/<issue>.json`
+as identity evidence, not as a stale-file timer. Fresh, live, malformed,
+mismatched, remote-host, symlinked, or otherwise ambiguous evidence blocks
+recovery without changing the claim ref, labels, or run-state comment.
+
+Only an exact expired heartbeat whose structured worker PID is dead can be
+recovered. Before the claim becomes available, Autospec durably copies the
+evidence to
+`<repo-dir>/quarantine/startup-heartbeats/<issue>-<nonce-hex>.json`, then
+performs an identity-bound handoff through
+`<repo-dir>/quarantine/startup-heartbeat-handoffs/`. A replacement at the live
+name aborts recovery and is preserved.
+
+The repository heartbeat directory and quarantine ancestry must be owned by the
+effective user with mode `0700`; live, session, and retained evidence files use
+mode `0600`. Inspect evidence without modifying it:
+
+```bash
+repo_dir="$HOME/.autospec/process-heartbeats/<repo-key>"; stat -c '%U %a %n' "$repo_dir" "$repo_dir"/*.json; jq . "$repo_dir"/*.json
+```
+
+Do not delete or move heartbeat or quarantine files manually. Correct unsafe
+ownership or permissions as the owning operator, then retry recovery; retained
+copies are the audit trail for why a claim was released.
+
 The conductor also defaults `AUTOSPEC_RESCAN_INTERVAL` to `300` seconds after
 an empty backlog, while an explicit environment value remains authoritative.
 
