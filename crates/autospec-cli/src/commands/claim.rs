@@ -3731,7 +3731,7 @@ fn publish_session_binding(
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HeartbeatPublicationDurability {
-    DirectorySyncPending,
+    Unconfirmed,
     Durable,
 }
 
@@ -3874,7 +3874,7 @@ fn publish_private_heartbeat_file(
                 return Err(post_commit_failure(
                     file,
                     identity,
-                    HeartbeatPublicationDurability::DirectorySyncPending,
+                    HeartbeatPublicationDurability::Unconfirmed,
                     error,
                 ))
             }
@@ -3905,13 +3905,13 @@ fn publish_private_heartbeat_file(
                     return Err(post_commit_failure(
                         file,
                         identity,
-                        HeartbeatPublicationDurability::DirectorySyncPending,
+                        HeartbeatPublicationDurability::Unconfirmed,
                         error,
                     ))
                 }
             };
     }
-    if binding != HeartbeatFinalBinding::Exact {
+    if (binding, link_count) != (HeartbeatFinalBinding::Exact, 1) {
         let error = CommandFailure::diagnostic(format!(
             "heartbeat link failed or lost identity: {}",
             link_error.map_or_else(
@@ -3919,11 +3919,11 @@ fn publish_private_heartbeat_file(
                 |error| error.to_string()
             )
         ));
-        if link_count > 0 {
+        if link_error.is_none() || binding == HeartbeatFinalBinding::Exact || link_count > 0 {
             return Err(post_commit_failure(
                 file,
                 identity,
-                HeartbeatPublicationDurability::DirectorySyncPending,
+                HeartbeatPublicationDurability::Unconfirmed,
                 error,
             ));
         }
@@ -3936,20 +3936,20 @@ fn publish_private_heartbeat_file(
         return Err(post_commit_failure(
             file,
             identity,
-            HeartbeatPublicationDurability::DirectorySyncPending,
+            HeartbeatPublicationDurability::Unconfirmed,
             error,
         ));
     }
     if let Err(error) = boundary(role, "revalidate").and_then(|()| {
-        (heartbeat_final_binding(&file, directory, final_name, identity)?.0
-            == HeartbeatFinalBinding::Exact)
+        (heartbeat_final_binding(&file, directory, final_name, identity)?
+            == (HeartbeatFinalBinding::Exact, 1))
             .then_some(())
             .ok_or_else(|| CommandFailure::diagnostic("heartbeat final identity changed"))
     }) {
         return Err(post_commit_failure(
             file,
             identity,
-            HeartbeatPublicationDurability::Durable,
+            HeartbeatPublicationDurability::Unconfirmed,
             error,
         ));
     }
