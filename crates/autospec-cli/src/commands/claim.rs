@@ -3611,7 +3611,7 @@ fn write_startup_heartbeat(
     #[cfg(not(target_os = "linux"))]
     {
         Err(CommandFailure::diagnostic(
-            "secure heartbeat publication requires Linux openat2",
+            "heartbeat publication requires Linux openat2",
         ))
     }
 }
@@ -3631,14 +3631,17 @@ fn write_startup_heartbeat_with_hook(
 ) -> Result<(), CommandFailure> {
     let (parent, root_name) = open_heartbeat_writer_parent(root)?;
     let root = ensure_receipt_directory(&parent, root_name)?;
-    let repo_directory = ensure_receipt_directory(
-        &root,
-        &super::autonomous::drain::repository_progress_key(repo),
-    )?;
+    let repo_name = super::autonomous::drain::repository_progress_key(repo);
+    let repo_directory = ensure_receipt_directory(&root, &repo_name)?;
     let sessions = session_id
         .map(|_| ensure_receipt_directory(&repo_directory, "sessions"))
         .transpose()?;
     after_open();
+    verify_heartbeat_directory_binding(&parent, root_name, &root)?;
+    verify_heartbeat_directory_binding(&root, &repo_name, &repo_directory)?;
+    if let Some(sessions) = sessions.as_ref() {
+        verify_heartbeat_directory_binding(&repo_directory, "sessions", sessions)?;
+    }
     let timestamp = unix_now()?;
     let identity = worker_id.rsplit_once(':').and_then(|(prefix, nonce)| {
         let (kind, pid) = prefix.rsplit_once(':')?;
@@ -3663,9 +3666,7 @@ fn write_startup_heartbeat_with_hook(
         publish_session_binding_at(sessions, &name, body.as_bytes(), &identity)?;
     }
     publish_private_heartbeat_file(&repo_directory, &format!("{issue}.json"), body.as_bytes())
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not write claim startup heartbeat: {error}"))
-        })
+        .map_err(|error| CommandFailure::diagnostic(error.to_string()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3811,8 +3812,36 @@ fn open_heartbeat_writer_parent(path: &Path) -> Result<(fs::File, &str), Command
     let parent = options.open(parent).map_err(|error| {
         CommandFailure::diagnostic(format!("could not open heartbeat root parent: {error}"))
     })?;
+    let meta = parent
+        .metadata()
+        .map_err(|e| CommandFailure::diagnostic(e.to_string()))?;
+    if meta.uid() != nix::unistd::geteuid().as_raw() {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat parent not owned by euid",
+        ));
+    }
+    if meta.mode() & 0o7777 != 0o700 {
+        use std::os::unix::fs::PermissionsExt;
+        parent
+            .set_permissions(fs::Permissions::from_mode(0o700))
+            .and_then(|()| parent.sync_all())
+            .map_err(|error| CommandFailure::diagnostic(error.to_string()))?;
+    }
     private_heartbeat_directory_identity(&parent, "writer parent")?;
     Ok((parent, name))
+}
+
+#[cfg(target_os = "linux")]
+fn verify_heartbeat_directory_binding(
+    parent: &fs::File,
+    name: &str,
+    held: &fs::File,
+) -> Result<(), CommandFailure> {
+    let current = open_heartbeat_directory_beneath(parent, Path::new(name))?;
+    (private_heartbeat_directory_identity(&current, "current binding")?
+        == private_heartbeat_directory_identity(held, "held binding")?)
+    .then_some(())
+    .ok_or_else(|| CommandFailure::diagnostic("heartbeat directory name binding changed"))
 }
 
 #[cfg(target_os = "linux")]
@@ -3822,7 +3851,7 @@ fn publish_private_heartbeat_file(
     document: &[u8],
 ) -> std::io::Result<()> {
     use nix::fcntl::{openat, OFlag};
-    use nix::sys::stat::{fchmod, Mode};
+    use nix::sys::stat::Mode;
     let descriptor = openat(
         directory,
         name,
@@ -3833,9 +3862,7 @@ fn publish_private_heartbeat_file(
             | OFlag::O_CLOEXEC
             | OFlag::O_NONBLOCK,
         Mode::from_bits_truncate(0o600),
-    )
-    .map_err(std::io::Error::from)?;
-    fchmod(&descriptor, Mode::from_bits_truncate(0o600)).map_err(std::io::Error::from)?;
+    )?;
     let mut file = fs::File::from(descriptor);
     let metadata = file.metadata()?;
     if !metadata.is_file()
@@ -3847,7 +3874,7 @@ fn publish_private_heartbeat_file(
     }
     file.write_all(document)?;
     file.sync_all()?;
-    nix::unistd::fsync(directory).map_err(std::io::Error::from)?;
+    nix::unistd::fsync(directory)?;
     Ok(())
 }
 
@@ -3856,8 +3883,7 @@ fn read_private_heartbeat_file(directory: &fs::File, name: &str) -> std::io::Res
     let snapshot = read_regular_file_at_no_follow(directory, name.as_ref())?;
     use nix::fcntl::AtFlags;
     use nix::sys::stat::{fstatat, SFlag};
-    let stat =
-        fstatat(directory, name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(std::io::Error::from)?;
+    let stat = fstatat(directory, name, AtFlags::AT_SYMLINK_NOFOLLOW)?;
     if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
         || stat.st_uid != nix::unistd::geteuid().as_raw()
         || stat.st_mode & 0o7777 != 0o600
@@ -5383,9 +5409,8 @@ mod tests {
         document: &[u8],
         expected: &SessionBindingIdentity,
     ) -> Result<bool, super::CommandFailure> {
-        let directory = std::fs::File::open(path.parent().unwrap()).unwrap();
         publish_session_binding_at(
-            &directory,
+            &std::fs::File::open(path.parent().unwrap()).unwrap(),
             path.file_name().unwrap().to_str().unwrap(),
             document,
             expected,
@@ -5497,7 +5522,7 @@ mod tests {
                 _ => repo.join("sessions"),
             };
             let moved = parent.join(format!("moved-{role}"));
-            super::write_startup_heartbeat_with_hook(
+            let result = super::write_startup_heartbeat_with_hook(
                 &root,
                 "owner/repo",
                 42,
@@ -5510,8 +5535,15 @@ mod tests {
                     std::fs::rename(&target, &moved).unwrap();
                     symlink(&outside, &target).unwrap();
                 },
-            )
-            .unwrap();
+            );
+            assert!(result.is_err(), "{role}");
+            for leaf in [
+                repo.join("42.json"),
+                repo.join("sessions/73657373696f6e2d61.json"),
+            ] {
+                let suffix = leaf.strip_prefix(&target).unwrap_or(&leaf);
+                assert!(!moved.join(suffix).exists(), "{role}");
+            }
             assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0, "{role}");
         }
     }

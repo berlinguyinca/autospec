@@ -1883,11 +1883,15 @@ fn run_heartbeat_writer_acquire(
 #[test]
 fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     let fixture = temp_dir("autospec-claim-acquire");
-    let heartbeats = fixture.join("heartbeats");
+    let private_parent = fixture.join(".autospec");
+    std::fs::create_dir(&private_parent).unwrap();
+    std::fs::set_permissions(&private_parent, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let heartbeats = private_parent.join("process-heartbeats");
     let worker = canonical_worker_id();
     let output = run_heartbeat_writer_acquire(&fixture, &heartbeats, &worker);
 
     assert!(output.status.success());
+    assert_eq!(mode(&private_parent), 0o700);
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"claimed\":true"));
