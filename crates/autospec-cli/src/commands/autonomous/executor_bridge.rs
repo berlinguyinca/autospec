@@ -44665,6 +44665,13 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         state.phase = super::BridgePhase::MergeRequested;
         state.pr = Some(17);
         state.head_oid = Some(head.clone());
+        let closeout = "## Closeout report\n";
+        state.closeout_digest = Some(autospec_core::autonomous::waterfall::sha256_hex(
+            closeout.as_bytes(),
+        ));
+        let body =
+            serde_json::to_string(&super::canonical_pull_request_body(&state, closeout).unwrap())
+                .unwrap();
         let state_path = fixture.root.join("state/invocation.json");
         super::write_invocation_atomic(&state_path, &state).expect("requested state");
         git(
@@ -44684,7 +44691,7 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
             format!(
                 "#!/bin/sh\nset -eu\n\
                  if [ \"$1 $2\" = 'pr view' ]; then\n\
-                   printf '%s\\n' '{{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":{{\"oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}}}}'\n\
+                   printf '%s\\n' '{{\"number\":17,\"state\":\"MERGED\",\"isDraft\":false,\"headRefOid\":\"{head}\",\"baseRefName\":\"main\",\"mergeCommit\":{{\"oid\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"}},\"body\":{body}}}'\n\
                    exit 0\n\
                  fi\n\
                  exit 64\n"
