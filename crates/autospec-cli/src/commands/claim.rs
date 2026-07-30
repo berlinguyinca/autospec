@@ -3727,6 +3727,168 @@ fn publish_session_binding(
     Ok(true)
 }
 
+#[cfg(unix)]
+#[allow(dead_code)]
+#[derive(Debug)]
+struct HeartbeatPublication {
+    final_name: String,
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn cleanup_private_heartbeat_stage(
+    directory: &impl std::os::fd::AsFd,
+    stage: &str,
+    role: &str,
+    original: CommandFailure,
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> CommandFailure {
+    use nix::unistd::{fsync, unlinkat, UnlinkatFlags};
+
+    if let Err(error) = boundary(role, "cleanup") {
+        return CommandFailure::diagnostic(format!("{original}; stage cleanup failed: {error}"));
+    }
+    if let Err(error) = unlinkat(directory, stage, UnlinkatFlags::NoRemoveDir) {
+        return CommandFailure::diagnostic(format!(
+            "{original}; could not remove private stage {stage}: {error}"
+        ));
+    }
+    if let Err(error) = fsync(directory) {
+        return CommandFailure::diagnostic(format!(
+            "{original}; could not sync private stage cleanup: {error}"
+        ));
+    }
+    original
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn publish_private_heartbeat_file(
+    directory: &impl std::os::fd::AsFd,
+    final_name: &str,
+    document: &[u8],
+    role: &str,
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<HeartbeatPublication, CommandFailure> {
+    use nix::fcntl::{openat, AtFlags, OFlag};
+    use nix::sys::stat::{fchmod, fstat, fstatat, Mode};
+    use nix::unistd::{fsync, linkat, unlinkat, UnlinkatFlags};
+
+    private_heartbeat_directory_identity(directory, "publication")?;
+    let stage = format!(
+        ".heartbeat-stage-{}-{}",
+        std::process::id(),
+        UNIQUE_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let descriptor = openat(
+        directory,
+        stage.as_str(),
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| {
+        CommandFailure::diagnostic(format!("could not stage {role} heartbeat: {error}"))
+    })?;
+    let mut file = fs::File::from(descriptor);
+    let prepared = (|| {
+        boundary(role, "chmod")?;
+        fchmod(&file, Mode::from_bits_truncate(0o600)).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not protect {role} heartbeat: {error}"))
+        })?;
+        boundary(role, "write")?;
+        file.write_all(document).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not write {role} heartbeat: {error}"))
+        })?;
+        boundary(role, "fsync")?;
+        file.sync_all().map_err(|error| {
+            CommandFailure::diagnostic(format!("could not persist {role} heartbeat: {error}"))
+        })?;
+        boundary(role, "publish")
+    })();
+    if let Err(error) = prepared {
+        drop(file);
+        return Err(cleanup_private_heartbeat_stage(
+            directory, &stage, role, error, boundary,
+        ));
+    }
+    let identity = boundary(role, "inspect").and_then(|()| {
+        fstat(&file).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not inspect staged {role} heartbeat: {error}"
+            ))
+        })
+    });
+    let identity = match identity {
+        Ok(identity) => identity,
+        Err(error) => {
+            drop(file);
+            return Err(cleanup_private_heartbeat_stage(
+                directory, &stage, role, error, boundary,
+            ));
+        }
+    };
+    if let Err(error) = linkat(
+        directory,
+        stage.as_str(),
+        directory,
+        final_name,
+        AtFlags::empty(),
+    ) {
+        drop(file);
+        return Err(cleanup_private_heartbeat_stage(
+            directory,
+            &stage,
+            role,
+            CommandFailure::diagnostic(format!("could not publish {role} heartbeat: {error}")),
+            boundary,
+        ));
+    }
+    let verified = fstatat(directory, final_name, AtFlags::AT_SYMLINK_NOFOLLOW)
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("could not verify {role} heartbeat: {error}"))
+        })
+        .and_then(|published| {
+            ((published.st_dev, published.st_ino) == (identity.st_dev, identity.st_ino))
+                .then_some(())
+                .ok_or_else(|| {
+                    CommandFailure::diagnostic(format!(
+                        "{role} heartbeat final identity changed during publication"
+                    ))
+                })
+        });
+    if let Err(error) = verified {
+        drop(file);
+        return Err(cleanup_private_heartbeat_stage(
+            directory, &stage, role, error, boundary,
+        ));
+    }
+    unlinkat(directory, stage.as_str(), UnlinkatFlags::NoRemoveDir).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not retire private stage {stage}: {error}"))
+    })?;
+    fsync(directory).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not sync published {role} heartbeat: {error}"
+        ))
+    })?;
+    let published =
+        fstatat(directory, final_name, AtFlags::AT_SYMLINK_NOFOLLOW).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not recheck {role} heartbeat: {error}"))
+        })?;
+    if (published.st_dev, published.st_ino, published.st_nlink)
+        != (identity.st_dev, identity.st_ino, 1)
+    {
+        return Err(CommandFailure::diagnostic(format!(
+            "{role} heartbeat identity changed after publication"
+        )));
+    }
+    Ok(HeartbeatPublication {
+        final_name: final_name.to_string(),
+        device: identity.st_dev as u64,
+        inode: identity.st_ino as u64,
+    })
+}
+
 fn heartbeat_session_key(session_id: &str) -> String {
     session_id
         .as_bytes()
@@ -5687,6 +5849,122 @@ mod tests {
         } else {
             Ok(())
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_heartbeat_atomic_publication() {
+        use nix::fcntl::{open, OFlag};
+        use nix::sys::stat::{umask, Mode};
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        const CHILD: &str = "AUTOSPEC_TEST_ATOMIC_HEARTBEAT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    concat!(module_path!(), "::startup_heartbeat_atomic_publication"),
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let (fixture, issue) = startup_heartbeat_fixture("atomic-publication");
+        let directory = open(
+            &fixture,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW,
+            Mode::empty(),
+        )
+        .unwrap();
+        let previous = umask(Mode::from_bits_truncate(0o777));
+        let attempt = |name: &str, failed: Option<&str>| {
+            super::publish_private_heartbeat_file(
+                &directory,
+                name,
+                b"heartbeat\n",
+                "test",
+                &mut |_, boundary| {
+                    if failed == Some(boundary) {
+                        Err(super::CommandFailure::diagnostic(
+                            "injected persistence failure",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                },
+            )
+        };
+        for failed in ["chmod", "write", "fsync", "inspect"] {
+            assert!(attempt("42.json", Some(failed)).is_err());
+            assert!(!issue.exists());
+        }
+        let cleanup = super::publish_private_heartbeat_file(
+            &directory,
+            "42.json",
+            b"heartbeat\n",
+            "test",
+            &mut |_, boundary| {
+                if matches!(boundary, "write" | "cleanup") {
+                    Err(super::CommandFailure::diagnostic(
+                        "injected cleanup failure",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .unwrap_err();
+        assert!(cleanup.message.contains("stage cleanup failed"));
+        let stage = std::fs::read_dir(&fixture)
+            .unwrap()
+            .find(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".heartbeat-stage-")
+            })
+            .unwrap()
+            .unwrap()
+            .path();
+        std::fs::remove_file(stage).unwrap();
+        let outside = fixture.join("outside");
+        std::fs::write(&outside, b"caller-owned").unwrap();
+        std::fs::hard_link(&outside, &issue).unwrap();
+        assert!(attempt("42.json", None).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), b"caller-owned");
+        assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 2);
+        std::fs::remove_file(&issue).unwrap();
+        nix::unistd::mkfifo(&issue, Mode::from_bits_truncate(0o600)).unwrap();
+        assert!(attempt("42.json", None).is_err());
+        assert!(std::os::unix::fs::FileTypeExt::is_fifo(
+            &std::fs::symlink_metadata(&issue).unwrap().file_type()
+        ));
+        std::fs::remove_file(&issue).unwrap();
+        let session = fixture.join("session.json");
+        attempt("42.json", None).unwrap();
+        attempt("session.json", None).unwrap();
+        umask(previous);
+        for path in [&issue, &session] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+                0o600
+            );
+        }
+        assert!(std::fs::read_dir(&fixture).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".heartbeat-stage-")));
     }
 
     #[cfg(target_os = "linux")]
