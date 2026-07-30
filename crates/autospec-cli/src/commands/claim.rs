@@ -1,9 +1,12 @@
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[cfg(unix)]
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 use autospec_core::autonomous_lifecycle::{
     ClaimBranch, ClaimContext, ClaimEvidence, IssueNumber, LeaseFreshness, RepositoryScope,
@@ -20,6 +23,7 @@ use autospec_core::claim::{
 };
 use autospec_core::coordination::ConductorOutcome;
 use autospec_core::safety::redact_secrets;
+use autospec_core::state::json::JsonParser;
 
 use super::lint::claim_safety_with_config;
 use super::CommandFailure;
@@ -3765,6 +3769,239 @@ pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
         .join("process-heartbeats"))
 }
 
+// These primitives remain inert until the guarded recovery activation slice.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
+struct StartupHeartbeatExpectation<'a> {
+    repo: &'a str,
+    issue: u64,
+    worker_id: &'a str,
+    branch: &'a str,
+    pull_request: &'a str,
+    claim_id: &'a str,
+    step: &'a str,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupHeartbeatEvidence {
+    repo: String,
+    issue: String,
+    worker_id: String,
+    branch: String,
+    pr: String,
+    claim_id: String,
+    step: String,
+    ts: u64,
+    ttl_seconds: u64,
+    pid: u32,
+    nonce: String,
+    session_id: Option<String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegularFileIdentity {
+    device: u64,
+    inode: u64,
+    length: u64,
+    modified_seconds: i64,
+    modified_nanos: i64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegularFileSnapshot {
+    document: Vec<u8>,
+    identity: RegularFileIdentity,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StartupHeartbeatSnapshot {
+    file: RegularFileSnapshot,
+    evidence: StartupHeartbeatEvidence,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupPidLiveness {
+    Live,
+    Dead,
+    Unknown,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StartupHeartbeatClassification {
+    Absent,
+    Blocking,
+    ExpiredDead(Box<StartupHeartbeatSnapshot>),
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn file_identity(metadata: &fs::Metadata) -> RegularFileIdentity {
+    RegularFileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        length: metadata.len(),
+        modified_seconds: metadata.mtime(),
+        modified_nanos: metadata.mtime_nsec(),
+    }
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn read_regular_file_no_follow(path: &Path) -> std::io::Result<RegularFileSnapshot> {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    let mut file = options.open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file() {
+        return Err(std::io::Error::other("heartbeat is not a regular file"));
+    }
+    let before = file_identity(&before);
+    let mut document = Vec::new();
+    file.read_to_end(&mut document)?;
+    let after = file_identity(&file.metadata()?);
+    if before != after || after.length != document.len() as u64 {
+        return Err(std::io::Error::other(
+            "heartbeat changed while it was being read",
+        ));
+    }
+    Ok(RegularFileSnapshot {
+        document,
+        identity: after,
+    })
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+fn read_regular_file_no_follow(path: &Path) -> std::io::Result<RegularFileSnapshot> {
+    match fs::symlink_metadata(path) {
+        Err(error) => Err(error),
+        Ok(_) => Err(std::io::Error::other("heartbeat snapshots require Unix")),
+    }
+}
+
+#[allow(dead_code)]
+fn parse_startup_heartbeat(document: &[u8]) -> Option<StartupHeartbeatEvidence> {
+    let mut fields = JsonParser::new(std::str::from_utf8(document).ok()?)
+        .parse()
+        .ok()?
+        .into_object("startup heartbeat")
+        .ok()?;
+    let (repo, issue, worker_id, branch, pr, claim_id, step, nonce) = {
+        let mut string = |name| fields.remove(name)?.into_string(name).ok();
+        (
+            string("repo")?,
+            string("issue")?,
+            string("worker_id")?,
+            string("branch")?,
+            string("pr")?,
+            string("claim_id")?,
+            string("step")?,
+            string("nonce")?,
+        )
+    };
+    let (ts, ttl_seconds, pid) = {
+        let mut number = |name| fields.remove(name)?.into_number(name).ok();
+        (
+            number("ts")?,
+            number("ttl_seconds")?,
+            u32::try_from(number("pid")?).ok()?,
+        )
+    };
+    let session_id = fields
+        .remove("session_id")
+        .map(|value| value.into_string("session_id"))
+        .transpose()
+        .ok()?;
+    fields.is_empty().then_some(StartupHeartbeatEvidence {
+        repo,
+        issue,
+        worker_id,
+        branch,
+        pr,
+        claim_id,
+        step,
+        ts,
+        ttl_seconds,
+        pid,
+        nonce,
+        session_id,
+    })
+}
+
+#[allow(dead_code)]
+fn classify_startup_heartbeat(
+    path: &Path,
+    expected: StartupHeartbeatExpectation<'_>,
+    now: u64,
+    observe_pid: impl FnOnce(&str, u32) -> StartupPidLiveness,
+) -> StartupHeartbeatClassification {
+    let file = match read_regular_file_no_follow(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return StartupHeartbeatClassification::Absent;
+        }
+        Err(_) => return StartupHeartbeatClassification::Blocking,
+    };
+    let Some(evidence) = parse_startup_heartbeat(&file.document) else {
+        return StartupHeartbeatClassification::Blocking;
+    };
+    let exact = evidence.repo == expected.repo
+        && evidence.issue == expected.issue.to_string()
+        && evidence.worker_id == expected.worker_id
+        && evidence.branch == expected.branch
+        && evidence.pr == expected.pull_request
+        && evidence.claim_id == expected.claim_id
+        && evidence.step == expected.step
+        && evidence.ttl_seconds > 0
+        && evidence.pid > 0
+        && evidence.pid <= i32::MAX as u32
+        && !evidence.nonce.is_empty();
+    let expired = now.saturating_sub(evidence.ts) > evidence.ttl_seconds && now >= evidence.ts;
+    if !exact || !expired || !cfg!(unix) {
+        return StartupHeartbeatClassification::Blocking;
+    }
+    if observe_pid(&evidence.worker_id, evidence.pid) != StartupPidLiveness::Dead {
+        return StartupHeartbeatClassification::Blocking;
+    }
+    StartupHeartbeatClassification::ExpiredDead(Box::new(StartupHeartbeatSnapshot {
+        file,
+        evidence,
+    }))
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn observe_local_startup_pid(worker_id: &str, pid: u32) -> StartupPidLiveness {
+    let fields = worker_id.rsplitn(5, ':').collect::<Vec<_>>();
+    let local = fields.len() == 5
+        && fields[2] == "rust"
+        && fields[1].parse::<u32>() == Ok(pid)
+        && std::env::var("USER").unwrap_or_else(|_| "unknown-user".into()) == fields[3]
+        && std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".into()) == fields[4];
+    if !local {
+        return StartupPidLiveness::Unknown;
+    }
+    match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
+        Ok(()) | Err(nix::errno::Errno::EPERM) => StartupPidLiveness::Live,
+        Err(nix::errno::Errno::ESRCH) => StartupPidLiveness::Dead,
+        Err(_) => StartupPidLiveness::Unknown,
+    }
+}
+
+#[cfg(not(unix))]
+#[allow(dead_code)]
+fn observe_local_startup_pid(_worker_id: &str, _pid: u32) -> StartupPidLiveness {
+    StartupPidLiveness::Unknown
+}
+
 fn startup_heartbeat_exists(repo: &str, issue: u64) -> bool {
     heartbeat_root().is_ok_and(|root| {
         root.join(super::autonomous::drain::repository_progress_key(repo))
@@ -4125,6 +4362,167 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
 
     static BRIDGE_TRANSITION_ENV: Mutex<()> = Mutex::new(());
+
+    fn startup_heartbeat_fixture(label: &str) -> (PathBuf, PathBuf) {
+        let directory = std::env::temp_dir().join(format!(
+            "autospec-startup-heartbeat-{label}-{}-{}",
+            std::process::id(),
+            super::UNIQUE_ID_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&directory).expect("startup heartbeat fixture");
+        let path = directory.join("42.json");
+        (directory, path)
+    }
+
+    fn startup_heartbeat_document(worker: &str, pid: u32) -> String {
+        format!(
+            r#"{{"repo":"owner/repo","issue":"42","worker_id":"{worker}","branch":"feat/worker","pr":"","claim_id":"claim-a","step":"claimed","ts":100,"ttl_seconds":10,"pid":{pid},"nonce":"nonce-a"}}"#
+        )
+    }
+
+    fn expected_startup_heartbeat<'a>(
+        worker_id: &'a str,
+    ) -> super::StartupHeartbeatExpectation<'a> {
+        super::StartupHeartbeatExpectation {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id,
+            branch: "feat/worker",
+            pull_request: "",
+            claim_id: "claim-a",
+            step: "claimed",
+        }
+    }
+
+    #[test]
+    fn classify_startup_heartbeat_marks_missing_evidence_absent() {
+        let (directory, path) = startup_heartbeat_fixture("absent");
+
+        let classified = super::classify_startup_heartbeat(
+            &path,
+            expected_startup_heartbeat("worker-a"),
+            200,
+            |_, _| super::StartupPidLiveness::Dead,
+        );
+
+        assert_eq!(classified, super::StartupHeartbeatClassification::Absent);
+        std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[test]
+    fn classify_startup_heartbeat_blocks_fresh_live_malformed_mismatched_and_remote_evidence() {
+        use super::StartupPidLiveness::{Dead, Live, Unknown};
+
+        let (directory, path) = startup_heartbeat_fixture("blocking");
+        let exact = startup_heartbeat_document("worker-a", 4242);
+        let changed = |from, to| exact.replace(from, to);
+        let mut cases = vec![
+            ("fresh", exact.clone(), 105, Dead),
+            ("live", exact.clone(), 200, Live),
+            ("remote", exact.clone(), 200, Unknown),
+        ];
+        let mutations = r#"malformed|not-json
+owner/repo|other/repo
+"42"|"43"
+worker-a|worker-b
+feat/worker|feat/other
+"pr":""|"pr":"17"
+claim-a|claim-b
+claimed|review
+"ttl_seconds":10|"ttl_seconds":0
+"pid":4242|"pid":0
+nonce-a|"#;
+        cases.extend(mutations.lines().map(|row| {
+            let (from, to) = row.split_once('|').expect("mutation row");
+            let document = if from == "malformed" {
+                to.into()
+            } else {
+                changed(from, to)
+            };
+            ("malformed or mismatch", document, 200, Dead)
+        }));
+        for (label, document, now, liveness) in cases {
+            std::fs::write(&path, document).expect("write heartbeat fixture");
+            assert_eq!(
+                super::classify_startup_heartbeat(
+                    &path,
+                    expected_startup_heartbeat("worker-a"),
+                    now,
+                    |_, _| liveness,
+                ),
+                super::StartupHeartbeatClassification::Blocking,
+                "{label}"
+            );
+        }
+        std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_startup_heartbeat_returns_snapshot_only_for_expired_dead_local_pid() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (directory, path) = startup_heartbeat_fixture("expired-dead");
+        let document = startup_heartbeat_document("worker-a", 4242);
+        std::fs::write(&path, &document).expect("write heartbeat fixture");
+
+        let classified = super::classify_startup_heartbeat(
+            &path,
+            expected_startup_heartbeat("worker-a"),
+            200,
+            |worker, pid| {
+                assert_eq!((worker, pid), ("worker-a", 4242));
+                super::StartupPidLiveness::Dead
+            },
+        );
+        let super::StartupHeartbeatClassification::ExpiredDead(snapshot) = classified else {
+            panic!("exact expired dead evidence was not reclaimable");
+        };
+        let metadata = std::fs::metadata(&path).expect("heartbeat metadata");
+        assert_eq!(snapshot.file.document, document.as_bytes());
+        assert_eq!(snapshot.file.identity.device, metadata.dev());
+        assert_eq!(snapshot.file.identity.inode, metadata.ino());
+        assert_eq!(snapshot.file.identity.length, metadata.len());
+        assert_eq!(snapshot.file.identity.modified_seconds, metadata.mtime());
+        assert_eq!(snapshot.file.identity.modified_nanos, metadata.mtime_nsec());
+        std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_startup_heartbeat_rejects_symlink_and_observes_current_pid_as_live() {
+        let (directory, path) = startup_heartbeat_fixture("symlink-live");
+        let target = directory.join("target.json");
+        let host = std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".into());
+        let user = std::env::var("USER").unwrap_or_else(|_| "unknown-user".into());
+        let pid = std::process::id();
+        let worker = format!("{host}:{user}:rust:{pid}:1");
+        let document = startup_heartbeat_document(&worker, pid);
+        std::fs::write(&target, &document).expect("write target heartbeat");
+        std::os::unix::fs::symlink(&target, &path).expect("symlink heartbeat");
+        assert_eq!(
+            super::classify_startup_heartbeat(
+                &path,
+                expected_startup_heartbeat(&worker),
+                200,
+                super::observe_local_startup_pid,
+            ),
+            super::StartupHeartbeatClassification::Blocking
+        );
+
+        std::fs::remove_file(&path).expect("remove symlink");
+        std::fs::rename(&target, &path).expect("publish regular heartbeat");
+        assert_eq!(
+            super::classify_startup_heartbeat(
+                &path,
+                expected_startup_heartbeat(&worker),
+                200,
+                super::observe_local_startup_pid,
+            ),
+            super::StartupHeartbeatClassification::Blocking
+        );
+        std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
 
     #[test]
     fn paginated_comments_parser_flattens_two_raw_pages() {
