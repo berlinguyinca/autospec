@@ -8,6 +8,11 @@ use autospec_core::runtime_env::{random_session_token, RuntimeContext, RuntimeSt
 
 use crate::commands::CommandFailure;
 
+#[path = "terminal.rs"]
+mod terminal;
+
+use terminal::{configure_process_group, TerminalForeground};
+
 const CHILD_TERMINATION_TIMEOUT: Duration = Duration::from_millis(500);
 const LEGACY_SESSION_WORKER_ENV: &str = "AUTOSPEC_RUNTIME_SESSION_WORKER";
 const SESSION_HANDOFF_ENV: &str = "AUTOSPEC_RUNTIME_SESSION_HANDOFF";
@@ -101,7 +106,7 @@ pub(super) fn spawn_direct_command(
     runtime: Option<(&RuntimeContext, &RuntimeState)>,
     bypassed: bool,
     process_group: bool,
-) -> Result<Child, CommandFailure> {
+) -> Result<SpawnedCommand, CommandFailure> {
     let (program, arguments) = command.split_first().ok_or_else(|| {
         CommandFailure::diagnostic("autospec runtime env requires a child command")
     })?;
@@ -113,16 +118,13 @@ pub(super) fn spawn_direct_command(
     } else if bypassed {
         child.env("AUTOSPEC_ISOLATION_BYPASSED", "1");
     }
-    #[cfg(unix)]
-    if process_group {
-        use std::os::unix::process::CommandExt;
-        child.process_group(0);
-    }
-    child.spawn().map_err(|error| {
+    let foreground = configure_process_group(&mut child, process_group)?;
+    let child = child.spawn().map_err(|error| {
         CommandFailure::diagnostic(format!(
             "could not run runtime child command {program}: {error}"
         ))
-    })
+    })?;
+    Ok(SpawnedCommand { child, foreground })
 }
 
 pub(super) fn configure_runtime_environment(
@@ -153,11 +155,7 @@ pub(super) fn scrub_external_environment(command: &mut Command) {
 
 pub(super) fn run_session_supervisor(command: &mut Command) -> Result<(), CommandFailure> {
     super::reset_session_signal_handlers();
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
+    let foreground = configure_process_group(command, true)?;
     let mut worker = ChildGuard::new(
         command.spawn().map_err(|error| {
             diagnostic(format!("could not start runtime session worker: {error}"))
@@ -179,9 +177,29 @@ pub(super) fn run_session_supervisor(command: &mut Command) -> Result<(), Comman
         }
         if let Some(status) = worker.child().try_wait().map_err(wait_error)? {
             worker.disarm();
+            foreground.restore()?;
             return super::child_status(status);
         }
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+pub(super) struct SpawnedCommand {
+    pub(super) child: Child,
+    pub(super) foreground: TerminalForeground,
+}
+
+impl std::ops::Deref for SpawnedCommand {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for SpawnedCommand {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.child
     }
 }
 
