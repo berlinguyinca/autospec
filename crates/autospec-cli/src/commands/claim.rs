@@ -3971,6 +3971,161 @@ fn classify_startup_heartbeat(
 }
 #[cfg(unix)]
 #[allow(dead_code)]
+fn revalidate_heartbeat_snapshot(
+    observed: &RegularFileSnapshot,
+    expected: &RegularFileSnapshot,
+) -> Result<(), CommandFailure> {
+    if observed.identity != expected.identity {
+        return Err(CommandFailure::diagnostic(
+            "startup heartbeat identity drift",
+        ));
+    }
+    if observed.document != expected.document {
+        return Err(CommandFailure::diagnostic(
+            "startup heartbeat document drift",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn open_private_quarantine_component(
+    parent: &std::os::fd::OwnedFd,
+    component: &str,
+    after_open: &mut impl FnMut(&str),
+) -> Result<std::os::fd::OwnedFd, CommandFailure> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::{fchmod, fstat, mkdirat, Mode};
+
+    let private = Mode::from_bits_truncate(0o700);
+    let created = match mkdirat(parent, component, private) {
+        Ok(()) => true,
+        Err(nix::errno::Errno::EEXIST) => false,
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "could not create private heartbeat quarantine: {error}"
+            )))
+        }
+    };
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let child = openat(parent, component, flags, Mode::empty()).map_err(|_| {
+        CommandFailure::diagnostic(format!(
+            "heartbeat quarantine ancestor {component} is not a safe directory"
+        ))
+    })?;
+    fchmod(&child, private).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not protect heartbeat quarantine ancestor {component}: {error}"
+        ))
+    })?;
+    after_open(component);
+    let verified = openat(parent, component, flags, Mode::empty()).map_err(|_| {
+        CommandFailure::diagnostic(format!(
+            "heartbeat quarantine ancestor {component} changed during creation"
+        ))
+    })?;
+    let opened = fstat(&child).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not inspect heartbeat quarantine: {error}"))
+    })?;
+    let current = fstat(&verified).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not recheck heartbeat quarantine: {error}"))
+    })?;
+    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino) {
+        return Err(CommandFailure::diagnostic(format!(
+            "heartbeat quarantine ancestor {component} changed during creation"
+        )));
+    }
+    if created {
+        nix::unistd::fsync(parent).map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not sync heartbeat quarantine ancestry: {error}"
+            ))
+        })?;
+    }
+    Ok(child)
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn persist_heartbeat_copy(
+    state_root: &Path,
+    source: &Path,
+    snapshot: &StartupHeartbeatSnapshot,
+) -> Result<std::path::PathBuf, CommandFailure> {
+    persist_heartbeat_copy_with_hook(state_root, source, snapshot, |_| {})
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
+fn persist_heartbeat_copy_with_hook(
+    state_root: &Path,
+    source: &Path,
+    snapshot: &StartupHeartbeatSnapshot,
+    mut after_open: impl FnMut(&str),
+) -> Result<std::path::PathBuf, CommandFailure> {
+    use nix::fcntl::{open, openat, OFlag};
+    use nix::sys::stat::{fchmod, Mode};
+
+    let observed = read_regular_file_no_follow(source).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not revalidate startup heartbeat: {error}"))
+    })?;
+    revalidate_heartbeat_snapshot(&observed, &snapshot.file)?;
+    let directory_flags =
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let root = open(state_root, directory_flags, Mode::empty()).map_err(|_| {
+        CommandFailure::diagnostic("heartbeat private state root is not a safe directory")
+    })?;
+    let quarantine = open_private_quarantine_component(&root, "quarantine", &mut after_open)?;
+    let copies =
+        open_private_quarantine_component(&quarantine, "startup-heartbeats", &mut after_open)?;
+    let filename = format!(
+        "{}-{}.json",
+        snapshot.evidence.issue,
+        heartbeat_session_key(&snapshot.evidence.nonce)
+    );
+    let target = state_root
+        .join("quarantine")
+        .join("startup-heartbeats")
+        .join(&filename);
+    let flags =
+        OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let descriptor = openat(
+        &copies,
+        filename.as_str(),
+        flags,
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|error| {
+        CommandFailure::diagnostic(if error == nix::errno::Errno::EEXIST {
+            "heartbeat quarantine copy already exists".to_string()
+        } else {
+            format!("could not create heartbeat quarantine copy: {error}")
+        })
+    })?;
+    fchmod(&descriptor, Mode::from_bits_truncate(0o600)).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not protect heartbeat quarantine copy: {error}"
+        ))
+    })?;
+    let mut file = fs::File::from(descriptor);
+    file.write_all(&snapshot.file.document)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not persist heartbeat quarantine copy: {error}"
+            ))
+        })?;
+    nix::unistd::fsync(&copies).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "could not sync heartbeat quarantine directory: {error}"
+        ))
+    })?;
+    Ok(target)
+}
+
+#[cfg(unix)]
+#[allow(dead_code)]
 fn observe_local_startup_pid(worker_id: &str, pid: u32) -> StartupPidLiveness {
     let fields = worker_id.rsplitn(5, ':').collect::<Vec<_>>();
     let local = fields.len() == 5
@@ -4522,6 +4677,170 @@ claimed|review
         );
         assert_eq!(classify(&remote_worker), (Blocking, true));
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(unix)]
+    fn expired_heartbeat_snapshot(path: &Path) -> Box<super::StartupHeartbeatSnapshot> {
+        let worker = "host:user:rust:4242:nonce-a";
+        std::fs::write(path, startup_heartbeat_document(worker, 4242))
+            .expect("write expired heartbeat");
+        let classified = super::classify_startup_heartbeat(
+            path,
+            expected_startup_heartbeat(worker),
+            200,
+            |_, _| super::StartupPidLiveness::Dead,
+        );
+        let super::StartupHeartbeatClassification::ExpiredDead(snapshot) = classified else {
+            panic!("fixture heartbeat was not expired and dead");
+        };
+        snapshot
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn heartbeat_quarantine_copy_is_private_exact_and_create_new() {
+        let (directory, source) = startup_heartbeat_fixture("copy-success");
+        let snapshot = expired_heartbeat_snapshot(&source);
+
+        let target = super::persist_heartbeat_copy(&directory, &source, &snapshot)
+            .expect("persist quarantine copy");
+
+        assert_eq!(
+            std::fs::read(&target).expect("read copy"),
+            snapshot.file.document
+        );
+        assert_eq!(
+            std::fs::read(&source).expect("read source"),
+            snapshot.file.document
+        );
+        assert_eq!(
+            std::fs::metadata(directory.join("quarantine"))
+                .expect("quarantine metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(directory.join("quarantine/startup-heartbeats"))
+                .expect("copy directory metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&target)
+                .expect("copy metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert!(
+            super::persist_heartbeat_copy(&directory, &source, &snapshot)
+                .expect_err("copy target must be create-new")
+                .to_string()
+                .contains("already exists")
+        );
+        std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn heartbeat_quarantine_copy_rejects_snapshot_drift_deterministically() {
+        let (directory, source) = startup_heartbeat_fixture("copy-drift");
+        let snapshot = expired_heartbeat_snapshot(&source);
+        let mut observed = snapshot.file.clone();
+        observed.identity.inode += 1;
+        assert!(
+            super::revalidate_heartbeat_snapshot(&observed, &snapshot.file)
+                .expect_err("identity drift")
+                .to_string()
+                .contains("identity drift")
+        );
+        observed = snapshot.file.clone();
+        observed.document[0] = b'[';
+        assert!(
+            super::revalidate_heartbeat_snapshot(&observed, &snapshot.file)
+                .expect_err("document drift")
+                .to_string()
+                .contains("document drift")
+        );
+
+        std::fs::rename(&source, directory.join("old.json")).expect("move classified inode");
+        std::fs::write(&source, &snapshot.file.document).expect("publish replacement inode");
+        assert!(
+            super::persist_heartbeat_copy(&directory, &source, &snapshot)
+                .expect_err("replacement source")
+                .to_string()
+                .contains("identity drift")
+        );
+        assert_eq!(
+            std::fs::read(&source).expect("replacement survives"),
+            snapshot.file.document
+        );
+        std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn heartbeat_quarantine_copy_rejects_preexisting_and_swapped_symlink_ancestors() {
+        let (preexisting_root, preexisting_source) =
+            startup_heartbeat_fixture("copy-preexisting-symlink");
+        let preexisting_snapshot = expired_heartbeat_snapshot(&preexisting_source);
+        let outside = startup_heartbeat_fixture("copy-outside").0;
+        std::os::unix::fs::symlink(&outside, preexisting_root.join("quarantine"))
+            .expect("preexisting quarantine symlink");
+        assert!(super::persist_heartbeat_copy(
+            &preexisting_root,
+            &preexisting_source,
+            &preexisting_snapshot,
+        )
+        .is_err());
+        assert_eq!(
+            std::fs::read_dir(&outside)
+                .expect("outside directory")
+                .count(),
+            0
+        );
+
+        let (swapped_root, swapped_source) = startup_heartbeat_fixture("copy-swapped-symlink");
+        let swapped_snapshot = expired_heartbeat_snapshot(&swapped_source);
+        let mut swapped = false;
+        let result = super::persist_heartbeat_copy_with_hook(
+            &swapped_root,
+            &swapped_source,
+            &swapped_snapshot,
+            |component| {
+                if component == "quarantine" {
+                    std::fs::rename(
+                        swapped_root.join("quarantine"),
+                        swapped_root.join("displaced"),
+                    )
+                    .expect("displace opened quarantine");
+                    std::os::unix::fs::symlink(&outside, swapped_root.join("quarantine"))
+                        .expect("swap quarantine symlink");
+                    swapped = true;
+                }
+            },
+        );
+        assert!(swapped);
+        assert!(result.is_err());
+        assert_eq!(
+            std::fs::read_dir(&outside)
+                .expect("outside directory")
+                .count(),
+            0
+        );
+        assert_eq!(
+            std::fs::read(&swapped_source).expect("source survives"),
+            swapped_snapshot.file.document
+        );
+
+        std::fs::remove_dir_all(preexisting_root).expect("remove preexisting fixture");
+        std::fs::remove_dir_all(swapped_root).expect("remove swapped fixture");
+        std::fs::remove_dir_all(outside).expect("remove outside fixture");
     }
 
     #[test]
