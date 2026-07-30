@@ -1,6 +1,6 @@
 #![cfg(target_os = "linux")]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -43,6 +43,10 @@ IFS= read -r line && printf "%s\n" "$line" > "$AUTOSPEC_TEST_CALLER_READ""#,
         .stdout(Stdio::from(log.try_clone().expect("clone session log")))
         .stderr(Stdio::from(log));
     let mut session = SessionGuard::spawn(command);
+    assert!(
+        session.wait_for_owned_session_count(2, Instant::now() + Duration::from_secs(2)),
+        "script did not publish its nested PTY session"
+    );
     session
         .stdin()
         .write_all(b"harness-input\ncaller-input\n")
@@ -50,7 +54,7 @@ IFS= read -r line && printf "%s\n" "$line" > "$AUTOSPEC_TEST_CALLER_READ""#,
     session.close_stdin();
 
     let status = session.wait_until(Instant::now() + WAIT_TIMEOUT);
-    session.cleanup();
+    session.cleanup().expect("clean PTY session");
 
     assert!(
         status.is_some_and(|status| status.success()),
@@ -72,30 +76,30 @@ fn session_cleanup_reaps_nested_process_groups_after_timeout() {
     let mut command = Command::new("setsid");
     command
         .args([
-            "sh",
-            "-c",
+            "script",
+            "-qfec",
             "trap '' TERM; python3 -c 'import os, signal, time; os.setpgid(0, 0); signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)' & while :; do sleep 1; done",
+            "/dev/null",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     let mut session = SessionGuard::spawn(command);
     let discovery_deadline = Instant::now() + Duration::from_secs(2);
-    while session_process_groups(session.session_id).len() < 2
-        && Instant::now() < discovery_deadline
-    {
-        std::thread::sleep(Duration::from_millis(10));
-    }
     assert!(
-        session_process_groups(session.session_id).len() >= 2,
-        "fixture did not create nested process groups"
+        session.wait_for_owned_session_count(2, discovery_deadline),
+        "fixture did not create the nested PTY session"
+    );
+    assert!(
+        session.owned_process_groups().len() >= 3,
+        "fixture did not create nested process groups across both sessions"
     );
 
     let cleanup_started = Instant::now();
-    session.cleanup();
+    session.cleanup().expect("clean nested PTY sessions");
 
     assert!(
-        session_process_groups(session.session_id).is_empty(),
+        session.owned_process_groups().is_empty(),
         "session cleanup left a nested process group"
     );
     assert!(
@@ -129,15 +133,25 @@ impl Drop for Fixture {
 
 struct SessionGuard {
     child: Child,
-    session_id: i32,
+    root_pid: i32,
+    root_start_time: u64,
+    owned_sessions: BTreeMap<i32, u64>,
     cleaned: bool,
 }
 
 impl SessionGuard {
     fn spawn(mut command: Command) -> Self {
         let child = command.spawn().expect("spawn shell on PTY");
+        let root_pid = child.id() as i32;
+        let root_start_time = process_table()
+            .into_iter()
+            .find(|process| process.pid == root_pid)
+            .map(|process| process.start_time)
+            .expect("read PTY wrapper identity");
         Self {
-            session_id: child.id() as i32,
+            root_pid,
+            root_start_time,
+            owned_sessions: BTreeMap::new(),
             child,
             cleaned: false,
         }
@@ -151,8 +165,20 @@ impl SessionGuard {
         self.child.stdin.take();
     }
 
+    fn wait_for_owned_session_count(&mut self, count: usize, deadline: Instant) -> bool {
+        while Instant::now() < deadline {
+            self.refresh_owned_sessions();
+            if self.owned_sessions.len() >= count {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
     fn wait_until(&mut self, deadline: Instant) -> Option<ExitStatus> {
         loop {
+            self.refresh_owned_sessions();
             if let Some(status) = self.child.try_wait().expect("wait for PTY shell") {
                 return Some(status);
             }
@@ -163,53 +189,157 @@ impl SessionGuard {
         }
     }
 
-    fn cleanup(&mut self) {
+    fn cleanup(&mut self) -> Result<(), String> {
         if self.cleaned {
-            return;
+            return Ok(());
         }
-        terminate_session_groups(self.session_id, nix::sys::signal::Signal::SIGTERM);
-        wait_until_session_gone(self.session_id, Instant::now() + TERMINATION_TIMEOUT);
-        terminate_session_groups(self.session_id, nix::sys::signal::Signal::SIGKILL);
-        wait_until_session_gone(self.session_id, Instant::now() + TERMINATION_TIMEOUT);
-        if self.child.try_wait().ok().flatten().is_none() {
+        let gone = self.terminate_until(
+            nix::sys::signal::Signal::SIGTERM,
+            Instant::now() + TERMINATION_TIMEOUT,
+        );
+        let gone = gone
+            || self.terminate_until(
+                nix::sys::signal::Signal::SIGKILL,
+                Instant::now() + TERMINATION_TIMEOUT,
+            );
+        if !gone {
+            return Err("owned PTY sessions survived SIGKILL".to_string());
+        }
+        if self
+            .child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
             let _ = self.child.kill();
         }
-        let _ = self.child.wait();
+        let reap_deadline = Instant::now() + TERMINATION_TIMEOUT;
+        while self
+            .child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            if Instant::now() >= reap_deadline {
+                return Err("PTY wrapper was not reaped before the deadline".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
         self.cleaned = true;
+        Ok(())
+    }
+
+    fn terminate_until(&mut self, signal: nix::sys::signal::Signal, deadline: Instant) -> bool {
+        while Instant::now() < deadline {
+            self.refresh_owned_sessions();
+            let groups = self.owned_process_groups();
+            if groups.is_empty() {
+                return true;
+            }
+            terminate_process_groups(groups, signal);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        self.owned_process_groups().is_empty()
+    }
+
+    fn refresh_owned_sessions(&mut self) {
+        let processes = process_table();
+        let valid_sessions = self.valid_owned_sessions(&processes);
+        let mut owned_processes = processes
+            .iter()
+            .filter(|process| {
+                process.pid == self.root_pid && process.start_time == self.root_start_time
+            })
+            .map(|process| process.pid)
+            .collect::<BTreeSet<_>>();
+        loop {
+            let mut changed = false;
+            for process in &processes {
+                if (owned_processes.contains(&process.parent)
+                    || valid_sessions.contains(&process.session))
+                    && owned_processes.insert(process.pid)
+                {
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for session in processes
+            .iter()
+            .filter(|process| owned_processes.contains(&process.pid))
+            .map(|process| process.session)
+        {
+            if self.owned_sessions.contains_key(&session) {
+                continue;
+            }
+            if let Some(leader) = processes.iter().find(|process| process.pid == session) {
+                self.owned_sessions.insert(session, leader.start_time);
+            }
+        }
+    }
+
+    fn owned_process_groups(&self) -> BTreeSet<i32> {
+        let processes = process_table();
+        let valid_sessions = self.valid_owned_sessions(&processes);
+        processes
+            .into_iter()
+            .filter(|process| process.state != 'Z' && valid_sessions.contains(&process.session))
+            .map(|process| process.group)
+            .filter(|group| *group > 0)
+            .collect()
+    }
+
+    fn valid_owned_sessions(&self, processes: &[Process]) -> BTreeSet<i32> {
+        self.owned_sessions
+            .iter()
+            .filter_map(|(session, start_time)| {
+                match processes.iter().find(|process| process.pid == *session) {
+                    Some(leader) if leader.start_time == *start_time => Some(*session),
+                    Some(_) => None,
+                    None if processes.iter().any(|process| process.session == *session) => {
+                        Some(*session)
+                    }
+                    None => None,
+                }
+            })
+            .collect()
     }
 }
 
 impl Drop for SessionGuard {
     fn drop(&mut self) {
-        self.cleanup();
+        let _ = self.cleanup();
     }
 }
 
-fn wait_until_session_gone(session_id: i32, deadline: Instant) {
-    while Instant::now() < deadline {
-        if session_process_groups(session_id).is_empty() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn terminate_session_groups(session_id: i32, signal: nix::sys::signal::Signal) {
-    for process_group in session_process_groups(session_id) {
+fn terminate_process_groups(process_groups: BTreeSet<i32>, signal: nix::sys::signal::Signal) {
+    for process_group in process_groups {
         let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(-process_group), signal);
     }
 }
 
-fn session_process_groups(session_id: i32) -> BTreeSet<i32> {
-    let mut groups = BTreeSet::new();
+#[derive(Clone, Copy)]
+struct Process {
+    pid: i32,
+    parent: i32,
+    group: i32,
+    session: i32,
+    start_time: u64,
+    state: char,
+}
+
+fn process_table() -> Vec<Process> {
+    let mut processes = Vec::new();
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return groups;
+        return processes;
     };
     for entry in entries.flatten() {
         let Some(pid) = entry
             .file_name()
             .to_str()
-            .and_then(|name| name.parse::<u32>().ok())
+            .and_then(|name| name.parse::<i32>().ok())
         else {
             continue;
         };
@@ -219,18 +349,27 @@ fn session_process_groups(session_id: i32) -> BTreeSet<i32> {
         let Some(fields) = stat.rsplit_once(") ").map(|(_, fields)| fields) else {
             continue;
         };
-        let mut fields = fields.split_whitespace();
-        let (Some(_state), Some(_parent), Some(process_group), Some(session)) = (
-            fields.next(),
-            fields.next(),
-            fields.next().and_then(|value| value.parse::<i32>().ok()),
-            fields.next().and_then(|value| value.parse::<i32>().ok()),
+        let fields = fields.split_whitespace().collect::<Vec<_>>();
+        if fields.len() <= 19 {
+            continue;
+        }
+        let (Some(state), Ok(parent), Ok(group), Ok(session), Ok(start_time)) = (
+            fields[0].chars().next(),
+            fields[1].parse::<i32>(),
+            fields[2].parse::<i32>(),
+            fields[3].parse::<i32>(),
+            fields[19].parse::<u64>(),
         ) else {
             continue;
         };
-        if session == session_id && process_group > 0 {
-            groups.insert(process_group);
-        }
+        processes.push(Process {
+            pid,
+            parent,
+            group,
+            session,
+            start_time,
+            state,
+        });
     }
-    groups
+    processes
 }
