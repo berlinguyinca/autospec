@@ -741,6 +741,16 @@ pub(crate) fn acquire_for_conductor(
     worker_id: &str,
     branch: &str,
 ) -> Result<ClaimLease, ConductorClaimError> {
+    let recovered = recover_active_issue(repo, issue, 300)?;
+    if !recovered {
+        if let Some(owner) = read_claim_ref(repo, issue)?.and_then(|head| {
+            (head.record.state == "claimed"
+                && (head.record.worker_id != worker_id || head.record.branch != branch))
+                .then_some(head.record.worker_id)
+        }) {
+            return unavailable_claim_with_observed_owner(issue, repo, worker_id, &owner);
+        }
+    }
     acquire_record(AcquireOptions {
         issue,
         repo: Some(repo.to_string()),

@@ -3422,6 +3422,129 @@ fn foreground_rejects_a_terminal_run_state_before_claim_mutation() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
+    // Break caught: foreground acquisition skipped stale-startup recovery, replaced the
+    // stranded claim generation, and then failed to publish over its expired heartbeat.
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_empty_local_remote();
+    let branch = "feat/autonomous-issue-42";
+    let stale = RunStateRecord::new(
+        "test/repo",
+        42,
+        "successor-worker",
+        "claimed",
+        branch,
+        "",
+        "heartbeat-pending:none",
+        Vec::new(),
+        "2000-01-01T00:00:00Z",
+        "2000-01-01T00:00:00Z",
+        1,
+    )
+    .with_claim_id("successor-claim");
+    fixture.transition_claim_ref(&stale);
+    fixture.seed_expired_claim_heartbeat("prior-worker", branch, "prior-claim");
+    seed_foreground_state(&fixture, &selected_foreground_state());
+    fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
+
+    let output = fixture.run_foreground();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={} calls={} claim={:?} heartbeat={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default(),
+        fixture.claim_record(),
+        fs::read_to_string(fixture.heartbeats.join("o4_test_r4_repo/42.json")).unwrap_or_default(),
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("heartbeat_write_failed"),
+        "foreground attempted acquisition before stale-startup recovery"
+    );
+    let acquired = fixture.claim_record();
+    assert!(acquired.worker_id.starts_with("rust-foreground-conductor-"));
+    assert_ne!(acquired.claim_id.as_deref(), Some("successor-claim"));
+    let heartbeat = fs::read_to_string(fixture.heartbeats.join("o4_test_r4_repo/42.json"))
+        .expect("fresh foreground heartbeat");
+    assert!(heartbeat.contains(&format!("\"worker_id\":{:?}", acquired.worker_id)));
+    assert!(heartbeat.contains(&format!(
+        "\"claim_id\":{:?}",
+        acquired.claim_id.expect("fresh claim ID")
+    )));
+    assert!(fs::read_dir(
+        fixture
+            .heartbeats
+            .join("o4_test_r4_repo/quarantine/startup-heartbeat-handoffs")
+    )
+    .expect("prior heartbeat handoff")
+    .filter_map(Result::ok)
+    .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+    .any(|document| document.contains("\"claim_id\":\"prior-claim\"")));
+
+    for (case, updated_at, fresh_heartbeat) in [
+        ("fresh-claim", fresh_iso_timestamp(), false),
+        (
+            "blocked-heartbeat",
+            "2000-01-01T00:00:00Z".to_string(),
+            true,
+        ),
+    ] {
+        let fixture = ForegroundFixture::new();
+        fixture.initialize_empty_local_remote();
+        let blocked = RunStateRecord::new(
+            "test/repo",
+            42,
+            "blocked-worker",
+            "claimed",
+            branch,
+            "",
+            "heartbeat-pending:none",
+            Vec::new(),
+            &updated_at,
+            &updated_at,
+            1,
+        )
+        .with_claim_id("blocked-claim");
+        fixture.transition_claim_ref(&blocked);
+        if fresh_heartbeat {
+            fixture.seed_claim_heartbeat("prior-worker", branch, "prior-claim");
+        } else {
+            fixture.seed_expired_claim_heartbeat("prior-worker", branch, "prior-claim");
+        }
+        seed_foreground_state(&fixture, &selected_foreground_state());
+        fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
+        let heartbeat_path = fixture.heartbeats.join("o4_test_r4_repo/42.json");
+        let heartbeat_before = fs::read_to_string(&heartbeat_path).expect("blocked heartbeat");
+        let claim_before = fixture.claim_record();
+
+        let output = fixture.run_foreground();
+
+        assert!(
+            !output.status.success(),
+            "{case}: acquisition unexpectedly won"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("\"reason\":\"claim_lost\""),
+            "{case}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            fixture.claim_record(),
+            claim_before,
+            "{case}: claim mutated"
+        );
+        assert_eq!(
+            fs::read_to_string(&heartbeat_path).expect("preserved blocked heartbeat"),
+            heartbeat_before,
+            "{case}: heartbeat mutated"
+        );
+    }
+}
+
 #[test]
 fn foreground_ignores_a_malformed_audit_projection_without_a_claim_ref() {
     let fixture = ForegroundFixture::new();
@@ -5775,7 +5898,12 @@ if [ "$1" = issue ] && [ "$2" = edit ]; then
       printf '%s\n' "${FOREGROUND_STOP_MODE_ON_RETRYABLE_RELEASE:-immediate}" '2026-07-31T00:00:00Z test@localhost' > "$FOREGROUND_STOP_ON_RETRYABLE_RELEASE"
     fi
   else
-    printf 'claimed\n' > "$AUTOSPEC_FOREGROUND_MODE"
+    last=""
+    for value in "$@"; do last="$value"; done
+    case "$last" in
+      auto-implement) printf 'reviewed\n' > "$AUTOSPEC_FOREGROUND_MODE" ;;
+      *) printf 'claimed\n' > "$AUTOSPEC_FOREGROUND_MODE" ;;
+    esac
   fi
   exit 0
 fi
@@ -6271,6 +6399,19 @@ printf '%s\n' '[]' > "$report"
         assert!(remote.status.success());
     }
 
+    fn initialize_empty_local_remote(&self) {
+        git_fixture(&self.repo_dir, &["init", "-b", "main"]);
+        git_fixture(
+            &self.repo_dir,
+            &[
+                "remote",
+                "add",
+                "origin",
+                self.claim_remote.to_str().expect("claim remote"),
+            ],
+        );
+    }
+
     fn run_foreground(&self) -> std::process::Output {
         self.command().output().expect("run foreground")
     }
@@ -6513,10 +6654,30 @@ printf '%s\n' '[]' > "$report"
     }
 
     fn seed_claim_heartbeat(&self, worker_id: &str, branch: &str, claim_id: &str) {
-        let repo = "test/repo";
-        let issue = 42_u64;
         let pid = std::process::id();
         let (_, process_start) = process_identity(pid).expect("current process identity");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("heartbeat clock")
+            .as_secs();
+        self.seed_claim_heartbeat_record(worker_id, branch, claim_id, now, pid, process_start);
+    }
+
+    fn seed_expired_claim_heartbeat(&self, worker_id: &str, branch: &str, claim_id: &str) {
+        self.seed_claim_heartbeat_record(worker_id, branch, claim_id, 1, 2_147_483_647, 1);
+    }
+
+    fn seed_claim_heartbeat_record(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+        timestamp: u64,
+        pid: u32,
+        process_start: u64,
+    ) {
+        let repo = "test/repo";
+        let issue = 42_u64;
         let host = fs::read_to_string("/proc/sys/kernel/hostname")
             .expect("read current host")
             .trim()
@@ -6541,10 +6702,7 @@ printf '%s\n' '[]' > "$report"
             &path,
             format!(
                 "{{\"issue\":\"{issue}\",\"branch\":{branch:?},\"step\":\"claimed\",\"ts\":{},\"ttl_seconds\":10800,\"pid\":{pid},\"nonce\":\"{}\",\"host\":{host:?},\"boot_id\":{boot_id:?},\"process_start\":\"{process_start}\",\"pr\":\"\",\"repo\":\"{repo}\",\"worker_id\":{worker_id:?},\"claim_id\":{claim_id:?}}}\n",
-                SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .expect("heartbeat clock")
-                    .as_secs(),
+                timestamp,
                 sha256_hex(&nonce_frame),
             ),
         )
