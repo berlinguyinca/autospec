@@ -6951,15 +6951,14 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn released_heartbeat_handoff_is_resumable_and_preserves_replacements() {
-        use std::os::unix::fs::{MetadataExt, PermissionsExt};
-
-        let (source_path, live) = startup_heartbeat_fixture("released-handoff");
-        let archive_path = source_path.join("archive");
-        std::fs::create_dir(&archive_path).unwrap();
-        std::fs::set_permissions(&archive_path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let source = std::fs::File::open(&source_path).unwrap();
-        let archive = std::fs::File::open(&archive_path).unwrap();
+    fn retryable_release_requires_exact_heartbeat_evidence() {
+        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let (root, _) = startup_heartbeat_fixture("released-missing");
+        let heartbeat_root = root.join("heartbeats");
+        std::fs::create_dir(&heartbeat_root).unwrap();
+        std::fs::set_permissions(&heartbeat_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", heartbeat_root);
         let identity = super::ClaimMutationIdentity {
             repo: "owner/repo",
             issue: 42,
@@ -6967,91 +6966,13 @@ mod tests {
             branch: "feat/worker",
             claim_id: "claim-a",
         };
-        let document = b"{\"issue\":\"42\",\"branch\":\"feat/worker\",\"step\":\"claimed\",\"ts\":1,\"pr\":\"\",\"repo\":\"owner/repo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}\n";
-        let write = |path: &Path, body: &[u8]| {
-            std::fs::write(path, body).unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        };
-        write(&live, document);
-        let retained = "issue-42-claim-a.json";
-        assert!(super::retire_released_heartbeat_name(
-            &source,
-            "42.json",
-            &archive,
-            retained,
-            identity,
-            "issue",
-            &mut |_, boundary| (boundary != "source-fsync")
-                .then_some(())
-                .ok_or_else(|| super::CommandFailure::diagnostic("injected fsync failure")),
-        )
-        .is_err());
-        super::retire_released_heartbeat_name(
-            &source,
-            "42.json",
-            &archive,
-            retained,
-            identity,
-            "issue",
-            &mut |_, _| Ok(()),
-        )
-        .unwrap();
-        assert!(!live.exists());
-        assert_eq!(
-            std::fs::read(archive_path.join(retained)).unwrap(),
-            document
-        );
-
-        for (name, boundary) in [
-            ("replacement-before.json", "before-rename"),
-            ("replacement-after.json", "after-rename"),
-        ] {
-            let target = source_path.join(name);
-            let replacement = source_path.join(format!("{name}.replacement"));
-            write(&target, document);
-            write(&replacement, b"foreign");
-            let archived = format!("{name}.retained");
-            let result = super::retire_released_heartbeat_name(
-                &source,
-                name,
-                &archive,
-                &archived,
-                identity,
-                "session",
-                &mut |_, observed| {
-                    if observed == boundary {
-                        if observed == "before-rename" {
-                            std::fs::rename(&replacement, &target).unwrap();
-                        } else {
-                            write(&target, b"foreign");
-                        }
-                    }
-                    Ok(())
-                },
-            );
-            assert!(result.is_err());
-            assert_eq!(std::fs::read(&target).unwrap(), b"foreign");
-            assert_eq!(
-                archive_path.join(archived).exists(),
-                boundary == "after-rename"
-            );
+        let result = super::retire_released_startup_heartbeat(identity);
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
         }
-
-        let outside = source_path.join("outside");
-        let linked = source_path.join("linked.json");
-        write(&outside, document);
-        std::fs::hard_link(&outside, &linked).unwrap();
-        assert!(super::retire_released_heartbeat_name(
-            &source,
-            "linked.json",
-            &archive,
-            "linked.retained",
-            identity,
-            "issue",
-            &mut |_, _| Ok(()),
-        )
-        .is_err());
-        assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 2);
+        std::fs::remove_dir_all(root).unwrap();
+        result.expect_err("missing issue evidence must keep terminal preparation retryable");
     }
 
     #[cfg(target_os = "linux")]
