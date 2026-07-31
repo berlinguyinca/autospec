@@ -3726,12 +3726,20 @@ fn write_startup_heartbeat(
         ))
     })?;
     let timestamp = unix_now()?;
+    let worker_fields = worker_id.rsplit(':').collect::<Vec<_>>();
+    let pid = worker_fields
+        .get(1)
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or_else(std::process::id);
+    let nonce = worker_fields.first().copied().unwrap_or(claim_id);
     let session_field = session_id.map_or_else(String::new, |session_id| {
         format!(",\"session_id\":\"{}\"", json_escape(session_id))
     });
     let body = format!(
-        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
+        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"ttl_seconds\":{},\"pid\":{pid},\"nonce\":\"{}\",\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
         json_escape(branch),
+        claim_ttl_seconds(),
+        json_escape(nonce),
         json_escape(repo),
         json_escape(worker_id),
         json_escape(claim_id),
@@ -5417,6 +5425,260 @@ fn handoff_stale_heartbeat(
             .map_err(|error| CommandFailure::diagnostic(format!("receipt sync: {error}")))
     })?;
     Ok(copy)
+}
+
+#[cfg(target_os = "linux")]
+fn held_heartbeat_at(
+    directory: &fs::File,
+    name: &std::ffi::OsStr,
+    expected: &StartupHeartbeatSnapshot,
+) -> Result<Option<fs::File>, CommandFailure> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::{fstat, Mode, SFlag};
+
+    let descriptor = match openat(
+        directory,
+        name,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+        Mode::empty(),
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Ok(descriptor) => descriptor,
+        Err(_) => return Err(CommandFailure::diagnostic("heartbeat entry is unsafe")),
+    };
+    let file = fs::File::from(descriptor);
+    let stat = fstat(&file)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat fstat: {error}")))?;
+    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
+        || stat.st_uid != nix::unistd::geteuid().as_raw()
+        || stat.st_mode & 0o7777 != 0o600
+        || stat.st_nlink != 1
+    {
+        return Err(CommandFailure::diagnostic("heartbeat entry is unsafe"));
+    }
+    let observed = file
+        .try_clone()
+        .and_then(read_regular_file)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat read: {error}")))?;
+    revalidate_heartbeat_snapshot(&observed, &expected.file)?;
+    if parse_startup_heartbeat(&observed.document).as_ref() != Some(&expected.evidence)
+        || heartbeat_final_binding(
+            &file,
+            directory,
+            name.to_string_lossy().as_ref(),
+            (observed.identity.device, observed.identity.inode),
+        )? != (HeartbeatFinalBinding::Exact, 1)
+    {
+        return Err(CommandFailure::diagnostic("heartbeat identity changed"));
+    }
+    Ok(Some(file))
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn handoff_retained_heartbeat(
+    state_root: &Path,
+    repo: &fs::File,
+    live_name: &std::ffi::OsStr,
+    snapshot: &StartupHeartbeatSnapshot,
+    mut boundary: impl FnMut(&str, &fs::File, &fs::File, &str),
+    mut after_sync: impl FnMut(HeartbeatHandoffSyncBoundary) -> Result<(), CommandFailure>,
+) -> Result<std::path::PathBuf, CommandFailure> {
+    use nix::fcntl::RenameFlags;
+    use nix::unistd::fsync;
+
+    let issue = snapshot
+        .evidence
+        .issue
+        .parse::<u64>()
+        .map_err(|_| CommandFailure::diagnostic("heartbeat issue is not an integer"))?;
+    let expected = StartupHeartbeatExpectation {
+        repo: &snapshot.evidence.repo,
+        issue,
+        worker_id: &snapshot.evidence.worker_id,
+        branch: &snapshot.evidence.branch,
+        pull_request: &snapshot.evidence.pr,
+        claim_id: &snapshot.evidence.claim_id,
+        step: &snapshot.evidence.step,
+    };
+    let (pending, completed) = heartbeat_receipt_names(expected);
+    let archive_name = completed.replace(".receipt", ".json");
+    let quarantine = ensure_receipt_directory(repo, "quarantine")?;
+    drop(ensure_receipt_directory(
+        &quarantine,
+        "startup-heartbeat-handoffs",
+    )?);
+    let decision = heartbeat_receipt_retry_decision(repo, expected);
+    let handoff = match decision {
+        HeartbeatReceiptDecision::Absent => None,
+        HeartbeatReceiptDecision::Pending | HeartbeatReceiptDecision::Completed => {
+            Some(open_receipt_anchors_with_hook(repo, |_| {})?)
+        }
+        HeartbeatReceiptDecision::Blocking => {
+            return Err(CommandFailure::diagnostic("heartbeat receipt is unsafe"))
+        }
+    };
+    let source = held_heartbeat_at(repo, live_name, snapshot)?;
+    let archived = handoff
+        .as_ref()
+        .map(|directory| held_heartbeat_at(directory, archive_name.as_ref(), snapshot))
+        .transpose()?
+        .flatten();
+    if decision == HeartbeatReceiptDecision::Completed && (source.is_some() || archived.is_none()) {
+        return Err(CommandFailure::diagnostic(
+            "completed heartbeat handoff is inconsistent",
+        ));
+    }
+    let transaction = match decision {
+        HeartbeatReceiptDecision::Absent if source.is_some() && archived.is_none() => {
+            begin_heartbeat_receipt(repo, expected)?
+        }
+        HeartbeatReceiptDecision::Pending
+            if (source.is_some() && archived.is_none())
+                || (source.is_none() && archived.is_some()) =>
+        {
+            HeartbeatReceiptTransaction {
+                handoff: handoff.expect("pending receipt has handoff"),
+                pending,
+                completed,
+            }
+        }
+        HeartbeatReceiptDecision::Completed => {
+            let retained = archived.expect("validated completed archive");
+            let handoff = handoff.expect("completed receipt has handoff");
+            return validate_retained_heartbeat(
+                state_root,
+                repo,
+                live_name,
+                retained,
+                snapshot,
+                archive_name,
+                handoff,
+                None,
+                &mut after_sync,
+            );
+        }
+        _ => {
+            return Err(CommandFailure::diagnostic(
+                "heartbeat handoff state is ambiguous",
+            ))
+        }
+    };
+    let handoff = &transaction.handoff;
+    let retained = if let Some(source) = source {
+        boundary("before-check", repo, handoff, &archive_name);
+        if heartbeat_final_binding(
+            &source,
+            repo,
+            live_name.to_string_lossy().as_ref(),
+            (snapshot.file.identity.device, snapshot.file.identity.inode),
+        )? != (HeartbeatFinalBinding::Exact, 1)
+        {
+            return Err(CommandFailure::diagnostic("heartbeat source changed"));
+        }
+        boundary("before-rename", repo, handoff, &archive_name);
+        nix::fcntl::renameat2(
+            repo,
+            live_name,
+            handoff,
+            archive_name.as_str(),
+            RenameFlags::RENAME_NOREPLACE,
+        )
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("could not retain heartbeat: {error}"))
+        })?;
+        if heartbeat_final_binding(
+            &source,
+            handoff,
+            &archive_name,
+            (snapshot.file.identity.device, snapshot.file.identity.inode),
+        )? != (HeartbeatFinalBinding::Exact, 1)
+        {
+            restore_moved_heartbeat(repo, live_name, handoff, &archive_name, &mut after_sync)?;
+            return Err(CommandFailure::diagnostic(
+                "renamed heartbeat was not the held inode",
+            ));
+        }
+        boundary("after-rename", repo, handoff, &archive_name);
+        source
+    } else {
+        archived.expect("pending receipt has source or archive")
+    };
+    fsync(repo).map_err(|error| CommandFailure::diagnostic(format!("source fsync: {error}")))?;
+    after_sync(HeartbeatHandoffSyncBoundary::Source)?;
+    fsync(handoff)
+        .map_err(|error| CommandFailure::diagnostic(format!("archive fsync: {error}")))?;
+    after_sync(HeartbeatHandoffSyncBoundary::Handoff)?;
+    boundary("final", repo, handoff, &archive_name);
+    let handoff_guard = handoff
+        .try_clone()
+        .map_err(|error| CommandFailure::diagnostic(format!("retained archive clone: {error}")))?;
+    validate_retained_heartbeat(
+        state_root,
+        repo,
+        live_name,
+        retained,
+        snapshot,
+        archive_name,
+        handoff_guard,
+        Some(transaction),
+        &mut after_sync,
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn validate_retained_heartbeat(
+    state_root: &Path,
+    repo: &fs::File,
+    live_name: &std::ffi::OsStr,
+    retained: fs::File,
+    snapshot: &StartupHeartbeatSnapshot,
+    archive_name: String,
+    handoff: fs::File,
+    transaction: Option<HeartbeatReceiptTransaction>,
+    after_sync: &mut impl FnMut(HeartbeatHandoffSyncBoundary) -> Result<(), CommandFailure>,
+) -> Result<std::path::PathBuf, CommandFailure> {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::{fstat, fstatat};
+
+    let mut reader = retained.try_clone().map_err(|error| {
+        CommandFailure::diagnostic(format!("retained heartbeat clone: {error}"))
+    })?;
+    std::io::Seek::rewind(&mut reader)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat rewind: {error}")))?;
+    let observed = read_regular_file(reader)
+        .map_err(|error| CommandFailure::diagnostic(format!("retained heartbeat read: {error}")))?;
+    let stat = fstat(&retained)
+        .map_err(|error| CommandFailure::diagnostic(format!("retained fstat: {error}")))?;
+    if !matches!(
+        fstatat(repo, live_name, AtFlags::AT_SYMLINK_NOFOLLOW),
+        Err(nix::errno::Errno::ENOENT)
+    ) || stat.st_uid != nix::unistd::geteuid().as_raw()
+        || stat.st_mode & 0o7777 != 0o600
+        || stat.st_nlink != 1
+        || observed != snapshot.file
+        || heartbeat_final_binding(
+            &retained,
+            &handoff,
+            &archive_name,
+            (snapshot.file.identity.device, snapshot.file.identity.inode),
+        )? != (HeartbeatFinalBinding::Exact, 1)
+    {
+        return Err(CommandFailure::diagnostic(
+            "retained heartbeat final validation failed",
+        ));
+    }
+    if let Some(transaction) = transaction {
+        retire_heartbeat_receipt_with_sync(transaction, |directory| {
+            nix::unistd::fsync(directory)
+                .map_err(|error| CommandFailure::diagnostic(format!("receipt fsync: {error}")))
+        })?;
+        after_sync(HeartbeatHandoffSyncBoundary::Cleanup)?;
+    }
+    Ok(state_root
+        .join("quarantine/startup-heartbeat-handoffs")
+        .join(archive_name))
 }
 
 #[cfg(unix)]
