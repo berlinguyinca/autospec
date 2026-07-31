@@ -1890,11 +1890,11 @@ fn quarantine_authoritative_stale_heartbeat(
 
 #[cfg(not(target_os = "linux"))]
 fn quarantine_authoritative_stale_heartbeat(
-    repo: &str,
-    issue: u64,
+    _repo: &str,
+    _issue: u64,
     _record: &RunStateRecord,
 ) -> Result<bool, CommandFailure> {
-    Ok(!startup_heartbeat_exists(repo, issue))
+    Ok(false)
 }
 
 fn release_stale_startup_labels(repo: &str, issue: u64) -> Result<(), CommandFailure> {
@@ -5500,6 +5500,26 @@ fn heartbeat_receipt_retry_decision_with_hook(
     expected: StartupHeartbeatExpectation<'_>,
     after_open: impl FnMut(&str),
 ) -> HeartbeatReceiptDecision {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::fstatat;
+
+    let quarantine = match fstatat(trusted_repo, "quarantine", AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Err(nix::errno::Errno::ENOENT) => return HeartbeatReceiptDecision::Absent,
+        Err(_) => return HeartbeatReceiptDecision::Blocking,
+        Ok(_) => match open_heartbeat_directory_beneath(trusted_repo, Path::new("quarantine")) {
+            Ok(directory) => directory,
+            Err(_) => return HeartbeatReceiptDecision::Blocking,
+        },
+    };
+    match fstatat(
+        &quarantine,
+        "startup-heartbeat-handoffs",
+        AtFlags::AT_SYMLINK_NOFOLLOW,
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return HeartbeatReceiptDecision::Absent,
+        Err(_) => return HeartbeatReceiptDecision::Blocking,
+        Ok(_) => {}
+    }
     let Ok(handoff) = open_receipt_anchors_with_hook(trusted_repo, after_open) else {
         return HeartbeatReceiptDecision::Blocking;
     };
