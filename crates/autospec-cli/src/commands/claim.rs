@@ -980,21 +980,11 @@ fn lifecycle_lease_freshness(server_timestamp: &str) -> LeaseFreshness {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HeartbeatClaimPhase {
-    Pending,
-    Ready,
-}
-
-fn heartbeat_claim_step(phase: HeartbeatClaimPhase, session_id: Option<&str>) -> String {
-    let phase = match phase {
-        HeartbeatClaimPhase::Pending => "heartbeat-pending",
-        HeartbeatClaimPhase::Ready => "heartbeat-ready",
-    };
+fn heartbeat_claim_step(phase: &str, session_id: Option<&str>) -> String {
     let session = session_id
         .map(heartbeat_session_key)
         .unwrap_or_else(|| "none".to_string());
-    format!("{phase}:{session}")
+    format!("heartbeat-{phase}:{session}")
 }
 
 fn resumable_heartbeat_phase(
@@ -1002,7 +992,7 @@ fn resumable_heartbeat_phase(
     worker_id: &str,
     branch: &str,
     session_id: Option<&str>,
-) -> Option<HeartbeatClaimPhase> {
+) -> Option<&'static str> {
     if head.record.state != "claimed"
         || head.record.worker_id != worker_id
         || head.record.branch != branch
@@ -1010,15 +1000,9 @@ fn resumable_heartbeat_phase(
     {
         return None;
     }
-    [HeartbeatClaimPhase::Pending, HeartbeatClaimPhase::Ready]
+    ["pending", "ready"]
         .into_iter()
-        .find(|phase| head.record.step == heartbeat_claim_step(*phase, session_id))
-}
-
-fn heartbeat_resume_record(head: &ClaimRefHead, now: &str) -> RunStateRecord {
-    let mut record = head.record.clone();
-    record.updated_at = now.to_string();
-    record
+        .find(|phase| head.record.step == heartbeat_claim_step(phase, session_id))
 }
 
 fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimError> {
@@ -1063,25 +1047,13 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     }
 
     let (claim_id, mut head, phase) = if let Some(phase) = resume {
-        let prior = prior.as_ref().expect("resume requires a claim ref");
-        let claim_id = prior
+        let head = prior.clone().expect("resume requires a claim ref");
+        let claim_id = head
             .record
             .claim_id
             .clone()
             .expect("resumable claim has an ID");
-        let refreshed = heartbeat_resume_record(prior, &utc_now_iso()?);
-        let head = match advance_claim_ref(&repo, options.issue, Some(prior), &refreshed)? {
-            ClaimRefAdvance::Won(head) => head,
-            ClaimRefAdvance::Lost => {
-                return unavailable_claim(
-                    options.issue,
-                    &repo,
-                    Some(&worker_id),
-                    "heartbeat_resume_transition_lost",
-                )
-            }
-        };
-        (claim_id, head, phase)
+        (claim_id, Box::new(head), phase)
     } else {
         let claim_id = claim_generation_id()?;
         let now = utc_now_iso()?;
@@ -1092,7 +1064,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             "claimed",
             &options.branch,
             "",
-            heartbeat_claim_step(HeartbeatClaimPhase::Pending, options.session_id.as_deref()),
+            heartbeat_claim_step("pending", options.session_id.as_deref()),
             Vec::new(),
             &now,
             &now,
@@ -1114,10 +1086,28 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             }
         };
         project_claim_ref_to_comments(&repo, &head);
-        (claim_id, head, HeartbeatClaimPhase::Pending)
+        (claim_id, head, "pending")
     };
 
-    if phase == HeartbeatClaimPhase::Pending {
+    if phase == "pending" {
+        let mut publishing = head.record.clone();
+        publishing.step = format!(
+            "{}:{}",
+            heartbeat_claim_step("publishing", options.session_id.as_deref()),
+            claim_generation_id()?
+        );
+        publishing.updated_at = utc_now_iso()?;
+        head = match advance_claim_ref(&repo, options.issue, Some(&head), &publishing)? {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => {
+                return unavailable_claim(
+                    options.issue,
+                    &repo,
+                    Some(&worker_id),
+                    "heartbeat_publish_transition_lost",
+                )
+            }
+        };
         if write_startup_heartbeat(
             &repo,
             options.issue,
@@ -1128,6 +1118,14 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         )
         .is_err()
         {
+            let mut pending = head.record.clone();
+            pending.step = heartbeat_claim_step("pending", options.session_id.as_deref());
+            pending.updated_at = utc_now_iso()?;
+            if let ClaimRefAdvance::Won(pending) =
+                advance_claim_ref(&repo, options.issue, Some(&head), &pending)?
+            {
+                project_claim_ref_to_comments(&repo, &pending);
+            }
             return unavailable_claim(
                 options.issue,
                 &repo,
@@ -1136,8 +1134,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             );
         }
         let mut ready = head.record.clone();
-        ready.step =
-            heartbeat_claim_step(HeartbeatClaimPhase::Ready, options.session_id.as_deref());
+        ready.step = heartbeat_claim_step("ready", options.session_id.as_deref());
         ready.updated_at = utc_now_iso()?;
         head = match advance_claim_ref(&repo, options.issue, Some(&head), &ready)? {
             ClaimRefAdvance::Won(head) => head,
@@ -1200,11 +1197,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
                 || head.record.state != "claimed"
                 || head.record.claim_id.as_deref() != Some(claim_id.as_str())
                 || head.record.branch != options.branch
-                || head.record.step
-                    != heartbeat_claim_step(
-                        HeartbeatClaimPhase::Ready,
-                        options.session_id.as_deref(),
-                    )
+                || head.record.step != heartbeat_claim_step("ready", options.session_id.as_deref())
         }) || !labels.iter().any(|label| label == "in-progress-by-bot")
         {
             let owner = observed
