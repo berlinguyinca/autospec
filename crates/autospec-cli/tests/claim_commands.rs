@@ -1459,6 +1459,25 @@ fn claim_stale_heartbeat_recovery() {
         )
         .with_claim_id("claim-b"),
     );
+    for issue in [44, 45, 46] {
+        transition_claim_ref(
+            &repo,
+            &RunStateRecord::new(
+                "testorg/testrepo",
+                issue,
+                "worker-new",
+                "claimed",
+                "feat/test",
+                "",
+                "heartbeat-pending:none",
+                Vec::new(),
+                "2000-01-01T00:00:00Z",
+                "2000-01-01T00:00:00Z",
+                1,
+            )
+            .with_claim_id("claim-new"),
+        );
+    }
     std::fs::create_dir_all(&heartbeat_repo).expect("heartbeat repository");
     std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o700))
         .expect("private heartbeat root");
@@ -1594,6 +1613,87 @@ exit 17
         0o600
     );
     assert!(claim_ref_message(&repo, 42).contains("\"state\":\"available\""));
+
+    let prior_generation_document = |repo: &str, issue: u64, ts: u64, nonce: &str| {
+        format!(
+            "{{\"issue\":\"{issue}\",\"branch\":\"feat/test\",\"step\":\"claimed\",\"ts\":{ts},\"ttl_seconds\":1,\"pid\":2147483647,\"nonce\":\"{nonce}\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"1\",\"pr\":\"\",\"repo\":\"{repo}\",\"worker_id\":\"worker-old\",\"claim_id\":\"claim-old\"}}\n",
+            host.trim(),
+            boot.trim()
+        )
+    };
+    let successor_heartbeat = heartbeat_repo.join("44.json");
+    std::fs::write(
+        &successor_heartbeat,
+        prior_generation_document(
+            "testorg/testrepo",
+            44,
+            1,
+            "ec8b91f0af46c8d2aa2e0737f0fd9d3c3808e5ce539d0b26f1c2be2cdcf901e1",
+        ),
+    )
+    .expect("expired prior-generation heartbeat");
+    std::fs::set_permissions(&successor_heartbeat, std::fs::Permissions::from_mode(0o600))
+        .expect("private prior-generation heartbeat");
+
+    let successor = recover("44");
+
+    assert!(successor.status.success());
+    assert!(String::from_utf8_lossy(&successor.stdout).contains("\"recovered\":true"));
+    assert!(!successor_heartbeat.exists());
+    assert!(std::fs::read_dir(&handoff)
+        .expect("prior-generation handoff")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .any(|document| document.contains("\"issue\":\"44\"")
+            && document.contains("\"claim_id\":\"claim-old\"")));
+    let recovered = claim_ref_message(&repo, 44);
+    assert!(recovered.contains("\"state\":\"available\""));
+    assert!(recovered.contains("\"step\":\"stale_startup_recovered\""));
+
+    let fresh_heartbeat = heartbeat_repo.join("45.json");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("wall clock")
+        .as_secs();
+    std::fs::write(
+        &fresh_heartbeat,
+        prior_generation_document(
+            "testorg/testrepo",
+            45,
+            now,
+            "200ba5dde87a479bccd82ffab1dcc64d59b63e68d0234682c133873593363a67",
+        ),
+    )
+    .expect("fresh prior-generation heartbeat");
+    std::fs::set_permissions(&fresh_heartbeat, std::fs::Permissions::from_mode(0o600))
+        .expect("private fresh heartbeat");
+    let fresh_claim = claim_ref_message(&repo, 45);
+    let fresh = recover("45");
+    assert!(String::from_utf8_lossy(&fresh.stdout).contains("\"recovered\":false"));
+    assert_eq!(claim_ref_message(&repo, 45), fresh_claim);
+    assert!(fresh_heartbeat.exists());
+
+    let cross_repo_heartbeat = heartbeat_repo.join("46.json");
+    std::fs::write(
+        &cross_repo_heartbeat,
+        prior_generation_document(
+            "otherorg/testrepo",
+            46,
+            1,
+            "da6c29ccd42ddf083f065bfc437879d61e4cda55f4e00f0f7f26de8e2c7807dd",
+        ),
+    )
+    .expect("cross-repository heartbeat");
+    std::fs::set_permissions(
+        &cross_repo_heartbeat,
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("private cross-repository heartbeat");
+    let cross_repo_claim = claim_ref_message(&repo, 46);
+    let cross_repo = recover("46");
+    assert!(String::from_utf8_lossy(&cross_repo.stdout).contains("\"recovered\":false"));
+    assert_eq!(claim_ref_message(&repo, 46), cross_repo_claim);
+    assert!(cross_repo_heartbeat.exists());
 }
 
 #[test]

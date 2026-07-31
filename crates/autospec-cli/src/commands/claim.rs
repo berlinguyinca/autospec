@@ -1748,7 +1748,6 @@ fn recover_authoritative_stale_startup(
     }
     if selected.record.state != "claimed"
         || !selected.record.pr.is_empty()
-        || heartbeat_lifecycle_step(&selected.record.step)
         || branch_ref_exists(&selected.record.branch)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {
@@ -1820,13 +1819,57 @@ fn quarantine_authoritative_stale_heartbeat(
         step: "claimed",
     };
     let issue_name = format!("{issue}.json");
-    let classified = classify_startup_heartbeat_at(
-        &repo,
-        issue_name.as_ref(),
-        expected,
-        unix_now()?,
-        observe_local_startup_pid,
-    );
+    let classified = if heartbeat_lifecycle_step(&record.step) {
+        match read_regular_file_at_no_follow(&repo, issue_name.as_ref()) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                StartupHeartbeatClassification::Absent
+            }
+            Err(_) => StartupHeartbeatClassification::Blocking,
+            Ok(file) => {
+                let evidence = parse_startup_heartbeat(&file.document);
+                match evidence {
+                    Some(evidence)
+                        if (evidence.worker_id != record.worker_id
+                            || evidence.claim_id != claim_id)
+                            && evidence.repo == repo_name
+                            && evidence.issue == issue.to_string()
+                            && evidence.branch == record.branch
+                            && evidence.pr.is_empty() =>
+                    {
+                        let prior_generation = StartupHeartbeatExpectation {
+                            repo: &evidence.repo,
+                            issue,
+                            worker_id: &evidence.worker_id,
+                            branch: &evidence.branch,
+                            pull_request: &evidence.pr,
+                            claim_id: &evidence.claim_id,
+                            step: &evidence.step,
+                        };
+                        classify_startup_heartbeat_snapshot(
+                            file,
+                            prior_generation,
+                            unix_now()?,
+                            observe_local_startup_pid,
+                        )
+                    }
+                    _ => classify_startup_heartbeat_snapshot(
+                        file,
+                        expected,
+                        unix_now()?,
+                        observe_local_startup_pid,
+                    ),
+                }
+            }
+        }
+    } else {
+        classify_startup_heartbeat_at(
+            &repo,
+            issue_name.as_ref(),
+            expected,
+            unix_now()?,
+            observe_local_startup_pid,
+        )
+    };
     let snapshot = match classified {
         StartupHeartbeatClassification::Blocking => return Ok(false),
         StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
