@@ -2010,7 +2010,9 @@ pub(crate) fn transition_bridge_claim(
             ClaimRefAdvance::Lost => return Ok(BridgeClaimTransition::OwnershipLost),
         }
     };
-
+    if disposition == BridgeClaimDisposition::Retryable {
+        retire_released_startup_heartbeat(identity)?;
+    }
     let mut arguments = vec![
         "issue".to_string(),
         "edit".to_string(),
@@ -3717,6 +3719,8 @@ fn write_startup_heartbeat(
     claim_id: &str,
     session_id: Option<&str>,
 ) -> Result<(), CommandFailure> {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     let root = heartbeat_root()?;
     let directory = root.join(super::autonomous::drain::repository_progress_key(repo));
     fs::create_dir_all(&directory).map_err(|error| {
@@ -3725,6 +3729,12 @@ fn write_startup_heartbeat(
             directory.display()
         ))
     })?;
+    #[cfg(unix)]
+    for private in [&root, &directory] {
+        fs::set_permissions(private, fs::Permissions::from_mode(0o700)).map_err(|error| {
+            CommandFailure::diagnostic(format!("could not protect heartbeat directory: {error}"))
+        })?;
+    }
     let timestamp = unix_now()?;
     let ttl_seconds = claim_ttl_seconds().max(1);
     let pid = std::process::id();
@@ -3752,13 +3762,23 @@ fn write_startup_heartbeat(
                 sessions.display()
             ))
         })?;
+        #[cfg(unix)]
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700))
+            .map_err(|error| CommandFailure::diagnostic(format!("protect sessions: {error}")))?;
         let path = sessions.join(format!("{}.json", heartbeat_session_key(session_id)));
         let identity = SessionBindingIdentity::new(session_id, issue, worker_id, branch, claim_id);
         publish_session_binding(&path, body.as_bytes(), &identity)?;
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|error| CommandFailure::diagnostic(format!("protect session: {error}")))?;
     }
-    fs::write(directory.join(format!("{issue}.json")), &body).map_err(|error| {
+    let issue_path = directory.join(format!("{issue}.json"));
+    fs::write(&issue_path, &body).map_err(|error| {
         CommandFailure::diagnostic(format!("could not write claim startup heartbeat: {error}"))
     })?;
+    #[cfg(unix)]
+    fs::set_permissions(issue_path, fs::Permissions::from_mode(0o600))
+        .map_err(|error| CommandFailure::diagnostic(format!("protect issue heartbeat: {error}")))?;
     Ok(())
 }
 
@@ -4168,6 +4188,185 @@ pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
     Ok(root)
 }
 
+#[cfg(target_os = "linux")]
+fn terminal_heartbeat_snapshot(
+    directory: &fs::File,
+    name: &std::ffi::OsStr,
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<StartupHeartbeatSnapshot, CommandFailure> {
+    let mut archive = None;
+    let file = match read_regular_file_at_no_follow(directory, name) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let expected = StartupHeartbeatExpectation {
+                repo: identity.repo,
+                issue: identity.issue,
+                worker_id: identity.worker_id,
+                branch: identity.branch,
+                pull_request: "",
+                claim_id: identity.claim_id,
+                step: "claimed",
+            };
+            let completed = heartbeat_receipt_names(expected).1;
+            let archive_name = completed.replace(".receipt", ".json");
+            let handoff = open_receipt_anchors_with_hook(directory, |_| {})?;
+            let file = read_regular_file_at_no_follow(&handoff, archive_name.as_ref())
+                .map_err(|error| CommandFailure::diagnostic(format!("retained read: {error}")))?;
+            archive = Some((handoff, archive_name));
+            file
+        }
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "terminal heartbeat read: {error}"
+            )))
+        }
+    };
+    let evidence = parse_startup_heartbeat(&file.document)
+        .ok_or_else(|| CommandFailure::diagnostic("terminal heartbeat evidence is invalid"))?;
+    let snapshot = StartupHeartbeatSnapshot { file, evidence };
+    let (source, observed) = archive
+        .as_ref()
+        .map_or((directory, name), |(handoff, name)| {
+            (handoff, name.as_ref())
+        });
+    held_heartbeat_at(source, observed, &snapshot)?
+        .ok_or_else(|| CommandFailure::diagnostic("terminal heartbeat evidence is absent"))?;
+    Ok(snapshot)
+}
+#[cfg(target_os = "linux")]
+fn handoff_terminal_heartbeat(
+    state_root: &Path,
+    directory: &fs::File,
+    name: &std::ffi::OsStr,
+    snapshot: &StartupHeartbeatSnapshot,
+    role: &str,
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    handoff_retained_heartbeat(
+        state_root,
+        directory,
+        name,
+        snapshot,
+        |_, _, _, _| {},
+        |sync| {
+            boundary(
+                role,
+                match sync {
+                    HeartbeatHandoffSyncBoundary::Source => "source-fsync",
+                    HeartbeatHandoffSyncBoundary::Handoff => "archive-fsync",
+                    HeartbeatHandoffSyncBoundary::Cleanup => "cleanup",
+                    HeartbeatHandoffSyncBoundary::RestoreRoot => "restore-source",
+                    HeartbeatHandoffSyncBoundary::RestoreUnlink => "restore-unlink",
+                    HeartbeatHandoffSyncBoundary::RestoreHandoff => "restore-archive",
+                },
+            )
+        },
+    )
+    .map(|_| ())
+}
+#[cfg(target_os = "linux")]
+fn retire_released_startup_heartbeat_with_hook(
+    identity: ClaimMutationIdentity<'_>,
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+    let root_path = heartbeat_root()?;
+    let root = fs::File::from(
+        open(
+            &root_path,
+            OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat root open: {error}")))?,
+    );
+    private_heartbeat_directory_identity(&root, "terminal root")?;
+    let repo_name = super::autonomous::drain::repository_progress_key(identity.repo);
+    let repo = open_heartbeat_directory_beneath(&root, Path::new(&repo_name))?;
+    let issue_name = format!("{}.json", identity.issue);
+    let issue = terminal_heartbeat_snapshot(&repo, issue_name.as_ref(), identity)?;
+    let evidence = &issue.evidence;
+    let exact = evidence.repo == identity.repo
+        && evidence.issue == identity.issue.to_string()
+        && evidence.worker_id == identity.worker_id
+        && evidence.branch == identity.branch
+        && evidence.claim_id == identity.claim_id
+        && evidence.step == "claimed"
+        && evidence.pr.is_empty()
+        && evidence.ttl_seconds > 0
+        && evidence.pid > 0
+        && evidence.pid <= i32::MAX as u32
+        && evidence.nonce
+            == startup_heartbeat_nonce(identity.repo, identity.issue, identity.claim_id)
+        && !evidence.host.is_empty()
+        && !evidence.boot_id.is_empty()
+        && evidence
+            .session_id
+            .as_ref()
+            .is_none_or(|value| !value.is_empty())
+        && evidence
+            .process_start
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .is_some_and(|value| value.to_string() == evidence.process_start);
+    if !exact {
+        return Err(CommandFailure::diagnostic(
+            "terminal heartbeat does not match prepared claim",
+        ));
+    }
+    if observe_local_startup_pid(
+        &evidence.worker_id,
+        evidence.pid,
+        &evidence.host,
+        &evidence.boot_id,
+        &evidence.process_start,
+    ) == StartupPidLiveness::Unknown
+    {
+        return Err(CommandFailure::diagnostic(
+            "terminal heartbeat process identity is ambiguous",
+        ));
+    }
+    let repo_path = root_path.join(&repo_name);
+    if let Some(session) = &evidence.session_id {
+        let sessions = open_heartbeat_directory_beneath(&repo, Path::new("sessions"))?;
+        let session_name = format!("{}.json", heartbeat_session_key(session));
+        let session = terminal_heartbeat_snapshot(&sessions, session_name.as_ref(), identity)?;
+        if session.evidence != issue.evidence {
+            return Err(CommandFailure::diagnostic(
+                "terminal session heartbeat does not match issue evidence",
+            ));
+        }
+        handoff_terminal_heartbeat(
+            &repo_path.join("sessions"),
+            &sessions,
+            session_name.as_ref(),
+            &session,
+            "session",
+            boundary,
+        )?;
+    }
+    handoff_terminal_heartbeat(
+        &repo_path,
+        &repo,
+        issue_name.as_ref(),
+        &issue,
+        "issue",
+        boundary,
+    )
+}
+#[cfg(target_os = "linux")]
+fn retire_released_startup_heartbeat(
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<(), CommandFailure> {
+    retire_released_startup_heartbeat_with_hook(identity, &mut |_, _| Ok(()))
+}
+#[cfg(not(target_os = "linux"))]
+fn retire_released_startup_heartbeat(
+    _identity: ClaimMutationIdentity<'_>,
+) -> Result<(), CommandFailure> {
+    Ok(())
+}
 #[cfg(target_os = "linux")]
 fn prepare_heartbeat_root_parent_with_hook(
     root: &Path,
@@ -6692,6 +6891,31 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn retryable_release_requires_exact_heartbeat_evidence() {
+        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let (root, _) = startup_heartbeat_fixture("released-missing");
+        let heartbeat_root = root.join("heartbeats");
+        std::fs::create_dir(&heartbeat_root).unwrap();
+        std::fs::set_permissions(&heartbeat_root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", heartbeat_root);
+        let identity = super::ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker",
+            claim_id: "claim-a",
+        };
+        let result = super::retire_released_startup_heartbeat(identity);
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+        }
+        std::fs::remove_dir_all(root).unwrap();
+        result.expect_err("missing issue evidence must keep terminal preparation retryable");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
     fn heartbeat_directory_openat2() {
         use nix::fcntl::{open, OFlag, ResolveFlag};
         use nix::sys::stat::fstat;
@@ -8775,6 +8999,7 @@ claimed|review
         let old_fail_first_label = std::env::var_os("GH_FAIL_FIRST_LABEL");
         let old_first_label_failed = std::env::var_os("GH_FIRST_LABEL_FAILED");
         let old_retries = std::env::var_os("AUTOSPEC_GH_API_RETRIES");
+        let old_heartbeat = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
         std::env::set_var(
             "PATH",
             format!(
@@ -8802,6 +9027,7 @@ claimed|review
         );
         std::env::set_var("GH_FIRST_LABEL_FAILED", &first_label_failed);
         std::env::set_var("AUTOSPEC_GH_API_RETRIES", "1");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", fixture.root.join("heartbeats"));
 
         let claimed = claim_record("worker-a", "claim-a", "claimed");
         assert!(matches!(
@@ -8824,6 +9050,17 @@ claimed|review
             branch: "feat/worker-a",
             claim_id: "claim-a",
         };
+        if disposition == super::BridgeClaimDisposition::Retryable {
+            super::write_startup_heartbeat(
+                identity.repo,
+                identity.issue,
+                identity.worker_id,
+                identity.branch,
+                identity.claim_id,
+                None,
+            )
+            .expect("retryable heartbeat");
+        }
         let pr = (disposition == super::BridgeClaimDisposition::Merged).then_some(17);
         if interrupt_after_preparation {
             super::transition_bridge_claim(identity, pr, disposition)
@@ -8897,6 +9134,7 @@ claimed|review
             ("GH_FAIL_FIRST_LABEL", old_fail_first_label),
             ("GH_FIRST_LABEL_FAILED", old_first_label_failed),
             ("AUTOSPEC_GH_API_RETRIES", old_retries),
+            ("AUTOSPEC_HEARTBEAT_DIR", old_heartbeat),
         ] {
             match value {
                 Some(value) => std::env::set_var(key, value),
