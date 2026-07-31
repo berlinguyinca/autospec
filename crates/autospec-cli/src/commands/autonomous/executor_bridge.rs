@@ -703,7 +703,20 @@ pub(crate) fn recover_terminal_failure_identity(
     reject_symlink_path(&cleanup_intent)?;
     match fs::symlink_metadata(&cleanup_intent) {
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if observe_terminal_bridge_claim(
+                bridge_claim_identity(&state),
+                state.pr,
+                BridgeClaimDisposition::Retryable,
+            )
+            .map_err(|error| error.message)?
+            {
+                return Ok(None);
+            }
+            return Err(
+                "missing failure cleanup intent requires an exact retryable release".to_string(),
+            );
+        }
         Err(error) => return Err(format!("inspect executor failure cleanup intent: {error}")),
     }
     read_failure_cleanup_intent(&state_path, &state)?;
@@ -26284,38 +26297,6 @@ exit 64
         assert_eq!(
             state.terminal_result.as_deref(),
             Some("retryable:executor_zero_effect_completion")
-        );
-    }
-
-    #[test]
-    fn autonomous_executor_bridge_terminal_failure_without_intent_is_absent() {
-        let (fixture, mut state, _snapshot, _) =
-            implementation_proof_fixture("terminal-failure-without-intent");
-        state.phase = super::BridgePhase::Interrupted;
-        state.identity.invocation_id =
-            format!("{}-{}", state.identity.issue, state.identity.claim_id);
-        state.identity.runtime_environment_dir = None;
-        state.identity.runtime_session_id = None;
-        let state_dir = fixture.root.join("state/executor");
-        let generation = &super::sha256_hex(state.identity.claim_id.as_bytes())[..16];
-        let state_path =
-            state_dir.join(format!("issue-{}-{generation}.json", state.identity.issue));
-        super::write_invocation_atomic(&state_path, &state).expect("persist interrupted state");
-        let lease = crate::commands::claim::ClaimLease {
-            issue: state.identity.issue,
-            repo: state.identity.repository.clone(),
-            worker_id: state.identity.worker_id.clone(),
-            branch: state.identity.branch.clone(),
-            claim_id: state.identity.claim_id.clone(),
-            session_id: None,
-        };
-
-        let recovered = super::recover_terminal_failure_identity(&state_dir, &lease)
-            .expect("missing failure intent is not corrupt terminal proof");
-
-        assert_eq!(
-            recovered, None,
-            "an interrupted invocation without a cleanup intent is not a terminal failure"
         );
     }
 
