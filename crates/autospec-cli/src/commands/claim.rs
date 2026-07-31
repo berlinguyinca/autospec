@@ -3718,13 +3718,6 @@ fn write_startup_heartbeat(
     session_id: Option<&str>,
 ) -> Result<(), CommandFailure> {
     let root = heartbeat_root()?;
-    let directory = root.join(super::autonomous::drain::repository_progress_key(repo));
-    fs::create_dir_all(&directory).map_err(|error| {
-        CommandFailure::diagnostic(format!(
-            "could not create claim heartbeat directory {}: {error}",
-            directory.display()
-        ))
-    })?;
     let timestamp = unix_now()?;
     let session_field = session_id.map_or_else(String::new, |session_id| {
         format!(",\"session_id\":\"{}\"", json_escape(session_id))
@@ -3736,25 +3729,200 @@ fn write_startup_heartbeat(
         json_escape(worker_id),
         json_escape(claim_id),
     );
-    if let Some(session_id) = session_id {
-        let sessions = directory.join("sessions");
-        fs::create_dir_all(&sessions).map_err(|error| {
+    publish_startup_heartbeat_transaction(&root, repo, issue, session_id, body.as_bytes())
+}
+
+#[cfg(target_os = "linux")]
+fn open_private_heartbeat_directory(path: &Path) -> Result<fs::File, CommandFailure> {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+
+    prepare_heartbeat_root_parent_with_hook(&path.join(".publication-anchor"), |_| Ok(()))?;
+    let directory = fs::File::from(
+        open(
+            path,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| {
             CommandFailure::diagnostic(format!(
-                "could not create claim session heartbeat directory {}: {error}",
-                sessions.display()
+                "could not open heartbeat publication directory: {error}"
             ))
-        })?;
-        let path = sessions.join(format!("{}.json", heartbeat_session_key(session_id)));
-        let identity = SessionBindingIdentity::new(session_id, issue, worker_id, branch, claim_id);
-        publish_session_binding(&path, body.as_bytes(), &identity)?;
+        })?,
+    );
+    private_heartbeat_directory_identity(&directory, "publication directory")?;
+    Ok(directory)
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeartbeatTarget {
+    Missing,
+    Exact,
+    Blocking,
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_heartbeat_target(directory: &fs::File, name: &str, expected: &[u8]) -> HeartbeatTarget {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::{fchmod, fstat, Mode, SFlag};
+
+    let descriptor = match openat(
+        directory,
+        name,
+        OFlag::O_RDWR | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+        Mode::empty(),
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return HeartbeatTarget::Missing,
+        Ok(descriptor) => descriptor,
+        Err(_) => return HeartbeatTarget::Blocking,
+    };
+    let file = fs::File::from(descriptor);
+    let Ok(stat) = fstat(&file) else {
+        return HeartbeatTarget::Blocking;
+    };
+    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
+        || stat.st_uid != nix::unistd::geteuid().as_raw()
+        || stat.st_nlink != 1
+    {
+        return HeartbeatTarget::Blocking;
     }
-    fs::write(directory.join(format!("{issue}.json")), &body).map_err(|error| {
-        CommandFailure::diagnostic(format!("could not write claim startup heartbeat: {error}"))
-    })?;
+    let Ok(snapshot) = file.try_clone().and_then(read_regular_file) else {
+        return HeartbeatTarget::Blocking;
+    };
+    let normalize = |document: &[u8]| {
+        let mut value: serde_json::Value = serde_json::from_slice(document).ok()?;
+        value.as_object_mut()?.remove("ts");
+        Some(value)
+    };
+    if normalize(&snapshot.document) != normalize(expected) {
+        return HeartbeatTarget::Blocking;
+    }
+    if stat.st_mode & 0o7777 != 0o600
+        && (fchmod(&file, Mode::from_bits_truncate(0o600)).is_err() || file.sync_all().is_err())
+    {
+        return HeartbeatTarget::Blocking;
+    }
+    let Ok(current) = fstat(&file) else {
+        return HeartbeatTarget::Blocking;
+    };
+    if current.st_mode & 0o7777 != 0o600 {
+        return HeartbeatTarget::Blocking;
+    }
+    if heartbeat_final_binding(&file, directory, name, (stat.st_dev, stat.st_ino)).ok()
+        == Some((HeartbeatFinalBinding::Exact, 1))
+    {
+        HeartbeatTarget::Exact
+    } else {
+        HeartbeatTarget::Blocking
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn heartbeat_publication_error(error: HeartbeatPublicationFailure) -> CommandFailure {
+    match error {
+        HeartbeatPublicationFailure::PreCommit(error)
+        | HeartbeatPublicationFailure::PostCommit { error, .. } => error,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn publish_startup_heartbeat_transaction(
+    root: &Path,
+    repo: &str,
+    issue: u64,
+    session_id: Option<&str>,
+    document: &[u8],
+) -> Result<(), CommandFailure> {
+    publish_startup_heartbeat_transaction_with_hook(
+        root,
+        repo,
+        issue,
+        session_id,
+        document,
+        &mut |_, _| Ok(()),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn publish_startup_heartbeat_transaction_with_hook(
+    root: &Path,
+    repo: &str,
+    issue: u64,
+    session_id: Option<&str>,
+    document: &[u8],
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    let root_path = root;
+    let root = open_private_heartbeat_directory(root_path)?;
+    let repo_name = super::autonomous::drain::repository_progress_key(repo);
+    let repo_path = root_path.join(&repo_name);
+    drop(open_private_heartbeat_directory(&repo_path)?);
+    let repo = open_heartbeat_directory_beneath(&root, Path::new(&repo_name))?;
+    let issue_name = format!("{issue}.json");
+    let issue_state = inspect_heartbeat_target(&repo, &issue_name, document);
+    let sessions = session_id
+        .map(|_| {
+            drop(open_private_heartbeat_directory(
+                &repo_path.join("sessions"),
+            )?);
+            open_heartbeat_directory_beneath(&repo, Path::new("sessions"))
+        })
+        .transpose()?;
+    let session_name = session_id.map(|value| format!("{}.json", heartbeat_session_key(value)));
+    let session_state = match (&sessions, &session_name) {
+        (Some(directory), Some(name)) => inspect_heartbeat_target(directory, name, document),
+        _ => HeartbeatTarget::Exact,
+    };
+    if issue_state == HeartbeatTarget::Blocking || session_state == HeartbeatTarget::Blocking {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat publication target conflicts with the claim identity",
+        ));
+    }
+    let issue_file = (issue_state == HeartbeatTarget::Missing)
+        .then(|| prepare_private_heartbeat_file(&repo, document, "issue", boundary))
+        .transpose()
+        .map_err(heartbeat_publication_error)?;
+    let session_file = (session_state == HeartbeatTarget::Missing)
+        .then(|| {
+            prepare_private_heartbeat_file(
+                sessions.as_ref().expect("session directory"),
+                document,
+                "session",
+                boundary,
+            )
+        })
+        .transpose()
+        .map_err(heartbeat_publication_error)?;
+    if let Some(prepared) = issue_file {
+        publish_prepared_heartbeat_file(&repo, &issue_name, prepared, "issue", boundary)
+            .map_err(heartbeat_publication_error)?;
+    }
+    if let (Some(directory), Some(name), Some(prepared)) =
+        (sessions.as_ref(), session_name.as_ref(), session_file)
+    {
+        publish_prepared_heartbeat_file(directory, name, prepared, "session", boundary)
+            .map_err(heartbeat_publication_error)?;
+    }
+    drop(root);
     Ok(())
 }
 
+#[cfg(not(target_os = "linux"))]
+fn publish_startup_heartbeat_transaction(
+    _root: &Path,
+    _repo: &str,
+    _issue: u64,
+    _session_id: Option<&str>,
+    _document: &[u8],
+) -> Result<(), CommandFailure> {
+    Err(CommandFailure::diagnostic(
+        "identity-bound heartbeat publication is unavailable on this platform",
+    ))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 struct SessionBindingIdentity {
     session_id: String,
     issue: String,
@@ -3763,6 +3931,7 @@ struct SessionBindingIdentity {
     claim_id: String,
 }
 
+#[allow(dead_code)]
 impl SessionBindingIdentity {
     fn new(session_id: &str, issue: u64, worker_id: &str, branch: &str, claim_id: &str) -> Self {
         Self {
@@ -3810,6 +3979,7 @@ impl SessionBindingIdentity {
     }
 }
 
+#[allow(dead_code)]
 fn publish_session_binding(
     path: &Path,
     document: &[u8],
@@ -3861,6 +4031,13 @@ struct HeartbeatPublication {
     device: u64,
     inode: u64,
     durability: HeartbeatPublicationDurability,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PreparedHeartbeat {
+    file: fs::File,
+    identity: (u64, u64),
 }
 
 #[cfg(unix)]
@@ -3940,21 +4117,16 @@ fn post_commit_failure(
 }
 
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
-fn publish_private_heartbeat_file(
+fn prepare_private_heartbeat_file(
     directory: &impl std::os::fd::AsFd,
-    final_name: &str,
     document: &[u8],
     role: &str,
     boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
-) -> Result<HeartbeatPublication, HeartbeatPublicationFailure> {
-    use nix::fcntl::{openat, AtFlags, OFlag, AT_FDCWD};
+) -> Result<PreparedHeartbeat, HeartbeatPublicationFailure> {
+    use nix::fcntl::{openat, OFlag};
     use nix::sys::stat::{fchmod, fstat, Mode};
-    use nix::unistd::{fsync, linkat};
-    use std::os::fd::AsRawFd;
 
     let pre = HeartbeatPublicationFailure::PreCommit;
-    validate_heartbeat_final_name(final_name)?;
     private_heartbeat_directory_identity(directory, "publication").map_err(pre)?;
     let descriptor = openat(
         directory,
@@ -3979,9 +4151,27 @@ fn publish_private_heartbeat_file(
     file.sync_all()
         .map_err(|error| fail(format!("heartbeat fsync: {error}")))?;
     let stat = fstat(&file).map_err(|error| fail(format!("heartbeat fstat: {error}")))?;
-    let identity = (stat.st_dev as u64, stat.st_ino as u64);
     boundary(role, "before-link").map_err(pre)?;
+    Ok(PreparedHeartbeat {
+        file,
+        identity: (stat.st_dev as u64, stat.st_ino as u64),
+    })
+}
 
+#[cfg(target_os = "linux")]
+fn publish_prepared_heartbeat_file(
+    directory: &impl std::os::fd::AsFd,
+    final_name: &str,
+    prepared: PreparedHeartbeat,
+    role: &str,
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<HeartbeatPublication, HeartbeatPublicationFailure> {
+    use nix::fcntl::{AtFlags, AT_FDCWD};
+    use nix::unistd::{fsync, linkat};
+    use std::os::fd::AsRawFd;
+
+    validate_heartbeat_final_name(final_name)?;
+    let PreparedHeartbeat { file, identity } = prepared;
     let mut link_error = linkat(&file, "", directory, final_name, AtFlags::AT_EMPTY_PATH).err();
     let (mut binding, mut link_count) =
         match heartbeat_final_binding(&file, directory, final_name, identity) {
@@ -4043,7 +4233,7 @@ fn publish_private_heartbeat_file(
                 error,
             ));
         }
-        return Err(pre(error));
+        return Err(HeartbeatPublicationFailure::PreCommit(error));
     }
 
     if let Err(error) = boundary(role, "directory-fsync").and_then(|()| {
@@ -4075,6 +4265,20 @@ fn publish_private_heartbeat_file(
         inode: identity.1,
         durability: HeartbeatPublicationDurability::Durable,
     })
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn publish_private_heartbeat_file(
+    directory: &impl std::os::fd::AsFd,
+    final_name: &str,
+    document: &[u8],
+    role: &str,
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<HeartbeatPublication, HeartbeatPublicationFailure> {
+    validate_heartbeat_final_name(final_name)?;
+    let prepared = prepare_private_heartbeat_file(directory, document, role, boundary)?;
+    publish_prepared_heartbeat_file(directory, final_name, prepared, role, boundary)
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
@@ -6197,7 +6401,10 @@ mod tests {
         }
         unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root) };
         let issue = repo.join("42.json");
-        let session = sessions.join(format!("{}.json", super::heartbeat_session_key("session-a")));
+        let session = sessions.join(format!(
+            "{}.json",
+            super::heartbeat_session_key("session-a")
+        ));
         let caller = fixture.join("caller-owned-heartbeat");
         std::fs::write(&caller, b"caller-owned").unwrap();
         std::fs::hard_link(&caller, &issue).unwrap();
@@ -6214,6 +6421,48 @@ mod tests {
         assert_eq!(std::fs::metadata(&caller).unwrap().nlink(), 2);
         assert!(!session.exists());
 
+        let session_b = sessions.join(format!(
+            "{}.json",
+            super::heartbeat_session_key("session-b")
+        ));
+        let prepared = br#"{"issue":"43","branch":"feat/worker","step":"claimed","ts":1,"pr":"","repo":"owner/repo","worker_id":"worker-a","claim_id":"claim-b","session_id":"session-b"}
+"#;
+        assert!(super::publish_startup_heartbeat_transaction_with_hook(
+            &root,
+            "owner/repo",
+            43,
+            Some("session-b"),
+            prepared,
+            &mut |role, boundary| {
+                if (role, boundary) == ("session", "before-link") {
+                    Err(super::CommandFailure::diagnostic(
+                        "injected session preparation failure",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+        )
+        .is_err());
+        assert!(!repo.join("43.json").exists());
+        assert!(!session_b.exists());
+
+        std::fs::remove_file(&issue).unwrap();
+        nix::unistd::mkfifo(&issue, Mode::from_bits_truncate(0o600)).unwrap();
+        std::fs::set_permissions(&issue, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let fifo_identity = std::fs::symlink_metadata(&issue).unwrap();
+        assert!(super::write_startup_heartbeat(
+            "owner/repo",
+            42,
+            "worker-a",
+            "feat/worker",
+            "claim-a",
+            Some("session-a"),
+        )
+        .is_err());
+        let fifo_after = std::fs::symlink_metadata(&issue).unwrap();
+        assert_eq!(identity(&fifo_identity), identity(&fifo_after));
+        assert!(!session.exists());
         std::fs::remove_file(&issue).unwrap();
         let transaction_umask = umask(Mode::from_bits_truncate(0o777));
         super::write_startup_heartbeat(

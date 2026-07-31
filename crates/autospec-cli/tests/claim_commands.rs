@@ -1899,8 +1899,7 @@ fn claim_acquire_prelink_failure_keeps_pending_ref() {
     let repo = claim_git_repo(&fixture);
     let heartbeats = fixture.join("heartbeats");
     std::fs::create_dir(&bin).unwrap();
-    std::fs::create_dir(&heartbeats).unwrap();
-    std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o500)).unwrap();
+    std::fs::write(&heartbeats, b"not-a-directory").unwrap();
     write_executable(
         &bin.join("gh"),
         "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; fi\n",
