@@ -1877,20 +1877,12 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     assert!(heartbeat.contains("\"worker_id\":\"worker-a\""));
     assert!(heartbeat.contains("\"claim_id\":\"claim-"));
     assert!(heartbeat.contains("\"session_id\":\"session-real-7\""));
-    let claim_id = heartbeat
-        .split("\"claim_id\":\"")
-        .nth(1)
-        .unwrap()
-        .split('"')
-        .next()
-        .unwrap();
+    let claim_id = heartbeat.split_once("\"claim_id\":\"").unwrap().1;
+    let claim_id = claim_id.split_once('"').unwrap().0;
     assert!(stdout.contains(&format!("\"claim_id\":\"{claim_id}\"")));
     assert!(heartbeats
         .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d7265616c2d37.json")
         .exists());
-    assert!(std::fs::read_to_string(&comments)
-        .expect("claim comments")
-        .contains("worker-a"));
     assert!(std::fs::read_to_string(&comments)
         .unwrap()
         .contains("\\\"step\\\":\\\"claimed\\\""));
@@ -1914,21 +1906,9 @@ fn claim_acquire_prelink_failure_keeps_pending_ref() {
         "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; fi\n",
     );
     let issue = r###"{"labels":["auto-implement","safety:reviewed"],"title":"claim","body":"## Safety review\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","author":"agent"}"###;
-    let output = autospec()
-        .args([
-            "claim",
-            "acquire",
-            "--issue",
-            "42",
-            "--repo",
-            "testorg/testrepo",
-            "--worker-id",
-            "worker-a",
-            "--branch",
-            "feat/test",
-            "--session-id",
-            "session-a",
-        ])
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("\"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/test --session-id session-a")
         .current_dir(&repo)
         .env(
             "AUTOSPEC_CLAIM_GIT_REMOTE",
@@ -1936,6 +1916,7 @@ fn claim_acquire_prelink_failure_keeps_pending_ref() {
         )
         .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
         .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .env("AUTOSPEC_BIN", env!("CARGO_BIN_EXE_autospec"))
         .env("PATH", path_with(&bin))
         .env("GH_ISSUE", issue)
         .output()

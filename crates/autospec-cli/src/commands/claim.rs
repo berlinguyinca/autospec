@@ -987,6 +987,22 @@ fn heartbeat_claim_step(phase: &str, session_id: Option<&str>) -> String {
     format!("heartbeat-{phase}:{session}")
 }
 
+fn heartbeat_lifecycle_step(step: &str) -> bool {
+    let session = |value: &str| {
+        value == "none"
+            || (!value.is_empty()
+                && value.len().is_multiple_of(2)
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    };
+    match step.split(':').collect::<Vec<_>>().as_slice() {
+        ["heartbeat-pending" | "heartbeat-ready", value] => session(value),
+        ["heartbeat-publishing", value, attempt] => session(value) && !attempt.is_empty(),
+        _ => false,
+    }
+}
+
 fn resumable_heartbeat_phase(
     head: &ClaimRefHead,
     worker_id: &str,
@@ -1732,6 +1748,7 @@ fn recover_authoritative_stale_startup(
     }
     if selected.record.state != "claimed"
         || !selected.record.pr.is_empty()
+        || heartbeat_lifecycle_step(&selected.record.step)
         || startup_heartbeat_exists(repo, issue)
         || branch_ref_exists(&selected.record.branch)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
