@@ -1952,7 +1952,7 @@ fn assert_released_heartbeat_generation_handoff() {
     );
     let archive = fixture
         .heartbeats
-        .join("o4_test_r4_repo/quarantine/released-heartbeats");
+        .join("o4_test_r4_repo/quarantine/startup-heartbeat-handoffs");
     let archived = fs::read_dir(&archive)
         .expect("released heartbeat archive")
         .filter_map(Result::ok)
@@ -1961,12 +1961,10 @@ fn assert_released_heartbeat_generation_handoff() {
         .count();
     assert_eq!(archived, 1, "archive must retain the exact old generation");
 }
-
 #[test]
 fn foreground_reclaims_prunable_zero_effect_branch_on_a_fresh_claim_generation() {
     assert_released_heartbeat_generation_handoff();
 }
-
 #[test]
 fn released_heartbeat_generation_handoff() {
     assert_released_heartbeat_generation_handoff();
