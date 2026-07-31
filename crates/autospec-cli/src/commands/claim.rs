@@ -1748,6 +1748,8 @@ fn recover_authoritative_stale_startup(
     }
     if selected.record.state != "claimed"
         || !selected.record.pr.is_empty()
+        || (heartbeat_lifecycle_step(&selected.record.step)
+            && selected.record.step != "heartbeat-pending:none")
         || branch_ref_exists(&selected.record.branch)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {

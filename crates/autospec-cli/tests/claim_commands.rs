@@ -1478,6 +1478,23 @@ fn claim_stale_heartbeat_recovery() {
             .with_claim_id("claim-new"),
         );
     }
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            48,
+            "worker-new",
+            "claimed",
+            "feat/test",
+            "",
+            "heartbeat-publishing:73657373696f6e2d63757272656e74:attempt-live",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-new"),
+    );
     std::fs::create_dir_all(&heartbeat_repo).expect("heartbeat repository");
     std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o700))
         .expect("private heartbeat root");
@@ -1724,6 +1741,53 @@ exit 17
     let resumed = claim_ref_message(&repo, 47);
     assert!(resumed.contains("\"state\":\"available\""));
     assert!(resumed.contains("\"step\":\"stale_startup_recovered\""));
+
+    let publishing_digest = "21db6c26883b61ad67d2efa3bef926dc9e5a15892fc04bfddf13956e574f9238";
+    let old_receipt = handoff.join(format!("completed-48-{publishing_digest}.receipt"));
+    let old_archive = handoff.join(format!("completed-48-{publishing_digest}.json"));
+    std::fs::write(&old_receipt, b"").expect("completed old-generation receipt");
+    std::fs::set_permissions(&old_receipt, std::fs::Permissions::from_mode(0o600))
+        .expect("private completed receipt");
+    std::fs::write(
+        &old_archive,
+        prior_generation_document(
+            "testorg/testrepo",
+            48,
+            1,
+            "95efb38c00bc3b7d331c9c9000a5a2617cb28204ea933c9ddb907928a566b707",
+        ),
+    )
+    .expect("retained old-generation heartbeat");
+    std::fs::set_permissions(&old_archive, std::fs::Permissions::from_mode(0o600))
+        .expect("private retained heartbeat");
+    let sessions = heartbeat_repo.join("sessions");
+    std::fs::create_dir(&sessions).expect("session heartbeat directory");
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700))
+        .expect("private session directory");
+    let session = sessions.join("73657373696f6e2d63757272656e74.json");
+    let stat = std::fs::read_to_string("/proc/self/stat").expect("process identity");
+    let process_start = stat
+        .rsplit_once(") ")
+        .expect("process stat fields")
+        .1
+        .split_whitespace()
+        .nth(19)
+        .expect("process start");
+    std::fs::write(&session, format!("{{\"issue\":\"48\",\"branch\":\"feat/test\",\"step\":\"claimed\",\"ts\":{now},\"ttl_seconds\":10800,\"pid\":{},\"nonce\":\"d7289361137ba9d5556f9e1c9ddb9367a7cb4768e6b9dcb48a8c0dcc4273e1d2\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"{process_start}\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-new\",\"claim_id\":\"claim-new\",\"session_id\":\"session-current\"}}\n", std::process::id(), host.trim(), boot.trim())).expect("current session heartbeat");
+    std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o600))
+        .expect("private session heartbeat");
+    let publishing_claim = claim_ref_message(&repo, 48);
+    let calls = std::fs::read_to_string(&log).expect("gh calls before publishing recovery");
+
+    let publishing = recover("48");
+
+    assert!(String::from_utf8_lossy(&publishing.stdout).contains("\"recovered\":false"));
+    assert_eq!(claim_ref_message(&repo, 48), publishing_claim);
+    assert!(session.exists());
+    assert_eq!(
+        std::fs::read_to_string(&log).expect("gh calls after recovery"),
+        calls
+    );
 }
 
 #[test]
