@@ -2769,6 +2769,7 @@ fn run_foreground_with_lease(
             state,
             selection,
             lease,
+            &health.branch,
         )? {
             ForegroundDispatchResult::State(state) => Ok(ForegroundCompletion::State(state)),
             ForegroundDispatchResult::Lifecycle(lifecycle) => {
@@ -2835,7 +2836,15 @@ fn run_foreground_with_lease(
         return Ok(ForegroundCompletion::State(Box::new(state)));
     };
     persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
-    match dispatch_foreground(layout, options, lease, &state_path, state, selected)? {
+    match dispatch_foreground(
+        layout,
+        options,
+        lease,
+        &state_path,
+        state,
+        selected,
+        &health.branch,
+    )? {
         ForegroundDispatchResult::State(state) => Ok(ForegroundCompletion::State(state)),
         ForegroundDispatchResult::Lifecycle(lifecycle) => {
             Ok(ForegroundCompletion::Lifecycle(lifecycle))
@@ -3200,6 +3209,7 @@ fn dispatch_foreground(
     state_path: &Path,
     state: ConductorState,
     selection: ForegroundSelection,
+    base_branch: &str,
 ) -> Result<ForegroundDispatchResult, ForegroundFailure> {
     let admission =
         resilience_admission_for_issue(layout, options, Some(selection.issue), Some(lease))?;
@@ -3229,7 +3239,15 @@ fn dispatch_foreground(
         return Ok(ForegroundDispatchResult::Lifecycle(lifecycle));
     }
     persist_lifecycle_decision(layout, &lifecycle).map_err(CommandFailure::diagnostic)?;
-    execute_foreground_dispatch(layout, options, state_path, state, selection, None)
+    execute_foreground_dispatch(
+        layout,
+        options,
+        state_path,
+        state,
+        selection,
+        None,
+        base_branch,
+    )
 }
 
 fn execute_foreground_dispatch(
@@ -3239,6 +3257,7 @@ fn execute_foreground_dispatch(
     mut state: ConductorState,
     selection: ForegroundSelection,
     mut recovered_lease: Option<claim::ClaimLease>,
+    base_branch: &str,
 ) -> Result<ForegroundDispatchResult, ForegroundFailure> {
     loop {
         if let Some(mode @ LifecycleStopMode::Immediate) =
@@ -3265,6 +3284,7 @@ fn execute_foreground_dispatch(
                     selection.issue,
                     &worker_id,
                     &branch,
+                    base_branch,
                 )?;
                 persist_claim_acquisition_receipt(state_path, &lease)
                     .map_err(CommandFailure::diagnostic)?;

@@ -3548,8 +3548,11 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
 #[cfg(target_os = "linux")]
 #[test]
 fn foreground_recovers_with_integrated_inactive_local_branch() {
-    for (case, unmerged, should_recover) in [("integrated", false, true), ("unmerged", true, false)]
-    {
+    for (case, unmerged, topic_head, should_recover) in [
+        ("integrated", false, false, true),
+        ("unmerged", true, false, false),
+        ("topic-contains-branch", true, true, false),
+    ] {
         let fixture = ForegroundFixture::new();
         fixture.initialize_empty_local_remote();
         git_fixture(
@@ -3563,6 +3566,7 @@ fn foreground_recovers_with_integrated_inactive_local_branch() {
         fs::write(fixture.repo_dir.join("README.md"), "baseline\n").expect("write baseline");
         git_fixture(&fixture.repo_dir, &["add", "README.md"]);
         git_fixture(&fixture.repo_dir, &["commit", "-m", "baseline"]);
+        git_fixture(&fixture.repo_dir, &["push", "-u", "origin", "main"]);
         let branch = "feat/autonomous-issue-42";
         git_fixture(&fixture.repo_dir, &["branch", branch]);
         if unmerged {
@@ -3571,7 +3575,11 @@ fn foreground_recovers_with_integrated_inactive_local_branch() {
                 .expect("write unmerged work");
             git_fixture(&fixture.repo_dir, &["add", "work.txt"]);
             git_fixture(&fixture.repo_dir, &["commit", "-m", "unmerged work"]);
-            git_fixture(&fixture.repo_dir, &["checkout", "main"]);
+            if topic_head {
+                git_fixture(&fixture.repo_dir, &["checkout", "-b", "topic"]);
+            } else {
+                git_fixture(&fixture.repo_dir, &["checkout", "main"]);
+            }
         }
         let stale = RunStateRecord::new(
             "test/repo",
