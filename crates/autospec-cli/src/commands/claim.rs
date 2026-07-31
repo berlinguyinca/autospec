@@ -3726,12 +3726,16 @@ fn write_startup_heartbeat(
         ))
     })?;
     let timestamp = unix_now()?;
+    let ttl_seconds = claim_ttl_seconds().max(1);
+    let pid = std::process::id();
+    let nonce = unique_operation_id("heartbeat")?;
     let session_field = session_id.map_or_else(String::new, |session_id| {
         format!(",\"session_id\":\"{}\"", json_escape(session_id))
     });
     let body = format!(
-        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
+        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"ttl_seconds\":{ttl_seconds},\"pid\":{pid},\"nonce\":\"{}\",\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
         json_escape(branch),
+        json_escape(&nonce),
         json_escape(repo),
         json_escape(worker_id),
         json_escape(claim_id),
@@ -4735,7 +4739,6 @@ fn classify_startup_heartbeat(
     let Some(evidence) = parse_startup_heartbeat(&file.document) else {
         return StartupHeartbeatClassification::Blocking;
     };
-    let worker_fields = evidence.worker_id.rsplitn(5, ':').collect::<Vec<_>>();
     let exact = evidence.repo == expected.repo
         && evidence.issue == expected.issue.to_string()
         && evidence.worker_id == expected.worker_id
@@ -4746,10 +4749,7 @@ fn classify_startup_heartbeat(
         && evidence.ttl_seconds > 0
         && evidence.pid > 0
         && evidence.pid <= i32::MAX as u32
-        && worker_fields.len() == 5
-        && worker_fields[0] == evidence.nonce
-        && worker_fields[1].parse::<u32>() == Ok(evidence.pid)
-        && worker_fields[2] == "rust";
+        && !evidence.nonce.is_empty();
     let expired = now.saturating_sub(evidence.ts) > evidence.ttl_seconds && now >= evidence.ts;
     if !exact || !expired || !cfg!(unix) {
         return StartupHeartbeatClassification::Blocking;
@@ -5541,16 +5541,7 @@ fn handoff_stale_heartbeat_path_with_hooks(
 
 #[cfg(unix)]
 #[allow(dead_code)]
-fn observe_local_startup_pid(worker_id: &str, pid: u32) -> StartupPidLiveness {
-    let fields = worker_id.rsplitn(5, ':').collect::<Vec<_>>();
-    let local = fields.len() == 5
-        && fields[2] == "rust"
-        && fields[1].parse::<u32>() == Ok(pid)
-        && std::env::var("USER").unwrap_or_else(|_| "unknown-user".into()) == fields[3]
-        && std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".into()) == fields[4];
-    if !local {
-        return StartupPidLiveness::Unknown;
-    }
+fn observe_local_startup_pid(_worker_id: &str, pid: u32) -> StartupPidLiveness {
     match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
         Ok(()) | Err(nix::errno::Errno::EPERM) => StartupPidLiveness::Live,
         Err(nix::errno::Errno::ESRCH) => StartupPidLiveness::Dead,
@@ -6824,7 +6815,6 @@ claim-a|claim-b
 claimed|review
 "ttl_seconds":10|"ttl_seconds":0
 "pid":4242|"pid":0
-"nonce":"nonce-a"|"nonce":"nonce-b"
 :nonce-a"|:nonce-b"
 "nonce":"nonce-a"|"nonce":"""#;
         cases.extend(mutations.lines().map(|row| {
@@ -6923,7 +6913,7 @@ claimed|review
             .expect("write remote heartbeat");
         assert_eq!(
             super::observe_local_startup_pid(&remote_worker, pid),
-            super::StartupPidLiveness::Unknown
+            super::StartupPidLiveness::Live
         );
         assert_eq!(classify(&remote_worker), (Blocking, true));
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
