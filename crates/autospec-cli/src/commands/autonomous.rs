@@ -7776,4 +7776,19 @@ mod foreground_tests {
 
         assert!(foreground_state_is_retained(&state));
     }
+
+    #[test]
+    fn terminal_claim_short_circuits_executor_receipt_error() {
+        let mut probed = false;
+        let resumed = executor_receipt_failure_can_resume(true, || {
+            probed = true;
+            Err(CommandFailure::diagnostic(
+                "read executor state metadata: missing",
+            ))
+        })
+        .expect("terminal claim resumes");
+
+        assert!(resumed);
+        assert!(!probed, "terminal evidence must precede the receipt probe");
+    }
 }
