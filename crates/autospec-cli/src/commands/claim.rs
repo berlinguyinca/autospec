@@ -1749,10 +1749,15 @@ fn recover_authoritative_stale_startup(
     if selected.record.state != "claimed"
         || !selected.record.pr.is_empty()
         || heartbeat_lifecycle_step(&selected.record.step)
-        || startup_heartbeat_exists(repo, issue)
         || branch_ref_exists(&selected.record.branch)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "claim_evidence_or_fresh_state".to_string(),
+        });
+    }
+    if !quarantine_authoritative_stale_heartbeat(repo, issue, &selected.record)? {
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
@@ -1778,6 +1783,118 @@ fn recover_authoritative_stale_startup(
         recovered: true,
         reason: "released_stale_startup_claim".to_string(),
     })
+}
+
+#[cfg(target_os = "linux")]
+fn quarantine_authoritative_stale_heartbeat(
+    repo_name: &str,
+    issue: u64,
+    record: &RunStateRecord,
+) -> Result<bool, CommandFailure> {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::fstatat;
+
+    let root_path = heartbeat_root()?;
+    let root = open_private_heartbeat_directory(&root_path)?;
+    let repo_key = super::autonomous::drain::repository_progress_key(repo_name);
+    let repo_path = Path::new(&repo_key);
+    let repo = match fstatat(&root, repo_path, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(true),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "heartbeat repository inspection failed: {error}"
+            )))
+        }
+        Ok(_) => open_heartbeat_directory_beneath(&root, repo_path)?,
+    };
+    let Some(claim_id) = record.claim_id.as_deref() else {
+        return Ok(false);
+    };
+    let expected = StartupHeartbeatExpectation {
+        repo: repo_name,
+        issue,
+        worker_id: &record.worker_id,
+        branch: &record.branch,
+        pull_request: "",
+        claim_id,
+        step: "claimed",
+    };
+    let issue_name = format!("{issue}.json");
+    let classified = classify_startup_heartbeat_at(
+        &repo,
+        issue_name.as_ref(),
+        expected,
+        unix_now()?,
+        observe_local_startup_pid,
+    );
+    let snapshot = match classified {
+        StartupHeartbeatClassification::Blocking => return Ok(false),
+        StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
+        StartupHeartbeatClassification::Absent => {
+            match heartbeat_receipt_retry_decision(&repo, expected) {
+                HeartbeatReceiptDecision::Absent => None,
+                HeartbeatReceiptDecision::Pending | HeartbeatReceiptDecision::Completed => {
+                    let snapshot = terminal_heartbeat_snapshot(
+                        &repo,
+                        issue_name.as_ref(),
+                        ClaimMutationIdentity {
+                            repo: repo_name,
+                            issue,
+                            worker_id: &record.worker_id,
+                            branch: &record.branch,
+                            claim_id,
+                        },
+                    )?;
+                    match classify_startup_heartbeat_snapshot(
+                        snapshot.file.clone(),
+                        expected,
+                        unix_now()?,
+                        observe_local_startup_pid,
+                    ) {
+                        StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
+                        StartupHeartbeatClassification::Absent
+                        | StartupHeartbeatClassification::Blocking => return Ok(false),
+                    }
+                }
+                HeartbeatReceiptDecision::Blocking => return Ok(false),
+            }
+        }
+    };
+    if let Some(snapshot) = snapshot {
+        handoff_retained_heartbeat(
+            &root_path.join(&repo_key),
+            &repo,
+            issue_name.as_ref(),
+            &snapshot,
+            |_, _, _, _| {},
+            |_| Ok(()),
+        )?;
+    } else if !matches!(
+        fstatat(
+            &repo,
+            std::ffi::OsStr::new(&issue_name),
+            AtFlags::AT_SYMLINK_NOFOLLOW,
+        ),
+        Err(nix::errno::Errno::ENOENT)
+    ) {
+        return Ok(false);
+    }
+    let opened = private_heartbeat_directory_identity(&repo, "recovery repository")?;
+    if private_heartbeat_name_identity(&root, repo_path, "recovery repository binding")? != opened {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat recovery repository binding changed",
+        ));
+    }
+    Ok(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn quarantine_authoritative_stale_heartbeat(
+    _repo: &str,
+    _issue: u64,
+    _record: &RunStateRecord,
+) -> Result<bool, CommandFailure> {
+    Ok(false)
 }
 
 fn release_stale_startup_labels(repo: &str, issue: u64) -> Result<(), CommandFailure> {
@@ -5182,6 +5299,33 @@ fn classify_startup_heartbeat(
         }
         Err(_) => return StartupHeartbeatClassification::Blocking,
     };
+    classify_startup_heartbeat_snapshot(file, expected, now, observe_pid)
+}
+
+#[cfg(unix)]
+fn classify_startup_heartbeat_at(
+    directory: &impl std::os::fd::AsFd,
+    name: &std::ffi::OsStr,
+    expected: StartupHeartbeatExpectation<'_>,
+    now: u64,
+    observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
+) -> StartupHeartbeatClassification {
+    let file = match read_regular_file_at_no_follow(directory, name) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return StartupHeartbeatClassification::Absent;
+        }
+        Err(_) => return StartupHeartbeatClassification::Blocking,
+    };
+    classify_startup_heartbeat_snapshot(file, expected, now, observe_pid)
+}
+
+fn classify_startup_heartbeat_snapshot(
+    file: RegularFileSnapshot,
+    expected: StartupHeartbeatExpectation<'_>,
+    now: u64,
+    observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
+) -> StartupHeartbeatClassification {
     let Some(evidence) = parse_startup_heartbeat(&file.document) else {
         return StartupHeartbeatClassification::Blocking;
     };
@@ -5356,6 +5500,26 @@ fn heartbeat_receipt_retry_decision_with_hook(
     expected: StartupHeartbeatExpectation<'_>,
     after_open: impl FnMut(&str),
 ) -> HeartbeatReceiptDecision {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::fstatat;
+
+    let quarantine = match fstatat(trusted_repo, "quarantine", AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Err(nix::errno::Errno::ENOENT) => return HeartbeatReceiptDecision::Absent,
+        Err(_) => return HeartbeatReceiptDecision::Blocking,
+        Ok(_) => match open_heartbeat_directory_beneath(trusted_repo, Path::new("quarantine")) {
+            Ok(directory) => directory,
+            Err(_) => return HeartbeatReceiptDecision::Blocking,
+        },
+    };
+    match fstatat(
+        &quarantine,
+        "startup-heartbeat-handoffs",
+        AtFlags::AT_SYMLINK_NOFOLLOW,
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return HeartbeatReceiptDecision::Absent,
+        Err(_) => return HeartbeatReceiptDecision::Blocking,
+        Ok(_) => {}
+    }
     let Ok(handoff) = open_receipt_anchors_with_hook(trusted_repo, after_open) else {
         return HeartbeatReceiptDecision::Blocking;
     };
@@ -7746,6 +7910,23 @@ mod tests {
             });
         assert_eq!(decision, Pending);
         std::fs::remove_dir_all(parent_path).expect("remove rename fixture");
+    }
+
+    #[test]
+    fn unsupported_platform_stale_recovery_is_fail_closed() {
+        let source = include_str!("claim.rs");
+        let fallback = source
+            .split(
+                "#[cfg(not(target_os = \"linux\"))]\nfn quarantine_authoritative_stale_heartbeat",
+            )
+            .nth(1)
+            .expect("unsupported-platform recovery fallback");
+        let fallback = fallback
+            .split("fn release_stale_startup_labels")
+            .next()
+            .expect("fallback boundary");
+        assert!(fallback.contains("Ok(false)"));
+        assert!(!fallback.contains("startup_heartbeat_exists"));
     }
 
     #[test]

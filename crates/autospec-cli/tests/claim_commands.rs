@@ -1411,6 +1411,191 @@ exit 17
     assert!(message.contains("\"claim_id\":\"claim-a\""));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn claim_stale_heartbeat_recovery() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Break caught: authoritative recovery treated every heartbeat pathname as live evidence,
+    // so an exact expired heartbeat from a dead process could wedge its claim forever.
+    let fixture = temp_dir("autospec-claim-stale-heartbeat-recovery");
+    let bin = fixture.join("bin");
+    let log = fixture.join("gh.log");
+    let repo = claim_git_repo(&fixture);
+    let heartbeats = fixture.join("heartbeats");
+    let heartbeat_repo = heartbeats.join("o7_testorg_r8_testrepo");
+    let handoff = heartbeat_repo.join("quarantine/startup-heartbeat-handoffs");
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            42,
+            "worker-a",
+            "claimed",
+            "feat/test",
+            "",
+            "claimed",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-a"),
+    );
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            43,
+            "worker-b",
+            "claimed",
+            "feat/empty",
+            "",
+            "claimed",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-b"),
+    );
+    std::fs::create_dir_all(&heartbeat_repo).expect("heartbeat repository");
+    std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o700))
+        .expect("private heartbeat root");
+    std::fs::set_permissions(&heartbeat_repo, std::fs::Permissions::from_mode(0o700))
+        .expect("private heartbeat repository");
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").expect("host identity");
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot identity");
+    let heartbeat = heartbeat_repo.join("42.json");
+    let expired_document = format!(
+        "{{\"issue\":\"42\",\"branch\":\"feat/test\",\"step\":\"claimed\",\"ts\":1,\"ttl_seconds\":1,\"pid\":2147483647,\"nonce\":\"cb2fb10be6aeeaa790206bdd149beaf909af1587ff0f794c1a88d479f39f1ded\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"1\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}}\n",
+        host.trim(),
+        boot.trim()
+    );
+    std::fs::create_dir_all(&bin).expect("fake bin directory");
+    write_executable(
+        &bin.join("gh"),
+        r#"#!/bin/sh
+set -eu
+printf '%s\n' "$@" >> "$AUTOSPEC_CLAIM_LOG"
+if [ "$1" = api ]; then printf '[]\n'; exit 0; fi
+if [ "$1 $2" = 'issue comment' ] || [ "$1 $2" = 'issue edit' ]; then
+  if printf '%s\n' "$@" | grep -qx 42; then
+    # linter:allow-DOC_OUT_OF_SYNC existing git flag remains test-fixture-only after issue routing
+    git --git-dir "$AUTOSPEC_CLAIM_REMOTE" show -s --format=%B refs/autospec/claims/issue-42 |
+      grep -Fq '"state":"available"' || exit 45
+    find "$AUTOSPEC_HEARTBEAT_HANDOFF" -type f -name '*.json' -print -quit |
+      grep -q . || exit 46
+  fi
+  exit 0
+fi
+exit 17
+"#,
+    );
+
+    let recover = |issue| {
+        autospec()
+            .args([
+                "claim",
+                "state",
+                "recover-stale-startup",
+                "--issue",
+                issue,
+                "--repo",
+                "testorg/testrepo",
+                // linter:allow-DOC_OUT_OF_SYNC existing recovery flag moved within test closure
+                "--timeout-seconds",
+                "1",
+            ])
+            .current_dir(&repo)
+            .env(
+                "AUTOSPEC_CLAIM_GIT_REMOTE",
+                fixture.join("claim-remote.git"),
+            )
+            .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+            .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+            .env("AUTOSPEC_HEARTBEAT_HANDOFF", &handoff)
+            .env("AUTOSPEC_CLAIM_REMOTE", fixture.join("claim-remote.git"))
+            .env("AUTOSPEC_CLAIM_LOG", &log)
+            .env("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0")
+            .env("PATH", path_with(&bin))
+            .output()
+            .expect("autospec stale heartbeat recovery starts")
+    };
+    let absent = recover("43");
+    assert!(absent.status.success());
+    assert!(String::from_utf8_lossy(&absent.stdout).contains("\"recovered\":true"));
+    assert!(claim_ref_message(&repo, 43).contains("\"state\":\"available\""));
+    let claimed = claim_ref_message(&repo, 42);
+    nix::unistd::mkfifo(&heartbeat, nix::sys::stat::Mode::from_bits_truncate(0o600))
+        .expect("heartbeat FIFO");
+    let started = std::time::Instant::now();
+    let blocked = recover("42");
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    assert!(String::from_utf8_lossy(&blocked.stdout).contains("\"recovered\":false"));
+    assert_eq!(claim_ref_message(&repo, 42), claimed);
+    std::fs::remove_file(&heartbeat).expect("remove FIFO");
+
+    for document in [
+        "{}\n".to_string(),
+        expired_document.replace(
+            "\"ts\":1,",
+            &format!(
+                "\"ts\":{},",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("wall clock")
+                    .as_secs()
+            ),
+        ),
+    ] {
+        std::fs::write(&heartbeat, document).expect("blocking heartbeat");
+        std::fs::set_permissions(&heartbeat, std::fs::Permissions::from_mode(0o600))
+            .expect("private heartbeat");
+        let blocked = recover("42");
+        assert!(String::from_utf8_lossy(&blocked.stdout).contains("\"recovered\":false"));
+        assert_eq!(claim_ref_message(&repo, 42), claimed);
+        std::fs::remove_file(&heartbeat).expect("remove blocking heartbeat");
+    }
+
+    std::fs::write(&heartbeat, &expired_document).expect("expired heartbeat");
+    std::fs::set_permissions(&heartbeat, std::fs::Permissions::from_mode(0o600))
+        .expect("private heartbeat");
+    let displaced = fixture.join("displaced-heartbeat-repo");
+    std::fs::rename(&heartbeat_repo, &displaced).expect("rename heartbeat repository");
+    std::os::unix::fs::symlink(&displaced, &heartbeat_repo).expect("replace repository with link");
+    assert!(!recover("42").status.success());
+    assert_eq!(claim_ref_message(&repo, 42), claimed);
+    std::fs::remove_file(&heartbeat_repo).expect("remove repository link");
+    std::fs::rename(&displaced, &heartbeat_repo).expect("restore heartbeat repository");
+
+    let output = recover("42");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"recovered\":true"));
+    assert!(!heartbeat.exists(), "expired heartbeat remained live");
+    let retained = std::fs::read_dir(&handoff)
+        .expect("heartbeat handoff")
+        .filter_map(Result::ok)
+        .find(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
+        .expect("retained heartbeat");
+    assert_eq!(
+        retained
+            .metadata()
+            .expect("retained metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(claim_ref_message(&repo, 42).contains("\"state\":\"available\""));
+}
+
 #[test]
 fn stale_startup_recovery_retries_a_prepared_label_transition() {
     let fixture = temp_dir("autospec-claim-recover-prepared-ref");
