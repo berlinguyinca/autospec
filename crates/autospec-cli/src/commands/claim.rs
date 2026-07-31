@@ -3729,12 +3729,20 @@ fn write_startup_heartbeat(
         ))
     })?;
     let timestamp = unix_now()?;
+    let ttl_seconds = claim_ttl_seconds().max(1);
+    let pid = std::process::id();
+    let nonce = startup_heartbeat_nonce(repo, issue, claim_id);
+    let (host, boot_id, process_start) = startup_process_identity(pid)?;
     let session_field = session_id.map_or_else(String::new, |session_id| {
         format!(",\"session_id\":\"{}\"", json_escape(session_id))
     });
     let body = format!(
-        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
+        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"ttl_seconds\":{ttl_seconds},\"pid\":{pid},\"nonce\":\"{}\",\"host\":\"{}\",\"boot_id\":\"{}\",\"process_start\":\"{}\",\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
         json_escape(branch),
+        json_escape(&nonce),
+        json_escape(&host),
+        json_escape(&boot_id),
+        json_escape(&process_start),
         json_escape(repo),
         json_escape(worker_id),
         json_escape(claim_id),
@@ -3755,6 +3763,39 @@ fn write_startup_heartbeat(
         CommandFailure::diagnostic(format!("could not write claim startup heartbeat: {error}"))
     })?;
     Ok(())
+}
+
+fn startup_heartbeat_nonce(repo: &str, issue: u64, claim_id: &str) -> String {
+    let mut identity = b"autospec-startup-heartbeat-nonce-v1".to_vec();
+    for field in [repo, &issue.to_string(), claim_id] {
+        identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        identity.extend_from_slice(field.as_bytes());
+    }
+    autospec_core::autonomous::waterfall::sha256_hex(&identity)
+}
+
+#[cfg(target_os = "linux")]
+fn startup_process_identity(pid: u32) -> Result<(String, String, String), CommandFailure> {
+    let host = fs::read_to_string("/proc/sys/kernel/hostname")
+        .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat host: {error}")))?
+        .trim()
+        .to_string();
+    let (boot_id, process_start) = super::autonomous::process_birth_identity(pid)
+        .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat process: {error}")))?
+        .ok_or_else(|| CommandFailure::diagnostic("heartbeat process identity disappeared"))?;
+    if host.is_empty() || boot_id.is_empty() || process_start.is_empty() {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat process identity is incomplete",
+        ));
+    }
+    Ok((host, boot_id, process_start))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn startup_process_identity(_pid: u32) -> Result<(String, String, String), CommandFailure> {
+    Err(CommandFailure::diagnostic(
+        "heartbeat process identity requires Linux /proc",
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4826,6 +4867,9 @@ struct StartupHeartbeatEvidence {
     ttl_seconds: u64,
     pid: u32,
     nonce: String,
+    host: String,
+    boot_id: String,
+    process_start: String,
     session_id: Option<String>,
 }
 #[allow(dead_code)]
@@ -4936,7 +4980,7 @@ fn parse_startup_heartbeat(document: &[u8]) -> Option<StartupHeartbeatEvidence> 
         .ok()?
         .into_object("startup heartbeat")
         .ok()?;
-    let (repo, issue, worker_id, branch, pr, claim_id, step, nonce) = {
+    let (repo, issue, worker_id, branch, pr, claim_id, step, nonce, host, boot_id, process_start) = {
         let mut string = |name| fields.remove(name)?.into_string(name).ok();
         (
             string("repo")?,
@@ -4947,6 +4991,9 @@ fn parse_startup_heartbeat(document: &[u8]) -> Option<StartupHeartbeatEvidence> 
             string("claim_id")?,
             string("step")?,
             string("nonce")?,
+            string("host")?,
+            string("boot_id")?,
+            string("process_start")?,
         )
     };
     let (ts, ttl_seconds, pid) = {
@@ -4974,6 +5021,9 @@ fn parse_startup_heartbeat(document: &[u8]) -> Option<StartupHeartbeatEvidence> 
         ttl_seconds,
         pid,
         nonce,
+        host,
+        boot_id,
+        process_start,
         session_id,
     })
 }
@@ -4982,7 +5032,7 @@ fn classify_startup_heartbeat(
     path: &Path,
     expected: StartupHeartbeatExpectation<'_>,
     now: u64,
-    observe_pid: impl FnOnce(&str, u32) -> StartupPidLiveness,
+    observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
 ) -> StartupHeartbeatClassification {
     let file = match read_regular_file_no_follow(path) {
         Ok(file) => file,
@@ -4994,7 +5044,6 @@ fn classify_startup_heartbeat(
     let Some(evidence) = parse_startup_heartbeat(&file.document) else {
         return StartupHeartbeatClassification::Blocking;
     };
-    let worker_fields = evidence.worker_id.rsplitn(5, ':').collect::<Vec<_>>();
     let exact = evidence.repo == expected.repo
         && evidence.issue == expected.issue.to_string()
         && evidence.worker_id == expected.worker_id
@@ -5005,15 +5054,28 @@ fn classify_startup_heartbeat(
         && evidence.ttl_seconds > 0
         && evidence.pid > 0
         && evidence.pid <= i32::MAX as u32
-        && worker_fields.len() == 5
-        && worker_fields[0] == evidence.nonce
-        && worker_fields[1].parse::<u32>() == Ok(evidence.pid)
-        && worker_fields[2] == "rust";
+        && evidence.nonce
+            == startup_heartbeat_nonce(expected.repo, expected.issue, expected.claim_id)
+        && !evidence.host.is_empty()
+        && !evidence.boot_id.is_empty()
+        && evidence
+            .process_start
+            .parse::<u64>()
+            .ok()
+            .filter(|start| *start > 0)
+            .is_some_and(|start| start.to_string() == evidence.process_start);
     let expired = now.saturating_sub(evidence.ts) > evidence.ttl_seconds && now >= evidence.ts;
     if !exact || !expired || !cfg!(unix) {
         return StartupHeartbeatClassification::Blocking;
     }
-    if observe_pid(&evidence.worker_id, evidence.pid) != StartupPidLiveness::Dead {
+    if observe_pid(
+        &evidence.worker_id,
+        evidence.pid,
+        &evidence.host,
+        &evidence.boot_id,
+        &evidence.process_start,
+    ) != StartupPidLiveness::Dead
+    {
         return StartupHeartbeatClassification::Blocking;
     }
     StartupHeartbeatClassification::ExpiredDead(Box::new(StartupHeartbeatSnapshot {
@@ -5678,6 +5740,255 @@ fn handoff_stale_heartbeat(
     Ok(copy)
 }
 
+#[cfg(target_os = "linux")]
+fn held_heartbeat_at(
+    directory: &fs::File,
+    name: &std::ffi::OsStr,
+    expected: &StartupHeartbeatSnapshot,
+) -> Result<Option<fs::File>, CommandFailure> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::{fstat, Mode, SFlag};
+    let descriptor = match openat(
+        directory,
+        name,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+        Mode::empty(),
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Ok(descriptor) => descriptor,
+        Err(_) => return Err(CommandFailure::diagnostic("heartbeat entry is unsafe")),
+    };
+    let file = fs::File::from(descriptor);
+    let stat = fstat(&file)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat fstat: {error}")))?;
+    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
+        || stat.st_uid != nix::unistd::geteuid().as_raw()
+        || stat.st_mode & 0o7777 != 0o600
+        || stat.st_nlink != 1
+    {
+        return Err(CommandFailure::diagnostic("heartbeat entry is unsafe"));
+    }
+    let observed = file
+        .try_clone()
+        .and_then(read_regular_file)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat read: {error}")))?;
+    revalidate_heartbeat_snapshot(&observed, &expected.file)?;
+    if parse_startup_heartbeat(&observed.document).as_ref() != Some(&expected.evidence)
+        || heartbeat_final_binding(
+            &file,
+            directory,
+            name.to_string_lossy().as_ref(),
+            (observed.identity.device, observed.identity.inode),
+        )? != (HeartbeatFinalBinding::Exact, 1)
+    {
+        return Err(CommandFailure::diagnostic("heartbeat identity changed"));
+    }
+    Ok(Some(file))
+}
+
+#[cfg(target_os = "linux")]
+#[allow(dead_code)]
+fn handoff_retained_heartbeat(
+    state_root: &Path,
+    repo: &fs::File,
+    live_name: &std::ffi::OsStr,
+    snapshot: &StartupHeartbeatSnapshot,
+    mut boundary: impl FnMut(&str, &fs::File, &fs::File, &str),
+    mut after_sync: impl FnMut(HeartbeatHandoffSyncBoundary) -> Result<(), CommandFailure>,
+) -> Result<std::path::PathBuf, CommandFailure> {
+    use nix::fcntl::RenameFlags;
+    use nix::unistd::fsync;
+
+    let issue = snapshot
+        .evidence
+        .issue
+        .parse::<u64>()
+        .map_err(|_| CommandFailure::diagnostic("heartbeat issue is not an integer"))?;
+    let expected = StartupHeartbeatExpectation {
+        repo: &snapshot.evidence.repo,
+        issue,
+        worker_id: &snapshot.evidence.worker_id,
+        branch: &snapshot.evidence.branch,
+        pull_request: &snapshot.evidence.pr,
+        claim_id: &snapshot.evidence.claim_id,
+        step: &snapshot.evidence.step,
+    };
+    let (pending, completed) = heartbeat_receipt_names(expected);
+    let archive_name = completed.replace(".receipt", ".json");
+    let quarantine = ensure_receipt_directory(repo, "quarantine")?;
+    ensure_receipt_directory(&quarantine, "startup-heartbeat-handoffs")?;
+    let decision = heartbeat_receipt_retry_decision(repo, expected);
+    let handoff = match decision {
+        HeartbeatReceiptDecision::Absent => None,
+        HeartbeatReceiptDecision::Pending | HeartbeatReceiptDecision::Completed => {
+            Some(open_receipt_anchors_with_hook(repo, |_| {})?)
+        }
+        HeartbeatReceiptDecision::Blocking => {
+            return Err(CommandFailure::diagnostic("heartbeat receipt is unsafe"))
+        }
+    };
+    let source = held_heartbeat_at(repo, live_name, snapshot)?;
+    let archived = handoff
+        .as_ref()
+        .map(|directory| held_heartbeat_at(directory, archive_name.as_ref(), snapshot))
+        .transpose()?
+        .flatten();
+    if decision == HeartbeatReceiptDecision::Completed && (source.is_some() || archived.is_none()) {
+        return Err(CommandFailure::diagnostic("completed handoff inconsistent"));
+    }
+    let transaction = match decision {
+        HeartbeatReceiptDecision::Absent if source.is_some() && archived.is_none() => {
+            begin_heartbeat_receipt(repo, expected)?
+        }
+        HeartbeatReceiptDecision::Pending
+            if (source.is_some() && archived.is_none())
+                || (source.is_none() && archived.is_some()) =>
+        {
+            HeartbeatReceiptTransaction {
+                handoff: handoff.expect("pending receipt has handoff"),
+                pending,
+                completed,
+            }
+        }
+        HeartbeatReceiptDecision::Completed => {
+            let retained = archived.expect("validated completed archive");
+            let handoff = handoff.expect("completed receipt has handoff");
+            return validate_retained_heartbeat(
+                state_root,
+                repo,
+                live_name,
+                retained,
+                snapshot,
+                archive_name,
+                handoff,
+                None,
+                &mut after_sync,
+            );
+        }
+        _ => {
+            return Err(CommandFailure::diagnostic(
+                "heartbeat handoff state is ambiguous",
+            ))
+        }
+    };
+    let handoff = &transaction.handoff;
+    let retained = if let Some(source) = source {
+        boundary("before-check", repo, handoff, &archive_name);
+        if heartbeat_final_binding(
+            &source,
+            repo,
+            live_name.to_string_lossy().as_ref(),
+            (snapshot.file.identity.device, snapshot.file.identity.inode),
+        )? != (HeartbeatFinalBinding::Exact, 1)
+        {
+            return Err(CommandFailure::diagnostic("heartbeat source changed"));
+        }
+        boundary("before-rename", repo, handoff, &archive_name);
+        nix::fcntl::renameat2(
+            repo,
+            live_name,
+            handoff,
+            archive_name.as_str(),
+            RenameFlags::RENAME_NOREPLACE,
+        )
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("could not retain heartbeat: {error}"))
+        })?;
+        if heartbeat_final_binding(
+            &source,
+            handoff,
+            &archive_name,
+            (snapshot.file.identity.device, snapshot.file.identity.inode),
+        )? != (HeartbeatFinalBinding::Exact, 1)
+        {
+            restore_moved_heartbeat(repo, live_name, handoff, &archive_name, &mut after_sync)?;
+            return Err(CommandFailure::diagnostic(
+                "renamed heartbeat was not the held inode",
+            ));
+        }
+        boundary("after-rename", repo, handoff, &archive_name);
+        source
+    } else {
+        archived.expect("pending receipt has source or archive")
+    };
+    fsync(repo).map_err(|error| CommandFailure::diagnostic(format!("source fsync: {error}")))?;
+    after_sync(HeartbeatHandoffSyncBoundary::Source)?;
+    fsync(handoff)
+        .map_err(|error| CommandFailure::diagnostic(format!("archive fsync: {error}")))?;
+    after_sync(HeartbeatHandoffSyncBoundary::Handoff)?;
+    boundary("final", repo, handoff, &archive_name);
+    let handoff_guard = handoff
+        .try_clone()
+        .map_err(|error| CommandFailure::diagnostic(format!("retained archive clone: {error}")))?;
+    validate_retained_heartbeat(
+        state_root,
+        repo,
+        live_name,
+        retained,
+        snapshot,
+        archive_name,
+        handoff_guard,
+        Some(transaction),
+        &mut after_sync,
+    )
+}
+
+#[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
+fn validate_retained_heartbeat(
+    state_root: &Path,
+    repo: &fs::File,
+    live_name: &std::ffi::OsStr,
+    retained: fs::File,
+    snapshot: &StartupHeartbeatSnapshot,
+    archive_name: String,
+    handoff: fs::File,
+    transaction: Option<HeartbeatReceiptTransaction>,
+    after_sync: &mut impl FnMut(HeartbeatHandoffSyncBoundary) -> Result<(), CommandFailure>,
+) -> Result<std::path::PathBuf, CommandFailure> {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::{fstat, fstatat};
+    if transaction.is_some() {
+        after_sync(HeartbeatHandoffSyncBoundary::Cleanup)?;
+    }
+    let mut reader = retained.try_clone().map_err(|error| {
+        CommandFailure::diagnostic(format!("retained heartbeat clone: {error}"))
+    })?;
+    std::io::Seek::rewind(&mut reader)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat rewind: {error}")))?;
+    let observed = read_regular_file(reader)
+        .map_err(|error| CommandFailure::diagnostic(format!("retained heartbeat read: {error}")))?;
+    let stat = fstat(&retained)
+        .map_err(|error| CommandFailure::diagnostic(format!("retained fstat: {error}")))?;
+    if !matches!(
+        fstatat(repo, live_name, AtFlags::AT_SYMLINK_NOFOLLOW),
+        Err(nix::errno::Errno::ENOENT)
+    ) || stat.st_uid != nix::unistd::geteuid().as_raw()
+        || stat.st_mode & 0o7777 != 0o600
+        || stat.st_nlink != 1
+        || observed != snapshot.file
+        || heartbeat_final_binding(
+            &retained,
+            &handoff,
+            &archive_name,
+            (snapshot.file.identity.device, snapshot.file.identity.inode),
+        )? != (HeartbeatFinalBinding::Exact, 1)
+    {
+        return Err(CommandFailure::diagnostic(
+            "retained heartbeat final validation failed",
+        ));
+    }
+    if let Some(transaction) = transaction {
+        retire_heartbeat_receipt_with_sync(transaction, |directory| {
+            nix::unistd::fsync(directory)
+                .map_err(|error| CommandFailure::diagnostic(format!("receipt fsync: {error}")))
+        })?;
+    }
+    Ok(state_root
+        .join("quarantine/startup-heartbeat-handoffs")
+        .join(archive_name))
+}
+
 #[cfg(unix)]
 #[allow(dead_code)]
 fn handoff_stale_heartbeat_path(
@@ -5800,15 +6111,25 @@ fn handoff_stale_heartbeat_path_with_hooks(
 
 #[cfg(unix)]
 #[allow(dead_code)]
-fn observe_local_startup_pid(worker_id: &str, pid: u32) -> StartupPidLiveness {
-    let fields = worker_id.rsplitn(5, ':').collect::<Vec<_>>();
-    let local = fields.len() == 5
-        && fields[2] == "rust"
-        && fields[1].parse::<u32>() == Ok(pid)
-        && std::env::var("USER").unwrap_or_else(|_| "unknown-user".into()) == fields[3]
-        && std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".into()) == fields[4];
-    if !local {
+fn observe_local_startup_pid(
+    _worker_id: &str,
+    pid: u32,
+    host: &str,
+    boot_id: &str,
+    process_start: &str,
+) -> StartupPidLiveness {
+    let current_host = fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|host| host.trim().to_string());
+    let current_boot = super::autonomous::current_boot_identity().ok();
+    if current_host.as_deref() != Some(host) || current_boot.as_deref() != Some(boot_id) {
         return StartupPidLiveness::Unknown;
+    }
+    match super::autonomous::process_birth_identity(pid) {
+        Ok(None) => return StartupPidLiveness::Dead,
+        Ok(Some((observed_boot, observed_start)))
+            if observed_boot == boot_id && observed_start == process_start => {}
+        Ok(Some(_)) | Err(_) => return StartupPidLiveness::Unknown,
     }
     match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
         Ok(()) | Err(nix::errno::Errno::EPERM) => StartupPidLiveness::Live,
@@ -5819,7 +6140,13 @@ fn observe_local_startup_pid(worker_id: &str, pid: u32) -> StartupPidLiveness {
 
 #[cfg(not(unix))]
 #[allow(dead_code)]
-fn observe_local_startup_pid(_worker_id: &str, _pid: u32) -> StartupPidLiveness {
+fn observe_local_startup_pid(
+    _worker_id: &str,
+    _pid: u32,
+    _host: &str,
+    _boot_id: &str,
+    _process_start: &str,
+) -> StartupPidLiveness {
     StartupPidLiveness::Unknown
 }
 
@@ -6185,6 +6512,7 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
 
     static BRIDGE_TRANSITION_ENV: Mutex<()> = Mutex::new(());
+    static STARTUP_HEARTBEAT_ENV: Mutex<()> = Mutex::new(());
 
     fn startup_heartbeat_fixture(label: &str) -> (PathBuf, PathBuf) {
         let directory = std::env::temp_dir().join(format!(
@@ -6269,8 +6597,9 @@ mod tests {
     }
 
     fn startup_heartbeat_document(worker: &str, pid: u32) -> String {
+        let nonce = super::startup_heartbeat_nonce("owner/repo", 42, "claim-a");
         format!(
-            r#"{{"repo":"owner/repo","issue":"42","worker_id":"{worker}","branch":"feat/worker","pr":"","claim_id":"claim-a","step":"claimed","ts":100,"ttl_seconds":10,"pid":{pid},"nonce":"nonce-a"}}"#
+            r#"{{"repo":"owner/repo","issue":"42","worker_id":"{worker}","branch":"feat/worker","pr":"","claim_id":"claim-a","step":"claimed","ts":100,"ttl_seconds":10,"pid":{pid},"nonce":"{nonce}","host":"host-a","boot_id":"boot-a","process_start":"1"}}"#
         )
     }
 
@@ -6925,10 +7254,201 @@ mod tests {
             &path,
             expected_startup_heartbeat("worker-a"),
             200,
-            |_, _| super::StartupPidLiveness::Dead,
+            |_, _, _, _, _| super::StartupPidLiveness::Dead,
         );
         assert_eq!(classified, super::StartupHeartbeatClassification::Absent);
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_heartbeat_process_identity() {
+        use super::{StartupHeartbeatClassification::ExpiredDead, StartupPidLiveness};
+
+        let _environment = STARTUP_HEARTBEAT_ENV.lock().unwrap();
+        let (directory, _) = startup_heartbeat_fixture("process-identity");
+        let root = directory.join(".autospec/process-heartbeats");
+        let old_root = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        let old_ttl = std::env::var_os("AUTOSPEC_CLAIM_LEASE_SECONDS");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
+        std::env::set_var("AUTOSPEC_CLAIM_LEASE_SECONDS", "0");
+        let path = root
+            .join(super::super::autonomous::drain::repository_progress_key(
+                "owner/repo",
+            ))
+            .join("42.json");
+        let publish = |claim_id, session_id| {
+            super::write_startup_heartbeat(
+                "owner/repo",
+                42,
+                "worker-a",
+                "feat/worker",
+                claim_id,
+                Some(session_id),
+            )
+            .unwrap();
+            super::parse_startup_heartbeat(&std::fs::read(&path).unwrap())
+                .unwrap()
+                .nonce
+        };
+        let first_nonce = publish("claim-a", "session-a");
+        assert_eq!(publish("claim-a", "session-a"), first_nonce);
+        assert_ne!(publish("claim-b", "session-b"), first_nonce);
+        let mut nonces = Vec::new();
+        let mut last = None;
+        for worker in ["worker-a", "opaque worker:with/slash"] {
+            super::write_startup_heartbeat(
+                "owner/repo",
+                42,
+                worker,
+                "feat/worker",
+                "claim-a",
+                None,
+            )
+            .unwrap();
+            let document = std::fs::read(&path).unwrap();
+            let evidence = super::parse_startup_heartbeat(&document).unwrap();
+            assert_eq!(evidence.worker_id, worker);
+            assert_eq!(evidence.pid, std::process::id());
+            assert_eq!(evidence.ttl_seconds, 1);
+            assert!(!evidence.nonce.is_empty());
+            assert_eq!(
+                super::observe_local_startup_pid(
+                    worker,
+                    evidence.pid,
+                    &evidence.host,
+                    &evidence.boot_id,
+                    &evidence.process_start,
+                ),
+                StartupPidLiveness::Live
+            );
+            assert!(matches!(
+                super::classify_startup_heartbeat(
+                    &path,
+                    expected_startup_heartbeat(worker),
+                    evidence.ts + evidence.ttl_seconds + 1,
+                    |observed, pid, host, boot_id, process_start| {
+                        assert_eq!((observed, pid), (worker, evidence.pid));
+                        assert_eq!(
+                            (host, boot_id, process_start),
+                            (
+                                evidence.host.as_str(),
+                                evidence.boot_id.as_str(),
+                                evidence.process_start.as_str()
+                            )
+                        );
+                        StartupPidLiveness::Dead
+                    },
+                ),
+                ExpiredDead(_)
+            ));
+            nonces.push(evidence.nonce.clone());
+            last = Some((worker, document, evidence));
+        }
+        assert_eq!(nonces[0], nonces[1]);
+
+        let (worker, document, evidence) = last.unwrap();
+        let document = String::from_utf8(document).unwrap();
+        let pid = format!("\"pid\":{}", evidence.pid);
+        let nonce = format!("\"nonce\":\"{}\"", evidence.nonce);
+        for malformed in [
+            document.replace(&pid, "\"pid\":0"),
+            document.replace(&pid, "\"pid\":\"bad\""),
+            document.replace(&nonce, "\"nonce\":\"\""),
+            document.replace(&nonce, &format!("\"nonce\":\"{}\"", "f".repeat(64))),
+            document.replace(worker, "different-worker"),
+        ] {
+            std::fs::write(&path, malformed).unwrap();
+            assert_eq!(
+                super::classify_startup_heartbeat(
+                    &path,
+                    expected_startup_heartbeat(worker),
+                    evidence.ts + evidence.ttl_seconds + 1,
+                    |_, _, _, _, _| StartupPidLiveness::Dead,
+                ),
+                super::StartupHeartbeatClassification::Blocking
+            );
+        }
+        for (key, value) in [
+            ("AUTOSPEC_HEARTBEAT_DIR", old_root),
+            ("AUTOSPEC_CLAIM_LEASE_SECONDS", old_ttl),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_heartbeat_remote_process_identity() {
+        let _environment = STARTUP_HEARTBEAT_ENV.lock().unwrap();
+        let (directory, _) = startup_heartbeat_fixture("remote-process-identity");
+        let root = directory.join(".autospec/process-heartbeats");
+        let old_root = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
+        super::write_startup_heartbeat(
+            "owner/repo",
+            42,
+            "opaque-worker",
+            "feat/worker",
+            "claim-a",
+            None,
+        )
+        .unwrap();
+        let path = root
+            .join(super::super::autonomous::drain::repository_progress_key(
+                "owner/repo",
+            ))
+            .join("42.json");
+        let document = std::fs::read(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&document).unwrap();
+        let identity = |name| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .filter(|field| !field.is_empty())
+                .unwrap()
+                .to_string()
+        };
+        let host = identity("host");
+        let boot_id = identity("boot_id");
+        let process_start = identity("process_start");
+        assert_ne!(host, boot_id);
+        assert_ne!(boot_id, process_start);
+        let absent_pid = i32::MAX as u32;
+        assert!(!Path::new(&format!("/proc/{absent_pid}")).exists());
+        for (field, replacement, remote) in [
+            ("host", "remote-host", true),
+            ("boot_id", "remote-boot", false),
+            ("process_start", "0", true),
+            ("process_start", "garbage", true),
+            ("process_start", "01", true),
+        ] {
+            let mut mutated = value.clone();
+            mutated[field] = serde_json::json!(replacement);
+            if remote {
+                mutated["pid"] = serde_json::json!(absent_pid);
+            }
+            std::fs::write(&path, serde_json::to_vec(&mutated).unwrap()).unwrap();
+            assert_eq!(
+                super::classify_startup_heartbeat(
+                    &path,
+                    expected_startup_heartbeat("opaque-worker"),
+                    value["ts"].as_u64().unwrap() + value["ttl_seconds"].as_u64().unwrap() + 1,
+                    super::observe_local_startup_pid,
+                ),
+                super::StartupHeartbeatClassification::Blocking,
+                "{field}"
+            );
+        }
+        match old_root {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(target_os = "linux")]
@@ -7098,9 +7618,8 @@ claim-a|claim-b
 claimed|review
 "ttl_seconds":10|"ttl_seconds":0
 "pid":4242|"pid":0
-"nonce":"nonce-a"|"nonce":"nonce-b"
 :nonce-a"|:nonce-b"
-"nonce":"nonce-a"|"nonce":"""#;
+"process_start":"1"|"process_start":"""#;
         cases.extend(mutations.lines().map(|row| {
             let (from, to) = row.split_once('|').expect("mutation row");
             let document = if from == "malformed" {
@@ -7118,7 +7637,7 @@ claimed|review
                     &path,
                     expected_startup_heartbeat(worker),
                     now,
-                    |_, _| {
+                    |_, _, _, _, _| {
                         observed = true;
                         liveness
                     },
@@ -7143,7 +7662,7 @@ claimed|review
             &path,
             expected_startup_heartbeat(worker),
             200,
-            |worker, pid| {
+            |worker, pid, _, _, _| {
                 assert_eq!((worker, pid), ("host:user:rust:4242:nonce-a", 4242));
                 super::StartupPidLiveness::Dead
             },
@@ -7172,7 +7691,14 @@ claimed|review
         let user = std::env::var("USER").unwrap_or_else(|_| "unknown-user".into());
         let pid = std::process::id();
         let worker = format!("{host}:{user}:rust:{pid}:nonce-a");
-        let document = startup_heartbeat_document(&worker, pid);
+        let identity = super::startup_process_identity(pid).unwrap();
+        let make_document = |worker| {
+            startup_heartbeat_document(worker, pid)
+                .replace("host-a", &identity.0)
+                .replace("boot-a", &identity.1)
+                .replace("start-a", &identity.2)
+        };
+        let document = make_document(&worker);
         std::fs::write(&target, &document).expect("write target heartbeat");
         std::os::unix::fs::symlink(&target, &path).expect("symlink heartbeat");
         let classify = |worker: &str| {
@@ -7181,9 +7707,9 @@ claimed|review
                 &path,
                 expected_startup_heartbeat(worker),
                 200,
-                |worker, pid| {
+                |worker, pid, host, boot_id, process_start| {
                     observed = true;
-                    super::observe_local_startup_pid(worker, pid)
+                    super::observe_local_startup_pid(worker, pid, host, boot_id, process_start)
                 },
             );
             (result, observed)
@@ -7193,11 +7719,16 @@ claimed|review
         std::fs::rename(&target, &path).expect("publish regular heartbeat");
         assert_eq!(classify(&worker), (Blocking, true));
         let remote_worker = format!("remote-{host}:{user}:rust:{pid}:nonce-a");
-        std::fs::write(&path, startup_heartbeat_document(&remote_worker, pid))
-            .expect("write remote heartbeat");
+        std::fs::write(&path, make_document(&remote_worker)).expect("write remote heartbeat");
         assert_eq!(
-            super::observe_local_startup_pid(&remote_worker, pid),
-            super::StartupPidLiveness::Unknown
+            super::observe_local_startup_pid(
+                &remote_worker,
+                pid,
+                &identity.0,
+                &identity.1,
+                &identity.2,
+            ),
+            super::StartupPidLiveness::Live
         );
         assert_eq!(classify(&remote_worker), (Blocking, true));
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
@@ -7217,7 +7748,7 @@ claimed|review
                 &fifo,
                 expected_startup_heartbeat("host:user:rust:4242:nonce-a"),
                 200,
-                |_, _| super::StartupPidLiveness::Dead,
+                |_, _, _, _, _| super::StartupPidLiveness::Dead,
             ),
             super::StartupHeartbeatClassification::Blocking
         );
@@ -7273,7 +7804,7 @@ claimed|review
             path,
             expected_startup_heartbeat(worker),
             200,
-            |_, _| super::StartupPidLiveness::Dead,
+            |_, _, _, _, _| super::StartupPidLiveness::Dead,
         );
         let super::StartupHeartbeatClassification::ExpiredDead(snapshot) = classified else {
             panic!("fixture heartbeat was not expired and dead");
@@ -7283,9 +7814,10 @@ claimed|review
 
     #[cfg(unix)]
     fn heartbeat_copy_path(root: &Path) -> PathBuf {
+        let nonce = super::startup_heartbeat_nonce("owner/repo", 42, "claim-a");
         root.join(format!(
             "quarantine/startup-heartbeats/42-{}.json",
-            super::heartbeat_session_key("nonce-a")
+            super::heartbeat_session_key(&nonce)
         ))
     }
 
@@ -7322,6 +7854,17 @@ claimed|review
         std::fs::File::from(fd).write_all(b"drift").unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    fn mutate_retained(path: &Path, source: &Path, mutation: &str) {
+        match mutation.trim_start_matches("cleanup-") {
+            "content" => std::fs::write(path, b"drift"),
+            "mode" => std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)),
+            "binding" => std::fs::rename(path, path.with_extension("moved")),
+            "source" => std::fs::write(source, b"foreign"),
+            _ => unreachable!(),
+        }
+        .unwrap();
+    }
     #[cfg(unix)]
     fn assert_mode(path: &Path, expected: u32) {
         let permissions = std::fs::metadata(path)
@@ -7772,6 +8315,146 @@ claimed|review
         let handoff = repo_path.join("quarantine/startup-heartbeat-handoffs");
         assert!(source.exists() || std::fs::read_dir(handoff).unwrap().count() > 1);
         std::fs::remove_dir_all(parent_path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_heartbeat_retained_handoff() {
+        use std::os::unix::fs::MetadataExt;
+        for race in
+            "before-check before-rename after-rename collision malformed fifo hardlink".split(' ')
+        {
+            let (parent, repo_path, source, repo, snapshot) =
+                anchored_startup_heartbeat_fixture(race);
+            let replacement = repo_path.join("replacement");
+            std::fs::write(&replacement, b"foreign").unwrap();
+            std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
+            match race {
+                "malformed" => std::fs::write(&source, [123]).unwrap(),
+                "fifo" => {
+                    std::fs::remove_file(&source).unwrap();
+                    nix::unistd::mkfifo(&source, nix::sys::stat::Mode::from_bits_truncate(0o600))
+                        .unwrap();
+                }
+                "hardlink" => std::fs::hard_link(&source, source.with_extension("link")).unwrap(),
+                _ => {}
+            }
+            let result = super::handoff_retained_heartbeat(
+                &repo_path,
+                &repo,
+                source.file_name().unwrap(),
+                &snapshot,
+                |boundary, _, handoff, name| {
+                    if race == "collision" && boundary == "before-check" {
+                        let file = nix::fcntl::openat(
+                            handoff,
+                            name,
+                            nix::fcntl::OFlag::O_WRONLY
+                                | nix::fcntl::OFlag::O_CREAT
+                                | nix::fcntl::OFlag::O_EXCL,
+                            nix::sys::stat::Mode::from_bits_truncate(0o600),
+                        )
+                        .unwrap();
+                        std::fs::File::from(file).write_all(b"foreign").unwrap();
+                    } else if boundary == race {
+                        if race == "after-rename" {
+                            std::fs::write(&source, b"foreign").unwrap();
+                            std::fs::set_permissions(
+                                &source,
+                                std::fs::Permissions::from_mode(0o600),
+                            )
+                            .unwrap();
+                        } else {
+                            std::fs::rename(&replacement, &source).unwrap();
+                        }
+                    }
+                },
+                |_| Ok(()),
+            );
+            assert!(result.is_err(), "{race}");
+            if matches!(race, "before-check" | "before-rename" | "after-rename") {
+                assert_eq!(std::fs::read(&source).unwrap(), b"foreign", "{race}");
+            }
+            std::fs::remove_dir_all(parent).unwrap();
+        }
+
+        for failed in [
+            super::HeartbeatHandoffSyncBoundary::Source,
+            super::HeartbeatHandoffSyncBoundary::Handoff,
+        ] {
+            let (parent, repo_path, source, repo, snapshot) =
+                anchored_startup_heartbeat_fixture("retained-fsync");
+            let inode = std::fs::metadata(&source).unwrap().ino();
+            assert!(super::handoff_retained_heartbeat(
+                &repo_path,
+                &repo,
+                source.file_name().unwrap(),
+                &snapshot,
+                |_, _, _, _| {},
+                |boundary| (boundary != failed)
+                    .then_some(())
+                    .ok_or_else(|| super::CommandFailure::diagnostic("injected fsync failure")),
+            )
+            .is_err());
+            for _ in 0..2 {
+                let retained = super::handoff_retained_heartbeat(
+                    &repo_path,
+                    &repo,
+                    source.file_name().unwrap(),
+                    &snapshot,
+                    |_, _, _, _| {},
+                    |_| Ok(()),
+                )
+                .unwrap();
+                assert_eq!(std::fs::metadata(retained).unwrap().ino(), inode);
+            }
+            std::fs::remove_dir_all(parent).unwrap();
+        }
+
+        for mutation in [
+            "content",
+            "mode",
+            "binding",
+            "cleanup-content",
+            "cleanup-mode",
+            "cleanup-binding",
+            "cleanup-source",
+        ] {
+            let (parent, repo_path, source, repo, snapshot) =
+                anchored_startup_heartbeat_fixture(mutation);
+            let expected = expected_startup_heartbeat("host:user:rust:4242:nonce-a");
+            let (_, completed) = super::heartbeat_receipt_names(expected);
+            let archive = repo_path
+                .join("quarantine/startup-heartbeat-handoffs")
+                .join(completed.replace(".receipt", ".json"));
+            let result = super::handoff_retained_heartbeat(
+                &repo_path,
+                &repo,
+                source.file_name().unwrap(),
+                &snapshot,
+                |boundary, _, _, _| {
+                    if boundary == "final" && !mutation.starts_with("cleanup-") {
+                        mutate_retained(&archive, &source, mutation);
+                    }
+                },
+                |boundary| {
+                    if boundary == super::HeartbeatHandoffSyncBoundary::Cleanup
+                        && mutation.starts_with("cleanup-")
+                    {
+                        mutate_retained(&archive, &source, mutation);
+                    }
+                    Ok(())
+                },
+            );
+            assert!(result.is_err(), "{mutation}");
+            let receipts = super::open_receipt_anchors_with_hook(&repo, |_| {}).unwrap();
+            assert!(
+                super::inspect_heartbeat_receipt(&receipts, completed.as_ref())
+                    == super::HeartbeatReceiptEntry::Missing,
+                "{mutation}"
+            );
+            std::fs::remove_dir_all(parent).unwrap();
+        }
     }
 
     #[test]
