@@ -21822,8 +21822,12 @@ fn reclaim_prunable_zero_effect_branch(
                 && block.lines().any(|line| line == expected_head)
         })
         .count();
+    let registration_conflicts = blocks.iter().any(|block| {
+        block.lines().any(|line| line == expected_path)
+            || block.lines().any(|line| line == expected_branch)
+    });
     if !intent_path.exists() {
-        if exact_prunable != 1 {
+        if exact_prunable != 1 && registration_conflicts {
             return Err(
                 "executor zero-effect branch is not the one exact prunable registration"
                     .to_string(),
@@ -21835,11 +21839,7 @@ fn reclaim_prunable_zero_effect_branch(
             "executor prunable branch reclaim intent",
         )?;
     } else {
-        let conflicts = blocks.iter().any(|block| {
-            block.lines().any(|line| line == expected_path)
-                || block.lines().any(|line| line == expected_branch)
-        });
-        if conflicts && exact_prunable != 1 {
+        if registration_conflicts && exact_prunable != 1 {
             return Err(
                 "executor prunable reclaim intent conflicts with a registration".to_string(),
             );
@@ -27136,6 +27136,44 @@ exit 64
             "reclaim must leave unrelated prunable registrations untouched: {registry}"
         );
 
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "remove",
+                reclaimed.path.to_str().expect("worktree path"),
+            ],
+        );
+        let _ = fs::remove_dir_all(reclaimed.path.parent().expect("scope root"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_reclaims_orphaned_zero_effect_branch() {
+        let (fixture, scope, worktree, advanced) =
+            prunable_zero_effect_branch_fixture("orphaned-zero-effect-branch", false);
+        git(&fixture.repo, &["worktree", "prune", "--expire", "now"]);
+        let registry = git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"]);
+        assert!(!registry.contains(&format!("worktree {}", worktree.path.display())));
+        assert!(!registry.contains(&format!("branch refs/heads/{}", worktree.branch)));
+
+        let reclaimed = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &advanced,
+            Some(("claim-fresh", "invocation-fresh")),
+        )
+        .expect("reclaim proven orphaned zero-effect branch");
+
+        assert_eq!(reclaimed.path, worktree.path);
+        assert_eq!(
+            git_stdout(&reclaimed.path, &["rev-parse", "--verify", "HEAD^{commit}"]),
+            advanced.base_oid
+        );
+        assert_eq!(
+            git_stdout(&reclaimed.path, &["status", "--porcelain=v1"]),
+            ""
+        );
         git(
             &fixture.repo,
             &[
