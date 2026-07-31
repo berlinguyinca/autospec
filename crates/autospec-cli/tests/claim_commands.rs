@@ -973,23 +973,6 @@ fn claim_state_upsert_requires_expected_claim_id() {
         )
         .with_claim_id("claim-a"),
     );
-    transition_claim_ref(
-        &repo,
-        &RunStateRecord::new(
-            "testorg/testrepo",
-            43,
-            "worker-b",
-            "claimed",
-            "feat/empty",
-            "",
-            "claimed",
-            Vec::new(),
-            "2000-01-01T00:00:00Z",
-            "2000-01-01T00:00:00Z",
-            1,
-        )
-        .with_claim_id("claim-b"),
-    );
     let original_oid = claim_ref_oid(&repo, 42);
     std::fs::create_dir_all(&bin).expect("fake bin directory");
     std::fs::write(&comments, "[]\n").expect("comments fixture");
@@ -1458,6 +1441,23 @@ fn claim_stale_heartbeat_recovery() {
             1,
         )
         .with_claim_id("claim-a"),
+    );
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            43,
+            "worker-b",
+            "claimed",
+            "feat/empty",
+            "",
+            "claimed",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-b"),
     );
     std::fs::create_dir_all(&heartbeat_repo).expect("heartbeat repository");
     std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o700))
