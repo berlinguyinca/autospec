@@ -2645,9 +2645,9 @@ fn run_foreground_with_lease(
                     return Ok(ForegroundCompletion::State(Box::new(state)));
                 }
             } else if state.pause_reason() == Some("executor_receipt_failed") {
-                if executor_receipt_failure_is_recoverable(layout, &state_path, issue)?
-                    || claim_terminal
-                {
+                if executor_receipt_failure_can_resume(claim_terminal, || {
+                    executor_receipt_failure_is_recoverable(layout, &state_path, issue)
+                })? {
                     state = state
                         .transition(ConductorEvent::Resume)
                         .map_err(CommandFailure::diagnostic)?;
@@ -2840,6 +2840,17 @@ fn run_foreground_with_lease(
         ForegroundDispatchResult::Lifecycle(lifecycle) => {
             Ok(ForegroundCompletion::Lifecycle(lifecycle))
         }
+    }
+}
+
+fn executor_receipt_failure_can_resume(
+    claim_terminal: bool,
+    recover_receipt: impl FnOnce() -> Result<bool, CommandFailure>,
+) -> Result<bool, CommandFailure> {
+    if claim_terminal {
+        Ok(true)
+    } else {
+        recover_receipt()
     }
 }
 
@@ -7775,5 +7786,20 @@ mod foreground_tests {
             .expect("slice complete");
 
         assert!(foreground_state_is_retained(&state));
+    }
+
+    #[test]
+    fn terminal_claim_short_circuits_executor_receipt_error() {
+        let mut probed = false;
+        let resumed = executor_receipt_failure_can_resume(true, || {
+            probed = true;
+            Err(CommandFailure::diagnostic(
+                "read executor state metadata: missing",
+            ))
+        })
+        .expect("terminal claim resumes");
+
+        assert!(resumed);
+        assert!(!probed, "terminal evidence must precede the receipt probe");
     }
 }
