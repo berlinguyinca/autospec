@@ -43,7 +43,7 @@ cargo test -p autospec-cli foreground_recovers_exact_immediate_stop_release_with
 
 Expected: FAIL with `missing failure cleanup intent requires an exact retryable release`.
 
-- [ ] **Step 2: Write the failing identity-table integration**
+- [ ] **Step 2: Lock the pre-existing identity rejection boundary**
 
 For worker ID, claim ID, branch, and PR, seed one mismatched authoritative
 record while keeping the local acquisition and invocation unchanged. Assert
@@ -55,8 +55,9 @@ Run:
 cargo test -p autospec-cli foreground_missing_failure_intent_requires_exact_released_identity
 ```
 
-Expected: FAIL until the exact generic-release observer exists; after the
-observer is added, every mismatch must remain rejected.
+Expected before and after implementation: PASS because current recovery already
+rejects every generic release and the new observer must preserve rejection for
+each mismatched identity field.
 
 - [ ] **Step 3: Add the read-only observer**
 
