@@ -21126,6 +21126,20 @@ fn observe_process_identity_once(
     }
 }
 
+pub(crate) fn process_birth_identity(pid: u32) -> Result<Option<(String, String)>, String> {
+    observe_process_birth(pid).map(|birth| birth.map(|birth| (birth.boot_id, birth.start_identity)))
+}
+
+pub(crate) fn current_boot_identity() -> Result<String, String> {
+    let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .map_err(|error| format!("read executor boot identity: {error}"))?
+        .trim()
+        .to_string();
+    (!boot_id.is_empty())
+        .then_some(boot_id)
+        .ok_or_else(|| "executor boot identity is empty".to_string())
+}
+
 fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
     #[cfg(not(target_os = "linux"))]
     {
@@ -21153,10 +21167,7 @@ fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
         .map_err(|error| format!("observe executor process group: {error}"))?;
         let process_group = u32::try_from(process_group.as_raw())
             .map_err(|_| "executor process group is negative".to_string())?;
-        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
-            .map_err(|error| format!("read executor boot identity: {error}"))?
-            .trim()
-            .to_string();
+        let boot_id = current_boot_identity()?;
         Ok(Some(ProcessBirth {
             pid,
             process_group,
