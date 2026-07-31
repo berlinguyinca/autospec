@@ -2205,11 +2205,10 @@ case "$endpoint" in
     ;;
   repos/owner/repo/issues/1600)
     case "$AUTOSPEC_TEST_ISSUE_STATE" in
-      closed) state=CLOSED; labels='"auto-implement"' ;;
-      unlabeled) state=OPEN; labels='' ;;
+      closed) printf '%s\t%s\n' CLOSED true ;;
+      unlabeled) printf '%s\t%s\n' OPEN false ;;
       failure) printf '%s\n' 'authoritative reread failed' >&2; exit 1 ;;
     esac
-    printf '{"number":1600,"title":"Issue","body":"","labels":[%s],"author":{"login":"owner"},"state":"%s"}\n' "$labels" "$state"
     ;;
   repos/owner/repo/issues/1600/comments?*)
     printf '%s\n' '{"raw_count":0,"items":[]}'

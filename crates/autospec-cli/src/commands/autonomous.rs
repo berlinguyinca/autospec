@@ -2584,6 +2584,18 @@ fn run_foreground_with_lease(
     let state_path = foreground_state_path(layout, scope);
     let mut state =
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
+    if state.phase() == ConductorPhase::Paused {
+        if let Some(issue) = state.selected_issue() {
+            if !issue_is_open_auto_implement(&layout.repo, issue)? {
+                state = state
+                    .transition(ConductorEvent::RetireObsoleteSelection)
+                    .map_err(CommandFailure::diagnostic)?;
+                persist_foreground_state(&state_path, &state)
+                    .map_err(CommandFailure::diagnostic)?;
+                return Ok(ForegroundCompletion::State(Box::new(state)));
+            }
+        }
+    }
     if no_ready_selection_pause(&state).map_err(CommandFailure::diagnostic)? {
         let ready = initial_plan.as_ref().map_err(|reason| {
             CommandFailure::diagnostic(format!("cannot recheck paused foreground queue: {reason}"))
@@ -2922,6 +2934,36 @@ fn foreground_state_is_retained(state: &ConductorState) -> bool {
         state.phase(),
         ConductorPhase::Paused | ConductorPhase::SliceComplete | ConductorPhase::AllDone
     )
+}
+
+fn issue_is_open_auto_implement(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
+    let endpoint = format!("repos/{repo}/issues/{issue}");
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "--method",
+            "GET",
+            &endpoint,
+            "--jq",
+            r#"[.state, ([.labels[].name] | index("auto-implement") != null)] | @tsv"#,
+        ])
+        .output()
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("cannot run gh issue reread {issue}: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(CommandFailure::diagnostic(format!(
+            "gh issue reread {issue} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    match String::from_utf8_lossy(&output.stdout).trim() {
+        "OPEN\ttrue" => Ok(true),
+        "OPEN\tfalse" | "CLOSED\ttrue" | "CLOSED\tfalse" => Ok(false),
+        value => Err(CommandFailure::diagnostic(format!(
+            "could not parse GitHub issue reread {issue}: {value:?}"
+        ))),
+    }
 }
 
 fn no_ready_selection_pause(state: &ConductorState) -> Result<bool, String> {
