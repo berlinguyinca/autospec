@@ -1723,8 +1723,7 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
     assert!(!Path::new(&format!("/proc/{harness_pid}")).exists());
 }
 
-#[test]
-fn foreground_reclaims_prunable_zero_effect_branch_on_a_fresh_claim_generation() {
+fn assert_released_heartbeat_generation_handoff() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
@@ -1951,6 +1950,26 @@ fn foreground_reclaims_prunable_zero_effect_branch_on_a_fresh_claim_generation()
         adopted_transfer["to_invocation_id"], merged_receipt["invocation_id"],
         "fresh merged invocation must own the reclaimed worktree"
     );
+    let archive = fixture
+        .heartbeats
+        .join("o4_test_r4_repo/quarantine/released-heartbeats");
+    let archived = fs::read_dir(&archive)
+        .expect("released heartbeat archive")
+        .filter_map(Result::ok)
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .filter(|document| document.contains(&old_claim_id))
+        .count();
+    assert_eq!(archived, 1, "archive must retain the exact old generation");
+}
+
+#[test]
+fn foreground_reclaims_prunable_zero_effect_branch_on_a_fresh_claim_generation() {
+    assert_released_heartbeat_generation_handoff();
+}
+
+#[test]
+fn released_heartbeat_generation_handoff() {
+    assert_released_heartbeat_generation_handoff();
 }
 
 #[test]
