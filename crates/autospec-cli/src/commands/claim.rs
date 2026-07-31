@@ -7966,7 +7966,7 @@ claimed|review
             std::fs::write(&replacement, b"foreign").unwrap();
             std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
             match race {
-                "malformed" => std::fs::write(&source, b"{").unwrap(),
+                "malformed" => std::fs::write(&source, [123]).unwrap(),
                 "fifo" => {
                     std::fs::remove_file(&source).unwrap();
                     nix::unistd::mkfifo(&source, nix::sys::stat::Mode::from_bits_truncate(0o600))
