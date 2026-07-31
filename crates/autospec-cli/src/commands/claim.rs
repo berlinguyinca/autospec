@@ -2204,6 +2204,20 @@ pub(crate) fn observe_terminal_bridge_claim(
         && selected.record.pr == expected_pr)
 }
 
+pub(crate) fn observe_released_bridge_claim(
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<bool, CommandFailure> {
+    let Some(selected) = read_claim_ref(identity.repo, identity.issue)? else {
+        return Ok(false);
+    };
+    Ok(selected.record.worker_id == identity.worker_id
+        && selected.record.claim_id.as_deref() == Some(identity.claim_id)
+        && selected.record.branch == identity.branch
+        && selected.record.state == "released"
+        && selected.record.step == "released"
+        && selected.record.pr.is_empty())
+}
+
 fn project_bridge_terminal_audit(
     identity: ClaimMutationIdentity<'_>,
     pull_request: Option<u64>,
