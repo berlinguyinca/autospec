@@ -1884,6 +1884,11 @@ fn quarantine_authoritative_stale_heartbeat(
                         unix_now()?,
                     )? {
                         StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
+                        StartupHeartbeatClassification::Absent
+                            if heartbeat_lifecycle_step(&record.step) =>
+                        {
+                            return Ok(false)
+                        }
                         StartupHeartbeatClassification::Absent => None,
                         StartupHeartbeatClassification::Blocking => return Ok(false),
                     }

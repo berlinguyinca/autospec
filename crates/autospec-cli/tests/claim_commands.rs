@@ -2271,7 +2271,7 @@ fn startup_heartbeat_claim_lifecycle() {
         "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; elif [ \"$1 $2\" = 'issue edit' ]; then exit 23; fi\n",
     );
     let issue = r###"{"labels":["auto-implement","safety:reviewed"],"title":"claim","body":"## Safety review\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","author":"agent"}"###;
-    Command::new("sh")
+    let lifecycle = Command::new("sh")
         .arg("-c")
         .arg("AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" AUTOSPEC_CLAIM_GIT_BIN=\"$GIT_WRAPPER\" \"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/a --session-id session-a & a=$!; i=0; while [ ! -e \"$PAUSED\" ]; do i=$((i+1)); [ $i -lt 500 ] || exit 99; sleep .01; done; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_B\" \"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/a --session-id session-a || true; : > \"$RELEASE\"; wait $a || true; before=$(/usr/bin/git --git-dir \"$AUTOSPEC_CLAIM_GIT_REMOTE\" rev-parse refs/autospec/claims/issue-43); AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim state recover-stale-startup --issue 43 --repo testorg/testrepo --timeout-seconds 1 || true; after=$(/usr/bin/git --git-dir \"$AUTOSPEC_CLAIM_GIT_REMOTE\" rev-parse refs/autospec/claims/issue-43); [ \"$before\" = \"$after\" ] || exit 98; for identity in 'worker-x feat/c session-conflict' 'worker-c feat/x session-conflict' 'worker-c feat/c session-x'; do set -- $identity; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim acquire --issue 43 --repo testorg/testrepo --worker-id \"$1\" --branch \"$2\" --session-id \"$3\" || true; done; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim acquire --issue 43 --repo testorg/testrepo --worker-id worker-c --branch feat/c --session-id session-conflict || true; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim acquire --issue 44 --repo testorg/testrepo --worker-id worker-d --branch feat/d --session-id session-fresh || true")
         .current_dir(&repo)
@@ -2287,6 +2287,12 @@ fn startup_heartbeat_claim_lifecycle() {
         .env("GH_ISSUE", issue)
         .output()
         .unwrap();
+    assert!(
+        lifecycle.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&lifecycle.stdout),
+        String::from_utf8_lossy(&lifecycle.stderr)
+    );
     assert!(heartbeats_a.join("o7_testorg_r8_testrepo/42.json").exists());
     assert!(!heartbeats_b.join("o7_testorg_r8_testrepo/42.json").exists());
     assert!(!heartbeats_b
