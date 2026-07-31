@@ -2205,8 +2205,8 @@ case "$endpoint" in
     ;;
   repos/owner/repo/issues/1600)
     case "$AUTOSPEC_TEST_ISSUE_STATE" in
-      closed) printf '%s\t%s\n' CLOSED true ;;
-      unlabeled) printf '%s\t%s\n' OPEN false ;;
+      closed) printf '%s\t%s\n' closed false ;;
+      unlabeled) printf '%s\t%s\n' open false ;;
       failure) printf '%s\n' 'authoritative reread failed' >&2; exit 1 ;;
     esac
     ;;

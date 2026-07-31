@@ -2957,10 +2957,12 @@ fn issue_is_open_auto_implement(repo: &str, issue: u64) -> Result<bool, CommandF
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    match String::from_utf8_lossy(&output.stdout).trim() {
-        "OPEN\ttrue" => Ok(true),
-        "OPEN\tfalse" | "CLOSED\ttrue" | "CLOSED\tfalse" => Ok(false),
-        value => Err(CommandFailure::diagnostic(format!(
+    let value = String::from_utf8_lossy(&output.stdout);
+    let value = value.trim();
+    match value.to_ascii_lowercase().as_str() {
+        "open\ttrue" => Ok(true),
+        "open\tfalse" | "closed\ttrue" | "closed\tfalse" => Ok(false),
+        _ => Err(CommandFailure::diagnostic(format!(
             "could not parse GitHub issue reread {issue}: {value:?}"
         ))),
     }
