@@ -5642,6 +5642,13 @@ fn validate_retained_heartbeat(
     use nix::fcntl::AtFlags;
     use nix::sys::stat::{fstat, fstatat};
 
+    if let Some(transaction) = transaction {
+        retire_heartbeat_receipt_with_sync(transaction, |directory| {
+            nix::unistd::fsync(directory)
+                .map_err(|error| CommandFailure::diagnostic(format!("receipt fsync: {error}")))
+        })?;
+        after_sync(HeartbeatHandoffSyncBoundary::Cleanup)?;
+    }
     let mut reader = retained.try_clone().map_err(|error| {
         CommandFailure::diagnostic(format!("retained heartbeat clone: {error}"))
     })?;
@@ -5668,13 +5675,6 @@ fn validate_retained_heartbeat(
         return Err(CommandFailure::diagnostic(
             "retained heartbeat final validation failed",
         ));
-    }
-    if let Some(transaction) = transaction {
-        retire_heartbeat_receipt_with_sync(transaction, |directory| {
-            nix::unistd::fsync(directory)
-                .map_err(|error| CommandFailure::diagnostic(format!("receipt fsync: {error}")))
-        })?;
-        after_sync(HeartbeatHandoffSyncBoundary::Cleanup)?;
     }
     Ok(state_root
         .join("quarantine/startup-heartbeat-handoffs")
