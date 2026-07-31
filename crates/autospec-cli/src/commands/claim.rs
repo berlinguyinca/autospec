@@ -6802,7 +6802,9 @@ mod tests {
         for (field, replacement, remote) in [
             ("host", "remote-host", true),
             ("boot_id", "remote-boot", false),
-            ("process_start", "0", false),
+            ("process_start", "0", true),
+            ("process_start", "garbage", true),
+            ("process_start", "01", true),
         ] {
             let mut mutated = value.clone();
             mutated[field] = serde_json::json!(replacement);
