@@ -30650,6 +30650,28 @@ exit 64
     }
 
     #[test]
+    fn autonomous_executor_bridge_live_harness_identity_allows_only_argv_mutation() {
+        // Break caught: a harness self-reexec keeping its immutable lifetime and executable was
+        // mistaken for PID reuse solely because its observable argv changed.
+        let expected = persisted_invocation().process.expect("process identity");
+        let mut observed = expected.clone();
+        observed.argv_digest = "d".repeat(64);
+        assert!(expected.matches_live_harness(&observed));
+
+        for mutate in [
+            |identity: &mut ProcessIdentity| identity.pid += 1,
+            |identity: &mut ProcessIdentity| identity.process_group += 1,
+            |identity: &mut ProcessIdentity| identity.executable = PathBuf::from("/other"),
+            |identity: &mut ProcessIdentity| identity.boot_id = "other-boot".to_string(),
+            |identity: &mut ProcessIdentity| identity.start_identity = "other-start".to_string(),
+        ] {
+            let mut changed = observed.clone();
+            mutate(&mut changed);
+            assert!(!expected.matches_live_harness(&changed));
+        }
+    }
+
+    #[test]
     fn autonomous_executor_bridge_prompt_binds_local_only_authority() {
         let invocation = persisted_invocation();
         let closeout = Path::new("/safe/worktree/.autospec/closeout.json");
