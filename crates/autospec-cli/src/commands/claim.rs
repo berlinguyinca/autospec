@@ -6056,7 +6056,7 @@ mod tests {
             let output = Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    concat!(module_path!(), "::startup_heartbeat_atomic_publication"),
+                    "commands::claim::tests::startup_heartbeat_atomic_publication",
                     "--nocapture",
                 ])
                 .env(CHILD, "1")
@@ -6064,9 +6064,11 @@ mod tests {
                 .unwrap();
             assert!(
                 output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
             );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("running 1 test"));
             return;
         }
 
@@ -6112,12 +6114,14 @@ mod tests {
         }
         let outside = fixture.join("outside");
         std::fs::write(&outside, b"caller-owned").unwrap();
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o600)).unwrap();
         std::fs::hard_link(&outside, &issue).unwrap();
         assert!(matches!(attempt("42.json", None), Err(PreCommit(_))));
         assert_eq!(std::fs::read(&outside).unwrap(), b"caller-owned");
         assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 2);
         std::fs::remove_file(&issue).unwrap();
         nix::unistd::mkfifo(&issue, Mode::from_bits_truncate(0o600)).unwrap();
+        std::fs::set_permissions(&issue, std::fs::Permissions::from_mode(0o600)).unwrap();
         let mut fifo = std::fs::File::from(
             open(&issue, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty()).unwrap(),
         );
@@ -6179,6 +6183,62 @@ mod tests {
             assert_eq!(
                 (metadata.dev(), metadata.ino()),
                 (publication.device, publication.inode)
+            );
+        }
+
+        let root = fixture.join("transaction-root");
+        let repo = root.join(crate::commands::autonomous::drain::repository_progress_key(
+            "owner/repo",
+        ));
+        let sessions = repo.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        for directory in [&root, &repo, &sessions] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root) };
+        let issue = repo.join("42.json");
+        let session = sessions.join(format!("{}.json", super::heartbeat_session_key("session-a")));
+        let caller = fixture.join("caller-owned-heartbeat");
+        std::fs::write(&caller, b"caller-owned").unwrap();
+        std::fs::hard_link(&caller, &issue).unwrap();
+        assert!(super::write_startup_heartbeat(
+            "owner/repo",
+            42,
+            "worker-a",
+            "feat/worker",
+            "claim-a",
+            Some("session-a"),
+        )
+        .is_err());
+        assert_eq!(std::fs::read(&caller).unwrap(), b"caller-owned");
+        assert_eq!(std::fs::metadata(&caller).unwrap().nlink(), 2);
+        assert!(!session.exists());
+
+        std::fs::remove_file(&issue).unwrap();
+        let transaction_umask = umask(Mode::from_bits_truncate(0o777));
+        super::write_startup_heartbeat(
+            "owner/repo",
+            42,
+            "worker-a",
+            "feat/worker",
+            "claim-a",
+            Some("session-a"),
+        )
+        .unwrap();
+        umask(transaction_umask);
+        super::write_startup_heartbeat(
+            "owner/repo",
+            42,
+            "worker-a",
+            "feat/worker",
+            "claim-a",
+            Some("session-a"),
+        )
+        .unwrap();
+        for path in [&issue, &session] {
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+                0o600
             );
         }
     }
