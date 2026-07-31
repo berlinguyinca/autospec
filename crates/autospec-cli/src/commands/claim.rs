@@ -6576,6 +6576,23 @@ mod tests {
                 "owner/repo",
             ))
             .join("42.json");
+        let publish = |claim_id, session_id| {
+            super::write_startup_heartbeat(
+                "owner/repo",
+                42,
+                "worker-a",
+                "feat/worker",
+                claim_id,
+                Some(session_id),
+            )
+            .unwrap();
+            super::parse_startup_heartbeat(&std::fs::read(&path).unwrap())
+                .unwrap()
+                .nonce
+        };
+        let first_nonce = publish("claim-a", "session-a");
+        assert_eq!(publish("claim-a", "session-a"), first_nonce);
+        assert_ne!(publish("claim-b", "session-b"), first_nonce);
         let mut nonces = Vec::new();
         let mut last = None;
         for worker in ["worker-a", "opaque worker:with/slash"] {
