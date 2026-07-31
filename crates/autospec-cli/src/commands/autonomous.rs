@@ -2687,6 +2687,19 @@ fn run_foreground_with_lease(
         let mut local_acquisition =
             load_claim_acquisition_receipt(&state_path, &layout.repo, issue)
                 .map_err(CommandFailure::diagnostic)?;
+        if state.phase() == ConductorPhase::Claim
+            && local_acquisition.is_none()
+            && !issue_is_open_for_autonomous_work(&layout.repo, issue)?
+        {
+            state = state
+                .transition(ConductorEvent::Pause {
+                    reason: "obsolete_selected_issue".to_string(),
+                })
+                .and_then(|state| state.transition(ConductorEvent::RetireObsoleteSelection))
+                .map_err(CommandFailure::diagnostic)?;
+            persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
+            return Ok(ForegroundCompletion::State(Box::new(state)));
+        }
         if local_acquisition.is_none() && state.phase() != ConductorPhase::Claim {
             let legacy = claim::authoritative_lease_for_legacy_migration(&layout.repo, issue)?;
             if let Some(legacy) = legacy {
