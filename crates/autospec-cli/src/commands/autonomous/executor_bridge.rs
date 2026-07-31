@@ -9390,6 +9390,10 @@ impl ProcessIdentity {
         self == observed
     }
 
+    fn matches_live_harness(&self, observed: &Self) -> bool {
+        self.same_birth(observed) && self.executable == observed.executable
+    }
+
     fn same_birth(&self, observed: &Self) -> bool {
         self.pid == observed.pid
             && self.process_group == observed.process_group
@@ -20008,7 +20012,7 @@ fn launch_and_supervise(
             }
 
             match observe_process_identity(process.pid, &process.argv_digest)? {
-                Some(observed) if process.matches(&observed) => {
+                Some(observed) if process.matches_live_harness(&observed) => {
                     if !guard.child_mut().processes.leader.is_live()? {
                         return Err("executor supervisor exited while its harness remained live"
                             .to_string());
