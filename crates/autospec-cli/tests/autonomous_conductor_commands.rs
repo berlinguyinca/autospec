@@ -2742,6 +2742,11 @@ fn foreground_exhausted_retry_recovers_after_receipt_retirement_crash() {
         &fresh_iso_timestamp(),
         EXECUTOR_CLAIM_ID,
     );
+    fixture.seed_claim_heartbeat(
+        "rust-foreground-conductor-recovered",
+        "feat/autonomous-issue-42",
+        EXECUTOR_CLAIM_ID,
+    );
     fixture.seed_claim_acquisition_receipt(
         "rust-foreground-conductor-recovered",
         "feat/autonomous-issue-42",
@@ -5949,6 +5954,47 @@ printf '%s\n' '[]' > "$report"
         .expect("seed claim acquisition receipt");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
             .expect("make claim acquisition receipt private");
+    }
+
+    fn seed_claim_heartbeat(&self, worker_id: &str, branch: &str, claim_id: &str) {
+        let repo = "test/repo";
+        let issue = 42_u64;
+        let pid = std::process::id();
+        let (_, process_start) = process_identity(pid).expect("current process identity");
+        let host = fs::read_to_string("/proc/sys/kernel/hostname")
+            .expect("read current host")
+            .trim()
+            .to_string();
+        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")
+            .expect("read current boot identity")
+            .trim()
+            .to_string();
+        let mut nonce_frame = b"autospec-startup-heartbeat-nonce-v1".to_vec();
+        for field in [repo, &issue.to_string(), claim_id] {
+            nonce_frame.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            nonce_frame.extend_from_slice(field.as_bytes());
+        }
+        let directory = self.heartbeats.join("o4_test_r4_repo");
+        fs::create_dir_all(&directory).expect("create claim heartbeat directory");
+        for private in [&self.heartbeats, &directory] {
+            fs::set_permissions(private, fs::Permissions::from_mode(0o700))
+                .expect("make claim heartbeat directory private");
+        }
+        let path = directory.join("42.json");
+        fs::write(
+            &path,
+            format!(
+                "{{\"issue\":\"{issue}\",\"branch\":{branch:?},\"step\":\"claimed\",\"ts\":{},\"ttl_seconds\":10800,\"pid\":{pid},\"nonce\":\"{}\",\"host\":{host:?},\"boot_id\":{boot_id:?},\"process_start\":\"{process_start}\",\"pr\":\"\",\"repo\":\"{repo}\",\"worker_id\":{worker_id:?},\"claim_id\":{claim_id:?}}}\n",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("heartbeat clock")
+                    .as_secs(),
+                sha256_hex(&nonce_frame),
+            ),
+        )
+        .expect("seed claim heartbeat");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("make claim heartbeat private");
     }
 
     fn copy_claim_ref_to(&self, remote: &Path) {
