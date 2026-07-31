@@ -21822,12 +21822,17 @@ fn reclaim_prunable_zero_effect_branch(
                 && block.lines().any(|line| line == expected_head)
         })
         .count();
-    let registration_conflicts = blocks.iter().any(|block| {
-        block.lines().any(|line| line == expected_path)
-            || block.lines().any(|line| line == expected_branch)
-    });
+    let matching_registrations = blocks
+        .iter()
+        .filter(|block| {
+            block.lines().any(|line| line == expected_path)
+                || block.lines().any(|line| line == expected_branch)
+        })
+        .count();
+    let registration_is_reclaimable =
+        matching_registrations == 0 || (matching_registrations == 1 && exact_prunable == 1);
     if !intent_path.exists() {
-        if exact_prunable != 1 && registration_conflicts {
+        if !registration_is_reclaimable {
             return Err(
                 "executor zero-effect branch is not the one exact prunable registration"
                     .to_string(),
@@ -21839,7 +21844,7 @@ fn reclaim_prunable_zero_effect_branch(
             "executor prunable branch reclaim intent",
         )?;
     } else {
-        if registration_conflicts && exact_prunable != 1 {
+        if !registration_is_reclaimable {
             return Err(
                 "executor prunable reclaim intent conflicts with a registration".to_string(),
             );
@@ -27186,11 +27191,71 @@ exit 64
     }
 
     #[test]
+    fn autonomous_executor_bridge_rejects_competing_branch_registration_without_mutation() {
+        let (fixture, scope, worktree, advanced) =
+            prunable_zero_effect_branch_fixture("competing-branch-registration", false);
+        let competing = fixture.root.join("competing-worktree");
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "add",
+                "--force",
+                "--quiet",
+                competing.to_str().expect("competing worktree path"),
+                &worktree.branch,
+            ],
+        );
+        let registry_before = git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"]);
+        let intent = worktree
+            .path
+            .parent()
+            .expect("scope root")
+            .join("issue-42.prunable-reclaim-intent.json");
+
+        let error = super::provision_issue_worktree_for_claim(
+            &fixture.repo,
+            &scope,
+            42,
+            &advanced,
+            Some(("claim-fresh", "invocation-fresh")),
+        )
+        .expect_err("competing branch registration must fail closed");
+
+        assert!(error.contains("one exact prunable registration"), "{error}");
+        assert_eq!(
+            git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"]),
+            registry_before,
+            "a rejected reclaim must not mutate the worktree registry"
+        );
+        assert!(
+            !intent.exists(),
+            "a rejected reclaim must not create durable intent"
+        );
+        git(
+            &fixture.repo,
+            &[
+                "worktree",
+                "remove",
+                competing.to_str().expect("competing worktree path"),
+            ],
+        );
+        git(&fixture.repo, &["worktree", "prune", "--expire", "now"]);
+        let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
+    }
+
+    #[test]
     fn autonomous_executor_bridge_prunable_zero_effect_branch_resumes_both_crash_boundaries() {
-        for boundary in [1, 2] {
-            let label = format!("prunable-zero-effect-crash-{boundary}");
+        for (mode, boundary) in ["prunable", "orphan"]
+            .into_iter()
+            .flat_map(|mode| [1, 2].map(move |boundary| (mode, boundary)))
+        {
+            let label = format!("{mode}-zero-effect-crash-{boundary}");
             let (fixture, scope, worktree, advanced) =
                 prunable_zero_effect_branch_fixture(&label, false);
+            if mode == "orphan" {
+                git(&fixture.repo, &["worktree", "prune", "--expire", "now"]);
+            }
             let recorded_head = git_stdout(
                 &fixture.repo,
                 &[
@@ -27207,7 +27272,7 @@ exit 64
                 &advanced,
                 Some(("claim-fresh", "invocation-fresh")),
             )
-            .expect_err("interrupt exact prunable reclaim");
+            .expect_err("interrupt zero-effect reclaim");
             assert!(interrupted.contains("injected executor prunable reclaim crash"));
             let intent = worktree
                 .path
@@ -27236,7 +27301,7 @@ exit 64
                 &advanced,
                 Some(("claim-fresh", "invocation-fresh")),
             )
-            .expect("resume exact prunable reclaim");
+            .expect("resume zero-effect reclaim");
             assert!(!intent.exists());
             assert_eq!(
                 git_stdout(&resumed.path, &["rev-parse", "--verify", "HEAD^{commit}"]),
