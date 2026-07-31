@@ -44,6 +44,16 @@ mkdir -p "$(dirname "$HOOK_PATH")"
 cat > "$HOOK_PATH" <<'HOOK_EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+STAGED_BASE_ARGS=()
+MERGE_HEAD_PATH=$(git rev-parse --git-path MERGE_HEAD)
+if [ -e "$MERGE_HEAD_PATH" ]; then
+  if ! MERGE_HEAD=$(git rev-parse --verify 'MERGE_HEAD^{commit}' 2>/dev/null); then
+    echo "Pre-commit lint FAILED: MERGE_HEAD is not a valid commit." >&2
+    exit 1
+  fi
+  STAGED_BASE_ARGS=(--staged-base "$MERGE_HEAD")
+fi
+
 STAGED=$(git diff --cached --name-only)
 [ -z "$STAGED" ] && exit 0
 
@@ -63,7 +73,7 @@ case "$BRANCH" in
     ;;
 esac
 
-if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" --pre-commit --staged "${ISSUE_ARGS[@]}" > "$OUT" 2>&1; then
+if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" --pre-commit --staged "${STAGED_BASE_ARGS[@]}" "${ISSUE_ARGS[@]}" > "$OUT" 2>&1; then
   echo "Pre-commit lint FAILED. Findings:" >&2
   cat "$OUT" >&2
   echo "" >&2

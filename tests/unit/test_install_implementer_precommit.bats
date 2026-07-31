@@ -55,6 +55,86 @@ teardown() {
     grep -q "\-\-pre-commit \-\-staged" "$TMPDIR_REPO/.git/hooks/pre-commit"
 }
 
+@test "lint-implementation: staged base excludes changes in the incoming merge parent" {
+    git -C "$TMPDIR_REPO" branch feature
+    cat > "$TMPDIR_REPO/incoming.sh" <<'EOF'
+#!/usr/bin/env bash
+# TODO incoming main only
+echo incoming
+EOF
+    git -C "$TMPDIR_REPO" add incoming.sh
+    git -C "$TMPDIR_REPO" commit -q -m "incoming main"
+    incoming="$(git -C "$TMPDIR_REPO" rev-parse HEAD)"
+
+    git -C "$TMPDIR_REPO" checkout -q feature
+    printf '#!/usr/bin/env bash\necho feature\n' > "$TMPDIR_REPO/feature.sh"
+    git -C "$TMPDIR_REPO" add feature.sh
+    git -C "$TMPDIR_REPO" commit -q -m "feature"
+    git -C "$TMPDIR_REPO" merge -q --no-commit --no-ff "$incoming"
+
+    run bash -c "cd '$TMPDIR_REPO' && bash '$LINT_SCRIPT' --pre-commit --staged"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "TODO_LEFT"
+
+    run bash -c "cd '$TMPDIR_REPO' && bash '$LINT_SCRIPT' --pre-commit --staged --staged-base '$incoming'"
+    [ "$status" -eq 0 ]
+}
+
+@test "lint-implementation: staged base rejects an invalid commit" {
+    printf 'staged\n' > "$TMPDIR_REPO/staged.txt"
+    git -C "$TMPDIR_REPO" add staged.txt
+
+    run bash -c "cd '$TMPDIR_REPO' && bash '$LINT_SCRIPT' --staged --staged-base not-a-commit"
+    [ "$status" -eq 1 ]
+    echo "$output" | grep -q "invalid staged base"
+}
+
+@test "install-implementer-precommit: ordinary staged hook omits staged base" {
+    bash "$INSTALL_SCRIPT" "$TMPDIR_REPO"
+    mkdir -p "$TMPDIR_REPO/lint-bin"
+    cat > "$TMPDIR_REPO/lint-bin/lint-implementation.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$LINT_ARGS"
+EOF
+    chmod +x "$TMPDIR_REPO/lint-bin/lint-implementation.sh"
+    printf 'ordinary\n' > "$TMPDIR_REPO/ordinary.txt"
+    git -C "$TMPDIR_REPO" add ordinary.txt
+
+    run bash -c "cd '$TMPDIR_REPO' && AUTOSPEC_SCRIPTS_DIR='$TMPDIR_REPO/lint-bin' \
+        LINT_ARGS='$TMPDIR_REPO/lint.args' .git/hooks/pre-commit"
+    [ "$status" -eq 0 ]
+    [ -f "$TMPDIR_REPO/lint.args" ]
+    ! grep -q -- "--staged-base" "$TMPDIR_REPO/lint.args"
+}
+
+@test "install-implementer-precommit: merge hook passes the valid incoming parent" {
+    bash "$INSTALL_SCRIPT" "$TMPDIR_REPO"
+    mkdir -p "$TMPDIR_REPO/lint-bin"
+    cat > "$TMPDIR_REPO/lint-bin/lint-implementation.sh" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$LINT_ARGS"
+EOF
+    chmod +x "$TMPDIR_REPO/lint-bin/lint-implementation.sh"
+    incoming="$(git -C "$TMPDIR_REPO" rev-parse HEAD)"
+    printf 'merge\n' > "$TMPDIR_REPO/merge.txt"
+    git -C "$TMPDIR_REPO" add merge.txt
+    printf '%s\n' "$incoming" > "$TMPDIR_REPO/.git/MERGE_HEAD"
+
+    run bash -c "cd '$TMPDIR_REPO' && AUTOSPEC_SCRIPTS_DIR='$TMPDIR_REPO/lint-bin' \
+        LINT_ARGS='$TMPDIR_REPO/lint.args' .git/hooks/pre-commit"
+    [ "$status" -eq 0 ]
+    grep -A1 -x -- "--staged-base" "$TMPDIR_REPO/lint.args" | grep -q "$incoming"
+}
+
+@test "install-implementer-precommit: invalid merge head fails closed" {
+    bash "$INSTALL_SCRIPT" "$TMPDIR_REPO"
+    printf 'not-a-commit\n' > "$TMPDIR_REPO/.git/MERGE_HEAD"
+
+    run bash -c "cd '$TMPDIR_REPO' && .git/hooks/pre-commit"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "MERGE_HEAD"
+}
+
 @test "install-implementer-precommit: prints success message" {
     run bash "$INSTALL_SCRIPT" "$TMPDIR_REPO"
     [ "$status" -eq 0 ]
