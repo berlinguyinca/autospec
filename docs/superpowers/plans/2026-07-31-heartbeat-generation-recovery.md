@@ -31,7 +31,7 @@
 
 - [ ] **Step 1: Extend the exact foreground regression**
 
-Seed the startup heartbeat for the retained claim inside `run_missing_cleanup_recovery`. The positive case must assert that the heartbeat is absent from the live issue path and retained by the existing handoff transaction. Every worker, claim ID, branch, and PR mismatch must assert that both the heartbeat and acquisition receipt remain.
+Seed the startup heartbeat for the retained claim inside `run_missing_cleanup_recovery`. The positive case must assert that the heartbeat is absent from the live issue path and retained by the existing handoff transaction. Then invoke the foreground path a second time and assert that it publishes exactly one new-generation heartbeat without `heartbeat_write_failed`. Every worker, claim ID, branch, and PR mismatch must assert that both the heartbeat and acquisition receipt remain.
 
 - [ ] **Step 2: Run the focused regression and verify RED**
 
@@ -78,7 +78,7 @@ cargo test -p autospec-cli --test autonomous_conductor_commands foreground_recov
 cargo test -p autospec-cli --test autonomous_conductor_commands foreground_missing_failure_intent_requires_exact_released_identity -- --exact
 ```
 
-Expected: PASS; the positive archives the heartbeat, and every mismatch preserves it.
+Expected: PASS; the positive archives the old heartbeat and publishes exactly one fresh successor heartbeat without `heartbeat_write_failed`, while every mismatch preserves its evidence.
 
 - [ ] **Step 5: Commit Task 1**
 
