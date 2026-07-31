@@ -6735,6 +6735,7 @@ mod tests {
             document.replace(&pid, "\"pid\":0"),
             document.replace(&pid, "\"pid\":\"bad\""),
             document.replace(&nonce, "\"nonce\":\"\""),
+            document.replace(&nonce, &format!("\"nonce\":\"{}\"", "f".repeat(64))),
             document.replace(worker, "different-worker"),
         ] {
             std::fs::write(&path, malformed).unwrap();
