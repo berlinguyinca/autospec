@@ -24,7 +24,8 @@ use autospec_core::autonomous_lifecycle::{
     StopMode as LifecycleStopMode, WorkerId,
 };
 use autospec_core::coordination::{
-    ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
+    parse_dependency_issue_json, ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope,
+    ConductorState,
 };
 use autospec_core::execution::{OneShotIssueSelector, QueueStatus};
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
@@ -2762,6 +2763,18 @@ fn run_foreground_with_lease(
             }
         };
     }
+    if state.phase() == ConductorPhase::Paused {
+        if let Some(issue) = state.selected_issue() {
+            if !issue_is_open_for_autonomous_work(&layout.repo, issue)? {
+                state = state
+                    .transition(ConductorEvent::RetireObsoleteSelection)
+                    .map_err(CommandFailure::diagnostic)?;
+                persist_foreground_state(&state_path, &state)
+                    .map_err(CommandFailure::diagnostic)?;
+                return Ok(ForegroundCompletion::State(Box::new(state)));
+            }
+        }
+    }
     if foreground_state_is_retained(&state) {
         return Ok(ForegroundCompletion::State(Box::new(state)));
     }
@@ -2922,6 +2935,40 @@ fn foreground_state_is_retained(state: &ConductorState) -> bool {
         state.phase(),
         ConductorPhase::Paused | ConductorPhase::SliceComplete | ConductorPhase::AllDone
     )
+}
+
+fn issue_is_open_for_autonomous_work(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
+    let endpoint = format!("repos/{repo}/issues/{issue}");
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "--method",
+            "GET",
+            &endpoint,
+            "--jq",
+            r#"{labels:[.labels[].name], state:.state}"#,
+        ])
+        .output()
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!("cannot run gh issue reread {issue}: {error}"))
+        })?;
+    output.status.success().then_some(()).ok_or_else(|| {
+        CommandFailure::diagnostic(format!(
+            "gh issue reread {issue} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    })?;
+    let current = parse_dependency_issue_json(&String::from_utf8_lossy(&output.stdout), issue)
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not parse GitHub issue reread {issue}: {error}"
+            ))
+        })?;
+    Ok(!current.closed
+        && current
+            .labels
+            .iter()
+            .any(|label| matches!(label.as_str(), "auto-implement" | "in-progress-by-bot")))
 }
 
 fn no_ready_selection_pause(state: &ConductorState) -> Result<bool, String> {
