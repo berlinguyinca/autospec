@@ -1971,6 +1971,112 @@ fn released_heartbeat_generation_handoff() {
 }
 
 #[test]
+fn immediate_stop_after_claim_prevents_retry_claim_and_executor() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let fail_once = fixture.root.join("harness.failed");
+    let harness_launches = fixture.root.join("harness.launches");
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env("AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE", &fail_once)
+        .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches)
+        .env(
+            "FOREGROUND_STOP_ON_RETRYABLE_RELEASE",
+            fixture.scoped_stop_sentinel(),
+        )
+        .output()
+        .expect("run immediate stop at retry boundary");
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "{\"decision\":\"stop\",\"mode\":\"immediate\"}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&harness_launches)
+            .expect("harness launch ledger")
+            .lines()
+            .count(),
+        1,
+        "an immediate stop at the retry boundary must not dispatch a successor executor"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
+    assert_eq!(
+        calls.matches("--add-label\nin-progress-by-bot").count(),
+        1,
+        "an immediate stop at the retry boundary must not acquire a successor claim"
+    );
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 0);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 0);
+    assert!(
+        fs::read_to_string(fixture.resilience_state_path())
+            .expect("read released lifecycle state")
+            .contains("\"status\":\"released\""),
+        "the stop boundary must release lifecycle ownership"
+    );
+}
+
+#[test]
+fn graceful_stop_after_claim_allows_retry_to_finish_issue() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    let fail_once = fixture.root.join("harness.failed");
+    let harness_launches = fixture.root.join("harness.launches");
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env("AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE", &fail_once)
+        .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches)
+        .env(
+            "FOREGROUND_STOP_ON_RETRYABLE_RELEASE",
+            fixture.scoped_stop_sentinel(),
+        )
+        .env("FOREGROUND_STOP_MODE_ON_RETRYABLE_RELEASE", "graceful")
+        .output()
+        .expect("run graceful stop at retry boundary");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert_eq!(
+        fs::read_to_string(&harness_launches)
+            .expect("harness launch ledger")
+            .lines()
+            .count(),
+        2,
+        "a graceful stop must allow the current issue's successor executor"
+    );
+    let calls = fs::read_to_string(&fixture.calls).expect("bridge calls");
+    assert_eq!(
+        calls.matches("--add-label\nin-progress-by-bot").count(),
+        2,
+        "a graceful stop must allow the current issue's successor claim"
+    );
+    assert_eq!(calls.matches("\npr\ncreate\n").count(), 1);
+    assert_eq!(calls.matches("\npr\nmerge\n").count(), 1);
+    assert_eq!(fixture.read_state().phase(), ConductorPhase::Scan);
+}
+
+#[test]
 fn foreground_retry_preserves_dirty_wip_and_merges_on_a_fresh_claim_generation() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
@@ -5316,6 +5422,10 @@ if [ "$1" = issue ] && [ "$2" = edit ]; then
       *" --remove-label in-progress-by-bot "*) printf 'terminal\n' > "$AUTOSPEC_FOREGROUND_MODE" ;;
       *" --add-label in-progress-by-bot "*) printf 'claimed\n' > "$AUTOSPEC_FOREGROUND_MODE" ;;
     esac
+    if [ -n "${FOREGROUND_STOP_ON_RETRYABLE_RELEASE:-}" ] && [ "$(cat "$AUTOSPEC_FOREGROUND_MODE")" = reviewed ]; then
+      mkdir -p "$(dirname "$FOREGROUND_STOP_ON_RETRYABLE_RELEASE")"
+      printf '%s\n' "${FOREGROUND_STOP_MODE_ON_RETRYABLE_RELEASE:-immediate}" '2026-07-31T00:00:00Z test@localhost' > "$FOREGROUND_STOP_ON_RETRYABLE_RELEASE"
+    fi
   else
     printf 'claimed\n' > "$AUTOSPEC_FOREGROUND_MODE"
   fi
