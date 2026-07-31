@@ -1899,8 +1899,7 @@ fn claim_acquire_prelink_failure_keeps_pending_ref() {
     let repo = claim_git_repo(&fixture);
     let heartbeats = fixture.join("heartbeats");
     std::fs::create_dir(&bin).unwrap();
-    std::fs::create_dir(&heartbeats).unwrap();
-    std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o500)).unwrap();
+    std::fs::write(&heartbeats, b"not-a-directory").unwrap();
     write_executable(
         &bin.join("gh"),
         "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; fi\n",
@@ -1940,7 +1939,9 @@ fn startup_heartbeat_claim_lifecycle() {
     let pending = RunStateRecord::parse_json(r#"{"schema":1,"repo":"testorg/testrepo","issue":42,"worker_id":"worker-a","state":"claimed","branch":"feat/a","pr":"","step":"heartbeat-pending:73657373696f6e2d61","paths":[],"claimed_at":"2999-07-30T00:00:00Z","updated_at":"2999-07-30T00:00:00Z","ttl_seconds":10800,"claim_id":"claim-a"}"#).unwrap();
     transition_claim_ref(&repo, &pending);
     let binding = sessions.join("73657373696f6e2d636f6e666c696374.json");
-    std::fs::write(&binding, b"{\"issue\":\"43\",\"branch\":\"feat/c\",\"step\":\"claimed\",\"ts\":1,\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-c\",\"claim_id\":\"claim-old\",\"session_id\":\"session-conflict\"}\n").unwrap();
+    let host = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap();
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap();
+    std::fs::write(&binding, format!("{{\"issue\":\"43\",\"branch\":\"feat/c\",\"step\":\"claimed\",\"ts\":1,\"ttl_seconds\":10800,\"pid\":1,\"nonce\":\"27ba109f66aa73f03cb40a405356da986874fb0ef2a279127821fdc4dc319b0c\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"1\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-c\",\"claim_id\":\"claim-old\",\"session_id\":\"session-conflict\"}}\n", host.trim(), boot.trim())).unwrap();
     let stale = RunStateRecord::parse_json(r#"{"schema":1,"repo":"testorg/testrepo","issue":43,"worker_id":"worker-c","state":"claimed","branch":"feat/c","pr":"","step":"heartbeat-publishing:73657373696f6e2d636f6e666c696374:attempt-old","paths":[],"claimed_at":"2000-07-30T00:00:00Z","updated_at":"2000-07-30T00:00:00Z","ttl_seconds":1,"claim_id":"claim-old"}"#).unwrap();
     transition_claim_ref(&repo, &stale);
     let fresh = RunStateRecord::parse_json(r#"{"schema":1,"repo":"testorg/testrepo","issue":44,"worker_id":"worker-d","state":"claimed","branch":"feat/d","pr":"","step":"heartbeat-publishing:73657373696f6e2d6672657368:attempt-live","paths":[],"claimed_at":"2999-07-30T00:00:00Z","updated_at":"2999-07-30T00:00:00Z","ttl_seconds":10800,"claim_id":"claim-live"}"#).unwrap();
