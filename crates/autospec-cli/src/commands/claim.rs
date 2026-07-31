@@ -740,8 +740,9 @@ pub(crate) fn acquire_for_conductor(
     issue: u64,
     worker_id: &str,
     branch: &str,
+    base_branch: &str,
 ) -> Result<ClaimLease, ConductorClaimError> {
-    let recovered = recover_active_issue(repo, issue, 300)?;
+    let recovered = recover_active_issue_against(repo, issue, 300, Some(base_branch))?;
     if !recovered {
         if let Some(owner) = read_claim_ref(repo, issue)?.and_then(|head| {
             (head.record.state == "claimed"
@@ -1632,10 +1633,19 @@ pub(crate) fn recover_active_issue(
     issue: u64,
     timeout_seconds: u64,
 ) -> Result<bool, CommandFailure> {
+    recover_active_issue_against(repo, issue, timeout_seconds, None)
+}
+
+fn recover_active_issue_against(
+    repo: &str,
+    issue: u64,
+    timeout_seconds: u64,
+    base_branch: Option<&str>,
+) -> Result<bool, CommandFailure> {
     let Some(selected) = read_claim_ref(repo, issue)? else {
         return Ok(false);
     };
-    recover_authoritative_stale_startup(repo, issue, timeout_seconds, selected)
+    recover_authoritative_stale_startup(repo, issue, timeout_seconds, selected, base_branch)
         .map(|outcome| outcome.recovered)
 }
 
@@ -1691,7 +1701,7 @@ fn recover_stale_startup_record(
     timeout_seconds: u64,
 ) -> Result<RecoveryOutcome, CommandFailure> {
     if let Some(selected) = read_claim_ref(repo, issue)? {
-        return recover_authoritative_stale_startup(repo, issue, timeout_seconds, selected);
+        return recover_authoritative_stale_startup(repo, issue, timeout_seconds, selected, None);
     }
     let comments = list_comments(repo, issue)?;
     let Some(selected) = select_run_state(&comments, repo, issue) else {
@@ -1747,6 +1757,7 @@ fn recover_authoritative_stale_startup(
     issue: u64,
     timeout_seconds: u64,
     selected: ClaimRefHead,
+    base_branch: Option<&str>,
 ) -> Result<RecoveryOutcome, CommandFailure> {
     if selected.record.state == "available" && selected.record.step == "stale_startup_recovered" {
         release_stale_startup_labels(repo, issue)?;
@@ -1760,7 +1771,7 @@ fn recover_authoritative_stale_startup(
         || !selected.record.pr.is_empty()
         || (heartbeat_lifecycle_step(&selected.record.step)
             && selected.record.step != "heartbeat-pending:none")
-        || branch_ref_exists(&selected.record.branch)
+        || branch_blocks_stale_recovery(&selected.record.branch, base_branch)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {
         return Ok(RecoveryOutcome {
@@ -6677,6 +6688,74 @@ fn branch_ref_exists(branch: &str) -> bool {
         Ok(output) if output.status.success() => !output.stdout.is_empty(),
         Ok(_) | Err(_) => true,
     }
+}
+
+fn branch_blocks_stale_recovery(branch: &str, base_branch: Option<&str>) -> bool {
+    if branch.trim().is_empty() {
+        return false;
+    }
+    let local = format!("refs/heads/{branch}");
+    match Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", &local])
+        .status()
+    {
+        Ok(status) if status.success() => {
+            let Some(base_branch) = base_branch else {
+                return true;
+            };
+            if !local_branch_is_integrated_and_inactive(&local, base_branch) {
+                return true;
+            }
+        }
+        Ok(status) if status.code() == Some(1) => {}
+        Ok(_) | Err(_) => return true,
+    }
+    for reference in [format!("refs/remotes/origin/{branch}")] {
+        match Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &reference])
+            .status()
+        {
+            Ok(status) if status.success() => return true,
+            Ok(status) if status.code() == Some(1) => {}
+            Ok(_) | Err(_) => return true,
+        }
+    }
+    match Command::new("git")
+        .args(["ls-remote", "--heads", "origin", branch])
+        .output()
+    {
+        Ok(output) if output.status.success() => !output.stdout.is_empty(),
+        Ok(_) | Err(_) => true,
+    }
+}
+
+fn local_branch_is_integrated_and_inactive(reference: &str, base_branch: &str) -> bool {
+    let worktrees = match Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output.stdout,
+        Ok(_) | Err(_) => return false,
+    };
+    let checked_out = format!("branch {reference}");
+    if String::from_utf8_lossy(&worktrees)
+        .lines()
+        .any(|line| line == checked_out)
+    {
+        return false;
+    }
+    let base = format!("refs/remotes/origin/{base_branch}");
+    if !Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", &base])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        return false;
+    }
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", reference, &base])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn claim_ttl_seconds() -> u64 {
