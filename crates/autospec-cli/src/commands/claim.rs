@@ -7410,6 +7410,33 @@ claimed|review
         std::fs::remove_dir_all(parent_path).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_heartbeat_retained_handoff() {
+        use std::os::unix::fs::MetadataExt;
+
+        let (parent, repo_path, source, repo, snapshot) =
+            anchored_startup_heartbeat_fixture("retained-handoff");
+        let source_inode = std::fs::metadata(&source).unwrap().ino();
+        let retained = super::handoff_stale_heartbeat(
+            &repo_path,
+            &repo,
+            source.file_name().unwrap(),
+            &snapshot,
+            |_, _, _| {},
+            |_| Ok(()),
+            |_| Ok(()),
+        )
+        .unwrap();
+        assert!(!source.exists());
+        assert_eq!(
+            std::fs::metadata(&retained).unwrap().ino(),
+            source_inode,
+            "the retained archive must be the exact held source inode"
+        );
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
     #[test]
     fn paginated_comments_parser_flattens_two_raw_pages() {
         // Break caught: treating each slurped page array as a comment object.
