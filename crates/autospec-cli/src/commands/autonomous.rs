@@ -48,6 +48,7 @@ use super::{claim, queue, CommandFailure};
 pub(crate) mod drain;
 #[allow(dead_code)]
 mod executor_bridge;
+pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
 mod premerge;
 // Task 3 wires the closed dispatcher into the foreground cycle.
 #[allow(dead_code)]
