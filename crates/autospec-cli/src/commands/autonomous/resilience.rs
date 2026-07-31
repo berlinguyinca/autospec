@@ -2,6 +2,7 @@ use std::env;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
@@ -188,11 +189,7 @@ impl ResilienceStore {
             scope,
             state_root: state_base.join("autonomous"),
             spend_root,
-            host: env::var("AUTOSPEC_HOST")
-                .or_else(|_| env::var("HOSTNAME"))
-                .ok()
-                .filter(|host| !host.is_empty())
-                .unwrap_or_else(|| "unknown".to_string()),
+            host: local_host_identity(),
         })
     }
     fn read_state(&self) -> Result<Option<(ResilienceState, bool)>, StoreError> {
@@ -542,6 +539,26 @@ impl ResilienceStore {
             root.join(hyphen).join(leaf),
         ]
     }
+}
+
+fn local_host_identity() -> String {
+    ["AUTOSPEC_HOST", "HOSTNAME"]
+        .into_iter()
+        .find_map(|name| {
+            env::var(name)
+                .ok()
+                .map(|host| host.trim().to_string())
+                .filter(|host| !host.is_empty())
+        })
+        .or_else(|| {
+            let output = Command::new("hostname").arg("-s").output().ok()?;
+            output
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        })
+        .filter(|host| !host.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn conductor_lease_decision(

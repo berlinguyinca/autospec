@@ -3730,6 +3730,52 @@ fn forced_restart_releases_an_unknown_host_lease_after_the_conductor_is_gone() {
 }
 
 #[test]
+fn autonomous_start_records_kernel_hostname_without_host_env() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_git_remote();
+    let expected_host = Command::new("hostname")
+        .arg("-s")
+        .output()
+        .expect("read kernel hostname");
+    assert!(expected_host.status.success());
+    let expected_host = String::from_utf8(expected_host.stdout)
+        .expect("hostname is UTF-8")
+        .trim()
+        .to_string();
+    assert!(!expected_host.is_empty());
+
+    let output = fixture
+        .detached_command("start")
+        .args(["--detach", "--branch", "main"])
+        .env_remove("AUTOSPEC_HOST")
+        .env_remove("HOSTNAME")
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("AUTOSPEC_FOREGROUND_BLOCK_GH", "1")
+        .output()
+        .expect("start conductor without host environment");
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    wait_for_file_contents(&fixture.calls, "repos/test/repo/branches/main");
+    let state = fs::read_to_string(fixture.resilience_state_path())
+        .expect("read persisted lifecycle lease");
+    fixture.terminate_recorded_conductor();
+
+    let state: serde_json::Value = serde_json::from_str(&state).expect("parse lifecycle lease");
+    assert_eq!(
+        state.get("host").and_then(serde_json::Value::as_str),
+        Some(expected_host.as_str())
+    );
+    assert_eq!(
+        state.get("lock_host").and_then(serde_json::Value::as_str),
+        Some(expected_host.as_str())
+    );
+}
+
+#[test]
 fn foreground_stops_before_executor_when_main_health_blocks() {
     let fixture = ForegroundFixture::new();
     let output = fixture
