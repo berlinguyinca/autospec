@@ -2946,18 +2946,18 @@ fn issue_is_open_for_autonomous_work(repo: &str, issue: u64) -> Result<bool, Com
             "GET",
             &endpoint,
             "--jq",
-            r#"{labels:[.labels[].name], state:(.state // "OPEN")}"#,
+            r#"{labels:[.labels[].name], state:.state}"#,
         ])
         .output()
         .map_err(|error| {
             CommandFailure::diagnostic(format!("cannot run gh issue reread {issue}: {error}"))
         })?;
-    if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
+    output.status.success().then_some(()).ok_or_else(|| {
+        CommandFailure::diagnostic(format!(
             "gh issue reread {issue} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
+        ))
+    })?;
     let current = parse_dependency_issue_json(&String::from_utf8_lossy(&output.stdout), issue)
         .map_err(|error| {
             CommandFailure::diagnostic(format!(
