@@ -6667,6 +6667,74 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn startup_heartbeat_remote_process_identity() {
+        let _environment = STARTUP_HEARTBEAT_ENV.lock().unwrap();
+        let (directory, _) = startup_heartbeat_fixture("remote-process-identity");
+        let root = directory.join(".autospec/process-heartbeats");
+        let old_root = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
+        super::write_startup_heartbeat(
+            "owner/repo",
+            42,
+            "opaque-worker",
+            "feat/worker",
+            "claim-a",
+            None,
+        )
+        .unwrap();
+        let path = root
+            .join(super::super::autonomous::drain::repository_progress_key(
+                "owner/repo",
+            ))
+            .join("42.json");
+        let document = std::fs::read(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&document).unwrap();
+        let identity = |name| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .filter(|field| !field.is_empty())
+                .unwrap()
+                .to_string()
+        };
+        let host = identity("host");
+        let boot_id = identity("boot_id");
+        let process_start = identity("process_start");
+        assert_ne!(host, boot_id);
+        assert_ne!(boot_id, process_start);
+        let absent_pid = i32::MAX as u32;
+        assert!(!Path::new(&format!("/proc/{absent_pid}")).exists());
+        for (field, replacement, remote) in [
+            ("host", "remote-host", true),
+            ("boot_id", "remote-boot", false),
+            ("process_start", "0", false),
+        ] {
+            let mut mutated = value.clone();
+            mutated[field] = serde_json::json!(replacement);
+            if remote {
+                mutated["pid"] = serde_json::json!(absent_pid);
+            }
+            std::fs::write(&path, serde_json::to_vec(&mutated).unwrap()).unwrap();
+            assert_eq!(
+                super::classify_startup_heartbeat(
+                    &path,
+                    expected_startup_heartbeat("opaque-worker"),
+                    value["ts"].as_u64().unwrap() + value["ttl_seconds"].as_u64().unwrap() + 1,
+                    super::observe_local_startup_pid,
+                ),
+                super::StartupHeartbeatClassification::Blocking,
+                "{field}"
+            );
+        }
+        match old_root {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn stale_heartbeat_receipt_transaction() {
         use super::HeartbeatReceiptDecision::{Absent, Blocking, Completed, Pending};
         use nix::fcntl::{open, OFlag};
