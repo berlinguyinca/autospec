@@ -19,10 +19,11 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::commands::claim::{
-    authoritative_executor_result, observe_released_bridge_claim, observe_terminal_bridge_claim,
-    record_executor_result_with_receipt, refresh_claim_generation, transition_bridge_claim,
-    BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity, ClaimRefreshResult,
-    ExecutorResultAuthorityBinding, ExecutorResultRecord, ExecutorSuccessBinding,
+    authoritative_executor_result, observe_terminal_bridge_claim,
+    record_executor_result_with_receipt, recover_released_bridge_claim, refresh_claim_generation,
+    transition_bridge_claim, BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity,
+    ClaimRefreshResult, ExecutorResultAuthorityBinding, ExecutorResultRecord,
+    ExecutorSuccessBinding,
 };
 use crate::commands::CommandFailureKind;
 use autospec_core::autonomous::premerge::{
@@ -705,7 +706,7 @@ pub(crate) fn recover_terminal_failure_identity(
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let identity = bridge_claim_identity(&state);
-            if observe_released_bridge_claim(identity).map_err(|error| error.message)?
+            if recover_released_bridge_claim(identity).map_err(|error| error.message)?
                 || observe_terminal_bridge_claim(
                     identity,
                     state.pr,

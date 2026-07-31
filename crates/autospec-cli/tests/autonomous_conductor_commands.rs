@@ -1622,27 +1622,82 @@ fn foreground_missing_failure_intent_requires_exact_retryable_release() {
 
 #[test]
 fn foreground_recovers_exact_immediate_stop_release_without_cleanup_intent() {
-    let (success, stderr, receipt_exists, returned_to_scan) = run_missing_cleanup_recovery(None);
+    let recovery = run_missing_cleanup_recovery(None);
 
-    assert!(success, "stderr={stderr}");
-    assert!(!receipt_exists, "exact release must retire the acquisition");
-    assert!(returned_to_scan, "exact release must resume queue scanning");
+    assert!(recovery.success, "stderr={}", recovery.stderr);
+    assert!(
+        !recovery.receipt_exists,
+        "exact release must retire the acquisition"
+    );
+    assert!(
+        !recovery.heartbeat_exists,
+        "exact release must retire the live startup heartbeat"
+    );
+    assert!(
+        recovery.heartbeat_archived,
+        "exact release must retain the startup heartbeat handoff"
+    );
+    assert!(
+        recovery.returned_to_scan,
+        "exact release must resume queue scanning"
+    );
+    let fresh = recovery
+        .fresh_run
+        .expect("exact recovery must run the foreground path again");
+    assert!(fresh.success, "stderr={}", fresh.stderr);
+    assert!(
+        !fresh.stderr.contains("heartbeat_write_failed"),
+        "fresh generation heartbeat publication failed: {}",
+        fresh.stderr
+    );
+    assert_eq!(
+        fresh.heartbeat_count, 1,
+        "the successor must publish exactly one live heartbeat"
+    );
+    assert!(
+        fresh.generation_is_fresh,
+        "the successor heartbeat must belong to a fresh claim generation"
+    );
 }
 
 #[test]
 fn foreground_missing_failure_intent_requires_exact_released_identity() {
     for mismatch in ["worker", "claim", "branch", "pr"] {
-        let (success, _stderr, receipt_exists, _) = run_missing_cleanup_recovery(Some(mismatch));
+        let recovery = run_missing_cleanup_recovery(Some(mismatch));
 
-        assert!(!success, "{mismatch}: recovery accepted foreign evidence");
         assert!(
-            receipt_exists,
+            !recovery.success,
+            "{mismatch}: recovery accepted foreign evidence"
+        );
+        assert!(
+            recovery.receipt_exists,
             "{mismatch}: foreign evidence retired the local acquisition"
+        );
+        assert!(
+            recovery.heartbeat_exists,
+            "{mismatch}: foreign evidence retired the local startup heartbeat"
         );
     }
 }
 
-fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> (bool, String, bool, bool) {
+struct MissingCleanupRecovery {
+    success: bool,
+    stderr: String,
+    receipt_exists: bool,
+    returned_to_scan: bool,
+    heartbeat_exists: bool,
+    heartbeat_archived: bool,
+    fresh_run: Option<FreshHeartbeatRun>,
+}
+
+struct FreshHeartbeatRun {
+    success: bool,
+    stderr: String,
+    heartbeat_count: usize,
+    generation_is_fresh: bool,
+}
+
+fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> MissingCleanupRecovery {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
     let bridge = fixture.configure_real_bridge();
@@ -1688,6 +1743,7 @@ fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> (bool, String, bool, 
     }
     fixture.transition_claim_ref(&remote);
     fixture.seed_claim_acquisition_receipt(worker_id, branch, claim_id);
+    fixture.seed_claim_heartbeat(worker_id, branch, claim_id);
     fixture.seed_interrupted_executor_invocation_without_cleanup(worker_id, branch, claim_id);
     let seeded = git_fixture(
         &fixture.claim_repo,
@@ -1709,30 +1765,75 @@ fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> (bool, String, bool, 
     );
     fs::write(&fixture.mode, "reviewed\n").expect("seed claim label projection");
 
-    let output = fixture
-        .command()
-        .env("PATH", path_with(&bridge.bin))
-        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
-        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
-        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
-        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
-        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
-        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
-        .output()
-        .expect("run missing-cleanup recovery");
+    let configure = |command: &mut Command| {
+        command
+            .env("PATH", path_with(&bridge.bin))
+            .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+            .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+            .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+            .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+    };
+    let mut command = fixture.command();
+    configure(&mut command);
+    let output = command.output().expect("run missing-cleanup recovery");
     let receipt_exists = fixture
         .state_path()
         .with_extension("claim-acquisition.json")
         .exists();
     let returned_to_scan = fixture.read_state().phase() == ConductorPhase::Scan;
+    let heartbeat_exists = fixture.heartbeats.join("o4_test_r4_repo/42.json").exists();
+    let heartbeat_archived = fs::read_dir(
+        fixture
+            .heartbeats
+            .join("o4_test_r4_repo/quarantine/startup-heartbeat-handoffs"),
+    )
+    .ok()
+    .into_iter()
+    .flatten()
+    .filter_map(Result::ok)
+    .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+    .any(|document| document.contains(claim_id));
+    let fresh_run = mismatch.is_none().then(|| {
+        let mut command = fixture.command();
+        configure(&mut command);
+        let output = command.output().expect("run fresh foreground generation");
+        let heartbeat_documents = fs::read_dir(fixture.heartbeats.join("o4_test_r4_repo"))
+            .expect("read fresh heartbeat directory")
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .collect::<Vec<_>>();
+        let generation_is_fresh = heartbeat_documents.iter().any(|document| {
+            serde_json::from_str::<serde_json::Value>(document)
+                .ok()
+                .and_then(|heartbeat| heartbeat["claim_id"].as_str().map(str::to_string))
+                .is_some_and(|fresh_claim_id| fresh_claim_id != claim_id)
+        });
+        FreshHeartbeatRun {
+            success: output.status.success(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            heartbeat_count: heartbeat_documents.len(),
+            generation_is_fresh,
+        }
+    });
 
-    (
-        output.status.success(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+    MissingCleanupRecovery {
+        success: output.status.success(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         receipt_exists,
         returned_to_scan,
-    )
+        heartbeat_exists,
+        heartbeat_archived,
+        fresh_run,
+    }
 }
 
 #[test]
