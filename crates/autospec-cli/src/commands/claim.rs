@@ -980,82 +980,198 @@ fn lifecycle_lease_freshness(server_timestamp: &str) -> LeaseFreshness {
     }
 }
 
+fn heartbeat_claim_step(phase: &str, session_id: Option<&str>) -> String {
+    let session = session_id
+        .map(heartbeat_session_key)
+        .unwrap_or_else(|| "none".to_string());
+    format!("heartbeat-{phase}:{session}")
+}
+
+fn heartbeat_lifecycle_step(step: &str) -> bool {
+    let session = |value: &str| {
+        value == "none"
+            || (!value.is_empty()
+                && value.len().is_multiple_of(2)
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+    };
+    match step.split(':').collect::<Vec<_>>().as_slice() {
+        ["heartbeat-pending" | "heartbeat-ready", value] => session(value),
+        ["heartbeat-publishing", value, attempt] => session(value) && !attempt.is_empty(),
+        _ => false,
+    }
+}
+
+fn resumable_heartbeat_phase(
+    head: &ClaimRefHead,
+    worker_id: &str,
+    branch: &str,
+    session_id: Option<&str>,
+) -> Option<&'static str> {
+    if head.record.state != "claimed"
+        || head.record.worker_id != worker_id
+        || head.record.branch != branch
+        || head.record.claim_id.is_none()
+    {
+        return None;
+    }
+    ["pending", "ready"]
+        .into_iter()
+        .find(|phase| head.record.step == heartbeat_claim_step(phase, session_id))
+        .or_else(|| {
+            let publishing = heartbeat_claim_step("publishing", session_id) + ":";
+            (head.record.step.starts_with(&publishing)
+                && server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds))
+            .then_some("pending")
+        })
+}
+
 fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimError> {
     let repo = match options.repo {
         Some(repo) => repo,
         None => infer_repo()?,
     };
     let worker_id = options.worker_id.unwrap_or_else(default_worker_id);
+    let prior = read_claim_ref(&repo, options.issue)?;
+    let resume = prior.as_ref().and_then(|head| {
+        resumable_heartbeat_phase(
+            head,
+            &worker_id,
+            &options.branch,
+            options.session_id.as_deref(),
+        )
+    });
     let issue = load_claim_issue(&repo, options.issue)?;
-    if !issue.labels.iter().any(|label| label == "auto-implement") {
+    if resume.is_none() && !issue.labels.iter().any(|label| label == "auto-implement") {
         return unavailable_claim(options.issue, &repo, Some(&worker_id), "not_auto_implement");
     }
     let safety = claim_safety_with_config(&issue.safety_input())?;
     if !safety.allowed {
         return unavailable_safety_claim(options.issue, &repo, &worker_id, safety.reason);
     }
-    let prior = read_claim_ref(&repo, options.issue)?;
     if prior
         .as_ref()
         .is_some_and(|head| head.record.state == "merged")
     {
         return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
     }
-    if let Some(owner) = prior.as_ref().and_then(|head| {
-        (!matches!(
-            head.record.state.as_str(),
-            "available" | "released" | "retryable"
-        ) && !server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds))
-        .then_some(head.record.worker_id.as_str())
-    }) {
-        return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
+    if resume.is_none() {
+        if let Some(owner) = prior.as_ref().and_then(|head| {
+            (!matches!(
+                head.record.state.as_str(),
+                "available" | "released" | "retryable"
+            ) && (head.record.step.starts_with("heartbeat-publishing:")
+                || !server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds)))
+            .then_some(head.record.worker_id.as_str())
+        }) {
+            return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
+        }
     }
 
-    let claim_id = claim_generation_id()?;
-    if write_startup_heartbeat(
-        &repo,
-        options.issue,
-        &worker_id,
-        &options.branch,
-        &claim_id,
-        options.session_id.as_deref(),
-    )
-    .is_err()
-    {
-        return unavailable_claim(
-            options.issue,
+    let (claim_id, mut head, phase) = if let Some(phase) = resume {
+        let head = prior.clone().expect("resume requires a claim ref");
+        let claim_id = head
+            .record
+            .claim_id
+            .clone()
+            .expect("resumable claim has an ID");
+        (claim_id, Box::new(head), phase)
+    } else {
+        let claim_id = claim_generation_id()?;
+        let now = utc_now_iso()?;
+        let record = RunStateRecord::new(
             &repo,
-            Some(&worker_id),
-            "heartbeat_write_failed",
-        );
-    }
-    let ttl_seconds = claim_ttl_seconds();
-    let now = utc_now_iso()?;
-    let record = RunStateRecord::new(
-        &repo,
-        options.issue,
-        &worker_id,
-        "claimed",
-        &options.branch,
-        "",
-        "claimed",
-        Vec::new(),
-        &now,
-        &now,
-        ttl_seconds,
-    )
-    .with_claim_id(claim_id.clone());
-    let head = match advance_claim_ref(&repo, options.issue, prior.as_ref(), &record)? {
-        ClaimRefAdvance::Won(head) => head,
-        ClaimRefAdvance::Lost => {
-            cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
-            let owner = read_claim_ref(&repo, options.issue)?
-                .map(|head| head.record.worker_id)
-                .unwrap_or_default();
-            return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, &owner);
-        }
+            options.issue,
+            &worker_id,
+            "claimed",
+            &options.branch,
+            "",
+            heartbeat_claim_step("pending", options.session_id.as_deref()),
+            Vec::new(),
+            &now,
+            &now,
+            claim_ttl_seconds(),
+        )
+        .with_claim_id(claim_id.clone());
+        let head = match advance_claim_ref(&repo, options.issue, prior.as_ref(), &record)? {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => {
+                let owner = read_claim_ref(&repo, options.issue)?
+                    .map(|head| head.record.worker_id)
+                    .unwrap_or_default();
+                return unavailable_claim_with_observed_owner(
+                    options.issue,
+                    &repo,
+                    &worker_id,
+                    &owner,
+                );
+            }
+        };
+        project_claim_ref_to_comments(&repo, &head);
+        (claim_id, head, "pending")
     };
-    project_claim_ref_to_comments(&repo, &head);
+
+    if phase == "pending" {
+        let mut publishing = head.record.clone();
+        publishing.step = format!(
+            "{}:{}",
+            heartbeat_claim_step("publishing", options.session_id.as_deref()),
+            claim_generation_id()?
+        );
+        publishing.updated_at = utc_now_iso()?;
+        head = match advance_claim_ref(&repo, options.issue, Some(&head), &publishing)? {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => {
+                return unavailable_claim(
+                    options.issue,
+                    &repo,
+                    Some(&worker_id),
+                    "heartbeat_publish_transition_lost",
+                )
+            }
+        };
+        if write_startup_heartbeat(
+            &repo,
+            options.issue,
+            &worker_id,
+            &options.branch,
+            &claim_id,
+            options.session_id.as_deref(),
+        )
+        .is_err()
+        {
+            let mut pending = head.record.clone();
+            pending.step = heartbeat_claim_step("pending", options.session_id.as_deref());
+            pending.updated_at = utc_now_iso()?;
+            if let ClaimRefAdvance::Won(pending) =
+                advance_claim_ref(&repo, options.issue, Some(&head), &pending)?
+            {
+                project_claim_ref_to_comments(&repo, &pending);
+            }
+            return unavailable_claim(
+                options.issue,
+                &repo,
+                Some(&worker_id),
+                "heartbeat_write_failed",
+            );
+        }
+        let mut ready = head.record.clone();
+        ready.step = heartbeat_claim_step("ready", options.session_id.as_deref());
+        ready.updated_at = utc_now_iso()?;
+        head = match advance_claim_ref(&repo, options.issue, Some(&head), &ready)? {
+            ClaimRefAdvance::Won(head) => head,
+            ClaimRefAdvance::Lost => {
+                return unavailable_claim(
+                    options.issue,
+                    &repo,
+                    Some(&worker_id),
+                    "heartbeat_ready_transition_lost",
+                )
+            }
+        };
+        project_claim_ref_to_comments(&repo, &head);
+    }
 
     let label_create = [
         "label".to_string(),
@@ -1079,17 +1195,12 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         "--add-label".to_string(),
         "in-progress-by-bot".to_string(),
     ];
-    if run_gh_with_retry(&label_move, "mark issue in progress").is_err() {
-        let mut released = head.record.clone();
-        released.state = "available".to_string();
-        released.step = "label_mutation_failed".to_string();
-        released.updated_at = utc_now_iso()?;
-        if let Ok(ClaimRefAdvance::Won(released)) =
-            advance_claim_ref(&repo, options.issue, Some(&head), &released)
-        {
-            project_claim_ref_to_comments(&repo, &released);
-        }
-        cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
+    if !issue
+        .labels
+        .iter()
+        .any(|label| label == "in-progress-by-bot")
+        && run_gh_with_retry(&label_move, "mark issue in progress").is_err()
+    {
         return unavailable_claim(
             options.issue,
             &repo,
@@ -1109,9 +1220,9 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
                 || head.record.state != "claimed"
                 || head.record.claim_id.as_deref() != Some(claim_id.as_str())
                 || head.record.branch != options.branch
+                || head.record.step != heartbeat_claim_step("ready", options.session_id.as_deref())
         }) || !labels.iter().any(|label| label == "in-progress-by-bot")
         {
-            cleanup_startup_heartbeat(&repo, options.issue, options.session_id.as_deref());
             let owner = observed
                 .as_ref()
                 .map(|head| head.record.worker_id.as_str())
@@ -1119,6 +1230,21 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
         }
     }
+    let mut claimed = head.record.clone();
+    claimed.step = "claimed".to_string();
+    claimed.updated_at = utc_now_iso()?;
+    let head = match advance_claim_ref(&repo, options.issue, Some(&head), &claimed)? {
+        ClaimRefAdvance::Won(head) => head,
+        ClaimRefAdvance::Lost => {
+            return unavailable_claim(
+                options.issue,
+                &repo,
+                Some(&worker_id),
+                "claim_confirmation_transition_lost",
+            )
+        }
+    };
+    project_claim_ref_to_comments(&repo, &head);
     emit_claim_telemetry("session.started", &repo, options.issue, "claimed");
     Ok(ClaimLease {
         issue: options.issue,
@@ -1622,6 +1748,7 @@ fn recover_authoritative_stale_startup(
     }
     if selected.record.state != "claimed"
         || !selected.record.pr.is_empty()
+        || heartbeat_lifecycle_step(&selected.record.step)
         || startup_heartbeat_exists(repo, issue)
         || branch_ref_exists(&selected.record.branch)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
@@ -3609,7 +3736,6 @@ fn write_startup_heartbeat(
         json_escape(worker_id),
         json_escape(claim_id),
     );
-    let mut created_session_binding = None;
     if let Some(session_id) = session_id {
         let sessions = directory.join("sessions");
         fs::create_dir_all(&sessions).map_err(|error| {
@@ -3620,17 +3746,11 @@ fn write_startup_heartbeat(
         })?;
         let path = sessions.join(format!("{}.json", heartbeat_session_key(session_id)));
         let identity = SessionBindingIdentity::new(session_id, issue, worker_id, branch, claim_id);
-        let created = publish_session_binding(&path, body.as_bytes(), &identity)?;
-        created_session_binding = created.then_some(path);
+        publish_session_binding(&path, body.as_bytes(), &identity)?;
     }
-    if let Err(error) = fs::write(directory.join(format!("{issue}.json")), &body) {
-        if let Some(path) = created_session_binding {
-            let _ = fs::remove_file(path);
-        }
-        return Err(CommandFailure::diagnostic(format!(
-            "could not write claim startup heartbeat: {error}"
-        )));
-    }
+    fs::write(directory.join(format!("{issue}.json")), &body).map_err(|error| {
+        CommandFailure::diagnostic(format!("could not write claim startup heartbeat: {error}"))
+    })?;
     Ok(())
 }
 
@@ -3718,8 +3838,6 @@ fn publish_session_binding(
         }
     };
     if let Err(error) = file.write_all(document).and_then(|()| file.sync_all()) {
-        drop(file);
-        let _ = fs::remove_file(path);
         return Err(CommandFailure::diagnostic(format!(
             "could not persist claim session binding: {error}"
         )));
@@ -3982,21 +4100,6 @@ fn heartbeat_session_key(session_id: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
-}
-
-fn cleanup_startup_heartbeat(repo: &str, issue: u64, session_id: Option<&str>) {
-    let Ok(root) = heartbeat_root() else {
-        return;
-    };
-    let directory = root.join(super::autonomous::drain::repository_progress_key(repo));
-    let _ = fs::remove_file(directory.join(format!("{issue}.json")));
-    if let Some(session_id) = session_id {
-        let _ = fs::remove_file(
-            directory
-                .join("sessions")
-                .join(format!("{}.json", heartbeat_session_key(session_id))),
-        );
-    }
 }
 
 pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {

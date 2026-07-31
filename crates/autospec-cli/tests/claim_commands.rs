@@ -1830,11 +1830,12 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     std::fs::write(&mode, "ready\n").expect("label mode fixture");
     write_executable(
         &bin.join("gh"),
-        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then\n  if [ \"$(cat \"$AUTOSPEC_CLAIM_MODE\")\" = active ]; then labels='[\"in-progress-by-bot\",\"safety:reviewed\"]'; else labels='[\"auto-implement\",\"safety:reviewed\"]'; fi\n  jq -n --argjson labels \"$labels\" --arg body \"$AUTOSPEC_CLAIM_ISSUE_BODY\" '{labels:$labels,title:\"Add Rust claim\",body:$body,author:\"agent\"}'\n  exit 0\nfi\nif [ \"$1\" = label ] && [ \"$2\" = create ]; then exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then printf active > \"$AUTOSPEC_CLAIM_MODE\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id:100,updated_at:\"2026-07-14T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nexit 0\n",
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then\n  if [ \"$(cat \"$AUTOSPEC_CLAIM_MODE\")\" = active ]; then labels='[\"in-progress-by-bot\",\"safety:reviewed\"]'; else labels='[\"auto-implement\",\"safety:reviewed\"]'; fi\n  jq -n --argjson labels \"$labels\" --arg body \"$AUTOSPEC_CLAIM_ISSUE_BODY\" '{labels:$labels,title:\"Add Rust claim\",body:$body,author:\"agent\"}'\n  exit 0\nfi\nif [ \"$1\" = label ] && [ \"$2\" = create ]; then exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then if [ \"$(cat \"$AUTOSPEC_CLAIM_MODE\")\" = ready ]; then printf retry > \"$AUTOSPEC_CLAIM_MODE\"; exit 23; fi; printf active > \"$AUTOSPEC_CLAIM_MODE\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id:100,updated_at:\"2026-07-14T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nexit 0\n",
     );
     let body = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Goal\nAdd the Rust implementation.";
 
-    let output = autospec()
+    let mut acquire = autospec();
+    acquire
         .args([
             "claim",
             "acquire",
@@ -1855,10 +1856,14 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
         .env("AUTOSPEC_CLAIM_MODE", &mode)
         .env("AUTOSPEC_CLAIM_ISSUE_BODY", body)
         .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .env("AUTOSPEC_GH_API_RETRIES", "1")
         .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
-        .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
-        .output()
-        .expect("autospec claim acquire starts");
+        .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0");
+    let first = acquire.output().expect("autospec claim acquire starts");
+    assert_eq!(first.status.code(), Some(2));
+    let ready = std::fs::read_to_string(&comments).unwrap();
+    assert!(ready.contains("heartbeat-ready:"));
+    let output = acquire.output().expect("autospec claim retry starts");
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
@@ -1872,16 +1877,109 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     assert!(heartbeat.contains("\"worker_id\":\"worker-a\""));
     assert!(heartbeat.contains("\"claim_id\":\"claim-"));
     assert!(heartbeat.contains("\"session_id\":\"session-real-7\""));
+    let claim_id = heartbeat.split_once("\"claim_id\":\"").unwrap().1;
+    let claim_id = claim_id.split_once('"').unwrap().0;
+    assert!(stdout.contains(&format!("\"claim_id\":\"{claim_id}\"")));
     assert!(heartbeats
         .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d7265616c2d37.json")
         .exists());
     assert!(std::fs::read_to_string(&comments)
-        .expect("claim comments")
-        .contains("worker-a"));
+        .unwrap()
+        .contains("\\\"step\\\":\\\"claimed\\\""));
     let calls = std::fs::read_to_string(log).expect("gh call log");
     let label_edit = calls.find("issue\nedit\n42").expect("label edit");
     let create_comment = calls.find("issue\ncomment\n42").expect("claim comment");
     assert!(create_comment < label_edit);
+}
+
+#[test]
+fn claim_acquire_prelink_failure_keeps_pending_ref() {
+    let fixture = temp_dir("autospec-claim-acquire-prelink");
+    let bin = fixture.join("bin");
+    let repo = claim_git_repo(&fixture);
+    let heartbeats = fixture.join("heartbeats");
+    std::fs::create_dir(&bin).unwrap();
+    std::fs::create_dir(&heartbeats).unwrap();
+    std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o500)).unwrap();
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; fi\n",
+    );
+    let issue = r###"{"labels":["auto-implement","safety:reviewed"],"title":"claim","body":"## Safety review\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","author":"agent"}"###;
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("\"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/test --session-id session-a")
+        .current_dir(&repo)
+        .env(
+            "AUTOSPEC_CLAIM_GIT_REMOTE",
+            fixture.join("claim-remote.git"),
+        )
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .env("AUTOSPEC_BIN", env!("CARGO_BIN_EXE_autospec"))
+        .env("PATH", path_with(&bin))
+        .env("GH_ISSUE", issue)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let record = claim_ref_message(&repo, 42);
+    assert!(record.contains("\"state\":\"claimed\""), "{record}");
+    assert!(record.contains("\"step\":\"heartbeat-pending:"), "{record}");
+}
+
+#[test]
+fn startup_heartbeat_claim_lifecycle() {
+    let fixture = temp_dir("autospec-claim-acquire-race");
+    let bin = fixture.join("bin");
+    let repo = claim_git_repo(&fixture);
+    let heartbeats_a = fixture.join("heartbeats-a");
+    let heartbeats_b = fixture.join("heartbeats-b");
+    let sessions = heartbeats_a.join("o7_testorg_r8_testrepo/sessions");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+    let pending = RunStateRecord::parse_json(r#"{"schema":1,"repo":"testorg/testrepo","issue":42,"worker_id":"worker-a","state":"claimed","branch":"feat/a","pr":"","step":"heartbeat-pending:73657373696f6e2d61","paths":[],"claimed_at":"2999-07-30T00:00:00Z","updated_at":"2999-07-30T00:00:00Z","ttl_seconds":10800,"claim_id":"claim-a"}"#).unwrap();
+    transition_claim_ref(&repo, &pending);
+    let binding = sessions.join("73657373696f6e2d636f6e666c696374.json");
+    std::fs::write(&binding, b"{\"issue\":\"43\",\"branch\":\"feat/c\",\"step\":\"claimed\",\"ts\":1,\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-c\",\"claim_id\":\"claim-old\",\"session_id\":\"session-conflict\"}\n").unwrap();
+    let stale = RunStateRecord::parse_json(r#"{"schema":1,"repo":"testorg/testrepo","issue":43,"worker_id":"worker-c","state":"claimed","branch":"feat/c","pr":"","step":"heartbeat-publishing:73657373696f6e2d636f6e666c696374:attempt-old","paths":[],"claimed_at":"2000-07-30T00:00:00Z","updated_at":"2000-07-30T00:00:00Z","ttl_seconds":1,"claim_id":"claim-old"}"#).unwrap();
+    transition_claim_ref(&repo, &stale);
+    let fresh = RunStateRecord::parse_json(r#"{"schema":1,"repo":"testorg/testrepo","issue":44,"worker_id":"worker-d","state":"claimed","branch":"feat/d","pr":"","step":"heartbeat-publishing:73657373696f6e2d6672657368:attempt-live","paths":[],"claimed_at":"2999-07-30T00:00:00Z","updated_at":"2999-07-30T00:00:00Z","ttl_seconds":10800,"claim_id":"claim-live"}"#).unwrap();
+    transition_claim_ref(&repo, &fresh);
+    let fresh_oid = claim_ref_oid(&repo, 44);
+    write_executable(
+        &bin.join("git-wrapper"),
+        "#!/bin/sh\n/usr/bin/git \"$@\"; status=$?; case \" $* \" in *' push '*) if [ $status = 0 ] && [ ! -e \"$PAUSED\" ]; then : > \"$PAUSED\"; while [ ! -e \"$RELEASE\" ]; do sleep .01; done; fi;; esac; exit $status\n",
+    );
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; elif [ \"$1 $2\" = 'issue edit' ]; then exit 23; fi\n",
+    );
+    let issue = r###"{"labels":["auto-implement","safety:reviewed"],"title":"claim","body":"## Safety review\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","author":"agent"}"###;
+    Command::new("sh")
+        .arg("-c")
+        .arg("AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" AUTOSPEC_CLAIM_GIT_BIN=\"$GIT_WRAPPER\" \"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/a --session-id session-a & a=$!; i=0; while [ ! -e \"$PAUSED\" ]; do i=$((i+1)); [ $i -lt 500 ] || exit 99; sleep .01; done; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_B\" \"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/a --session-id session-a || true; : > \"$RELEASE\"; wait $a || true; before=$(/usr/bin/git --git-dir \"$AUTOSPEC_CLAIM_GIT_REMOTE\" rev-parse refs/autospec/claims/issue-43); AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim state recover-stale-startup --issue 43 --repo testorg/testrepo --timeout-seconds 1 || true; after=$(/usr/bin/git --git-dir \"$AUTOSPEC_CLAIM_GIT_REMOTE\" rev-parse refs/autospec/claims/issue-43); [ \"$before\" = \"$after\" ] || exit 98; for identity in 'worker-x feat/c session-conflict' 'worker-c feat/x session-conflict' 'worker-c feat/c session-x'; do set -- $identity; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim acquire --issue 43 --repo testorg/testrepo --worker-id \"$1\" --branch \"$2\" --session-id \"$3\" || true; done; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim acquire --issue 43 --repo testorg/testrepo --worker-id worker-c --branch feat/c --session-id session-conflict || true; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim acquire --issue 44 --repo testorg/testrepo --worker-id worker-d --branch feat/d --session-id session-fresh || true")
+        .current_dir(&repo)
+        .env("AUTOSPEC_BIN", env!("CARGO_BIN_EXE_autospec"))
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.join("claim-remote.git"))
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("PATH", path_with(&bin))
+        .env("GIT_WRAPPER", bin.join("git-wrapper"))
+        .env("HEARTBEATS_A", &heartbeats_a)
+        .env("HEARTBEATS_B", &heartbeats_b)
+        .env("PAUSED", fixture.join("paused"))
+        .env("RELEASE", fixture.join("release"))
+        .env("GH_ISSUE", issue)
+        .output()
+        .unwrap();
+    assert!(heartbeats_a.join("o7_testorg_r8_testrepo/42.json").exists());
+    assert!(!heartbeats_b.join("o7_testorg_r8_testrepo/42.json").exists());
+    assert!(!heartbeats_b
+        .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d61.json")
+        .exists());
+    let ready = claim_ref_message(&repo, 43);
+    assert!(ready.contains("\"step\":\"heartbeat-ready:"));
+    assert!(ready.contains("\"claim_id\":\"claim-old\""));
+    assert_eq!(claim_ref_oid(&repo, 44), fresh_oid);
 }
 
 #[test]
