@@ -21775,13 +21775,23 @@ fn reclaim_prunable_zero_effect_branch(
         if !intent_path.exists() {
             return Ok(false);
         }
-        let live = blocks.iter().filter(|block| {
-            block.lines().any(|line| line == expected_path)
-                && block.lines().any(|line| line == expected_branch)
-                && block.lines().any(|line| line == expected_head)
-                && !block.lines().any(|line| line.starts_with("prunable "))
-        });
-        if live.count() != 1 {
+        let matching_registrations = blocks
+            .iter()
+            .filter(|block| {
+                block.lines().any(|line| line == expected_path)
+                    || block.lines().any(|line| line == expected_branch)
+            })
+            .count();
+        let exact_live = blocks
+            .iter()
+            .filter(|block| {
+                block.lines().any(|line| line == expected_path)
+                    && block.lines().any(|line| line == expected_branch)
+                    && block.lines().any(|line| line == expected_head)
+                    && !block.lines().any(|line| line.starts_with("prunable "))
+            })
+            .count();
+        if matching_registrations != 1 || exact_live != 1 {
             return Err(
                 "executor prunable reclaim resumed with a conflicting live registration"
                     .to_string(),
@@ -27293,6 +27303,46 @@ exit 64
                 "reclaim must never rewrite the branch ref"
             );
             assert_eq!(worktree.path.exists(), boundary == 2);
+
+            if boundary == 2 {
+                let competing = fixture.root.join(format!("{mode}-competing-worktree"));
+                git(
+                    &fixture.repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "--force",
+                        "--quiet",
+                        competing.to_str().expect("competing worktree path"),
+                        &worktree.branch,
+                    ],
+                );
+                let registry_before =
+                    git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"]);
+                let error = super::provision_issue_worktree_for_claim(
+                    &fixture.repo,
+                    &scope,
+                    42,
+                    &advanced,
+                    Some(("claim-fresh", "invocation-fresh")),
+                )
+                .expect_err("competing live branch registration must block resume");
+                assert!(error.contains("conflicting live registration"), "{error}");
+                assert_eq!(
+                    git_stdout(&fixture.repo, &["worktree", "list", "--porcelain"]),
+                    registry_before,
+                    "a rejected resume must not mutate the worktree registry"
+                );
+                assert!(intent.is_file(), "a rejected resume must retain intent");
+                git(
+                    &fixture.repo,
+                    &[
+                        "worktree",
+                        "remove",
+                        competing.to_str().expect("competing worktree path"),
+                    ],
+                );
+            }
 
             let resumed = super::provision_issue_worktree_for_claim(
                 &fixture.repo,
