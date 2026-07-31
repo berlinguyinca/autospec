@@ -3726,20 +3726,20 @@ fn write_startup_heartbeat(
         ))
     })?;
     let timestamp = unix_now()?;
-    let worker_fields = worker_id.rsplit(':').collect::<Vec<_>>();
-    let pid = worker_fields
-        .get(1)
-        .and_then(|value| value.parse::<u32>().ok())
-        .unwrap_or_else(std::process::id);
-    let nonce = worker_fields.first().copied().unwrap_or(claim_id);
+    let ttl_seconds = claim_ttl_seconds().max(1);
+    let pid = std::process::id();
+    let nonce = startup_heartbeat_nonce(repo, issue, claim_id);
+    let (host, boot_id, process_start) = startup_process_identity(pid)?;
     let session_field = session_id.map_or_else(String::new, |session_id| {
         format!(",\"session_id\":\"{}\"", json_escape(session_id))
     });
     let body = format!(
-        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"ttl_seconds\":{},\"pid\":{pid},\"nonce\":\"{}\",\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
+        "{{\"issue\":\"{issue}\",\"branch\":\"{}\",\"step\":\"claimed\",\"ts\":{timestamp},\"ttl_seconds\":{ttl_seconds},\"pid\":{pid},\"nonce\":\"{}\",\"host\":\"{}\",\"boot_id\":\"{}\",\"process_start\":\"{}\",\"pr\":\"\",\"repo\":\"{}\",\"worker_id\":\"{}\",\"claim_id\":\"{}\"{session_field}}}\n",
         json_escape(branch),
-        claim_ttl_seconds(),
-        json_escape(nonce),
+        json_escape(&nonce),
+        json_escape(&host),
+        json_escape(&boot_id),
+        json_escape(&process_start),
         json_escape(repo),
         json_escape(worker_id),
         json_escape(claim_id),
@@ -3760,6 +3760,39 @@ fn write_startup_heartbeat(
         CommandFailure::diagnostic(format!("could not write claim startup heartbeat: {error}"))
     })?;
     Ok(())
+}
+
+fn startup_heartbeat_nonce(repo: &str, issue: u64, claim_id: &str) -> String {
+    let mut identity = b"autospec-startup-heartbeat-nonce-v1".to_vec();
+    for field in [repo, &issue.to_string(), claim_id] {
+        identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
+        identity.extend_from_slice(field.as_bytes());
+    }
+    autospec_core::autonomous::waterfall::sha256_hex(&identity)
+}
+
+#[cfg(target_os = "linux")]
+fn startup_process_identity(pid: u32) -> Result<(String, String, String), CommandFailure> {
+    let host = fs::read_to_string("/proc/sys/kernel/hostname")
+        .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat host: {error}")))?
+        .trim()
+        .to_string();
+    let (boot_id, process_start) = super::autonomous::process_birth_identity(pid)
+        .map_err(|error| CommandFailure::diagnostic(format!("read heartbeat process: {error}")))?
+        .ok_or_else(|| CommandFailure::diagnostic("heartbeat process identity disappeared"))?;
+    if host.is_empty() || boot_id.is_empty() || process_start.is_empty() {
+        return Err(CommandFailure::diagnostic(
+            "heartbeat process identity is incomplete",
+        ));
+    }
+    Ok((host, boot_id, process_start))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn startup_process_identity(_pid: u32) -> Result<(String, String, String), CommandFailure> {
+    Err(CommandFailure::diagnostic(
+        "heartbeat process identity requires Linux /proc",
+    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4575,6 +4608,9 @@ struct StartupHeartbeatEvidence {
     ttl_seconds: u64,
     pid: u32,
     nonce: String,
+    host: String,
+    boot_id: String,
+    process_start: String,
     session_id: Option<String>,
 }
 #[allow(dead_code)]
@@ -4685,7 +4721,7 @@ fn parse_startup_heartbeat(document: &[u8]) -> Option<StartupHeartbeatEvidence> 
         .ok()?
         .into_object("startup heartbeat")
         .ok()?;
-    let (repo, issue, worker_id, branch, pr, claim_id, step, nonce) = {
+    let (repo, issue, worker_id, branch, pr, claim_id, step, nonce, host, boot_id, process_start) = {
         let mut string = |name| fields.remove(name)?.into_string(name).ok();
         (
             string("repo")?,
@@ -4696,6 +4732,9 @@ fn parse_startup_heartbeat(document: &[u8]) -> Option<StartupHeartbeatEvidence> 
             string("claim_id")?,
             string("step")?,
             string("nonce")?,
+            string("host")?,
+            string("boot_id")?,
+            string("process_start")?,
         )
     };
     let (ts, ttl_seconds, pid) = {
@@ -4723,6 +4762,9 @@ fn parse_startup_heartbeat(document: &[u8]) -> Option<StartupHeartbeatEvidence> 
         ttl_seconds,
         pid,
         nonce,
+        host,
+        boot_id,
+        process_start,
         session_id,
     })
 }
@@ -4731,7 +4773,7 @@ fn classify_startup_heartbeat(
     path: &Path,
     expected: StartupHeartbeatExpectation<'_>,
     now: u64,
-    observe_pid: impl FnOnce(&str, u32) -> StartupPidLiveness,
+    observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
 ) -> StartupHeartbeatClassification {
     let file = match read_regular_file_no_follow(path) {
         Ok(file) => file,
@@ -4743,7 +4785,6 @@ fn classify_startup_heartbeat(
     let Some(evidence) = parse_startup_heartbeat(&file.document) else {
         return StartupHeartbeatClassification::Blocking;
     };
-    let worker_fields = evidence.worker_id.rsplitn(5, ':').collect::<Vec<_>>();
     let exact = evidence.repo == expected.repo
         && evidence.issue == expected.issue.to_string()
         && evidence.worker_id == expected.worker_id
@@ -4754,15 +4795,28 @@ fn classify_startup_heartbeat(
         && evidence.ttl_seconds > 0
         && evidence.pid > 0
         && evidence.pid <= i32::MAX as u32
-        && worker_fields.len() == 5
-        && worker_fields[0] == evidence.nonce
-        && worker_fields[1].parse::<u32>() == Ok(evidence.pid)
-        && worker_fields[2] == "rust";
+        && evidence.nonce
+            == startup_heartbeat_nonce(expected.repo, expected.issue, expected.claim_id)
+        && !evidence.host.is_empty()
+        && !evidence.boot_id.is_empty()
+        && evidence
+            .process_start
+            .parse::<u64>()
+            .ok()
+            .filter(|start| *start > 0)
+            .is_some_and(|start| start.to_string() == evidence.process_start);
     let expired = now.saturating_sub(evidence.ts) > evidence.ttl_seconds && now >= evidence.ts;
     if !exact || !expired || !cfg!(unix) {
         return StartupHeartbeatClassification::Blocking;
     }
-    if observe_pid(&evidence.worker_id, evidence.pid) != StartupPidLiveness::Dead {
+    if observe_pid(
+        &evidence.worker_id,
+        evidence.pid,
+        &evidence.host,
+        &evidence.boot_id,
+        &evidence.process_start,
+    ) != StartupPidLiveness::Dead
+    {
         return StartupHeartbeatClassification::Blocking;
     }
     StartupHeartbeatClassification::ExpiredDead(Box::new(StartupHeartbeatSnapshot {
@@ -5803,15 +5857,25 @@ fn handoff_stale_heartbeat_path_with_hooks(
 
 #[cfg(unix)]
 #[allow(dead_code)]
-fn observe_local_startup_pid(worker_id: &str, pid: u32) -> StartupPidLiveness {
-    let fields = worker_id.rsplitn(5, ':').collect::<Vec<_>>();
-    let local = fields.len() == 5
-        && fields[2] == "rust"
-        && fields[1].parse::<u32>() == Ok(pid)
-        && std::env::var("USER").unwrap_or_else(|_| "unknown-user".into()) == fields[3]
-        && std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown-host".into()) == fields[4];
-    if !local {
+fn observe_local_startup_pid(
+    _worker_id: &str,
+    pid: u32,
+    host: &str,
+    boot_id: &str,
+    process_start: &str,
+) -> StartupPidLiveness {
+    let current_host = fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .map(|host| host.trim().to_string());
+    let current_boot = super::autonomous::current_boot_identity().ok();
+    if current_host.as_deref() != Some(host) || current_boot.as_deref() != Some(boot_id) {
         return StartupPidLiveness::Unknown;
+    }
+    match super::autonomous::process_birth_identity(pid) {
+        Ok(None) => return StartupPidLiveness::Dead,
+        Ok(Some((observed_boot, observed_start)))
+            if observed_boot == boot_id && observed_start == process_start => {}
+        Ok(Some(_)) | Err(_) => return StartupPidLiveness::Unknown,
     }
     match nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), None) {
         Ok(()) | Err(nix::errno::Errno::EPERM) => StartupPidLiveness::Live,
@@ -5822,7 +5886,13 @@ fn observe_local_startup_pid(worker_id: &str, pid: u32) -> StartupPidLiveness {
 
 #[cfg(not(unix))]
 #[allow(dead_code)]
-fn observe_local_startup_pid(_worker_id: &str, _pid: u32) -> StartupPidLiveness {
+fn observe_local_startup_pid(
+    _worker_id: &str,
+    _pid: u32,
+    _host: &str,
+    _boot_id: &str,
+    _process_start: &str,
+) -> StartupPidLiveness {
     StartupPidLiveness::Unknown
 }
 
@@ -6188,6 +6258,7 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
 
     static BRIDGE_TRANSITION_ENV: Mutex<()> = Mutex::new(());
+    static STARTUP_HEARTBEAT_ENV: Mutex<()> = Mutex::new(());
 
     fn startup_heartbeat_fixture(label: &str) -> (PathBuf, PathBuf) {
         let directory = std::env::temp_dir().join(format!(
@@ -6272,8 +6343,9 @@ mod tests {
     }
 
     fn startup_heartbeat_document(worker: &str, pid: u32) -> String {
+        let nonce = super::startup_heartbeat_nonce("owner/repo", 42, "claim-a");
         format!(
-            r#"{{"repo":"owner/repo","issue":"42","worker_id":"{worker}","branch":"feat/worker","pr":"","claim_id":"claim-a","step":"claimed","ts":100,"ttl_seconds":10,"pid":{pid},"nonce":"nonce-a"}}"#
+            r#"{{"repo":"owner/repo","issue":"42","worker_id":"{worker}","branch":"feat/worker","pr":"","claim_id":"claim-a","step":"claimed","ts":100,"ttl_seconds":10,"pid":{pid},"nonce":"{nonce}","host":"host-a","boot_id":"boot-a","process_start":"1"}}"#
         )
     }
 
@@ -6823,10 +6895,201 @@ mod tests {
             &path,
             expected_startup_heartbeat("worker-a"),
             200,
-            |_, _| super::StartupPidLiveness::Dead,
+            |_, _, _, _, _| super::StartupPidLiveness::Dead,
         );
         assert_eq!(classified, super::StartupHeartbeatClassification::Absent);
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_heartbeat_process_identity() {
+        use super::{StartupHeartbeatClassification::ExpiredDead, StartupPidLiveness};
+
+        let _environment = STARTUP_HEARTBEAT_ENV.lock().unwrap();
+        let (directory, _) = startup_heartbeat_fixture("process-identity");
+        let root = directory.join(".autospec/process-heartbeats");
+        let old_root = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        let old_ttl = std::env::var_os("AUTOSPEC_CLAIM_LEASE_SECONDS");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
+        std::env::set_var("AUTOSPEC_CLAIM_LEASE_SECONDS", "0");
+        let path = root
+            .join(super::super::autonomous::drain::repository_progress_key(
+                "owner/repo",
+            ))
+            .join("42.json");
+        let publish = |claim_id, session_id| {
+            super::write_startup_heartbeat(
+                "owner/repo",
+                42,
+                "worker-a",
+                "feat/worker",
+                claim_id,
+                Some(session_id),
+            )
+            .unwrap();
+            super::parse_startup_heartbeat(&std::fs::read(&path).unwrap())
+                .unwrap()
+                .nonce
+        };
+        let first_nonce = publish("claim-a", "session-a");
+        assert_eq!(publish("claim-a", "session-a"), first_nonce);
+        assert_ne!(publish("claim-b", "session-b"), first_nonce);
+        let mut nonces = Vec::new();
+        let mut last = None;
+        for worker in ["worker-a", "opaque worker:with/slash"] {
+            super::write_startup_heartbeat(
+                "owner/repo",
+                42,
+                worker,
+                "feat/worker",
+                "claim-a",
+                None,
+            )
+            .unwrap();
+            let document = std::fs::read(&path).unwrap();
+            let evidence = super::parse_startup_heartbeat(&document).unwrap();
+            assert_eq!(evidence.worker_id, worker);
+            assert_eq!(evidence.pid, std::process::id());
+            assert_eq!(evidence.ttl_seconds, 1);
+            assert!(!evidence.nonce.is_empty());
+            assert_eq!(
+                super::observe_local_startup_pid(
+                    worker,
+                    evidence.pid,
+                    &evidence.host,
+                    &evidence.boot_id,
+                    &evidence.process_start,
+                ),
+                StartupPidLiveness::Live
+            );
+            assert!(matches!(
+                super::classify_startup_heartbeat(
+                    &path,
+                    expected_startup_heartbeat(worker),
+                    evidence.ts + evidence.ttl_seconds + 1,
+                    |observed, pid, host, boot_id, process_start| {
+                        assert_eq!((observed, pid), (worker, evidence.pid));
+                        assert_eq!(
+                            (host, boot_id, process_start),
+                            (
+                                evidence.host.as_str(),
+                                evidence.boot_id.as_str(),
+                                evidence.process_start.as_str()
+                            )
+                        );
+                        StartupPidLiveness::Dead
+                    },
+                ),
+                ExpiredDead(_)
+            ));
+            nonces.push(evidence.nonce.clone());
+            last = Some((worker, document, evidence));
+        }
+        assert_eq!(nonces[0], nonces[1]);
+
+        let (worker, document, evidence) = last.unwrap();
+        let document = String::from_utf8(document).unwrap();
+        let pid = format!("\"pid\":{}", evidence.pid);
+        let nonce = format!("\"nonce\":\"{}\"", evidence.nonce);
+        for malformed in [
+            document.replace(&pid, "\"pid\":0"),
+            document.replace(&pid, "\"pid\":\"bad\""),
+            document.replace(&nonce, "\"nonce\":\"\""),
+            document.replace(&nonce, &format!("\"nonce\":\"{}\"", "f".repeat(64))),
+            document.replace(worker, "different-worker"),
+        ] {
+            std::fs::write(&path, malformed).unwrap();
+            assert_eq!(
+                super::classify_startup_heartbeat(
+                    &path,
+                    expected_startup_heartbeat(worker),
+                    evidence.ts + evidence.ttl_seconds + 1,
+                    |_, _, _, _, _| StartupPidLiveness::Dead,
+                ),
+                super::StartupHeartbeatClassification::Blocking
+            );
+        }
+        for (key, value) in [
+            ("AUTOSPEC_HEARTBEAT_DIR", old_root),
+            ("AUTOSPEC_CLAIM_LEASE_SECONDS", old_ttl),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_heartbeat_remote_process_identity() {
+        let _environment = STARTUP_HEARTBEAT_ENV.lock().unwrap();
+        let (directory, _) = startup_heartbeat_fixture("remote-process-identity");
+        let root = directory.join(".autospec/process-heartbeats");
+        let old_root = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
+        super::write_startup_heartbeat(
+            "owner/repo",
+            42,
+            "opaque-worker",
+            "feat/worker",
+            "claim-a",
+            None,
+        )
+        .unwrap();
+        let path = root
+            .join(super::super::autonomous::drain::repository_progress_key(
+                "owner/repo",
+            ))
+            .join("42.json");
+        let document = std::fs::read(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&document).unwrap();
+        let identity = |name| {
+            value
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .filter(|field| !field.is_empty())
+                .unwrap()
+                .to_string()
+        };
+        let host = identity("host");
+        let boot_id = identity("boot_id");
+        let process_start = identity("process_start");
+        assert_ne!(host, boot_id);
+        assert_ne!(boot_id, process_start);
+        let absent_pid = i32::MAX as u32;
+        assert!(!Path::new(&format!("/proc/{absent_pid}")).exists());
+        for (field, replacement, remote) in [
+            ("host", "remote-host", true),
+            ("boot_id", "remote-boot", false),
+            ("process_start", "0", true),
+            ("process_start", "garbage", true),
+            ("process_start", "01", true),
+        ] {
+            let mut mutated = value.clone();
+            mutated[field] = serde_json::json!(replacement);
+            if remote {
+                mutated["pid"] = serde_json::json!(absent_pid);
+            }
+            std::fs::write(&path, serde_json::to_vec(&mutated).unwrap()).unwrap();
+            assert_eq!(
+                super::classify_startup_heartbeat(
+                    &path,
+                    expected_startup_heartbeat("opaque-worker"),
+                    value["ts"].as_u64().unwrap() + value["ttl_seconds"].as_u64().unwrap() + 1,
+                    super::observe_local_startup_pid,
+                ),
+                super::StartupHeartbeatClassification::Blocking,
+                "{field}"
+            );
+        }
+        match old_root {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(target_os = "linux")]
@@ -6996,9 +7259,8 @@ claim-a|claim-b
 claimed|review
 "ttl_seconds":10|"ttl_seconds":0
 "pid":4242|"pid":0
-"nonce":"nonce-a"|"nonce":"nonce-b"
 :nonce-a"|:nonce-b"
-"nonce":"nonce-a"|"nonce":"""#;
+"process_start":"1"|"process_start":"""#;
         cases.extend(mutations.lines().map(|row| {
             let (from, to) = row.split_once('|').expect("mutation row");
             let document = if from == "malformed" {
@@ -7016,7 +7278,7 @@ claimed|review
                     &path,
                     expected_startup_heartbeat(worker),
                     now,
-                    |_, _| {
+                    |_, _, _, _, _| {
                         observed = true;
                         liveness
                     },
@@ -7041,7 +7303,7 @@ claimed|review
             &path,
             expected_startup_heartbeat(worker),
             200,
-            |worker, pid| {
+            |worker, pid, _, _, _| {
                 assert_eq!((worker, pid), ("host:user:rust:4242:nonce-a", 4242));
                 super::StartupPidLiveness::Dead
             },
@@ -7070,7 +7332,14 @@ claimed|review
         let user = std::env::var("USER").unwrap_or_else(|_| "unknown-user".into());
         let pid = std::process::id();
         let worker = format!("{host}:{user}:rust:{pid}:nonce-a");
-        let document = startup_heartbeat_document(&worker, pid);
+        let identity = super::startup_process_identity(pid).unwrap();
+        let make_document = |worker| {
+            startup_heartbeat_document(worker, pid)
+                .replace("host-a", &identity.0)
+                .replace("boot-a", &identity.1)
+                .replace("start-a", &identity.2)
+        };
+        let document = make_document(&worker);
         std::fs::write(&target, &document).expect("write target heartbeat");
         std::os::unix::fs::symlink(&target, &path).expect("symlink heartbeat");
         let classify = |worker: &str| {
@@ -7079,9 +7348,9 @@ claimed|review
                 &path,
                 expected_startup_heartbeat(worker),
                 200,
-                |worker, pid| {
+                |worker, pid, host, boot_id, process_start| {
                     observed = true;
-                    super::observe_local_startup_pid(worker, pid)
+                    super::observe_local_startup_pid(worker, pid, host, boot_id, process_start)
                 },
             );
             (result, observed)
@@ -7091,11 +7360,16 @@ claimed|review
         std::fs::rename(&target, &path).expect("publish regular heartbeat");
         assert_eq!(classify(&worker), (Blocking, true));
         let remote_worker = format!("remote-{host}:{user}:rust:{pid}:nonce-a");
-        std::fs::write(&path, startup_heartbeat_document(&remote_worker, pid))
-            .expect("write remote heartbeat");
+        std::fs::write(&path, make_document(&remote_worker)).expect("write remote heartbeat");
         assert_eq!(
-            super::observe_local_startup_pid(&remote_worker, pid),
-            super::StartupPidLiveness::Unknown
+            super::observe_local_startup_pid(
+                &remote_worker,
+                pid,
+                &identity.0,
+                &identity.1,
+                &identity.2,
+            ),
+            super::StartupPidLiveness::Live
         );
         assert_eq!(classify(&remote_worker), (Blocking, true));
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
@@ -7115,7 +7389,7 @@ claimed|review
                 &fifo,
                 expected_startup_heartbeat("host:user:rust:4242:nonce-a"),
                 200,
-                |_, _| super::StartupPidLiveness::Dead,
+                |_, _, _, _, _| super::StartupPidLiveness::Dead,
             ),
             super::StartupHeartbeatClassification::Blocking
         );
@@ -7171,7 +7445,7 @@ claimed|review
             path,
             expected_startup_heartbeat(worker),
             200,
-            |_, _| super::StartupPidLiveness::Dead,
+            |_, _, _, _, _| super::StartupPidLiveness::Dead,
         );
         let super::StartupHeartbeatClassification::ExpiredDead(snapshot) = classified else {
             panic!("fixture heartbeat was not expired and dead");
@@ -7181,9 +7455,10 @@ claimed|review
 
     #[cfg(unix)]
     fn heartbeat_copy_path(root: &Path) -> PathBuf {
+        let nonce = super::startup_heartbeat_nonce("owner/repo", 42, "claim-a");
         root.join(format!(
             "quarantine/startup-heartbeats/42-{}.json",
-            super::heartbeat_session_key("nonce-a")
+            super::heartbeat_session_key(&nonce)
         ))
     }
 
