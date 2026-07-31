@@ -3744,51 +3744,44 @@ fn open_private_heartbeat_directory(path: &Path) -> Result<fs::File, CommandFail
             OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
             Mode::empty(),
         )
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!(
-                "could not open heartbeat publication directory: {error}"
-            ))
-        })?,
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat dir open: {error}")))?,
     );
     private_heartbeat_directory_identity(&directory, "publication directory")?;
     Ok(directory)
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum HeartbeatTarget {
-    Missing,
-    Exact,
-    Blocking,
-}
-
-#[cfg(target_os = "linux")]
-fn inspect_heartbeat_target(directory: &fs::File, name: &str, expected: &[u8]) -> HeartbeatTarget {
+fn inspect_heartbeat_target(
+    directory: &fs::File,
+    name: &str,
+    expected: &[u8],
+) -> Result<Option<HeartbeatPublication>, CommandFailure> {
     use nix::fcntl::{openat, OFlag};
     use nix::sys::stat::{fchmod, fstat, Mode, SFlag};
 
+    let blocking = || CommandFailure::diagnostic("heartbeat publication target conflicts");
     let descriptor = match openat(
         directory,
         name,
         OFlag::O_RDWR | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
         Mode::empty(),
     ) {
-        Err(nix::errno::Errno::ENOENT) => return HeartbeatTarget::Missing,
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
         Ok(descriptor) => descriptor,
-        Err(_) => return HeartbeatTarget::Blocking,
+        Err(_) => return Err(blocking()),
     };
     let file = fs::File::from(descriptor);
     let Ok(stat) = fstat(&file) else {
-        return HeartbeatTarget::Blocking;
+        return Err(blocking());
     };
     if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
         || stat.st_uid != nix::unistd::geteuid().as_raw()
         || stat.st_nlink != 1
     {
-        return HeartbeatTarget::Blocking;
+        return Err(blocking());
     }
     let Ok(snapshot) = file.try_clone().and_then(read_regular_file) else {
-        return HeartbeatTarget::Blocking;
+        return Err(blocking());
     };
     let normalize = |document: &[u8]| {
         let mut value: serde_json::Value = serde_json::from_slice(document).ok()?;
@@ -3796,25 +3789,30 @@ fn inspect_heartbeat_target(directory: &fs::File, name: &str, expected: &[u8]) -
         Some(value)
     };
     if normalize(&snapshot.document) != normalize(expected) {
-        return HeartbeatTarget::Blocking;
+        return Err(blocking());
     }
     if stat.st_mode & 0o7777 != 0o600
         && (fchmod(&file, Mode::from_bits_truncate(0o600)).is_err() || file.sync_all().is_err())
     {
-        return HeartbeatTarget::Blocking;
+        return Err(blocking());
     }
     let Ok(current) = fstat(&file) else {
-        return HeartbeatTarget::Blocking;
+        return Err(blocking());
     };
     if current.st_mode & 0o7777 != 0o600 {
-        return HeartbeatTarget::Blocking;
+        return Err(blocking());
     }
     if heartbeat_final_binding(&file, directory, name, (stat.st_dev, stat.st_ino)).ok()
         == Some((HeartbeatFinalBinding::Exact, 1))
     {
-        HeartbeatTarget::Exact
+        Ok(Some(HeartbeatPublication {
+            file,
+            device: stat.st_dev,
+            inode: stat.st_ino,
+            durability: HeartbeatPublicationDurability::Unconfirmed,
+        }))
     } else {
-        HeartbeatTarget::Blocking
+        Err(blocking())
     }
 }
 
@@ -3853,14 +3851,13 @@ fn publish_startup_heartbeat_transaction_with_hook(
     document: &[u8],
     boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
 ) -> Result<(), CommandFailure> {
-    let root_path = root;
-    let root = open_private_heartbeat_directory(root_path)?;
+    let root_directory = open_private_heartbeat_directory(root)?;
     let repo_name = super::autonomous::drain::repository_progress_key(repo);
-    let repo_path = root_path.join(&repo_name);
+    let repo_path = root.join(&repo_name);
     drop(open_private_heartbeat_directory(&repo_path)?);
-    let repo = open_heartbeat_directory_beneath(&root, Path::new(&repo_name))?;
+    let repo = open_heartbeat_directory_beneath(&root_directory, Path::new(&repo_name))?;
     let issue_name = format!("{issue}.json");
-    let issue_state = inspect_heartbeat_target(&repo, &issue_name, document);
+    let mut issue_guard = inspect_heartbeat_target(&repo, &issue_name, document)?;
     let sessions = session_id
         .map(|_| {
             drop(open_private_heartbeat_directory(
@@ -3870,20 +3867,16 @@ fn publish_startup_heartbeat_transaction_with_hook(
         })
         .transpose()?;
     let session_name = session_id.map(|value| format!("{}.json", heartbeat_session_key(value)));
-    let session_state = match (&sessions, &session_name) {
-        (Some(directory), Some(name)) => inspect_heartbeat_target(directory, name, document),
-        _ => HeartbeatTarget::Exact,
+    let mut session_guard = match (&sessions, &session_name) {
+        (Some(directory), Some(name)) => inspect_heartbeat_target(directory, name, document)?,
+        _ => None,
     };
-    if issue_state == HeartbeatTarget::Blocking || session_state == HeartbeatTarget::Blocking {
-        return Err(CommandFailure::diagnostic(
-            "heartbeat publication target conflicts with the claim identity",
-        ));
-    }
-    let issue_file = (issue_state == HeartbeatTarget::Missing)
+    let issue_file = issue_guard
+        .is_none()
         .then(|| prepare_private_heartbeat_file(&repo, document, "issue", boundary))
         .transpose()
         .map_err(heartbeat_publication_error)?;
-    let session_file = (session_state == HeartbeatTarget::Missing)
+    let session_file = (session_guard.is_none() && sessions.is_some())
         .then(|| {
             prepare_private_heartbeat_file(
                 sessions.as_ref().expect("session directory"),
@@ -3895,14 +3888,43 @@ fn publish_startup_heartbeat_transaction_with_hook(
         .transpose()
         .map_err(heartbeat_publication_error)?;
     if let Some(prepared) = issue_file {
-        publish_prepared_heartbeat_file(&repo, &issue_name, prepared, "issue", boundary)
-            .map_err(heartbeat_publication_error)?;
+        issue_guard = Some(
+            publish_prepared_heartbeat_file(&repo, &issue_name, prepared, "issue", boundary)
+                .map_err(heartbeat_publication_error)?,
+        );
     }
     if let (Some(directory), Some(name), Some(prepared)) =
         (sessions.as_ref(), session_name.as_ref(), session_file)
     {
-        publish_prepared_heartbeat_file(directory, name, prepared, "session", boundary)
-            .map_err(heartbeat_publication_error)?;
+        session_guard = Some(
+            publish_prepared_heartbeat_file(directory, name, prepared, "session", boundary)
+                .map_err(heartbeat_publication_error)?,
+        );
+    }
+    boundary("issue", "transaction-fsync")?;
+    nix::unistd::fsync(&repo)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat repo fsync: {error}")))?;
+    if let Some(directory) = sessions.as_ref() {
+        boundary("session", "transaction-fsync")?;
+        nix::unistd::fsync(directory).map_err(|error| {
+            CommandFailure::diagnostic(format!("heartbeat session fsync: {error}"))
+        })?;
+    }
+    let exact = |directory: &fs::File, name: &str, guard: &HeartbeatPublication| {
+        heartbeat_final_binding(&guard.file, directory, name, (guard.device, guard.inode)).ok()
+            == Some((HeartbeatFinalBinding::Exact, 1))
+    };
+    if !exact(
+        &repo,
+        &issue_name,
+        issue_guard.as_ref().expect("issue guard"),
+    ) || sessions
+        .as_ref()
+        .zip(session_name.as_deref())
+        .zip(session_guard.as_ref())
+        .is_some_and(|((directory, name), guard)| !exact(directory, name, guard))
+    {
+        return Err(CommandFailure::diagnostic("heartbeat binding changed"));
     }
     Ok(())
 }
@@ -3916,7 +3938,7 @@ fn publish_startup_heartbeat_transaction(
     _document: &[u8],
 ) -> Result<(), CommandFailure> {
     Err(CommandFailure::diagnostic(
-        "identity-bound heartbeat publication is unavailable on this platform",
+        "heartbeat publisher unavailable",
     ))
 }
 
@@ -6395,9 +6417,6 @@ mod tests {
         ));
         let sessions = repo.join("sessions");
         std::fs::create_dir_all(&sessions).unwrap();
-        for directory in [&root, &repo, &sessions] {
-            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
         unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root) };
         let issue = repo.join("42.json");
         let session = sessions.join(format!(
@@ -6422,12 +6441,8 @@ mod tests {
         assert_eq!(std::fs::metadata(&caller).unwrap().nlink(), 2);
         assert!(!session.exists());
 
-        let session_b = sessions.join(format!(
-            "{}.json",
-            super::heartbeat_session_key("session-b")
-        ));
-        let prepared = br#"{"issue":"43","branch":"feat/worker","step":"claimed","ts":1,"pr":"","repo":"owner/repo","worker_id":"worker-a","claim_id":"claim-b","session_id":"session-b"}
-"#;
+        let session_b = sessions.join("73657373696f6e2d62.json");
+        let prepared = b"{\"issue\":\"43\",\"branch\":\"feat/worker\",\"step\":\"claimed\",\"ts\":1,\"pr\":\"\",\"repo\":\"owner/repo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-b\",\"session_id\":\"session-b\"}\n";
         let attempt = |issue, session, document: &[u8], failed| {
             super::publish_startup_heartbeat_transaction_with_hook(
                 &root,
@@ -6470,35 +6485,18 @@ mod tests {
             let document = format!(
                 "{{\"issue\":\"{number}\",\"branch\":\"feat/worker\",\"step\":\"claimed\",\"ts\":1,\"pr\":\"\",\"repo\":\"owner/repo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-{number}\",\"session_id\":\"{session_id}\"}}\n"
             );
-            assert!(attempt(
-                number,
-                session_id,
-                document.as_bytes(),
-                (role, "directory-fsync")
-            )
-            .is_err());
-            assert!(attempt(
-                number,
-                session_id,
-                document.as_bytes(),
-                (role, "transaction-fsync")
-            )
-            .is_err());
-            super::publish_startup_heartbeat_transaction(
-                &root,
-                "owner/repo",
-                number,
-                Some(session_id),
-                document.as_bytes(),
-            )
-            .unwrap();
+            for boundary in ["directory-fsync", "transaction-fsync"] {
+                assert!(
+                    attempt(number, session_id, document.as_bytes(), (role, boundary)).is_err()
+                );
+            }
+            assert!(attempt(number, session_id, document.as_bytes(), ("never", "never")).is_ok());
         }
 
         std::fs::remove_file(&session).unwrap();
         let expected = std::fs::read(&issue).unwrap();
         let replacement = repo.join("replacement");
         std::fs::write(&replacement, b"foreign").unwrap();
-        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
         let replaced = super::publish_startup_heartbeat_transaction_with_hook(
             &root,
             "owner/repo",
