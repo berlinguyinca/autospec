@@ -5558,10 +5558,7 @@ fn handoff_retained_heartbeat(
     let (pending, completed) = heartbeat_receipt_names(expected);
     let archive_name = completed.replace(".receipt", ".json");
     let quarantine = ensure_receipt_directory(repo, "quarantine")?;
-    drop(ensure_receipt_directory(
-        &quarantine,
-        "startup-heartbeat-handoffs",
-    )?);
+    ensure_receipt_directory(&quarantine, "startup-heartbeat-handoffs")?;
     let decision = heartbeat_receipt_retry_decision(repo, expected);
     let handoff = match decision {
         HeartbeatReceiptDecision::Absent => None,
@@ -5579,9 +5576,7 @@ fn handoff_retained_heartbeat(
         .transpose()?
         .flatten();
     if decision == HeartbeatReceiptDecision::Completed && (source.is_some() || archived.is_none()) {
-        return Err(CommandFailure::diagnostic(
-            "completed heartbeat handoff is inconsistent",
-        ));
+        return Err(CommandFailure::diagnostic("completed handoff inconsistent"));
     }
     let transaction = match decision {
         HeartbeatReceiptDecision::Absent if source.is_some() && archived.is_none() => {
@@ -7963,12 +7958,24 @@ claimed|review
     fn startup_heartbeat_retained_handoff() {
         use std::os::unix::fs::MetadataExt;
 
-        for race in ["before-check", "before-rename", "after-rename", "collision"] {
+        for race in
+            "before-check before-rename after-rename collision malformed fifo hardlink".split(' ')
+        {
             let (parent, repo_path, source, repo, snapshot) =
                 anchored_startup_heartbeat_fixture(race);
             let replacement = repo_path.join("replacement");
             std::fs::write(&replacement, b"foreign").unwrap();
             std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
+            match race {
+                "malformed" => std::fs::write(&source, b"{").unwrap(),
+                "fifo" => {
+                    std::fs::remove_file(&source).unwrap();
+                    nix::unistd::mkfifo(&source, nix::sys::stat::Mode::from_bits_truncate(0o600))
+                        .unwrap();
+                }
+                "hardlink" => std::fs::hard_link(&source, source.with_extension("link")).unwrap(),
+                _ => {}
+            }
             let result = super::handoff_retained_heartbeat(
                 &repo_path,
                 &repo,
@@ -8002,7 +8009,7 @@ claimed|review
                 |_| Ok(()),
             );
             assert!(result.is_err(), "{race}");
-            if race != "collision" {
+            if matches!(race, "before-check" | "before-rename" | "after-rename") {
                 assert_eq!(std::fs::read(&source).unwrap(), b"foreign", "{race}");
             }
             std::fs::remove_dir_all(parent).unwrap();
@@ -8026,16 +8033,18 @@ claimed|review
                     .ok_or_else(|| super::CommandFailure::diagnostic("injected fsync failure")),
             )
             .is_err());
-            let retained = super::handoff_retained_heartbeat(
-                &repo_path,
-                &repo,
-                source.file_name().unwrap(),
-                &snapshot,
-                |_, _, _, _| {},
-                |_| Ok(()),
-            )
-            .unwrap();
-            assert_eq!(std::fs::metadata(retained).unwrap().ino(), inode);
+            for _ in 0..2 {
+                let retained = super::handoff_retained_heartbeat(
+                    &repo_path,
+                    &repo,
+                    source.file_name().unwrap(),
+                    &snapshot,
+                    |_, _, _, _| {},
+                    |_| Ok(()),
+                )
+                .unwrap();
+                assert_eq!(std::fs::metadata(retained).unwrap().ino(), inode);
+            }
             std::fs::remove_dir_all(parent).unwrap();
         }
 
