@@ -1607,7 +1607,7 @@ fn foreground_missing_failure_intent_requires_exact_retryable_release() {
     );
     assert!(
         String::from_utf8_lossy(&output.stderr)
-            .contains("missing failure cleanup intent requires an exact retryable release"),
+            .contains("missing failure cleanup intent requires an exact released claim"),
         "stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -1618,6 +1618,121 @@ fn foreground_missing_failure_intent_requires_exact_retryable_release() {
             .exists(),
         "non-retryable terminal state must retain its durable acquisition"
     );
+}
+
+#[test]
+fn foreground_recovers_exact_immediate_stop_release_without_cleanup_intent() {
+    let (success, stderr, receipt_exists, returned_to_scan) = run_missing_cleanup_recovery(None);
+
+    assert!(success, "stderr={stderr}");
+    assert!(!receipt_exists, "exact release must retire the acquisition");
+    assert!(returned_to_scan, "exact release must resume queue scanning");
+}
+
+#[test]
+fn foreground_missing_failure_intent_requires_exact_released_identity() {
+    for mismatch in ["worker", "claim", "branch", "pr"] {
+        let (success, _stderr, receipt_exists, _) = run_missing_cleanup_recovery(Some(mismatch));
+
+        assert!(!success, "{mismatch}: recovery accepted foreign evidence");
+        assert!(
+            receipt_exists,
+            "{mismatch}: foreign evidence retired the local acquisition"
+        );
+    }
+}
+
+fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> (bool, String, bool, bool) {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(
+        fixture.state_path(),
+        selected_foreground_state()
+            .transition(ConductorEvent::Claimed)
+            .expect("seed claimed conductor")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+            })
+            .expect("seed receipt failure")
+            .to_json(),
+    )
+    .expect("persist receipt-failed conductor state");
+    let worker_id = "rust-foreground-conductor-recovered";
+    let branch = "feat/autonomous-issue-42";
+    let claim_id = "terminal-immediate-stop-generation";
+    let updated_at = fresh_iso_timestamp();
+    let mut remote = RunStateRecord::new(
+        "test/repo",
+        42,
+        worker_id,
+        "released",
+        branch,
+        "",
+        "released",
+        Vec::new(),
+        &updated_at,
+        &updated_at,
+        10_800,
+    )
+    .with_claim_id(claim_id);
+    match mismatch {
+        Some("worker") => remote.worker_id = "foreign-worker".to_string(),
+        Some("claim") => remote.claim_id = Some("foreign-claim".to_string()),
+        Some("branch") => remote.branch = "feat/foreign".to_string(),
+        Some("pr") => remote.pr = "17".to_string(),
+        Some(other) => panic!("unknown claim mismatch {other}"),
+        None => {}
+    }
+    fixture.transition_claim_ref(&remote);
+    fixture.seed_claim_acquisition_receipt(worker_id, branch, claim_id);
+    fixture.seed_interrupted_executor_invocation_without_cleanup(worker_id, branch, claim_id);
+    let seeded = git_fixture(
+        &fixture.claim_repo,
+        &[
+            "ls-remote",
+            "--refs",
+            fixture.claim_remote.to_str().expect("claim remote"),
+            "refs/autospec/claims/issue-42",
+        ],
+    );
+    let seeded = seeded.split_whitespace().next().expect("seeded claim oid");
+    git_fixture(
+        &fixture.claim_repo,
+        &[
+            "push",
+            bridge.remote.to_str().expect("bridge remote"),
+            &format!("{seeded}:refs/autospec/claims/issue-42"),
+        ],
+    );
+    fs::write(&fixture.mode, "reviewed\n").expect("seed claim label projection");
+
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .output()
+        .expect("run missing-cleanup recovery");
+    let receipt_exists = fixture
+        .state_path()
+        .with_extension("claim-acquisition.json")
+        .exists();
+    let returned_to_scan = fixture.read_state().phase() == ConductorPhase::Scan;
+
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        receipt_exists,
+        returned_to_scan,
+    )
 }
 
 #[test]
