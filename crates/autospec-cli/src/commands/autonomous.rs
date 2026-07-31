@@ -3217,7 +3217,9 @@ fn execute_foreground_dispatch(
     mut recovered_lease: Option<claim::ClaimLease>,
 ) -> Result<ForegroundDispatchResult, ForegroundFailure> {
     loop {
-        if let Some(mode) = persisted_stop_mode(layout).map_err(CommandFailure::diagnostic)? {
+        if let Some(mode @ LifecycleStopMode::Immediate) =
+            persisted_stop_mode(layout).map_err(CommandFailure::diagnostic)?
+        {
             let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
                 CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))
             })?;
