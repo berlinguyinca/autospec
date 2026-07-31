@@ -1459,6 +1459,42 @@ fn claim_stale_heartbeat_recovery() {
         )
         .with_claim_id("claim-b"),
     );
+    for issue in [44, 45, 46, 47] {
+        transition_claim_ref(
+            &repo,
+            &RunStateRecord::new(
+                "testorg/testrepo",
+                issue,
+                "worker-new",
+                "claimed",
+                "feat/test",
+                "",
+                "heartbeat-pending:none",
+                Vec::new(),
+                "2000-01-01T00:00:00Z",
+                "2000-01-01T00:00:00Z",
+                1,
+            )
+            .with_claim_id("claim-new"),
+        );
+    }
+    transition_claim_ref(
+        &repo,
+        &RunStateRecord::new(
+            "testorg/testrepo",
+            48,
+            "worker-new",
+            "claimed",
+            "feat/test",
+            "",
+            "heartbeat-publishing:73657373696f6e2d63757272656e74:attempt-live",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("claim-new"),
+    );
     std::fs::create_dir_all(&heartbeat_repo).expect("heartbeat repository");
     std::fs::set_permissions(&heartbeats, std::fs::Permissions::from_mode(0o700))
         .expect("private heartbeat root");
@@ -1594,6 +1630,164 @@ exit 17
         0o600
     );
     assert!(claim_ref_message(&repo, 42).contains("\"state\":\"available\""));
+
+    let prior_generation_document = |repo: &str, issue: u64, ts: u64, nonce: &str| {
+        format!(
+            "{{\"issue\":\"{issue}\",\"branch\":\"feat/test\",\"step\":\"claimed\",\"ts\":{ts},\"ttl_seconds\":1,\"pid\":2147483647,\"nonce\":\"{nonce}\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"1\",\"pr\":\"\",\"repo\":\"{repo}\",\"worker_id\":\"worker-old\",\"claim_id\":\"claim-old\"}}\n",
+            host.trim(),
+            boot.trim()
+        )
+    };
+    let successor_heartbeat = heartbeat_repo.join("44.json");
+    std::fs::write(
+        &successor_heartbeat,
+        prior_generation_document(
+            "testorg/testrepo",
+            44,
+            1,
+            "ec8b91f0af46c8d2aa2e0737f0fd9d3c3808e5ce539d0b26f1c2be2cdcf901e1",
+        ),
+    )
+    .expect("expired prior-generation heartbeat");
+    std::fs::set_permissions(&successor_heartbeat, std::fs::Permissions::from_mode(0o600))
+        .expect("private prior-generation heartbeat");
+
+    let successor = recover("44");
+
+    assert!(successor.status.success());
+    assert!(String::from_utf8_lossy(&successor.stdout).contains("\"recovered\":true"));
+    assert!(!successor_heartbeat.exists());
+    assert!(std::fs::read_dir(&handoff)
+        .expect("prior-generation handoff")
+        .filter_map(Result::ok)
+        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
+        .any(|document| document.contains("\"issue\":\"44\"")
+            && document.contains("\"claim_id\":\"claim-old\"")));
+    let recovered = claim_ref_message(&repo, 44);
+    assert!(recovered.contains("\"state\":\"available\""));
+    assert!(recovered.contains("\"step\":\"stale_startup_recovered\""));
+
+    let fresh_heartbeat = heartbeat_repo.join("45.json");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("wall clock")
+        .as_secs();
+    std::fs::write(
+        &fresh_heartbeat,
+        prior_generation_document(
+            "testorg/testrepo",
+            45,
+            now,
+            "200ba5dde87a479bccd82ffab1dcc64d59b63e68d0234682c133873593363a67",
+        ),
+    )
+    .expect("fresh prior-generation heartbeat");
+    std::fs::set_permissions(&fresh_heartbeat, std::fs::Permissions::from_mode(0o600))
+        .expect("private fresh heartbeat");
+    let fresh_claim = claim_ref_message(&repo, 45);
+    let fresh = recover("45");
+    assert!(String::from_utf8_lossy(&fresh.stdout).contains("\"recovered\":false"));
+    assert_eq!(claim_ref_message(&repo, 45), fresh_claim);
+    assert!(fresh_heartbeat.exists());
+
+    let cross_repo_heartbeat = heartbeat_repo.join("46.json");
+    std::fs::write(
+        &cross_repo_heartbeat,
+        prior_generation_document(
+            "otherorg/testrepo",
+            46,
+            1,
+            "da6c29ccd42ddf083f065bfc437879d61e4cda55f4e00f0f7f26de8e2c7807dd",
+        ),
+    )
+    .expect("cross-repository heartbeat");
+    std::fs::set_permissions(
+        &cross_repo_heartbeat,
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .expect("private cross-repository heartbeat");
+    let cross_repo_claim = claim_ref_message(&repo, 46);
+    let cross_repo = recover("46");
+    assert!(String::from_utf8_lossy(&cross_repo.stdout).contains("\"recovered\":false"));
+    assert_eq!(claim_ref_message(&repo, 46), cross_repo_claim);
+    assert!(cross_repo_heartbeat.exists());
+
+    let interrupted_digest = "1b9806766ed75d84434219eb6cb4e07fa0a8754f9537b060a2f3e097fc690105";
+    let pending = handoff.join(format!("pending-47-{interrupted_digest}.receipt"));
+    let completed = handoff.join(format!("completed-47-{interrupted_digest}.receipt"));
+    let archive = handoff.join(format!("completed-47-{interrupted_digest}.json"));
+    std::fs::write(&pending, b"").expect("pending prior-generation receipt");
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o600))
+        .expect("private pending receipt");
+    std::fs::write(
+        &archive,
+        prior_generation_document(
+            "testorg/testrepo",
+            47,
+            1,
+            "f1837a09a0d35a8239ed726cccf717868ee651f98dd97f1337b0a986796baf4f",
+        ),
+    )
+    .expect("retained prior-generation heartbeat");
+    std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(0o600))
+        .expect("private retained heartbeat");
+
+    let interrupted = recover("47");
+
+    assert!(interrupted.status.success());
+    assert!(String::from_utf8_lossy(&interrupted.stdout).contains("\"recovered\":true"));
+    assert!(!pending.exists(), "pending receipt was not retired");
+    assert!(completed.exists(), "completed receipt was not published");
+    let resumed = claim_ref_message(&repo, 47);
+    assert!(resumed.contains("\"state\":\"available\""));
+    assert!(resumed.contains("\"step\":\"stale_startup_recovered\""));
+
+    let publishing_digest = "21db6c26883b61ad67d2efa3bef926dc9e5a15892fc04bfddf13956e574f9238";
+    let old_receipt = handoff.join(format!("completed-48-{publishing_digest}.receipt"));
+    let old_archive = handoff.join(format!("completed-48-{publishing_digest}.json"));
+    std::fs::write(&old_receipt, b"").expect("completed old-generation receipt");
+    std::fs::set_permissions(&old_receipt, std::fs::Permissions::from_mode(0o600))
+        .expect("private completed receipt");
+    std::fs::write(
+        &old_archive,
+        prior_generation_document(
+            "testorg/testrepo",
+            48,
+            1,
+            "95efb38c00bc3b7d331c9c9000a5a2617cb28204ea933c9ddb907928a566b707",
+        ),
+    )
+    .expect("retained old-generation heartbeat");
+    std::fs::set_permissions(&old_archive, std::fs::Permissions::from_mode(0o600))
+        .expect("private retained heartbeat");
+    let sessions = heartbeat_repo.join("sessions");
+    std::fs::create_dir(&sessions).expect("session heartbeat directory");
+    std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700))
+        .expect("private session directory");
+    let session = sessions.join("73657373696f6e2d63757272656e74.json");
+    let stat = std::fs::read_to_string("/proc/self/stat").expect("process identity");
+    let process_start = stat
+        .rsplit_once(") ")
+        .expect("process stat fields")
+        .1
+        .split_whitespace()
+        .nth(19)
+        .expect("process start");
+    std::fs::write(&session, format!("{{\"issue\":\"48\",\"branch\":\"feat/test\",\"step\":\"claimed\",\"ts\":{now},\"ttl_seconds\":10800,\"pid\":{},\"nonce\":\"d7289361137ba9d5556f9e1c9ddb9367a7cb4768e6b9dcb48a8c0dcc4273e1d2\",\"host\":{:?},\"boot_id\":{:?},\"process_start\":\"{process_start}\",\"pr\":\"\",\"repo\":\"testorg/testrepo\",\"worker_id\":\"worker-new\",\"claim_id\":\"claim-new\",\"session_id\":\"session-current\"}}\n", std::process::id(), host.trim(), boot.trim())).expect("current session heartbeat");
+    std::fs::set_permissions(&session, std::fs::Permissions::from_mode(0o600))
+        .expect("private session heartbeat");
+    let publishing_claim = claim_ref_message(&repo, 48);
+    let calls = std::fs::read_to_string(&log).expect("gh calls before publishing recovery");
+
+    let publishing = recover("48");
+
+    assert!(String::from_utf8_lossy(&publishing.stdout).contains("\"recovered\":false"));
+    assert_eq!(claim_ref_message(&repo, 48), publishing_claim);
+    assert!(session.exists());
+    assert_eq!(
+        std::fs::read_to_string(&log).expect("gh calls after recovery"),
+        calls
+    );
 }
 
 #[test]
@@ -2141,7 +2335,7 @@ fn startup_heartbeat_claim_lifecycle() {
         "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; elif [ \"$1 $2\" = 'issue edit' ]; then exit 23; fi\n",
     );
     let issue = r###"{"labels":["auto-implement","safety:reviewed"],"title":"claim","body":"## Safety review\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","author":"agent"}"###;
-    Command::new("sh")
+    let lifecycle = Command::new("sh")
         .arg("-c")
         .arg("AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" AUTOSPEC_CLAIM_GIT_BIN=\"$GIT_WRAPPER\" \"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/a --session-id session-a & a=$!; i=0; while [ ! -e \"$PAUSED\" ]; do i=$((i+1)); [ $i -lt 500 ] || exit 99; sleep .01; done; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_B\" \"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/a --session-id session-a || true; : > \"$RELEASE\"; wait $a || true; before=$(/usr/bin/git --git-dir \"$AUTOSPEC_CLAIM_GIT_REMOTE\" rev-parse refs/autospec/claims/issue-43); AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim state recover-stale-startup --issue 43 --repo testorg/testrepo --timeout-seconds 1 || true; after=$(/usr/bin/git --git-dir \"$AUTOSPEC_CLAIM_GIT_REMOTE\" rev-parse refs/autospec/claims/issue-43); [ \"$before\" = \"$after\" ] || exit 98; for identity in 'worker-x feat/c session-conflict' 'worker-c feat/x session-conflict' 'worker-c feat/c session-x'; do set -- $identity; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim acquire --issue 43 --repo testorg/testrepo --worker-id \"$1\" --branch \"$2\" --session-id \"$3\" || true; done; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim acquire --issue 43 --repo testorg/testrepo --worker-id worker-c --branch feat/c --session-id session-conflict || true; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim acquire --issue 44 --repo testorg/testrepo --worker-id worker-d --branch feat/d --session-id session-fresh || true")
         .current_dir(&repo)
@@ -2157,6 +2351,12 @@ fn startup_heartbeat_claim_lifecycle() {
         .env("GH_ISSUE", issue)
         .output()
         .unwrap();
+    assert!(
+        lifecycle.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&lifecycle.stdout),
+        String::from_utf8_lossy(&lifecycle.stderr)
+    );
     assert!(heartbeats_a.join("o7_testorg_r8_testrepo/42.json").exists());
     assert!(!heartbeats_b.join("o7_testorg_r8_testrepo/42.json").exists());
     assert!(!heartbeats_b
