@@ -3545,6 +3545,79 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn foreground_recovers_with_integrated_inactive_local_branch() {
+    for (case, unmerged, should_recover) in [("integrated", false, true), ("unmerged", true, false)]
+    {
+        let fixture = ForegroundFixture::new();
+        fixture.initialize_empty_local_remote();
+        git_fixture(
+            &fixture.repo_dir,
+            &["config", "user.name", "Autospec Branch Test"],
+        );
+        git_fixture(
+            &fixture.repo_dir,
+            &["config", "user.email", "autospec-branch-test@localhost"],
+        );
+        fs::write(fixture.repo_dir.join("README.md"), "baseline\n").expect("write baseline");
+        git_fixture(&fixture.repo_dir, &["add", "README.md"]);
+        git_fixture(&fixture.repo_dir, &["commit", "-m", "baseline"]);
+        let branch = "feat/autonomous-issue-42";
+        git_fixture(&fixture.repo_dir, &["branch", branch]);
+        if unmerged {
+            git_fixture(&fixture.repo_dir, &["checkout", branch]);
+            fs::write(fixture.repo_dir.join("work.txt"), "unmerged\n")
+                .expect("write unmerged work");
+            git_fixture(&fixture.repo_dir, &["add", "work.txt"]);
+            git_fixture(&fixture.repo_dir, &["commit", "-m", "unmerged work"]);
+            git_fixture(&fixture.repo_dir, &["checkout", "main"]);
+        }
+        let stale = RunStateRecord::new(
+            "test/repo",
+            42,
+            "stale-worker",
+            "claimed",
+            branch,
+            "",
+            "heartbeat-pending:none",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("stale-claim");
+        fixture.transition_claim_ref(&stale);
+        fixture.seed_expired_claim_heartbeat("stale-worker", branch, "stale-claim");
+        seed_foreground_state(&fixture, &selected_foreground_state());
+        fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
+        let heartbeat_path = fixture.heartbeats.join("o4_test_r4_repo/42.json");
+        let heartbeat_before = fs::read_to_string(&heartbeat_path).expect("stale heartbeat");
+
+        let output = fixture.run_foreground();
+
+        assert_eq!(
+            output.status.success(),
+            should_recover,
+            "{case}: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if should_recover {
+            assert!(fixture
+                .claim_record()
+                .worker_id
+                .starts_with("rust-foreground-conductor-"));
+        } else {
+            assert_eq!(fixture.claim_record(), stale);
+            assert_eq!(
+                fs::read_to_string(&heartbeat_path).expect("preserved heartbeat"),
+                heartbeat_before
+            );
+        }
+    }
+}
+
 #[test]
 fn foreground_ignores_a_malformed_audit_projection_without_a_claim_ref() {
     let fixture = ForegroundFixture::new();

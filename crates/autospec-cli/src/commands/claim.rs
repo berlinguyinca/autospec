@@ -1760,7 +1760,7 @@ fn recover_authoritative_stale_startup(
         || !selected.record.pr.is_empty()
         || (heartbeat_lifecycle_step(&selected.record.step)
             && selected.record.step != "heartbeat-pending:none")
-        || branch_ref_exists(&selected.record.branch)
+        || branch_blocks_stale_recovery(&selected.record.branch)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {
         return Ok(RecoveryOutcome {
@@ -6677,6 +6677,63 @@ fn branch_ref_exists(branch: &str) -> bool {
         Ok(output) if output.status.success() => !output.stdout.is_empty(),
         Ok(_) | Err(_) => true,
     }
+}
+
+fn branch_blocks_stale_recovery(branch: &str) -> bool {
+    if branch.trim().is_empty() {
+        return false;
+    }
+    let local = format!("refs/heads/{branch}");
+    match Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", &local])
+        .status()
+    {
+        Ok(status) if status.success() => {
+            if !local_branch_is_integrated_and_inactive(&local) {
+                return true;
+            }
+        }
+        Ok(status) if status.code() == Some(1) => {}
+        Ok(_) | Err(_) => return true,
+    }
+    for reference in [format!("refs/remotes/origin/{branch}")] {
+        match Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &reference])
+            .status()
+        {
+            Ok(status) if status.success() => return true,
+            Ok(status) if status.code() == Some(1) => {}
+            Ok(_) | Err(_) => return true,
+        }
+    }
+    match Command::new("git")
+        .args(["ls-remote", "--heads", "origin", branch])
+        .output()
+    {
+        Ok(output) if output.status.success() => !output.stdout.is_empty(),
+        Ok(_) | Err(_) => true,
+    }
+}
+
+fn local_branch_is_integrated_and_inactive(reference: &str) -> bool {
+    let worktrees = match Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output.stdout,
+        Ok(_) | Err(_) => return false,
+    };
+    let checked_out = format!("branch {reference}");
+    if String::from_utf8_lossy(&worktrees)
+        .lines()
+        .any(|line| line == checked_out)
+    {
+        return false;
+    }
+    Command::new("git")
+        .args(["merge-base", "--is-ancestor", reference, "HEAD"])
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 fn claim_ttl_seconds() -> u64 {
