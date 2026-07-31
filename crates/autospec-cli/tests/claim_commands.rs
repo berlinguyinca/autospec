@@ -1948,49 +1948,58 @@ fn claim_acquire_prelink_failure_keeps_pending_ref() {
 }
 
 #[test]
-fn claim_acquire_race_and_ambiguous_write_leave_no_loser_artifacts() {
+fn startup_heartbeat_claim_lifecycle() {
     let fixture = temp_dir("autospec-claim-acquire-race");
     let bin = fixture.join("bin");
     let repo = claim_git_repo(&fixture);
-    let heartbeats = fixture.join("heartbeats");
-    let sessions = heartbeats.join("o7_testorg_r8_testrepo/sessions");
+    let heartbeats_a = fixture.join("heartbeats-a");
+    let heartbeats_b = fixture.join("heartbeats-b");
+    let sessions = heartbeats_a.join("o7_testorg_r8_testrepo/sessions");
     std::fs::create_dir_all(&bin).unwrap();
     std::fs::create_dir_all(&sessions).unwrap();
+    let pending = RunStateRecord::parse_json(r#"{"schema":1,"repo":"testorg/testrepo","issue":42,"worker_id":"worker-a","state":"claimed","branch":"feat/a","pr":"","step":"heartbeat-pending:73657373696f6e2d61","paths":[],"claimed_at":"2999-07-30T00:00:00Z","updated_at":"2999-07-30T00:00:00Z","ttl_seconds":10800,"claim_id":"claim-a"}"#).unwrap();
+    transition_claim_ref(&repo, &pending);
     let conflict = sessions.join("73657373696f6e2d636f6e666c696374.json");
     std::fs::write(&conflict, b"prior-attempt").unwrap();
     write_executable(
+        &bin.join("git-wrapper"),
+        "#!/bin/sh\n/usr/bin/git \"$@\"; status=$?; case \" $* \" in *' push '*) if [ $status = 0 ] && [ ! -e \"$PAUSED\" ]; then : > \"$PAUSED\"; while [ ! -e \"$RELEASE\" ]; do sleep .01; done; fi;; esac; exit $status\n",
+    );
+    write_executable(
         &bin.join("gh"),
-        "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then : > \"$GH_BARRIER.$$\"; set -- \"$GH_BARRIER\".*; while [ \"$#\" -lt 2 ]; do sleep .01; set -- \"$GH_BARRIER\".*; done; printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; elif [ \"$1 $2\" = 'issue edit' ]; then exit 23; fi\n",
+        "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; elif [ \"$1 $2\" = 'issue edit' ]; then exit 23; fi\n",
     );
     let issue = r###"{"labels":["auto-implement","safety:reviewed"],"title":"claim","body":"## Safety review\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","author":"agent"}"###;
     let output = Command::new("sh")
         .arg("-c")
-        .arg("\"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/a --session-id session-a & a=$!; \"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-b --branch feat/b --session-id session-b & b=$!; wait $a || true; wait $b || true; \"$AUTOSPEC_BIN\" claim acquire --issue 43 --repo testorg/testrepo --worker-id worker-c --branch feat/c --session-id session-conflict || true")
+        .arg("AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" AUTOSPEC_CLAIM_GIT_BIN=\"$GIT_WRAPPER\" \"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/a --session-id session-a & a=$!; i=0; while [ ! -e \"$PAUSED\" ]; do i=$((i+1)); [ $i -lt 500 ] || exit 99; sleep .01; done; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_B\" \"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/a --session-id session-a || true; : > \"$RELEASE\"; wait $a || true; AUTOSPEC_HEARTBEAT_DIR=\"$HEARTBEATS_A\" \"$AUTOSPEC_BIN\" claim acquire --issue 43 --repo testorg/testrepo --worker-id worker-c --branch feat/c --session-id session-conflict || true")
         .current_dir(&repo)
         .env("AUTOSPEC_BIN", env!("CARGO_BIN_EXE_autospec"))
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.join("claim-remote.git"))
         .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
-        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
         .env("AUTOSPEC_GH_API_RETRIES", "1")
         .env("PATH", path_with(&bin))
-        .env("GH_BARRIER", fixture.join("barrier"))
+        .env("GIT_WRAPPER", bin.join("git-wrapper"))
+        .env("HEARTBEATS_A", &heartbeats_a)
+        .env("HEARTBEATS_B", &heartbeats_b)
+        .env("PAUSED", fixture.join("paused"))
+        .env("RELEASE", fixture.join("release"))
         .env("GH_ISSUE", issue)
         .output()
         .unwrap();
     assert!(output.status.success());
-    let race_finals = ["73657373696f6e2d61.json", "73657373696f6e2d62.json"]
-        .iter()
-        .filter(|name| sessions.join(name).exists())
-        .count();
-    assert_eq!(race_finals, 1);
-    assert!(heartbeats.join("o7_testorg_r8_testrepo/42.json").exists());
+    assert!(heartbeats_a.join("o7_testorg_r8_testrepo/42.json").exists());
+    assert!(!heartbeats_b.join("o7_testorg_r8_testrepo/42.json").exists());
+    assert!(!heartbeats_b
+        .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d61.json")
+        .exists());
     let pending = claim_ref_message(&repo, 43);
     assert!(
         pending.contains("\"step\":\"heartbeat-pending:"),
         "{pending}"
     );
     assert_eq!(std::fs::read(&conflict).unwrap(), b"prior-attempt");
-    assert!(!heartbeats.join("o7_testorg_r8_testrepo/43.json").exists());
+    assert!(!heartbeats_a.join("o7_testorg_r8_testrepo/43.json").exists());
 }
 
 #[test]
