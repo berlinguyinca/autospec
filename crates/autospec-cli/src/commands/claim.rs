@@ -4795,10 +4795,16 @@ fn classify_startup_heartbeat(
         && evidence.ttl_seconds > 0
         && evidence.pid > 0
         && evidence.pid <= i32::MAX as u32
-        && !evidence.nonce.is_empty()
+        && evidence.nonce
+            == startup_heartbeat_nonce(expected.repo, expected.issue, expected.claim_id)
         && !evidence.host.is_empty()
         && !evidence.boot_id.is_empty()
-        && !evidence.process_start.is_empty();
+        && evidence
+            .process_start
+            .parse::<u64>()
+            .ok()
+            .filter(|start| *start > 0)
+            .is_some_and(|start| start.to_string() == evidence.process_start);
     let expired = now.saturating_sub(evidence.ts) > evidence.ttl_seconds && now >= evidence.ts;
     if !exact || !expired || !cfg!(unix) {
         return StartupHeartbeatClassification::Blocking;
@@ -6083,8 +6089,9 @@ mod tests {
     }
 
     fn startup_heartbeat_document(worker: &str, pid: u32) -> String {
+        let nonce = super::startup_heartbeat_nonce("owner/repo", 42, "claim-a");
         format!(
-            r#"{{"repo":"owner/repo","issue":"42","worker_id":"{worker}","branch":"feat/worker","pr":"","claim_id":"claim-a","step":"claimed","ts":100,"ttl_seconds":10,"pid":{pid},"nonce":"nonce-a","host":"host-a","boot_id":"boot-a","process_start":"start-a"}}"#
+            r#"{{"repo":"owner/repo","issue":"42","worker_id":"{worker}","branch":"feat/worker","pr":"","claim_id":"claim-a","step":"claimed","ts":100,"ttl_seconds":10,"pid":{pid},"nonce":"{nonce}","host":"host-a","boot_id":"boot-a","process_start":"1"}}"#
         )
     }
 
@@ -6999,7 +7006,7 @@ claimed|review
 "ttl_seconds":10|"ttl_seconds":0
 "pid":4242|"pid":0
 :nonce-a"|:nonce-b"
-"nonce":"nonce-a"|"nonce":"""#;
+"process_start":"1"|"process_start":"""#;
         cases.extend(mutations.lines().map(|row| {
             let (from, to) = row.split_once('|').expect("mutation row");
             let document = if from == "malformed" {
@@ -7194,9 +7201,10 @@ claimed|review
 
     #[cfg(unix)]
     fn heartbeat_copy_path(root: &Path) -> PathBuf {
+        let nonce = super::startup_heartbeat_nonce("owner/repo", 42, "claim-a");
         root.join(format!(
             "quarantine/startup-heartbeats/42-{}.json",
-            super::heartbeat_session_key("nonce-a")
+            super::heartbeat_session_key(&nonce)
         ))
     }
 
