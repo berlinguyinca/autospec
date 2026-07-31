@@ -1280,6 +1280,45 @@ fn legacy_executor_pending_state() -> ConductorState {
 }
 
 #[test]
+fn foreground_closed_claim_phase_selection_retires_without_reacquisition() {
+    let fixture = ForegroundFixture::new();
+    let retry_claim = selected_foreground_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("claim first generation")
+        .transition(ConductorEvent::DispatchRecorded {
+            outcome: ConductorOutcome::Retryable("executor_harness_exit_1".to_string()),
+        })
+        .expect("record retryable result")
+        .transition(ConductorEvent::RetryScheduled)
+        .expect("schedule successor claim");
+    assert_eq!(retry_claim.phase(), ConductorPhase::Claim);
+    seed_foreground_state(&fixture, &retry_claim);
+    fs::write(&fixture.mode, "reviewed\n").expect("seed queue labels");
+
+    let output = fixture
+        .command()
+        .env("FOREGROUND_ISSUE_STATE", "closed")
+        .output()
+        .expect("recover closed claim-phase selection");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    let recovered = fixture.read_state();
+    assert_eq!(recovered.phase(), ConductorPhase::Scan);
+    assert_eq!(recovered.selected_issue(), None);
+    let calls = fs::read_to_string(&fixture.calls).expect("GitHub calls");
+    assert!(
+        !calls.contains("issue\nedit\n42"),
+        "a closed selected issue must not receive a successor claim"
+    );
+}
+
+#[test]
 fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_windows() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     for (name, state, seeded_claim_state) in [
@@ -5291,11 +5330,11 @@ fi
 issue() {
   if [ "${AUTOSPEC_FOREGROUND_REAL_BRIDGE:-0}" = 1 ]; then
     if [ "$mode" = claimed ]; then real_labels='[{"name":"in-progress-by-bot"},{"name":"safety:reviewed"}]'; elif [ "$mode" = terminal ]; then real_labels='[]'; else real_labels='[{"name":"auto-implement"},{"name":"safety:reviewed"}]'; fi
-    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n/usr/bin/test -s tests/smoke/generation.sh\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n/usr/bin/test -s tests/smoke/generation.sh\\n\`\`\`\",\"labels\":$real_labels,\"author\":{\"login\":\"agent\"}}"
+    printf '%s\n' "{\"number\":42,\"title\":\"Ship the bridge fixture\",\"body\":\"## Goal\\n\\nAdd \`tests/smoke/generation.sh\` proving the native executor bridge runs.\\n\\n## Safety review\\n\\n<!-- autospec-safety:begin -->\\n- **decision:** \`SAFETY_PASS\`\\n<!-- autospec-safety:end -->\\n\\n## Implementation outline\\n\\n- \`tests/smoke/generation.sh\`\\n\\n## Tests required\\n\\n- smoke\\n\\n### Primary smoke test (inner loop)\\n\\n\`\`\`bash\\n/usr/bin/test -s tests/smoke/generation.sh\\n\`\`\`\\n\\n### Operator/full verification\\n\\n\`\`\`bash\\n/usr/bin/test -s tests/smoke/generation.sh\\n\`\`\`\",\"labels\":$real_labels,\"author\":{\"login\":\"agent\"},\"state\":\"${FOREGROUND_ISSUE_STATE:-open}\"}"
   elif [ "$mode" = unreviewed ]; then
-    printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Goal\n\nAdd the foreground adapter.","labels":[{"name":"auto-implement"}],"author":{"login":"agent"}}'
+    printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Goal\n\nAdd the foreground adapter.","labels":[{"name":"auto-implement"}],"author":{"login":"agent"},"state":"'"${FOREGROUND_ISSUE_STATE:-open}"'"}'
   else
-    printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","labels":[{"name":"auto-implement"},{"name":"safety:reviewed"}],"author":{"login":"agent"}}'
+    printf '%s\n' '{"number":42,"title":"Add Rust foreground","body":"## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","labels":[{"name":"auto-implement"},{"name":"safety:reviewed"}],"author":{"login":"agent"},"state":"'"${FOREGROUND_ISSUE_STATE:-open}"'"}'
   fi
 }
 claim_issue() {
