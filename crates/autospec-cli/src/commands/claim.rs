@@ -5489,7 +5489,6 @@ fn held_heartbeat_at(
 ) -> Result<Option<fs::File>, CommandFailure> {
     use nix::fcntl::{openat, OFlag};
     use nix::sys::stat::{fstat, Mode, SFlag};
-
     let descriptor = match openat(
         directory,
         name,
@@ -5690,12 +5689,7 @@ fn validate_retained_heartbeat(
 ) -> Result<std::path::PathBuf, CommandFailure> {
     use nix::fcntl::AtFlags;
     use nix::sys::stat::{fstat, fstatat};
-
-    if let Some(transaction) = transaction {
-        retire_heartbeat_receipt_with_sync(transaction, |directory| {
-            nix::unistd::fsync(directory)
-                .map_err(|error| CommandFailure::diagnostic(format!("receipt fsync: {error}")))
-        })?;
+    if transaction.is_some() {
         after_sync(HeartbeatHandoffSyncBoundary::Cleanup)?;
     }
     let mut reader = retained.try_clone().map_err(|error| {
@@ -5724,6 +5718,12 @@ fn validate_retained_heartbeat(
         return Err(CommandFailure::diagnostic(
             "retained heartbeat final validation failed",
         ));
+    }
+    if let Some(transaction) = transaction {
+        retire_heartbeat_receipt_with_sync(transaction, |directory| {
+            nix::unistd::fsync(directory)
+                .map_err(|error| CommandFailure::diagnostic(format!("receipt fsync: {error}")))
+        })?;
     }
     Ok(state_root
         .join("quarantine/startup-heartbeat-handoffs")
