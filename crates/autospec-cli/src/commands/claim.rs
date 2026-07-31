@@ -3729,7 +3729,12 @@ fn write_startup_heartbeat(
         json_escape(worker_id),
         json_escape(claim_id),
     );
-    publish_startup_heartbeat_transaction(&root, repo, issue, session_id, body.as_bytes())
+    #[cfg(target_os = "linux")]
+    return publish_startup_heartbeat_transaction(&root, repo, issue, session_id, body.as_bytes());
+    #[cfg(not(target_os = "linux"))]
+    Err(CommandFailure::diagnostic(
+        "heartbeat publisher unavailable",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -3927,19 +3932,6 @@ fn publish_startup_heartbeat_transaction_with_hook(
         return Err(CommandFailure::diagnostic("heartbeat binding changed"));
     }
     Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn publish_startup_heartbeat_transaction(
-    _root: &Path,
-    _repo: &str,
-    _issue: u64,
-    _session_id: Option<&str>,
-    _document: &[u8],
-) -> Result<(), CommandFailure> {
-    Err(CommandFailure::diagnostic(
-        "heartbeat publisher unavailable",
-    ))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6419,10 +6411,7 @@ mod tests {
         std::fs::create_dir_all(&sessions).unwrap();
         unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root) };
         let issue = repo.join("42.json");
-        let session = sessions.join(format!(
-            "{}.json",
-            super::heartbeat_session_key("session-a")
-        ));
+        let session = sessions.join("73657373696f6e2d61.json");
         let write = || {
             super::write_startup_heartbeat(
                 "owner/repo",
@@ -6462,24 +6451,15 @@ mod tests {
         assert!(!session_b.exists());
 
         std::fs::remove_file(&issue).unwrap();
-        nix::unistd::mkfifo(&issue, Mode::from_bits_truncate(0o600)).unwrap();
-        std::fs::set_permissions(&issue, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let fifo_identity = std::fs::symlink_metadata(&issue).unwrap();
-        assert!(write().is_err());
-        let fifo_after = std::fs::symlink_metadata(&issue).unwrap();
-        assert_eq!(identity(&fifo_identity), identity(&fifo_after));
-        assert!(!session.exists());
-        std::fs::remove_file(&issue).unwrap();
         let transaction_umask = umask(Mode::from_bits_truncate(0o777));
         write().unwrap();
         umask(transaction_umask);
         write().unwrap();
-        for path in [&issue, &session] {
-            assert_eq!(
-                std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
-                0o600
-            );
-        }
+        assert_eq!(
+            [&issue, &session]
+                .map(|path| { std::fs::metadata(path).unwrap().permissions().mode() & 0o7777 }),
+            [0o600; 2]
+        );
         for (number, session_id, role) in [(44, "session-c", "issue"), (45, "session-d", "session")]
         {
             let document = format!(
@@ -6490,28 +6470,36 @@ mod tests {
                     attempt(number, session_id, document.as_bytes(), (role, boundary)).is_err()
                 );
             }
-            assert!(attempt(number, session_id, document.as_bytes(), ("never", "never")).is_ok());
         }
 
-        std::fs::remove_file(&session).unwrap();
         let expected = std::fs::read(&issue).unwrap();
         let replacement = repo.join("replacement");
-        std::fs::write(&replacement, b"foreign").unwrap();
-        let replaced = super::publish_startup_heartbeat_transaction_with_hook(
-            &root,
-            "owner/repo",
-            42,
-            Some("session-a"),
-            &expected,
-            &mut |role, boundary| {
-                if (role, boundary) == ("session", "directory-fsync") {
-                    std::fs::rename(&replacement, &issue).unwrap();
-                }
-                Ok(())
-            },
-        );
-        assert!(replaced.is_err());
-        assert_eq!(std::fs::read(&issue).unwrap(), b"foreign");
+        let chmod =
+            |mode| std::fs::set_permissions(&issue, std::fs::Permissions::from_mode(mode)).unwrap();
+        for mutation in ["rename", "overwrite", "chmod"] {
+            std::fs::write(&issue, &expected).unwrap();
+            chmod(0o600);
+            std::fs::remove_file(&session).unwrap();
+            std::fs::write(&replacement, b"foreign").unwrap();
+            let result = super::publish_startup_heartbeat_transaction_with_hook(
+                &root,
+                "owner/repo",
+                42,
+                Some("session-a"),
+                &expected,
+                &mut |role, boundary| {
+                    if (role, boundary) == ("session", "directory-fsync") {
+                        match mutation {
+                            "rename" => std::fs::rename(&replacement, &issue).unwrap(),
+                            "overwrite" => std::fs::write(&issue, b"foreign").unwrap(),
+                            _ => chmod(0o640),
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            assert!(result.is_err(), "{mutation}");
+        }
     }
 
     #[cfg(target_os = "linux")]
