@@ -5,6 +5,7 @@
 #   scripts/lint-implementation.sh <PR> --issue <N>   # deterministic only, via gh pr diff
 #   scripts/lint-implementation.sh --diff-file <path> # offline / pre-push
 #   scripts/lint-implementation.sh --pre-commit --staged  # staged diff (pre-commit hook mode)
+#   scripts/lint-implementation.sh --staged --staged-base <commit>
 #   scripts/lint-implementation.sh --directives       # reformat findings as directive lines
 #   scripts/lint-implementation.sh --help             # print rules summary
 #
@@ -27,12 +28,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 HELP_TEXT="Usage: scripts/lint-implementation.sh <PR> --issue <N>
        scripts/lint-implementation.sh --diff-file <path>
        scripts/lint-implementation.sh --pre-commit --staged
+       scripts/lint-implementation.sh --staged --staged-base <commit>
        scripts/lint-implementation.sh [--directives]
        scripts/lint-implementation.sh --help
 
 Flags:
   --pre-commit      Run in pre-commit mode (reads staged diff instead of PR diff)
   --staged          Alias for --pre-commit; use git diff --cached as diff source
+  --staged-base     Compare the staged index to one explicit commit
   --directives      Reformat each finding as an imperative directive line:
                     \"Fix <RULE_ID>: <imperative action>\"
                     Suitable for injecting into implementer retry prompts.
@@ -84,6 +87,7 @@ ISSUE_NUMBER=""
 DIFF_FILE=""
 PRE_COMMIT=0
 STAGED=0
+STAGED_BASE=""
 DIRECTIVES=0
 VACUOUS_ASSERTIONS=0
 ASSERTION_DENSITY=0
@@ -120,6 +124,14 @@ while [ $# -gt 0 ]; do
         --staged)
             STAGED=1
             shift
+            ;;
+        --staged-base)
+            if [ $# -lt 2 ] || [ -n "$STAGED_BASE" ]; then
+                printf 'lint-implementation.sh: --staged-base requires one commit\n' >&2
+                exit 1
+            fi
+            STAGED_BASE="$2"
+            shift 2
             ;;
         --directives)
             DIRECTIVES=1
@@ -159,6 +171,17 @@ if [ "$STAGED" -eq 0 ] && [ -z "$PR_NUMBER" ] && [ -z "$DIFF_FILE" ]; then
     printf 'lint-implementation.sh: must supply <PR>, --diff-file <path>, or --staged\n' >&2
     printf '%s\n' "$HELP_TEXT" >&2
     exit 1
+fi
+
+if [ -n "$STAGED_BASE" ]; then
+    if [ "$STAGED" -eq 0 ]; then
+        printf 'lint-implementation.sh: --staged-base requires --staged\n' >&2
+        exit 1
+    fi
+    if ! STAGED_BASE="$(git rev-parse --verify "$STAGED_BASE^{commit}" 2>/dev/null)"; then
+        printf 'lint-implementation.sh: invalid staged base commit\n' >&2
+        exit 1
+    fi
 fi
 
 if [ -n "$DIFF_FILE" ] && [ ! -f "$DIFF_FILE" ]; then
@@ -284,7 +307,11 @@ if [ -n "$DIFF_FILE" ]; then
     cp "$DIFF_FILE" "$TMP_DIFF"
 elif [ "$STAGED" -eq 1 ]; then
     # Pre-commit / staged mode: read from git diff --cached
-    git diff --cached > "$TMP_DIFF" 2>/dev/null || {
+    if [ -n "$STAGED_BASE" ]; then
+        git diff --cached "$STAGED_BASE" -- > "$TMP_DIFF" 2>/dev/null
+    else
+        git diff --cached > "$TMP_DIFF" 2>/dev/null
+    fi || {
         printf 'ERROR: failed to get staged diff (git diff --cached)\n' >&2
         exit 1
     }
