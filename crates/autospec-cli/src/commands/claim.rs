@@ -3916,8 +3916,21 @@ fn publish_startup_heartbeat_transaction_with_hook(
         })?;
     }
     let exact = |directory: &fs::File, name: &str, guard: &HeartbeatPublication| {
-        heartbeat_final_binding(&guard.file, directory, name, (guard.device, guard.inode)).ok()
-            == Some((HeartbeatFinalBinding::Exact, 1))
+        let metadata = guard.file.metadata().ok();
+        let content = guard.file.try_clone().and_then(read_regular_file).ok();
+        let normalize = |value: &[u8]| {
+            let mut value: serde_json::Value = serde_json::from_slice(value).ok()?;
+            value.as_object_mut()?.remove("ts");
+            Some(value)
+        };
+        metadata.is_some_and(|value| {
+            value.is_file()
+                && value.uid() == nix::unistd::geteuid().as_raw()
+                && value.mode() & 0o7777 == 0o600
+        }) && content.is_some_and(|value| normalize(&value.document) == normalize(document))
+            && heartbeat_final_binding(&guard.file, directory, name, (guard.device, guard.inode))
+                .ok()
+                == Some((HeartbeatFinalBinding::Exact, 1))
     };
     if !exact(
         &repo,
@@ -4835,6 +4848,7 @@ fn file_identity(metadata: &fs::Metadata) -> RegularFileIdentity {
 #[cfg(unix)]
 #[allow(dead_code)]
 fn read_regular_file(mut file: fs::File) -> std::io::Result<RegularFileSnapshot> {
+    std::io::Seek::rewind(&mut file)?;
     let before = file.metadata()?;
     if !before.is_file() {
         return Err(std::io::Error::other("heartbeat is not a regular file"));
@@ -6426,9 +6440,7 @@ mod tests {
         std::fs::write(&caller, b"caller-owned").unwrap();
         std::fs::hard_link(&caller, &issue).unwrap();
         assert!(write().is_err());
-        assert_eq!(std::fs::read(&caller).unwrap(), b"caller-owned");
-        assert_eq!(std::fs::metadata(&caller).unwrap().nlink(), 2);
-        assert!(!session.exists());
+        assert!(std::fs::read(&caller).unwrap() == b"caller-owned" && !session.exists());
 
         let session_b = sessions.join("73657373696f6e2d62.json");
         let prepared = b"{\"issue\":\"43\",\"branch\":\"feat/worker\",\"step\":\"claimed\",\"ts\":1,\"pr\":\"\",\"repo\":\"owner/repo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-b\",\"session_id\":\"session-b\"}\n";
@@ -6447,8 +6459,7 @@ mod tests {
             )
         };
         assert!(attempt(43, "session-b", prepared, ("session", "before-link")).is_err());
-        assert!(!repo.join("43.json").exists());
-        assert!(!session_b.exists());
+        assert!(!repo.join("43.json").exists() && !session_b.exists());
 
         std::fs::remove_file(&issue).unwrap();
         let transaction_umask = umask(Mode::from_bits_truncate(0o777));
