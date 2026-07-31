@@ -7220,6 +7220,17 @@ claimed|review
         std::fs::File::from(fd).write_all(b"drift").unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    fn mutate_retained(path: &Path, source: &Path, mutation: &str) {
+        match mutation.trim_start_matches("cleanup-") {
+            "content" => std::fs::write(path, b"drift"),
+            "mode" => std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640)),
+            "binding" => std::fs::rename(path, path.with_extension("moved")),
+            "source" => std::fs::write(source, b"foreign"),
+            _ => unreachable!(),
+        }
+        .unwrap();
+    }
     #[cfg(unix)]
     fn assert_mode(path: &Path, expected: u32) {
         let permissions = std::fs::metadata(path)
@@ -7753,45 +7764,44 @@ claimed|review
             std::fs::remove_dir_all(parent).unwrap();
         }
 
-        for mutation in ["content", "mode", "binding"] {
+        for mutation in [
+            "content",
+            "mode",
+            "binding",
+            "cleanup-content",
+            "cleanup-mode",
+            "cleanup-binding",
+            "cleanup-source",
+        ] {
             let (parent, repo_path, source, repo, snapshot) =
                 anchored_startup_heartbeat_fixture(mutation);
+            let archive = repo_path
+                .join("quarantine/startup-heartbeat-handoffs")
+                .join(
+                    super::heartbeat_receipt_names(expected_startup_heartbeat(
+                        "host:user:rust:4242:nonce-a",
+                    ))
+                    .1
+                    .replace(".receipt", ".json"),
+                );
             let result = super::handoff_retained_heartbeat(
                 &repo_path,
                 &repo,
                 source.file_name().unwrap(),
                 &snapshot,
-                |boundary, _, handoff, name| {
-                    if boundary == "final" {
-                        let file = nix::fcntl::openat(
-                            handoff,
-                            name,
-                            nix::fcntl::OFlag::O_RDWR,
-                            nix::sys::stat::Mode::empty(),
-                        )
-                        .unwrap();
-                        match mutation {
-                            "content" => std::fs::File::from(file).write_all(b"drift").unwrap(),
-                            "mode" => nix::sys::stat::fchmod(
-                                &file,
-                                nix::sys::stat::Mode::from_bits_truncate(0o640),
-                            )
-                            .unwrap(),
-                            _ => {
-                                drop(file);
-                                nix::fcntl::renameat2(
-                                    handoff,
-                                    name,
-                                    handoff,
-                                    "replacement.json",
-                                    nix::fcntl::RenameFlags::RENAME_NOREPLACE,
-                                )
-                                .unwrap();
-                            }
-                        }
+                |boundary, _, _, _| {
+                    if boundary == "final" && !mutation.starts_with("cleanup-") {
+                        mutate_retained(&archive, &source, mutation);
                     }
                 },
-                |_| Ok(()),
+                |boundary| {
+                    if boundary == super::HeartbeatHandoffSyncBoundary::Cleanup
+                        && mutation.starts_with("cleanup-")
+                    {
+                        mutate_retained(&archive, &source, mutation);
+                    }
+                    Ok(())
+                },
             );
             assert!(result.is_err(), "{mutation}");
             std::fs::remove_dir_all(parent).unwrap();
