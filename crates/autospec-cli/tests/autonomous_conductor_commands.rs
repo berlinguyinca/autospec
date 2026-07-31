@@ -1995,12 +1995,10 @@ fn immediate_stop_after_claim_prevents_retry_claim_and_executor() {
         )
         .output()
         .expect("run immediate stop at retry boundary");
-    assert!(
-        output.status.success(),
-        "stdout={} stderr={} calls={}",
+    assert_eq!(output.status.code(), Some(20));
+    assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-        fs::read_to_string(&fixture.calls).unwrap_or_default()
+        "{\"decision\":\"stop\",\"mode\":\"immediate\"}\n"
     );
     assert_eq!(
         fs::read_to_string(&harness_launches)
