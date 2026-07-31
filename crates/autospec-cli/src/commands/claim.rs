@@ -3904,7 +3904,6 @@ fn publish_startup_heartbeat_transaction_with_hook(
         publish_prepared_heartbeat_file(directory, name, prepared, "session", boundary)
             .map_err(heartbeat_publication_error)?;
     }
-    drop(root);
     Ok(())
 }
 
@@ -6405,18 +6404,20 @@ mod tests {
             "{}.json",
             super::heartbeat_session_key("session-a")
         ));
+        let write = || {
+            super::write_startup_heartbeat(
+                "owner/repo",
+                42,
+                "worker-a",
+                "feat/worker",
+                "claim-a",
+                Some("session-a"),
+            )
+        };
         let caller = fixture.join("caller-owned-heartbeat");
         std::fs::write(&caller, b"caller-owned").unwrap();
         std::fs::hard_link(&caller, &issue).unwrap();
-        assert!(super::write_startup_heartbeat(
-            "owner/repo",
-            42,
-            "worker-a",
-            "feat/worker",
-            "claim-a",
-            Some("session-a"),
-        )
-        .is_err());
+        assert!(write().is_err());
         assert_eq!(std::fs::read(&caller).unwrap(), b"caller-owned");
         assert_eq!(std::fs::metadata(&caller).unwrap().nlink(), 2);
         assert!(!session.exists());
@@ -6427,23 +6428,21 @@ mod tests {
         ));
         let prepared = br#"{"issue":"43","branch":"feat/worker","step":"claimed","ts":1,"pr":"","repo":"owner/repo","worker_id":"worker-a","claim_id":"claim-b","session_id":"session-b"}
 "#;
-        assert!(super::publish_startup_heartbeat_transaction_with_hook(
-            &root,
-            "owner/repo",
-            43,
-            Some("session-b"),
-            prepared,
-            &mut |role, boundary| {
-                if (role, boundary) == ("session", "before-link") {
-                    Err(super::CommandFailure::diagnostic(
-                        "injected session preparation failure",
-                    ))
-                } else {
-                    Ok(())
-                }
-            },
-        )
-        .is_err());
+        let attempt = |issue, session, document: &[u8], failed| {
+            super::publish_startup_heartbeat_transaction_with_hook(
+                &root,
+                "owner/repo",
+                issue,
+                Some(session),
+                document,
+                &mut |role, boundary| {
+                    ((role, boundary) != failed)
+                        .then_some(())
+                        .ok_or_else(|| super::CommandFailure::diagnostic("injected failure"))
+                },
+            )
+        };
+        assert!(attempt(43, "session-b", prepared, ("session", "before-link")).is_err());
         assert!(!repo.join("43.json").exists());
         assert!(!session_b.exists());
 
@@ -6451,45 +6450,70 @@ mod tests {
         nix::unistd::mkfifo(&issue, Mode::from_bits_truncate(0o600)).unwrap();
         std::fs::set_permissions(&issue, std::fs::Permissions::from_mode(0o600)).unwrap();
         let fifo_identity = std::fs::symlink_metadata(&issue).unwrap();
-        assert!(super::write_startup_heartbeat(
-            "owner/repo",
-            42,
-            "worker-a",
-            "feat/worker",
-            "claim-a",
-            Some("session-a"),
-        )
-        .is_err());
+        assert!(write().is_err());
         let fifo_after = std::fs::symlink_metadata(&issue).unwrap();
         assert_eq!(identity(&fifo_identity), identity(&fifo_after));
         assert!(!session.exists());
         std::fs::remove_file(&issue).unwrap();
         let transaction_umask = umask(Mode::from_bits_truncate(0o777));
-        super::write_startup_heartbeat(
-            "owner/repo",
-            42,
-            "worker-a",
-            "feat/worker",
-            "claim-a",
-            Some("session-a"),
-        )
-        .unwrap();
+        write().unwrap();
         umask(transaction_umask);
-        super::write_startup_heartbeat(
-            "owner/repo",
-            42,
-            "worker-a",
-            "feat/worker",
-            "claim-a",
-            Some("session-a"),
-        )
-        .unwrap();
+        write().unwrap();
         for path in [&issue, &session] {
             assert_eq!(
                 std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
                 0o600
             );
         }
+        for (number, session_id, role) in [(44, "session-c", "issue"), (45, "session-d", "session")]
+        {
+            let document = format!(
+                "{{\"issue\":\"{number}\",\"branch\":\"feat/worker\",\"step\":\"claimed\",\"ts\":1,\"pr\":\"\",\"repo\":\"owner/repo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-{number}\",\"session_id\":\"{session_id}\"}}\n"
+            );
+            assert!(attempt(
+                number,
+                session_id,
+                document.as_bytes(),
+                (role, "directory-fsync")
+            )
+            .is_err());
+            assert!(attempt(
+                number,
+                session_id,
+                document.as_bytes(),
+                (role, "transaction-fsync")
+            )
+            .is_err());
+            super::publish_startup_heartbeat_transaction(
+                &root,
+                "owner/repo",
+                number,
+                Some(session_id),
+                document.as_bytes(),
+            )
+            .unwrap();
+        }
+
+        std::fs::remove_file(&session).unwrap();
+        let expected = std::fs::read(&issue).unwrap();
+        let replacement = repo.join("replacement");
+        std::fs::write(&replacement, b"foreign").unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let replaced = super::publish_startup_heartbeat_transaction_with_hook(
+            &root,
+            "owner/repo",
+            42,
+            Some("session-a"),
+            &expected,
+            &mut |role, boundary| {
+                if (role, boundary) == ("session", "directory-fsync") {
+                    std::fs::rename(&replacement, &issue).unwrap();
+                }
+                Ok(())
+            },
+        );
+        assert!(replaced.is_err());
+        assert_eq!(std::fs::read(&issue).unwrap(), b"foreign");
     }
 
     #[cfg(target_os = "linux")]
