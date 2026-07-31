@@ -5926,6 +5926,7 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
 
     static BRIDGE_TRANSITION_ENV: Mutex<()> = Mutex::new(());
+    static STARTUP_HEARTBEAT_ENV: Mutex<()> = Mutex::new(());
 
     fn startup_heartbeat_fixture(label: &str) -> (PathBuf, PathBuf) {
         let directory = std::env::temp_dir().join(format!(
@@ -6565,6 +6566,95 @@ mod tests {
         );
         assert_eq!(classified, super::StartupHeartbeatClassification::Absent);
         std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn startup_heartbeat_process_identity() {
+        use super::{StartupHeartbeatClassification::ExpiredDead, StartupPidLiveness};
+
+        let _environment = STARTUP_HEARTBEAT_ENV.lock().unwrap();
+        let (directory, _) = startup_heartbeat_fixture("process-identity");
+        let root = directory.join(".autospec/process-heartbeats");
+        let old_root = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        let old_ttl = std::env::var_os("AUTOSPEC_CLAIM_LEASE_SECONDS");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
+        std::env::set_var("AUTOSPEC_CLAIM_LEASE_SECONDS", "0");
+        let path = root
+            .join(super::super::autonomous::drain::repository_progress_key(
+                "owner/repo",
+            ))
+            .join("42.json");
+        let mut nonces = Vec::new();
+        let mut last = None;
+        for worker in ["worker-a", "opaque worker:with/slash"] {
+            super::write_startup_heartbeat(
+                "owner/repo",
+                42,
+                worker,
+                "feat/worker",
+                "claim-a",
+                None,
+            )
+            .unwrap();
+            let document = std::fs::read(&path).unwrap();
+            let evidence = super::parse_startup_heartbeat(&document).unwrap();
+            assert_eq!(evidence.worker_id, worker);
+            assert_eq!(evidence.pid, std::process::id());
+            assert_eq!(evidence.ttl_seconds, 1);
+            assert!(!evidence.nonce.is_empty());
+            assert_eq!(
+                super::observe_local_startup_pid(worker, evidence.pid),
+                StartupPidLiveness::Live
+            );
+            assert!(matches!(
+                super::classify_startup_heartbeat(
+                    &path,
+                    expected_startup_heartbeat(worker),
+                    evidence.ts + evidence.ttl_seconds + 1,
+                    |observed, pid| {
+                        assert_eq!((observed, pid), (worker, evidence.pid));
+                        StartupPidLiveness::Dead
+                    },
+                ),
+                ExpiredDead(_)
+            ));
+            nonces.push(evidence.nonce.clone());
+            last = Some((worker, document, evidence));
+        }
+        assert_ne!(nonces[0], nonces[1]);
+
+        let (worker, document, evidence) = last.unwrap();
+        let document = String::from_utf8(document).unwrap();
+        let pid = format!("\"pid\":{}", evidence.pid);
+        let nonce = format!("\"nonce\":\"{}\"", evidence.nonce);
+        for malformed in [
+            document.replace(&pid, "\"pid\":0"),
+            document.replace(&pid, "\"pid\":\"bad\""),
+            document.replace(&nonce, "\"nonce\":\"\""),
+            document.replace(worker, "different-worker"),
+        ] {
+            std::fs::write(&path, malformed).unwrap();
+            assert_eq!(
+                super::classify_startup_heartbeat(
+                    &path,
+                    expected_startup_heartbeat(worker),
+                    evidence.ts + evidence.ttl_seconds + 1,
+                    |_, _| StartupPidLiveness::Dead,
+                ),
+                super::StartupHeartbeatClassification::Blocking
+            );
+        }
+        for (key, value) in [
+            ("AUTOSPEC_HEARTBEAT_DIR", old_root),
+            ("AUTOSPEC_CLAIM_LEASE_SECONDS", old_ttl),
+        ] {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(target_os = "linux")]
