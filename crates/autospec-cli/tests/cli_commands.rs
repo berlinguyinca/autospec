@@ -2197,6 +2197,7 @@ fn autonomous_stop_graceful_writes_sentinel_and_leaves_conductor_running() {
     assert!(target_status.contains("\"monitor\":{\"running\":false"));
     assert!(target_status.contains("\"supervisor\":{\"running\":false"));
 
+    terminate_fixture_process(&original_conductor);
     cleanup_pids(&scope);
     assert!(!process_is_alive(&original_conductor));
 }
