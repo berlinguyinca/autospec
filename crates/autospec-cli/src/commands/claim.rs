@@ -7893,6 +7893,23 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_platform_stale_recovery_is_fail_closed() {
+        let source = include_str!("claim.rs");
+        let fallback = source
+            .split(
+                "#[cfg(not(target_os = \"linux\"))]\nfn quarantine_authoritative_stale_heartbeat",
+            )
+            .nth(1)
+            .expect("unsupported-platform recovery fallback");
+        let fallback = fallback
+            .split("fn release_stale_startup_labels")
+            .next()
+            .expect("fallback boundary");
+        assert!(fallback.contains("Ok(false)"));
+        assert!(!fallback.contains("startup_heartbeat_exists"));
+    }
+
+    #[test]
     fn classify_startup_heartbeat_blocks_fresh_live_malformed_mismatched_and_remote_evidence() {
         use super::StartupPidLiveness::{Dead, Live};
         let (directory, path) = startup_heartbeat_fixture("blocking");

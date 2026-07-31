@@ -23,6 +23,8 @@ heartbeat files, plus handoff receipts, use mode `0600`. Operators may inspect
 the retained JSON and completed receipt under the configured
 `AUTOSPEC_HEARTBEAT_DIR`; they must not edit, relink, or delete either artifact.
 Unsafe ownership, modes, file types, links, or directory bindings fail closed.
+Missing receipt ancestry is evidenceless only when descriptor inspection proves
+it absent; platforms without that secure inspection backend fail closed.
 
 When selection records `phase: paused`, `selected_issue: null`, and
 `pause_reason: no_ready_issue_after_review`, a continuous foreground conductor
