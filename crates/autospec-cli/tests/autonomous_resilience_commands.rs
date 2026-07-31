@@ -1,3 +1,4 @@
+use autospec_core::coordination::{ConductorEvent, ConductorPhase, ConductorScope, ConductorState};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -1501,6 +1502,45 @@ fn autonomous_foreground_persists_initial_preview_rejection_before_releasing_lea
 }
 
 #[test]
+fn obsolete_paused_selection_retires_after_authoritative_issue_reread() {
+    for issue_state in ["closed", "unlabeled"] {
+        let fixture = ResilienceFixture::new();
+        fixture.write_paused_foreground_state(1600);
+
+        let output = fixture.run_foreground_with_issue_state(issue_state);
+
+        assert!(
+            output.status.success(),
+            "{issue_state}: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state = fixture.read_foreground_state();
+        assert_eq!(state.phase(), ConductorPhase::Scan, "{issue_state}");
+        assert_eq!(state.selected_issue(), None, "{issue_state}");
+    }
+}
+
+#[test]
+fn obsolete_paused_selection_reread_failure_preserves_paused_state() {
+    let fixture = ResilienceFixture::new();
+    fixture.write_paused_foreground_state(1600);
+    let before = fs::read_to_string(fixture.foreground_state_path()).expect("read paused state");
+
+    let output = fixture.run_foreground_with_issue_state("failure");
+
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("gh issue reread 1600 failed"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.foreground_state_path()).expect("reread paused state"),
+        before
+    );
+}
+
+#[test]
 fn autonomous_foreground_rejects_failure_cap_before_dispatch() {
     let fixture = ResilienceFixture::new();
     fixture.write_failures("owner__repo", 42, 3);
@@ -2142,6 +2182,83 @@ esac
         self.foreground_with_changed_selection_command()
             .output()
             .expect("run foreground with changing selection")
+    }
+
+    fn run_foreground_with_issue_state(&self, issue_state: &str) -> Output {
+        let bin = self.root.join("bin");
+        fs::create_dir_all(&bin).expect("create fake bin");
+        write_executable(
+            &bin.join("gh"),
+            r####"#!/bin/sh
+set -eu
+endpoint=""
+for value in "$@"; do
+  case "$value" in repos/*) endpoint="$value" ;; esac
+done
+case "$endpoint" in
+  repos/owner/repo/branches/main) printf '%s\n' '{}' ;;
+  repos/owner/repo/commits/main/status)
+    printf '%s\n' '{"state":"success","total_count":1,"statuses":[{"context":"ci","state":"success"}]}'
+    ;;
+  *labels=auto-implement*|*labels=in-progress-by-bot*)
+    printf '%s\n' '{"raw_count":0,"items":[]}'
+    ;;
+  repos/owner/repo/issues/1600)
+    case "$AUTOSPEC_TEST_ISSUE_STATE" in
+      closed) printf '%s\n' '{"labels":["auto-implement"],"state":"closed"}' ;;
+      unlabeled) printf '%s\n' '{"labels":[],"state":"open"}' ;;
+      failure) printf '%s\n' 'authoritative reread failed' >&2; exit 1 ;;
+    esac
+    ;;
+  repos/owner/repo/issues/1600/comments?*)
+    printf '%s\n' '{"raw_count":0,"items":[]}'
+    ;;
+  '') printf '%s\n' '{"items":[],"page_info":{"has_next_page":false,"end_cursor":null}}' ;;
+  *) printf 'unexpected gh endpoint: %s\n' "$endpoint" >&2; exit 1 ;;
+esac
+"####,
+        );
+        self.command()
+            .args([
+                "run-foreground",
+                "--repo",
+                "owner/repo",
+                "--branch",
+                "main",
+                "--repo-dir",
+            ])
+            .arg(&self.repo_dir)
+            .env("AUTOSPEC_HOST", "autospec-test-host")
+            .env("AUTOSPEC_CLAIM_GIT_REMOTE", &self.repo_dir)
+            .env("AUTOSPEC_TEST_ISSUE_STATE", issue_state)
+            .env("PATH", path_with(&bin))
+            .output()
+            .expect("run foreground against authoritative issue state")
+    }
+
+    fn write_paused_foreground_state(&self, issue: u64) {
+        let state = ConductorState::new("owner/repo", ConductorScope::Repository, 3)
+            .expect("state")
+            .transition(ConductorEvent::ScanFoundWork)
+            .expect("scan")
+            .transition(ConductorEvent::SafetyReviewed)
+            .expect("review")
+            .transition(ConductorEvent::Selected {
+                issue,
+                serialization_reasons: Vec::new(),
+            })
+            .expect("select")
+            .transition(ConductorEvent::Pause {
+                reason: "operator_wait".to_string(),
+            })
+            .expect("pause");
+        write_file(&self.foreground_state_path(), &state.to_json());
+    }
+
+    fn read_foreground_state(&self) -> ConductorState {
+        let source =
+            fs::read_to_string(self.foreground_state_path()).expect("read foreground state");
+        ConductorState::parse_json(&source).expect("parse foreground state")
     }
 
     fn initialize_git_remote(&self) {

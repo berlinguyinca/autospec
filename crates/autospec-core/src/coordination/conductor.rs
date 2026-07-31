@@ -76,6 +76,7 @@ pub enum ConductorEvent {
         reason: String,
     },
     Resume,
+    RetireObsoleteSelection,
     AbandonExhausted,
     AbandonTerminal,
     AbandonOwnership,
@@ -324,6 +325,11 @@ impl ConductorState {
                 self.pause(reason)?
             }
             ConductorEvent::Resume if self.phase == ConductorPhase::Paused => self.resume()?,
+            ConductorEvent::RetireObsoleteSelection
+                if self.phase == ConductorPhase::Paused && self.selected_issue.is_some() =>
+            {
+                self.abandon_exhausted()
+            }
             ConductorEvent::AbandonExhausted if self.can_abandon_exhausted() => {
                 self.abandon_exhausted()
             }
@@ -491,5 +497,34 @@ impl ConductorState {
     fn clear_for_terminal(&mut self) {
         self.clear_selection();
         self.last_outcome = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConductorEvent, ConductorPhase, ConductorScope, ConductorState};
+
+    #[test]
+    fn obsolete_paused_selection_retires_to_scan() {
+        let retired = ConductorState::new("owner/repo", ConductorScope::Repository, 3)
+            .unwrap()
+            .transition(ConductorEvent::ScanFoundWork)
+            .unwrap()
+            .transition(ConductorEvent::SafetyReviewed)
+            .unwrap()
+            .transition(ConductorEvent::Selected {
+                issue: 1600,
+                serialization_reasons: Vec::new(),
+            })
+            .unwrap()
+            .transition(ConductorEvent::Pause {
+                reason: "operator_wait".to_string(),
+            })
+            .unwrap()
+            .transition(ConductorEvent::RetireObsoleteSelection)
+            .unwrap();
+
+        assert_eq!(retired.phase(), ConductorPhase::Scan);
+        assert_eq!(retired.selected_issue(), None);
     }
 }
