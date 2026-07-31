@@ -8,6 +8,22 @@ different recovery window; active workers refresh their claims as they run.
 The conductor also defaults `AUTOSPEC_RESCAN_INTERVAL` to `300` seconds after
 an empty backlog, while an explicit environment value remains authoritative.
 
+## Startup heartbeat recovery
+
+Authoritative claim recovery treats startup heartbeat evidence as an audit
+record, not a disposable lock file. Fresh, live, malformed, mismatched, remote,
+or otherwise ambiguous evidence remains blocking. An exact expired heartbeat
+whose local process generation is absent is moved into the repository-scoped
+`quarantine/startup-heartbeat-handoffs/` directory before the claim becomes
+available.
+
+Heartbeat roots, repository directories, quarantine directories, and handoff
+directories are owned by the effective user with mode `0700`. Live and retained
+heartbeat files, plus handoff receipts, use mode `0600`. Operators may inspect
+the retained JSON and completed receipt under the configured
+`AUTOSPEC_HEARTBEAT_DIR`; they must not edit, relink, or delete either artifact.
+Unsafe ownership, modes, file types, links, or directory bindings fail closed.
+
 When selection records `phase: paused`, `selected_issue: null`, and
 `pause_reason: no_ready_issue_after_review`, a continuous foreground conductor
 stays alive and polls at its configured interval. A later ready-queue snapshot
