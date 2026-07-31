@@ -2585,18 +2585,6 @@ fn run_foreground_with_lease(
     let state_path = foreground_state_path(layout, scope);
     let mut state =
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
-    if state.phase() == ConductorPhase::Paused {
-        if let Some(issue) = state.selected_issue() {
-            if !issue_is_open_for_autonomous_work(&layout.repo, issue)? {
-                state = state
-                    .transition(ConductorEvent::RetireObsoleteSelection)
-                    .map_err(CommandFailure::diagnostic)?;
-                persist_foreground_state(&state_path, &state)
-                    .map_err(CommandFailure::diagnostic)?;
-                return Ok(ForegroundCompletion::State(Box::new(state)));
-            }
-        }
-    }
     if no_ready_selection_pause(&state).map_err(CommandFailure::diagnostic)? {
         let ready = initial_plan.as_ref().map_err(|reason| {
             CommandFailure::diagnostic(format!("cannot recheck paused foreground queue: {reason}"))
@@ -2774,6 +2762,18 @@ fn run_foreground_with_lease(
                 Ok(ForegroundCompletion::Lifecycle(lifecycle))
             }
         };
+    }
+    if state.phase() == ConductorPhase::Paused {
+        if let Some(issue) = state.selected_issue() {
+            if !issue_is_open_for_autonomous_work(&layout.repo, issue)? {
+                state = state
+                    .transition(ConductorEvent::RetireObsoleteSelection)
+                    .map_err(CommandFailure::diagnostic)?;
+                persist_foreground_state(&state_path, &state)
+                    .map_err(CommandFailure::diagnostic)?;
+                return Ok(ForegroundCompletion::State(Box::new(state)));
+            }
+        }
     }
     if foreground_state_is_retained(&state) {
         return Ok(ForegroundCompletion::State(Box::new(state)));
