@@ -1435,6 +1435,13 @@ fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_w
                 },
             )
             .expect("seed claim label projection");
+            if name == "released-executor-receipt-failure" {
+                fixture.seed_interrupted_executor_invocation_without_cleanup(
+                    "rust-foreground-conductor-recovered",
+                    "feat/autonomous-issue-42",
+                    seeded_claim_id,
+                );
+            }
         }
         let mut command = if name == "released-executor-receipt-failure" {
             let mut command = fixture.configured_command();
@@ -1525,6 +1532,92 @@ fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_w
         }
         drop(bridge);
     }
+}
+
+#[test]
+fn foreground_missing_failure_intent_requires_exact_retryable_release() {
+    let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
+    let fixture = ForegroundFixture::new();
+    let bridge = fixture.configure_real_bridge();
+    fs::create_dir_all(fixture.state_path().parent().unwrap())
+        .expect("create recovery state directory");
+    fs::write(
+        fixture.state_path(),
+        selected_foreground_state()
+            .transition(ConductorEvent::Claimed)
+            .expect("seed claimed conductor")
+            .transition(ConductorEvent::DispatchRecorded {
+                outcome: ConductorOutcome::Blocked("executor_receipt_failed".to_string()),
+            })
+            .expect("seed receipt failure")
+            .to_json(),
+    )
+    .expect("persist receipt-failed conductor state");
+    let worker_id = "rust-foreground-conductor-recovered";
+    let branch = "feat/autonomous-issue-42";
+    let claim_id = "terminal-needs-human-generation";
+    fixture.seed_claim_state_with_id(
+        worker_id,
+        branch,
+        "failed",
+        &fresh_iso_timestamp(),
+        claim_id,
+    );
+    fixture.seed_claim_acquisition_receipt(worker_id, branch, claim_id);
+    fixture.seed_interrupted_executor_invocation_without_cleanup(worker_id, branch, claim_id);
+    let seeded = git_fixture(
+        &fixture.claim_repo,
+        &[
+            "ls-remote",
+            "--refs",
+            fixture.claim_remote.to_str().expect("claim remote"),
+            "refs/autospec/claims/issue-42",
+        ],
+    );
+    let seeded = seeded.split_whitespace().next().expect("seeded claim oid");
+    git_fixture(
+        &fixture.claim_repo,
+        &[
+            "push",
+            bridge.remote.to_str().expect("bridge remote"),
+            &format!("{seeded}:refs/autospec/claims/issue-42"),
+        ],
+    );
+    fs::write(&fixture.mode, "reviewed\n").expect("seed claim label projection");
+
+    let output = fixture
+        .command()
+        .env("PATH", path_with(&bridge.bin))
+        .env("AUTOSPEC_FOREGROUND_REAL_BRIDGE", "1")
+        .env("AUTOSPEC_BRIDGE_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_BRIDGE_MERGED", &bridge.merged)
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
+        .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
+        .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
+        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .output()
+        .expect("reject non-retryable terminal recovery");
+
+    assert!(
+        !output.status.success(),
+        "stdout={} stderr={} calls={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&fixture.calls).unwrap_or_default()
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("missing failure cleanup intent requires an exact retryable release"),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists(),
+        "non-retryable terminal state must retain its durable acquisition"
+    );
 }
 
 #[test]
@@ -6149,6 +6242,58 @@ printf '%s\n' '[]' > "$report"
         .expect("seed claim acquisition receipt");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
             .expect("make claim acquisition receipt private");
+    }
+
+    fn seed_interrupted_executor_invocation_without_cleanup(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+    ) {
+        let state_dir = self.scoped_dir().join("executor");
+        fs::create_dir_all(&state_dir).expect("create executor state directory");
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700))
+            .expect("make executor state directory private");
+        let generation = &sha256_hex(claim_id.as_bytes())[..16];
+        let path = state_dir.join(format!("issue-42-{generation}.json"));
+        let body = serde_json::json!({
+            "schema": 1,
+            "identity": {
+                "repository": "test/repo",
+                "repository_path": self.repo_dir,
+                "issue": 42,
+                "worker_id": worker_id,
+                "branch": branch,
+                "claim_id": claim_id,
+                "invocation_id": format!("42-{claim_id}"),
+                "base_ref": "origin/main",
+                "base_oid": "0".repeat(40),
+                "worktree": self.root.join("interrupted-worktree"),
+                "runtime_environment_dir": null,
+                "runtime_session_id": null
+            },
+            "harness": "claude",
+            "phase": "interrupted",
+            "supervisor": null,
+            "process": null,
+            "progress_at": 1,
+            "pr": null,
+            "head_oid": null,
+            "closeout_path": null,
+            "closeout_digest": null,
+            "remote_snapshot_digest": null,
+            "draft_process": null,
+            "terminal_result": null,
+            "umbrella": null,
+            "current_child": null
+        });
+        fs::write(&path, format!("{body}\n")).expect("seed interrupted executor invocation");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .expect("make interrupted executor invocation private");
+        assert!(
+            !path.with_extension("failure-cleanup.json").exists(),
+            "the crash window must precede failure cleanup intent persistence"
+        );
     }
 
     fn seed_claim_heartbeat(&self, worker_id: &str, branch: &str, claim_id: &str) {

@@ -699,6 +699,26 @@ pub(crate) fn recover_terminal_failure_identity(
     {
         return Ok(None);
     }
+    let cleanup_intent = failure_cleanup_intent_path(&state_path);
+    reject_symlink_path(&cleanup_intent)?;
+    match fs::symlink_metadata(&cleanup_intent) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if observe_terminal_bridge_claim(
+                bridge_claim_identity(&state),
+                state.pr,
+                BridgeClaimDisposition::Retryable,
+            )
+            .map_err(|error| error.message)?
+            {
+                return Ok(None);
+            }
+            return Err(
+                "missing failure cleanup intent requires an exact retryable release".to_string(),
+            );
+        }
+        Err(error) => return Err(format!("inspect executor failure cleanup intent: {error}")),
+    }
     read_failure_cleanup_intent(&state_path, &state)?;
     match (
         state.identity.runtime_session_id.as_deref(),
