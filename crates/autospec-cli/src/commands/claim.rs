@@ -7677,26 +7677,125 @@ claimed|review
     fn startup_heartbeat_retained_handoff() {
         use std::os::unix::fs::MetadataExt;
 
-        let (parent, repo_path, source, repo, snapshot) =
-            anchored_startup_heartbeat_fixture("retained-handoff");
-        let source_inode = std::fs::metadata(&source).unwrap().ino();
-        let retained = super::handoff_stale_heartbeat(
-            &repo_path,
-            &repo,
-            source.file_name().unwrap(),
-            &snapshot,
-            |_, _, _| {},
-            |_| Ok(()),
-            |_| Ok(()),
-        )
-        .unwrap();
-        assert!(!source.exists());
-        assert_eq!(
-            std::fs::metadata(&retained).unwrap().ino(),
-            source_inode,
-            "the retained archive must be the exact held source inode"
-        );
-        std::fs::remove_dir_all(parent).unwrap();
+        for race in ["before-check", "before-rename", "after-rename", "collision"] {
+            let (parent, repo_path, source, repo, snapshot) =
+                anchored_startup_heartbeat_fixture(race);
+            let replacement = repo_path.join("replacement");
+            std::fs::write(&replacement, b"foreign").unwrap();
+            std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let result = super::handoff_retained_heartbeat(
+                &repo_path,
+                &repo,
+                source.file_name().unwrap(),
+                &snapshot,
+                |boundary, _, handoff, name| {
+                    if race == "collision" && boundary == "before-check" {
+                        let file = nix::fcntl::openat(
+                            handoff,
+                            name,
+                            nix::fcntl::OFlag::O_WRONLY
+                                | nix::fcntl::OFlag::O_CREAT
+                                | nix::fcntl::OFlag::O_EXCL,
+                            nix::sys::stat::Mode::from_bits_truncate(0o600),
+                        )
+                        .unwrap();
+                        std::fs::File::from(file).write_all(b"foreign").unwrap();
+                    } else if boundary == race {
+                        if race == "after-rename" {
+                            std::fs::write(&source, b"foreign").unwrap();
+                            std::fs::set_permissions(
+                                &source,
+                                std::fs::Permissions::from_mode(0o600),
+                            )
+                            .unwrap();
+                        } else {
+                            std::fs::rename(&replacement, &source).unwrap();
+                        }
+                    }
+                },
+                |_| Ok(()),
+            );
+            assert!(result.is_err(), "{race}");
+            if race != "collision" {
+                assert_eq!(std::fs::read(&source).unwrap(), b"foreign", "{race}");
+            }
+            std::fs::remove_dir_all(parent).unwrap();
+        }
+
+        for failed in [
+            super::HeartbeatHandoffSyncBoundary::Source,
+            super::HeartbeatHandoffSyncBoundary::Handoff,
+        ] {
+            let (parent, repo_path, source, repo, snapshot) =
+                anchored_startup_heartbeat_fixture("retained-fsync");
+            let inode = std::fs::metadata(&source).unwrap().ino();
+            assert!(super::handoff_retained_heartbeat(
+                &repo_path,
+                &repo,
+                source.file_name().unwrap(),
+                &snapshot,
+                |_, _, _, _| {},
+                |boundary| (boundary != failed)
+                    .then_some(())
+                    .ok_or_else(|| super::CommandFailure::diagnostic("injected fsync failure")),
+            )
+            .is_err());
+            let retained = super::handoff_retained_heartbeat(
+                &repo_path,
+                &repo,
+                source.file_name().unwrap(),
+                &snapshot,
+                |_, _, _, _| {},
+                |_| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(std::fs::metadata(retained).unwrap().ino(), inode);
+            std::fs::remove_dir_all(parent).unwrap();
+        }
+
+        for mutation in ["content", "mode", "binding"] {
+            let (parent, repo_path, source, repo, snapshot) =
+                anchored_startup_heartbeat_fixture(mutation);
+            let result = super::handoff_retained_heartbeat(
+                &repo_path,
+                &repo,
+                source.file_name().unwrap(),
+                &snapshot,
+                |boundary, _, handoff, name| {
+                    if boundary == "final" {
+                        let file = nix::fcntl::openat(
+                            handoff,
+                            name,
+                            nix::fcntl::OFlag::O_RDWR,
+                            nix::sys::stat::Mode::empty(),
+                        )
+                        .unwrap();
+                        match mutation {
+                            "content" => std::fs::File::from(file).write_all(b"drift").unwrap(),
+                            "mode" => nix::sys::stat::fchmod(
+                                &file,
+                                nix::sys::stat::Mode::from_bits_truncate(0o640),
+                            )
+                            .unwrap(),
+                            _ => {
+                                drop(file);
+                                nix::fcntl::renameat2(
+                                    handoff,
+                                    name,
+                                    handoff,
+                                    "replacement.json",
+                                    nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+                                )
+                                .unwrap();
+                            }
+                        }
+                    }
+                },
+                |_| Ok(()),
+            );
+            assert!(result.is_err(), "{mutation}");
+            std::fs::remove_dir_all(parent).unwrap();
+        }
     }
 
     #[test]
