@@ -2010,6 +2010,9 @@ pub(crate) fn transition_bridge_claim(
             ClaimRefAdvance::Lost => return Ok(BridgeClaimTransition::OwnershipLost),
         }
     };
+    if disposition == BridgeClaimDisposition::Retryable {
+        retire_released_startup_heartbeat(identity)?;
+    }
 
     let mut arguments = vec![
         "issue".to_string(),
@@ -4125,6 +4128,262 @@ pub(crate) fn heartbeat_root() -> Result<std::path::PathBuf, CommandFailure> {
     #[cfg(target_os = "linux")]
     prepare_heartbeat_root_parent_with_hook(&root, |_| Ok(()))?;
     Ok(root)
+}
+
+#[cfg(target_os = "linux")]
+fn protect_released_heartbeat_directory(
+    directory: &fs::File,
+    role: &str,
+) -> Result<HeartbeatDirectoryIdentity, CommandFailure> {
+    use nix::sys::stat::{fchmod, fstat, Mode, SFlag};
+
+    let stat = fstat(directory)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat {role} fstat: {error}")))?;
+    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFDIR
+        || stat.st_uid != nix::unistd::geteuid().as_raw()
+    {
+        return Err(CommandFailure::diagnostic(format!(
+            "released heartbeat {role} is unsafe"
+        )));
+    }
+    if stat.st_mode & 0o7777 != 0o700 {
+        fchmod(directory, Mode::from_bits_truncate(0o700))
+            .and_then(|()| nix::unistd::fsync(directory))
+            .map_err(|error| CommandFailure::diagnostic(format!("protect {role}: {error}")))?;
+    }
+    private_heartbeat_directory_identity(directory, role)
+}
+
+#[cfg(target_os = "linux")]
+fn released_heartbeat_document(
+    document: &[u8],
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<Option<String>, CommandFailure> {
+    let value: serde_json::Value = serde_json::from_slice(document)
+        .map_err(|_| CommandFailure::diagnostic("released heartbeat is malformed"))?;
+    let field = |name| value.get(name).and_then(serde_json::Value::as_str);
+    if field("repo") != Some(identity.repo)
+        || field("issue") != Some(identity.issue.to_string().as_str())
+        || field("worker_id") != Some(identity.worker_id)
+        || field("branch") != Some(identity.branch)
+        || field("claim_id") != Some(identity.claim_id)
+        || field("step") != Some("claimed")
+        || field("pr") != Some("")
+        || value
+            .get("ts")
+            .and_then(serde_json::Value::as_u64)
+            .is_none()
+    {
+        return Err(CommandFailure::diagnostic(
+            "released heartbeat does not match terminal claim",
+        ));
+    }
+    Ok(field("session_id").map(str::to_string))
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_released_heartbeat(
+    directory: &fs::File,
+    name: &str,
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<Option<(fs::File, RegularFileSnapshot, Option<String>)>, CommandFailure> {
+    use nix::fcntl::{openat, OFlag};
+    use nix::sys::stat::{fchmod, fstat, Mode, SFlag};
+
+    let descriptor = match openat(
+        directory,
+        name,
+        OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC | OFlag::O_NONBLOCK,
+        Mode::empty(),
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Ok(descriptor) => descriptor,
+        Err(_) => return Err(CommandFailure::diagnostic("released heartbeat is unsafe")),
+    };
+    let file = fs::File::from(descriptor);
+    let stat = fstat(&file)
+        .map_err(|_| CommandFailure::diagnostic("could not inspect released heartbeat"))?;
+    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
+        || stat.st_uid != nix::unistd::geteuid().as_raw()
+        || stat.st_nlink != 1
+    {
+        return Err(CommandFailure::diagnostic("released heartbeat is unsafe"));
+    }
+    let snapshot = file
+        .try_clone()
+        .and_then(read_regular_file)
+        .map_err(|_| CommandFailure::diagnostic("released heartbeat changed during read"))?;
+    let session = released_heartbeat_document(&snapshot.document, identity)?;
+    if stat.st_mode & 0o7777 != 0o600
+        && (fchmod(&file, Mode::from_bits_truncate(0o600)).is_err() || file.sync_all().is_err())
+    {
+        return Err(CommandFailure::diagnostic(
+            "could not protect released heartbeat",
+        ));
+    }
+    if fstat(&file).map_or(true, |current| current.st_mode & 0o7777 != 0o600) {
+        return Err(CommandFailure::diagnostic(
+            "released heartbeat mode changed",
+        ));
+    }
+    if heartbeat_final_binding(
+        &file,
+        directory,
+        name,
+        (snapshot.identity.device, snapshot.identity.inode),
+    )? != (HeartbeatFinalBinding::Exact, 1)
+    {
+        return Err(CommandFailure::diagnostic(
+            "released heartbeat binding changed",
+        ));
+    }
+    Ok(Some((file, snapshot, session)))
+}
+
+#[cfg(target_os = "linux")]
+fn retire_released_heartbeat_name(
+    source: &fs::File,
+    source_name: &str,
+    archive: &fs::File,
+    archive_name: &str,
+    identity: ClaimMutationIdentity<'_>,
+    role: &str,
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<Option<String>, CommandFailure> {
+    let current = inspect_released_heartbeat(source, source_name, identity)?;
+    let retained = inspect_released_heartbeat(archive, archive_name, identity)?;
+    let (file, snapshot, session) = match (current, retained) {
+        (None, Some(retained)) => retained,
+        (Some(current), None) => {
+            boundary(role, "before-rename")?;
+            let observed = inspect_released_heartbeat(source, source_name, identity)?
+                .ok_or_else(|| CommandFailure::diagnostic("released heartbeat disappeared"))?;
+            if observed.1.identity != current.1.identity {
+                return Err(CommandFailure::diagnostic(
+                    "released heartbeat binding changed",
+                ));
+            }
+            nix::fcntl::renameat2(
+                source,
+                source_name,
+                archive,
+                archive_name,
+                nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+            )
+            .map_err(|error| {
+                CommandFailure::diagnostic(format!("could not retain released heartbeat: {error}"))
+            })?;
+            current
+        }
+        _ => {
+            return Err(CommandFailure::diagnostic(
+                "released heartbeat handoff is ambiguous",
+            ))
+        }
+    };
+    boundary(role, "source-fsync")?;
+    nix::unistd::fsync(source)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat source fsync: {error}")))?;
+    boundary(role, "after-rename")?;
+    if inspect_released_heartbeat(source, source_name, identity)?.is_some()
+        || inspect_released_heartbeat(archive, archive_name, identity)?
+            .is_none_or(|value| value.1.identity != snapshot.identity)
+    {
+        return Err(CommandFailure::diagnostic(
+            "released heartbeat handoff changed",
+        ));
+    }
+    boundary(role, "archive-fsync")?;
+    nix::unistd::fsync(archive)
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat archive fsync: {error}")))?;
+    drop(file);
+    Ok(session)
+}
+
+#[cfg(target_os = "linux")]
+fn retire_released_startup_heartbeat_with_hook(
+    identity: ClaimMutationIdentity<'_>,
+    boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
+) -> Result<(), CommandFailure> {
+    use nix::fcntl::{open, openat, OFlag};
+    use nix::sys::stat::Mode;
+
+    let root = heartbeat_root()?;
+    let root = fs::File::from(
+        open(
+            &root,
+            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| CommandFailure::diagnostic(format!("heartbeat root open: {error}")))?,
+    );
+    protect_released_heartbeat_directory(&root, "released root")?;
+    let repo_name = super::autonomous::drain::repository_progress_key(identity.repo);
+    let flags = OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC;
+    let repo = match openat(&root, repo_name.as_str(), flags, Mode::empty()) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(()),
+        Ok(repo) => fs::File::from(repo),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "released heartbeat repo open: {error}"
+            )))
+        }
+    };
+    let opened = protect_released_heartbeat_directory(&repo, "released repo")?;
+    if private_heartbeat_name_identity(&root, Path::new(&repo_name), "released repo")? != opened {
+        return Err(CommandFailure::diagnostic(
+            "released heartbeat repo binding changed",
+        ));
+    }
+    let quarantine = ensure_receipt_directory(&repo, "quarantine")?;
+    let archive = ensure_receipt_directory(&quarantine, "released-heartbeats")?;
+    let key = heartbeat_session_key(identity.claim_id);
+    let issue_name = format!("{}.json", identity.issue);
+    let archived_issue = format!("issue-{}-{key}.json", identity.issue);
+    let session = inspect_released_heartbeat(&repo, &issue_name, identity)?
+        .or_else(|| {
+            inspect_released_heartbeat(&archive, &archived_issue, identity)
+                .ok()
+                .flatten()
+        })
+        .ok_or_else(|| CommandFailure::diagnostic("released heartbeat evidence is absent"))?
+        .2;
+    if let Some(session) = session {
+        let sessions = open_heartbeat_directory_beneath(&repo, Path::new("sessions"))?;
+        retire_released_heartbeat_name(
+            &sessions,
+            &format!("{}.json", heartbeat_session_key(&session)),
+            &archive,
+            &format!("session-{}-{key}.json", heartbeat_session_key(&session)),
+            identity,
+            "session",
+            boundary,
+        )?;
+    }
+    retire_released_heartbeat_name(
+        &repo,
+        &issue_name,
+        &archive,
+        &archived_issue,
+        identity,
+        "issue",
+        boundary,
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn retire_released_startup_heartbeat(
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<(), CommandFailure> {
+    retire_released_startup_heartbeat_with_hook(identity, &mut |_, _| Ok(()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn retire_released_startup_heartbeat(
+    _identity: ClaimMutationIdentity<'_>,
+) -> Result<(), CommandFailure> {
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -6359,6 +6618,111 @@ mod tests {
         assert!(cleanup_failure
             .message
             .contains("could not remove staged heartbeat root parent"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn released_heartbeat_handoff_is_resumable_and_preserves_replacements() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let (source_path, live) = startup_heartbeat_fixture("released-handoff");
+        let archive_path = source_path.join("archive");
+        std::fs::create_dir(&archive_path).unwrap();
+        std::fs::set_permissions(&archive_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = std::fs::File::open(&source_path).unwrap();
+        let archive = std::fs::File::open(&archive_path).unwrap();
+        let identity = super::ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "worker-a",
+            branch: "feat/worker",
+            claim_id: "claim-a",
+        };
+        let document = b"{\"issue\":\"42\",\"branch\":\"feat/worker\",\"step\":\"claimed\",\"ts\":1,\"pr\":\"\",\"repo\":\"owner/repo\",\"worker_id\":\"worker-a\",\"claim_id\":\"claim-a\"}\n";
+        let write = |path: &Path, body: &[u8]| {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        write(&live, document);
+        let retained = "issue-42-claim-a.json";
+        assert!(super::retire_released_heartbeat_name(
+            &source,
+            "42.json",
+            &archive,
+            retained,
+            identity,
+            "issue",
+            &mut |_, boundary| (boundary != "source-fsync")
+                .then_some(())
+                .ok_or_else(|| super::CommandFailure::diagnostic("injected fsync failure")),
+        )
+        .is_err());
+        super::retire_released_heartbeat_name(
+            &source,
+            "42.json",
+            &archive,
+            retained,
+            identity,
+            "issue",
+            &mut |_, _| Ok(()),
+        )
+        .unwrap();
+        assert!(!live.exists());
+        assert_eq!(
+            std::fs::read(archive_path.join(retained)).unwrap(),
+            document
+        );
+
+        for (name, boundary) in [
+            ("replacement-before.json", "before-rename"),
+            ("replacement-after.json", "after-rename"),
+        ] {
+            let target = source_path.join(name);
+            let replacement = source_path.join(format!("{name}.replacement"));
+            write(&target, document);
+            write(&replacement, b"foreign");
+            let archived = format!("{name}.retained");
+            let result = super::retire_released_heartbeat_name(
+                &source,
+                name,
+                &archive,
+                &archived,
+                identity,
+                "session",
+                &mut |_, observed| {
+                    if observed == boundary {
+                        if observed == "before-rename" {
+                            std::fs::rename(&replacement, &target).unwrap();
+                        } else {
+                            write(&target, b"foreign");
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            assert!(result.is_err());
+            assert_eq!(std::fs::read(&target).unwrap(), b"foreign");
+            assert_eq!(
+                archive_path.join(archived).exists(),
+                boundary == "after-rename"
+            );
+        }
+
+        let outside = source_path.join("outside");
+        let linked = source_path.join("linked.json");
+        write(&outside, document);
+        std::fs::hard_link(&outside, &linked).unwrap();
+        assert!(super::retire_released_heartbeat_name(
+            &source,
+            "linked.json",
+            &archive,
+            "linked.retained",
+            identity,
+            "issue",
+            &mut |_, _| Ok(()),
+        )
+        .is_err());
+        assert_eq!(std::fs::metadata(&outside).unwrap().nlink(), 2);
     }
 
     #[cfg(target_os = "linux")]
