@@ -19,7 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::commands::claim::{
-    authoritative_executor_result, observe_terminal_bridge_claim,
+    authoritative_executor_result, observe_released_bridge_claim, observe_terminal_bridge_claim,
     record_executor_result_with_receipt, refresh_claim_generation, transition_bridge_claim,
     BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity, ClaimRefreshResult,
     ExecutorResultAuthorityBinding, ExecutorResultRecord, ExecutorSuccessBinding,
@@ -704,17 +704,19 @@ pub(crate) fn recover_terminal_failure_identity(
     match fs::symlink_metadata(&cleanup_intent) {
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            if observe_terminal_bridge_claim(
-                bridge_claim_identity(&state),
-                state.pr,
-                BridgeClaimDisposition::Retryable,
-            )
-            .map_err(|error| error.message)?
+            let identity = bridge_claim_identity(&state);
+            if observe_released_bridge_claim(identity).map_err(|error| error.message)?
+                || observe_terminal_bridge_claim(
+                    identity,
+                    state.pr,
+                    BridgeClaimDisposition::Retryable,
+                )
+                .map_err(|error| error.message)?
             {
                 return Ok(None);
             }
             return Err(
-                "missing failure cleanup intent requires an exact retryable release".to_string(),
+                "missing failure cleanup intent requires an exact released claim".to_string(),
             );
         }
         Err(error) => return Err(format!("inspect executor failure cleanup intent: {error}")),
