@@ -7957,7 +7957,6 @@ claimed|review
     #[test]
     fn startup_heartbeat_retained_handoff() {
         use std::os::unix::fs::MetadataExt;
-
         for race in
             "before-check before-rename after-rename collision malformed fifo hardlink".split(' ')
         {
@@ -8059,15 +8058,11 @@ claimed|review
         ] {
             let (parent, repo_path, source, repo, snapshot) =
                 anchored_startup_heartbeat_fixture(mutation);
+            let expected = expected_startup_heartbeat("host:user:rust:4242:nonce-a");
+            let (_, completed) = super::heartbeat_receipt_names(expected);
             let archive = repo_path
                 .join("quarantine/startup-heartbeat-handoffs")
-                .join(
-                    super::heartbeat_receipt_names(expected_startup_heartbeat(
-                        "host:user:rust:4242:nonce-a",
-                    ))
-                    .1
-                    .replace(".receipt", ".json"),
-                );
+                .join(completed.replace(".receipt", ".json"));
             let result = super::handoff_retained_heartbeat(
                 &repo_path,
                 &repo,
@@ -8088,6 +8083,12 @@ claimed|review
                 },
             );
             assert!(result.is_err(), "{mutation}");
+            let receipts = super::open_receipt_anchors_with_hook(&repo, |_| {}).unwrap();
+            assert!(
+                super::inspect_heartbeat_receipt(&receipts, completed.as_ref())
+                    == super::HeartbeatReceiptEntry::Missing,
+                "{mutation}"
+            );
             std::fs::remove_dir_all(parent).unwrap();
         }
     }
