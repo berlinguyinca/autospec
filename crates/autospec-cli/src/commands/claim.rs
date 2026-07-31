@@ -1003,6 +1003,12 @@ fn resumable_heartbeat_phase(
     ["pending", "ready"]
         .into_iter()
         .find(|phase| head.record.step == heartbeat_claim_step(phase, session_id))
+        .or_else(|| {
+            let publishing = heartbeat_claim_step("publishing", session_id) + ":";
+            (head.record.step.starts_with(&publishing)
+                && server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds))
+            .then_some("pending")
+        })
 }
 
 fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimError> {
@@ -1039,7 +1045,8 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
             (!matches!(
                 head.record.state.as_str(),
                 "available" | "released" | "retryable"
-            ) && !server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds))
+            ) && (head.record.step.starts_with("heartbeat-publishing:")
+                || !server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds)))
             .then_some(head.record.worker_id.as_str())
         }) {
             return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
