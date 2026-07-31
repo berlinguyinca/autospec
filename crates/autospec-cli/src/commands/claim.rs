@@ -1875,7 +1875,19 @@ fn quarantine_authoritative_stale_heartbeat(
         StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
         StartupHeartbeatClassification::Absent => {
             match heartbeat_receipt_retry_decision(&repo, expected) {
-                HeartbeatReceiptDecision::Absent => None,
+                HeartbeatReceiptDecision::Absent => {
+                    match classify_retained_prior_generation(
+                        &repo,
+                        repo_name,
+                        issue,
+                        record,
+                        unix_now()?,
+                    )? {
+                        StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
+                        StartupHeartbeatClassification::Absent => None,
+                        StartupHeartbeatClassification::Blocking => return Ok(false),
+                    }
+                }
                 HeartbeatReceiptDecision::Pending | HeartbeatReceiptDecision::Completed => {
                     let snapshot = terminal_heartbeat_snapshot(
                         &repo,
@@ -5600,6 +5612,106 @@ fn heartbeat_receipt_retry_decision_with_hook(
         }
         _ => HeartbeatReceiptDecision::Blocking,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn classify_retained_prior_generation(
+    trusted_repo: &fs::File,
+    repo_name: &str,
+    issue: u64,
+    record: &RunStateRecord,
+    now: u64,
+) -> Result<StartupHeartbeatClassification, CommandFailure> {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::fstatat;
+    use std::os::fd::AsRawFd;
+
+    let quarantine = match fstatat(trusted_repo, "quarantine", AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(StartupHeartbeatClassification::Absent),
+        Err(_) => return Ok(StartupHeartbeatClassification::Blocking),
+        Ok(_) => open_heartbeat_directory_beneath(trusted_repo, Path::new("quarantine"))?,
+    };
+    match fstatat(
+        &quarantine,
+        "startup-heartbeat-handoffs",
+        AtFlags::AT_SYMLINK_NOFOLLOW,
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(StartupHeartbeatClassification::Absent),
+        Err(_) => return Ok(StartupHeartbeatClassification::Blocking),
+        Ok(_) => {}
+    }
+    let handoff = open_receipt_anchors_with_hook(trusted_repo, |_| {})?;
+    let directory = format!("/proc/self/fd/{}", handoff.as_raw_fd());
+    let entries = fs::read_dir(directory)
+        .map_err(|error| CommandFailure::diagnostic(format!("retained scan: {error}")))?;
+    let pending_prefix = format!("pending-{issue}-");
+    let completed_prefix = format!("completed-{issue}-");
+    let mut relevant = 0usize;
+    let mut candidate = None;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| CommandFailure::diagnostic(format!("retained entry: {error}")))?;
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            return Ok(StartupHeartbeatClassification::Blocking);
+        };
+        if (name.starts_with(&pending_prefix) || name.starts_with(&completed_prefix))
+            && name.ends_with(".receipt")
+        {
+            relevant += 1;
+            continue;
+        }
+        if !name.starts_with(&completed_prefix) || !name.ends_with(".json") {
+            continue;
+        }
+        relevant += 1;
+        let Ok(file) = read_regular_file_at_no_follow(&handoff, name.as_ref()) else {
+            return Ok(StartupHeartbeatClassification::Blocking);
+        };
+        let Some(evidence) = parse_startup_heartbeat(&file.document) else {
+            return Ok(StartupHeartbeatClassification::Blocking);
+        };
+        if evidence.repo != repo_name
+            || evidence.issue != issue.to_string()
+            || evidence.branch != record.branch
+            || !evidence.pr.is_empty()
+            || (evidence.worker_id == record.worker_id
+                && evidence.claim_id.as_str() == record.claim_id.as_deref().unwrap_or_default())
+        {
+            return Ok(StartupHeartbeatClassification::Blocking);
+        }
+        let expected = StartupHeartbeatExpectation {
+            repo: &evidence.repo,
+            issue,
+            worker_id: &evidence.worker_id,
+            branch: &evidence.branch,
+            pull_request: &evidence.pr,
+            claim_id: &evidence.claim_id,
+            step: &evidence.step,
+        };
+        if heartbeat_receipt_names(expected)
+            .1
+            .replace(".receipt", ".json")
+            != name
+            || !matches!(
+                heartbeat_receipt_retry_decision(trusted_repo, expected),
+                HeartbeatReceiptDecision::Pending | HeartbeatReceiptDecision::Completed
+            )
+        {
+            return Ok(StartupHeartbeatClassification::Blocking);
+        }
+        match classify_startup_heartbeat_snapshot(file, expected, now, observe_local_startup_pid) {
+            StartupHeartbeatClassification::ExpiredDead(snapshot) if candidate.is_none() => {
+                candidate = Some(snapshot)
+            }
+            _ => return Ok(StartupHeartbeatClassification::Blocking),
+        }
+    }
+    Ok(match candidate {
+        Some(snapshot) if relevant == 2 => StartupHeartbeatClassification::ExpiredDead(snapshot),
+        Some(_) => StartupHeartbeatClassification::Blocking,
+        None if relevant > 0 => StartupHeartbeatClassification::Blocking,
+        None => StartupHeartbeatClassification::Absent,
+    })
 }
 #[cfg(target_os = "linux")]
 #[allow(dead_code)]

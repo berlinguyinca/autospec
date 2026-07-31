@@ -1459,7 +1459,7 @@ fn claim_stale_heartbeat_recovery() {
         )
         .with_claim_id("claim-b"),
     );
-    for issue in [44, 45, 46] {
+    for issue in [44, 45, 46, 47] {
         transition_claim_ref(
             &repo,
             &RunStateRecord::new(
@@ -1694,6 +1694,36 @@ exit 17
     assert!(String::from_utf8_lossy(&cross_repo.stdout).contains("\"recovered\":false"));
     assert_eq!(claim_ref_message(&repo, 46), cross_repo_claim);
     assert!(cross_repo_heartbeat.exists());
+
+    let interrupted_digest = "1b9806766ed75d84434219eb6cb4e07fa0a8754f9537b060a2f3e097fc690105";
+    let pending = handoff.join(format!("pending-47-{interrupted_digest}.receipt"));
+    let completed = handoff.join(format!("completed-47-{interrupted_digest}.receipt"));
+    let archive = handoff.join(format!("completed-47-{interrupted_digest}.json"));
+    std::fs::write(&pending, b"").expect("pending prior-generation receipt");
+    std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o600))
+        .expect("private pending receipt");
+    std::fs::write(
+        &archive,
+        prior_generation_document(
+            "testorg/testrepo",
+            47,
+            1,
+            "f1837a09a0d35a8239ed726cccf717868ee651f98dd97f1337b0a986796baf4f",
+        ),
+    )
+    .expect("retained prior-generation heartbeat");
+    std::fs::set_permissions(&archive, std::fs::Permissions::from_mode(0o600))
+        .expect("private retained heartbeat");
+
+    let interrupted = recover("47");
+
+    assert!(interrupted.status.success());
+    assert!(String::from_utf8_lossy(&interrupted.stdout).contains("\"recovered\":true"));
+    assert!(!pending.exists(), "pending receipt was not retired");
+    assert!(completed.exists(), "completed receipt was not published");
+    let resumed = claim_ref_message(&repo, 47);
+    assert!(resumed.contains("\"state\":\"available\""));
+    assert!(resumed.contains("\"step\":\"stale_startup_recovered\""));
 }
 
 #[test]
