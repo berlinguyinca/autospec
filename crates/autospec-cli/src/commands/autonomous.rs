@@ -24,7 +24,8 @@ use autospec_core::autonomous_lifecycle::{
     StopMode as LifecycleStopMode, WorkerId,
 };
 use autospec_core::coordination::{
-    ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope, ConductorState,
+    parse_dependency_issue_json, ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope,
+    ConductorState,
 };
 use autospec_core::execution::{OneShotIssueSelector, QueueStatus};
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
@@ -2586,7 +2587,7 @@ fn run_foreground_with_lease(
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
     if state.phase() == ConductorPhase::Paused {
         if let Some(issue) = state.selected_issue() {
-            if !issue_is_open_auto_implement(&layout.repo, issue)? {
+            if !issue_is_open_for_autonomous_work(&layout.repo, issue)? {
                 state = state
                     .transition(ConductorEvent::RetireObsoleteSelection)
                     .map_err(CommandFailure::diagnostic)?;
@@ -2936,7 +2937,7 @@ fn foreground_state_is_retained(state: &ConductorState) -> bool {
     )
 }
 
-fn issue_is_open_auto_implement(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
+fn issue_is_open_for_autonomous_work(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
     let endpoint = format!("repos/{repo}/issues/{issue}");
     let output = Command::new("gh")
         .args([
@@ -2945,7 +2946,7 @@ fn issue_is_open_auto_implement(repo: &str, issue: u64) -> Result<bool, CommandF
             "GET",
             &endpoint,
             "--jq",
-            r#"[.state, ([.labels[].name] | index("auto-implement") != null)] | @tsv"#,
+            r#"{labels:[.labels[].name], state:(.state // "OPEN")}"#,
         ])
         .output()
         .map_err(|error| {
@@ -2957,15 +2958,17 @@ fn issue_is_open_auto_implement(repo: &str, issue: u64) -> Result<bool, CommandF
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    let value = String::from_utf8_lossy(&output.stdout);
-    let value = value.trim();
-    match value.to_ascii_lowercase().as_str() {
-        "open\ttrue" => Ok(true),
-        "open\tfalse" | "closed\ttrue" | "closed\tfalse" => Ok(false),
-        _ => Err(CommandFailure::diagnostic(format!(
-            "could not parse GitHub issue reread {issue}: {value:?}"
-        ))),
-    }
+    let current = parse_dependency_issue_json(&String::from_utf8_lossy(&output.stdout), issue)
+        .map_err(|error| {
+            CommandFailure::diagnostic(format!(
+                "could not parse GitHub issue reread {issue}: {error}"
+            ))
+        })?;
+    Ok(!current.closed
+        && current
+            .labels
+            .iter()
+            .any(|label| matches!(label.as_str(), "auto-implement" | "in-progress-by-bot")))
 }
 
 fn no_ready_selection_pause(state: &ConductorState) -> Result<bool, String> {
