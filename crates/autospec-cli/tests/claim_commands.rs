@@ -1830,11 +1830,12 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     std::fs::write(&mode, "ready\n").expect("label mode fixture");
     write_executable(
         &bin.join("gh"),
-        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then\n  if [ \"$(cat \"$AUTOSPEC_CLAIM_MODE\")\" = active ]; then labels='[\"in-progress-by-bot\",\"safety:reviewed\"]'; else labels='[\"auto-implement\",\"safety:reviewed\"]'; fi\n  jq -n --argjson labels \"$labels\" --arg body \"$AUTOSPEC_CLAIM_ISSUE_BODY\" '{labels:$labels,title:\"Add Rust claim\",body:$body,author:\"agent\"}'\n  exit 0\nfi\nif [ \"$1\" = label ] && [ \"$2\" = create ]; then exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then printf active > \"$AUTOSPEC_CLAIM_MODE\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id:100,updated_at:\"2026-07-14T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nexit 0\n",
+        "#!/bin/sh\nset -eu\nprintf '%s\\n' \"$@\" >> \"$AUTOSPEC_CLAIM_LOG\"\nif [ \"$1\" = issue ] && [ \"$2\" = view ]; then\n  if [ \"$(cat \"$AUTOSPEC_CLAIM_MODE\")\" = active ]; then labels='[\"in-progress-by-bot\",\"safety:reviewed\"]'; else labels='[\"auto-implement\",\"safety:reviewed\"]'; fi\n  jq -n --argjson labels \"$labels\" --arg body \"$AUTOSPEC_CLAIM_ISSUE_BODY\" '{labels:$labels,title:\"Add Rust claim\",body:$body,author:\"agent\"}'\n  exit 0\nfi\nif [ \"$1\" = label ] && [ \"$2\" = create ]; then exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = edit ]; then if [ \"$(cat \"$AUTOSPEC_CLAIM_MODE\")\" = ready ]; then printf retry > \"$AUTOSPEC_CLAIM_MODE\"; exit 23; fi; printf active > \"$AUTOSPEC_CLAIM_MODE\"; exit 0; fi\nif [ \"$1\" = issue ] && [ \"$2\" = comment ]; then\n  body=''; shift 2\n  while [ \"$#\" -gt 0 ]; do case \"$1\" in --body) body=\"$2\"; shift 2 ;; *) shift ;; esac; done\n  jq --arg body \"$body\" '. + [{id:100,updated_at:\"2026-07-14T00:00:00Z\",body:$body}]' \"$AUTOSPEC_CLAIM_COMMENTS\" > \"$AUTOSPEC_CLAIM_COMMENTS.tmp\"\n  mv \"$AUTOSPEC_CLAIM_COMMENTS.tmp\" \"$AUTOSPEC_CLAIM_COMMENTS\"\n  exit 0\nfi\nif [ \"$1\" = api ] && [ \"$2\" = repos/testorg/testrepo/issues/42/comments ]; then cat \"$AUTOSPEC_CLAIM_COMMENTS\"; exit 0; fi\nexit 0\n",
     );
     let body = "## Safety review\n\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->\n\n## Goal\nAdd the Rust implementation.";
 
-    let output = autospec()
+    let mut acquire = autospec();
+    acquire
         .args([
             "claim",
             "acquire",
@@ -1855,10 +1856,14 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
         .env("AUTOSPEC_CLAIM_MODE", &mode)
         .env("AUTOSPEC_CLAIM_ISSUE_BODY", body)
         .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .env("AUTOSPEC_GH_API_RETRIES", "1")
         .env("AUTOSPEC_CLAIM_CONFIRM_READS", "1")
-        .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0")
-        .output()
-        .expect("autospec claim acquire starts");
+        .env("AUTOSPEC_CLAIM_SETTLE_MILLIS", "0");
+    let first = acquire.output().expect("autospec claim acquire starts");
+    assert_eq!(first.status.code(), Some(2));
+    let ready = std::fs::read_to_string(&comments).unwrap();
+    assert!(ready.contains("heartbeat-ready:"));
+    let output = acquire.output().expect("autospec claim retry starts");
 
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).is_empty());
@@ -1872,12 +1877,23 @@ fn claim_acquire_writes_startup_evidence_then_wins_the_initial_cas_comment() {
     assert!(heartbeat.contains("\"worker_id\":\"worker-a\""));
     assert!(heartbeat.contains("\"claim_id\":\"claim-"));
     assert!(heartbeat.contains("\"session_id\":\"session-real-7\""));
+    let claim_id = heartbeat
+        .split("\"claim_id\":\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap();
+    assert!(stdout.contains(&format!("\"claim_id\":\"{claim_id}\"")));
     assert!(heartbeats
         .join("o7_testorg_r8_testrepo/sessions/73657373696f6e2d7265616c2d37.json")
         .exists());
     assert!(std::fs::read_to_string(&comments)
         .expect("claim comments")
         .contains("worker-a"));
+    assert!(std::fs::read_to_string(&comments)
+        .unwrap()
+        .contains("\\\"step\\\":\\\"claimed\\\""));
     let calls = std::fs::read_to_string(log).expect("gh call log");
     let label_edit = calls.find("issue\nedit\n42").expect("label edit");
     let create_comment = calls.find("issue\ncomment\n42").expect("claim comment");
@@ -1929,6 +1945,52 @@ fn claim_acquire_prelink_failure_keeps_pending_ref() {
     assert!(record.contains("\"state\":\"claimed\""), "{record}");
     assert!(record.contains("\"step\":\"heartbeat-pending:"), "{record}");
     assert!(!record.contains("\"state\":\"available\""), "{record}");
+}
+
+#[test]
+fn claim_acquire_race_and_ambiguous_write_leave_no_loser_artifacts() {
+    let fixture = temp_dir("autospec-claim-acquire-race");
+    let bin = fixture.join("bin");
+    let repo = claim_git_repo(&fixture);
+    let heartbeats = fixture.join("heartbeats");
+    let sessions = heartbeats.join("o7_testorg_r8_testrepo/sessions");
+    std::fs::create_dir_all(&bin).unwrap();
+    std::fs::create_dir_all(&sessions).unwrap();
+    let conflict = sessions.join("73657373696f6e2d636f6e666c696374.json");
+    std::fs::write(&conflict, b"prior-attempt").unwrap();
+    write_executable(
+        &bin.join("gh"),
+        "#!/bin/sh\nif [ \"$1 $2\" = 'issue view' ]; then : > \"$GH_BARRIER.$$\"; set -- \"$GH_BARRIER\".*; while [ \"$#\" -lt 2 ]; do sleep .01; set -- \"$GH_BARRIER\".*; done; printf '%s\\n' \"$GH_ISSUE\"; elif [ \"$1\" = api ]; then printf '[]\\n'; elif [ \"$1 $2\" = 'issue edit' ]; then exit 23; fi\n",
+    );
+    let issue = r###"{"labels":["auto-implement","safety:reviewed"],"title":"claim","body":"## Safety review\n<!-- autospec-safety:begin -->\n- **decision:** `SAFETY_PASS`\n<!-- autospec-safety:end -->","author":"agent"}"###;
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("\"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-a --branch feat/a --session-id session-a & a=$!; \"$AUTOSPEC_BIN\" claim acquire --issue 42 --repo testorg/testrepo --worker-id worker-b --branch feat/b --session-id session-b & b=$!; wait $a || true; wait $b || true; \"$AUTOSPEC_BIN\" claim acquire --issue 43 --repo testorg/testrepo --worker-id worker-c --branch feat/c --session-id session-conflict || true")
+        .current_dir(&repo)
+        .env("AUTOSPEC_BIN", env!("CARGO_BIN_EXE_autospec"))
+        .env("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.join("claim-remote.git"))
+        .env("AUTOSPEC_CLAIM_GIT_STATE_DIR", fixture.join("claim-state"))
+        .env("AUTOSPEC_HEARTBEAT_DIR", &heartbeats)
+        .env("AUTOSPEC_GH_API_RETRIES", "1")
+        .env("PATH", path_with(&bin))
+        .env("GH_BARRIER", fixture.join("barrier"))
+        .env("GH_ISSUE", issue)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let race_finals = ["73657373696f6e2d61.json", "73657373696f6e2d62.json"]
+        .iter()
+        .filter(|name| sessions.join(name).exists())
+        .count();
+    assert_eq!(race_finals, 1);
+    assert!(heartbeats.join("o7_testorg_r8_testrepo/42.json").exists());
+    let pending = claim_ref_message(&repo, 43);
+    assert!(
+        pending.contains("\"step\":\"heartbeat-pending:"),
+        "{pending}"
+    );
+    assert_eq!(std::fs::read(&conflict).unwrap(), b"prior-attempt");
+    assert!(!heartbeats.join("o7_testorg_r8_testrepo/43.json").exists());
 }
 
 #[test]

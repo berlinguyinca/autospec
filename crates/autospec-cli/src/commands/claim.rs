@@ -1021,32 +1021,6 @@ fn heartbeat_resume_record(head: &ClaimRefHead, now: &str) -> RunStateRecord {
     record
 }
 
-#[derive(Debug)]
-enum HeartbeatWriteFailure {
-    NoPublication(CommandFailure),
-    Unconfirmed(CommandFailure),
-}
-
-fn heartbeat_can_rollback(failure: &HeartbeatWriteFailure, targets_absent: bool) -> bool {
-    targets_absent && matches!(failure, HeartbeatWriteFailure::NoPublication(_))
-}
-
-fn startup_heartbeat_targets_absent_in(
-    directory: &Path,
-    issue: u64,
-    session_id: Option<&str>,
-) -> bool {
-    let absent = |path| matches!(fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound);
-    absent(directory.join(format!("{issue}.json")))
-        && session_id.is_none_or(|id| {
-            absent(
-                directory
-                    .join("sessions")
-                    .join(format!("{}.json", heartbeat_session_key(id))),
-            )
-        })
-}
-
 fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimError> {
     let repo = match options.repo {
         Some(repo) => repo,
@@ -1144,44 +1118,22 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
     };
 
     if phase == HeartbeatClaimPhase::Pending {
-        if let Err(failure) = write_startup_heartbeat(
+        if write_startup_heartbeat(
             &repo,
             options.issue,
             &worker_id,
             &options.branch,
             &claim_id,
             options.session_id.as_deref(),
-        ) {
-            let targets_absent = heartbeat_root().ok().is_some_and(|root| {
-                startup_heartbeat_targets_absent_in(
-                    &root.join(super::autonomous::drain::repository_progress_key(&repo)),
-                    options.issue,
-                    options.session_id.as_deref(),
-                )
-            });
-            let rollback = heartbeat_can_rollback(&failure, targets_absent);
-            let reason = match failure {
-                HeartbeatWriteFailure::NoPublication(error) => {
-                    drop(error);
-                    "heartbeat_write_failed"
-                }
-                HeartbeatWriteFailure::Unconfirmed(error) => {
-                    drop(error);
-                    "heartbeat_write_unconfirmed"
-                }
-            };
-            if rollback {
-                let mut available = head.record.clone();
-                available.state = "available".to_string();
-                available.step = "heartbeat_write_failed".to_string();
-                available.updated_at = utc_now_iso()?;
-                if let Ok(ClaimRefAdvance::Won(available)) =
-                    advance_claim_ref(&repo, options.issue, Some(&head), &available)
-                {
-                    project_claim_ref_to_comments(&repo, &available);
-                }
-            }
-            return unavailable_claim(options.issue, &repo, Some(&worker_id), reason);
+        )
+        .is_err()
+        {
+            return unavailable_claim(
+                options.issue,
+                &repo,
+                Some(&worker_id),
+                "heartbeat_write_failed",
+            );
         }
         let mut ready = head.record.clone();
         ready.step =
@@ -3747,17 +3699,16 @@ fn write_startup_heartbeat(
     branch: &str,
     claim_id: &str,
     session_id: Option<&str>,
-) -> Result<(), HeartbeatWriteFailure> {
-    let no_publication = HeartbeatWriteFailure::NoPublication;
-    let root = heartbeat_root().map_err(no_publication)?;
+) -> Result<(), CommandFailure> {
+    let root = heartbeat_root()?;
     let directory = root.join(super::autonomous::drain::repository_progress_key(repo));
     fs::create_dir_all(&directory).map_err(|error| {
-        no_publication(CommandFailure::diagnostic(format!(
+        CommandFailure::diagnostic(format!(
             "could not create claim heartbeat directory {}: {error}",
             directory.display()
-        )))
+        ))
     })?;
-    let timestamp = unix_now().map_err(no_publication)?;
+    let timestamp = unix_now()?;
     let session_field = session_id.map_or_else(String::new, |session_id| {
         format!(",\"session_id\":\"{}\"", json_escape(session_id))
     });
@@ -3771,20 +3722,17 @@ fn write_startup_heartbeat(
     if let Some(session_id) = session_id {
         let sessions = directory.join("sessions");
         fs::create_dir_all(&sessions).map_err(|error| {
-            no_publication(CommandFailure::diagnostic(format!(
+            CommandFailure::diagnostic(format!(
                 "could not create claim session heartbeat directory {}: {error}",
                 sessions.display()
-            )))
+            ))
         })?;
         let path = sessions.join(format!("{}.json", heartbeat_session_key(session_id)));
         let identity = SessionBindingIdentity::new(session_id, issue, worker_id, branch, claim_id);
-        publish_session_binding(&path, body.as_bytes(), &identity)
-            .map_err(HeartbeatWriteFailure::Unconfirmed)?;
+        publish_session_binding(&path, body.as_bytes(), &identity)?;
     }
     fs::write(directory.join(format!("{issue}.json")), &body).map_err(|error| {
-        HeartbeatWriteFailure::Unconfirmed(CommandFailure::diagnostic(format!(
-            "could not write claim startup heartbeat: {error}"
-        )))
+        CommandFailure::diagnostic(format!("could not write claim startup heartbeat: {error}"))
     })?;
     Ok(())
 }
