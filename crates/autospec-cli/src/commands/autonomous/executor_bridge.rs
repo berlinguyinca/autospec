@@ -24582,6 +24582,14 @@ mod tests {
             std::process::id(),
             TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
+        let sibling_scope = PathBuf::from("/tmp/autospec-executor").join(format!(
+            "sibling_scope_{}_{}",
+            std::process::id(),
+            TEST_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&sibling_scope).expect("create sibling executor scope");
+        fs::write(sibling_scope.join("sentinel"), "preserve\n")
+            .expect("write sibling scope sentinel");
         let worktree =
             provision_issue_worktree(&fixture.repo, &scope, 42, &base).expect("provision worktree");
         assert_eq!(worktree.branch, "feat/autonomous-issue-42");
@@ -24605,13 +24613,12 @@ mod tests {
             &fixture.repo,
             &["worktree", "remove", worktree.path.to_str().unwrap()],
         );
-        let _ = fs::remove_dir_all(
-            worktree
-                .path
-                .parent()
-                .and_then(Path::parent)
-                .expect("scope root"),
+        let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
+        assert!(
+            sibling_scope.join("sentinel").is_file(),
+            "fixture teardown removed a sibling executor scope"
         );
+        let _ = fs::remove_dir_all(sibling_scope);
     }
 
     #[test]
@@ -28198,13 +28205,7 @@ exit 64
             &fixture.repo,
             &["worktree", "remove", worktree.path.to_str().unwrap()],
         );
-        let _ = fs::remove_dir_all(
-            worktree
-                .path
-                .parent()
-                .and_then(Path::parent)
-                .expect("scope root"),
-        );
+        let _ = fs::remove_dir_all(worktree.path.parent().expect("scope root"));
     }
 
     #[test]
