@@ -8511,8 +8511,11 @@ impl ResolvedHarness {
                     "--disallowedTools".into(),
                     CLAUDE_FORBIDDEN_TOOLS.into(),
                     "--no-session-persistence".into(),
+                    // Text mode buffers until exit, so long tool runs appear idle to supervision.
+                    "--verbose".into(),
+                    "--include-partial-messages".into(),
                     "--output-format".into(),
-                    "text".into(),
+                    "stream-json".into(),
                     prompt.into(),
                 ],
                 true,
@@ -30020,8 +30023,8 @@ exit 64
 
     #[test]
     fn autonomous_executor_bridge_builds_exact_claude_arguments() {
-        // Break caught: Claude being unable to test/commit locally, or inheriting remote Git
-        // permissions from user/project settings.
+        // Break caught: Claude buffering progress until exit, being unable to test/commit locally,
+        // or inheriting remote Git permissions from user/project settings.
         let root = test_root("claude-argv");
         let table = write_alias_table(&root, installed_aliases());
         let mut env = environment(&table);
@@ -30062,8 +30065,10 @@ exit 64
                 "--disallowedTools",
                 CLAUDE_FORBIDDEN_TOOLS,
                 "--no-session-persistence",
+                "--verbose",
+                "--include-partial-messages",
                 "--output-format",
-                "text",
+                "stream-json",
                 "implement issue 42",
             ]
         );
@@ -30102,6 +30107,21 @@ exit 64
             .find(|pair| pair[0] == "--setting-sources")
             .expect("explicit setting source isolation");
         assert_eq!(setting_sources[1], "");
+        let reviewer = resolved
+            .review_invocation(
+                Path::new("/safe/worktree"),
+                Path::new("/safe/state/review.txt"),
+                "review issue 42",
+            )
+            .expect("build Claude reviewer invocation");
+        assert!(reviewer
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--output-format", "text"]));
+        assert!(!reviewer
+            .args
+            .iter()
+            .any(|arg| arg == "--include-partial-messages"));
         for required in [
             "Read",
             "Edit",
