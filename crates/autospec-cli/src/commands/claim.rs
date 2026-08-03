@@ -1078,6 +1078,7 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         }) {
             return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
         }
+        retire_released_predecessor_heartbeat(&repo, options.issue, prior.as_ref())?;
     }
 
     let (claim_id, mut head, phase) = if let Some(phase) = resume {
@@ -1265,6 +1266,131 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         claim_id,
         session_id: options.session_id,
     })
+}
+
+fn retire_released_predecessor_heartbeat(
+    repo: &str,
+    issue: u64,
+    prior: Option<&ClaimRefHead>,
+) -> Result<(), CommandFailure> {
+    let Some(record) = prior
+        .map(|head| &head.record)
+        .filter(|record| record.state == "released")
+    else {
+        return Ok(());
+    };
+    let claim_id = record.claim_id.as_deref().ok_or_else(|| {
+        CommandFailure::diagnostic("released predecessor heartbeat has no claim identity")
+    })?;
+    let identity = ClaimMutationIdentity {
+        repo,
+        issue,
+        worker_id: &record.worker_id,
+        branch: &record.branch,
+        claim_id,
+    };
+    if !released_predecessor_heartbeat_evidence_exists(identity)? {
+        return Ok(());
+    }
+    retire_released_startup_heartbeat_with_hook(identity, true, &mut |_, _| Ok(()))
+}
+
+#[cfg(target_os = "linux")]
+fn released_predecessor_heartbeat_evidence_exists(
+    identity: ClaimMutationIdentity<'_>,
+) -> Result<bool, CommandFailure> {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+    use std::os::fd::AsRawFd;
+
+    let root_path = heartbeat_root()?;
+    let root = match open(
+        &root_path,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(false),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "heartbeat root inspection failed: {error}"
+            )))
+        }
+        Ok(root) => fs::File::from(root),
+    };
+    private_heartbeat_directory_identity(&root, "predecessor root")?;
+    let repo_name = super::autonomous::drain::repository_progress_key(identity.repo);
+    let Some(repo) = open_optional_heartbeat_directory(&root, Path::new(&repo_name))? else {
+        return Ok(false);
+    };
+    let issue_name = format!("{}.json", identity.issue);
+    match read_regular_file_at_no_follow(&repo, issue_name.as_ref()) {
+        Ok(_) => return Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "predecessor heartbeat inspection failed: {error}"
+            )))
+        }
+    }
+    let Some(quarantine) = open_optional_heartbeat_directory(&repo, Path::new("quarantine"))?
+    else {
+        return Ok(false);
+    };
+    let Some(handoff) =
+        open_optional_heartbeat_directory(&quarantine, Path::new("startup-heartbeat-handoffs"))?
+    else {
+        return Ok(false);
+    };
+    let directory = format!("/proc/self/fd/{}", handoff.as_raw_fd());
+    for entry in fs::read_dir(directory).map_err(|error| {
+        CommandFailure::diagnostic(format!(
+            "predecessor heartbeat handoff scan failed: {error}"
+        ))
+    })? {
+        let name = entry
+            .map_err(|error| {
+                CommandFailure::diagnostic(format!(
+                    "predecessor heartbeat handoff entry failed: {error}"
+                ))
+            })?
+            .file_name()
+            .into_string()
+            .map_err(|_| CommandFailure::diagnostic("predecessor heartbeat handoff is unsafe"))?;
+        let pending = format!("pending-{}-", identity.issue);
+        let completed = format!("completed-{}-", identity.issue);
+        if (name.starts_with(&pending) || name.starts_with(&completed))
+            && (name.ends_with(".receipt") || name.ends_with(".json"))
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn open_optional_heartbeat_directory(
+    parent: &fs::File,
+    descendant: &Path,
+) -> Result<Option<fs::File>, CommandFailure> {
+    use nix::fcntl::AtFlags;
+    use nix::sys::stat::fstatat;
+
+    match fstatat(parent, descendant, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Err(nix::errno::Errno::ENOENT) => Ok(None),
+        Err(error) => Err(CommandFailure::diagnostic(format!(
+            "heartbeat directory inspection failed: {error}"
+        ))),
+        Ok(_) => open_heartbeat_directory_beneath(parent, descendant).map(Some),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn released_predecessor_heartbeat_evidence_exists(
+    _identity: ClaimMutationIdentity<'_>,
+) -> Result<bool, CommandFailure> {
+    Err(CommandFailure::diagnostic(
+        "released predecessor heartbeat recovery is unavailable on this platform",
+    ))
 }
 
 fn read(args: &[String]) -> Result<(), CommandFailure> {
@@ -4685,6 +4811,7 @@ fn handoff_terminal_heartbeat(
 #[cfg(target_os = "linux")]
 fn retire_released_startup_heartbeat_with_hook(
     identity: ClaimMutationIdentity<'_>,
+    require_dead_process: bool,
     boundary: &mut impl FnMut(&str, &str) -> Result<(), CommandFailure>,
 ) -> Result<(), CommandFailure> {
     use nix::fcntl::{open, OFlag};
@@ -4733,13 +4860,17 @@ fn retire_released_startup_heartbeat_with_hook(
             "terminal heartbeat does not match prepared claim",
         ));
     }
-    if observe_local_startup_pid(
+    let liveness = observe_local_startup_pid(
         &evidence.worker_id,
         evidence.pid,
         &evidence.host,
         &evidence.boot_id,
         &evidence.process_start,
-    ) == StartupPidLiveness::Unknown
+    );
+    if liveness == StartupPidLiveness::Unknown
+        || (require_dead_process
+            && liveness != StartupPidLiveness::Dead
+            && evidence.pid != std::process::id())
     {
         return Err(CommandFailure::diagnostic(
             "terminal heartbeat process identity is ambiguous",
@@ -4777,7 +4908,7 @@ fn retire_released_startup_heartbeat_with_hook(
 fn retire_released_startup_heartbeat(
     identity: ClaimMutationIdentity<'_>,
 ) -> Result<(), CommandFailure> {
-    retire_released_startup_heartbeat_with_hook(identity, &mut |_, _| Ok(()))
+    retire_released_startup_heartbeat_with_hook(identity, false, &mut |_, _| Ok(()))
 }
 #[cfg(not(target_os = "linux"))]
 fn retire_released_startup_heartbeat(
