@@ -21,9 +21,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::commands::claim::{
     authoritative_executor_result, observe_terminal_bridge_claim,
     record_executor_result_with_receipt, recover_released_bridge_claim, refresh_claim_generation,
-    transition_bridge_claim, BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity,
-    ClaimRefreshResult, ExecutorResultAuthorityBinding, ExecutorResultRecord,
-    ExecutorSuccessBinding,
+    transition_bridge_claim, with_released_bridge_predecessor_authority, BridgeClaimDisposition,
+    BridgeClaimTransition, ClaimMutationIdentity, ClaimRefreshResult,
+    ExecutorResultAuthorityBinding, ExecutorResultRecord, ExecutorSuccessBinding,
 };
 use crate::commands::CommandFailureKind;
 use autospec_core::autonomous::premerge::{
@@ -36,6 +36,9 @@ use autospec_core::claim::{
     RemoteComment,
 };
 use autospec_core::coordination::ConductorOutcome;
+use autospec_core::lint::implementation::{
+    directive_for, parse_blocking_hook_failure, ImplementationLintRule,
+};
 use autospec_core::lint::{
     evaluate_patch_size, lint_implementation, lint_issue_implementation_contract,
     parse_unified_diff, ImplementationLintContext, ImplementationLintOptions,
@@ -43,6 +46,8 @@ use autospec_core::lint::{
 };
 #[cfg(unix)]
 use nix::fcntl::OFlag;
+#[cfg(target_os = "linux")]
+use nix::fcntl::{renameat2, RenameFlags};
 #[cfg(unix)]
 use nix::sys::signal::Signal;
 #[cfg(unix)]
@@ -65,7 +70,10 @@ pub(crate) const CLAUDE_LOCAL_TOOLS: &str = concat!(
     "Bash(mvn test),Bash(mvn test *),Bash(./mvnw test),Bash(./mvnw test *),",
     "Bash(gradle test),Bash(gradle test *),Bash(./gradlew test),",
     "Bash(./gradlew test *),Bash(sbt test),Bash(sbt test *),",
-    "Bash(make test),Bash(make test *)"
+    "Bash(make test),Bash(make test *),",
+    "Bash(bats),Bash(bats *),Bash(shellcheck),Bash(shellcheck *),",
+    "Bash(bash -n),Bash(bash -n *),",
+    "Bash(./scripts/validate-all.sh),Bash(./scripts/validate-all.sh *)"
 );
 pub(crate) const CLAUDE_FORBIDDEN_TOOLS: &str = concat!(
     "Bash(git push),Bash(git push *),Bash(git fetch),Bash(git fetch *),",
@@ -81,12 +89,19 @@ const CLAUDE_REVIEW_TOOLS: &str = "Read,Glob,Grep";
 const OPENCODE_REVIEWER_AGENT: &str = "autospec-reviewer";
 const OPENCODE_REVIEW_CONFIG: &str = r#"{"share":"disabled","instructions":[],"permission":{"*":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","lsp":"allow","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","webfetch":"deny","websearch":"deny","skill":"deny"},"agent":{"autospec-reviewer":{"description":"Autospec independent read-only reviewer","mode":"primary","prompt":"Review only. Never mutate files, git state, GitHub state, or external systems.","permission":{"*":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","lsp":"allow","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","webfetch":"deny","websearch":"deny","skill":"deny"}}}}"#;
 const INVOCATION_SCHEMA: u32 = 1;
+const MAX_IMPLEMENTATION_REPAIR_ATTEMPTS: u32 = 3;
 const MAX_DIRECT_COMMAND_LINE: usize = 4_096;
 const MAX_DIRECT_COMMAND_SEGMENTS: usize = 16;
 const MAX_DIRECT_COMMAND_ARGS: usize = 128;
 const MAX_DIRECT_ARGUMENT_LENGTH: usize = 1_024;
 const MAX_DIRECT_OUTPUT_BYTES: u64 = 1024 * 1024;
 static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImplementationLintRepairOutcome {
+    RetryPrepared,
+    Exhausted,
+}
 #[cfg(test)]
 static BASE_DRIFT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
@@ -722,7 +737,7 @@ pub(crate) fn recover_terminal_failure_identity(
         }
         Err(error) => return Err(format!("inspect executor failure cleanup intent: {error}")),
     }
-    read_failure_cleanup_intent(&state_path, &state)?;
+    let intent = read_failure_cleanup_intent(&state_path, &state)?;
     match (
         state.identity.runtime_session_id.as_deref(),
         state.identity.runtime_environment_dir.as_deref(),
@@ -738,7 +753,7 @@ pub(crate) fn recover_terminal_failure_identity(
     if !observe_terminal_bridge_claim(
         bridge_claim_identity(&state),
         state.pr,
-        BridgeClaimDisposition::Retryable,
+        failure_disposition(true, intent.exhausted),
     )
     .map_err(|error| error.message)?
     {
@@ -1016,14 +1031,15 @@ fn run_executor_bridge_with_codex_probe(
             }
         }
         if failure_cleanup_intent_path(&request.state_path).exists() {
-            let reason = read_failure_cleanup_intent(&request.state_path, recovered)?;
+            let intent = read_failure_cleanup_intent(&request.state_path, recovered)?;
             let mut recovered = recovered.clone();
-            return finalize_bridge_failure(
+            return finalize_bridge_failure_with_exhaustion(
                 request,
                 &mut recovered,
                 None,
                 &DraftPrAdapter::github_cli(),
-                &reason,
+                &intent.reason,
+                intent.exhausted,
             );
         }
     }
@@ -1051,6 +1067,26 @@ fn run_executor_bridge_with_codex_probe(
     } else {
         let base =
             resolve_base(&repository_path, &environment).map_err(bridge_provision_failure)?;
+        let state_dir = request
+            .state_path
+            .parent()
+            .ok_or_else(|| "executor state path has no parent".to_string())?;
+        recover_released_interrupted_predecessor_transfer(
+            state_dir,
+            &request.repository,
+            &repository_path,
+            request.issue,
+            &canonical_branch,
+            |predecessor, transfer| {
+                with_released_bridge_predecessor_authority(
+                    bridge_claim_identity(predecessor),
+                    || transfer().map_err(crate::commands::CommandFailure::diagnostic),
+                )
+                .map(|result| result.is_some())
+                .map_err(|error| error.message)
+            },
+        )
+        .map_err(bridge_provision_failure)?;
         let worktree = provision_issue_worktree_for_claim(
             &repository_path,
             &request.repository,
@@ -1099,6 +1135,7 @@ fn run_executor_bridge_with_codex_probe(
             terminal_result: None,
             umbrella: None,
             current_child: None,
+            implementation_repair_attempt: 0,
         };
         (state, runtime)
     };
@@ -1144,12 +1181,13 @@ fn run_executor_bridge_with_codex_probe(
     if launch_phase || state.phase == BridgePhase::ImplementationComplete {
         prepare_private_closeout_sink(&state.identity.worktree, &closeout_path)?;
     }
-    let prompt = build_implementer_prompt(
+    let mut prompt = build_implementer_prompt(
         &state.identity,
         &request.issue_title,
         &request.issue_body,
         &closeout_path,
     )?;
+    prompt.push_str(&implementation_repair_prompt(&request.state_path, &state)?);
     if resolved_harness.is_none()
         && launch_phase
         && has_durable_harness_recovery_evidence(&request.state_path, &state)?
@@ -1275,8 +1313,37 @@ fn run_executor_bridge_with_codex_probe(
         protected
             .verify(&state.identity.repository_path, &state.identity.branch)
             .map_err(BridgeRunFailure::from)?;
-        commit_sandboxed_executor_diff(&state, &request.issue_title)
-            .map_err(BridgeRunFailure::from)?;
+        if let Err(error) =
+            commit_sandboxed_executor_diff(&state, &request.issue_title, &request.issue_body)
+        {
+            let Some(hook_failure) = error.strip_prefix("commit sandboxed executor diff: ") else {
+                return Err(error.into());
+            };
+            let rules = parse_blocking_hook_failure(hook_failure)
+                .map_err(|parse| BridgeRunFailure::invariant(format!("{error}; {parse}")))?;
+            let outcome = prepare_implementation_lint_repair(
+                &request.state_path,
+                &mut state,
+                &closeout_path,
+                &rules,
+            )
+            .map_err(BridgeRunFailure::invariant)?;
+            return match outcome {
+                ImplementationLintRepairOutcome::RetryPrepared => {
+                    Ok(pending_bridge_receipt(request)?)
+                }
+                ImplementationLintRepairOutcome::Exhausted => {
+                    finalize_bridge_failure_with_exhaustion(
+                        request,
+                        &mut state,
+                        runtime.take(),
+                        &remote,
+                        "executor_implementation_lint_repair_exhausted",
+                        true,
+                    )
+                }
+            };
+        }
     }
     let proof = match recover_or_prove_implementation(
         &request.state_path,
@@ -1776,13 +1843,24 @@ fn finalize_bridge_failure(
     remote: &DraftPrAdapter,
     reason: &str,
 ) -> Result<BridgeRunReceipt, BridgeRunFailure> {
+    finalize_bridge_failure_with_exhaustion(request, state, runtime, remote, reason, false)
+}
+
+fn finalize_bridge_failure_with_exhaustion(
+    request: &ExecutorBridgeRequest,
+    state: &mut PersistedInvocation,
+    runtime: Option<RuntimeSessionAdapter>,
+    remote: &DraftPrAdapter,
+    reason: &str,
+    exhausted: bool,
+) -> Result<BridgeRunReceipt, BridgeRunFailure> {
     finalize_failed_executor(
         &request.state_path,
         state,
         runtime,
         Some(remote),
         true,
-        false,
+        exhausted,
         reason,
     )?;
     observe_terminal_label_release(state, remote)?;
@@ -1793,8 +1871,14 @@ fn finalize_bridge_failure(
         branch: state.identity.branch.clone(),
         claim_id: request.claim_id.clone(),
         invocation_id: request.invocation_id.clone(),
-        status: BridgeRunStatus::Retryable {
-            reason: reason.to_string(),
+        status: if exhausted {
+            BridgeRunStatus::Blocked {
+                reason: reason.to_string(),
+            }
+        } else {
+            BridgeRunStatus::Retryable {
+                reason: reason.to_string(),
+            }
         },
     };
     write_private_create_once(
@@ -9478,6 +9562,7 @@ pub(crate) struct PersistedInvocation {
     pub(crate) terminal_result: Option<String>,
     pub(crate) umbrella: Option<u64>,
     pub(crate) current_child: Option<u64>,
+    pub(crate) implementation_repair_attempt: u32,
 }
 
 impl PersistedInvocation {
@@ -9567,6 +9652,7 @@ fn invocation_to_value(invocation: &PersistedInvocation) -> serde_json::Value {
         "terminal_result": invocation.terminal_result,
         "umbrella": invocation.umbrella,
         "current_child": invocation.current_child,
+        "implementation_repair_attempt": invocation.implementation_repair_attempt,
     })
 }
 
@@ -9576,6 +9662,9 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
         object
             .entry("current_child")
             .or_insert(serde_json::Value::Null);
+        object
+            .entry("implementation_repair_attempt")
+            .or_insert(serde_json::json!(0));
     }
     let object = strict_object(
         value,
@@ -9596,6 +9685,7 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
             "terminal_result",
             "umbrella",
             "current_child",
+            "implementation_repair_attempt",
         ],
         "invocation",
     )?;
@@ -9633,6 +9723,12 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
     }
     let umbrella = optional_number(&object, "umbrella")?;
     let current_child = optional_number(&object, "current_child")?;
+    let implementation_repair_attempt = checked_u32(&object, "implementation_repair_attempt")?;
+    if implementation_repair_attempt > MAX_IMPLEMENTATION_REPAIR_ATTEMPTS {
+        return Err(format!(
+            "executor implementation repair attempt {implementation_repair_attempt} exceeds {MAX_IMPLEMENTATION_REPAIR_ATTEMPTS}"
+        ));
+    }
     if umbrella.is_some() != current_child.is_some()
         || current_child == Some(0)
         || umbrella.is_some_and(|parent| parent == 0 || Some(parent) == current_child)
@@ -9670,6 +9766,7 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
         terminal_result: optional_text(&object, "terminal_result")?,
         umbrella,
         current_child,
+        implementation_repair_attempt,
     })
 }
 
@@ -10122,6 +10219,8 @@ const EXECUTOR_INTERNAL_PATHSPECS: [&str; 3] = [
 
 #[derive(Debug)]
 struct TrustedWorktreeGit {
+    active_hooks: Vec<PathBuf>,
+    common_dir: PathBuf,
     git_dir: PathBuf,
     hooks_dir: PathBuf,
     worktree: PathBuf,
@@ -10219,6 +10318,8 @@ fn trusted_worktree_git_paths(
     }
 
     let mut binding = TrustedWorktreeGit {
+        active_hooks: Vec::new(),
+        common_dir: common,
         git_dir,
         hooks_dir: PathBuf::new(),
         worktree,
@@ -10255,14 +10356,7 @@ fn trusted_worktree_git_paths(
             .file_type()
             .map_err(|error| format!("inspect executor Git hook entry: {error}"))?;
         if file_type.is_symlink() {
-            let target = fs::canonicalize(hook.path())
-                .map_err(|error| format!("canonicalize executor Git hook: {error}"))?;
-            if target.starts_with(&binding.worktree) {
-                return Err(
-                    "executor Git hook resolves into the sandboxed implementer worktree"
-                        .to_string(),
-                );
-            }
+            return Err("executor Git hook must not be a symlink".to_string());
         }
         #[cfg(unix)]
         if !hook.file_name().to_string_lossy().ends_with(".sample")
@@ -10274,14 +10368,312 @@ fn trusted_worktree_git_paths(
                 & 0o111
                 != 0
         {
-            return Err(
-                "executor commit cannot safely run active Git hooks outside containment"
-                    .to_string(),
+            let name = hook.file_name();
+            if name.to_str() != Some("pre-commit") {
+                return Err(format!(
+                    "executor commit cannot contain unsupported active Git hook {}",
+                    name.to_string_lossy()
+                ));
+            }
+            let metadata = hook
+                .metadata()
+                .map_err(|error| format!("inspect executor Git hook: {error}"))?;
+            if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+                return Err("executor Git hook must be a singly linked regular file".to_string());
+            }
+            binding.active_hooks.push(
+                fs::canonicalize(hook.path())
+                    .map_err(|error| format!("canonicalize executor Git hook: {error}"))?,
             );
         }
     }
     binding.hooks_dir = hooks;
     Ok(binding)
+}
+
+#[cfg(unix)]
+static HOOK_BUNDLE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+struct TrustedHookBundle {
+    path: PathBuf,
+    temporary: bool,
+}
+
+#[cfg(unix)]
+struct TrustedHookContext {
+    environment: BTreeMap<String, OsString>,
+    autospec: PathBuf,
+}
+
+#[cfg(unix)]
+impl TrustedHookContext {
+    fn current() -> Result<Self, String> {
+        Ok(Self {
+            environment: std::env::vars_os()
+                .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+                .collect(),
+            autospec: std::env::current_exe()
+                .map_err(|error| format!("resolve contained hook Autospec binary: {error}"))?,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for TrustedHookBundle {
+    fn drop(&mut self) {
+        if self.temporary {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn toml_path_entry(path: &Path, permission: &str) -> Result<String, String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| "contained Git hook path must be UTF-8".to_string())?
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    Ok(format!("\"{path}\"=\"{permission}\""))
+}
+
+#[cfg(unix)]
+fn trusted_codex_executable_from(
+    binding: &TrustedWorktreeGit,
+    environment: &BTreeMap<String, OsString>,
+) -> Result<PathBuf, String> {
+    let codex = safe_executable(Path::new("codex"), environment)
+        .map_err(|error| format!("resolve contained Git hook sandbox: {error}"))?;
+    if codex.starts_with(&binding.worktree) {
+        return Err(
+            "contained Git hook sandbox executable is writable by the implementer".to_string(),
+        );
+    }
+    Ok(codex)
+}
+
+#[cfg(unix)]
+fn trusted_linter_from(
+    binding: &TrustedWorktreeGit,
+    environment: &BTreeMap<String, OsString>,
+) -> Result<(PathBuf, PathBuf), String> {
+    let home = environment
+        .get("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .ok_or_else(|| "HOME must be absolute for contained Git hooks".to_string())?;
+    let scripts_dir = environment
+        .get("AUTOSPEC_SCRIPTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".autospec/scripts"));
+    let scripts_dir = fs::canonicalize(&scripts_dir)
+        .map_err(|error| format!("canonicalize contained hook scripts: {error}"))?;
+    let candidate = scripts_dir.join("lint-implementation.sh");
+    let metadata = fs::symlink_metadata(&candidate)
+        .map_err(|error| format!("inspect contained hook linter: {error}"))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("contained hook linter must be a regular non-symlink file".to_string());
+    }
+    let linter = fs::canonicalize(&candidate)
+        .map_err(|error| format!("canonicalize contained hook linter: {error}"))?;
+    if scripts_dir.starts_with(&binding.worktree)
+        || linter.parent() != Some(scripts_dir.as_path())
+        || linter.starts_with(&binding.worktree)
+    {
+        return Err("contained hook linter must not be writable by the implementer".to_string());
+    }
+    Ok((scripts_dir, linter))
+}
+
+#[cfg(unix)]
+fn contained_hook_profile(
+    binding: &TrustedWorktreeGit,
+    bundle: &Path,
+    codex: &Path,
+    linter: &Path,
+    autospec: &Path,
+) -> Result<String, String> {
+    let mut entries = vec![
+        "\":minimal\"=\"read\"".to_string(),
+        "\":workspace_roots\"={}".to_string(),
+        toml_path_entry(&binding.worktree, "write")?,
+        toml_path_entry(&binding.worktree.join(".git"), "read")?,
+        toml_path_entry(
+            &binding.worktree.join(".autospec/executor-closeout.md"),
+            "read",
+        )?,
+        toml_path_entry(&binding.worktree.join(".autospec/local-git"), "read")?,
+        toml_path_entry(
+            &binding.worktree.join(".autospec/original-git-pointer"),
+            "read",
+        )?,
+        toml_path_entry(&binding.common_dir, "read")?,
+        toml_path_entry(&binding.git_dir, "read")?,
+        toml_path_entry(&binding.hooks_dir, "read")?,
+        toml_path_entry(linter, "read")?,
+        toml_path_entry(bundle, "read")?,
+        toml_path_entry(&bundle.join("tmp"), "write")?,
+        toml_path_entry(codex, "read")?,
+        toml_path_entry(autospec, "read")?,
+    ];
+    for path in [
+        "~/.aws",
+        "~/.azure",
+        "~/.cargo/credentials",
+        "~/.cargo/credentials.toml",
+        "~/.codex/archived_sessions",
+        "~/.codex/auth.json",
+        "~/.codex/config.toml",
+        "~/.codex/history.jsonl",
+        "~/.codex/sessions",
+        "~/.codex/shell_snapshots",
+        "~/.config/containers",
+        "~/.config/gcloud",
+        "~/.config/gh",
+        "~/.config/pip",
+        "~/.docker",
+        "~/.git-credentials",
+        "~/.gnupg",
+        "~/.gradle",
+        "~/.kube",
+        "~/.m2",
+        "~/.netrc",
+        "~/.npmrc",
+        "~/.pypirc",
+        "~/.ssh",
+        "~/.terraform.d",
+        "~/.vault-token",
+    ] {
+        entries.push(format!("\"{path}\"=\"deny\""));
+    }
+    Ok(format!(
+        "permissions.autospec-git-hook.filesystem={{{}}}",
+        entries.join(",")
+    ))
+}
+
+#[cfg(unix)]
+impl TrustedHookBundle {
+    fn create(binding: &TrustedWorktreeGit, issue_body: &str) -> Result<Self, String> {
+        let context = TrustedHookContext::current()?;
+        Self::create_with_context(binding, issue_body, &context)
+    }
+
+    fn create_with_context(
+        binding: &TrustedWorktreeGit,
+        issue_body: &str,
+        context: &TrustedHookContext,
+    ) -> Result<Self, String> {
+        if binding.active_hooks.is_empty() {
+            return Ok(Self {
+                path: binding.hooks_dir.clone(),
+                temporary: false,
+            });
+        }
+        let codex = trusted_codex_executable_from(binding, &context.environment)?;
+        let home = context
+            .environment
+            .get("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute())
+            .ok_or_else(|| "HOME must be absolute for contained Git hooks".to_string())?;
+        let (scripts_dir, linter) = trusted_linter_from(binding, &context.environment)?;
+        let autospec = fs::canonicalize(&context.autospec)
+            .map_err(|error| format!("canonicalize contained hook Autospec binary: {error}"))?;
+        if autospec.starts_with(&binding.worktree) {
+            return Err("contained hook tools must not be writable by the implementer".to_string());
+        }
+        let nonce = HOOK_BUNDLE_NONCE.fetch_add(1, Ordering::Relaxed);
+        let path = binding.git_dir.join(format!(
+            "autospec-contained-hooks-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).map_err(|error| format!("create contained hook bundle: {error}"))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("protect contained hook bundle: {error}"))?;
+        for child in ["codex-home", "tmp"] {
+            fs::create_dir(path.join(child))
+                .map_err(|error| format!("create contained hook {child}: {error}"))?;
+            fs::set_permissions(path.join(child), fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("protect contained hook {child}: {error}"))?;
+        }
+        let issue_body_path = path.join("issue-body.md");
+        write_private_create_once(
+            &issue_body_path,
+            issue_body.as_bytes(),
+            "contained hook issue body",
+        )?;
+        let profile = contained_hook_profile(binding, &path, &codex, &linter, &autospec)?;
+        for hook in &binding.active_hooks {
+            let name = hook
+                .file_name()
+                .and_then(OsStr::to_str)
+                .ok_or_else(|| "contained Git hook name must be UTF-8".to_string())?;
+            let status_path = path.join("tmp").join(format!("{name}.status"));
+            let script = format!(
+                "#!/bin/sh\nset -eu\nstatus_file={}\nrm -f \"$status_file\"\n/usr/bin/env -i HOME={} PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 TMPDIR={} CODEX_HOME={} AUTOSPEC_SCRIPTS_DIR={} AUTOSPEC_BIN={} AUTOSPEC_LINT_ISSUE_BODY_FILE={} GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 {} sandbox -C {} -P autospec-git-hook -c {} -c 'default_permissions=\"autospec-git-hook\"' -c 'permissions.autospec-git-hook.network.enabled=false' -c 'shell_environment_policy.inherit=\"all\"' -- /bin/sh -c 'hook=$1; status_file=$2; shift 2; \"$hook\" \"$@\"; status=$?; printf \"%s\\n\" \"$status\" > \"$status_file\"; exit \"$status\"' autospec-hook {} \"$status_file\" \"$@\"\n[ -f \"$status_file\" ] || exit 1\nIFS= read -r status < \"$status_file\" || exit 1\nrm -f \"$status_file\"\ncase \"$status\" in ''|*[!0-9]*) exit 1;; esac\n[ \"$status\" -le 255 ] || exit 1\nexit \"$status\"\n",
+                posix_shell_quote(status_path.to_string_lossy().as_ref()),
+                posix_shell_quote(home.to_string_lossy().as_ref()),
+                posix_shell_quote(path.join("tmp").to_string_lossy().as_ref()),
+                posix_shell_quote(path.join("codex-home").to_string_lossy().as_ref()),
+                posix_shell_quote(scripts_dir.to_string_lossy().as_ref()),
+                posix_shell_quote(autospec.to_string_lossy().as_ref()),
+                posix_shell_quote(issue_body_path.to_string_lossy().as_ref()),
+                posix_shell_quote(codex.to_string_lossy().as_ref()),
+                posix_shell_quote(binding.worktree.to_string_lossy().as_ref()),
+                posix_shell_quote(&profile),
+                posix_shell_quote(hook.to_string_lossy().as_ref()),
+            );
+            let wrapper = path.join(name);
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o700)
+                .open(&wrapper)
+                .map_err(|error| format!("create contained Git hook wrapper: {error}"))?;
+            file.write_all(script.as_bytes())
+                .map_err(|error| format!("write contained Git hook wrapper: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("sync contained Git hook wrapper: {error}"))?;
+        }
+        Ok(Self {
+            path,
+            temporary: true,
+        })
+    }
+}
+
+#[cfg(not(unix))]
+struct TrustedHookBundle {
+    path: PathBuf,
+}
+
+#[cfg(not(unix))]
+struct TrustedHookContext;
+
+#[cfg(not(unix))]
+impl TrustedHookBundle {
+    fn create(binding: &TrustedWorktreeGit, _issue_body: &str) -> Result<Self, String> {
+        if fs::read_dir(&binding.hooks_dir)
+            .map_err(|error| format!("inventory unsupported Git hooks: {error}"))?
+            .filter_map(Result::ok)
+            .any(|entry| !entry.file_name().to_string_lossy().ends_with(".sample"))
+        {
+            return Err("contained Git hooks are unsupported on this platform".to_string());
+        }
+        Ok(Self {
+            path: binding.hooks_dir.clone(),
+        })
+    }
+
+    fn create_with_context(
+        binding: &TrustedWorktreeGit,
+        issue_body: &str,
+        _context: &TrustedHookContext,
+    ) -> Result<Self, String> {
+        Self::create(binding, issue_body)
+    }
 }
 
 fn sandboxed_executor_diff(state: &PersistedInvocation) -> Result<Vec<u8>, String> {
@@ -10488,7 +10880,10 @@ fn attest_executor_signing(binding: &TrustedWorktreeGit) -> Result<(), String> {
     Ok(())
 }
 
-fn stage_sandboxed_executor_diff(binding: &TrustedWorktreeGit) -> Result<(), String> {
+fn stage_sandboxed_executor_diff(
+    binding: &TrustedWorktreeGit,
+    hooks_path: &Path,
+) -> Result<(), String> {
     let mut paths = BTreeSet::new();
     for args in [
         vec![
@@ -10540,6 +10935,8 @@ fn stage_sandboxed_executor_diff(binding: &TrustedWorktreeGit) -> Result<(), Str
     }
     let add = binding
         .command()
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", hooks_path.to_string_lossy()))
         .arg("--literal-pathspecs")
         .args(["add", "--all", "--"])
         .args(paths)
@@ -10554,9 +10951,325 @@ fn stage_sandboxed_executor_diff(binding: &TrustedWorktreeGit) -> Result<(), Str
     Ok(())
 }
 
+fn implementation_repair_artifact_path(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    attempt: u32,
+) -> Result<PathBuf, String> {
+    let root = state_path
+        .parent()
+        .ok_or_else(|| "executor state path requires a parent".to_string())?
+        .join("implementation-repair");
+    ensure_private_directory(&root)?;
+    let scope = &sha256_hex(state.identity.invocation_id.as_bytes())[..16];
+    Ok(root.join(format!("{scope}.attempt-{attempt}.json")))
+}
+
+fn implementation_repair_artifact_body(
+    state: &PersistedInvocation,
+    attempt: u32,
+    staged_diff_digest: &str,
+    rules: &[ImplementationLintRule],
+) -> String {
+    serde_json::json!({
+        "schema": 1,
+        "claim_id": state.identity.claim_id,
+        "invocation_id": state.identity.invocation_id,
+        "base_oid": state.identity.base_oid,
+        "branch": state.identity.branch,
+        "attempt": attempt,
+        "staged_diff_digest": staged_diff_digest,
+        "rules": rules.iter().map(|rule| rule.id()).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+fn validate_implementation_repair_artifact(path: &Path) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    validate_private_state_file(path)?;
+    #[cfg(unix)]
+    if fs::metadata(path)
+        .map_err(|error| format!("read implementation repair artifact metadata: {error}"))?
+        .nlink()
+        != 1
+    {
+        return Err("implementation repair artifact has a foreign hard link".to_string());
+    }
+    Ok(())
+}
+
+fn write_implementation_repair_artifact(path: &Path, body: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "implementation lint repair artifact requires a parent".to_string())?;
+    ensure_private_directory(parent)?;
+    if path
+        .try_exists()
+        .map_err(|error| format!("inspect implementation repair artifact: {error}"))?
+    {
+        validate_implementation_repair_artifact(path)?;
+        return if fs::read(path)
+            .map_err(|error| format!("read implementation repair artifact: {error}"))?
+            == body
+        {
+            Ok(())
+        } else {
+            Err("existing implementation lint repair artifact differs".to_string())
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    return Err(
+        "implementation repair artifact no-replace publication requires Linux renameat2"
+            .to_string(),
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let temporary = path.with_file_name(format!(
+            ".{}.{}.{}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("implementation-repair"),
+            std::process::id(),
+            INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true).mode(0o600);
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| format!("create implementation repair artifact: {error}"))?;
+        let result = (|| {
+            file.write_all(body)
+                .map_err(|error| format!("write implementation repair artifact: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("sync implementation repair artifact: {error}"))?;
+            let directory = File::open(parent)
+                .map_err(|error| format!("open implementation repair artifact parent: {error}"))?;
+            match renameat2(
+                &directory,
+                temporary.file_name().expect("temporary file has a name"),
+                &directory,
+                path.file_name()
+                    .ok_or_else(|| "implementation repair artifact has no name".to_string())?,
+                RenameFlags::RENAME_NOREPLACE,
+            ) {
+                Ok(()) => directory.sync_all().map_err(|error| {
+                    format!("sync implementation repair artifact parent: {error}")
+                }),
+                Err(nix::errno::Errno::EEXIST) => {
+                    validate_implementation_repair_artifact(path)?;
+                    if fs::read(path).map_err(|error| {
+                        format!("read existing implementation repair artifact: {error}")
+                    })? == body
+                    {
+                        Ok(())
+                    } else {
+                        Err("existing implementation lint repair artifact differs".to_string())
+                    }
+                }
+                Err(error) => Err(format!(
+                    "publish implementation repair artifact without replacement: {error}"
+                )),
+            }
+        })();
+        let _ = fs::remove_file(&temporary);
+        result?;
+        validate_implementation_repair_artifact(path)
+    }
+}
+
+fn read_implementation_repair_rules(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    attempt: u32,
+) -> Result<Vec<ImplementationLintRule>, String> {
+    let path = implementation_repair_artifact_path(state_path, state, attempt)?;
+    validate_implementation_repair_artifact(&path)?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("read implementation repair artifact: {error}"))?;
+    if raw.len() > 16 * 1024 {
+        return Err("implementation repair artifact exceeds 16384 bytes".to_string());
+    }
+    let object = strict_object(
+        serde_json::from_str(&raw)
+            .map_err(|error| format!("parse implementation repair artifact: {error}"))?,
+        &[
+            "schema",
+            "claim_id",
+            "invocation_id",
+            "base_oid",
+            "branch",
+            "attempt",
+            "staged_diff_digest",
+            "rules",
+        ],
+        "implementation repair artifact",
+    )?;
+    if number(&object, "schema")? != 1
+        || text(&object, "claim_id")? != state.identity.claim_id
+        || text(&object, "invocation_id")? != state.identity.invocation_id
+        || text(&object, "base_oid")? != state.identity.base_oid
+        || text(&object, "branch")? != state.identity.branch
+        || checked_u32(&object, "attempt")? != attempt
+    {
+        return Err("implementation repair artifact binding mismatch".to_string());
+    }
+    let digest = text(&object, "staged_diff_digest")?;
+    if !canonical_sha256(&digest) {
+        return Err("implementation repair artifact diff digest is invalid".to_string());
+    }
+    let values = required(&object, "rules")?
+        .as_array()
+        .filter(|rules| !rules.is_empty() && rules.len() <= 64)
+        .ok_or_else(|| "implementation repair artifact rules are invalid".to_string())?;
+    let rules = values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(ImplementationLintRule::from_id)
+                .ok_or_else(|| "implementation repair artifact has an unknown rule".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if raw != implementation_repair_artifact_body(state, attempt, &digest, &rules) {
+        return Err("implementation repair artifact is not canonical".to_string());
+    }
+    Ok(rules)
+}
+
+fn implementation_repair_prompt(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<String, String> {
+    if state.implementation_repair_attempt == 0 {
+        return Ok(String::new());
+    }
+    let mut seen = BTreeSet::new();
+    let mut directives = Vec::new();
+    for attempt in 1..=state.implementation_repair_attempt {
+        for rule in read_implementation_repair_rules(state_path, state, attempt)? {
+            if seen.insert(rule.id()) {
+                directives.push(format!("Fix {}: {}", rule.id(), directive_for(rule)));
+            }
+        }
+    }
+    Ok(format!(
+        "\nImplementation lint repair attempt {attempt} of {maximum}.\n\
+         Claim: {claim}\nInvocation: {invocation}\n\
+         The authority boundary is unchanged: you MUST NOT push or mutate remote state.\n\
+         Correct every cumulative deterministic finding below, rerun tests, and replace the Closeout report:\n{directives}\n",
+        attempt = state.implementation_repair_attempt,
+        maximum = MAX_IMPLEMENTATION_REPAIR_ATTEMPTS,
+        claim = state.identity.claim_id,
+        invocation = state.identity.invocation_id,
+        directives = directives.join("\n"),
+    ))
+}
+
+fn prepare_implementation_lint_repair(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    closeout: &Path,
+    rules: &[ImplementationLintRule],
+) -> Result<ImplementationLintRepairOutcome, String> {
+    if state.phase != BridgePhase::ImplementationComplete {
+        return Err("implementation lint repair requires completed implementation output".into());
+    }
+    let attempt = state.implementation_repair_attempt + 1;
+    if attempt > MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1 {
+        return Err(format!(
+            "executor implementation lint repair exhausted after {MAX_IMPLEMENTATION_REPAIR_ATTEMPTS} attempts"
+        ));
+    }
+    let binding = trusted_worktree_git(state)?;
+    let staged = binding
+        .command()
+        .args([
+            "diff",
+            "--cached",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "HEAD",
+            "--",
+            ".",
+        ])
+        .args(EXECUTOR_INTERNAL_PATHSPECS)
+        .output()
+        .map_err(|error| format!("capture implementation repair diff: {error}"))?;
+    if !staged.status.success() || staged.stdout.is_empty() {
+        return Err("implementation lint repair requires a non-empty staged diff".to_string());
+    }
+    let worktree_matches_index = binding
+        .command()
+        .args(["diff", "--quiet", "--exit-code", "--", "."])
+        .args(EXECUTOR_INTERNAL_PATHSPECS)
+        .status()
+        .map_err(|error| format!("compare implementation repair index: {error}"))?;
+    if !worktree_matches_index.success() {
+        return Err(
+            "implementation repair index differs from worktree; preserving staged bytes".into(),
+        );
+    }
+    let body =
+        implementation_repair_artifact_body(state, attempt, &sha256_hex(&staged.stdout), rules);
+    write_implementation_repair_artifact(
+        &implementation_repair_artifact_path(state_path, state, attempt)?,
+        body.as_bytes(),
+    )?;
+    if attempt == MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1 {
+        return Ok(ImplementationLintRepairOutcome::Exhausted);
+    }
+    let unstage = binding
+        .command()
+        .args(["restore", "--source=HEAD", "--staged", "--", "."])
+        .output()
+        .map_err(|error| format!("unstage implementation repair diff: {error}"))?;
+    if !unstage.status.success() {
+        return Err(format!(
+            "unstage implementation repair diff: {}",
+            String::from_utf8_lossy(&unstage.stderr).trim()
+        ));
+    }
+    prepare_private_closeout_sink(&state.identity.worktree, closeout)?;
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(closeout)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("clear implementation repair Closeout report: {error}"))?;
+    state.phase = BridgePhase::Interrupted;
+    state.implementation_repair_attempt = attempt;
+    state.head_oid = None;
+    state.closeout_path = None;
+    state.closeout_digest = None;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)?;
+    Ok(ImplementationLintRepairOutcome::RetryPrepared)
+}
+
 fn commit_sandboxed_executor_diff(
     state: &PersistedInvocation,
     issue_title: &str,
+    issue_body: &str,
+) -> Result<bool, String> {
+    commit_sandboxed_executor_diff_inner(state, issue_title, issue_body, None)
+}
+
+#[cfg(all(test, unix))]
+fn commit_sandboxed_executor_diff_with_hook_context(
+    state: &PersistedInvocation,
+    issue_title: &str,
+    issue_body: &str,
+    hook_context: &TrustedHookContext,
+) -> Result<bool, String> {
+    commit_sandboxed_executor_diff_inner(state, issue_title, issue_body, Some(hook_context))
+}
+
+fn commit_sandboxed_executor_diff_inner(
+    state: &PersistedInvocation,
+    issue_title: &str,
+    issue_body: &str,
+    hook_context: Option<&TrustedHookContext>,
 ) -> Result<bool, String> {
     let binding = trusted_worktree_git(state)?;
     let branch = binding
@@ -10582,7 +11295,11 @@ fn commit_sandboxed_executor_diff(
     }
     reject_external_filters(&binding)?;
     attest_executor_signing(&binding)?;
-    stage_sandboxed_executor_diff(&binding)?;
+    let hook_bundle = match hook_context {
+        Some(context) => TrustedHookBundle::create_with_context(&binding, issue_body, context)?,
+        None => TrustedHookBundle::create(&binding, issue_body)?,
+    };
+    stage_sandboxed_executor_diff(&binding, &hook_bundle.path)?;
     let staged = binding
         .command()
         .args(["diff", "--cached", "--quiet", "--exit-code"])
@@ -10604,7 +11321,7 @@ fn commit_sandboxed_executor_diff(
         .arg("-c")
         .arg(format!(
             "core.hooksPath={}",
-            binding.hooks_dir.to_string_lossy()
+            hook_bundle.path.to_string_lossy()
         ))
         .args(["commit", "-m", &subject])
         .output()
@@ -13439,6 +14156,76 @@ fn ownership_transfer_path(scope_root: &Path, issue: u64) -> PathBuf {
     scope_root.join(format!("issue-{issue}.ownership-transfer.json"))
 }
 
+const AVAILABLE_TRANSFER_FIELDS: &[&str] = &[
+    "schema",
+    "state",
+    "repository_path",
+    "issue",
+    "worktree",
+    "branch",
+    "from_claim_id",
+    "from_invocation_id",
+    "head_oid",
+    "status_digest",
+    "runtime_receipt",
+    "cleanup_binding",
+];
+
+const ADOPTED_TRANSFER_FIELDS: &[&str] = &[
+    "schema",
+    "state",
+    "repository_path",
+    "issue",
+    "worktree",
+    "branch",
+    "from_claim_id",
+    "from_invocation_id",
+    "head_oid",
+    "status_digest",
+    "runtime_receipt",
+    "cleanup_binding",
+    "to_claim_id",
+    "to_invocation_id",
+];
+
+fn ownership_transfer_names_predecessor(
+    path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    reject_symlink_path(path)?;
+    validate_private_state_file(path)?;
+    let value: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(path)
+            .map_err(|error| format!("read executor ownership transfer: {error}"))?,
+    )
+    .map_err(|error| format!("parse executor ownership transfer: {error}"))?;
+    let transfer_state = value
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "executor ownership transfer state is missing".to_string())?;
+    let (fields, adopted) = match transfer_state {
+        "available" => (AVAILABLE_TRANSFER_FIELDS, false),
+        "adopted" => (ADOPTED_TRANSFER_FIELDS, true),
+        _ => return Err("executor ownership transfer state is invalid".to_string()),
+    };
+    let object = strict_object(value, fields, "executor ownership transfer")?;
+    if checked_u32(&object, "schema")? != 1
+        || number(&object, "issue")? != state.identity.issue
+        || Path::new(&text(&object, "repository_path")?) != state.identity.repository_path.as_path()
+        || Path::new(&text(&object, "worktree")?) != state.identity.worktree.as_path()
+        || text(&object, "branch")? != state.identity.branch
+    {
+        return Err("executor ownership transfer identity changed".to_string());
+    }
+    let (claim_field, invocation_field) = if adopted {
+        ("to_claim_id", "to_invocation_id")
+    } else {
+        ("from_claim_id", "from_invocation_id")
+    };
+    Ok(text(&object, claim_field)? == state.identity.claim_id
+        && text(&object, invocation_field)? == state.identity.invocation_id)
+}
+
 pub(crate) fn finalize_ownership_loss_local(state_path: &Path) -> Result<(), String> {
     validate_private_state_file(state_path)?;
     let state = PersistedInvocation::from_json(
@@ -13446,6 +14233,105 @@ pub(crate) fn finalize_ownership_loss_local(state_path: &Path) -> Result<(), Str
             .map_err(|error| format!("read ownership-loss invocation: {error}"))?,
     )?;
     prepare_available_worktree_transfer(state_path, &state, None)
+}
+
+fn recover_released_interrupted_predecessor_transfer<Authorized>(
+    state_dir: &Path,
+    repository: &str,
+    repository_path: &Path,
+    issue: u64,
+    branch: &str,
+    mut authorize: Authorized,
+) -> Result<bool, String>
+where
+    Authorized:
+        FnMut(&PersistedInvocation, &mut dyn FnMut() -> Result<(), String>) -> Result<bool, String>,
+{
+    if !state_dir.exists() {
+        return Ok(false);
+    }
+    validate_private_directory(state_dir)?;
+    let prefix = format!("issue-{issue}-");
+    let mut candidates = Vec::new();
+    let mut saw_transfer = false;
+    for entry in fs::read_dir(state_dir)
+        .map_err(|error| format!("inventory interrupted executor predecessors: {error}"))?
+    {
+        let path = entry
+            .map_err(|error| format!("inventory interrupted executor predecessor: {error}"))?
+            .path();
+        let Some(name) = path.file_name().and_then(OsStr::to_str) else {
+            continue;
+        };
+        if !name.starts_with(&prefix) || !is_invocation_state_file(&path) {
+            continue;
+        }
+        reject_symlink_path(&path)?;
+        validate_private_state_file(&path)?;
+        let state = PersistedInvocation::from_json(
+            &fs::read_to_string(&path)
+                .map_err(|error| format!("read interrupted executor predecessor: {error}"))?,
+        )?;
+        if state.phase != BridgePhase::Interrupted
+            || state.identity.repository != repository
+            || state.identity.repository_path != repository_path
+            || state.identity.issue != issue
+            || state.identity.branch != branch
+        {
+            continue;
+        }
+        let Some(scope_root) = state.identity.worktree.parent() else {
+            return Err("interrupted executor predecessor has no worktree scope".to_string());
+        };
+        let transfer_path = ownership_transfer_path(scope_root, issue);
+        if !state.identity.worktree.exists() || !transfer_path.exists() {
+            continue;
+        }
+        saw_transfer = true;
+        if !executor_terminal_processes_are_quiescent(&state)? {
+            return Err("interrupted executor predecessor process is still live".to_string());
+        }
+        if !ownership_transfer_names_predecessor(&transfer_path, &state)? {
+            continue;
+        }
+        let generation = &sha256_hex(state.identity.claim_id.as_bytes())[..16];
+        if name != format!("issue-{issue}-{generation}.json") {
+            return Err(
+                "interrupted executor predecessor filename does not bind its claim".to_string(),
+            );
+        }
+        candidates.push((path, state));
+    }
+    let (state_path, state) = match candidates.len() {
+        0 if saw_transfer => {
+            return Err(
+                "executor ownership transfer does not name an interrupted predecessor".to_string(),
+            )
+        }
+        0 => return Ok(false),
+        1 => candidates.pop().expect("one interrupted predecessor"),
+        _ => {
+            return Err(
+                "multiple interrupted executor predecessors match one ownership transfer"
+                    .to_string(),
+            )
+        }
+    };
+    let mut transferred = false;
+    let authorized = authorize(&state, &mut || {
+        prepare_available_worktree_transfer(&state_path, &state, None)?;
+        transferred = true;
+        Ok(())
+    })?;
+    if !authorized {
+        return Err("interrupted executor predecessor claim is not released".to_string());
+    }
+    if !transferred {
+        return Err(
+            "interrupted executor predecessor authority did not transfer ownership".to_string(),
+        );
+    }
+    Ok(true)
 }
 
 fn prepare_available_worktree_transfer(
@@ -14011,6 +14897,12 @@ fn failure_cleanup_intent_path(state_path: &Path) -> PathBuf {
     state_path.with_extension("failure-cleanup.json")
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct FailureCleanupIntent {
+    reason: String,
+    exhausted: bool,
+}
+
 fn ensure_failure_cleanup_intent(
     state_path: &Path,
     state: &PersistedInvocation,
@@ -14048,7 +14940,7 @@ fn ensure_failure_cleanup_intent(
 fn read_failure_cleanup_intent(
     state_path: &Path,
     state: &PersistedInvocation,
-) -> Result<String, String> {
+) -> Result<FailureCleanupIntent, String> {
     let path = failure_cleanup_intent_path(state_path);
     validate_private_state_file(&path)?;
     let value: serde_json::Value = serde_json::from_str(
@@ -14061,10 +14953,13 @@ fn read_failure_cleanup_intent(
         &["schema", "binding", "retryable", "exhausted", "reason"],
         "executor failure cleanup intent",
     )?;
+    let exhausted = object
+        .get("exhausted")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "executor failure cleanup intent exhausted flag is invalid".to_string())?;
     if checked_u32(&object, "schema")? != 1
         || text(&object, "binding")? != cleanup_binding(state)
         || object.get("retryable").and_then(serde_json::Value::as_bool) != Some(true)
-        || object.get("exhausted").and_then(serde_json::Value::as_bool) != Some(false)
     {
         return Err("executor failure cleanup intent is not resumable".to_string());
     }
@@ -14072,7 +14967,10 @@ fn read_failure_cleanup_intent(
     if reason.trim().is_empty() {
         return Err("executor failure cleanup intent has no reason".to_string());
     }
-    Ok(reason.to_string())
+    Ok(FailureCleanupIntent {
+        reason: reason.to_string(),
+        exhausted,
+    })
 }
 
 fn close_retryable_pull_request(
@@ -17466,7 +18364,7 @@ fn has_durable_harness_recovery_evidence(
     if state.supervisor.is_some() || state.process.is_some() {
         return Ok(true);
     }
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let sinks = output_sink_paths_for_state(state_path, state)?;
     if sinks
         .supervisor_identity
         .try_exists()
@@ -17763,7 +18661,7 @@ fn supervise_validated_harness_with_claim_renewal(
     if config.stall_timeout.is_zero() || config.poll_interval.is_zero() {
         return Err("executor supervision intervals must be non-zero".to_string());
     }
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let sinks = output_sink_paths_for_state(state_path, state)?;
     let recovery_phase = state.phase;
     if state.process.is_none() {
         if sinks
@@ -19256,13 +20154,38 @@ impl Drop for LaunchGuard {
     }
 }
 
-fn output_sink_paths(state_path: &Path, invocation_id: &str) -> Result<OutputSinkPaths, String> {
+fn output_sink_paths_for_state(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<OutputSinkPaths, String> {
+    output_sink_paths_for_attempt(
+        state_path,
+        &state.identity.invocation_id,
+        state.implementation_repair_attempt,
+    )
+}
+
+fn output_sink_paths_for_attempt(
+    state_path: &Path,
+    invocation_id: &str,
+    implementation_repair_attempt: u32,
+) -> Result<OutputSinkPaths, String> {
+    if implementation_repair_attempt > MAX_IMPLEMENTATION_REPAIR_ATTEMPTS {
+        return Err(format!(
+            "executor implementation repair attempt {implementation_repair_attempt} exceeds {MAX_IMPLEMENTATION_REPAIR_ATTEMPTS}"
+        ));
+    }
     let parent = state_path
         .parent()
         .ok_or_else(|| "executor state path requires a parent".to_string())?
         .join("executor-output");
     ensure_private_directory(&parent)?;
-    let scope = &sha256_hex(invocation_id.as_bytes())[..16];
+    let scope_binding = if implementation_repair_attempt == 0 {
+        invocation_id.to_string()
+    } else {
+        format!("{invocation_id}\0implementation-lint-repair\0{implementation_repair_attempt}")
+    };
+    let scope = &sha256_hex(scope_binding.as_bytes())[..16];
     Ok(OutputSinkPaths {
         stdout: parent.join(format!("{scope}.stdout.ring")),
         stderr: parent.join(format!("{scope}.stderr.ring")),
@@ -19273,6 +20196,11 @@ fn output_sink_paths(state_path: &Path, invocation_id: &str) -> Result<OutputSin
         exit_status: parent.join(format!("{scope}.exit")),
         supervisor_identity: parent.join(format!("{scope}.supervisor.json")),
     })
+}
+
+#[cfg(test)]
+fn output_sink_paths(state_path: &Path, invocation_id: &str) -> Result<OutputSinkPaths, String> {
+    output_sink_paths_for_attempt(state_path, invocation_id, 0)
 }
 
 fn write_supervisor_identity(
@@ -19942,7 +20870,7 @@ fn launch_and_supervise(
     return Err("executor harness launch requires Unix process isolation".to_string());
     #[cfg(target_os = "linux")]
     let mut subreaper = ScopedChildSubreaper::enable()?;
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let sinks = output_sink_paths_for_state(state_path, state)?;
     #[cfg(unix)]
     let child = match spawn_blocked_harness(harness, &sinks, None) {
         Ok(child) => child,
@@ -20361,7 +21289,7 @@ fn supervise_adopted_process(
     };
     #[cfg(target_os = "linux")]
     let mut guard = AdoptedProcessGuard::new(owned_processes);
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let sinks = output_sink_paths_for_state(state_path, state)?;
     let mut readers = match DurableOutputReaders::open(&sinks, true) {
         Ok(readers) => readers,
         Err(error) => {
@@ -22117,7 +23045,7 @@ fn implementation_completion_header_is_exact(
     {
         return Ok(false);
     }
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let sinks = output_sink_paths_for_state(state_path, state)?;
     if !sinks.exit_status.is_file() {
         return Ok(false);
     }
@@ -22326,7 +23254,7 @@ fn zero_effect_recovery_marker(
         .remote_snapshot_digest
         .as_deref()
         .ok_or_else(|| "executor zero-effect recovery has no prelaunch snapshot".to_string())?;
-    let exit_path = output_sink_paths(state_path, &state.identity.invocation_id)?.exit_status;
+    let exit_path = output_sink_paths_for_state(state_path, state)?.exit_status;
     let exit = fs::read(&exit_path)
         .map_err(|error| format!("read zero-effect recovery exit status: {error}"))?;
     let binding = serde_json::json!({
@@ -24072,6 +25000,8 @@ mod tests {
     use std::fs::{self, File, OpenOptions};
     use std::io::Write;
     #[cfg(unix)]
+    use std::net::{TcpListener, TcpStream};
+    #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
@@ -25668,7 +26598,7 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
 
         super::IMPLEMENTATION_COMMIT_FAILPOINT.store(1, Ordering::SeqCst);
         let error =
-            super::commit_sandboxed_executor_diff(&state, "test: persist implementation proof")
+            super::commit_sandboxed_executor_diff(&state, "test: persist implementation proof", "")
                 .expect_err("interrupt after Rust commit");
         assert!(error.contains("after implementation commit"), "{error}");
         let durable = PersistedInvocation::from_json(
@@ -26503,7 +27433,8 @@ exit 64
         assert_eq!(durable.phase, super::BridgePhase::ImplementationComplete);
         assert_eq!(
             super::read_failure_cleanup_intent(&state_path, &durable)
-                .expect("read exact failure cleanup intent"),
+                .expect("read exact failure cleanup intent")
+                .reason,
             "executor_zero_effect_completion"
         );
 
@@ -27105,8 +28036,30 @@ exit 64
         );
     }
 
+    fn recover_test_predecessor<Authorized>(
+        fixture: &GitFixture,
+        state_dir: &Path,
+        worktree: &super::IssueWorktree,
+        authorize: Authorized,
+    ) -> Result<bool, String>
+    where
+        Authorized: FnMut(
+            &super::PersistedInvocation,
+            &mut dyn FnMut() -> Result<(), String>,
+        ) -> Result<bool, String>,
+    {
+        super::recover_released_interrupted_predecessor_transfer(
+            state_dir,
+            "owner/repo",
+            &fixture.repo.canonicalize().expect("canonical repo"),
+            42,
+            &worktree.branch,
+            authorize,
+        )
+    }
+
     #[test]
-    fn autonomous_executor_bridge_transfers_taken_over_worktree_without_losing_wip() {
+    fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer() {
         let fixture = GitFixture::new("worktree-takeover-transfer");
         let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
         let scope = format!(
@@ -27148,17 +28101,192 @@ exit 64
             "preserve me\n"
         );
         let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::Interrupted;
         state.identity.worktree = worktree.path.clone();
         state.identity.branch = worktree.branch.clone();
         state.identity.claim_id = "old-claim".to_string();
         state.identity.invocation_id = "old-invocation".to_string();
         state.identity.runtime_environment_dir = None;
         state.identity.runtime_session_id = None;
-        let state_path = fixture.root.join("state/old-invocation.json");
+        let state_dir = fixture.root.join("state");
+        let generation = &super::sha256_hex(b"old-claim")[..16];
+        let state_path = state_dir.join(format!("issue-42-{generation}.json"));
         super::write_invocation_atomic(&state_path, &state).expect("persist old invocation");
 
-        super::finalize_ownership_loss_local(&state_path)
-            .expect("quarantine exact old generation for takeover");
+        let malformed_path = state_dir.join("issue-42-0000000000000000.json");
+        fs::write(&malformed_path, [123]).expect("write malformed predecessor");
+        fs::set_permissions(&malformed_path, fs::Permissions::from_mode(0o600))
+            .expect("harden malformed predecessor");
+        let malformed_error = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("malformed predecessor must fail before the release check")
+        })
+        .expect_err("malformed predecessor fails closed");
+        assert!(
+            malformed_error.contains("JSON") || malformed_error.contains("parse"),
+            "{malformed_error}"
+        );
+        fs::remove_file(malformed_path).expect("remove malformed predecessor");
+
+        let mut symlinked = state.clone();
+        symlinked.identity.claim_id = "symlink-claim".to_string();
+        symlinked.identity.invocation_id = "symlink-invocation".to_string();
+        let symlink_target = fixture.root.join("symlink-predecessor.json");
+        super::write_invocation_atomic(&symlink_target, &symlinked)
+            .expect("persist symlink predecessor target");
+        let symlink_generation = &super::sha256_hex(b"symlink-claim")[..16];
+        let symlink_path = state_dir.join(format!("issue-42-{symlink_generation}.json"));
+        symlink(&symlink_target, &symlink_path).expect("install predecessor state symlink");
+        let symlink_error = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("symlink predecessor must fail before the release check")
+        })
+        .expect_err("symlink predecessor fails closed");
+        assert!(symlink_error.contains("symlink"), "{symlink_error}");
+        fs::remove_file(symlink_path).expect("remove predecessor state symlink");
+        fs::remove_file(symlink_target).expect("remove predecessor symlink target");
+
+        let transfer_path =
+            super::ownership_transfer_path(worktree.path.parent().expect("scope root"), 42);
+        super::write_private_atomic(
+            &transfer_path,
+            &[123],
+            "malformed executor ownership transfer",
+        )
+        .expect("write malformed transfer");
+        let malformed_transfer =
+            recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+                panic!("malformed transfer must fail before the release check")
+            })
+            .expect_err("malformed transfer fails closed");
+        assert!(malformed_transfer.contains("parse"), "{malformed_transfer}");
+        super::write_private_atomic(
+            &transfer_path,
+            serde_json::to_string(&initial_transfer)
+                .expect("serialize initial transfer")
+                .as_bytes(),
+            "restored executor ownership transfer",
+        )
+        .expect("restore transfer");
+
+        let transfer_target = fixture.root.join("ownership-transfer-target.json");
+        fs::rename(&transfer_path, &transfer_target).expect("move transfer target");
+        symlink(&transfer_target, &transfer_path).expect("install transfer symlink");
+        let symlink_transfer = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("symlinked transfer must fail before the release check")
+        })
+        .expect_err("symlinked transfer fails closed");
+        assert!(symlink_transfer.contains("symlink"), "{symlink_transfer}");
+        fs::remove_file(&transfer_path).expect("remove transfer symlink");
+        fs::rename(transfer_target, &transfer_path).expect("restore transfer target");
+
+        let mut mismatched_transfer = initial_transfer.clone();
+        mismatched_transfer["to_claim_id"] = serde_json::json!("missing-claim");
+        mismatched_transfer["to_invocation_id"] = serde_json::json!("missing-invocation");
+        super::write_private_atomic(
+            &transfer_path,
+            serde_json::to_string(&mismatched_transfer)
+                .expect("serialize mismatched transfer")
+                .as_bytes(),
+            "mismatched executor ownership transfer",
+        )
+        .expect("write mismatched transfer");
+        let mismatch = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("mismatched transfer must fail before the release check")
+        })
+        .expect_err("mismatched transfer fails closed");
+        assert!(mismatch.contains("does not name"), "{mismatch}");
+        super::write_private_atomic(
+            &transfer_path,
+            serde_json::to_string(&initial_transfer)
+                .expect("serialize initial transfer")
+                .as_bytes(),
+            "restored executor ownership transfer",
+        )
+        .expect("restore transfer");
+
+        let mut historical = state.clone();
+        historical.identity.claim_id = "older-claim".to_string();
+        historical.identity.invocation_id = "older-invocation".to_string();
+        historical.process =
+            super::observe_process_identity(std::process::id(), "").expect("observe test process");
+        let historical_generation = &super::sha256_hex(b"older-claim")[..16];
+        let historical_path = state_dir.join(format!("issue-42-{historical_generation}.json"));
+        super::write_invocation_atomic(&historical_path, &historical)
+            .expect("persist historical predecessor");
+        let live_historical = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("live historical predecessor must fail before the release check")
+        })
+        .expect_err("live historical predecessor blocks ownership transfer");
+        assert!(
+            live_historical.contains("process is still live"),
+            "{live_historical}"
+        );
+        historical.process = None;
+        super::write_invocation_atomic(&historical_path, &historical)
+            .expect("retire historical predecessor process");
+
+        let unreleased =
+            recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| Ok(false))
+                .expect_err("unreleased predecessor stays owned");
+        assert!(unreleased.contains("claim is not released"), "{unreleased}");
+        let unchanged: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(super::ownership_transfer_path(
+                worktree.path.parent().expect("scope root"),
+                42,
+            ))
+            .expect("unreleased transfer"),
+        )
+        .expect("parse unreleased transfer");
+        assert_eq!(unchanged["state"], "adopted");
+        assert_eq!(unchanged["to_claim_id"], "old-claim");
+
+        state.process =
+            super::observe_process_identity(std::process::id(), "").expect("observe test process");
+        super::write_invocation_atomic(&state_path, &state).expect("persist live invocation");
+        let live = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("live predecessor must be rejected before the release check")
+        })
+        .expect_err("live predecessor stays owned");
+        assert!(live.contains("process is still live"), "{live}");
+
+        state.process = None;
+        super::write_invocation_atomic(&state_path, &state).expect("persist quiescent invocation");
+        let withheld = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| Ok(true))
+            .expect_err("authority cannot escape without owning the transfer");
+        assert!(
+            withheld.contains("did not transfer ownership"),
+            "{withheld}"
+        );
+        let unchanged = fs::read_to_string(&wip).expect("withheld authority preserves WIP");
+        assert_eq!(unchanged, "preserve me\n");
+        let release_checks = std::cell::Cell::new(0usize);
+        assert!(recover_test_predecessor(
+            &fixture,
+            &state_dir,
+            &worktree,
+            |candidate, transfer| {
+                release_checks.set(release_checks.get() + 1);
+                if candidate.identity.claim_id != "old-claim" {
+                    return Ok(false);
+                }
+                transfer()?;
+                Ok(true)
+            },
+        )
+        .expect("recover released interrupted predecessor"));
+        assert_eq!(
+            release_checks.get(),
+            1,
+            "only the transfer-bound predecessor reaches the authority gate"
+        );
+        assert_eq!(
+            super::PersistedInvocation::from_json(
+                &fs::read_to_string(&historical_path).expect("read historical predecessor")
+            )
+            .expect("parse historical predecessor")
+            .phase,
+            BridgePhase::Interrupted,
+            "historical predecessor remains immutable"
+        );
         assert_eq!(
             fs::read_to_string(&wip).expect("old WIP remains"),
             "preserve me\n"
@@ -27189,6 +28317,7 @@ exit 64
         assert_eq!(transfer["from_claim_id"], "old-claim");
         assert_eq!(transfer["to_claim_id"], "new-claim");
 
+        fs::remove_file(historical_path).expect("remove historical predecessor");
         fs::remove_file(wip).expect("remove test WIP");
         git(
             &fixture.repo,
@@ -28360,6 +29489,7 @@ exit 64
             terminal_result: None,
             umbrella: None,
             current_child: None,
+            implementation_repair_attempt: 0,
         };
         write_invocation_atomic(&state_path, &invocation).expect("persist invocation");
         let recovered = recover_invocation(&state_path, &invocation.identity)
@@ -28795,6 +29925,7 @@ exit 64
             terminal_result: None,
             umbrella: None,
             current_child: None,
+            implementation_repair_attempt: 0,
         };
         write_invocation_atomic(&state_path, &invocation).expect("persist invocation");
         git(
@@ -30341,6 +31472,14 @@ exit 64
             "Bash(go test *)",
             "Bash(pytest *)",
             "Bash(python -m pytest *)",
+            "Bash(bats)",
+            "Bash(bats *)",
+            "Bash(shellcheck)",
+            "Bash(shellcheck *)",
+            "Bash(bash -n)",
+            "Bash(bash -n *)",
+            "Bash(./scripts/validate-all.sh)",
+            "Bash(./scripts/validate-all.sh *)",
         ] {
             assert!(
                 CLAUDE_LOCAL_TOOLS.split(',').any(|tool| tool == required),
@@ -30354,6 +31493,8 @@ exit 64
             "Bash(npm *)",
             "Bash(pnpm *)",
             "Bash(yarn *)",
+            "Bash(bash *)",
+            "Bash(bash -c *)",
         ] {
             assert!(
                 !CLAUDE_LOCAL_TOOLS
@@ -30828,6 +31969,7 @@ exit 64
             terminal_result: None,
             umbrella: None,
             current_child: None,
+            implementation_repair_attempt: 0,
         }
     }
 
@@ -30839,6 +31981,306 @@ exit 64
         let actual = PersistedInvocation::from_json(&json).expect("parse invocation");
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn implementation_repair_output_legacy_json_defaults_to_attempt_zero() {
+        let expected = persisted_invocation();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&expected.to_json().expect("serialize invocation"))
+                .expect("parse invocation JSON");
+        value
+            .as_object_mut()
+            .expect("invocation object")
+            .remove("implementation_repair_attempt");
+
+        let actual = PersistedInvocation::from_json(&value.to_string())
+            .expect("load legacy invocation without repair attempt");
+
+        assert_eq!(actual.implementation_repair_attempt, 0);
+    }
+
+    #[test]
+    fn implementation_repair_output_generations_are_disjoint_and_bounded() {
+        let root = test_root("implementation-repair-output");
+        let state_path = root.join("state/invocation.json");
+        let mut state = persisted_invocation();
+        let mut outputs = BTreeMap::new();
+        for attempt in 0..=3 {
+            state.implementation_repair_attempt = attempt;
+            let paths = super::output_sink_paths_for_state(&state_path, &state)
+                .expect("supported repair output generation");
+            outputs.insert(paths.stdout.clone(), attempt);
+        }
+
+        assert_eq!(outputs.len(), 4, "repair attempts reused durable output");
+        state.implementation_repair_attempt = 4;
+        let error = super::output_sink_paths_for_state(&state_path, &state)
+            .expect_err("attempt four must fail before launch");
+        assert!(error.contains("exceeds 3"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn implementation_repair_output_recovery_ignores_prior_attempt_exit_record() {
+        let root = test_root("implementation-repair-recovery");
+        let state_path = root.join("state/invocation.json");
+        let mut state = persisted_invocation();
+        state.supervisor = None;
+        state.process = None;
+
+        let prior =
+            super::output_sink_paths_for_attempt(&state_path, &state.identity.invocation_id, 0)
+                .expect("attempt zero output");
+        let mut complete = [0_u8; 16];
+        complete[..4].copy_from_slice(&0_i32.to_ne_bytes());
+        complete[4..8].copy_from_slice(b"EXIT");
+        complete[8..12].copy_from_slice(&0_i32.to_ne_bytes());
+        complete[12..].copy_from_slice(b"DONE");
+        fs::write(&prior.exit_status, complete).expect("prior durable exit");
+        fs::set_permissions(&prior.exit_status, fs::Permissions::from_mode(0o600))
+            .expect("private prior exit");
+
+        state.implementation_repair_attempt = 1;
+        assert!(
+            !super::has_durable_harness_recovery_evidence(&state_path, &state)
+                .expect("inspect current repair attempt"),
+            "attempt zero completion must not satisfy attempt one recovery"
+        );
+
+        let current =
+            super::output_sink_paths_for_state(&state_path, &state).expect("attempt one output");
+        fs::write(&current.exit_status, complete).expect("current durable exit");
+        fs::set_permissions(&current.exit_status, fs::Permissions::from_mode(0o600))
+            .expect("private current exit");
+        assert!(
+            super::has_durable_harness_recovery_evidence(&state_path, &state)
+                .expect("recover current repair attempt")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn implementation_lint_repair_persists_bound_evidence_and_cumulative_prompt() {
+        let fixture = GitFixture::new("implementation-lint-repair");
+        git(
+            &fixture.repo,
+            &["checkout", "-b", "feat/autonomous-issue-42"],
+        );
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::ImplementationComplete;
+        let state_path = fixture.root.join("state/invocation.json");
+        let closeout = fixture.repo.join(".autospec/executor-closeout.md");
+        super::prepare_private_closeout_sink(&fixture.repo, &closeout).expect("closeout sink");
+        fs::write(&closeout, "stale closeout").expect("stale closeout");
+        fs::write(fixture.repo.join("implementation.txt"), "repair me\n").expect("implementation");
+        git(&fixture.repo, &["add", "implementation.txt"]);
+        fs::remove_file(fixture.repo.join("implementation.txt")).expect("remove staged-only file");
+        let error = super::prepare_implementation_lint_repair(
+            &state_path,
+            &mut state,
+            &closeout,
+            &[super::ImplementationLintRule::Complexity],
+        )
+        .expect_err("staged-only bytes must be preserved");
+        assert!(error.contains("differs from worktree"), "{error}");
+        fs::write(fixture.repo.join("implementation.txt"), "repair me\n")
+            .expect("restore worktree");
+        super::prepare_implementation_lint_repair(
+            &state_path,
+            &mut state,
+            &closeout,
+            &[
+                super::ImplementationLintRule::Complexity,
+                super::ImplementationLintRule::Security,
+            ],
+        )
+        .expect("prepare first repair");
+
+        assert_eq!(state.phase, BridgePhase::Interrupted);
+        assert_eq!(state.implementation_repair_attempt, 1);
+        assert!(fs::read_to_string(&closeout)
+            .expect("cleared closeout")
+            .is_empty());
+        git(&fixture.repo, &["diff", "--cached", "--quiet"]);
+        let prompt =
+            super::implementation_repair_prompt(&state_path, &state).expect("repair prompt");
+        assert!(prompt.contains("Fix COMPLEXITY:") && prompt.contains("Fix SECURITY:"));
+        assert!(prompt.contains("Claim: claim-42"), "{prompt}");
+        assert!(prompt.contains("MUST NOT push"), "{prompt}");
+        let artifact = super::implementation_repair_artifact_path(&state_path, &state, 1)
+            .expect("first repair artifact");
+        let target = artifact.with_extension("target");
+        fs::rename(&artifact, &target).expect("move repair artifact");
+        symlink(&target, &artifact).expect("replace repair artifact with symlink");
+        assert!(super::implementation_repair_prompt(&state_path, &state)
+            .expect_err("symlinked artifact must fail closed")
+            .contains("symlink"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn implementation_lint_repair_exhaustion_persists_final_once_without_attempt_four_output() {
+        let fixture = GitFixture::new("implementation-lint-repair-exhaustion");
+        git(
+            &fixture.repo,
+            &["checkout", "-b", "feat/autonomous-issue-42"],
+        );
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::ImplementationComplete;
+        let state_path = fixture.root.join("state/invocation.json");
+        let closeout = fixture.repo.join(".autospec/executor-closeout.md");
+        super::prepare_private_closeout_sink(&fixture.repo, &closeout).expect("closeout sink");
+        fs::write(fixture.repo.join("implementation.txt"), "still blocked\n")
+            .expect("implementation");
+        for (attempt, rule) in [
+            super::ImplementationLintRule::Complexity,
+            super::ImplementationLintRule::Security,
+            super::ImplementationLintRule::TodoLeft,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            state.phase = BridgePhase::ImplementationComplete;
+            git(&fixture.repo, &["add", "implementation.txt"]);
+            assert_eq!(
+                super::prepare_implementation_lint_repair(
+                    &state_path,
+                    &mut state,
+                    &closeout,
+                    &[rule],
+                )
+                .expect("prepare bounded repair"),
+                super::ImplementationLintRepairOutcome::RetryPrepared,
+            );
+            assert_eq!(state.implementation_repair_attempt, attempt as u32 + 1);
+        }
+        let prompt = super::implementation_repair_prompt(&state_path, &state)
+            .expect("cumulative third repair prompt");
+        for rule in ["COMPLEXITY", "SECURITY", "TODO_LEFT"] {
+            assert!(prompt.contains(&format!("Fix {rule}:")), "{prompt}");
+        }
+
+        state.phase = BridgePhase::ImplementationComplete;
+        git(&fixture.repo, &["add", "implementation.txt"]);
+
+        for _ in 0..2 {
+            assert_eq!(
+                super::prepare_implementation_lint_repair(
+                    &state_path,
+                    &mut state,
+                    &closeout,
+                    &[super::ImplementationLintRule::Security],
+                )
+                .expect("seal exhausted repair"),
+                super::ImplementationLintRepairOutcome::Exhausted,
+            );
+        }
+        assert_eq!(state.phase, BridgePhase::ImplementationComplete);
+        assert_eq!(
+            state.implementation_repair_attempt,
+            super::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS
+        );
+        assert_eq!(
+            git_stdout(&fixture.repo, &["diff", "--cached", "--name-only"]),
+            "implementation.txt",
+            "exhaustion must preserve the staged implementation"
+        );
+        assert!(super::output_sink_paths_for_attempt(
+            &state_path,
+            &state.identity.invocation_id,
+            super::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
+        )
+        .is_err());
+        let artifact = super::implementation_repair_artifact_path(
+            &state_path,
+            &state,
+            super::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
+        )
+        .expect("final repair artifact");
+        assert_eq!(
+            super::read_implementation_repair_rules(
+                &state_path,
+                &state,
+                super::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
+            )
+            .expect("read final findings"),
+            vec![super::ImplementationLintRule::Security]
+        );
+
+        let foreign = artifact.with_extension("foreign-link");
+        fs::hard_link(&artifact, &foreign).expect("create foreign hard link");
+        assert!(super::read_implementation_repair_rules(
+            &state_path,
+            &state,
+            super::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
+        )
+        .expect_err("foreign hard link must fail closed")
+        .contains("hard link"));
+    }
+
+    #[test]
+    fn implementation_lint_repair_exhaustion_replays_needs_human_cleanup() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("implementation-lint-exhausted-cleanup");
+        state.phase = super::BridgePhase::ImplementationComplete;
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let state_path = fixture.root.join("state/exhausted-lint.json");
+        super::write_invocation_atomic(&state_path, &state).expect("persist failure state");
+
+        super::set_zero_effect_recovery_failpoint(
+            super::ZeroEffectRecoveryFailpoint::AfterClaimTransition,
+        );
+        let interrupted = super::finalize_failed_executor_with_transition(
+            &state_path,
+            &mut state,
+            None,
+            None,
+            true,
+            true,
+            "executor_implementation_lint_repair_exhausted",
+            |_, disposition| {
+                assert_eq!(disposition, super::BridgeClaimDisposition::NeedsHuman);
+                Ok(super::BridgeClaimTransition::Transitioned)
+            },
+        )
+        .expect_err("interrupt after needs-human transition");
+        super::set_zero_effect_recovery_failpoint(super::ZeroEffectRecoveryFailpoint::None);
+        assert!(interrupted.to_string().contains("after claim transition"));
+        let durable = super::PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("read interrupted state"),
+        )
+        .expect("parse interrupted state");
+        let intent = super::read_failure_cleanup_intent(&state_path, &durable)
+            .expect("read exhausted cleanup intent");
+        assert!(intent.exhausted);
+        assert_eq!(
+            intent.reason,
+            "executor_implementation_lint_repair_exhausted"
+        );
+
+        super::finalize_failed_executor_with_transition(
+            &state_path,
+            &mut state,
+            None,
+            None,
+            true,
+            intent.exhausted,
+            &intent.reason,
+            |_, disposition| {
+                assert_eq!(disposition, super::BridgeClaimDisposition::NeedsHuman);
+                Ok(super::BridgeClaimTransition::Transitioned)
+            },
+        )
+        .expect("resume exhausted terminalization");
+        assert_eq!(state.phase, super::BridgePhase::Complete);
+        assert_eq!(
+            state.terminal_result.as_deref(),
+            Some("needs-human:executor_implementation_lint_repair_exhausted")
+        );
     }
 
     #[test]
@@ -34107,7 +35549,7 @@ exit 64
         .expect("write sandboxed diff");
 
         assert!(
-            super::commit_sandboxed_executor_diff(&state, "test: add behavior coverage")
+            super::commit_sandboxed_executor_diff(&state, "test: add behavior coverage", "")
                 .expect("Rust-owned executor commit")
         );
 
@@ -34140,7 +35582,8 @@ exit 64
             ""
         );
         assert!(
-            !super::commit_sandboxed_executor_diff(&state, "test: duplicate").expect("clean no-op")
+            !super::commit_sandboxed_executor_diff(&state, "test: duplicate", "")
+                .expect("clean no-op")
         );
         assert_eq!(
             git_stdout(
@@ -34177,7 +35620,7 @@ exit 64
         .expect("write magic-looking implementation path");
 
         assert!(
-            super::commit_sandboxed_executor_diff(&state, "test: preserve literal path")
+            super::commit_sandboxed_executor_diff(&state, "test: preserve literal path", "")
                 .expect("Rust-owned literal-path commit")
         );
 
@@ -34227,7 +35670,7 @@ exit 64
             .expect("make model-controlled hook executable");
         git(&fixture.repo, &["config", "core.hooksPath", ".githooks"]);
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked hook escape")
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked hook escape", "")
             .expect_err("model-writable hooks must fail closed");
 
         assert!(error.contains("hook"), "{error}");
@@ -34271,7 +35714,7 @@ exit 64
         std::os::unix::fs::symlink(&model_hook, common_dir.join("hooks/post-index-change"))
             .expect("hook symlink");
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked hook symlink")
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked hook symlink", "")
             .expect_err("hook symlinks into the model worktree must fail closed");
 
         assert!(error.contains("hook"), "{error}");
@@ -34317,8 +35760,9 @@ exit 64
             ],
         );
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked filter escape")
-            .expect_err("external clean filters must fail closed");
+        let error =
+            super::commit_sandboxed_executor_diff(&state, "test: blocked filter escape", "")
+                .expect_err("external clean filters must fail closed");
 
         assert!(error.contains("filter"), "{error}");
         assert!(!marker.exists(), "clean filter escaped its sandbox");
@@ -34356,8 +35800,9 @@ exit 64
             ],
         );
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked signer escape")
-            .expect_err("worktree signing programs must fail closed");
+        let error =
+            super::commit_sandboxed_executor_diff(&state, "test: blocked signer escape", "")
+                .expect_err("worktree signing programs must fail closed");
 
         assert!(error.contains("sign"), "{error}");
         assert!(!marker.exists(), "signing program escaped its sandbox");
@@ -34397,7 +35842,7 @@ exit 64
         );
 
         let error =
-            super::commit_sandboxed_executor_diff(&state, "test: blocked key command escape")
+            super::commit_sandboxed_executor_diff(&state, "test: blocked key command escape", "")
                 .expect_err("SSH default key commands must fail closed");
 
         assert!(
@@ -34436,8 +35881,9 @@ exit 64
         )
         .expect("replace worktree git pointer");
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked metadata escape")
-            .expect_err("unregistered Git metadata must fail closed");
+        let error =
+            super::commit_sandboxed_executor_diff(&state, "test: blocked metadata escape", "")
+                .expect_err("unregistered Git metadata must fail closed");
 
         assert!(
             error.contains("gitdir") || error.contains("Git metadata"),
@@ -34464,6 +35910,179 @@ exit 64
 
     #[cfg(unix)]
     #[test]
+    fn trusted_git_inventory_accepts_external_validation_hook() {
+        let (_fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-trusted-hook-inventory");
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        let hook = common_dir.join("hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write validation hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("make validation hook executable");
+
+        let binding = super::trusted_worktree_git(&state)
+            .expect("trusted common-directory validation hook must be inventoried");
+
+        assert_eq!(binding.active_hooks, vec![hook.canonicalize().unwrap()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_git_inventory_rejects_post_hook() {
+        let (_fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-post-hook");
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        let hook = common_dir.join("hooks/post-index-change");
+        fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write post hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("make post hook executable");
+
+        let error = super::trusted_worktree_git(&state).expect_err("post hook must fail closed");
+
+        assert!(error.contains("unsupported active Git hook"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contained_hook_rejects_codex_selected_from_writable_worktree() {
+        let environment = std::env::vars_os()
+            .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+            .collect::<BTreeMap<_, _>>();
+        let codex = super::safe_executable(Path::new("codex"), &environment)
+            .expect("installed Codex executable");
+        let binding = super::TrustedWorktreeGit {
+            active_hooks: Vec::new(),
+            common_dir: PathBuf::new(),
+            git_dir: PathBuf::new(),
+            hooks_dir: PathBuf::new(),
+            worktree: codex.parent().expect("Codex parent").to_path_buf(),
+        };
+
+        let error = super::trusted_codex_executable_from(&binding, &environment)
+            .expect_err("worktree-selected Codex must fail closed");
+
+        assert!(error.contains("writable by the implementer"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contained_hook_rejects_linter_symlink_into_worktree() {
+        let (fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("contained-hook-linter-symlink");
+        let scripts = fixture.root.join("scripts");
+        fs::create_dir(&scripts).expect("create scripts directory");
+        let payload = state.identity.worktree.join("model-linter.sh");
+        fs::write(&payload, "#!/bin/sh\nexit 0\n").expect("write model linter");
+        std::os::unix::fs::symlink(&payload, scripts.join("lint-implementation.sh"))
+            .expect("link model linter");
+        let binding = super::trusted_worktree_git(&state).expect("trusted worktree");
+        let environment = BTreeMap::from([
+            ("HOME".to_string(), fixture.root.as_os_str().to_os_string()),
+            (
+                "AUTOSPEC_SCRIPTS_DIR".to_string(),
+                scripts.as_os_str().to_os_string(),
+            ),
+        ]);
+
+        let error = super::trusted_linter_from(&binding, &environment)
+            .expect_err("model-writable linter symlink must fail closed");
+
+        assert!(error.contains("non-symlink"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_commit_runs_trusted_validation_hook_inside_containment() {
+        let (fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-contained-hook");
+        let home = fixture.root.join("contained-hook-home");
+        fs::create_dir_all(home.join(".config/gh")).expect("create credential fixture");
+        fs::write(
+            home.join(".config/gh/hosts.yml"),
+            "known-credential-sentinel\n",
+        )
+        .expect("write credential fixture");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind local network fixture");
+        let listener_address = listener.local_addr().expect("local listener address");
+        let outside = TcpStream::connect(listener_address)
+            .expect("local listener must be reachable outside containment");
+        let (accepted, _) = listener.accept().expect("accept outside preflight");
+        drop((outside, accepted));
+        let mut environment = std::env::vars_os()
+            .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+            .collect::<BTreeMap<_, _>>();
+        environment.insert("HOME".to_string(), home.into_os_string());
+        environment.insert(
+            "AUTOSPEC_SCRIPTS_DIR".to_string(),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts")
+                .into_os_string(),
+        );
+        let hook_context = super::TrustedHookContext {
+            environment,
+            autospec: fs::canonicalize(std::env::current_exe().expect("current test executable"))
+                .expect("canonical test executable"),
+        };
+        let implementation = state.identity.worktree.join("implementation.txt");
+        fs::write(&implementation, "contained hook proof\n").expect("write implementation");
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        let hook = common_dir.join("hooks/pre-commit");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nset -eu\n[ \"$PWD\" = {} ]\n[ -r \"$AUTOSPEC_SCRIPTS_DIR/lint-implementation.sh\" ]\n[ -x \"$AUTOSPEC_BIN\" ]\ngrep -qx 'offline contained evidence' \"$AUTOSPEC_LINT_ISSUE_BODY_FILE\"\n[ ! -r \"$HOME/.config/gh/hosts.yml\" ]\n! /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{}'\ngit diff --cached --name-only | grep -qx implementation.txt\nchmod 600 implementation.txt\n",
+                super::posix_shell_quote(state.identity.worktree.to_string_lossy().as_ref()),
+                listener_address.port(),
+            ),
+        )
+        .expect("write validation hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("make validation hook executable");
+
+        assert!(super::commit_sandboxed_executor_diff_with_hook_context(
+            &state,
+            "test: contained hook",
+            "offline contained evidence\n",
+            &hook_context,
+        )
+        .expect("contained validation hook commit"));
+
+        assert_eq!(
+            fs::metadata(implementation)
+                .expect("implementation metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "the trusted validation hook did not execute"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation() {
         let (fixture, state, _snapshot, _closeout) =
             implementation_proof_fixture("rust-commit-sandboxed-failure");
@@ -34480,6 +36099,7 @@ exit 64
             "recoverable diff\n",
         )
         .expect("write sandboxed diff");
+        let head_before = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
         let common_dir = PathBuf::from(git_stdout(
             &state.identity.worktree,
             &["rev-parse", "--git-common-dir"],
@@ -34490,14 +36110,51 @@ exit 64
             state.identity.worktree.join(common_dir)
         };
         let hook = common_dir.join("hooks/pre-commit");
-        fs::write(&hook, "#!/bin/sh\nexit 1\n").expect("write rejecting hook");
+        let escaped = fixture.root.join("hook-escaped-containment");
+        let hook_body = format!(
+            "#!/bin/sh\nset +e\nchmod 600 implementation.txt\nprintf 'hook mutation\\n' > implementation.txt\ngit add implementation.txt\ngit update-ref refs/heads/hook-escape HEAD\ngit config autospec.hook-escape true\nprintf compromised > {}\nprintf escaped > {}\nexit 1\n",
+            super::posix_shell_quote(hook.to_string_lossy().as_ref()),
+            super::posix_shell_quote(escaped.to_string_lossy().as_ref()),
+        );
+        fs::write(&hook, &hook_body).expect("write escaping hook");
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
             .expect("make rejecting hook executable");
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked commit")
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked commit", "")
             .expect_err("hook must block Rust-owned commit");
 
         assert!(error.contains("commit"), "{error}");
+        assert!(!escaped.exists(), "validation hook escaped containment");
+        assert_eq!(
+            fs::metadata(state.identity.worktree.join("implementation.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "hook execution receipt is missing"
+        );
+        assert_eq!(
+            git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]),
+            head_before
+        );
+        assert_eq!(
+            git_stdout(&state.identity.worktree, &["show", ":implementation.txt"]),
+            "recoverable diff",
+            "contained hook rewrote the staged index"
+        );
+        assert_eq!(fs::read_to_string(&hook).unwrap(), hook_body);
+        for args in [
+            ["show-ref", "--verify", "refs/heads/hook-escape"],
+            ["config", "--get", "autospec.hook-escape"],
+        ] {
+            assert!(!Command::new("git")
+                .current_dir(&state.identity.worktree)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
         assert!(git_stdout(
             &state.identity.worktree,
             &["status", "--porcelain=v1", "--untracked-files=all"]
@@ -45417,7 +47074,8 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         assert!(error.to_string().contains("injected crash"), "{error}");
         assert_eq!(
             super::read_failure_cleanup_intent(&state_path, &state)
-                .expect("restart reads exact cleanup intent"),
+                .expect("restart reads exact cleanup intent")
+                .reason,
             "implementation failed"
         );
         assert!(

@@ -303,6 +303,19 @@ TMP_CONTRACT_OUT="$(mktemp -t lint-impl-contract-out.XXXXXX)"
 TMP_CONTRACT_ERR="$(mktemp -t lint-impl-contract-err.XXXXXX)"
 trap 'rm -f "$TMP_DIFF" "$TMP_ISSUE" "$TMP_CONTRACT_OUT" "$TMP_CONTRACT_ERR"' EXIT INT TERM
 
+# Validate operator-supplied offline evidence before any successful early return.
+OFFLINE_ISSUE_BODY=0
+if [ "${AUTOSPEC_LINT_ISSUE_BODY_FILE+x}" = x ]; then
+    if [ -z "$AUTOSPEC_LINT_ISSUE_BODY_FILE" ] ||
+        [ ! -f "$AUTOSPEC_LINT_ISSUE_BODY_FILE" ] ||
+        [ ! -r "$AUTOSPEC_LINT_ISSUE_BODY_FILE" ] ||
+        [ -L "$AUTOSPEC_LINT_ISSUE_BODY_FILE" ]; then
+        printf 'lint-implementation.sh: offline issue body file must be a readable regular file\n' >&2
+        exit 1
+    fi
+    OFFLINE_ISSUE_BODY=1
+fi
+
 if [ -n "$DIFF_FILE" ]; then
     cp "$DIFF_FILE" "$TMP_DIFF"
 elif [ "$STAGED" -eq 1 ]; then
@@ -329,7 +342,11 @@ fi
 
 # Fetch issue body for skip-directive parsing in every diff source mode.
 if [ -n "$ISSUE_NUMBER" ]; then
-    gh issue view "$ISSUE_NUMBER" --json body --jq '.body' > "$TMP_ISSUE" 2>/dev/null || true
+    if [ "$OFFLINE_ISSUE_BODY" -eq 1 ]; then
+        cp "$AUTOSPEC_LINT_ISSUE_BODY_FILE" "$TMP_ISSUE"
+    else
+        gh issue view "$ISSUE_NUMBER" --json body --jq '.body' > "$TMP_ISSUE" 2>/dev/null || true
+    fi
     parse_skip_directives "$TMP_ISSUE"
 fi
 

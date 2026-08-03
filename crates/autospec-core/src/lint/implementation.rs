@@ -54,6 +54,79 @@ impl ImplementationLintRule {
             Self::NewAbstractionSingleCaller => "NEW_ABSTRACTION_SINGLE_CALLER",
         }
     }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "PR_SIZE" => Self::PrSize,
+            "OUT_OF_SCOPE" => Self::OutOfScope,
+            "MISSING_TEST" => Self::MissingTest,
+            "COMPLEXITY" => Self::Complexity,
+            "SECURITY" => Self::Security,
+            "TODO_LEFT" => Self::TodoLeft,
+            "MOCK_DB" => Self::MockDb,
+            "DOC_OUT_OF_SYNC" => Self::DocOutOfSync,
+            "VACUOUS_GREP_INVERSE_OR_TRUE" => Self::VacuousGrepInverseOrTrue,
+            "VACUOUS_OR_TRUE" => Self::VacuousOrTrue,
+            "VACUOUS_TAUTOLOGY" => Self::VacuousTautology,
+            "VACUOUS_AC_STUB" => Self::VacuousAcStub,
+            "VACUOUS_EMPTY_TEST" => Self::VacuousEmptyTest,
+            "VACUOUS_NO_ASSERT" => Self::VacuousNoAssert,
+            "ASSERTION_DENSITY" => Self::AssertionDensity,
+            "REINVENT_REPO_UTIL" => Self::ReinventRepoUtil,
+            "NEW_DEP_UNJUSTIFIED" => Self::NewDepUnjustified,
+            "NEW_ABSTRACTION_SINGLE_CALLER" => Self::NewAbstractionSingleCaller,
+            _ => return None,
+        })
+    }
+}
+
+const HOOK_FAILURE_PREFIX: &str = "Pre-commit lint FAILED. Findings:\n";
+const HOOK_FAILURE_TRAILER: &str = "\n\nRun 'lint-implementation.sh --pre-commit --directives' to get re-prompt directives, OR fix the listed RULE_IDs and re-stage.";
+const MAX_HOOK_FAILURE_BYTES: usize = 16 * 1024;
+const MAX_HOOK_FINDING_LINES: usize = 64;
+
+pub fn parse_blocking_hook_failure(failure: &str) -> Result<Vec<ImplementationLintRule>, String> {
+    if failure.len() > MAX_HOOK_FAILURE_BYTES {
+        return Err("implementation hook failure evidence exceeds 16384 bytes".to_string());
+    }
+    let findings = failure
+        .strip_prefix(HOOK_FAILURE_PREFIX)
+        .and_then(|body| body.strip_suffix(HOOK_FAILURE_TRAILER))
+        .ok_or_else(|| {
+            "implementation hook failure envelope is malformed or truncated".to_string()
+        })?;
+    let lines = findings.lines().collect::<Vec<_>>();
+    if lines.is_empty() || lines.len() > MAX_HOOK_FINDING_LINES {
+        return Err("implementation hook failure has an invalid finding count".to_string());
+    }
+    let mut seen = BTreeSet::new();
+    let mut blocking = Vec::new();
+    for line in lines {
+        let (informational, record) = if let Some(record) = line.strip_prefix("INFO:") {
+            (true, record)
+        } else if let Some(record) = line.strip_prefix("ERROR:") {
+            (false, record)
+        } else {
+            (false, line)
+        };
+        let mut fields = record.splitn(4, ':');
+        let id = fields.next().unwrap_or_default();
+        let path = fields.next().unwrap_or_default();
+        let line_number = fields.next().unwrap_or_default();
+        let message = fields.next().and_then(|value| value.strip_prefix(' '));
+        let rule = ImplementationLintRule::from_id(id)
+            .ok_or_else(|| format!("implementation hook reported unknown rule ID {id:?}"))?;
+        if path.is_empty() || line_number.is_empty() || message.is_none_or(str::is_empty) {
+            return Err("implementation hook finding record is malformed".to_string());
+        }
+        if !informational && seen.insert(id) {
+            blocking.push(rule);
+        }
+    }
+    if blocking.is_empty() {
+        return Err("implementation hook failure contains no blocking finding".to_string());
+    }
+    Ok(blocking)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2131,5 +2204,40 @@ mod tests {
             "Add a test under tests/<tier>/ or a project-native scripts/test-* regression artifact \
              before re-pushing."
         );
+    }
+
+    #[test]
+    fn implementation_hook_failure_parses_only_known_blocking_rules() {
+        let failure = concat!(
+            "Pre-commit lint FAILED. Findings:\n",
+            "INFO:MISSING_TEST:tests/unit/:-: skipped by issue contract\n",
+            "COMPLEXITY:scripts/run.sh:12: nesting depth is 5\n",
+            "ERROR:VACUOUS_OR_TRUE:tests/run.bats:8: assertion masks failure\n",
+            "\n",
+            "Run 'lint-implementation.sh --pre-commit --directives' to get re-prompt directives, OR fix the listed RULE_IDs and re-stage."
+        );
+
+        assert_eq!(
+            parse_blocking_hook_failure(failure).expect("parse exact hook failure"),
+            vec![
+                ImplementationLintRule::Complexity,
+                ImplementationLintRule::VacuousOrTrue,
+            ]
+        );
+    }
+
+    #[test]
+    fn implementation_hook_failure_rejects_unknown_truncated_and_oversized_evidence() {
+        let trailer = "\n\nRun 'lint-implementation.sh --pre-commit --directives' to get re-prompt directives, OR fix the listed RULE_IDs and re-stage.";
+        for failure in [
+            format!("Pre-commit lint FAILED. Findings:\nUNKNOWN:x:-: no{trailer}"),
+            "Pre-commit lint FAILED. Findings:\nCOMPLEXITY:x:-: truncated".to_string(),
+            format!(
+                "Pre-commit lint FAILED. Findings:\nCOMPLEXITY:x:-: {}{trailer}",
+                "x".repeat(16_385)
+            ),
+        ] {
+            assert!(parse_blocking_hook_failure(&failure).is_err(), "{failure}");
+        }
     }
 }
