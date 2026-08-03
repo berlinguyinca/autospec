@@ -1298,7 +1298,7 @@ fn run_executor_bridge_with_codex_probe(
         protected
             .verify(&state.identity.repository_path, &state.identity.branch)
             .map_err(BridgeRunFailure::from)?;
-        commit_sandboxed_executor_diff(&state, &request.issue_title)
+        commit_sandboxed_executor_diff(&state, &request.issue_title, &request.issue_body)
             .map_err(BridgeRunFailure::from)?;
     }
     let proof = match recover_or_prove_implementation(
@@ -10373,6 +10373,8 @@ fn contained_hook_profile(
     binding: &TrustedWorktreeGit,
     bundle: &Path,
     codex: &Path,
+    scripts_dir: &Path,
+    autospec: &Path,
 ) -> Result<String, String> {
     let mut entries = vec![
         "\":minimal\"=\"read\"".to_string(),
@@ -10391,9 +10393,11 @@ fn contained_hook_profile(
         toml_path_entry(&binding.common_dir, "read")?,
         toml_path_entry(&binding.git_dir, "read")?,
         toml_path_entry(&binding.hooks_dir, "read")?,
+        toml_path_entry(scripts_dir, "read")?,
         toml_path_entry(bundle, "read")?,
         toml_path_entry(&bundle.join("tmp"), "write")?,
         toml_path_entry(codex, "read")?,
+        toml_path_entry(autospec, "read")?,
     ];
     for path in [
         "~/.aws",
@@ -10433,7 +10437,7 @@ fn contained_hook_profile(
 
 #[cfg(unix)]
 impl TrustedHookBundle {
-    fn create(binding: &TrustedWorktreeGit) -> Result<Self, String> {
+    fn create(binding: &TrustedWorktreeGit, issue_body: &str) -> Result<Self, String> {
         if binding.active_hooks.is_empty() {
             return Ok(Self {
                 path: binding.hooks_dir.clone(),
@@ -10441,6 +10445,23 @@ impl TrustedHookBundle {
             });
         }
         let codex = trusted_codex_executable(binding)?;
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute())
+            .ok_or_else(|| "HOME must be absolute for contained Git hooks".to_string())?;
+        let scripts_dir = std::env::var_os("AUTOSPEC_SCRIPTS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".autospec/scripts"));
+        let scripts_dir = fs::canonicalize(&scripts_dir)
+            .map_err(|error| format!("canonicalize contained hook scripts: {error}"))?;
+        let autospec = fs::canonicalize(
+            std::env::current_exe()
+                .map_err(|error| format!("resolve contained hook Autospec binary: {error}"))?,
+        )
+        .map_err(|error| format!("canonicalize contained hook Autospec binary: {error}"))?;
+        if scripts_dir.starts_with(&binding.worktree) || autospec.starts_with(&binding.worktree) {
+            return Err("contained hook tools must not be writable by the implementer".to_string());
+        }
         let nonce = HOOK_BUNDLE_NONCE.fetch_add(1, Ordering::Relaxed);
         let path = binding.git_dir.join(format!(
             "autospec-contained-hooks-{}-{nonce}",
@@ -10455,11 +10476,13 @@ impl TrustedHookBundle {
             fs::set_permissions(path.join(child), fs::Permissions::from_mode(0o700))
                 .map_err(|error| format!("protect contained hook {child}: {error}"))?;
         }
-        let profile = contained_hook_profile(binding, &path, &codex)?;
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .filter(|home| home.is_absolute())
-            .ok_or_else(|| "HOME must be absolute for contained Git hooks".to_string())?;
+        let issue_body_path = path.join("issue-body.md");
+        write_private_create_once(
+            &issue_body_path,
+            issue_body.as_bytes(),
+            "contained hook issue body",
+        )?;
+        let profile = contained_hook_profile(binding, &path, &codex, &scripts_dir, &autospec)?;
         for hook in &binding.active_hooks {
             let name = hook
                 .file_name()
@@ -10467,11 +10490,14 @@ impl TrustedHookBundle {
                 .ok_or_else(|| "contained Git hook name must be UTF-8".to_string())?;
             let status_path = path.join("tmp").join(format!("{name}.status"));
             let script = format!(
-                "#!/bin/sh\nset -eu\nstatus_file={}\nrm -f \"$status_file\"\n/usr/bin/env -i HOME={} PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 TMPDIR={} CODEX_HOME={} GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 {} sandbox -C {} -P autospec-git-hook -c {} -c 'default_permissions=\"autospec-git-hook\"' -c 'permissions.autospec-git-hook.network.enabled=false' -c 'shell_environment_policy.inherit=\"all\"' -- /bin/sh -c 'hook=$1; status_file=$2; shift 2; \"$hook\" \"$@\"; status=$?; printf \"%s\\n\" \"$status\" > \"$status_file\"; exit \"$status\"' autospec-hook {} \"$status_file\" \"$@\"\n[ -f \"$status_file\" ] || exit 1\nIFS= read -r status < \"$status_file\" || exit 1\nrm -f \"$status_file\"\ncase \"$status\" in ''|*[!0-9]*) exit 1;; esac\n[ \"$status\" -le 255 ] || exit 1\nexit \"$status\"\n",
+                "#!/bin/sh\nset -eu\nstatus_file={}\nrm -f \"$status_file\"\n/usr/bin/env -i HOME={} PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 TMPDIR={} CODEX_HOME={} AUTOSPEC_SCRIPTS_DIR={} AUTOSPEC_BIN={} AUTOSPEC_LINT_ISSUE_BODY_FILE={} GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 {} sandbox -C {} -P autospec-git-hook -c {} -c 'default_permissions=\"autospec-git-hook\"' -c 'permissions.autospec-git-hook.network.enabled=false' -c 'shell_environment_policy.inherit=\"all\"' -- /bin/sh -c 'hook=$1; status_file=$2; shift 2; \"$hook\" \"$@\"; status=$?; printf \"%s\\n\" \"$status\" > \"$status_file\"; exit \"$status\"' autospec-hook {} \"$status_file\" \"$@\"\n[ -f \"$status_file\" ] || exit 1\nIFS= read -r status < \"$status_file\" || exit 1\nrm -f \"$status_file\"\ncase \"$status\" in ''|*[!0-9]*) exit 1;; esac\n[ \"$status\" -le 255 ] || exit 1\nexit \"$status\"\n",
                 posix_shell_quote(status_path.to_string_lossy().as_ref()),
                 posix_shell_quote(home.to_string_lossy().as_ref()),
                 posix_shell_quote(path.join("tmp").to_string_lossy().as_ref()),
                 posix_shell_quote(path.join("codex-home").to_string_lossy().as_ref()),
+                posix_shell_quote(scripts_dir.to_string_lossy().as_ref()),
+                posix_shell_quote(autospec.to_string_lossy().as_ref()),
+                posix_shell_quote(issue_body_path.to_string_lossy().as_ref()),
                 posix_shell_quote(codex.to_string_lossy().as_ref()),
                 posix_shell_quote(binding.worktree.to_string_lossy().as_ref()),
                 posix_shell_quote(&profile),
@@ -10503,7 +10529,7 @@ struct TrustedHookBundle {
 
 #[cfg(not(unix))]
 impl TrustedHookBundle {
-    fn create(binding: &TrustedWorktreeGit) -> Result<Self, String> {
+    fn create(binding: &TrustedWorktreeGit, _issue_body: &str) -> Result<Self, String> {
         if fs::read_dir(&binding.hooks_dir)
             .map_err(|error| format!("inventory unsupported Git hooks: {error}"))?
             .filter_map(Result::ok)
@@ -10795,6 +10821,7 @@ fn stage_sandboxed_executor_diff(
 fn commit_sandboxed_executor_diff(
     state: &PersistedInvocation,
     issue_title: &str,
+    issue_body: &str,
 ) -> Result<bool, String> {
     let binding = trusted_worktree_git(state)?;
     let branch = binding
@@ -10820,7 +10847,7 @@ fn commit_sandboxed_executor_diff(
     }
     reject_external_filters(&binding)?;
     attest_executor_signing(&binding)?;
-    let hook_bundle = TrustedHookBundle::create(&binding)?;
+    let hook_bundle = TrustedHookBundle::create(&binding, issue_body)?;
     stage_sandboxed_executor_diff(&binding, &hook_bundle.path)?;
     let staged = binding
         .command()
@@ -25798,7 +25825,7 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
 
         super::IMPLEMENTATION_COMMIT_FAILPOINT.store(1, Ordering::SeqCst);
         let error =
-            super::commit_sandboxed_executor_diff(&state, "test: persist implementation proof")
+            super::commit_sandboxed_executor_diff(&state, "test: persist implementation proof", "")
                 .expect_err("interrupt after Rust commit");
         assert!(error.contains("after implementation commit"), "{error}");
         let durable = PersistedInvocation::from_json(
@@ -34385,7 +34412,7 @@ exit 64
         .expect("write sandboxed diff");
 
         assert!(
-            super::commit_sandboxed_executor_diff(&state, "test: add behavior coverage")
+            super::commit_sandboxed_executor_diff(&state, "test: add behavior coverage", "")
                 .expect("Rust-owned executor commit")
         );
 
@@ -34418,7 +34445,8 @@ exit 64
             ""
         );
         assert!(
-            !super::commit_sandboxed_executor_diff(&state, "test: duplicate").expect("clean no-op")
+            !super::commit_sandboxed_executor_diff(&state, "test: duplicate", "")
+                .expect("clean no-op")
         );
         assert_eq!(
             git_stdout(
@@ -34455,7 +34483,7 @@ exit 64
         .expect("write magic-looking implementation path");
 
         assert!(
-            super::commit_sandboxed_executor_diff(&state, "test: preserve literal path")
+            super::commit_sandboxed_executor_diff(&state, "test: preserve literal path", "")
                 .expect("Rust-owned literal-path commit")
         );
 
@@ -34505,7 +34533,7 @@ exit 64
             .expect("make model-controlled hook executable");
         git(&fixture.repo, &["config", "core.hooksPath", ".githooks"]);
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked hook escape")
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked hook escape", "")
             .expect_err("model-writable hooks must fail closed");
 
         assert!(error.contains("hook"), "{error}");
@@ -34549,7 +34577,7 @@ exit 64
         std::os::unix::fs::symlink(&model_hook, common_dir.join("hooks/post-index-change"))
             .expect("hook symlink");
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked hook symlink")
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked hook symlink", "")
             .expect_err("hook symlinks into the model worktree must fail closed");
 
         assert!(error.contains("hook"), "{error}");
@@ -34595,8 +34623,9 @@ exit 64
             ],
         );
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked filter escape")
-            .expect_err("external clean filters must fail closed");
+        let error =
+            super::commit_sandboxed_executor_diff(&state, "test: blocked filter escape", "")
+                .expect_err("external clean filters must fail closed");
 
         assert!(error.contains("filter"), "{error}");
         assert!(!marker.exists(), "clean filter escaped its sandbox");
@@ -34634,8 +34663,9 @@ exit 64
             ],
         );
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked signer escape")
-            .expect_err("worktree signing programs must fail closed");
+        let error =
+            super::commit_sandboxed_executor_diff(&state, "test: blocked signer escape", "")
+                .expect_err("worktree signing programs must fail closed");
 
         assert!(error.contains("sign"), "{error}");
         assert!(!marker.exists(), "signing program escaped its sandbox");
@@ -34675,7 +34705,7 @@ exit 64
         );
 
         let error =
-            super::commit_sandboxed_executor_diff(&state, "test: blocked key command escape")
+            super::commit_sandboxed_executor_diff(&state, "test: blocked key command escape", "")
                 .expect_err("SSH default key commands must fail closed");
 
         assert!(
@@ -34714,8 +34744,9 @@ exit 64
         )
         .expect("replace worktree git pointer");
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked metadata escape")
-            .expect_err("unregistered Git metadata must fail closed");
+        let error =
+            super::commit_sandboxed_executor_diff(&state, "test: blocked metadata escape", "")
+                .expect_err("unregistered Git metadata must fail closed");
 
         assert!(
             error.contains("gitdir") || error.contains("Git metadata"),
@@ -34831,7 +34862,7 @@ exit 64
         fs::write(
             &hook,
             format!(
-                "#!/bin/sh\nset -eu\n[ \"$PWD\" = {} ]\ngit diff --cached --name-only | grep -qx implementation.txt\nchmod 600 implementation.txt\n",
+                "#!/bin/sh\nset -eu\n[ \"$PWD\" = {} ]\n[ -r \"$AUTOSPEC_SCRIPTS_DIR/lint-implementation.sh\" ]\n[ -x \"$AUTOSPEC_BIN\" ]\ngrep -qx 'offline contained evidence' \"$AUTOSPEC_LINT_ISSUE_BODY_FILE\"\ngit diff --cached --name-only | grep -qx implementation.txt\nchmod 600 implementation.txt\n",
                 super::posix_shell_quote(state.identity.worktree.to_string_lossy().as_ref())
             ),
         )
@@ -34839,10 +34870,12 @@ exit 64
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
             .expect("make validation hook executable");
 
-        assert!(
-            super::commit_sandboxed_executor_diff(&state, "test: contained hook")
-                .expect("contained validation hook commit")
-        );
+        assert!(super::commit_sandboxed_executor_diff(
+            &state,
+            "test: contained hook",
+            "offline contained evidence\n",
+        )
+        .expect("contained validation hook commit"));
 
         assert_eq!(
             fs::metadata(implementation)
@@ -34894,7 +34927,7 @@ exit 64
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
             .expect("make rejecting hook executable");
 
-        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked commit")
+        let error = super::commit_sandboxed_executor_diff(&state, "test: blocked commit", "")
             .expect_err("hook must block Rust-owned commit");
 
         assert!(error.contains("commit"), "{error}");

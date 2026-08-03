@@ -329,7 +329,17 @@ fi
 
 # Fetch issue body for skip-directive parsing in every diff source mode.
 if [ -n "$ISSUE_NUMBER" ]; then
-    gh issue view "$ISSUE_NUMBER" --json body --jq '.body' > "$TMP_ISSUE" 2>/dev/null || true
+    if [ -n "${AUTOSPEC_LINT_ISSUE_BODY_FILE:-}" ]; then
+        if [ ! -f "$AUTOSPEC_LINT_ISSUE_BODY_FILE" ] ||
+            [ ! -r "$AUTOSPEC_LINT_ISSUE_BODY_FILE" ] ||
+            [ -L "$AUTOSPEC_LINT_ISSUE_BODY_FILE" ]; then
+            printf 'lint-implementation.sh: offline issue body file must be a readable regular file\n' >&2
+            exit 1
+        fi
+        cp "$AUTOSPEC_LINT_ISSUE_BODY_FILE" "$TMP_ISSUE"
+    else
+        gh issue view "$ISSUE_NUMBER" --json body --jq '.body' > "$TMP_ISSUE" 2>/dev/null || true
+    fi
     parse_skip_directives "$TMP_ISSUE"
 fi
 

@@ -505,6 +505,35 @@ EOF
     echo "$output" | grep -q "TODO_LEFT"
 }
 
+@test "lint-implementation: offline issue body applies skips without gh" {
+    mkdir -p "$PR_SIZE_TMP/bin"
+    printf '%s\n' \
+        'Guardian: skip-TODO_LEFT, skip-MISSING_TEST, skip-OUT_OF_SCOPE # contained hook receives exact offline issue evidence' \
+        > "$PR_SIZE_TMP/offline.issue.md"
+    cat > "$PR_SIZE_TMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+printf 'unexpected gh call\n' >&2
+exit 99
+EOF
+    chmod +x "$PR_SIZE_TMP/bin/gh"
+
+    run env PATH="$PR_SIZE_TMP/bin:$PATH" \
+        AUTOSPEC_LINT_ISSUE_BODY_FILE="$PR_SIZE_TMP/offline.issue.md" \
+        bash "$LINT" --diff-file "$FIX/skip-respected.diff" --issue 42
+
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '^INFO:TODO_LEFT:'
+    ! echo "$output" | grep -q 'unexpected gh call'
+}
+
+@test "lint-implementation: missing offline issue body fails closed" {
+    run env AUTOSPEC_LINT_ISSUE_BODY_FILE="$PR_SIZE_TMP/missing.issue.md" \
+        bash "$LINT" --diff-file "$FIX/good.diff" --issue 42
+
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q 'offline issue body file'
+}
+
 # ── --help documents new flags ────────────────────────────────────────────────
 
 @test "lint-implementation: --help documents --pre-commit" {
