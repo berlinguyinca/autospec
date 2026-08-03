@@ -46,6 +46,8 @@ use autospec_core::lint::{
 };
 #[cfg(unix)]
 use nix::fcntl::OFlag;
+#[cfg(target_os = "linux")]
+use nix::fcntl::{renameat2, RenameFlags};
 #[cfg(unix)]
 use nix::sys::signal::Signal;
 #[cfg(unix)]
@@ -94,6 +96,12 @@ const MAX_DIRECT_COMMAND_ARGS: usize = 128;
 const MAX_DIRECT_ARGUMENT_LENGTH: usize = 1_024;
 const MAX_DIRECT_OUTPUT_BYTES: u64 = 1024 * 1024;
 static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ImplementationLintRepairOutcome {
+    RetryPrepared,
+    Exhausted,
+}
 #[cfg(test)]
 static BASE_DRIFT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
@@ -729,7 +737,7 @@ pub(crate) fn recover_terminal_failure_identity(
         }
         Err(error) => return Err(format!("inspect executor failure cleanup intent: {error}")),
     }
-    read_failure_cleanup_intent(&state_path, &state)?;
+    let intent = read_failure_cleanup_intent(&state_path, &state)?;
     match (
         state.identity.runtime_session_id.as_deref(),
         state.identity.runtime_environment_dir.as_deref(),
@@ -745,7 +753,7 @@ pub(crate) fn recover_terminal_failure_identity(
     if !observe_terminal_bridge_claim(
         bridge_claim_identity(&state),
         state.pr,
-        BridgeClaimDisposition::Retryable,
+        failure_disposition(true, intent.exhausted),
     )
     .map_err(|error| error.message)?
     {
@@ -1023,14 +1031,15 @@ fn run_executor_bridge_with_codex_probe(
             }
         }
         if failure_cleanup_intent_path(&request.state_path).exists() {
-            let reason = read_failure_cleanup_intent(&request.state_path, recovered)?;
+            let intent = read_failure_cleanup_intent(&request.state_path, recovered)?;
             let mut recovered = recovered.clone();
-            return finalize_bridge_failure(
+            return finalize_bridge_failure_with_exhaustion(
                 request,
                 &mut recovered,
                 None,
                 &DraftPrAdapter::github_cli(),
-                &reason,
+                &intent.reason,
+                intent.exhausted,
             );
         }
     }
@@ -1312,14 +1321,28 @@ fn run_executor_bridge_with_codex_probe(
             };
             let rules = parse_blocking_hook_failure(hook_failure)
                 .map_err(|parse| BridgeRunFailure::invariant(format!("{error}; {parse}")))?;
-            prepare_implementation_lint_repair(
+            let outcome = prepare_implementation_lint_repair(
                 &request.state_path,
                 &mut state,
                 &closeout_path,
                 &rules,
             )
             .map_err(BridgeRunFailure::invariant)?;
-            return Ok(pending_bridge_receipt(request)?);
+            return match outcome {
+                ImplementationLintRepairOutcome::RetryPrepared => {
+                    Ok(pending_bridge_receipt(request)?)
+                }
+                ImplementationLintRepairOutcome::Exhausted => {
+                    finalize_bridge_failure_with_exhaustion(
+                        request,
+                        &mut state,
+                        runtime.take(),
+                        &remote,
+                        "executor_implementation_lint_repair_exhausted",
+                        true,
+                    )
+                }
+            };
         }
     }
     let proof = match recover_or_prove_implementation(
@@ -1820,13 +1843,24 @@ fn finalize_bridge_failure(
     remote: &DraftPrAdapter,
     reason: &str,
 ) -> Result<BridgeRunReceipt, BridgeRunFailure> {
+    finalize_bridge_failure_with_exhaustion(request, state, runtime, remote, reason, false)
+}
+
+fn finalize_bridge_failure_with_exhaustion(
+    request: &ExecutorBridgeRequest,
+    state: &mut PersistedInvocation,
+    runtime: Option<RuntimeSessionAdapter>,
+    remote: &DraftPrAdapter,
+    reason: &str,
+    exhausted: bool,
+) -> Result<BridgeRunReceipt, BridgeRunFailure> {
     finalize_failed_executor(
         &request.state_path,
         state,
         runtime,
         Some(remote),
         true,
-        false,
+        exhausted,
         reason,
     )?;
     observe_terminal_label_release(state, remote)?;
@@ -1837,8 +1871,14 @@ fn finalize_bridge_failure(
         branch: state.identity.branch.clone(),
         claim_id: request.claim_id.clone(),
         invocation_id: request.invocation_id.clone(),
-        status: BridgeRunStatus::Retryable {
-            reason: reason.to_string(),
+        status: if exhausted {
+            BridgeRunStatus::Blocked {
+                reason: reason.to_string(),
+            }
+        } else {
+            BridgeRunStatus::Retryable {
+                reason: reason.to_string(),
+            }
         },
     };
     write_private_create_once(
@@ -10944,14 +10984,106 @@ fn implementation_repair_artifact_body(
     .to_string()
 }
 
+fn validate_implementation_repair_artifact(path: &Path) -> Result<(), String> {
+    reject_symlink_path(path)?;
+    validate_private_state_file(path)?;
+    #[cfg(unix)]
+    if fs::metadata(path)
+        .map_err(|error| format!("read implementation repair artifact metadata: {error}"))?
+        .nlink()
+        != 1
+    {
+        return Err("implementation repair artifact has a foreign hard link".to_string());
+    }
+    Ok(())
+}
+
+fn write_implementation_repair_artifact(path: &Path, body: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "implementation lint repair artifact requires a parent".to_string())?;
+    ensure_private_directory(parent)?;
+    if path
+        .try_exists()
+        .map_err(|error| format!("inspect implementation repair artifact: {error}"))?
+    {
+        validate_implementation_repair_artifact(path)?;
+        return if fs::read(path)
+            .map_err(|error| format!("read implementation repair artifact: {error}"))?
+            == body
+        {
+            Ok(())
+        } else {
+            Err("existing implementation lint repair artifact differs".to_string())
+        };
+    }
+    #[cfg(not(target_os = "linux"))]
+    return Err(
+        "implementation repair artifact no-replace publication requires Linux renameat2"
+            .to_string(),
+    );
+    #[cfg(target_os = "linux")]
+    {
+        let temporary = path.with_file_name(format!(
+            ".{}.{}.{}.tmp",
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("implementation-repair"),
+            std::process::id(),
+            INVOCATION_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        ));
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true).mode(0o600);
+        let mut file = options
+            .open(&temporary)
+            .map_err(|error| format!("create implementation repair artifact: {error}"))?;
+        let result = (|| {
+            file.write_all(body)
+                .map_err(|error| format!("write implementation repair artifact: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("sync implementation repair artifact: {error}"))?;
+            let directory = File::open(parent)
+                .map_err(|error| format!("open implementation repair artifact parent: {error}"))?;
+            match renameat2(
+                &directory,
+                temporary.file_name().expect("temporary file has a name"),
+                &directory,
+                path.file_name()
+                    .ok_or_else(|| "implementation repair artifact has no name".to_string())?,
+                RenameFlags::RENAME_NOREPLACE,
+            ) {
+                Ok(()) => directory.sync_all().map_err(|error| {
+                    format!("sync implementation repair artifact parent: {error}")
+                }),
+                Err(nix::errno::Errno::EEXIST) => {
+                    validate_implementation_repair_artifact(path)?;
+                    if fs::read(path).map_err(|error| {
+                        format!("read existing implementation repair artifact: {error}")
+                    })? == body
+                    {
+                        Ok(())
+                    } else {
+                        Err("existing implementation lint repair artifact differs".to_string())
+                    }
+                }
+                Err(error) => Err(format!(
+                    "publish implementation repair artifact without replacement: {error}"
+                )),
+            }
+        })();
+        let _ = fs::remove_file(&temporary);
+        result?;
+        validate_implementation_repair_artifact(path)
+    }
+}
+
 fn read_implementation_repair_rules(
     state_path: &Path,
     state: &PersistedInvocation,
     attempt: u32,
 ) -> Result<Vec<ImplementationLintRule>, String> {
     let path = implementation_repair_artifact_path(state_path, state, attempt)?;
-    reject_symlink_path(&path)?;
-    validate_private_state_file(&path)?;
+    validate_implementation_repair_artifact(&path)?;
     let raw = fs::read_to_string(&path)
         .map_err(|error| format!("read implementation repair artifact: {error}"))?;
     if raw.len() > 16 * 1024 {
@@ -11038,12 +11170,12 @@ fn prepare_implementation_lint_repair(
     state: &mut PersistedInvocation,
     closeout: &Path,
     rules: &[ImplementationLintRule],
-) -> Result<(), String> {
+) -> Result<ImplementationLintRepairOutcome, String> {
     if state.phase != BridgePhase::ImplementationComplete {
         return Err("implementation lint repair requires completed implementation output".into());
     }
     let attempt = state.implementation_repair_attempt + 1;
-    if attempt > MAX_IMPLEMENTATION_REPAIR_ATTEMPTS {
+    if attempt > MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1 {
         return Err(format!(
             "executor implementation lint repair exhausted after {MAX_IMPLEMENTATION_REPAIR_ATTEMPTS} attempts"
         ));
@@ -11080,11 +11212,13 @@ fn prepare_implementation_lint_repair(
     }
     let body =
         implementation_repair_artifact_body(state, attempt, &sha256_hex(&staged.stdout), rules);
-    write_private_create_once(
+    write_implementation_repair_artifact(
         &implementation_repair_artifact_path(state_path, state, attempt)?,
         body.as_bytes(),
-        "implementation lint repair artifact",
     )?;
+    if attempt == MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1 {
+        return Ok(ImplementationLintRepairOutcome::Exhausted);
+    }
     let unstage = binding
         .command()
         .args(["restore", "--source=HEAD", "--staged", "--", "."])
@@ -11109,7 +11243,8 @@ fn prepare_implementation_lint_repair(
     state.closeout_path = None;
     state.closeout_digest = None;
     state.progress_at = unix_now()?;
-    write_invocation_atomic(state_path, state)
+    write_invocation_atomic(state_path, state)?;
+    Ok(ImplementationLintRepairOutcome::RetryPrepared)
 }
 
 fn commit_sandboxed_executor_diff(
@@ -14681,6 +14816,12 @@ fn failure_cleanup_intent_path(state_path: &Path) -> PathBuf {
     state_path.with_extension("failure-cleanup.json")
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct FailureCleanupIntent {
+    reason: String,
+    exhausted: bool,
+}
+
 fn ensure_failure_cleanup_intent(
     state_path: &Path,
     state: &PersistedInvocation,
@@ -14718,7 +14859,7 @@ fn ensure_failure_cleanup_intent(
 fn read_failure_cleanup_intent(
     state_path: &Path,
     state: &PersistedInvocation,
-) -> Result<String, String> {
+) -> Result<FailureCleanupIntent, String> {
     let path = failure_cleanup_intent_path(state_path);
     validate_private_state_file(&path)?;
     let value: serde_json::Value = serde_json::from_str(
@@ -14731,10 +14872,13 @@ fn read_failure_cleanup_intent(
         &["schema", "binding", "retryable", "exhausted", "reason"],
         "executor failure cleanup intent",
     )?;
+    let exhausted = object
+        .get("exhausted")
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| "executor failure cleanup intent exhausted flag is invalid".to_string())?;
     if checked_u32(&object, "schema")? != 1
         || text(&object, "binding")? != cleanup_binding(state)
         || object.get("retryable").and_then(serde_json::Value::as_bool) != Some(true)
-        || object.get("exhausted").and_then(serde_json::Value::as_bool) != Some(false)
     {
         return Err("executor failure cleanup intent is not resumable".to_string());
     }
@@ -14742,7 +14886,10 @@ fn read_failure_cleanup_intent(
     if reason.trim().is_empty() {
         return Err("executor failure cleanup intent has no reason".to_string());
     }
-    Ok(reason.to_string())
+    Ok(FailureCleanupIntent {
+        reason: reason.to_string(),
+        exhausted,
+    })
 }
 
 fn close_retryable_pull_request(
@@ -27008,7 +27155,8 @@ exit 64
         assert_eq!(durable.phase, super::BridgePhase::ImplementationComplete);
         assert_eq!(
             super::read_failure_cleanup_intent(&state_path, &durable)
-                .expect("read exact failure cleanup intent"),
+                .expect("read exact failure cleanup intent")
+                .reason,
             "executor_zero_effect_completion"
         );
 
@@ -31632,6 +31780,169 @@ exit 64
         assert!(super::implementation_repair_prompt(&state_path, &state)
             .expect_err("symlinked artifact must fail closed")
             .contains("symlink"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn implementation_lint_repair_exhaustion_persists_final_once_without_attempt_four_output() {
+        let fixture = GitFixture::new("implementation-lint-repair-exhaustion");
+        git(
+            &fixture.repo,
+            &["checkout", "-b", "feat/autonomous-issue-42"],
+        );
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::ImplementationComplete;
+        let state_path = fixture.root.join("state/invocation.json");
+        let closeout = fixture.repo.join(".autospec/executor-closeout.md");
+        super::prepare_private_closeout_sink(&fixture.repo, &closeout).expect("closeout sink");
+        fs::write(fixture.repo.join("implementation.txt"), "still blocked\n")
+            .expect("implementation");
+        for (attempt, rule) in [
+            super::ImplementationLintRule::Complexity,
+            super::ImplementationLintRule::Security,
+            super::ImplementationLintRule::TodoLeft,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            state.phase = BridgePhase::ImplementationComplete;
+            git(&fixture.repo, &["add", "implementation.txt"]);
+            assert_eq!(
+                super::prepare_implementation_lint_repair(
+                    &state_path,
+                    &mut state,
+                    &closeout,
+                    &[rule],
+                )
+                .expect("prepare bounded repair"),
+                super::ImplementationLintRepairOutcome::RetryPrepared,
+            );
+            assert_eq!(state.implementation_repair_attempt, attempt as u32 + 1);
+        }
+        let prompt = super::implementation_repair_prompt(&state_path, &state)
+            .expect("cumulative third repair prompt");
+        for rule in ["COMPLEXITY", "SECURITY", "TODO_LEFT"] {
+            assert!(prompt.contains(&format!("Fix {rule}:")), "{prompt}");
+        }
+
+        state.phase = BridgePhase::ImplementationComplete;
+        git(&fixture.repo, &["add", "implementation.txt"]);
+
+        for _ in 0..2 {
+            assert_eq!(
+                super::prepare_implementation_lint_repair(
+                    &state_path,
+                    &mut state,
+                    &closeout,
+                    &[super::ImplementationLintRule::Security],
+                )
+                .expect("seal exhausted repair"),
+                super::ImplementationLintRepairOutcome::Exhausted,
+            );
+        }
+        assert_eq!(state.phase, BridgePhase::ImplementationComplete);
+        assert_eq!(
+            state.implementation_repair_attempt,
+            super::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS
+        );
+        assert_eq!(
+            git_stdout(&fixture.repo, &["diff", "--cached", "--name-only"]),
+            "implementation.txt",
+            "exhaustion must preserve the staged implementation"
+        );
+        assert!(super::output_sink_paths_for_attempt(
+            &state_path,
+            &state.identity.invocation_id,
+            super::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
+        )
+        .is_err());
+        let artifact = super::implementation_repair_artifact_path(
+            &state_path,
+            &state,
+            super::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
+        )
+        .expect("final repair artifact");
+        assert_eq!(
+            super::read_implementation_repair_rules(
+                &state_path,
+                &state,
+                super::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
+            )
+            .expect("read final findings"),
+            vec![super::ImplementationLintRule::Security]
+        );
+
+        let foreign = artifact.with_extension("foreign-link");
+        fs::hard_link(&artifact, &foreign).expect("create foreign hard link");
+        assert!(super::read_implementation_repair_rules(
+            &state_path,
+            &state,
+            super::MAX_IMPLEMENTATION_REPAIR_ATTEMPTS + 1,
+        )
+        .expect_err("foreign hard link must fail closed")
+        .contains("hard link"));
+    }
+
+    #[test]
+    fn implementation_lint_repair_exhaustion_replays_needs_human_cleanup() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("implementation-lint-exhausted-cleanup");
+        state.phase = super::BridgePhase::ImplementationComplete;
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        let state_path = fixture.root.join("state/exhausted-lint.json");
+        super::write_invocation_atomic(&state_path, &state).expect("persist failure state");
+
+        super::set_zero_effect_recovery_failpoint(
+            super::ZeroEffectRecoveryFailpoint::AfterClaimTransition,
+        );
+        let interrupted = super::finalize_failed_executor_with_transition(
+            &state_path,
+            &mut state,
+            None,
+            None,
+            true,
+            true,
+            "executor_implementation_lint_repair_exhausted",
+            |_, disposition| {
+                assert_eq!(disposition, super::BridgeClaimDisposition::NeedsHuman);
+                Ok(super::BridgeClaimTransition::Transitioned)
+            },
+        )
+        .expect_err("interrupt after needs-human transition");
+        super::set_zero_effect_recovery_failpoint(super::ZeroEffectRecoveryFailpoint::None);
+        assert!(interrupted.to_string().contains("after claim transition"));
+        let durable = super::PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("read interrupted state"),
+        )
+        .expect("parse interrupted state");
+        let intent = super::read_failure_cleanup_intent(&state_path, &durable)
+            .expect("read exhausted cleanup intent");
+        assert!(intent.exhausted);
+        assert_eq!(
+            intent.reason,
+            "executor_implementation_lint_repair_exhausted"
+        );
+
+        super::finalize_failed_executor_with_transition(
+            &state_path,
+            &mut state,
+            None,
+            None,
+            true,
+            intent.exhausted,
+            &intent.reason,
+            |_, disposition| {
+                assert_eq!(disposition, super::BridgeClaimDisposition::NeedsHuman);
+                Ok(super::BridgeClaimTransition::Transitioned)
+            },
+        )
+        .expect("resume exhausted terminalization");
+        assert_eq!(state.phase, super::BridgePhase::Complete);
+        assert_eq!(
+            state.terminal_result.as_deref(),
+            Some("needs-human:executor_implementation_lint_repair_exhausted")
+        );
     }
 
     #[test]
@@ -46425,7 +46736,8 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         assert!(error.to_string().contains("injected crash"), "{error}");
         assert_eq!(
             super::read_failure_cleanup_intent(&state_path, &state)
-                .expect("restart reads exact cleanup intent"),
+                .expect("restart reads exact cleanup intent")
+                .reason,
             "implementation failed"
         );
         assert!(
