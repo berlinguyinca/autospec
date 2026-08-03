@@ -65,7 +65,10 @@ pub(crate) const CLAUDE_LOCAL_TOOLS: &str = concat!(
     "Bash(mvn test),Bash(mvn test *),Bash(./mvnw test),Bash(./mvnw test *),",
     "Bash(gradle test),Bash(gradle test *),Bash(./gradlew test),",
     "Bash(./gradlew test *),Bash(sbt test),Bash(sbt test *),",
-    "Bash(make test),Bash(make test *)"
+    "Bash(make test),Bash(make test *),",
+    "Bash(bats),Bash(bats *),Bash(shellcheck),Bash(shellcheck *),",
+    "Bash(bash -n),Bash(bash -n *),",
+    "Bash(./scripts/validate-all.sh),Bash(./scripts/validate-all.sh *)"
 );
 pub(crate) const CLAUDE_FORBIDDEN_TOOLS: &str = concat!(
     "Bash(git push),Bash(git push *),Bash(git fetch),Bash(git fetch *),",
@@ -30144,6 +30147,14 @@ exit 64
             "Bash(go test *)",
             "Bash(pytest *)",
             "Bash(python -m pytest *)",
+            "Bash(bats)",
+            "Bash(bats *)",
+            "Bash(shellcheck)",
+            "Bash(shellcheck *)",
+            "Bash(bash -n)",
+            "Bash(bash -n *)",
+            "Bash(./scripts/validate-all.sh)",
+            "Bash(./scripts/validate-all.sh *)",
         ] {
             assert!(
                 CLAUDE_LOCAL_TOOLS.split(',').any(|tool| tool == required),
@@ -30157,6 +30168,8 @@ exit 64
             "Bash(npm *)",
             "Bash(pnpm *)",
             "Bash(yarn *)",
+            "Bash(bash *)",
+            "Bash(bash -c *)",
         ] {
             assert!(
                 !CLAUDE_LOCAL_TOOLS
