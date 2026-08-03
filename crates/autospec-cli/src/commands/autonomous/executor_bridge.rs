@@ -12067,6 +12067,27 @@ where
                 && pull_request_body_matches_state(&pull_request.body, &sibling))
         });
     }
+    let base_branch = current
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor remote snapshot base must name origin".to_string())?;
+    let base_ref = format!("refs/heads/{base_branch}");
+    if observed.refs.get(&base_ref) != baseline.refs.get(&base_ref) {
+        if let (Some(sealed_base), Some(observed_base)) =
+            (baseline.refs.get(&base_ref), observed.refs.get(&base_ref))
+        {
+            if sealed_base == &current.identity.base_oid
+                && recovery_base_is_equal_or_descendant(
+                    &current.identity.repository_path,
+                    sealed_base,
+                    observed_base,
+                )?
+            {
+                observed.refs.insert(base_ref, sealed_base.clone());
+            }
+        }
+    }
     Ok(observed)
 }
 
@@ -36928,6 +36949,76 @@ exit 64
         assert!(unowned
             .refs
             .contains_key("refs/heads/feat/autonomous-issue-44"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_normalizes_descendant_base_remote_delta() {
+        // Break caught: ordinary main progress invalidating a create-once remote snapshot before
+        // the later Rust-owned base reconciliation phase can merge it.
+        let fixture = GitFixture::new("remote-descendant-base");
+        let current = supervision_state(&fixture);
+        let state_dir = fixture.root.join("state/executor");
+        super::ensure_private_directory(&state_dir).expect("private executor state");
+        let baseline = super::RemoteMutationSnapshot {
+            refs: BTreeMap::from([(
+                "refs/heads/main".to_string(),
+                current.identity.base_oid.clone(),
+            )]),
+            pull_requests: Vec::new(),
+        };
+        fs::write(fixture.root.join("seed/descendant.txt"), "descendant\n")
+            .expect("write descendant base");
+        git(&fixture.root.join("seed"), &["add", "descendant.txt"]);
+        git(
+            &fixture.root.join("seed"),
+            &["commit", "-m", "descendant base"],
+        );
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+        let descendant = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD"]);
+        let observed = super::RemoteMutationSnapshot {
+            refs: BTreeMap::from([("refs/heads/main".to_string(), descendant)]),
+            pull_requests: Vec::new(),
+        };
+
+        let normalized = super::normalize_authorized_sibling_remote_deltas_with_claim_lookup(
+            &state_dir.join("issue-42-current.json"),
+            &current,
+            &baseline,
+            observed,
+            |_| Ok(false),
+        )
+        .expect("descendant base advance must be deferred to reconciliation");
+
+        assert_eq!(normalized, baseline);
+
+        let tree = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD^{tree}"]);
+        let unrelated = Command::new("git")
+            .args(["commit-tree", &tree, "-m", "unrelated base"])
+            .current_dir(fixture.root.join("seed"))
+            .output()
+            .expect("create unrelated base");
+        assert!(unrelated.status.success());
+        let unrelated = String::from_utf8(unrelated.stdout).unwrap();
+        let force_refspec = format!("{}:refs/heads/main", unrelated.trim());
+        git(
+            &fixture.root.join("seed"),
+            &["push", "--force", "origin", &force_refspec],
+        );
+        let observed = super::RemoteMutationSnapshot {
+            refs: BTreeMap::from([("refs/heads/main".to_string(), unrelated.trim().to_string())]),
+            pull_requests: Vec::new(),
+        };
+
+        let normalized = super::normalize_authorized_sibling_remote_deltas_with_claim_lookup(
+            &state_dir.join("issue-42-current.json"),
+            &current,
+            &baseline,
+            observed.clone(),
+            |_| Ok(false),
+        )
+        .expect("unrelated base remains visible to draft admission");
+
+        assert_eq!(normalized, observed);
     }
 
     #[test]
