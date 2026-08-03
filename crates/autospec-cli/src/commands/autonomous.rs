@@ -2744,6 +2744,17 @@ fn run_foreground_with_lease(
             return Ok(ForegroundCompletion::State(Box::new(retired)));
         }
         if state.phase() != ConductorPhase::Claim && lease.is_none() {
+            let terminal_matches = match local_acquisition.as_ref() {
+                Some(acquisition) => {
+                    exact_terminal_claim_matches_acquisition(&layout.repo, issue, acquisition)?
+                }
+                None => false,
+            };
+            if terminal_matches {
+                let retired = retire_foreground_ownership(&state_path, state)
+                    .map_err(CommandFailure::diagnostic)?;
+                return Ok(ForegroundCompletion::State(Box::new(retired)));
+            }
             return Err(CommandFailure::diagnostic(
                 "foreground dispatch recovery has no authoritative claim",
             )
@@ -4401,6 +4412,22 @@ fn retire_recovered_claim_acquisition(
         ));
     }
     clear_claim_acquisition_receipt(state_path).map_err(CommandFailure::diagnostic)
+}
+
+fn exact_terminal_claim_matches_acquisition(
+    repo: &str,
+    issue: u64,
+    acquisition: &claim::ClaimLease,
+) -> Result<bool, CommandFailure> {
+    let Some(terminal) = claim::recover_terminal_for_conductor(repo, issue)? else {
+        return Ok(false);
+    };
+    if terminal != *acquisition {
+        return Err(CommandFailure::diagnostic(
+            "foreground terminal claim does not match the durable local acquisition",
+        ));
+    }
+    Ok(true)
 }
 
 fn foreground_retirement_failpoint(point: &str) -> Result<(), String> {
