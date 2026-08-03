@@ -84,6 +84,7 @@ const CLAUDE_REVIEW_TOOLS: &str = "Read,Glob,Grep";
 const OPENCODE_REVIEWER_AGENT: &str = "autospec-reviewer";
 const OPENCODE_REVIEW_CONFIG: &str = r#"{"share":"disabled","instructions":[],"permission":{"*":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","lsp":"allow","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","webfetch":"deny","websearch":"deny","skill":"deny"},"agent":{"autospec-reviewer":{"description":"Autospec independent read-only reviewer","mode":"primary","prompt":"Review only. Never mutate files, git state, GitHub state, or external systems.","permission":{"*":"deny","read":"allow","glob":"allow","grep":"allow","list":"allow","lsp":"allow","edit":"deny","bash":"deny","task":"deny","external_directory":"deny","webfetch":"deny","websearch":"deny","skill":"deny"}}}}"#;
 const INVOCATION_SCHEMA: u32 = 1;
+const MAX_IMPLEMENTATION_REPAIR_ATTEMPTS: u32 = 3;
 const MAX_DIRECT_COMMAND_LINE: usize = 4_096;
 const MAX_DIRECT_COMMAND_SEGMENTS: usize = 16;
 const MAX_DIRECT_COMMAND_ARGS: usize = 128;
@@ -1122,6 +1123,7 @@ fn run_executor_bridge_with_codex_probe(
             terminal_result: None,
             umbrella: None,
             current_child: None,
+            implementation_repair_attempt: 0,
         };
         (state, runtime)
     };
@@ -9501,6 +9503,7 @@ pub(crate) struct PersistedInvocation {
     pub(crate) terminal_result: Option<String>,
     pub(crate) umbrella: Option<u64>,
     pub(crate) current_child: Option<u64>,
+    pub(crate) implementation_repair_attempt: u32,
 }
 
 impl PersistedInvocation {
@@ -9590,6 +9593,7 @@ fn invocation_to_value(invocation: &PersistedInvocation) -> serde_json::Value {
         "terminal_result": invocation.terminal_result,
         "umbrella": invocation.umbrella,
         "current_child": invocation.current_child,
+        "implementation_repair_attempt": invocation.implementation_repair_attempt,
     })
 }
 
@@ -9599,6 +9603,9 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
         object
             .entry("current_child")
             .or_insert(serde_json::Value::Null);
+        object
+            .entry("implementation_repair_attempt")
+            .or_insert(serde_json::json!(0));
     }
     let object = strict_object(
         value,
@@ -9619,6 +9626,7 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
             "terminal_result",
             "umbrella",
             "current_child",
+            "implementation_repair_attempt",
         ],
         "invocation",
     )?;
@@ -9656,6 +9664,12 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
     }
     let umbrella = optional_number(&object, "umbrella")?;
     let current_child = optional_number(&object, "current_child")?;
+    let implementation_repair_attempt = checked_u32(&object, "implementation_repair_attempt")?;
+    if implementation_repair_attempt > MAX_IMPLEMENTATION_REPAIR_ATTEMPTS {
+        return Err(format!(
+            "executor implementation repair attempt {implementation_repair_attempt} exceeds {MAX_IMPLEMENTATION_REPAIR_ATTEMPTS}"
+        ));
+    }
     if umbrella.is_some() != current_child.is_some()
         || current_child == Some(0)
         || umbrella.is_some_and(|parent| parent == 0 || Some(parent) == current_child)
@@ -9693,6 +9707,7 @@ fn invocation_from_value(mut value: serde_json::Value) -> Result<PersistedInvoca
         terminal_result: optional_text(&object, "terminal_result")?,
         umbrella,
         current_child,
+        implementation_repair_attempt,
     })
 }
 
@@ -17801,7 +17816,7 @@ fn has_durable_harness_recovery_evidence(
     if state.supervisor.is_some() || state.process.is_some() {
         return Ok(true);
     }
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let sinks = output_sink_paths_for_state(state_path, state)?;
     if sinks
         .supervisor_identity
         .try_exists()
@@ -18098,7 +18113,7 @@ fn supervise_validated_harness_with_claim_renewal(
     if config.stall_timeout.is_zero() || config.poll_interval.is_zero() {
         return Err("executor supervision intervals must be non-zero".to_string());
     }
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let sinks = output_sink_paths_for_state(state_path, state)?;
     let recovery_phase = state.phase;
     if state.process.is_none() {
         if sinks
@@ -19591,13 +19606,38 @@ impl Drop for LaunchGuard {
     }
 }
 
-fn output_sink_paths(state_path: &Path, invocation_id: &str) -> Result<OutputSinkPaths, String> {
+fn output_sink_paths_for_state(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<OutputSinkPaths, String> {
+    output_sink_paths_for_attempt(
+        state_path,
+        &state.identity.invocation_id,
+        state.implementation_repair_attempt,
+    )
+}
+
+fn output_sink_paths_for_attempt(
+    state_path: &Path,
+    invocation_id: &str,
+    implementation_repair_attempt: u32,
+) -> Result<OutputSinkPaths, String> {
+    if implementation_repair_attempt > MAX_IMPLEMENTATION_REPAIR_ATTEMPTS {
+        return Err(format!(
+            "executor implementation repair attempt {implementation_repair_attempt} exceeds {MAX_IMPLEMENTATION_REPAIR_ATTEMPTS}"
+        ));
+    }
     let parent = state_path
         .parent()
         .ok_or_else(|| "executor state path requires a parent".to_string())?
         .join("executor-output");
     ensure_private_directory(&parent)?;
-    let scope = &sha256_hex(invocation_id.as_bytes())[..16];
+    let scope_binding = if implementation_repair_attempt == 0 {
+        invocation_id.to_string()
+    } else {
+        format!("{invocation_id}\0implementation-lint-repair\0{implementation_repair_attempt}")
+    };
+    let scope = &sha256_hex(scope_binding.as_bytes())[..16];
     Ok(OutputSinkPaths {
         stdout: parent.join(format!("{scope}.stdout.ring")),
         stderr: parent.join(format!("{scope}.stderr.ring")),
@@ -19608,6 +19648,11 @@ fn output_sink_paths(state_path: &Path, invocation_id: &str) -> Result<OutputSin
         exit_status: parent.join(format!("{scope}.exit")),
         supervisor_identity: parent.join(format!("{scope}.supervisor.json")),
     })
+}
+
+#[cfg(test)]
+fn output_sink_paths(state_path: &Path, invocation_id: &str) -> Result<OutputSinkPaths, String> {
+    output_sink_paths_for_attempt(state_path, invocation_id, 0)
 }
 
 fn write_supervisor_identity(
@@ -20277,7 +20322,7 @@ fn launch_and_supervise(
     return Err("executor harness launch requires Unix process isolation".to_string());
     #[cfg(target_os = "linux")]
     let mut subreaper = ScopedChildSubreaper::enable()?;
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let sinks = output_sink_paths_for_state(state_path, state)?;
     #[cfg(unix)]
     let child = match spawn_blocked_harness(harness, &sinks, None) {
         Ok(child) => child,
@@ -20696,7 +20741,7 @@ fn supervise_adopted_process(
     };
     #[cfg(target_os = "linux")]
     let mut guard = AdoptedProcessGuard::new(owned_processes);
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let sinks = output_sink_paths_for_state(state_path, state)?;
     let mut readers = match DurableOutputReaders::open(&sinks, true) {
         Ok(readers) => readers,
         Err(error) => {
@@ -22452,7 +22497,7 @@ fn implementation_completion_header_is_exact(
     {
         return Ok(false);
     }
-    let sinks = output_sink_paths(state_path, &state.identity.invocation_id)?;
+    let sinks = output_sink_paths_for_state(state_path, state)?;
     if !sinks.exit_status.is_file() {
         return Ok(false);
     }
@@ -22661,7 +22706,7 @@ fn zero_effect_recovery_marker(
         .remote_snapshot_digest
         .as_deref()
         .ok_or_else(|| "executor zero-effect recovery has no prelaunch snapshot".to_string())?;
-    let exit_path = output_sink_paths(state_path, &state.identity.invocation_id)?.exit_status;
+    let exit_path = output_sink_paths_for_state(state_path, state)?.exit_status;
     let exit = fs::read(&exit_path)
         .map_err(|error| format!("read zero-effect recovery exit status: {error}"))?;
     let binding = serde_json::json!({
@@ -28738,6 +28783,7 @@ exit 64
             terminal_result: None,
             umbrella: None,
             current_child: None,
+            implementation_repair_attempt: 0,
         };
         write_invocation_atomic(&state_path, &invocation).expect("persist invocation");
         let recovered = recover_invocation(&state_path, &invocation.identity)
@@ -29173,6 +29219,7 @@ exit 64
             terminal_result: None,
             umbrella: None,
             current_child: None,
+            implementation_repair_attempt: 0,
         };
         write_invocation_atomic(&state_path, &invocation).expect("persist invocation");
         git(
@@ -31216,6 +31263,7 @@ exit 64
             terminal_result: None,
             umbrella: None,
             current_child: None,
+            implementation_repair_attempt: 0,
         }
     }
 
@@ -31227,6 +31275,84 @@ exit 64
         let actual = PersistedInvocation::from_json(&json).expect("parse invocation");
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn implementation_repair_output_legacy_json_defaults_to_attempt_zero() {
+        let expected = persisted_invocation();
+        let mut value: serde_json::Value =
+            serde_json::from_str(&expected.to_json().expect("serialize invocation"))
+                .expect("parse invocation JSON");
+        value
+            .as_object_mut()
+            .expect("invocation object")
+            .remove("implementation_repair_attempt");
+
+        let actual = PersistedInvocation::from_json(&value.to_string())
+            .expect("load legacy invocation without repair attempt");
+
+        assert_eq!(actual.implementation_repair_attempt, 0);
+    }
+
+    #[test]
+    fn implementation_repair_output_generations_are_disjoint_and_bounded() {
+        let root = test_root("implementation-repair-output");
+        let state_path = root.join("state/invocation.json");
+        let mut state = persisted_invocation();
+        let mut outputs = BTreeMap::new();
+        for attempt in 0..=3 {
+            state.implementation_repair_attempt = attempt;
+            let paths = super::output_sink_paths_for_state(&state_path, &state)
+                .expect("supported repair output generation");
+            outputs.insert(paths.stdout.clone(), attempt);
+        }
+
+        assert_eq!(outputs.len(), 4, "repair attempts reused durable output");
+        state.implementation_repair_attempt = 4;
+        let error = super::output_sink_paths_for_state(&state_path, &state)
+            .expect_err("attempt four must fail before launch");
+        assert!(error.contains("exceeds 3"), "{error}");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn implementation_repair_output_recovery_ignores_prior_attempt_exit_record() {
+        let root = test_root("implementation-repair-recovery");
+        let state_path = root.join("state/invocation.json");
+        let mut state = persisted_invocation();
+        state.supervisor = None;
+        state.process = None;
+
+        let prior =
+            super::output_sink_paths_for_attempt(&state_path, &state.identity.invocation_id, 0)
+                .expect("attempt zero output");
+        let mut complete = [0_u8; 16];
+        complete[..4].copy_from_slice(&0_i32.to_ne_bytes());
+        complete[4..8].copy_from_slice(b"EXIT");
+        complete[8..12].copy_from_slice(&0_i32.to_ne_bytes());
+        complete[12..].copy_from_slice(b"DONE");
+        fs::write(&prior.exit_status, complete).expect("prior durable exit");
+        fs::set_permissions(&prior.exit_status, fs::Permissions::from_mode(0o600))
+            .expect("private prior exit");
+
+        state.implementation_repair_attempt = 1;
+        assert!(
+            !super::has_durable_harness_recovery_evidence(&state_path, &state)
+                .expect("inspect current repair attempt"),
+            "attempt zero completion must not satisfy attempt one recovery"
+        );
+
+        let current =
+            super::output_sink_paths_for_state(&state_path, &state).expect("attempt one output");
+        fs::write(&current.exit_status, complete).expect("current durable exit");
+        fs::set_permissions(&current.exit_status, fs::Permissions::from_mode(0o600))
+            .expect("private current exit");
+        assert!(
+            super::has_durable_harness_recovery_evidence(&state_path, &state)
+                .expect("recover current repair attempt")
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
