@@ -18018,6 +18018,51 @@ unsafe fn raw_children_quiescent() -> i32 {
 }
 
 #[cfg(unix)]
+unsafe fn raw_reap_adopted_children(harness_pid: nix::libc::pid_t) -> i32 {
+    loop {
+        // WNOWAIT lets the exact harness retain its dedicated waitpid path while terminated
+        // grandchildren adopted by this subreaper are collected during a long-running command.
+        let mut info: nix::libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: info is writable and these flags observe only terminal child state.
+        let observed = unsafe {
+            nix::libc::waitid(
+                nix::libc::P_ALL,
+                0,
+                std::ptr::addr_of_mut!(info),
+                nix::libc::WEXITED | nix::libc::WNOHANG | nix::libc::WNOWAIT,
+            )
+        };
+        if observed < 0 {
+            // SAFETY: errno is thread-local process state.
+            let error = unsafe { *nix::libc::__errno_location() };
+            if error == nix::libc::EINTR {
+                continue;
+            }
+            return if error == nix::libc::ECHILD { 0 } else { -1 };
+        }
+        // SAFETY: waitid initialized the SIGCHLD pid field for WEXITED observations.
+        let pid = unsafe { info.si_pid() };
+        if pid == 0 || pid == harness_pid {
+            return 0;
+        }
+        let mut status = 0_i32;
+        // SAFETY: pid was returned by waitid as a terminal child and is not the harness.
+        let waited = unsafe { nix::libc::waitpid(pid, &mut status, nix::libc::WNOHANG) };
+        if waited == pid {
+            continue;
+        }
+        if waited < 0 {
+            // SAFETY: errno is thread-local process state.
+            let error = unsafe { *nix::libc::__errno_location() };
+            if error == nix::libc::EINTR || error == nix::libc::ECHILD {
+                continue;
+            }
+        }
+        return -1;
+    }
+}
+
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn raw_supervisor_loop(
     harness_pid: nix::libc::pid_t,
@@ -18126,6 +18171,12 @@ unsafe fn raw_supervisor_loop(
             } else if waited < 0
                 // SAFETY: errno is thread-local process state.
                 && unsafe { *nix::libc::__errno_location() } != nix::libc::EINTR
+            {
+                terminate_post_fork(127);
+            }
+            if exit_code.is_none()
+                // SAFETY: the exact harness is excluded from this adopted-child reap.
+                && unsafe { raw_reap_adopted_children(harness_pid) } < 0
             {
                 terminate_post_fork(127);
             }
@@ -41506,6 +41557,33 @@ exit 19
         );
         assert!(!old_group_survived, "recovery left the old command alive");
         assert_eq!(recovered[0].terminal, super::AttemptTerminal::Exited(0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_direct_supervisor_reaps_adopted_children() {
+        let fixture = GitFixture::new("direct-live-adopted-reap");
+        let artifact_root = fixture.root.join("evidence");
+        let executable = std::env::current_exe().expect("current test executable");
+        let plan = super::DirectCommandPlan {
+            commands: vec![super::DirectCommand::success(vec![
+                executable.display().to_string(),
+                "--exact".to_string(),
+                "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_cleanup_precedes_executable_validation".to_string(),
+                "--test-threads=1".to_string(),
+            ])],
+        };
+
+        let observed = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(15),
+        )
+        .expect("nested process-cleanup test must pass under direct supervision");
+
+        assert_eq!(observed[0].terminal, super::AttemptTerminal::Exited(0));
     }
 
     #[cfg(target_os = "linux")]
