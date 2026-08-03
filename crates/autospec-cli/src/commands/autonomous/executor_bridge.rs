@@ -1718,8 +1718,7 @@ fn ensure_premerge_and_review(
     proof: &ImplementationProof,
     runtime: Option<&DirectRuntimeAdapter>,
 ) -> Result<Option<String>, BridgeRunFailure> {
-    if state.phase == BridgePhase::DraftCreated
-        && reconcile_base_drift(&request.state_path, state)?
+    if state.phase == BridgePhase::DraftCreated && reconcile_base_drift(&request.state_path, state)?
     {
         return Ok(None);
     }
@@ -16578,6 +16577,20 @@ fn publish_continuation_children(
     Ok((umbrella, parent.map_or(children[0], |_| receipt.issue)))
 }
 
+fn recover_bound_continuation(state: &PersistedInvocation) -> Result<Option<(u64, u64)>, String> {
+    let (Some(umbrella), Some(current_child)) = (state.umbrella, state.current_child) else {
+        return Ok(None);
+    };
+    let children = continuation_child_list(&state.identity.repository, umbrella)?;
+    if !children.contains(&current_child) {
+        return Err(
+            "executor continuation binding is absent from the authoritative child order"
+                .to_string(),
+        );
+    }
+    Ok(Some((umbrella, current_child)))
+}
+
 fn bind_continuation_part(
     state_path: &Path,
     state: &mut PersistedInvocation,
@@ -16611,7 +16624,10 @@ fn require_continuation_checkpoint(
     };
     emit_continuation_events(state_path, event_log, state, &checkpoint)?;
     if publish_children {
-        let binding = publish_continuation_children(state_path, &checkpoint.receipt)?;
+        let binding = match recover_bound_continuation(state)? {
+            Some(binding) => binding,
+            None => publish_continuation_children(state_path, &checkpoint.receipt)?,
+        };
         let mut bound = state.clone();
         bind_continuation_part(state_path, &mut bound, binding)?;
     }
@@ -39242,6 +39258,35 @@ esac
         assert!(!fs::read_to_string(store.join("calls"))
             .expect("restart calls")
             .contains("issue create"));
+
+        fs::write(state.identity.worktree.join("slice.txt"), "changed again\n")
+            .expect("advance continuation head");
+        git(&state.identity.worktree, &["add", "slice.txt"]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "test: advance continuation head"],
+        );
+        let next_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        let mut rebound = bound.clone();
+        rebound.head_oid = Some(next_head.clone());
+        let next_proof = super::ImplementationProof {
+            head_oid: next_head,
+            closeout_body: proof.closeout_body.clone(),
+        };
+        fs::write(store.join("calls"), "").expect("clear calls");
+        super::require_continuation_checkpoint(
+            &state_path,
+            &event_log,
+            &rebound,
+            &next_proof,
+            "",
+            true,
+        )
+        .expect("bound exact-head recovery");
+        let recovery_calls = fs::read_to_string(store.join("calls")).expect("recovery calls");
+        assert!(!recovery_calls.contains("issue create"));
+        assert_eq!(fs::read_to_string(store.join("next")).unwrap(), "103");
+
         let mut adverse = super::load_continuation_receipt(&state_path, &state).expect("receipt");
         adverse.unmet = vec!["Improve quality should feel nice".into()];
         adverse.content_digest = adverse.digest();
@@ -47721,8 +47766,7 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         super::persist_patch_size_admission(&state_path, &admission)
             .expect("original admission receipt");
 
-        fs::write(fixture.root.join("seed/premerge-fix.txt"), "base fix\n")
-            .expect("base drift");
+        fs::write(fixture.root.join("seed/premerge-fix.txt"), "base fix\n").expect("base drift");
         git(&fixture.root.join("seed"), &["add", "premerge-fix.txt"]);
         git(
             &fixture.root.join("seed"),
