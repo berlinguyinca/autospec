@@ -1293,6 +1293,7 @@ fn run_executor_bridge_with_codex_probe(
         }
     }
     if state.phase == BridgePhase::ImplementationComplete {
+        reharden_completed_closeout(&state.identity.worktree, &closeout_path)?;
         let scope_root = state
             .identity
             .worktree
@@ -14192,6 +14193,21 @@ fn ownership_transfer_names_predecessor(
     path: &Path,
     state: &PersistedInvocation,
 ) -> Result<bool, String> {
+    Ok(ownership_transfer_generation_head(path, state, None)?.is_some())
+}
+
+fn adopted_ownership_transfer_head_for_owner(
+    path: &Path,
+    state: &PersistedInvocation,
+) -> Result<Option<String>, String> {
+    ownership_transfer_generation_head(path, state, Some("adopted"))
+}
+
+fn ownership_transfer_generation_head(
+    path: &Path,
+    state: &PersistedInvocation,
+    required_state: Option<&str>,
+) -> Result<Option<String>, String> {
     reject_symlink_path(path)?;
     validate_private_state_file(path)?;
     let value: serde_json::Value = serde_json::from_str(
@@ -14203,6 +14219,9 @@ fn ownership_transfer_names_predecessor(
         .get("state")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "executor ownership transfer state is missing".to_string())?;
+    if required_state.is_some_and(|required| required != transfer_state) {
+        return Ok(None);
+    }
     let (fields, adopted) = match transfer_state {
         "available" => (AVAILABLE_TRANSFER_FIELDS, false),
         "adopted" => (ADOPTED_TRANSFER_FIELDS, true),
@@ -14217,13 +14236,21 @@ fn ownership_transfer_names_predecessor(
     {
         return Err("executor ownership transfer identity changed".to_string());
     }
+    let transfer_head = text(&object, "head_oid")?;
+    if !canonical_git_oid(&transfer_head) {
+        return Err("executor ownership transfer head OID is malformed".to_string());
+    }
     let (claim_field, invocation_field) = if adopted {
         ("to_claim_id", "to_invocation_id")
     } else {
         ("from_claim_id", "from_invocation_id")
     };
-    Ok(text(&object, claim_field)? == state.identity.claim_id
-        && text(&object, invocation_field)? == state.identity.invocation_id)
+    if text(&object, claim_field)? != state.identity.claim_id
+        || text(&object, invocation_field)? != state.identity.invocation_id
+    {
+        return Ok(None);
+    }
+    Ok(Some(transfer_head))
 }
 
 pub(crate) fn finalize_ownership_loss_local(state_path: &Path) -> Result<(), String> {
@@ -22966,6 +22993,14 @@ fn zero_effect_remote_snapshot_is_exact(
     state_path: &Path,
     state: &PersistedInvocation,
 ) -> Result<bool, String> {
+    remote_snapshot_with_feature_head_is_exact(state_path, state, None)
+}
+
+fn remote_snapshot_with_feature_head_is_exact(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    expected_feature_head: Option<&str>,
+) -> Result<bool, String> {
     let expected_digest = match state.remote_snapshot_digest.as_deref() {
         Some(digest)
             if digest.len() == 64
@@ -23000,7 +23035,11 @@ fn zero_effect_remote_snapshot_is_exact(
         .strip_prefix("origin/")
         .ok_or_else(|| "executor validated base ref must name origin".to_string())?;
     let branch_ref = format!("refs/heads/{}", state.identity.branch);
-    Ok(!snapshot.refs.contains_key(&branch_ref)
+    let feature_is_exact = match expected_feature_head {
+        Some(head) => snapshot.refs.get(&branch_ref).map(String::as_str) == Some(head),
+        None => !snapshot.refs.contains_key(&branch_ref),
+    };
+    Ok(feature_is_exact
         && snapshot.refs.get(&format!("refs/heads/{base_branch}"))
             == Some(&state.identity.base_oid)
         && !snapshot
@@ -23070,10 +23109,58 @@ fn committed_implementation_remote_and_branch_are_exact(
     .next()
     .ok_or_else(|| "executor remote base ref returned no OID".to_string())?
     .to_string();
+    if remote_base != state.identity.base_oid {
+        return Ok(false);
+    }
     let branch_ref = format!("refs/heads/{}", state.identity.branch);
-    Ok(remote_base == state.identity.base_oid
-        && !remote_head_refs(&state.identity.repository_path)?.contains_key(&branch_ref)
-        && zero_effect_remote_snapshot_is_exact(state_path, state)?)
+    let remote_refs = remote_head_refs(&state.identity.repository_path)?;
+    if !remote_refs.contains_key(&branch_ref) {
+        return zero_effect_remote_snapshot_is_exact(state_path, state);
+    }
+    if remote_refs.get(&branch_ref) != Some(&head) {
+        return Ok(false);
+    }
+    let scope_root = state
+        .identity
+        .worktree
+        .parent()
+        .ok_or_else(|| "adopted executor worktree has no scope root".to_string())?;
+    let transfer = ownership_transfer_path(scope_root, state.identity.issue);
+    if !transfer.exists() {
+        return Ok(false);
+    }
+    let Some(transfer_head) = adopted_ownership_transfer_head_for_owner(&transfer, state)? else {
+        return Ok(false);
+    };
+    if !adopted_transfer_reaches_recovered_head(
+        &state.identity.worktree,
+        &transfer_head,
+        &head,
+        &state.identity.base_oid,
+    )? {
+        return Ok(false);
+    }
+    remote_snapshot_with_feature_head_is_exact(state_path, state, Some(&head))
+}
+
+fn adopted_transfer_reaches_recovered_head(
+    worktree: &Path,
+    transfer_head: &str,
+    recovered_head: &str,
+    base_oid: &str,
+) -> Result<bool, String> {
+    if transfer_head == recovered_head {
+        return Ok(true);
+    }
+    if !canonical_git_oid(transfer_head)
+        || !canonical_git_oid(recovered_head)
+        || !canonical_git_oid(base_oid)
+    {
+        return Err("executor adopted recovery OID is malformed".to_string());
+    }
+    let parents = git_stdout(worktree, &["show", "-s", "--format=%P", recovered_head])?;
+    let parents = parents.split_whitespace().collect::<Vec<_>>();
+    Ok(parents.as_slice() == [transfer_head, base_oid])
 }
 
 fn exact_zero_effect_scope_root(state: &PersistedInvocation) -> Result<PathBuf, String> {
@@ -24036,6 +24123,63 @@ fn prepare_private_closeout_sink(worktree: &Path, closeout: &Path) -> Result<(),
     }
     validate_private_state_file(closeout)
         .map_err(|error| format!("executor Closeout sink must be private: {error}"))
+}
+
+fn reharden_completed_closeout(worktree: &Path, closeout: &Path) -> Result<(), String> {
+    let expected = worktree.join(".autospec/executor-closeout.md");
+    if closeout != expected {
+        return Err("executor Closeout sink must use the exact worktree artifact path".to_string());
+    }
+    let artifact_dir = closeout
+        .parent()
+        .ok_or_else(|| "executor Closeout sink has no artifact directory".to_string())?;
+    ensure_private_directory(artifact_dir)?;
+    reject_symlink_path(closeout)?;
+    #[cfg(not(unix))]
+    return prepare_private_closeout_sink(worktree, closeout);
+    #[cfg(unix)]
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(OFlag::O_NOFOLLOW.bits())
+            .open(closeout)
+            .map_err(|error| format!("secure completed executor Closeout sink: {error}"))?;
+        let opened = file
+            .metadata()
+            .map_err(|error| format!("inspect opened executor Closeout sink: {error}"))?;
+        if !opened.is_file() {
+            return Err("executor Closeout sink is not a regular file".to_string());
+        }
+        if opened.nlink() != 1 {
+            return Err("executor Closeout sink has a foreign hard link".to_string());
+        }
+        // SAFETY: geteuid has no arguments or memory-safety preconditions.
+        if opened.uid() != unsafe { nix::libc::geteuid() } {
+            return Err("executor Closeout sink ownership changed".to_string());
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("secure executor Closeout sink: {error}"))?;
+        let secured = file
+            .metadata()
+            .map_err(|error| format!("reinspect opened executor Closeout sink: {error}"))?;
+        let current = fs::symlink_metadata(closeout)
+            .map_err(|error| format!("reinspect executor Closeout sink: {error}"))?;
+        if current.file_type().is_symlink()
+            || !current.is_file()
+            || current.dev() != secured.dev()
+            || current.ino() != secured.ino()
+        {
+            return Err("executor Closeout sink identity changed while securing it".to_string());
+        }
+        if secured.nlink() != 1
+            || secured.uid() != unsafe { nix::libc::geteuid() }
+            || secured.mode() & 0o077 != 0
+        {
+            return Err("executor Closeout sink is not a private single-link file".to_string());
+        }
+        Ok(())
+    }
 }
 
 fn reject_symlink_path(path: &Path) -> Result<(), String> {
@@ -25969,6 +26113,63 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_executor_bridge_rehardens_replaced_closeout_after_harness_exit_and_rejects_links()
+    {
+        let (_fixture, state, _state_path, _) =
+            zero_effect_classifier_fixture("reharden-replaced-closeout", false, false);
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        super::prepare_private_closeout_sink(&state.identity.worktree, &closeout)
+            .expect("prepare original closeout sink");
+        let replacement = closeout.with_extension("replacement");
+        fs::write(&replacement, "replacement closeout\n").expect("write replacement closeout");
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o664))
+            .expect("make replacement public");
+        fs::rename(&replacement, &closeout).expect("replace prepared closeout sink");
+
+        super::reharden_completed_closeout(&state.identity.worktree, &closeout)
+            .expect("reharden completed closeout");
+
+        assert_eq!(
+            fs::metadata(&closeout)
+                .expect("rehardened closeout metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_to_string(closeout).expect("read replacement closeout"),
+            "replacement closeout\n"
+        );
+
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        let alias = closeout.with_extension("alias");
+        fs::remove_file(&closeout).expect("remove hardened closeout");
+        fs::write(&alias, "aliased closeout\n").expect("write aliased closeout");
+        fs::set_permissions(&alias, fs::Permissions::from_mode(0o664)).expect("make alias public");
+        fs::hard_link(&alias, &closeout).expect("hard-link closeout replacement");
+
+        let error = super::reharden_completed_closeout(&state.identity.worktree, &closeout)
+            .expect_err("reject hard-linked closeout");
+        assert!(error.contains("hard link"), "{error}");
+        assert_eq!(
+            fs::metadata(alias)
+                .expect("alias metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o664,
+            "rejection must not chmod the aliased inode"
+        );
+    }
+
+    #[test]
     fn autonomous_executor_bridge_hardens_closeout_before_recovery_classification() {
         let (_fixture, mut state, state_path, _) =
             zero_effect_classifier_fixture("private-closeout-recovery", false, false);
@@ -26431,6 +26632,163 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
             .expect("persist recovered implementation proof");
         assert_eq!(recovered.phase, BridgePhase::ImplementationProven);
         assert_eq!(recovered.head_oid.as_deref(), Some(proof.head_oid.as_str()));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_recovers_exact_adopted_remote_implementation() {
+        let (fixture, mut state, state_path, _) =
+            zero_effect_classifier_fixture("adopted-remote-implementation", false, false);
+        let implementation = state.identity.worktree.join("implementation.txt");
+        fs::write(&implementation, "adopted implementation\n").expect("write implementation");
+        git(&state.identity.worktree, &["add", "implementation.txt"]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "test: preserve adopted implementation"],
+        );
+        let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &["push", "-u", "origin", &state.identity.branch],
+        );
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        fs::create_dir_all(closeout.parent().expect("closeout parent"))
+            .expect("create closeout parent");
+        fs::write(
+            &closeout,
+            "## Closeout report\n\n\
+Result: Preserved the adopted implementation.\n\
+Claims: [verified] runtime the focused test exits with status 0.\n\
+Proof type: runtime\n\
+Before/after: Before 0 implementation files; after 1 implementation file.\n\
+Artifacts: `implementation.txt`; rerun with `test -f implementation.txt`.\n\
+Scoped git status: Added `implementation.txt`; closeout excluded from the commit.\n\
+One likely hidden failure: The fixture does not exercise a pull request.\n",
+        )
+        .expect("write closeout");
+        fs::set_permissions(&closeout, fs::Permissions::from_mode(0o600))
+            .expect("private closeout");
+        super::ensure_active_worktree_ownership(
+            &state.identity.repository_path,
+            state.identity.worktree.parent().expect("scope root"),
+            state.identity.issue,
+            &state.identity.worktree,
+            &state.identity.branch,
+            &state.identity.claim_id,
+            &state.identity.invocation_id,
+        )
+        .expect("record adopted ownership transfer");
+        let snapshot_path = super::remote_snapshot_path(&state_path);
+        let mut snapshot: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&snapshot_path).expect("read remote snapshot"),
+        )
+        .expect("parse remote snapshot");
+        snapshot["identity"]["local_head"] = serde_json::json!(head);
+        snapshot["refs"][format!("refs/heads/{}", state.identity.branch)] = serde_json::json!(head);
+        let snapshot = format!("{snapshot}\n");
+        fs::write(&snapshot_path, &snapshot).expect("write adopted remote snapshot");
+        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+            .expect("secure adopted remote snapshot");
+        state.remote_snapshot_digest = Some(super::sha256_hex(snapshot.as_bytes()));
+        super::write_invocation_atomic(&state_path, &state).expect("persist adopted invocation");
+
+        assert!(
+            super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("classify exact adopted implementation")
+        );
+
+        let transfer_path = super::ownership_transfer_path(
+            state.identity.worktree.parent().expect("scope root"),
+            state.identity.issue,
+        );
+        let exact_transfer = fs::read_to_string(&transfer_path).expect("read exact transfer");
+
+        let seed = fixture.root.join("seed");
+        git(&seed, &["checkout", "main"]);
+        fs::write(seed.join("base-advance.txt"), "advanced base\n").expect("advance base branch");
+        git(&seed, &["add", "base-advance.txt"]);
+        git(&seed, &["commit", "-m", "test: advance adopted base"]);
+        git(&seed, &["push", "origin", "main"]);
+        let advanced_base = git_stdout(&seed, &["rev-parse", "HEAD"]);
+        git(&state.identity.worktree, &["fetch", "origin", "main"]);
+        git(
+            &state.identity.worktree,
+            &["merge", "--no-ff", "--no-edit", &advanced_base],
+        );
+        let reconciled_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &["push", "origin", &state.identity.branch],
+        );
+        state.identity.base_oid = advanced_base.clone();
+        let mut snapshot: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&snapshot_path).expect("read reconciled remote snapshot"),
+        )
+        .expect("parse reconciled remote snapshot");
+        snapshot["identity"]["base_oid"] = serde_json::json!(advanced_base);
+        snapshot["identity"]["local_head"] = serde_json::json!(reconciled_head);
+        snapshot["refs"]["refs/heads/main"] = serde_json::json!(advanced_base);
+        snapshot["refs"][format!("refs/heads/{}", state.identity.branch)] =
+            serde_json::json!(reconciled_head);
+        let snapshot = format!("{snapshot}\n");
+        fs::write(&snapshot_path, &snapshot).expect("write reconciled remote snapshot");
+        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+            .expect("secure reconciled remote snapshot");
+        state.remote_snapshot_digest = Some(super::sha256_hex(snapshot.as_bytes()));
+        super::write_invocation_atomic(&state_path, &state)
+            .expect("persist reconciled adopted invocation");
+
+        assert!(
+            super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("classify exact adopted base-reconciliation merge"),
+            "the transfer head may be the first parent of the exact base merge"
+        );
+
+        let mut mismatched: serde_json::Value =
+            serde_json::from_str(&exact_transfer).expect("parse exact transfer");
+        mismatched["to_claim_id"] = serde_json::json!("claim-other");
+        fs::write(&transfer_path, format!("{mismatched}\n")).expect("write mismatched transfer");
+        fs::set_permissions(&transfer_path, fs::Permissions::from_mode(0o600))
+            .expect("secure mismatched transfer");
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("reject mismatched transfer")
+        );
+
+        fs::write(&transfer_path, exact_transfer).expect("restore exact transfer");
+        fs::set_permissions(&transfer_path, fs::Permissions::from_mode(0o600))
+            .expect("secure restored transfer");
+        let exact_transfer = fs::read_to_string(&transfer_path).expect("reread exact transfer");
+        let mut mismatched_head: serde_json::Value =
+            serde_json::from_str(&exact_transfer).expect("parse exact transfer");
+        mismatched_head["head_oid"] = serde_json::json!("f".repeat(40));
+        fs::write(&transfer_path, format!("{mismatched_head}\n"))
+            .expect("write mismatched transfer head");
+        fs::set_permissions(&transfer_path, fs::Permissions::from_mode(0o600))
+            .expect("secure mismatched transfer head");
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("reject mismatched transfer head")
+        );
+
+        fs::write(&transfer_path, exact_transfer).expect("restore exact transfer head");
+        fs::set_permissions(&transfer_path, fs::Permissions::from_mode(0o600))
+            .expect("secure restored transfer head");
+        git(&seed, &["fetch", "origin", &state.identity.branch]);
+        git(&seed, &["checkout", "-B", "remote-advance", "FETCH_HEAD"]);
+        fs::write(seed.join("remote-advance.txt"), "advanced\n").expect("advance remote branch");
+        git(&seed, &["add", "remote-advance.txt"]);
+        git(&seed, &["commit", "-m", "test: advance remote branch"]);
+        git(
+            &seed,
+            &["push", "origin", &format!("HEAD:{}", state.identity.branch)],
+        );
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("reject mismatched remote OID")
+        );
     }
 
     #[cfg(unix)]
