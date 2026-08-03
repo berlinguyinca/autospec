@@ -10327,6 +10327,25 @@ struct TrustedHookBundle {
 }
 
 #[cfg(unix)]
+struct TrustedHookContext {
+    environment: BTreeMap<String, OsString>,
+    autospec: PathBuf,
+}
+
+#[cfg(unix)]
+impl TrustedHookContext {
+    fn current() -> Result<Self, String> {
+        Ok(Self {
+            environment: std::env::vars_os()
+                .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+                .collect(),
+            autospec: std::env::current_exe()
+                .map_err(|error| format!("resolve contained hook Autospec binary: {error}"))?,
+        })
+    }
+}
+
+#[cfg(unix)]
 impl Drop for TrustedHookBundle {
     fn drop(&mut self) {
         if self.temporary {
@@ -10358,14 +10377,6 @@ fn trusted_codex_executable_from(
         );
     }
     Ok(codex)
-}
-
-#[cfg(unix)]
-fn trusted_codex_executable(binding: &TrustedWorktreeGit) -> Result<PathBuf, String> {
-    let environment = std::env::vars_os()
-        .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
-        .collect::<BTreeMap<_, _>>();
-    trusted_codex_executable_from(binding, &environment)
 }
 
 #[cfg(unix)]
@@ -10471,27 +10482,31 @@ fn contained_hook_profile(
 #[cfg(unix)]
 impl TrustedHookBundle {
     fn create(binding: &TrustedWorktreeGit, issue_body: &str) -> Result<Self, String> {
+        let context = TrustedHookContext::current()?;
+        Self::create_with_context(binding, issue_body, &context)
+    }
+
+    fn create_with_context(
+        binding: &TrustedWorktreeGit,
+        issue_body: &str,
+        context: &TrustedHookContext,
+    ) -> Result<Self, String> {
         if binding.active_hooks.is_empty() {
             return Ok(Self {
                 path: binding.hooks_dir.clone(),
                 temporary: false,
             });
         }
-        let codex = trusted_codex_executable(binding)?;
-        let environment = std::env::vars_os()
-            .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
-            .collect::<BTreeMap<_, _>>();
-        let home = environment
+        let codex = trusted_codex_executable_from(binding, &context.environment)?;
+        let home = context
+            .environment
             .get("HOME")
             .map(PathBuf::from)
             .filter(|home| home.is_absolute())
             .ok_or_else(|| "HOME must be absolute for contained Git hooks".to_string())?;
-        let (scripts_dir, linter) = trusted_linter_from(binding, &environment)?;
-        let autospec = fs::canonicalize(
-            std::env::current_exe()
-                .map_err(|error| format!("resolve contained hook Autospec binary: {error}"))?,
-        )
-        .map_err(|error| format!("canonicalize contained hook Autospec binary: {error}"))?;
+        let (scripts_dir, linter) = trusted_linter_from(binding, &context.environment)?;
+        let autospec = fs::canonicalize(&context.autospec)
+            .map_err(|error| format!("canonicalize contained hook Autospec binary: {error}"))?;
         if autospec.starts_with(&binding.worktree) {
             return Err("contained hook tools must not be writable by the implementer".to_string());
         }
@@ -10561,6 +10576,9 @@ struct TrustedHookBundle {
 }
 
 #[cfg(not(unix))]
+struct TrustedHookContext;
+
+#[cfg(not(unix))]
 impl TrustedHookBundle {
     fn create(binding: &TrustedWorktreeGit, _issue_body: &str) -> Result<Self, String> {
         if fs::read_dir(&binding.hooks_dir)
@@ -10573,6 +10591,14 @@ impl TrustedHookBundle {
         Ok(Self {
             path: binding.hooks_dir.clone(),
         })
+    }
+
+    fn create_with_context(
+        binding: &TrustedWorktreeGit,
+        issue_body: &str,
+        _context: &TrustedHookContext,
+    ) -> Result<Self, String> {
+        Self::create(binding, issue_body)
     }
 }
 
@@ -10856,6 +10882,25 @@ fn commit_sandboxed_executor_diff(
     issue_title: &str,
     issue_body: &str,
 ) -> Result<bool, String> {
+    commit_sandboxed_executor_diff_inner(state, issue_title, issue_body, None)
+}
+
+#[cfg(all(test, unix))]
+fn commit_sandboxed_executor_diff_with_hook_context(
+    state: &PersistedInvocation,
+    issue_title: &str,
+    issue_body: &str,
+    hook_context: &TrustedHookContext,
+) -> Result<bool, String> {
+    commit_sandboxed_executor_diff_inner(state, issue_title, issue_body, Some(hook_context))
+}
+
+fn commit_sandboxed_executor_diff_inner(
+    state: &PersistedInvocation,
+    issue_title: &str,
+    issue_body: &str,
+    hook_context: Option<&TrustedHookContext>,
+) -> Result<bool, String> {
     let binding = trusted_worktree_git(state)?;
     let branch = binding
         .command()
@@ -10880,7 +10925,10 @@ fn commit_sandboxed_executor_diff(
     }
     reject_external_filters(&binding)?;
     attest_executor_signing(&binding)?;
-    let hook_bundle = TrustedHookBundle::create(&binding, issue_body)?;
+    let hook_bundle = match hook_context {
+        Some(context) => TrustedHookBundle::create_with_context(&binding, issue_body, context)?,
+        None => TrustedHookBundle::create(&binding, issue_body)?,
+    };
     stage_sandboxed_executor_diff(&binding, &hook_bundle.path)?;
     let staged = binding
         .command()
@@ -24359,6 +24407,8 @@ mod tests {
     use std::fs::{self, File, OpenOptions};
     use std::io::Write;
     #[cfg(unix)]
+    use std::net::{TcpListener, TcpStream};
+    #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
@@ -34904,8 +34954,36 @@ exit 64
     #[cfg(unix)]
     #[test]
     fn rust_commit_runs_trusted_validation_hook_inside_containment() {
-        let (_fixture, state, _snapshot, _closeout) =
+        let (fixture, state, _snapshot, _closeout) =
             implementation_proof_fixture("rust-commit-contained-hook");
+        let home = fixture.root.join("contained-hook-home");
+        fs::create_dir_all(home.join(".config/gh")).expect("create credential fixture");
+        fs::write(
+            home.join(".config/gh/hosts.yml"),
+            "known-credential-sentinel\n",
+        )
+        .expect("write credential fixture");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind local network fixture");
+        let listener_address = listener.local_addr().expect("local listener address");
+        let outside = TcpStream::connect(listener_address)
+            .expect("local listener must be reachable outside containment");
+        let (accepted, _) = listener.accept().expect("accept outside preflight");
+        drop((outside, accepted));
+        let mut environment = std::env::vars_os()
+            .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+            .collect::<BTreeMap<_, _>>();
+        environment.insert("HOME".to_string(), home.into_os_string());
+        environment.insert(
+            "AUTOSPEC_SCRIPTS_DIR".to_string(),
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../scripts")
+                .into_os_string(),
+        );
+        let hook_context = super::TrustedHookContext {
+            environment,
+            autospec: fs::canonicalize(std::env::current_exe().expect("current test executable"))
+                .expect("canonical test executable"),
+        };
         let implementation = state.identity.worktree.join("implementation.txt");
         fs::write(&implementation, "contained hook proof\n").expect("write implementation");
         let common_dir = PathBuf::from(git_stdout(
@@ -34921,18 +34999,20 @@ exit 64
         fs::write(
             &hook,
             format!(
-                "#!/bin/sh\nset -eu\n[ \"$PWD\" = {} ]\n[ -r \"$AUTOSPEC_SCRIPTS_DIR/lint-implementation.sh\" ]\n[ -x \"$AUTOSPEC_BIN\" ]\ngrep -qx 'offline contained evidence' \"$AUTOSPEC_LINT_ISSUE_BODY_FILE\"\n[ ! -r \"$HOME/.config/gh/hosts.yml\" ]\n[ ! -x /usr/bin/curl ] || ! /usr/bin/curl --max-time 1 --silent https://github.com/\ngit diff --cached --name-only | grep -qx implementation.txt\nchmod 600 implementation.txt\n",
-                super::posix_shell_quote(state.identity.worktree.to_string_lossy().as_ref())
+                "#!/bin/sh\nset -eu\n[ \"$PWD\" = {} ]\n[ -r \"$AUTOSPEC_SCRIPTS_DIR/lint-implementation.sh\" ]\n[ -x \"$AUTOSPEC_BIN\" ]\ngrep -qx 'offline contained evidence' \"$AUTOSPEC_LINT_ISSUE_BODY_FILE\"\n[ ! -r \"$HOME/.config/gh/hosts.yml\" ]\n! /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/{}'\ngit diff --cached --name-only | grep -qx implementation.txt\nchmod 600 implementation.txt\n",
+                super::posix_shell_quote(state.identity.worktree.to_string_lossy().as_ref()),
+                listener_address.port(),
             ),
         )
         .expect("write validation hook");
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
             .expect("make validation hook executable");
 
-        assert!(super::commit_sandboxed_executor_diff(
+        assert!(super::commit_sandboxed_executor_diff_with_hook_context(
             &state,
             "test: contained hook",
             "offline contained evidence\n",
+            &hook_context,
         )
         .expect("contained validation hook commit"));
 

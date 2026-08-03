@@ -541,6 +541,18 @@ EOF
     echo "$output" | grep -q 'offline issue body file'
 }
 
+@test "lint-implementation: missing offline issue body fails closed before an empty staged diff" {
+    cd "$PR_SIZE_TMP"
+    git init -q
+
+    run env AUTOSPEC_LINT_ISSUE_BODY_FILE="$PR_SIZE_TMP/missing.issue.md" \
+        bash "$LINT" --staged
+
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q 'offline issue body file'
+    ! echo "$output" | grep -q 'no staged changes found'
+}
+
 # ── --help documents new flags ────────────────────────────────────────────────
 
 @test "lint-implementation: --help documents --pre-commit" {
