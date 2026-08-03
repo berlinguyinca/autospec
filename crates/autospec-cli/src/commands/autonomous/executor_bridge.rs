@@ -4661,9 +4661,9 @@ fn verify_full_suite_base(
         .split_whitespace()
         .next()
         .ok_or_else(|| "executor full-suite base ref returned no OID".to_string())?;
-    if observed != expected_base_oid {
+    if !recovery_base_is_equal_or_descendant(worktree, expected_base_oid, observed)? {
         return Err(format!(
-            "executor full-suite base drift: expected {expected_base_oid}, observed {observed}"
+            "executor full-suite base is unrelated: expected {expected_base_oid} or a descendant, observed {observed}"
         ));
     }
     let ancestry = Command::new("git")
@@ -45620,6 +45620,69 @@ exit 19
         })
         .expect_err("stale revalidation commit must fail closed");
         assert!(error.contains("commit mismatch"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_full_suite_accepts_descendant_remote_base_only() {
+        // Break caught: main advancing after draft creation stranded evidence that remained
+        // correctly bound to the sealed implementation and its still-ancestral base.
+        let fixture = GitFixture::new("full-suite-descendant-base");
+        let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        let env = BTreeMap::from([(
+            "AUTOSPEC_FULL_TEST_COMMAND".to_string(),
+            OsString::from("/usr/bin/true"),
+        )]);
+        fs::write(fixture.root.join("seed/base-advance.txt"), "advance\n")
+            .expect("write base advance");
+        git(&fixture.root.join("seed"), &["add", "base-advance.txt"]);
+        git(
+            &fixture.root.join("seed"),
+            &["commit", "-m", "base advance"],
+        );
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+
+        super::revalidate_full_suite(super::FullSuiteRevalidationRequest {
+            worktree: &fixture.repo,
+            issue_body: "",
+            spec_documents: &[],
+            env: &env,
+            artifact_root: &fixture.root.join("full-descendant"),
+            runtime: None,
+            stall_timeout: Duration::from_secs(5),
+            expected_base_ref: "origin/main",
+            expected_base_oid: &commit,
+            expected_commit: &commit,
+        })
+        .expect("descendant remote base must defer to later reconciliation");
+
+        let tree = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD^{tree}"]);
+        let unrelated = Command::new("git")
+            .args(["commit-tree", &tree, "-m", "unrelated base"])
+            .current_dir(fixture.root.join("seed"))
+            .output()
+            .expect("create unrelated base");
+        assert!(unrelated.status.success());
+        let unrelated = String::from_utf8(unrelated.stdout).expect("unrelated OID");
+        let force_refspec = format!("{}:refs/heads/main", unrelated.trim());
+        git(
+            &fixture.root.join("seed"),
+            &["push", "--force", "origin", &force_refspec],
+        );
+
+        let error = super::revalidate_full_suite(super::FullSuiteRevalidationRequest {
+            worktree: &fixture.repo,
+            issue_body: "",
+            spec_documents: &[],
+            env: &env,
+            artifact_root: &fixture.root.join("full-unrelated"),
+            runtime: None,
+            stall_timeout: Duration::from_secs(5),
+            expected_base_ref: "origin/main",
+            expected_base_oid: &commit,
+            expected_commit: &commit,
+        })
+        .expect_err("unrelated remote base must fail closed");
+        assert!(error.contains("unrelated"), "{error}");
     }
 
     #[test]
