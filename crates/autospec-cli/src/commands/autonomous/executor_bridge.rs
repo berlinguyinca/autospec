@@ -14156,6 +14156,76 @@ fn ownership_transfer_path(scope_root: &Path, issue: u64) -> PathBuf {
     scope_root.join(format!("issue-{issue}.ownership-transfer.json"))
 }
 
+const AVAILABLE_TRANSFER_FIELDS: &[&str] = &[
+    "schema",
+    "state",
+    "repository_path",
+    "issue",
+    "worktree",
+    "branch",
+    "from_claim_id",
+    "from_invocation_id",
+    "head_oid",
+    "status_digest",
+    "runtime_receipt",
+    "cleanup_binding",
+];
+
+const ADOPTED_TRANSFER_FIELDS: &[&str] = &[
+    "schema",
+    "state",
+    "repository_path",
+    "issue",
+    "worktree",
+    "branch",
+    "from_claim_id",
+    "from_invocation_id",
+    "head_oid",
+    "status_digest",
+    "runtime_receipt",
+    "cleanup_binding",
+    "to_claim_id",
+    "to_invocation_id",
+];
+
+fn ownership_transfer_names_predecessor(
+    path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    reject_symlink_path(path)?;
+    validate_private_state_file(path)?;
+    let value: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(path)
+            .map_err(|error| format!("read executor ownership transfer: {error}"))?,
+    )
+    .map_err(|error| format!("parse executor ownership transfer: {error}"))?;
+    let transfer_state = value
+        .get("state")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "executor ownership transfer state is missing".to_string())?;
+    let (fields, adopted) = match transfer_state {
+        "available" => (AVAILABLE_TRANSFER_FIELDS, false),
+        "adopted" => (ADOPTED_TRANSFER_FIELDS, true),
+        _ => return Err("executor ownership transfer state is invalid".to_string()),
+    };
+    let object = strict_object(value, fields, "executor ownership transfer")?;
+    if checked_u32(&object, "schema")? != 1
+        || number(&object, "issue")? != state.identity.issue
+        || Path::new(&text(&object, "repository_path")?) != state.identity.repository_path.as_path()
+        || Path::new(&text(&object, "worktree")?) != state.identity.worktree.as_path()
+        || text(&object, "branch")? != state.identity.branch
+    {
+        return Err("executor ownership transfer identity changed".to_string());
+    }
+    let (claim_field, invocation_field) = if adopted {
+        ("to_claim_id", "to_invocation_id")
+    } else {
+        ("from_claim_id", "from_invocation_id")
+    };
+    Ok(text(&object, claim_field)? == state.identity.claim_id
+        && text(&object, invocation_field)? == state.identity.invocation_id)
+}
+
 pub(crate) fn finalize_ownership_loss_local(state_path: &Path) -> Result<(), String> {
     validate_private_state_file(state_path)?;
     let state = PersistedInvocation::from_json(
@@ -14183,6 +14253,7 @@ where
     validate_private_directory(state_dir)?;
     let prefix = format!("issue-{issue}-");
     let mut candidates = Vec::new();
+    let mut saw_transfer = false;
     for entry in fs::read_dir(state_dir)
         .map_err(|error| format!("inventory interrupted executor predecessors: {error}"))?
     {
@@ -14212,8 +14283,15 @@ where
         let Some(scope_root) = state.identity.worktree.parent() else {
             return Err("interrupted executor predecessor has no worktree scope".to_string());
         };
-        if !state.identity.worktree.exists() || !ownership_transfer_path(scope_root, issue).exists()
-        {
+        let transfer_path = ownership_transfer_path(scope_root, issue);
+        if !state.identity.worktree.exists() || !transfer_path.exists() {
+            continue;
+        }
+        saw_transfer = true;
+        if !executor_terminal_processes_are_quiescent(&state)? {
+            return Err("interrupted executor predecessor process is still live".to_string());
+        }
+        if !ownership_transfer_names_predecessor(&transfer_path, &state)? {
             continue;
         }
         let generation = &sha256_hex(state.identity.claim_id.as_bytes())[..16];
@@ -14225,17 +14303,20 @@ where
         candidates.push((path, state));
     }
     let (state_path, state) = match candidates.len() {
+        0 if saw_transfer => {
+            return Err(
+                "executor ownership transfer does not name an interrupted predecessor".to_string(),
+            )
+        }
         0 => return Ok(false),
         1 => candidates.pop().expect("one interrupted predecessor"),
         _ => {
             return Err(
-                "multiple interrupted executor predecessors require operator review".to_string(),
+                "multiple interrupted executor predecessors match one ownership transfer"
+                    .to_string(),
             )
         }
     };
-    if !executor_terminal_processes_are_quiescent(&state)? {
-        return Err("interrupted executor predecessor process is still live".to_string());
-    }
     let mut transferred = false;
     let authorized = authorize(&state, &mut || {
         prepare_available_worktree_transfer(&state_path, &state, None)?;
@@ -27758,6 +27839,28 @@ exit 64
         );
     }
 
+    fn recover_test_predecessor<Authorized>(
+        fixture: &GitFixture,
+        state_dir: &Path,
+        worktree: &super::IssueWorktree,
+        authorize: Authorized,
+    ) -> Result<bool, String>
+    where
+        Authorized: FnMut(
+            &super::PersistedInvocation,
+            &mut dyn FnMut() -> Result<(), String>,
+        ) -> Result<bool, String>,
+    {
+        super::recover_released_interrupted_predecessor_transfer(
+            state_dir,
+            "owner/repo",
+            &fixture.repo.canonicalize().expect("canonical repo"),
+            42,
+            &worktree.branch,
+            authorize,
+        )
+    }
+
     #[test]
     fn autonomous_executor_bridge_recovers_released_interrupted_predecessor_transfer() {
         let fixture = GitFixture::new("worktree-takeover-transfer");
@@ -27817,14 +27920,9 @@ exit 64
         fs::write(&malformed_path, [123]).expect("write malformed predecessor");
         fs::set_permissions(&malformed_path, fs::Permissions::from_mode(0o600))
             .expect("harden malformed predecessor");
-        let malformed_error = super::recover_released_interrupted_predecessor_transfer(
-            &state_dir,
-            "owner/repo",
-            &fixture.repo.canonicalize().expect("canonical repo"),
-            42,
-            &worktree.branch,
-            |_, _| panic!("malformed predecessor must fail before the release check"),
-        )
+        let malformed_error = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("malformed predecessor must fail before the release check")
+        })
         .expect_err("malformed predecessor fails closed");
         assert!(
             malformed_error.contains("JSON") || malformed_error.contains("parse"),
@@ -27841,50 +27939,97 @@ exit 64
         let symlink_generation = &super::sha256_hex(b"symlink-claim")[..16];
         let symlink_path = state_dir.join(format!("issue-42-{symlink_generation}.json"));
         symlink(&symlink_target, &symlink_path).expect("install predecessor state symlink");
-        let symlink_error = super::recover_released_interrupted_predecessor_transfer(
-            &state_dir,
-            "owner/repo",
-            &fixture.repo.canonicalize().expect("canonical repo"),
-            42,
-            &worktree.branch,
-            |_, _| panic!("symlink predecessor must fail before the release check"),
-        )
+        let symlink_error = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("symlink predecessor must fail before the release check")
+        })
         .expect_err("symlink predecessor fails closed");
         assert!(symlink_error.contains("symlink"), "{symlink_error}");
         fs::remove_file(symlink_path).expect("remove predecessor state symlink");
         fs::remove_file(symlink_target).expect("remove predecessor symlink target");
 
-        let mut ambiguous = state.clone();
-        ambiguous.identity.claim_id = "older-claim".to_string();
-        ambiguous.identity.invocation_id = "older-invocation".to_string();
-        let ambiguous_generation = &super::sha256_hex(b"older-claim")[..16];
-        let ambiguous_path = state_dir.join(format!("issue-42-{ambiguous_generation}.json"));
-        super::write_invocation_atomic(&ambiguous_path, &ambiguous)
-            .expect("persist ambiguous predecessor");
-        let ambiguous_error = super::recover_released_interrupted_predecessor_transfer(
-            &state_dir,
-            "owner/repo",
-            &fixture.repo.canonicalize().expect("canonical repo"),
-            42,
-            &worktree.branch,
-            |_, _| panic!("ambiguous predecessors must fail before the release check"),
+        let transfer_path =
+            super::ownership_transfer_path(worktree.path.parent().expect("scope root"), 42);
+        super::write_private_atomic(
+            &transfer_path,
+            &[123],
+            "malformed executor ownership transfer",
         )
-        .expect_err("ambiguous predecessors fail closed");
-        assert!(
-            ambiguous_error.contains("multiple interrupted"),
-            "{ambiguous_error}"
-        );
-        fs::remove_file(ambiguous_path).expect("remove ambiguous predecessor");
+        .expect("write malformed transfer");
+        let malformed_transfer =
+            recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+                panic!("malformed transfer must fail before the release check")
+            })
+            .expect_err("malformed transfer fails closed");
+        assert!(malformed_transfer.contains("parse"), "{malformed_transfer}");
+        super::write_private_atomic(
+            &transfer_path,
+            serde_json::to_string(&initial_transfer)
+                .expect("serialize initial transfer")
+                .as_bytes(),
+            "restored executor ownership transfer",
+        )
+        .expect("restore transfer");
 
-        let unreleased = super::recover_released_interrupted_predecessor_transfer(
-            &state_dir,
-            "owner/repo",
-            &fixture.repo.canonicalize().expect("canonical repo"),
-            42,
-            &worktree.branch,
-            |_, _| Ok(false),
+        let transfer_target = fixture.root.join("ownership-transfer-target.json");
+        fs::rename(&transfer_path, &transfer_target).expect("move transfer target");
+        symlink(&transfer_target, &transfer_path).expect("install transfer symlink");
+        let symlink_transfer = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("symlinked transfer must fail before the release check")
+        })
+        .expect_err("symlinked transfer fails closed");
+        assert!(symlink_transfer.contains("symlink"), "{symlink_transfer}");
+        fs::remove_file(&transfer_path).expect("remove transfer symlink");
+        fs::rename(transfer_target, &transfer_path).expect("restore transfer target");
+
+        let mut mismatched_transfer = initial_transfer.clone();
+        mismatched_transfer["to_claim_id"] = serde_json::json!("missing-claim");
+        mismatched_transfer["to_invocation_id"] = serde_json::json!("missing-invocation");
+        super::write_private_atomic(
+            &transfer_path,
+            serde_json::to_string(&mismatched_transfer)
+                .expect("serialize mismatched transfer")
+                .as_bytes(),
+            "mismatched executor ownership transfer",
         )
-        .expect_err("unreleased predecessor stays owned");
+        .expect("write mismatched transfer");
+        let mismatch = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("mismatched transfer must fail before the release check")
+        })
+        .expect_err("mismatched transfer fails closed");
+        assert!(mismatch.contains("does not name"), "{mismatch}");
+        super::write_private_atomic(
+            &transfer_path,
+            serde_json::to_string(&initial_transfer)
+                .expect("serialize initial transfer")
+                .as_bytes(),
+            "restored executor ownership transfer",
+        )
+        .expect("restore transfer");
+
+        let mut historical = state.clone();
+        historical.identity.claim_id = "older-claim".to_string();
+        historical.identity.invocation_id = "older-invocation".to_string();
+        historical.process =
+            super::observe_process_identity(std::process::id(), "").expect("observe test process");
+        let historical_generation = &super::sha256_hex(b"older-claim")[..16];
+        let historical_path = state_dir.join(format!("issue-42-{historical_generation}.json"));
+        super::write_invocation_atomic(&historical_path, &historical)
+            .expect("persist historical predecessor");
+        let live_historical = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("live historical predecessor must fail before the release check")
+        })
+        .expect_err("live historical predecessor blocks ownership transfer");
+        assert!(
+            live_historical.contains("process is still live"),
+            "{live_historical}"
+        );
+        historical.process = None;
+        super::write_invocation_atomic(&historical_path, &historical)
+            .expect("retire historical predecessor process");
+
+        let unreleased =
+            recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| Ok(false))
+                .expect_err("unreleased predecessor stays owned");
         assert!(unreleased.contains("claim is not released"), "{unreleased}");
         let unchanged: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(super::ownership_transfer_path(
@@ -27900,28 +28045,16 @@ exit 64
         state.process =
             super::observe_process_identity(std::process::id(), "").expect("observe test process");
         super::write_invocation_atomic(&state_path, &state).expect("persist live invocation");
-        let live = super::recover_released_interrupted_predecessor_transfer(
-            &state_dir,
-            "owner/repo",
-            &fixture.repo.canonicalize().expect("canonical repo"),
-            42,
-            &worktree.branch,
-            |_, _| panic!("live predecessor must be rejected before the release check"),
-        )
+        let live = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| {
+            panic!("live predecessor must be rejected before the release check")
+        })
         .expect_err("live predecessor stays owned");
         assert!(live.contains("process is still live"), "{live}");
 
         state.process = None;
         super::write_invocation_atomic(&state_path, &state).expect("persist quiescent invocation");
-        let withheld = super::recover_released_interrupted_predecessor_transfer(
-            &state_dir,
-            "owner/repo",
-            &fixture.repo.canonicalize().expect("canonical repo"),
-            42,
-            &worktree.branch,
-            |_, _| Ok(true),
-        )
-        .expect_err("authority cannot escape without owning the transfer");
+        let withheld = recover_test_predecessor(&fixture, &state_dir, &worktree, |_, _| Ok(true))
+            .expect_err("authority cannot escape without owning the transfer");
         assert!(
             withheld.contains("did not transfer ownership"),
             "{withheld}"
@@ -27929,12 +28062,10 @@ exit 64
         let unchanged = fs::read_to_string(&wip).expect("withheld authority preserves WIP");
         assert_eq!(unchanged, "preserve me\n");
         let release_checks = std::cell::Cell::new(0usize);
-        assert!(super::recover_released_interrupted_predecessor_transfer(
+        assert!(recover_test_predecessor(
+            &fixture,
             &state_dir,
-            "owner/repo",
-            &fixture.repo.canonicalize().expect("canonical repo"),
-            42,
-            &worktree.branch,
+            &worktree,
             |candidate, transfer| {
                 release_checks.set(release_checks.get() + 1);
                 if candidate.identity.claim_id != "old-claim" {
@@ -27948,7 +28079,16 @@ exit 64
         assert_eq!(
             release_checks.get(),
             1,
-            "one authority gate must own the transfer operation"
+            "only the transfer-bound predecessor reaches the authority gate"
+        );
+        assert_eq!(
+            super::PersistedInvocation::from_json(
+                &fs::read_to_string(&historical_path).expect("read historical predecessor")
+            )
+            .expect("parse historical predecessor")
+            .phase,
+            BridgePhase::Interrupted,
+            "historical predecessor remains immutable"
         );
         assert_eq!(
             fs::read_to_string(&wip).expect("old WIP remains"),
@@ -27980,6 +28120,7 @@ exit 64
         assert_eq!(transfer["from_claim_id"], "old-claim");
         assert_eq!(transfer["to_claim_id"], "new-claim");
 
+        fs::remove_file(historical_path).expect("remove historical predecessor");
         fs::remove_file(wip).expect("remove test WIP");
         git(
             &fixture.repo,
