@@ -10145,6 +10145,7 @@ const EXECUTOR_INTERNAL_PATHSPECS: [&str; 3] = [
 
 #[derive(Debug)]
 struct TrustedWorktreeGit {
+    active_hooks: Vec<PathBuf>,
     git_dir: PathBuf,
     hooks_dir: PathBuf,
     worktree: PathBuf,
@@ -10242,6 +10243,7 @@ fn trusted_worktree_git_paths(
     }
 
     let mut binding = TrustedWorktreeGit {
+        active_hooks: Vec::new(),
         git_dir,
         hooks_dir: PathBuf::new(),
         worktree,
@@ -10278,14 +10280,7 @@ fn trusted_worktree_git_paths(
             .file_type()
             .map_err(|error| format!("inspect executor Git hook entry: {error}"))?;
         if file_type.is_symlink() {
-            let target = fs::canonicalize(hook.path())
-                .map_err(|error| format!("canonicalize executor Git hook: {error}"))?;
-            if target.starts_with(&binding.worktree) {
-                return Err(
-                    "executor Git hook resolves into the sandboxed implementer worktree"
-                        .to_string(),
-                );
-            }
+            return Err("executor Git hook must not be a symlink".to_string());
         }
         #[cfg(unix)]
         if !hook.file_name().to_string_lossy().ends_with(".sample")
@@ -10297,14 +10292,226 @@ fn trusted_worktree_git_paths(
                 & 0o111
                 != 0
         {
-            return Err(
-                "executor commit cannot safely run active Git hooks outside containment"
-                    .to_string(),
+            let name = hook.file_name();
+            if name.to_str() != Some("pre-commit") {
+                return Err(format!(
+                    "executor commit cannot contain unsupported active Git hook {}",
+                    name.to_string_lossy()
+                ));
+            }
+            let metadata = hook
+                .metadata()
+                .map_err(|error| format!("inspect executor Git hook: {error}"))?;
+            if !metadata.file_type().is_file() || metadata.nlink() != 1 {
+                return Err("executor Git hook must be a singly linked regular file".to_string());
+            }
+            binding.active_hooks.push(
+                fs::canonicalize(hook.path())
+                    .map_err(|error| format!("canonicalize executor Git hook: {error}"))?,
             );
         }
     }
     binding.hooks_dir = hooks;
     Ok(binding)
+}
+
+#[cfg(unix)]
+static HOOK_BUNDLE_NONCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+struct TrustedHookBundle {
+    path: PathBuf,
+    temporary: bool,
+}
+
+#[cfg(unix)]
+impl Drop for TrustedHookBundle {
+    fn drop(&mut self) {
+        if self.temporary {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn toml_path_entry(path: &Path, permission: &str) -> Result<String, String> {
+    let path = path
+        .to_str()
+        .ok_or_else(|| "contained Git hook path must be UTF-8".to_string())?
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    Ok(format!("\"{path}\"=\"{permission}\""))
+}
+
+#[cfg(unix)]
+fn trusted_codex_executable_from(
+    binding: &TrustedWorktreeGit,
+    environment: &BTreeMap<String, OsString>,
+) -> Result<PathBuf, String> {
+    let codex = safe_executable(Path::new("codex"), environment)
+        .map_err(|error| format!("resolve contained Git hook sandbox: {error}"))?;
+    if codex.starts_with(&binding.worktree) {
+        return Err(
+            "contained Git hook sandbox executable is writable by the implementer".to_string(),
+        );
+    }
+    Ok(codex)
+}
+
+#[cfg(unix)]
+fn trusted_codex_executable(binding: &TrustedWorktreeGit) -> Result<PathBuf, String> {
+    let environment = std::env::vars_os()
+        .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+        .collect::<BTreeMap<_, _>>();
+    trusted_codex_executable_from(binding, &environment)
+}
+
+#[cfg(unix)]
+fn contained_hook_profile(
+    binding: &TrustedWorktreeGit,
+    bundle: &Path,
+    codex: &Path,
+) -> Result<String, String> {
+    let mut entries = vec![
+        "\":minimal\"=\"read\"".to_string(),
+        "\":workspace_roots\"={}".to_string(),
+        toml_path_entry(&binding.worktree, "write")?,
+        toml_path_entry(&binding.worktree.join(".git"), "read")?,
+        toml_path_entry(
+            &binding.worktree.join(".autospec/executor-closeout.md"),
+            "read",
+        )?,
+        toml_path_entry(&binding.worktree.join(".autospec/local-git"), "read")?,
+        toml_path_entry(
+            &binding.worktree.join(".autospec/original-git-pointer"),
+            "read",
+        )?,
+        toml_path_entry(&binding.git_dir, "read")?,
+        toml_path_entry(&binding.hooks_dir, "read")?,
+        toml_path_entry(bundle, "read")?,
+        toml_path_entry(&bundle.join("tmp"), "write")?,
+        toml_path_entry(codex, "read")?,
+    ];
+    for path in [
+        "~/.aws",
+        "~/.azure",
+        "~/.cargo/credentials",
+        "~/.cargo/credentials.toml",
+        "~/.codex/archived_sessions",
+        "~/.codex/auth.json",
+        "~/.codex/config.toml",
+        "~/.codex/history.jsonl",
+        "~/.codex/sessions",
+        "~/.codex/shell_snapshots",
+        "~/.config/containers",
+        "~/.config/gcloud",
+        "~/.config/gh",
+        "~/.config/pip",
+        "~/.docker",
+        "~/.git-credentials",
+        "~/.gnupg",
+        "~/.gradle",
+        "~/.kube",
+        "~/.m2",
+        "~/.netrc",
+        "~/.npmrc",
+        "~/.pypirc",
+        "~/.ssh",
+        "~/.terraform.d",
+        "~/.vault-token",
+    ] {
+        entries.push(format!("\"{path}\"=\"deny\""));
+    }
+    Ok(format!(
+        "permissions.autospec-git-hook.filesystem={{{}}}",
+        entries.join(",")
+    ))
+}
+
+#[cfg(unix)]
+impl TrustedHookBundle {
+    fn create(binding: &TrustedWorktreeGit) -> Result<Self, String> {
+        if binding.active_hooks.is_empty() {
+            return Ok(Self {
+                path: binding.hooks_dir.clone(),
+                temporary: false,
+            });
+        }
+        let codex = trusted_codex_executable(binding)?;
+        let nonce = HOOK_BUNDLE_NONCE.fetch_add(1, Ordering::Relaxed);
+        let path = binding.git_dir.join(format!(
+            "autospec-contained-hooks-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir(&path).map_err(|error| format!("create contained hook bundle: {error}"))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("protect contained hook bundle: {error}"))?;
+        for child in ["codex-home", "tmp"] {
+            fs::create_dir(path.join(child))
+                .map_err(|error| format!("create contained hook {child}: {error}"))?;
+            fs::set_permissions(path.join(child), fs::Permissions::from_mode(0o700))
+                .map_err(|error| format!("protect contained hook {child}: {error}"))?;
+        }
+        let profile = contained_hook_profile(binding, &path, &codex)?;
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|home| home.is_absolute())
+            .ok_or_else(|| "HOME must be absolute for contained Git hooks".to_string())?;
+        for hook in &binding.active_hooks {
+            let name = hook
+                .file_name()
+                .and_then(OsStr::to_str)
+                .ok_or_else(|| "contained Git hook name must be UTF-8".to_string())?;
+            let status_path = path.join("tmp").join(format!("{name}.status"));
+            let script = format!(
+                "#!/bin/sh\nset -eu\nstatus_file={}\nrm -f \"$status_file\"\n/usr/bin/env -i HOME={} PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 TMPDIR={} CODEX_HOME={} GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0 {} sandbox -C {} -P autospec-git-hook -c {} -c 'default_permissions=\"autospec-git-hook\"' -c 'permissions.autospec-git-hook.network.enabled=false' -c 'shell_environment_policy.inherit=\"all\"' -- /bin/sh -c 'hook=$1; status_file=$2; shift 2; \"$hook\" \"$@\"; status=$?; printf \"%s\\n\" \"$status\" > \"$status_file\"; exit \"$status\"' autospec-hook {} \"$status_file\" \"$@\"\n[ -f \"$status_file\" ] || exit 1\nIFS= read -r status < \"$status_file\" || exit 1\nrm -f \"$status_file\"\ncase \"$status\" in ''|*[!0-9]*) exit 1;; esac\n[ \"$status\" -le 255 ] || exit 1\nexit \"$status\"\n",
+                posix_shell_quote(status_path.to_string_lossy().as_ref()),
+                posix_shell_quote(home.to_string_lossy().as_ref()),
+                posix_shell_quote(path.join("tmp").to_string_lossy().as_ref()),
+                posix_shell_quote(path.join("codex-home").to_string_lossy().as_ref()),
+                posix_shell_quote(codex.to_string_lossy().as_ref()),
+                posix_shell_quote(binding.worktree.to_string_lossy().as_ref()),
+                posix_shell_quote(&profile),
+                posix_shell_quote(hook.to_string_lossy().as_ref()),
+            );
+            let wrapper = path.join(name);
+            let mut file = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o700)
+                .open(&wrapper)
+                .map_err(|error| format!("create contained Git hook wrapper: {error}"))?;
+            file.write_all(script.as_bytes())
+                .map_err(|error| format!("write contained Git hook wrapper: {error}"))?;
+            file.sync_all()
+                .map_err(|error| format!("sync contained Git hook wrapper: {error}"))?;
+        }
+        Ok(Self {
+            path,
+            temporary: true,
+        })
+    }
+}
+
+#[cfg(not(unix))]
+struct TrustedHookBundle {
+    path: PathBuf,
+}
+
+#[cfg(not(unix))]
+impl TrustedHookBundle {
+    fn create(binding: &TrustedWorktreeGit) -> Result<Self, String> {
+        if fs::read_dir(&binding.hooks_dir)
+            .map_err(|error| format!("inventory unsupported Git hooks: {error}"))?
+            .filter_map(Result::ok)
+            .any(|entry| !entry.file_name().to_string_lossy().ends_with(".sample"))
+        {
+            return Err("contained Git hooks are unsupported on this platform".to_string());
+        }
+        Ok(Self {
+            path: binding.hooks_dir.clone(),
+        })
+    }
 }
 
 fn sandboxed_executor_diff(state: &PersistedInvocation) -> Result<Vec<u8>, String> {
@@ -10511,7 +10718,10 @@ fn attest_executor_signing(binding: &TrustedWorktreeGit) -> Result<(), String> {
     Ok(())
 }
 
-fn stage_sandboxed_executor_diff(binding: &TrustedWorktreeGit) -> Result<(), String> {
+fn stage_sandboxed_executor_diff(
+    binding: &TrustedWorktreeGit,
+    hooks_path: &Path,
+) -> Result<(), String> {
     let mut paths = BTreeSet::new();
     for args in [
         vec![
@@ -10563,6 +10773,8 @@ fn stage_sandboxed_executor_diff(binding: &TrustedWorktreeGit) -> Result<(), Str
     }
     let add = binding
         .command()
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", hooks_path.to_string_lossy()))
         .arg("--literal-pathspecs")
         .args(["add", "--all", "--"])
         .args(paths)
@@ -10605,7 +10817,8 @@ fn commit_sandboxed_executor_diff(
     }
     reject_external_filters(&binding)?;
     attest_executor_signing(&binding)?;
-    stage_sandboxed_executor_diff(&binding)?;
+    let hook_bundle = TrustedHookBundle::create(&binding)?;
+    stage_sandboxed_executor_diff(&binding, &hook_bundle.path)?;
     let staged = binding
         .command()
         .args(["diff", "--cached", "--quiet", "--exit-code"])
@@ -10627,7 +10840,7 @@ fn commit_sandboxed_executor_diff(
         .arg("-c")
         .arg(format!(
             "core.hooksPath={}",
-            binding.hooks_dir.to_string_lossy()
+            hook_bundle.path.to_string_lossy()
         ))
         .args(["commit", "-m", &subject])
         .output()
@@ -34526,6 +34739,120 @@ exit 64
 
     #[cfg(unix)]
     #[test]
+    fn trusted_git_inventory_accepts_external_validation_hook() {
+        let (_fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-trusted-hook-inventory");
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        let hook = common_dir.join("hooks/pre-commit");
+        fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write validation hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("make validation hook executable");
+
+        let binding = super::trusted_worktree_git(&state)
+            .expect("trusted common-directory validation hook must be inventoried");
+
+        assert_eq!(binding.active_hooks, vec![hook.canonicalize().unwrap()]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_git_inventory_rejects_post_hook() {
+        let (_fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-post-hook");
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        let hook = common_dir.join("hooks/post-index-change");
+        fs::write(&hook, "#!/bin/sh\nexit 0\n").expect("write post hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("make post hook executable");
+
+        let error = super::trusted_worktree_git(&state).expect_err("post hook must fail closed");
+
+        assert!(error.contains("unsupported active Git hook"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contained_hook_rejects_codex_selected_from_writable_worktree() {
+        let environment = std::env::vars_os()
+            .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+            .collect::<BTreeMap<_, _>>();
+        let codex = super::safe_executable(Path::new("codex"), &environment)
+            .expect("installed Codex executable");
+        let binding = super::TrustedWorktreeGit {
+            active_hooks: Vec::new(),
+            git_dir: PathBuf::new(),
+            hooks_dir: PathBuf::new(),
+            worktree: codex.parent().expect("Codex parent").to_path_buf(),
+        };
+
+        let error = super::trusted_codex_executable_from(&binding, &environment)
+            .expect_err("worktree-selected Codex must fail closed");
+
+        assert!(error.contains("writable by the implementer"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rust_commit_runs_trusted_validation_hook_inside_containment() {
+        let (_fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("rust-commit-contained-hook");
+        let implementation = state.identity.worktree.join("implementation.txt");
+        fs::write(&implementation, "contained hook proof\n").expect("write implementation");
+        let common_dir = PathBuf::from(git_stdout(
+            &state.identity.worktree,
+            &["rev-parse", "--git-common-dir"],
+        ));
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            state.identity.worktree.join(common_dir)
+        };
+        let hook = common_dir.join("hooks/pre-commit");
+        fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\nset -eu\n[ \"$PWD\" = {} ]\nchmod 600 implementation.txt\n",
+                super::posix_shell_quote(state.identity.worktree.to_string_lossy().as_ref())
+            ),
+        )
+        .expect("write validation hook");
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("make validation hook executable");
+
+        assert!(
+            super::commit_sandboxed_executor_diff(&state, "test: contained hook")
+                .expect("contained validation hook commit")
+        );
+
+        assert_eq!(
+            fs::metadata(implementation)
+                .expect("implementation metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "the trusted validation hook did not execute"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rust_commit_failure_preserves_sandboxed_executor_diff_without_remote_mutation() {
         let (fixture, state, _snapshot, _closeout) =
             implementation_proof_fixture("rust-commit-sandboxed-failure");
@@ -34542,6 +34869,7 @@ exit 64
             "recoverable diff\n",
         )
         .expect("write sandboxed diff");
+        let head_before = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
         let common_dir = PathBuf::from(git_stdout(
             &state.identity.worktree,
             &["rev-parse", "--git-common-dir"],
@@ -34552,7 +34880,13 @@ exit 64
             state.identity.worktree.join(common_dir)
         };
         let hook = common_dir.join("hooks/pre-commit");
-        fs::write(&hook, "#!/bin/sh\nexit 1\n").expect("write rejecting hook");
+        let escaped = fixture.root.join("hook-escaped-containment");
+        let hook_body = format!(
+            "#!/bin/sh\nset +e\nchmod 600 implementation.txt\nprintf 'hook mutation\\n' > implementation.txt\ngit add implementation.txt\ngit update-ref refs/heads/hook-escape HEAD\ngit config autospec.hook-escape true\nprintf compromised > {}\nprintf escaped > {}\nexit 1\n",
+            super::posix_shell_quote(hook.to_string_lossy().as_ref()),
+            super::posix_shell_quote(escaped.to_string_lossy().as_ref()),
+        );
+        fs::write(&hook, &hook_body).expect("write escaping hook");
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
             .expect("make rejecting hook executable");
 
@@ -34560,6 +34894,37 @@ exit 64
             .expect_err("hook must block Rust-owned commit");
 
         assert!(error.contains("commit"), "{error}");
+        assert!(!escaped.exists(), "validation hook escaped containment");
+        assert_eq!(
+            fs::metadata(state.identity.worktree.join("implementation.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "hook execution receipt is missing"
+        );
+        assert_eq!(
+            git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]),
+            head_before
+        );
+        assert_eq!(
+            git_stdout(&state.identity.worktree, &["show", ":implementation.txt"]),
+            "recoverable diff",
+            "contained hook rewrote the staged index"
+        );
+        assert_eq!(fs::read_to_string(&hook).unwrap(), hook_body);
+        for args in [
+            ["show-ref", "--verify", "refs/heads/hook-escape"],
+            ["config", "--get", "autospec.hook-escape"],
+        ] {
+            assert!(!Command::new("git")
+                .current_dir(&state.identity.worktree)
+                .args(args)
+                .status()
+                .unwrap()
+                .success());
+        }
         assert!(git_stdout(
             &state.identity.worktree,
             &["status", "--porcelain=v1", "--untracked-files=all"]
