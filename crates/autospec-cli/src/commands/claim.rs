@@ -2557,6 +2557,40 @@ pub(crate) fn recover_released_bridge_claim(
     Ok(exact)
 }
 
+pub(crate) fn with_released_bridge_predecessor_authority<T>(
+    identity: ClaimMutationIdentity<'_>,
+    operation: impl FnOnce() -> Result<T, CommandFailure>,
+) -> Result<Option<T>, CommandFailure> {
+    let exact_release = read_claim_ref(identity.repo, identity.issue)?.is_some_and(|selected| {
+        selected.record.worker_id == identity.worker_id
+            && selected.record.claim_id.as_deref() == Some(identity.claim_id)
+            && selected.record.branch == identity.branch
+            && selected.record.state == "released"
+            && selected.record.step == "released"
+            && selected.record.pr.is_empty()
+    });
+    if exact_release {
+        retire_released_startup_heartbeat(identity)?;
+        return operation().map(Some);
+    }
+    with_retained_bridge_predecessor_authority(
+        identity,
+        observe_local_startup_pid,
+        || {},
+        operation,
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn with_retained_bridge_predecessor_authority<T>(
+    _identity: ClaimMutationIdentity<'_>,
+    _observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
+    _boundary: impl FnOnce(),
+    _operation: impl FnOnce() -> Result<T, CommandFailure>,
+) -> Result<Option<T>, CommandFailure> {
+    Ok(None)
+}
+
 fn project_bridge_terminal_audit(
     identity: ClaimMutationIdentity<'_>,
     pull_request: Option<u64>,
@@ -6550,6 +6584,138 @@ fn held_heartbeat_at(
 }
 
 #[cfg(target_os = "linux")]
+fn with_retained_bridge_predecessor_authority<T>(
+    identity: ClaimMutationIdentity<'_>,
+    observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
+    boundary: impl FnOnce(),
+    operation: impl FnOnce() -> Result<T, CommandFailure>,
+) -> Result<Option<T>, CommandFailure> {
+    use nix::fcntl::{open, AtFlags, OFlag};
+    use nix::sys::stat::{fstatat, Mode};
+
+    let root_path = heartbeat_root()?;
+    let root = match open(
+        &root_path,
+        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "retained bridge heartbeat root open: {error}"
+            )))
+        }
+        Ok(root) => fs::File::from(root),
+    };
+    private_heartbeat_directory_identity(&root, "retained bridge root")?;
+    let repo_name = super::autonomous::drain::repository_progress_key(identity.repo);
+    match fstatat(&root, repo_name.as_str(), AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "retained bridge repository inspect: {error}"
+            )))
+        }
+        Ok(_) => {}
+    }
+    let repo = open_heartbeat_directory_beneath(&root, Path::new(&repo_name))?;
+    let expected = StartupHeartbeatExpectation {
+        repo: identity.repo,
+        issue: identity.issue,
+        worker_id: identity.worker_id,
+        branch: identity.branch,
+        pull_request: "",
+        claim_id: identity.claim_id,
+        step: "claimed",
+    };
+    match heartbeat_receipt_retry_decision(&repo, expected) {
+        HeartbeatReceiptDecision::Absent => return Ok(None),
+        HeartbeatReceiptDecision::Completed => {}
+        HeartbeatReceiptDecision::Pending | HeartbeatReceiptDecision::Blocking => {
+            return Err(CommandFailure::diagnostic(
+                "retained bridge predecessor receipt is incomplete or unsafe",
+            ))
+        }
+    }
+    let (pending_name, receipt_name) = heartbeat_receipt_names(expected);
+    let archive_name = receipt_name.replace(".receipt", ".json");
+    let handoff = open_receipt_anchors_with_hook(&repo, |_| {})?;
+    let handoff_identity = private_heartbeat_directory_identity(&handoff, "bridge handoff")?;
+    let receipt_snapshot = read_regular_file_at_no_follow(&handoff, receipt_name.as_ref())
+        .map_err(|error| CommandFailure::diagnostic(format!("bridge receipt read: {error}")))?;
+    if inspect_heartbeat_receipt(&handoff, receipt_name.as_ref()) != HeartbeatReceiptEntry::Exact {
+        return Err(CommandFailure::diagnostic(
+            "retained bridge predecessor receipt is unsafe",
+        ));
+    }
+    let heartbeat = match classify_startup_heartbeat_at(
+        &handoff,
+        archive_name.as_ref(),
+        expected,
+        unix_now()?,
+        observe_pid,
+    ) {
+        StartupHeartbeatClassification::ExpiredDead(snapshot) => snapshot,
+        StartupHeartbeatClassification::Absent => {
+            return Err(CommandFailure::diagnostic(
+                "retained bridge predecessor heartbeat is absent",
+            ))
+        }
+        StartupHeartbeatClassification::Blocking => {
+            return Err(CommandFailure::diagnostic(
+                "retained bridge predecessor heartbeat is unsafe",
+            ))
+        }
+    };
+    let heartbeat = *heartbeat;
+    let validate = || -> Result<(), CommandFailure> {
+        if heartbeat_receipt_retry_decision(&repo, expected) != HeartbeatReceiptDecision::Completed
+        {
+            return Err(CommandFailure::diagnostic(
+                "retained bridge predecessor receipt changed",
+            ));
+        }
+        let handoff = open_receipt_anchors_with_hook(&repo, |_| {})?;
+        let observed_receipt = read_regular_file_at_no_follow(&handoff, receipt_name.as_ref())
+            .map_err(|error| {
+                CommandFailure::diagnostic(format!("bridge receipt re-read: {error}"))
+            })?;
+        if private_heartbeat_directory_identity(&handoff, "bridge handoff")? != handoff_identity
+            || observed_receipt != receipt_snapshot
+            || inspect_heartbeat_receipt(&handoff, pending_name.as_ref())
+                != HeartbeatReceiptEntry::Missing
+            || inspect_heartbeat_receipt(&handoff, receipt_name.as_ref())
+                != HeartbeatReceiptEntry::Exact
+        {
+            return Err(CommandFailure::diagnostic(
+                "retained bridge predecessor receipt is unsafe",
+            ));
+        }
+        let retained =
+            held_heartbeat_at(&handoff, archive_name.as_ref(), &heartbeat)?.ok_or_else(|| {
+                CommandFailure::diagnostic("retained bridge predecessor heartbeat disappeared")
+            })?;
+        let synthetic_live_name = format!(".{receipt_name}.bridge-authority");
+        validate_retained_heartbeat(
+            &root_path,
+            &repo,
+            synthetic_live_name.as_ref(),
+            retained,
+            &heartbeat,
+            archive_name.clone(),
+            handoff,
+            None,
+            &mut |_| Ok(()),
+        )?;
+        Ok(())
+    };
+    validate()?;
+    boundary();
+    validate()?;
+    operation().map(Some)
+}
+
+#[cfg(target_os = "linux")]
 #[allow(dead_code)]
 fn handoff_retained_heartbeat(
     state_root: &Path,
@@ -9408,6 +9574,124 @@ claimed|review
             );
             std::fs::remove_dir_all(parent).unwrap();
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_bridge_predecessor_authority_is_exact_and_boundary_bound() {
+        use nix::fcntl::{open, OFlag};
+        use nix::sys::stat::Mode;
+        use std::cell::Cell;
+
+        let _guard = STARTUP_HEARTBEAT_ENV.lock().unwrap();
+        let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        let (sandbox, _) = startup_heartbeat_fixture("retained-bridge-authority");
+        let root = sandbox.join("heartbeats");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let repo_name = crate::commands::autonomous::drain::repository_progress_key("owner/repo");
+        let repo_path = root.join(&repo_name);
+        std::fs::create_dir(&repo_path).unwrap();
+        std::fs::set_permissions(&repo_path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let source = repo_path.join("42.json");
+        std::fs::write(
+            &source,
+            startup_heartbeat_document("host:user:rust:4242:nonce-a", 4242),
+        )
+        .unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let snapshot = expired_heartbeat_snapshot(&source);
+        let root_fd = std::fs::File::from(
+            open(
+                &root,
+                OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW,
+                Mode::empty(),
+            )
+            .unwrap(),
+        );
+        let repo =
+            super::open_heartbeat_directory_beneath(&root_fd, Path::new(&repo_name)).unwrap();
+        let archive = super::handoff_retained_heartbeat(
+            &repo_path,
+            &repo,
+            source.file_name().unwrap(),
+            &snapshot,
+            |_, _, _, _| {},
+            |_| Ok(()),
+        )
+        .unwrap();
+        unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root) };
+        let identity = super::ClaimMutationIdentity {
+            repo: "owner/repo",
+            issue: 42,
+            worker_id: "host:user:rust:4242:nonce-a",
+            branch: "feat/worker",
+            claim_id: "claim-a",
+        };
+        let calls = Cell::new(0usize);
+        let accepted = super::with_retained_bridge_predecessor_authority(
+            identity,
+            |_, _, _, _, _| super::StartupPidLiveness::Dead,
+            || {},
+            || {
+                calls.set(calls.get() + 1);
+                Ok("transferred")
+            },
+        )
+        .unwrap();
+        assert_eq!(accepted, Some("transferred"));
+        assert_eq!(calls.get(), 1);
+
+        let missing = super::with_retained_bridge_predecessor_authority(
+            super::ClaimMutationIdentity {
+                claim_id: "another-claim",
+                ..identity
+            },
+            |_, _, _, _, _| super::StartupPidLiveness::Dead,
+            || {},
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(missing.is_none());
+        let live = super::with_retained_bridge_predecessor_authority(
+            identity,
+            |_, _, _, _, _| super::StartupPidLiveness::Live,
+            || {},
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(live.is_err());
+        assert_eq!(calls.get(), 1);
+
+        let receipt = archive.with_extension("receipt");
+        let replacement = repo_path.join("replacement-receipt");
+        std::fs::write(&replacement, "").unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let raced = super::with_retained_bridge_predecessor_authority(
+            identity,
+            |_, _, _, _, _| super::StartupPidLiveness::Dead,
+            || {
+                std::fs::remove_file(&receipt).unwrap();
+                std::fs::rename(&replacement, &receipt).unwrap();
+            },
+            || {
+                calls.set(calls.get() + 1);
+                Ok(())
+            },
+        );
+        assert!(raced.is_err());
+        assert_eq!(calls.get(), 1, "raced proof must not invoke transfer");
+
+        match previous {
+            Some(value) => unsafe { std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value) },
+            None => unsafe { std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR") },
+        }
+        std::fs::remove_dir_all(sandbox).unwrap();
     }
 
     #[test]
