@@ -1831,7 +1831,7 @@ fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> MissingCleanupRecover
     }
     fixture.transition_claim_ref(&remote);
     fixture.seed_claim_acquisition_receipt(worker_id, branch, claim_id);
-    fixture.seed_claim_heartbeat(worker_id, branch, claim_id);
+    fixture.seed_expired_claim_heartbeat(worker_id, branch, claim_id);
     fixture.seed_interrupted_executor_invocation_without_cleanup(worker_id, branch, claim_id);
     let seeded = git_fixture(
         &fixture.claim_repo,
@@ -3508,6 +3508,188 @@ fn foreground_rejects_a_terminal_run_state_before_claim_mutation() {
         !calls.contains("issue\nedit\n42"),
         "terminal state must be rejected before claim label mutation"
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn foreground_retires_exact_released_predecessor_heartbeat_before_acquire() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_empty_local_remote();
+    let branch = "feat/autonomous-issue-42";
+    seed_preserved_issue_branch(&fixture, branch);
+    fixture.seed_claim_state_with_id(
+        "predecessor-worker",
+        branch,
+        "released",
+        &fresh_iso_timestamp(),
+        "predecessor-claim",
+    );
+    fixture.seed_expired_claim_heartbeat("predecessor-worker", branch, "predecessor-claim");
+    seed_foreground_state(&fixture, &selected_foreground_state());
+    fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
+
+    let output = fixture.run_foreground();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("heartbeat_write_failed"),
+        "successor publication collided with released predecessor heartbeat"
+    );
+    let successor = fixture.claim_record();
+    assert_eq!(successor.state, "claimed");
+    assert_ne!(successor.claim_id.as_deref(), Some("predecessor-claim"));
+    let heartbeat = fs::read_to_string(fixture.heartbeats.join("o4_test_r4_repo/42.json"))
+        .expect("successor heartbeat");
+    assert!(heartbeat.contains(successor.claim_id.as_deref().expect("successor claim ID")));
+    assert!(fs::read_dir(
+        fixture
+            .heartbeats
+            .join("o4_test_r4_repo/quarantine/startup-heartbeat-handoffs")
+    )
+    .expect("predecessor heartbeat handoff")
+    .filter_map(Result::ok)
+    .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+    .any(|document| document.contains("\"claim_id\":\"predecessor-claim\"")));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn foreground_rejects_foreign_released_predecessor_heartbeat_before_acquire() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_empty_local_remote();
+    let branch = "feat/autonomous-issue-42";
+    seed_preserved_issue_branch(&fixture, branch);
+    fixture.seed_claim_state_with_id(
+        "predecessor-worker",
+        branch,
+        "released",
+        &fresh_iso_timestamp(),
+        "predecessor-claim",
+    );
+    fixture.seed_expired_claim_heartbeat("foreign-worker", branch, "foreign-claim");
+    seed_foreground_state(&fixture, &selected_foreground_state());
+    fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
+    let predecessor = fixture.claim_record();
+
+    let output = fixture.run_foreground();
+
+    assert!(!output.status.success());
+    assert_eq!(fixture.claim_record(), predecessor);
+    let heartbeat = fs::read_to_string(fixture.heartbeats.join("o4_test_r4_repo/42.json"))
+        .expect("foreign heartbeat remains live");
+    assert!(heartbeat.contains("\"claim_id\":\"foreign-claim\""));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn foreground_rejects_live_released_predecessor_heartbeat_before_acquire() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_empty_local_remote();
+    let branch = "feat/autonomous-issue-42";
+    seed_preserved_issue_branch(&fixture, branch);
+    fixture.seed_claim_state_with_id(
+        "predecessor-worker",
+        branch,
+        "released",
+        &fresh_iso_timestamp(),
+        "predecessor-claim",
+    );
+    fixture.seed_claim_heartbeat("predecessor-worker", branch, "predecessor-claim");
+    seed_foreground_state(&fixture, &selected_foreground_state());
+    fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
+    let predecessor = fixture.claim_record();
+
+    let output = fixture.run_foreground();
+
+    assert!(!output.status.success());
+    assert_eq!(fixture.claim_record(), predecessor);
+    assert!(fixture.heartbeats.join("o4_test_r4_repo/42.json").exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn foreground_resumes_pending_released_predecessor_heartbeat_handoff_before_acquire() {
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_empty_local_remote();
+    let branch = "feat/autonomous-issue-42";
+    seed_preserved_issue_branch(&fixture, branch);
+    fixture.seed_claim_state_with_id(
+        "predecessor-worker",
+        branch,
+        "released",
+        &fresh_iso_timestamp(),
+        "predecessor-claim",
+    );
+    let (pending, completed) = fixture.seed_pending_claim_heartbeat_handoff(
+        "predecessor-worker",
+        branch,
+        "predecessor-claim",
+    );
+    seed_foreground_state(&fixture, &selected_foreground_state());
+    fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
+
+    let output = fixture.run_foreground();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!pending.exists());
+    assert!(completed.exists());
+    let successor = fixture.claim_record();
+    assert_ne!(successor.claim_id.as_deref(), Some("predecessor-claim"));
+    let heartbeat = fs::read_to_string(fixture.heartbeats.join("o4_test_r4_repo/42.json"))
+        .expect("successor heartbeat");
+    assert!(heartbeat.contains(successor.claim_id.as_deref().expect("successor claim ID")));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn foreground_rejects_unsafe_released_predecessor_heartbeat_root_before_acquire() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = ForegroundFixture::new();
+    fixture.initialize_empty_local_remote();
+    let branch = "feat/autonomous-issue-42";
+    seed_preserved_issue_branch(&fixture, branch);
+    fixture.seed_claim_state_with_id(
+        "predecessor-worker",
+        branch,
+        "released",
+        &fresh_iso_timestamp(),
+        "predecessor-claim",
+    );
+    let heartbeat_target = fixture.root.join("foreign-heartbeats");
+    fs::create_dir(&heartbeat_target).expect("create foreign heartbeat root");
+    symlink(&heartbeat_target, &fixture.heartbeats).expect("symlink heartbeat root");
+    seed_foreground_state(&fixture, &selected_foreground_state());
+    fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
+    let predecessor = fixture.claim_record();
+
+    let output = fixture.run_foreground();
+
+    assert!(!output.status.success());
+    assert_eq!(fixture.claim_record(), predecessor);
+    assert_eq!(fs::read_dir(&heartbeat_target).unwrap().count(), 0);
+}
+
+fn seed_preserved_issue_branch(fixture: &ForegroundFixture, branch: &str) {
+    git_fixture(
+        &fixture.repo_dir,
+        &["config", "user.email", "test@example.com"],
+    );
+    git_fixture(&fixture.repo_dir, &["config", "user.name", "Autospec Test"]);
+    fs::write(fixture.repo_dir.join("README.md"), "fixture\n").expect("seed repository");
+    git_fixture(&fixture.repo_dir, &["add", "README.md"]);
+    git_fixture(&fixture.repo_dir, &["commit", "-m", "seed repository"]);
+    git_fixture(&fixture.repo_dir, &["branch", branch]);
 }
 
 #[cfg(target_os = "linux")]
@@ -6834,6 +7016,45 @@ printf '%s\n' '[]' > "$report"
 
     fn seed_expired_claim_heartbeat(&self, worker_id: &str, branch: &str, claim_id: &str) {
         self.seed_claim_heartbeat_record(worker_id, branch, claim_id, 1, 2_147_483_647, 1);
+    }
+
+    fn seed_pending_claim_heartbeat_handoff(
+        &self,
+        worker_id: &str,
+        branch: &str,
+        claim_id: &str,
+    ) -> (PathBuf, PathBuf) {
+        self.seed_expired_claim_heartbeat(worker_id, branch, claim_id);
+        let mut identity = Vec::new();
+        for field in [
+            "test/repo",
+            "42",
+            worker_id,
+            branch,
+            "",
+            claim_id,
+            "claimed",
+        ] {
+            identity.extend_from_slice(&(field.len() as u64).to_be_bytes());
+            identity.extend_from_slice(field.as_bytes());
+        }
+        let digest = sha256_hex(&identity);
+        let quarantine = self.heartbeats.join("o4_test_r4_repo/quarantine");
+        let handoff = quarantine.join("startup-heartbeat-handoffs");
+        fs::create_dir_all(&handoff).expect("create heartbeat handoff directory");
+        for private in [&quarantine, &handoff] {
+            fs::set_permissions(private, fs::Permissions::from_mode(0o700))
+                .expect("make heartbeat handoff directory private");
+        }
+        let pending = handoff.join(format!("pending-42-{digest}.receipt"));
+        let completed = handoff.join(format!("completed-42-{digest}.receipt"));
+        let archive = handoff.join(format!("completed-42-{digest}.json"));
+        fs::write(&pending, "").expect("seed pending heartbeat receipt");
+        fs::set_permissions(&pending, fs::Permissions::from_mode(0o600))
+            .expect("make pending heartbeat receipt private");
+        fs::rename(self.heartbeats.join("o4_test_r4_repo/42.json"), archive)
+            .expect("seed moved heartbeat archive");
+        (pending, completed)
     }
 
     fn seed_claim_heartbeat_record(
