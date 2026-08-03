@@ -1897,7 +1897,6 @@ fn recover_authoritative_stale_startup(
         || !selected.record.pr.is_empty()
         || (heartbeat_lifecycle_step(&selected.record.step)
             && selected.record.step != "heartbeat-pending:none")
-        || branch_blocks_stale_recovery(&selected.record.branch, base_branch)
         || !server_lease_is_stale(&selected.record.updated_at, timeout_seconds)
     {
         return Ok(RecoveryOutcome {
@@ -1905,7 +1904,25 @@ fn recover_authoritative_stale_startup(
             reason: "claim_evidence_or_fresh_state".to_string(),
         });
     }
-    if !quarantine_authoritative_stale_heartbeat(repo, issue, &selected.record)? {
+    let branch_blocked = branch_blocks_stale_recovery(&selected.record.branch, base_branch);
+    let authorized_prior = if branch_blocked {
+        expired_prior_generation_heartbeat(repo, issue, &selected.record)?
+    } else {
+        None
+    };
+    if branch_blocked && authorized_prior.is_none() {
+        return Ok(RecoveryOutcome {
+            recovered: false,
+            reason: "claim_evidence_or_fresh_state".to_string(),
+        });
+    }
+    if !quarantine_authoritative_stale_heartbeat(
+        repo,
+        issue,
+        &selected.record,
+        authorized_prior.as_deref(),
+        &mut || Ok(()),
+    )? {
         return Ok(RecoveryOutcome {
             recovered: false,
             reason: "claim_evidence_or_fresh_state".to_string(),
@@ -1934,10 +1951,111 @@ fn recover_authoritative_stale_startup(
 }
 
 #[cfg(target_os = "linux")]
+fn expired_prior_generation_heartbeat(
+    repo_name: &str,
+    issue: u64,
+    record: &RunStateRecord,
+) -> Result<Option<Box<StartupHeartbeatSnapshot>>, CommandFailure> {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+
+    let root_path = heartbeat_root()?;
+    let root = match open(
+        &root_path,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "heartbeat root inspection failed: {error}"
+            )))
+        }
+        Ok(root) => fs::File::from(root),
+    };
+    private_heartbeat_directory_identity(&root, "prior-generation root")?;
+    let repo_key = super::autonomous::drain::repository_progress_key(repo_name);
+    let Some(repo) = open_optional_heartbeat_directory(&root, Path::new(&repo_key))? else {
+        return Ok(None);
+    };
+    let issue_name = format!("{issue}.json");
+    let file = match read_regular_file_at_no_follow(&repo, issue_name.as_ref()) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(
+                match classify_retained_prior_generation(
+                    &repo,
+                    repo_name,
+                    issue,
+                    record,
+                    unix_now()?,
+                )? {
+                    StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
+                    StartupHeartbeatClassification::Absent
+                    | StartupHeartbeatClassification::Blocking => None,
+                },
+            )
+        }
+        Err(error) => {
+            return Err(CommandFailure::diagnostic(format!(
+                "prior-generation heartbeat inspection failed: {error}"
+            )))
+        }
+        Ok(file) => file,
+    };
+    let Some(evidence) = parse_startup_heartbeat(&file.document) else {
+        return Ok(None);
+    };
+    let Some(claim_id) = record.claim_id.as_deref() else {
+        return Ok(None);
+    };
+    if evidence.repo != repo_name
+        || evidence.issue != issue.to_string()
+        || evidence.branch != record.branch
+        || !evidence.pr.is_empty()
+        || (evidence.worker_id == record.worker_id && evidence.claim_id == claim_id)
+    {
+        return Ok(None);
+    }
+    let expected = StartupHeartbeatExpectation {
+        repo: &evidence.repo,
+        issue,
+        worker_id: &evidence.worker_id,
+        branch: &evidence.branch,
+        pull_request: &evidence.pr,
+        claim_id: &evidence.claim_id,
+        step: &evidence.step,
+    };
+    Ok(
+        match classify_startup_heartbeat_snapshot(
+            file,
+            expected,
+            unix_now()?,
+            observe_local_startup_pid,
+        ) {
+            StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
+            StartupHeartbeatClassification::Absent | StartupHeartbeatClassification::Blocking => {
+                None
+            }
+        },
+    )
+}
+
+#[cfg(not(target_os = "linux"))]
+fn expired_prior_generation_heartbeat(
+    _repo: &str,
+    _issue: u64,
+    _record: &RunStateRecord,
+) -> Result<Option<Box<StartupHeartbeatSnapshot>>, CommandFailure> {
+    Ok(None)
+}
+
+#[cfg(target_os = "linux")]
 fn quarantine_authoritative_stale_heartbeat(
     repo_name: &str,
     issue: u64,
     record: &RunStateRecord,
+    authorized_prior: Option<&StartupHeartbeatSnapshot>,
+    boundary: &mut impl FnMut() -> Result<(), CommandFailure>,
 ) -> Result<bool, CommandFailure> {
     use nix::fcntl::AtFlags;
     use nix::sys::stat::fstatat;
@@ -1958,6 +2076,7 @@ fn quarantine_authoritative_stale_heartbeat(
     let Some(claim_id) = record.claim_id.as_deref() else {
         return Ok(false);
     };
+    boundary()?;
     let expected = StartupHeartbeatExpectation {
         repo: repo_name,
         issue,
@@ -2069,6 +2188,11 @@ fn quarantine_authoritative_stale_heartbeat(
             }
         }
     };
+    if authorized_prior.is_some_and(|authorized| snapshot.as_deref() != Some(authorized)) {
+        return Err(CommandFailure::diagnostic(
+            "authorized prior-generation heartbeat changed before quarantine",
+        ));
+    }
     if let Some(snapshot) = snapshot {
         handoff_retained_heartbeat(
             &root_path.join(&repo_key),
@@ -2102,6 +2226,8 @@ fn quarantine_authoritative_stale_heartbeat(
     _repo: &str,
     _issue: u64,
     _record: &RunStateRecord,
+    _authorized_prior: Option<&StartupHeartbeatSnapshot>,
+    _boundary: &mut impl FnMut() -> Result<(), CommandFailure>,
 ) -> Result<bool, CommandFailure> {
     Ok(false)
 }
@@ -7766,6 +7892,101 @@ mod tests {
         }
         std::fs::remove_dir_all(root).unwrap();
         result.expect_err("missing issue evidence must keep terminal preparation retryable");
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn prior_generation_authorization_rejects_heartbeat_replacement() {
+        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let (sandbox, _) = startup_heartbeat_fixture("prior-generation-race");
+        let heartbeat_root = sandbox.join("heartbeats");
+        let repo_key = super::super::autonomous::drain::repository_progress_key("owner/repo");
+        let repo = heartbeat_root.join(repo_key);
+        std::fs::create_dir_all(&repo).unwrap();
+        for directory in [&heartbeat_root, &repo] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap()
+            .trim()
+            .to_string();
+        let boot = super::super::autonomous::current_boot_identity().unwrap();
+        let document = |worker: &str, claim: &str| {
+            let nonce = super::startup_heartbeat_nonce("owner/repo", 42, claim);
+            format!(
+                r#"{{"repo":"owner/repo","issue":"42","worker_id":"{worker}","branch":"feat/worker","pr":"","claim_id":"{claim}","step":"claimed","ts":1,"ttl_seconds":10,"pid":2147483647,"nonce":"{nonce}","host":"{host}","boot_id":"{boot}","process_start":"1"}}"#
+            )
+        };
+        let source = repo.join("42.json");
+        std::fs::write(&source, document("prior-worker", "prior-claim")).unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = super::read_regular_file(std::fs::File::open(&source).unwrap()).unwrap();
+        let authorized = super::StartupHeartbeatSnapshot {
+            evidence: super::parse_startup_heartbeat(&file.document).unwrap(),
+            file,
+        };
+        let record = RunStateRecord::new(
+            "owner/repo",
+            42,
+            "current-worker",
+            "claimed",
+            "feat/worker",
+            "",
+            "heartbeat-pending:none",
+            Vec::new(),
+            "2000-01-01T00:00:00Z",
+            "2000-01-01T00:00:00Z",
+            1,
+        )
+        .with_claim_id("current-claim");
+        let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &heartbeat_root);
+        let current = document("current-worker", "current-claim");
+        let result = super::quarantine_authoritative_stale_heartbeat(
+            "owner/repo",
+            42,
+            &record,
+            Some(&authorized),
+            &mut || {
+                std::fs::write(&source, &current).unwrap();
+                Ok(())
+            },
+        );
+        assert!(result
+            .unwrap_err()
+            .message
+            .contains("changed before quarantine"));
+        assert_eq!(std::fs::read_to_string(&source).unwrap(), current);
+        std::fs::write(&source, document("prior-worker", "prior-claim")).unwrap();
+        let file = super::read_regular_file(std::fs::File::open(&source).unwrap()).unwrap();
+        let authorized = super::StartupHeartbeatSnapshot {
+            evidence: super::parse_startup_heartbeat(&file.document).unwrap(),
+            file,
+        };
+        assert!(super::quarantine_authoritative_stale_heartbeat(
+            "owner/repo",
+            42,
+            &record,
+            Some(&authorized),
+            &mut || Ok(()),
+        )
+        .unwrap());
+        assert!(!source.exists());
+        let retained = super::expired_prior_generation_heartbeat("owner/repo", 42, &record)
+            .unwrap()
+            .expect("retained authorization");
+        assert!(super::quarantine_authoritative_stale_heartbeat(
+            "owner/repo",
+            42,
+            &record,
+            Some(&retained),
+            &mut || Ok(()),
+        )
+        .unwrap());
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+        }
+        std::fs::remove_dir_all(sandbox).unwrap();
     }
     #[cfg(target_os = "linux")]
     #[test]
