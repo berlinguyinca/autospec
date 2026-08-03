@@ -2799,6 +2799,15 @@ fn run_foreground_with_lease(
         ))
         .into());
     }
+    // Scan, review, selection, and admission must all observe the synchronized
+    // integration base.
+    synchronize_fresh_selection_base(
+        Path::new(&options.repo_dir),
+        &health.branch,
+        state.phase(),
+        state.selected_issue(),
+    )
+    .map_err(CommandFailure::diagnostic)?;
 
     let waterfall_policy = waterfall_policy::WaterfallPolicy::from_config(config)
         .map_err(CommandFailure::diagnostic)?;
@@ -2968,6 +2977,23 @@ fn foreground_state_is_retained(state: &ConductorState) -> bool {
         state.phase(),
         ConductorPhase::Paused | ConductorPhase::SliceComplete | ConductorPhase::AllDone
     )
+}
+
+/// Synchronize the configured integration base for a fresh selection only.
+///
+/// A recovered lease already owns a dispatched base and must not repeat the
+/// fresh-selection synchronization, so any state that still carries a selected
+/// issue or has left the scan phase is skipped and reports `None`.
+fn synchronize_fresh_selection_base(
+    repo_dir: &Path,
+    branch: &str,
+    phase: ConductorPhase,
+    selected_issue: Option<u64>,
+) -> Result<Option<String>, String> {
+    if phase != ConductorPhase::Scan || selected_issue.is_some() {
+        return Ok(None);
+    }
+    executor_bridge::synchronize_integration_base(repo_dir, branch).map(Some)
 }
 
 fn issue_is_open_for_autonomous_work(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
@@ -7495,6 +7521,145 @@ mod autonomous_metadata_tests {
 #[cfg(test)]
 mod foreground_tests {
     use super::*;
+
+    fn git_fixture(directory: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_fixture_stdout(directory: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git UTF-8")
+            .trim()
+            .to_string()
+    }
+
+    /// Build a real clone whose `main` is one commit behind `origin/main`.
+    fn behind_integration_checkout(label: &str) -> (PathBuf, PathBuf, String) {
+        let root = std::env::temp_dir().join(format!(
+            "autospec-foreground-{label}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create fixture root");
+        let remote = root.join("remote.git");
+        let publisher = root.join("publisher");
+        let repo = root.join("repo");
+        git_fixture(
+            &root,
+            &["init", "--bare", remote.to_str().expect("remote path")],
+        );
+        git_fixture(
+            &root,
+            &["init", publisher.to_str().expect("publisher path")],
+        );
+        git_fixture(
+            &publisher,
+            &["config", "user.email", "autospec@example.invalid"],
+        );
+        git_fixture(&publisher, &["config", "user.name", "Autospec Test"]);
+        fs::write(publisher.join("README.md"), "fixture\n").expect("write fixture");
+        git_fixture(&publisher, &["add", "."]);
+        git_fixture(&publisher, &["commit", "-m", "fixture"]);
+        git_fixture(&publisher, &["branch", "-M", "main"]);
+        git_fixture(
+            &publisher,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path"),
+            ],
+        );
+        git_fixture(&publisher, &["push", "-u", "origin", "main"]);
+        git_fixture(
+            &root,
+            &[
+                "--git-dir",
+                remote.to_str().expect("remote path"),
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            ],
+        );
+        git_fixture(
+            &root,
+            &[
+                "clone",
+                remote.to_str().expect("remote path"),
+                repo.to_str().expect("repo path"),
+            ],
+        );
+        fs::write(publisher.join("advanced.txt"), "advanced").expect("write advanced file");
+        git_fixture(&publisher, &["add", "."]);
+        git_fixture(&publisher, &["commit", "-m", "advanced"]);
+        git_fixture(&publisher, &["push", "origin", "main"]);
+        let advanced = git_fixture_stdout(&publisher, &["rev-parse", "HEAD"]);
+        (root, repo, advanced)
+    }
+
+    #[test]
+    fn recovered_lease_does_not_repeat_fresh_selection_base_synchronization() {
+        let (root, repo, advanced) = behind_integration_checkout("recovered-lease-sync");
+        let behind = git_fixture_stdout(&repo, &["rev-parse", "refs/heads/main"]);
+        assert_ne!(behind, advanced);
+
+        for phase in [
+            ConductorPhase::Claim,
+            ConductorPhase::Dispatch,
+            ConductorPhase::DispatchRecorded,
+            ConductorPhase::Retry,
+        ] {
+            assert_eq!(
+                synchronize_fresh_selection_base(&repo, "main", phase, Some(42))
+                    .expect("recovered lease sync"),
+                None
+            );
+            assert_eq!(
+                git_fixture_stdout(&repo, &["rev-parse", "refs/heads/main"]),
+                behind
+            );
+        }
+        assert_eq!(
+            synchronize_fresh_selection_base(&repo, "main", ConductorPhase::Scan, Some(42))
+                .expect("retained selection sync"),
+            None
+        );
+        assert_eq!(
+            git_fixture_stdout(&repo, &["rev-parse", "refs/heads/main"]),
+            behind
+        );
+
+        let synchronized =
+            synchronize_fresh_selection_base(&repo, "main", ConductorPhase::Scan, None)
+                .expect("fresh selection sync");
+
+        assert_eq!(synchronized, Some(advanced.clone()));
+        assert_eq!(
+            git_fixture_stdout(&repo, &["rev-parse", "refs/heads/main"]),
+            advanced
+        );
+
+        fs::remove_dir_all(&root).expect("remove fixture");
+    }
 
     #[test]
     fn protected_path_override_removes_only_the_protected_surface() {
