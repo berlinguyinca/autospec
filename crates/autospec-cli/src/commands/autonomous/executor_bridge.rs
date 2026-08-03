@@ -7035,7 +7035,7 @@ pub(crate) fn execute_direct_plan(
             }
         };
         if paths.record.is_file()
-            && changed_direct_proxy_failure(
+            && changed_direct_proxy_record(
                 &worktree,
                 &paths,
                 command,
@@ -7319,17 +7319,13 @@ fn changed_automatic_reviewer_failure(
     Ok(true)
 }
 
-fn changed_direct_proxy_failure(
+fn changed_direct_proxy_record(
     worktree: &Path,
     paths: &DirectAttemptPaths,
     declared: &DirectCommand,
     resolved: &ResolvedDirectExecutable,
     runtime_session_id: Option<&str>,
 ) -> Result<bool, String> {
-    let observed = read_observed_command_record(worktree, &paths.record)?;
-    if declared.accepts(&observed.terminal) {
-        return Ok(false);
-    }
     let canonical_argv_zero = resolved.program.to_string_lossy();
     if resolved.argv_zero == canonical_argv_zero {
         return Ok(false);
@@ -44069,6 +44065,76 @@ exit 19
             .expect("proxy failure archive")
             .flatten()
             .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_success() {
+        let fixture = GitFixture::new("direct-proxy-success-retry");
+        let artifact_root = fixture.root.join("proxy-evidence");
+        let executable = PathBuf::from("/usr/bin/true")
+            .canonicalize()
+            .expect("canonical true executable");
+        let proxy = fixture.root.join("true-proxy");
+        std::os::unix::fs::symlink(&executable, &proxy).expect("true executable proxy");
+        let canonical_plan = super::parse_direct_command_plan(&executable.display().to_string())
+            .expect("canonical command plan");
+        let proxy_plan = super::parse_direct_command_plan(&proxy.display().to_string())
+            .expect("proxy command plan");
+
+        let first = super::execute_direct_plan(
+            &fixture.repo,
+            &canonical_plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("canonical command success");
+        assert_eq!(first[0].terminal, super::AttemptTerminal::Exited(0));
+        let observed = super::execute_direct_plan(
+            &fixture.repo,
+            &proxy_plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("proxy correction must archive and rerun prior success");
+
+        assert_eq!(observed[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_eq!(observed[0].argv[0], proxy.display().to_string());
+        assert!(fs::read_dir(&artifact_root)
+            .expect("proxy success archive")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_cargo_proxy_dispatches_rustup() {
+        let fixture = GitFixture::new("cargo-rustup-proxy");
+        let Ok(rustup) = super::resolve_direct_executable(&fixture.repo, "rustup") else {
+            return;
+        };
+        let proxy = fixture.root.join("cargo");
+        std::os::unix::fs::symlink(&rustup.program, &proxy).expect("Cargo rustup proxy");
+        let plan = super::parse_direct_command_plan(&format!("{} --version", proxy.display()))
+            .expect("Cargo proxy command plan");
+
+        let observed = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &fixture.root.join("cargo-evidence"),
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("Cargo proxy dispatch through rustup");
+
+        assert_eq!(observed[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_eq!(observed[0].executable, rustup.program);
+        assert_eq!(observed[0].argv[0], proxy.display().to_string());
+        assert!(fs::read_to_string(&observed[0].stdout_path)
+            .expect("Cargo version output")
+            .starts_with("cargo "));
     }
 
     #[test]
