@@ -3700,6 +3700,8 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
     let fixture = ForegroundFixture::new();
     fixture.initialize_empty_local_remote();
     let branch = "feat/autonomous-issue-42";
+    seed_preserved_issue_branch(&fixture, branch);
+    let branch_oid = git_fixture(&fixture.repo_dir, &["rev-parse", branch]);
     let stale = RunStateRecord::new(
         "test/repo",
         42,
@@ -3737,6 +3739,10 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
     let acquired = fixture.claim_record();
     assert!(acquired.worker_id.starts_with("rust-foreground-conductor-"));
     assert_ne!(acquired.claim_id.as_deref(), Some("successor-claim"));
+    assert_eq!(
+        git_fixture(&fixture.repo_dir, &["rev-parse", branch]),
+        branch_oid
+    );
     let heartbeat = fs::read_to_string(fixture.heartbeats.join("o4_test_r4_repo/42.json"))
         .expect("fresh foreground heartbeat");
     assert!(heartbeat.contains(&format!("\"worker_id\":{:?}", acquired.worker_id)));
@@ -3754,16 +3760,44 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
     .filter_map(|entry| fs::read_to_string(entry.path()).ok())
     .any(|document| document.contains("\"claim_id\":\"prior-claim\"")));
 
-    for (case, updated_at, fresh_heartbeat) in [
-        ("fresh-claim", fresh_iso_timestamp(), false),
+    for (case, updated_at, heartbeat_worker, heartbeat_branch, heartbeat_claim, live) in [
         (
-            "blocked-heartbeat",
+            "fresh-claim",
+            fresh_iso_timestamp(),
+            "prior-worker",
+            branch,
+            "prior-claim",
+            false,
+        ),
+        (
+            "current-generation",
             "2000-01-01T00:00:00Z".to_string(),
+            "blocked-worker",
+            branch,
+            "blocked-claim",
+            false,
+        ),
+        (
+            "live-prior",
+            "2000-01-01T00:00:00Z".to_string(),
+            "prior-worker",
+            branch,
+            "prior-claim",
             true,
+        ),
+        (
+            "wrong-branch",
+            "2000-01-01T00:00:00Z".to_string(),
+            "prior-worker",
+            "feat/foreign",
+            "prior-claim",
+            false,
         ),
     ] {
         let fixture = ForegroundFixture::new();
         fixture.initialize_empty_local_remote();
+        seed_preserved_issue_branch(&fixture, branch);
+        let blocked_branch_oid = git_fixture(&fixture.repo_dir, &["rev-parse", branch]);
         let blocked = RunStateRecord::new(
             "test/repo",
             42,
@@ -3779,10 +3813,14 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
         )
         .with_claim_id("blocked-claim");
         fixture.transition_claim_ref(&blocked);
-        if fresh_heartbeat {
-            fixture.seed_claim_heartbeat("prior-worker", branch, "prior-claim");
+        if live {
+            fixture.seed_claim_heartbeat(heartbeat_worker, heartbeat_branch, heartbeat_claim);
         } else {
-            fixture.seed_expired_claim_heartbeat("prior-worker", branch, "prior-claim");
+            fixture.seed_expired_claim_heartbeat(
+                heartbeat_worker,
+                heartbeat_branch,
+                heartbeat_claim,
+            );
         }
         seed_foreground_state(&fixture, &selected_foreground_state());
         fs::write(&fixture.mode, "reviewed\n").expect("seed reviewed issue");
@@ -3811,6 +3849,11 @@ fn foreground_reclaims_stale_heartbeat_pending_before_acquire() {
             fs::read_to_string(&heartbeat_path).expect("preserved blocked heartbeat"),
             heartbeat_before,
             "{case}: heartbeat mutated"
+        );
+        assert_eq!(
+            git_fixture(&fixture.repo_dir, &["rev-parse", branch]),
+            blocked_branch_oid,
+            "{case}: branch mutated"
         );
     }
 }
