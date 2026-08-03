@@ -1718,6 +1718,11 @@ fn ensure_premerge_and_review(
     proof: &ImplementationProof,
     runtime: Option<&DirectRuntimeAdapter>,
 ) -> Result<Option<String>, BridgeRunFailure> {
+    if state.phase == BridgePhase::DraftCreated
+        && reconcile_base_drift(&request.state_path, state)?
+    {
+        return Ok(None);
+    }
     let digest_path = request
         .state_path
         .with_extension(format!("premerge-{}.digest", proof.head_oid));
@@ -47684,6 +47689,88 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
             .status()
             .expect("ancestry");
         assert!(ancestor.success());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_reconciles_draft_base_before_premerge_evidence() {
+        // Break caught: stale branches running scanners and the full suite before they receive
+        // process fixes already merged to their integration base.
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let previous_claim = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
+        std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("draft-premerge-base-drift");
+        commit_implementation(&state);
+        let original_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{original_head}:refs/heads/{}", state.identity.branch),
+            ],
+        );
+        state.phase = super::BridgePhase::DraftCreated;
+        state.pr = Some(17);
+        state.head_oid = Some(original_head.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("draft state");
+        let admission =
+            super::evaluate_patch_size_admission(&state, &original_head, DRAFT_ISSUE_BODY)
+                .expect("original admission");
+        super::persist_patch_size_admission(&state_path, &admission)
+            .expect("original admission receipt");
+
+        fs::write(fixture.root.join("seed/premerge-fix.txt"), "base fix\n")
+            .expect("base drift");
+        git(&fixture.root.join("seed"), &["add", "premerge-fix.txt"]);
+        git(
+            &fixture.root.join("seed"),
+            &["commit", "-m", "premerge fix"],
+        );
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+        let updated_base = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD"]);
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: state.identity.repository_path.clone(),
+            issue: state.identity.issue,
+            issue_title: "Reconcile stale implementation".to_string(),
+            issue_body: DRAFT_ISSUE_BODY.to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: fixture.root.join("events.jsonl"),
+        };
+        let proof = super::ImplementationProof {
+            head_oid: original_head.clone(),
+            closeout_body: String::new(),
+        };
+
+        let result = super::ensure_premerge_and_review(
+            &request,
+            &BTreeMap::new(),
+            &super::DraftPrAdapter::github_cli(),
+            &mut state,
+            &proof,
+            None,
+        );
+        match previous_claim {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM"),
+        }
+
+        assert_eq!(
+            result.expect("base drift must precede scanner resolution"),
+            None
+        );
+        assert_eq!(state.phase, super::BridgePhase::DraftCreated);
+        assert_eq!(state.identity.base_oid, updated_base);
+        assert_ne!(state.head_oid.as_deref(), Some(original_head.as_str()));
+        assert!(
+            !state.identity.worktree.join(".autospec/evidence").exists(),
+            "premerge evidence started before the stale branch was updated"
+        );
     }
 
     #[test]
