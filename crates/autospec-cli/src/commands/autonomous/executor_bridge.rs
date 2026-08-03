@@ -24154,8 +24154,7 @@ fn reharden_completed_closeout(worktree: &Path, closeout: &Path) -> Result<(), S
         if opened.nlink() != 1 {
             return Err("executor Closeout sink has a foreign hard link".to_string());
         }
-        // SAFETY: geteuid has no arguments or memory-safety preconditions.
-        if opened.uid() != unsafe { nix::libc::geteuid() } {
+        if opened.uid() != nix::unistd::geteuid().as_raw() {
             return Err("executor Closeout sink ownership changed".to_string());
         }
         file.set_permissions(fs::Permissions::from_mode(0o600))
@@ -24173,7 +24172,7 @@ fn reharden_completed_closeout(worktree: &Path, closeout: &Path) -> Result<(), S
             return Err("executor Closeout sink identity changed while securing it".to_string());
         }
         if secured.nlink() != 1
-            || secured.uid() != unsafe { nix::libc::geteuid() }
+            || secured.uid() != nix::unistd::geteuid().as_raw()
             || secured.mode() & 0o077 != 0
         {
             return Err("executor Closeout sink is not a private single-link file".to_string());
