@@ -11417,9 +11417,13 @@ pub(crate) fn prove_implementation(
     .next()
     .ok_or_else(|| "executor remote base ref returned no OID".to_string())?
     .to_string();
-    if remote_base != state.identity.base_oid {
+    if !recovery_base_is_equal_or_descendant(
+        &state.identity.repository_path,
+        &state.identity.base_oid,
+        &remote_base,
+    )? {
         return Err(format!(
-            "executor validated base OID drifted: expected {}, observed {remote_base}",
+            "executor validated base OID is unrelated: expected {} or a descendant, observed {remote_base}",
             state.identity.base_oid
         ));
     }
@@ -23111,7 +23115,6 @@ fn committed_implementation_remote_and_branch_are_exact(
     .to_string();
     if !recovery_base_is_equal_or_descendant(
         &state.identity.repository_path,
-        base_branch,
         &state.identity.base_oid,
         &remote_base,
     )? {
@@ -23150,7 +23153,6 @@ fn committed_implementation_remote_and_branch_are_exact(
 
 fn recovery_base_is_equal_or_descendant(
     repository: &Path,
-    base_branch: &str,
     invocation_base: &str,
     remote_base: &str,
 ) -> Result<bool, String> {
@@ -23166,7 +23168,7 @@ fn recovery_base_is_equal_or_descendant(
             "--no-tags",
             "--no-write-fetch-head",
             "origin",
-            &format!("refs/heads/{base_branch}"),
+            remote_base,
         ])
         .current_dir(repository)
         .output()
@@ -36516,8 +36518,9 @@ exit 64
     }
 
     #[test]
-    fn autonomous_executor_bridge_rejects_base_oid_drift_before_remote_mutation() {
-        // Break caught: a push proceeding after the configured remote base moved.
+    fn autonomous_executor_bridge_proves_descendant_base_drift_before_reconciliation() {
+        // Break caught: an ordinary main advance stranding a committed implementation before
+        // the later base-drift reconciliation phase can merge the new base.
         let (fixture, mut state, snapshot, closeout) =
             implementation_proof_fixture("proof-base-drift");
         commit_implementation(&state);
@@ -36534,15 +36537,16 @@ exit 64
             ],
         );
 
-        let error = super::prove_implementation(
+        let proof = super::prove_implementation(
             &fixture.root.join("state/invocation.json"),
             &mut state,
             &snapshot,
             &closeout,
         )
-        .expect_err("base OID drift must fail closed");
+        .expect("descendant base drift must remain eligible for later reconciliation");
 
-        assert!(error.contains("base"), "{error}");
+        assert_eq!(proof.head_oid, state.head_oid.clone().unwrap());
+        assert_eq!(state.phase, BridgePhase::ImplementationProven);
         assert_eq!(
             git_stdout(
                 &fixture.root,
@@ -36551,6 +36555,56 @@ exit 64
                     fixture.root.join("remote.git").to_str().unwrap(),
                     "show-ref"
                 ]
+            ),
+            remote_before
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_unrelated_base_drift_before_remote_mutation() {
+        // Break caught: treating a force-pushed unrelated base as an ordinary main advance.
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("proof-unrelated-base-drift");
+        commit_implementation(&state);
+        let tree = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD^{tree}"]);
+        let unrelated = Command::new("git")
+            .args(["commit-tree", &tree, "-m", "unrelated base"])
+            .current_dir(fixture.root.join("seed"))
+            .output()
+            .expect("create unrelated base");
+        assert!(unrelated.status.success());
+        let unrelated = String::from_utf8(unrelated.stdout).unwrap();
+        let force_refspec = format!("{}:refs/heads/main", unrelated.trim());
+        git(
+            &fixture.root.join("seed"),
+            &["push", "--force", "origin", &force_refspec],
+        );
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &closeout,
+        )
+        .expect_err("unrelated base drift must fail closed");
+
+        assert!(error.contains("unrelated"), "{error}");
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref",
+                ],
             ),
             remote_before
         );
