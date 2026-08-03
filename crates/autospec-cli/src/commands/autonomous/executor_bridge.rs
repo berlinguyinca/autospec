@@ -3994,11 +3994,11 @@ fn observed_evidence_bundle(
         validate_observed_command(worktree, command)?;
         let executable = resolve_direct_executable(worktree, &declared.argv[0])?;
         let mut expected = declared.argv.clone();
-        expected[0] = executable.display().to_string();
+        expected[0] = executable.argv_zero.clone();
         if command.argv != expected
-            || command.executable != executable
+            || command.executable != executable.program
             || command.process_argv != expected
-            || command.process_executable != executable
+            || command.process_executable != executable.program
         {
             return Err("observed QA argv differs from the canonical declared plan".to_string());
         }
@@ -6556,6 +6556,7 @@ fn copy_direct_ring(ring_path: &Path, cursor_path: &Path, output: &File) -> Resu
 fn execute_supervised_direct_attempt(
     attempt_id: &str,
     worktree: &Path,
+    program: &Path,
     command: &DirectCommand,
     paths: &DirectAttemptPaths,
     stdout: &File,
@@ -6574,7 +6575,8 @@ fn execute_supervised_direct_attempt(
         Err(error) => return AttemptTerminal::InfrastructureFailed(error),
     };
     let invocation = ValidatedInvocation {
-        program: PathBuf::from(&command.argv[0]),
+        program: program.to_path_buf(),
+        argv_zero: Some(command.argv[0].clone().into()),
         args: command.argv[1..].to_vec(),
         current_dir: worktree.to_path_buf(),
         environment_overrides,
@@ -6982,7 +6984,7 @@ pub(crate) fn execute_direct_plan(
             attempt_id = reserve_direct_attempt_id(&paths)?;
             reconciled_launches.insert(index, false);
         }
-        let executable = match resolve_direct_executable(&worktree, &command.argv[0]) {
+        let resolved = match resolve_direct_executable(&worktree, &command.argv[0]) {
             Ok(executable) => executable,
             Err(reason) => {
                 if paths.record.is_file() {
@@ -7032,8 +7034,21 @@ pub(crate) fn execute_direct_plan(
                 ));
             }
         };
+        if paths.record.is_file()
+            && changed_direct_proxy_failure(
+                &worktree,
+                &paths,
+                command,
+                &resolved,
+                runtime.map(DirectRuntimeAdapter::session_id),
+            )?
+        {
+            archive_reconciled_direct_failure(&paths)?;
+            attempt_id = reserve_direct_attempt_id(&paths)?;
+        }
+        let executable = resolved.program;
         let mut effective = command.clone();
-        effective.argv[0] = executable.display().to_string();
+        effective.argv[0] = resolved.argv_zero;
         if paths.record.is_file()
             && changed_automatic_reviewer_failure(
                 &worktree,
@@ -7175,6 +7190,7 @@ pub(crate) fn execute_direct_plan(
             Ok(environment_overrides) => execute_supervised_direct_attempt(
                 &attempt_id,
                 &worktree,
+                &executable,
                 &effective,
                 &paths,
                 &stdout,
@@ -7303,6 +7319,52 @@ fn changed_automatic_reviewer_failure(
     Ok(true)
 }
 
+fn changed_direct_proxy_failure(
+    worktree: &Path,
+    paths: &DirectAttemptPaths,
+    declared: &DirectCommand,
+    resolved: &ResolvedDirectExecutable,
+    runtime_session_id: Option<&str>,
+) -> Result<bool, String> {
+    let observed = read_observed_command_record(worktree, &paths.record)?;
+    if declared.accepts(&observed.terminal) {
+        return Ok(false);
+    }
+    let canonical_argv_zero = resolved.program.to_string_lossy();
+    if resolved.argv_zero == canonical_argv_zero {
+        return Ok(false);
+    }
+    let intent_path = paths.record.with_extension("intent.json");
+    validate_private_state_file(&intent_path)
+        .map_err(|error| format!("direct proxy intent is unsafe: {error}"))?;
+    let intent: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&intent_path)
+            .map_err(|error| format!("read direct proxy intent: {error}"))?,
+    )
+    .map_err(|error| format!("parse direct proxy intent: {error}"))?;
+    let prior_argv = intent
+        .get("argv")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "direct proxy intent argv is malformed".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "direct proxy intent argv is malformed".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if prior_argv.first().map(String::as_str) != Some(canonical_argv_zero.as_ref())
+        || prior_argv.get(1..) != declared.argv.get(1..)
+    {
+        return Ok(false);
+    }
+    let mut prior = declared.clone();
+    prior.argv = prior_argv;
+    recover_observed_command(worktree, &paths.record, &prior, runtime_session_id)?;
+    Ok(true)
+}
+
 fn recover_observed_command(
     worktree: &Path,
     record_path: &Path,
@@ -7334,12 +7396,12 @@ fn recover_observed_command(
         } else {
             let executable = resolve_direct_executable(worktree, &declared.argv[0])?;
             let mut argv = declared.argv.clone();
-            argv[0] = executable.display().to_string();
+            argv[0] = executable.argv_zero.clone();
             let expected_intent = direct_intent_document_with_policy(
                 &observed.attempt_id,
                 &observed.commit_oid,
                 runtime_session_id,
-                &executable,
+                &executable.program,
                 &argv,
                 &declared.accepted_exit_codes,
                 declared.identity_digest.as_deref(),
@@ -7351,7 +7413,7 @@ fn recover_observed_command(
                     "recovered command differs from its resolved invocation intent".to_string(),
                 );
             }
-            (executable, argv)
+            (executable.program, argv)
         };
     if observed.attempt_id != expected_attempt_id
         || observed.executable != expected_executable
@@ -7584,7 +7646,16 @@ fn observed_command_document(
     .to_string()
 }
 
-fn resolve_direct_executable(worktree: &Path, executable: &str) -> Result<PathBuf, String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedDirectExecutable {
+    program: PathBuf,
+    argv_zero: String,
+}
+
+fn resolve_direct_executable(
+    worktree: &Path,
+    executable: &str,
+) -> Result<ResolvedDirectExecutable, String> {
     if executable.is_empty() || executable.starts_with('-') {
         return Err("executor direct command executable is invalid".to_string());
     }
@@ -7632,7 +7703,14 @@ fn resolve_direct_executable(worktree: &Path, executable: &str) -> Result<PathBu
             ));
         }
     }
-    Ok(canonical)
+    let argv_zero = candidate
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "executor direct command proxy path is not UTF-8".to_string())?;
+    Ok(ResolvedDirectExecutable {
+        program: canonical,
+        argv_zero,
+    })
 }
 
 fn resolve_independent_reviewer(
@@ -8108,7 +8186,7 @@ fn independent_reviewer_plan(
         .argv
         .first()
         .ok_or_else(|| "executor independent reviewer command is empty".to_string())?;
-    let executable = resolve_direct_executable(&state.identity.worktree, executable)?;
+    let executable = resolve_direct_executable(&state.identity.worktree, executable)?.program;
     validate_external_reviewer_executable(state, &executable)?;
     let mut trusted = plan.clone();
     trusted.commands[0].argv[0] = executable
@@ -8159,19 +8237,27 @@ fn validate_observed_command(
     if !matches!(observed.terminal, AttemptTerminal::SpawnFailed(_)) {
         let executable = fs::canonicalize(&observed.executable)
             .map_err(|error| format!("canonicalize observed command executable: {error}"))?;
-        if executable != observed.executable
-            || observed.argv.first().map(String::as_str)
-                != Some(observed.executable.to_string_lossy().as_ref())
-        {
+        let argv_executable = observed
+            .argv
+            .first()
+            .ok_or_else(|| "executor observed command argv is empty".to_string())?;
+        let argv_executable = fs::canonicalize(argv_executable)
+            .map_err(|error| format!("canonicalize observed command argv zero: {error}"))?;
+        if executable != observed.executable || argv_executable != observed.executable {
             return Err(
                 "executor observed command executable or argv identity changed".to_string(),
             );
         }
         let process_executable = fs::canonicalize(&observed.process_executable)
             .map_err(|error| format!("canonicalize observed process executable: {error}"))?;
+        let process_argv_executable = observed
+            .process_argv
+            .first()
+            .ok_or_else(|| "executor observed process argv is empty".to_string())?;
+        let process_argv_executable = fs::canonicalize(process_argv_executable)
+            .map_err(|error| format!("canonicalize observed process argv zero: {error}"))?;
         if process_executable != observed.process_executable
-            || observed.process_argv.first().map(String::as_str)
-                != Some(observed.process_executable.to_string_lossy().as_ref())
+            || process_argv_executable != observed.process_executable
         {
             return Err(
                 "executor observed process executable or argv identity changed".to_string(),
@@ -17661,6 +17747,7 @@ fn write_output_cursor(file: &File, mut cursor: OutputCursor) -> Result<OutputCu
 #[derive(Clone, Debug)]
 struct ValidatedInvocation {
     program: PathBuf,
+    argv_zero: Option<OsString>,
     args: Vec<String>,
     current_dir: PathBuf,
     environment_overrides: Vec<(OsString, OsString)>,
@@ -18469,6 +18556,7 @@ fn validate_invocation(
     }
     Ok(ValidatedInvocation {
         program,
+        argv_zero: None,
         args: invocation.args.clone(),
         current_dir,
         environment_overrides: Vec::new(),
@@ -20321,7 +20409,16 @@ fn spawn_blocked_harness(
     let executable = CString::new(harness.program.as_os_str().as_bytes())
         .map_err(|_| "executor program contains a NUL byte".to_string())?;
     let mut argv = Vec::with_capacity(harness.args.len() + 1);
-    argv.push(executable.clone());
+    argv.push(
+        CString::new(
+            harness
+                .argv_zero
+                .as_deref()
+                .unwrap_or(harness.program.as_os_str())
+                .as_bytes(),
+        )
+        .map_err(|_| "executor argv zero contains a NUL byte".to_string())?,
+    );
     for arg in &harness.args {
         argv.push(
             CString::new(arg.as_bytes())
@@ -30618,6 +30715,7 @@ exit 64
         let result = artifact_root.join("harness-result.txt");
         let invocation = super::ValidatedInvocation {
             program: fs::canonicalize(&harness).expect("canonical stateful reviewer"),
+            argv_zero: None,
             args: vec![launches.display().to_string(), result.display().to_string()],
             current_dir: root.clone(),
             environment_overrides: Vec::new(),
@@ -30682,6 +30780,7 @@ exit 64
         );
         let invocation = super::ValidatedInvocation {
             program: fs::canonicalize(&harness).expect("canonical forking reviewer"),
+            argv_zero: None,
             args: vec![
                 result.display().to_string(),
                 descendant_identity_path.display().to_string(),
@@ -30784,6 +30883,7 @@ exit 64
             write_executable(&harness, &body);
             let invocation = super::ValidatedInvocation {
                 program: fs::canonicalize(&harness).expect("canonical bounded reviewer"),
+                argv_zero: None,
                 args,
                 current_dir: root.clone(),
                 environment_overrides: Vec::new(),
@@ -31107,6 +31207,7 @@ exit 64
         super::ensure_private_directory(&artifact_root).expect("private review artifact directory");
         let invocation = super::ValidatedInvocation {
             program: fs::canonicalize(&harness).expect("canonical noisy reviewer"),
+            argv_zero: None,
             args: Vec::new(),
             current_dir: root.clone(),
             environment_overrides: Vec::new(),
@@ -43865,6 +43966,112 @@ exit 19
     }
 
     #[test]
+    fn autonomous_executor_bridge_direct_proxy_argv_zero_helper() {
+        if std::env::var_os("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO").is_none() {
+            return;
+        }
+        assert_eq!(
+            std::env::args_os()
+                .next()
+                .as_deref()
+                .and_then(|arg0| Path::new(arg0).file_name()),
+            Some(std::ffi::OsStr::new("cargo-proxy"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_direct_proxy_preserves_argv_zero() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("direct-proxy-argv-zero");
+        let proxy = fixture.root.join("cargo-proxy");
+        let executable = std::env::current_exe()
+            .expect("current test executable")
+            .canonicalize()
+            .expect("canonical test executable");
+        std::os::unix::fs::symlink(&executable, &proxy).expect("test executable proxy");
+        let plan = super::parse_direct_command_plan(&format!(
+            "{} commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_direct_proxy_argv_zero_helper --exact --nocapture",
+            proxy.display()
+        ))
+        .expect("proxy command plan");
+        let previous = std::env::var_os("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO");
+        std::env::set_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO", "1");
+
+        let result = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &fixture.root.join("proxy-evidence"),
+            None,
+            Duration::from_secs(5),
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO"),
+        }
+        let observed = result.expect("validated proxy must preserve argv zero");
+        assert_eq!(observed[0].executable, executable);
+        assert_eq!(observed[0].process_executable, executable);
+        assert_eq!(observed[0].argv[0], proxy.display().to_string());
+        assert_eq!(observed[0].process_argv[0], proxy.display().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_failure() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("direct-proxy-retry");
+        let artifact_root = fixture.root.join("proxy-evidence");
+        let executable = std::env::current_exe()
+            .expect("current test executable")
+            .canonicalize()
+            .expect("canonical test executable");
+        let proxy = fixture.root.join("cargo-proxy");
+        std::os::unix::fs::symlink(&executable, &proxy).expect("test executable proxy");
+        let arguments = "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_direct_proxy_argv_zero_helper --exact --nocapture";
+        let canonical_plan =
+            super::parse_direct_command_plan(&format!("{} {arguments}", executable.display()))
+                .expect("canonical command plan");
+        let proxy_plan =
+            super::parse_direct_command_plan(&format!("{} {arguments}", proxy.display()))
+                .expect("proxy command plan");
+        let previous = std::env::var_os("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO");
+        std::env::set_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO", "1");
+
+        let first = super::execute_direct_plan(
+            &fixture.repo,
+            &canonical_plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        );
+        assert!(
+            first.is_err(),
+            "canonical argv zero must reproduce the proxy failure"
+        );
+        let result = super::execute_direct_plan(
+            &fixture.repo,
+            &proxy_plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO"),
+        }
+        let observed = result.expect("proxy correction must archive and retry prior failure");
+        assert_eq!(observed[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_eq!(observed[0].argv[0], proxy.display().to_string());
+        assert!(fs::read_dir(&artifact_root)
+            .expect("proxy failure archive")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+    }
+
+    #[test]
     fn autonomous_executor_bridge_codex_sandbox_fallback_children_have_no_sensitive_credentials() {
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let fixture = GitFixture::new("credentialless-direct-child");
@@ -44884,8 +45091,9 @@ exit 19
         fs::write(generated.join("bundle.js"), format!("{token}\n"))
             .expect("generated secret fixture");
         fs::write(source.join("source.js"), format!("{token}\n")).expect("source secret fixture");
-        let gitleaks =
-            super::resolve_direct_executable(&fixture.repo, "gitleaks").expect("real gitleaks");
+        let gitleaks = super::resolve_direct_executable(&fixture.repo, "gitleaks")
+            .expect("real gitleaks")
+            .program;
         let scanners = super::ScannerExecutables::from_paths(
             ["gitleaks", "semgrep", "trivy", "license-checker"]
                 .into_iter()
@@ -44969,8 +45177,9 @@ exit 19
             "AUTOSPEC_CUSTOM_SECRET_SOURCE\n",
         )
         .expect("source custom-rule fixture");
-        let gitleaks =
-            super::resolve_direct_executable(&fixture.repo, "gitleaks").expect("real gitleaks");
+        let gitleaks = super::resolve_direct_executable(&fixture.repo, "gitleaks")
+            .expect("real gitleaks")
+            .program;
         let scanners = super::ScannerExecutables::from_paths(
             ["gitleaks", "semgrep", "trivy", "license-checker"]
                 .into_iter()
@@ -45286,8 +45495,9 @@ exit 19
         .expect("clean feature larger than Semgrep's default 1 MB limit");
         git(&fixture.repo, &["add", "feature.js"]);
         git(&fixture.repo, &["commit", "-m", "clean feature"]);
-        let semgrep =
-            super::resolve_direct_executable(&fixture.repo, "semgrep").expect("real Semgrep");
+        let semgrep = super::resolve_direct_executable(&fixture.repo, "semgrep")
+            .expect("real Semgrep")
+            .program;
         let scan = |artifact: &str| {
             let mut command = super::DirectCommand::success(vec![
                 semgrep.display().to_string(),
