@@ -1293,6 +1293,7 @@ fn run_executor_bridge_with_codex_probe(
         }
     }
     if state.phase == BridgePhase::ImplementationComplete {
+        reharden_completed_closeout(&state.identity.worktree, &closeout_path)?;
         let scope_root = state
             .identity
             .worktree
@@ -1717,6 +1718,11 @@ fn ensure_premerge_and_review(
     proof: &ImplementationProof,
     runtime: Option<&DirectRuntimeAdapter>,
 ) -> Result<Option<String>, BridgeRunFailure> {
+    if state.phase == BridgePhase::DraftCreated
+        && reconcile_base_drift(&request.state_path, state)?
+    {
+        return Ok(None);
+    }
     let digest_path = request
         .state_path
         .with_extension(format!("premerge-{}.digest", proof.head_oid));
@@ -3993,11 +3999,11 @@ fn observed_evidence_bundle(
         validate_observed_command(worktree, command)?;
         let executable = resolve_direct_executable(worktree, &declared.argv[0])?;
         let mut expected = declared.argv.clone();
-        expected[0] = executable.display().to_string();
+        expected[0] = executable.argv_zero.clone();
         if command.argv != expected
-            || command.executable != executable
+            || command.executable != executable.program
             || command.process_argv != expected
-            || command.process_executable != executable
+            || command.process_executable != executable.program
         {
             return Err("observed QA argv differs from the canonical declared plan".to_string());
         }
@@ -4660,9 +4666,9 @@ fn verify_full_suite_base(
         .split_whitespace()
         .next()
         .ok_or_else(|| "executor full-suite base ref returned no OID".to_string())?;
-    if observed != expected_base_oid {
+    if !recovery_base_is_equal_or_descendant(worktree, expected_base_oid, observed)? {
         return Err(format!(
-            "executor full-suite base drift: expected {expected_base_oid}, observed {observed}"
+            "executor full-suite base is unrelated: expected {expected_base_oid} or a descendant, observed {observed}"
         ));
     }
     let ancestry = Command::new("git")
@@ -6555,6 +6561,7 @@ fn copy_direct_ring(ring_path: &Path, cursor_path: &Path, output: &File) -> Resu
 fn execute_supervised_direct_attempt(
     attempt_id: &str,
     worktree: &Path,
+    program: &Path,
     command: &DirectCommand,
     paths: &DirectAttemptPaths,
     stdout: &File,
@@ -6573,7 +6580,8 @@ fn execute_supervised_direct_attempt(
         Err(error) => return AttemptTerminal::InfrastructureFailed(error),
     };
     let invocation = ValidatedInvocation {
-        program: PathBuf::from(&command.argv[0]),
+        program: program.to_path_buf(),
+        argv_zero: Some(command.argv[0].clone().into()),
         args: command.argv[1..].to_vec(),
         current_dir: worktree.to_path_buf(),
         environment_overrides,
@@ -6981,7 +6989,7 @@ pub(crate) fn execute_direct_plan(
             attempt_id = reserve_direct_attempt_id(&paths)?;
             reconciled_launches.insert(index, false);
         }
-        let executable = match resolve_direct_executable(&worktree, &command.argv[0]) {
+        let resolved = match resolve_direct_executable(&worktree, &command.argv[0]) {
             Ok(executable) => executable,
             Err(reason) => {
                 if paths.record.is_file() {
@@ -7031,8 +7039,21 @@ pub(crate) fn execute_direct_plan(
                 ));
             }
         };
+        if paths.record.is_file()
+            && changed_direct_proxy_record(
+                &worktree,
+                &paths,
+                command,
+                &resolved,
+                runtime.map(DirectRuntimeAdapter::session_id),
+            )?
+        {
+            archive_reconciled_direct_failure(&paths)?;
+            attempt_id = reserve_direct_attempt_id(&paths)?;
+        }
+        let executable = resolved.program;
         let mut effective = command.clone();
-        effective.argv[0] = executable.display().to_string();
+        effective.argv[0] = resolved.argv_zero;
         if paths.record.is_file()
             && changed_automatic_reviewer_failure(
                 &worktree,
@@ -7174,6 +7195,7 @@ pub(crate) fn execute_direct_plan(
             Ok(environment_overrides) => execute_supervised_direct_attempt(
                 &attempt_id,
                 &worktree,
+                &executable,
                 &effective,
                 &paths,
                 &stdout,
@@ -7302,6 +7324,48 @@ fn changed_automatic_reviewer_failure(
     Ok(true)
 }
 
+fn changed_direct_proxy_record(
+    worktree: &Path,
+    paths: &DirectAttemptPaths,
+    declared: &DirectCommand,
+    resolved: &ResolvedDirectExecutable,
+    runtime_session_id: Option<&str>,
+) -> Result<bool, String> {
+    let canonical_argv_zero = resolved.program.to_string_lossy();
+    if resolved.argv_zero == canonical_argv_zero {
+        return Ok(false);
+    }
+    let intent_path = paths.record.with_extension("intent.json");
+    validate_private_state_file(&intent_path)
+        .map_err(|error| format!("direct proxy intent is unsafe: {error}"))?;
+    let intent: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(&intent_path)
+            .map_err(|error| format!("read direct proxy intent: {error}"))?,
+    )
+    .map_err(|error| format!("parse direct proxy intent: {error}"))?;
+    let prior_argv = intent
+        .get("argv")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "direct proxy intent argv is malformed".to_string())?
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| "direct proxy intent argv is malformed".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if prior_argv.first().map(String::as_str) != Some(canonical_argv_zero.as_ref())
+        || prior_argv.get(1..) != declared.argv.get(1..)
+    {
+        return Ok(false);
+    }
+    let mut prior = declared.clone();
+    prior.argv = prior_argv;
+    recover_observed_command(worktree, &paths.record, &prior, runtime_session_id)?;
+    Ok(true)
+}
+
 fn recover_observed_command(
     worktree: &Path,
     record_path: &Path,
@@ -7333,12 +7397,12 @@ fn recover_observed_command(
         } else {
             let executable = resolve_direct_executable(worktree, &declared.argv[0])?;
             let mut argv = declared.argv.clone();
-            argv[0] = executable.display().to_string();
+            argv[0] = executable.argv_zero.clone();
             let expected_intent = direct_intent_document_with_policy(
                 &observed.attempt_id,
                 &observed.commit_oid,
                 runtime_session_id,
-                &executable,
+                &executable.program,
                 &argv,
                 &declared.accepted_exit_codes,
                 declared.identity_digest.as_deref(),
@@ -7350,7 +7414,7 @@ fn recover_observed_command(
                     "recovered command differs from its resolved invocation intent".to_string(),
                 );
             }
-            (executable, argv)
+            (executable.program, argv)
         };
     if observed.attempt_id != expected_attempt_id
         || observed.executable != expected_executable
@@ -7583,7 +7647,16 @@ fn observed_command_document(
     .to_string()
 }
 
-fn resolve_direct_executable(worktree: &Path, executable: &str) -> Result<PathBuf, String> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ResolvedDirectExecutable {
+    program: PathBuf,
+    argv_zero: String,
+}
+
+fn resolve_direct_executable(
+    worktree: &Path,
+    executable: &str,
+) -> Result<ResolvedDirectExecutable, String> {
     if executable.is_empty() || executable.starts_with('-') {
         return Err("executor direct command executable is invalid".to_string());
     }
@@ -7631,7 +7704,14 @@ fn resolve_direct_executable(worktree: &Path, executable: &str) -> Result<PathBu
             ));
         }
     }
-    Ok(canonical)
+    let argv_zero = candidate
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "executor direct command proxy path is not UTF-8".to_string())?;
+    Ok(ResolvedDirectExecutable {
+        program: canonical,
+        argv_zero,
+    })
 }
 
 fn resolve_independent_reviewer(
@@ -8107,7 +8187,7 @@ fn independent_reviewer_plan(
         .argv
         .first()
         .ok_or_else(|| "executor independent reviewer command is empty".to_string())?;
-    let executable = resolve_direct_executable(&state.identity.worktree, executable)?;
+    let executable = resolve_direct_executable(&state.identity.worktree, executable)?.program;
     validate_external_reviewer_executable(state, &executable)?;
     let mut trusted = plan.clone();
     trusted.commands[0].argv[0] = executable
@@ -8158,19 +8238,27 @@ fn validate_observed_command(
     if !matches!(observed.terminal, AttemptTerminal::SpawnFailed(_)) {
         let executable = fs::canonicalize(&observed.executable)
             .map_err(|error| format!("canonicalize observed command executable: {error}"))?;
-        if executable != observed.executable
-            || observed.argv.first().map(String::as_str)
-                != Some(observed.executable.to_string_lossy().as_ref())
-        {
+        let argv_executable = observed
+            .argv
+            .first()
+            .ok_or_else(|| "executor observed command argv is empty".to_string())?;
+        let argv_executable = fs::canonicalize(argv_executable)
+            .map_err(|error| format!("canonicalize observed command argv zero: {error}"))?;
+        if executable != observed.executable || argv_executable != observed.executable {
             return Err(
                 "executor observed command executable or argv identity changed".to_string(),
             );
         }
         let process_executable = fs::canonicalize(&observed.process_executable)
             .map_err(|error| format!("canonicalize observed process executable: {error}"))?;
+        let process_argv_executable = observed
+            .process_argv
+            .first()
+            .ok_or_else(|| "executor observed process argv is empty".to_string())?;
+        let process_argv_executable = fs::canonicalize(process_argv_executable)
+            .map_err(|error| format!("canonicalize observed process argv zero: {error}"))?;
         if process_executable != observed.process_executable
-            || observed.process_argv.first().map(String::as_str)
-                != Some(observed.process_executable.to_string_lossy().as_ref())
+            || process_argv_executable != observed.process_executable
         {
             return Err(
                 "executor observed process executable or argv identity changed".to_string(),
@@ -11416,9 +11504,13 @@ pub(crate) fn prove_implementation(
     .next()
     .ok_or_else(|| "executor remote base ref returned no OID".to_string())?
     .to_string();
-    if remote_base != state.identity.base_oid {
+    if !recovery_base_is_equal_or_descendant(
+        &state.identity.repository_path,
+        &state.identity.base_oid,
+        &remote_base,
+    )? {
         return Err(format!(
-            "executor validated base OID drifted: expected {}, observed {remote_base}",
+            "executor validated base OID is unrelated: expected {} or a descendant, observed {remote_base}",
             state.identity.base_oid
         ));
     }
@@ -12061,6 +12153,27 @@ where
                 && sibling.head_oid.as_deref() == Some(pull_request.head_ref_oid.as_str())
                 && pull_request_body_matches_state(&pull_request.body, &sibling))
         });
+    }
+    let base_branch = current
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .ok_or_else(|| "executor remote snapshot base must name origin".to_string())?;
+    let base_ref = format!("refs/heads/{base_branch}");
+    if observed.refs.get(&base_ref) != baseline.refs.get(&base_ref) {
+        if let (Some(sealed_base), Some(observed_base)) =
+            (baseline.refs.get(&base_ref), observed.refs.get(&base_ref))
+        {
+            if sealed_base == &current.identity.base_oid
+                && recovery_base_is_equal_or_descendant(
+                    &current.identity.repository_path,
+                    sealed_base,
+                    observed_base,
+                )?
+            {
+                observed.refs.insert(base_ref, sealed_base.clone());
+            }
+        }
     }
     Ok(observed)
 }
@@ -14192,6 +14305,21 @@ fn ownership_transfer_names_predecessor(
     path: &Path,
     state: &PersistedInvocation,
 ) -> Result<bool, String> {
+    Ok(ownership_transfer_generation_head(path, state, None)?.is_some())
+}
+
+fn adopted_ownership_transfer_head_for_owner(
+    path: &Path,
+    state: &PersistedInvocation,
+) -> Result<Option<String>, String> {
+    ownership_transfer_generation_head(path, state, Some("adopted"))
+}
+
+fn ownership_transfer_generation_head(
+    path: &Path,
+    state: &PersistedInvocation,
+    required_state: Option<&str>,
+) -> Result<Option<String>, String> {
     reject_symlink_path(path)?;
     validate_private_state_file(path)?;
     let value: serde_json::Value = serde_json::from_str(
@@ -14203,6 +14331,9 @@ fn ownership_transfer_names_predecessor(
         .get("state")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "executor ownership transfer state is missing".to_string())?;
+    if required_state.is_some_and(|required| required != transfer_state) {
+        return Ok(None);
+    }
     let (fields, adopted) = match transfer_state {
         "available" => (AVAILABLE_TRANSFER_FIELDS, false),
         "adopted" => (ADOPTED_TRANSFER_FIELDS, true),
@@ -14217,13 +14348,21 @@ fn ownership_transfer_names_predecessor(
     {
         return Err("executor ownership transfer identity changed".to_string());
     }
+    let transfer_head = text(&object, "head_oid")?;
+    if !canonical_git_oid(&transfer_head) {
+        return Err("executor ownership transfer head OID is malformed".to_string());
+    }
     let (claim_field, invocation_field) = if adopted {
         ("to_claim_id", "to_invocation_id")
     } else {
         ("from_claim_id", "from_invocation_id")
     };
-    Ok(text(&object, claim_field)? == state.identity.claim_id
-        && text(&object, invocation_field)? == state.identity.invocation_id)
+    if text(&object, claim_field)? != state.identity.claim_id
+        || text(&object, invocation_field)? != state.identity.invocation_id
+    {
+        return Ok(None);
+    }
+    Ok(Some(transfer_head))
 }
 
 pub(crate) fn finalize_ownership_loss_local(state_path: &Path) -> Result<(), String> {
@@ -17709,6 +17848,7 @@ fn write_output_cursor(file: &File, mut cursor: OutputCursor) -> Result<OutputCu
 #[derive(Clone, Debug)]
 struct ValidatedInvocation {
     program: PathBuf,
+    argv_zero: Option<OsString>,
     args: Vec<String>,
     current_dir: PathBuf,
     environment_overrides: Vec<(OsString, OsString)>,
@@ -17983,6 +18123,51 @@ unsafe fn raw_children_quiescent() -> i32 {
 }
 
 #[cfg(unix)]
+unsafe fn raw_reap_adopted_children(harness_pid: nix::libc::pid_t) -> i32 {
+    loop {
+        // WNOWAIT lets the exact harness retain its dedicated waitpid path while terminated
+        // grandchildren adopted by this subreaper are collected during a long-running command.
+        let mut info: nix::libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: info is writable and these flags observe only terminal child state.
+        let observed = unsafe {
+            nix::libc::waitid(
+                nix::libc::P_ALL,
+                0,
+                std::ptr::addr_of_mut!(info),
+                nix::libc::WEXITED | nix::libc::WNOHANG | nix::libc::WNOWAIT,
+            )
+        };
+        if observed < 0 {
+            // SAFETY: errno is thread-local process state.
+            let error = unsafe { *nix::libc::__errno_location() };
+            if error == nix::libc::EINTR {
+                continue;
+            }
+            return if error == nix::libc::ECHILD { 0 } else { -1 };
+        }
+        // SAFETY: waitid initialized the SIGCHLD pid field for WEXITED observations.
+        let pid = unsafe { info.si_pid() };
+        if pid == 0 || pid == harness_pid {
+            return 0;
+        }
+        let mut status = 0_i32;
+        // SAFETY: pid was returned by waitid as a terminal child and is not the harness.
+        let waited = unsafe { nix::libc::waitpid(pid, &mut status, nix::libc::WNOHANG) };
+        if waited == pid {
+            continue;
+        }
+        if waited < 0 {
+            // SAFETY: errno is thread-local process state.
+            let error = unsafe { *nix::libc::__errno_location() };
+            if error == nix::libc::EINTR || error == nix::libc::ECHILD {
+                continue;
+            }
+        }
+        return -1;
+    }
+}
+
+#[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn raw_supervisor_loop(
     harness_pid: nix::libc::pid_t,
@@ -18091,6 +18276,12 @@ unsafe fn raw_supervisor_loop(
             } else if waited < 0
                 // SAFETY: errno is thread-local process state.
                 && unsafe { *nix::libc::__errno_location() } != nix::libc::EINTR
+            {
+                terminate_post_fork(127);
+            }
+            if exit_code.is_none()
+                // SAFETY: the exact harness is excluded from this adopted-child reap.
+                && unsafe { raw_reap_adopted_children(harness_pid) } < 0
             {
                 terminate_post_fork(127);
             }
@@ -18517,6 +18708,7 @@ fn validate_invocation(
     }
     Ok(ValidatedInvocation {
         program,
+        argv_zero: None,
         args: invocation.args.clone(),
         current_dir,
         environment_overrides: Vec::new(),
@@ -20369,7 +20561,16 @@ fn spawn_blocked_harness(
     let executable = CString::new(harness.program.as_os_str().as_bytes())
         .map_err(|_| "executor program contains a NUL byte".to_string())?;
     let mut argv = Vec::with_capacity(harness.args.len() + 1);
-    argv.push(executable.clone());
+    argv.push(
+        CString::new(
+            harness
+                .argv_zero
+                .as_deref()
+                .unwrap_or(harness.program.as_os_str())
+                .as_bytes(),
+        )
+        .map_err(|_| "executor argv zero contains a NUL byte".to_string())?,
+    );
     for arg in &harness.args {
         argv.push(
             CString::new(arg.as_bytes())
@@ -23066,6 +23267,14 @@ fn zero_effect_remote_snapshot_is_exact(
     state_path: &Path,
     state: &PersistedInvocation,
 ) -> Result<bool, String> {
+    remote_snapshot_with_feature_head_is_exact(state_path, state, None)
+}
+
+fn remote_snapshot_with_feature_head_is_exact(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    expected_feature_head: Option<&str>,
+) -> Result<bool, String> {
     let expected_digest = match state.remote_snapshot_digest.as_deref() {
         Some(digest)
             if digest.len() == 64
@@ -23100,7 +23309,11 @@ fn zero_effect_remote_snapshot_is_exact(
         .strip_prefix("origin/")
         .ok_or_else(|| "executor validated base ref must name origin".to_string())?;
     let branch_ref = format!("refs/heads/{}", state.identity.branch);
-    Ok(!snapshot.refs.contains_key(&branch_ref)
+    let feature_is_exact = match expected_feature_head {
+        Some(head) => snapshot.refs.get(&branch_ref).map(String::as_str) == Some(head),
+        None => !snapshot.refs.contains_key(&branch_ref),
+    };
+    Ok(feature_is_exact
         && snapshot.refs.get(&format!("refs/heads/{base_branch}"))
             == Some(&state.identity.base_oid)
         && !snapshot
@@ -23170,10 +23383,98 @@ fn committed_implementation_remote_and_branch_are_exact(
     .next()
     .ok_or_else(|| "executor remote base ref returned no OID".to_string())?
     .to_string();
+    if !recovery_base_is_equal_or_descendant(
+        &state.identity.repository_path,
+        &state.identity.base_oid,
+        &remote_base,
+    )? {
+        return Ok(false);
+    }
     let branch_ref = format!("refs/heads/{}", state.identity.branch);
-    Ok(remote_base == state.identity.base_oid
-        && !remote_head_refs(&state.identity.repository_path)?.contains_key(&branch_ref)
-        && zero_effect_remote_snapshot_is_exact(state_path, state)?)
+    let remote_refs = remote_head_refs(&state.identity.repository_path)?;
+    if !remote_refs.contains_key(&branch_ref) {
+        return zero_effect_remote_snapshot_is_exact(state_path, state);
+    }
+    if remote_refs.get(&branch_ref) != Some(&head) {
+        return Ok(false);
+    }
+    let scope_root = state
+        .identity
+        .worktree
+        .parent()
+        .ok_or_else(|| "adopted executor worktree has no scope root".to_string())?;
+    let transfer = ownership_transfer_path(scope_root, state.identity.issue);
+    if !transfer.exists() {
+        return Ok(false);
+    }
+    let Some(transfer_head) = adopted_ownership_transfer_head_for_owner(&transfer, state)? else {
+        return Ok(false);
+    };
+    if !adopted_transfer_reaches_recovered_head(
+        &state.identity.worktree,
+        &transfer_head,
+        &head,
+        &state.identity.base_oid,
+    )? {
+        return Ok(false);
+    }
+    remote_snapshot_with_feature_head_is_exact(state_path, state, Some(&head))
+}
+
+fn recovery_base_is_equal_or_descendant(
+    repository: &Path,
+    invocation_base: &str,
+    remote_base: &str,
+) -> Result<bool, String> {
+    if remote_base == invocation_base {
+        return Ok(true);
+    }
+    if !canonical_git_oid(invocation_base) || !canonical_git_oid(remote_base) {
+        return Err("executor recovery base OID is malformed".to_string());
+    }
+    let fetch = Command::new("git")
+        .args([
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "origin",
+            remote_base,
+        ])
+        .current_dir(repository)
+        .output()
+        .map_err(|error| format!("fetch recovered executor base advance: {error}"))?;
+    if !fetch.status.success() {
+        return Err(format!(
+            "fetch recovered executor base advance failed: {}",
+            String::from_utf8_lossy(&fetch.stderr).trim()
+        ));
+    }
+    let status = Command::new("git")
+        .args(["merge-base", "--is-ancestor", invocation_base, remote_base])
+        .current_dir(repository)
+        .status()
+        .map_err(|error| format!("verify recovered executor base advance: {error}"))?;
+    Ok(status.success())
+}
+
+fn adopted_transfer_reaches_recovered_head(
+    worktree: &Path,
+    transfer_head: &str,
+    recovered_head: &str,
+    base_oid: &str,
+) -> Result<bool, String> {
+    if transfer_head == recovered_head {
+        return Ok(true);
+    }
+    if !canonical_git_oid(transfer_head)
+        || !canonical_git_oid(recovered_head)
+        || !canonical_git_oid(base_oid)
+    {
+        return Err("executor adopted recovery OID is malformed".to_string());
+    }
+    let parents = git_stdout(worktree, &["show", "-s", "--format=%P", recovered_head])?;
+    let parents = parents.split_whitespace().collect::<Vec<_>>();
+    Ok(parents.as_slice() == [transfer_head, base_oid])
 }
 
 fn exact_zero_effect_scope_root(state: &PersistedInvocation) -> Result<PathBuf, String> {
@@ -24136,6 +24437,62 @@ fn prepare_private_closeout_sink(worktree: &Path, closeout: &Path) -> Result<(),
     }
     validate_private_state_file(closeout)
         .map_err(|error| format!("executor Closeout sink must be private: {error}"))
+}
+
+fn reharden_completed_closeout(worktree: &Path, closeout: &Path) -> Result<(), String> {
+    let expected = worktree.join(".autospec/executor-closeout.md");
+    if closeout != expected {
+        return Err("executor Closeout sink must use the exact worktree artifact path".to_string());
+    }
+    let artifact_dir = closeout
+        .parent()
+        .ok_or_else(|| "executor Closeout sink has no artifact directory".to_string())?;
+    ensure_private_directory(artifact_dir)?;
+    reject_symlink_path(closeout)?;
+    #[cfg(not(unix))]
+    return prepare_private_closeout_sink(worktree, closeout);
+    #[cfg(unix)]
+    {
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(OFlag::O_NOFOLLOW.bits())
+            .open(closeout)
+            .map_err(|error| format!("secure completed executor Closeout sink: {error}"))?;
+        let opened = file
+            .metadata()
+            .map_err(|error| format!("inspect opened executor Closeout sink: {error}"))?;
+        if !opened.is_file() {
+            return Err("executor Closeout sink is not a regular file".to_string());
+        }
+        if opened.nlink() != 1 {
+            return Err("executor Closeout sink has a foreign hard link".to_string());
+        }
+        if opened.uid() != nix::unistd::geteuid().as_raw() {
+            return Err("executor Closeout sink ownership changed".to_string());
+        }
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("secure executor Closeout sink: {error}"))?;
+        let secured = file
+            .metadata()
+            .map_err(|error| format!("reinspect opened executor Closeout sink: {error}"))?;
+        let current = fs::symlink_metadata(closeout)
+            .map_err(|error| format!("reinspect executor Closeout sink: {error}"))?;
+        if current.file_type().is_symlink()
+            || !current.is_file()
+            || current.dev() != secured.dev()
+            || current.ino() != secured.ino()
+        {
+            return Err("executor Closeout sink identity changed while securing it".to_string());
+        }
+        if secured.nlink() != 1
+            || secured.uid() != nix::unistd::geteuid().as_raw()
+            || secured.mode() & 0o077 != 0
+        {
+            return Err("executor Closeout sink is not a private single-link file".to_string());
+        }
+        Ok(())
+    }
 }
 
 fn reject_symlink_path(path: &Path) -> Result<(), String> {
@@ -26166,6 +26523,63 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_executor_bridge_rehardens_replaced_closeout_after_harness_exit_and_rejects_links()
+    {
+        let (_fixture, state, _state_path, _) =
+            zero_effect_classifier_fixture("reharden-replaced-closeout", false, false);
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        super::prepare_private_closeout_sink(&state.identity.worktree, &closeout)
+            .expect("prepare original closeout sink");
+        let replacement = closeout.with_extension("replacement");
+        fs::write(&replacement, "replacement closeout\n").expect("write replacement closeout");
+        fs::set_permissions(&replacement, fs::Permissions::from_mode(0o664))
+            .expect("make replacement public");
+        fs::rename(&replacement, &closeout).expect("replace prepared closeout sink");
+
+        super::reharden_completed_closeout(&state.identity.worktree, &closeout)
+            .expect("reharden completed closeout");
+
+        assert_eq!(
+            fs::metadata(&closeout)
+                .expect("rehardened closeout metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_to_string(closeout).expect("read replacement closeout"),
+            "replacement closeout\n"
+        );
+
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        let alias = closeout.with_extension("alias");
+        fs::remove_file(&closeout).expect("remove hardened closeout");
+        fs::write(&alias, "aliased closeout\n").expect("write aliased closeout");
+        fs::set_permissions(&alias, fs::Permissions::from_mode(0o664)).expect("make alias public");
+        fs::hard_link(&alias, &closeout).expect("hard-link closeout replacement");
+
+        let error = super::reharden_completed_closeout(&state.identity.worktree, &closeout)
+            .expect_err("reject hard-linked closeout");
+        assert!(error.contains("hard link"), "{error}");
+        assert_eq!(
+            fs::metadata(alias)
+                .expect("alias metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o664,
+            "rejection must not chmod the aliased inode"
+        );
+    }
+
+    #[test]
     fn autonomous_executor_bridge_hardens_closeout_before_recovery_classification() {
         let (_fixture, mut state, state_path, _) =
             zero_effect_classifier_fixture("private-closeout-recovery", false, false);
@@ -26628,6 +27042,225 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
             .expect("persist recovered implementation proof");
         assert_eq!(recovered.phase, BridgePhase::ImplementationProven);
         assert_eq!(recovered.head_oid.as_deref(), Some(proof.head_oid.as_str()));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_recovers_exact_adopted_remote_implementation() {
+        let (fixture, mut state, state_path, _) =
+            zero_effect_classifier_fixture("adopted-remote-implementation", false, false);
+        let implementation = state.identity.worktree.join("implementation.txt");
+        fs::write(&implementation, "adopted implementation\n").expect("write implementation");
+        git(&state.identity.worktree, &["add", "implementation.txt"]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "test: preserve adopted implementation"],
+        );
+        let head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &["push", "-u", "origin", &state.identity.branch],
+        );
+        let closeout = state
+            .identity
+            .worktree
+            .join(".autospec/executor-closeout.md");
+        fs::create_dir_all(closeout.parent().expect("closeout parent"))
+            .expect("create closeout parent");
+        fs::write(
+            &closeout,
+            "## Closeout report\n\n\
+Result: Preserved the adopted implementation.\n\
+Claims: [verified] runtime the focused test exits with status 0.\n\
+Proof type: runtime\n\
+Before/after: Before 0 implementation files; after 1 implementation file.\n\
+Artifacts: `implementation.txt`; rerun with `test -f implementation.txt`.\n\
+Scoped git status: Added `implementation.txt`; closeout excluded from the commit.\n\
+One likely hidden failure: The fixture does not exercise a pull request.\n",
+        )
+        .expect("write closeout");
+        fs::set_permissions(&closeout, fs::Permissions::from_mode(0o600))
+            .expect("private closeout");
+        super::ensure_active_worktree_ownership(
+            &state.identity.repository_path,
+            state.identity.worktree.parent().expect("scope root"),
+            state.identity.issue,
+            &state.identity.worktree,
+            &state.identity.branch,
+            &state.identity.claim_id,
+            &state.identity.invocation_id,
+        )
+        .expect("record adopted ownership transfer");
+        let snapshot_path = super::remote_snapshot_path(&state_path);
+        let mut snapshot: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&snapshot_path).expect("read remote snapshot"),
+        )
+        .expect("parse remote snapshot");
+        snapshot["identity"]["local_head"] = serde_json::json!(head);
+        snapshot["refs"][format!("refs/heads/{}", state.identity.branch)] = serde_json::json!(head);
+        let snapshot = format!("{snapshot}\n");
+        fs::write(&snapshot_path, &snapshot).expect("write adopted remote snapshot");
+        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+            .expect("secure adopted remote snapshot");
+        state.remote_snapshot_digest = Some(super::sha256_hex(snapshot.as_bytes()));
+        super::write_invocation_atomic(&state_path, &state).expect("persist adopted invocation");
+
+        assert!(
+            super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("classify exact adopted implementation")
+        );
+
+        let transfer_path = super::ownership_transfer_path(
+            state.identity.worktree.parent().expect("scope root"),
+            state.identity.issue,
+        );
+        let exact_transfer = fs::read_to_string(&transfer_path).expect("read exact transfer");
+
+        let seed = fixture.root.join("seed");
+        git(&seed, &["checkout", "main"]);
+        fs::write(seed.join("base-advance.txt"), "advanced base\n").expect("advance base branch");
+        git(&seed, &["add", "base-advance.txt"]);
+        git(&seed, &["commit", "-m", "test: advance adopted base"]);
+        git(&seed, &["push", "origin", "main"]);
+        let advanced_base = git_stdout(&seed, &["rev-parse", "HEAD"]);
+        git(&state.identity.worktree, &["fetch", "origin", "main"]);
+        git(
+            &state.identity.worktree,
+            &["merge", "--no-ff", "--no-edit", &advanced_base],
+        );
+        let reconciled_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &["push", "origin", &state.identity.branch],
+        );
+        state.identity.base_oid = advanced_base.clone();
+        let mut snapshot: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&snapshot_path).expect("read reconciled remote snapshot"),
+        )
+        .expect("parse reconciled remote snapshot");
+        snapshot["identity"]["base_oid"] = serde_json::json!(advanced_base);
+        snapshot["identity"]["local_head"] = serde_json::json!(reconciled_head);
+        snapshot["refs"]["refs/heads/main"] = serde_json::json!(advanced_base);
+        snapshot["refs"][format!("refs/heads/{}", state.identity.branch)] =
+            serde_json::json!(reconciled_head);
+        let snapshot = format!("{snapshot}\n");
+        fs::write(&snapshot_path, &snapshot).expect("write reconciled remote snapshot");
+        fs::set_permissions(&snapshot_path, fs::Permissions::from_mode(0o600))
+            .expect("secure reconciled remote snapshot");
+        state.remote_snapshot_digest = Some(super::sha256_hex(snapshot.as_bytes()));
+        super::write_invocation_atomic(&state_path, &state)
+            .expect("persist reconciled adopted invocation");
+
+        assert!(
+            super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("classify exact adopted base-reconciliation merge"),
+            "the transfer head may be the first parent of the exact base merge"
+        );
+
+        fs::write(
+            seed.join("post-crash-base.txt"),
+            "post-crash base advance\n",
+        )
+        .expect("advance base after executor crash");
+        git(&seed, &["add", "post-crash-base.txt"]);
+        git(
+            &seed,
+            &["commit", "-m", "test: advance base after executor crash"],
+        );
+        git(&seed, &["push", "origin", "main"]);
+        let post_crash_base = git_stdout(&seed, &["rev-parse", "HEAD"]);
+        assert!(
+            super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("classify adopted implementation after base advance"),
+            "a descendant main advance must remain recoverable for the later base-drift gate"
+        );
+
+        git(&seed, &["checkout", "--orphan", "unrelated-main"]);
+        fs::write(seed.join("unrelated-main.txt"), "unrelated main\n")
+            .expect("write unrelated main");
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-m", "test: create unrelated main"]);
+        let unrelated_main = git_stdout(&seed, &["rev-parse", "HEAD"]);
+        let remote = fixture.root.join("remote.git");
+        git(&seed, &["push", "origin", "HEAD:refs/heads/unrelated-main"]);
+        git(
+            &fixture.root,
+            &[
+                "--git-dir",
+                remote.to_str().expect("remote path"),
+                "update-ref",
+                "refs/heads/main",
+                &unrelated_main,
+            ],
+        );
+        git(
+            &fixture.root,
+            &[
+                "--git-dir",
+                remote.to_str().expect("remote path"),
+                "update-ref",
+                "-d",
+                "refs/heads/unrelated-main",
+            ],
+        );
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("reject unrelated post-crash base"),
+            "a non-descendant main replacement must stay fail-closed"
+        );
+        git(
+            &fixture.root,
+            &[
+                "--git-dir",
+                remote.to_str().expect("remote path"),
+                "update-ref",
+                "refs/heads/main",
+                &post_crash_base,
+            ],
+        );
+
+        let mut mismatched: serde_json::Value =
+            serde_json::from_str(&exact_transfer).expect("parse exact transfer");
+        mismatched["to_claim_id"] = serde_json::json!("claim-other");
+        fs::write(&transfer_path, format!("{mismatched}\n")).expect("write mismatched transfer");
+        fs::set_permissions(&transfer_path, fs::Permissions::from_mode(0o600))
+            .expect("secure mismatched transfer");
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("reject mismatched transfer")
+        );
+
+        fs::write(&transfer_path, exact_transfer).expect("restore exact transfer");
+        fs::set_permissions(&transfer_path, fs::Permissions::from_mode(0o600))
+            .expect("secure restored transfer");
+        let exact_transfer = fs::read_to_string(&transfer_path).expect("reread exact transfer");
+        let mut mismatched_head: serde_json::Value =
+            serde_json::from_str(&exact_transfer).expect("parse exact transfer");
+        mismatched_head["head_oid"] = serde_json::json!("f".repeat(40));
+        fs::write(&transfer_path, format!("{mismatched_head}\n"))
+            .expect("write mismatched transfer head");
+        fs::set_permissions(&transfer_path, fs::Permissions::from_mode(0o600))
+            .expect("secure mismatched transfer head");
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("reject mismatched transfer head")
+        );
+
+        fs::write(&transfer_path, exact_transfer).expect("restore exact transfer head");
+        fs::set_permissions(&transfer_path, fs::Permissions::from_mode(0o600))
+            .expect("secure restored transfer head");
+        git(&seed, &["fetch", "origin", &state.identity.branch]);
+        git(&seed, &["checkout", "-B", "remote-advance", "FETCH_HEAD"]);
+        fs::write(seed.join("remote-advance.txt"), "advanced\n").expect("advance remote branch");
+        git(&seed, &["add", "remote-advance.txt"]);
+        git(&seed, &["commit", "-m", "test: advance remote branch"]);
+        git(
+            &seed,
+            &["push", "origin", &format!("HEAD:{}", state.identity.branch)],
+        );
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("reject mismatched remote OID")
+        );
     }
 
     #[cfg(unix)]
@@ -30331,6 +30964,7 @@ exit 64
         let result = artifact_root.join("harness-result.txt");
         let invocation = super::ValidatedInvocation {
             program: fs::canonicalize(&harness).expect("canonical stateful reviewer"),
+            argv_zero: None,
             args: vec![launches.display().to_string(), result.display().to_string()],
             current_dir: root.clone(),
             environment_overrides: Vec::new(),
@@ -30395,6 +31029,7 @@ exit 64
         );
         let invocation = super::ValidatedInvocation {
             program: fs::canonicalize(&harness).expect("canonical forking reviewer"),
+            argv_zero: None,
             args: vec![
                 result.display().to_string(),
                 descendant_identity_path.display().to_string(),
@@ -30497,6 +31132,7 @@ exit 64
             write_executable(&harness, &body);
             let invocation = super::ValidatedInvocation {
                 program: fs::canonicalize(&harness).expect("canonical bounded reviewer"),
+                argv_zero: None,
                 args,
                 current_dir: root.clone(),
                 environment_overrides: Vec::new(),
@@ -30820,6 +31456,7 @@ exit 64
         super::ensure_private_directory(&artifact_root).expect("private review artifact directory");
         let invocation = super::ValidatedInvocation {
             program: fs::canonicalize(&harness).expect("canonical noisy reviewer"),
+            argv_zero: None,
             args: Vec::new(),
             current_dir: root.clone(),
             environment_overrides: Vec::new(),
@@ -36252,8 +36889,9 @@ exit 64
     }
 
     #[test]
-    fn autonomous_executor_bridge_rejects_base_oid_drift_before_remote_mutation() {
-        // Break caught: a push proceeding after the configured remote base moved.
+    fn autonomous_executor_bridge_proves_descendant_base_drift_before_reconciliation() {
+        // Break caught: an ordinary main advance stranding a committed implementation before
+        // the later base-drift reconciliation phase can merge the new base.
         let (fixture, mut state, snapshot, closeout) =
             implementation_proof_fixture("proof-base-drift");
         commit_implementation(&state);
@@ -36270,15 +36908,16 @@ exit 64
             ],
         );
 
-        let error = super::prove_implementation(
+        let proof = super::prove_implementation(
             &fixture.root.join("state/invocation.json"),
             &mut state,
             &snapshot,
             &closeout,
         )
-        .expect_err("base OID drift must fail closed");
+        .expect("descendant base drift must remain eligible for later reconciliation");
 
-        assert!(error.contains("base"), "{error}");
+        assert_eq!(proof.head_oid, state.head_oid.clone().unwrap());
+        assert_eq!(state.phase, BridgePhase::ImplementationProven);
         assert_eq!(
             git_stdout(
                 &fixture.root,
@@ -36287,6 +36926,56 @@ exit 64
                     fixture.root.join("remote.git").to_str().unwrap(),
                     "show-ref"
                 ]
+            ),
+            remote_before
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_rejects_unrelated_base_drift_before_remote_mutation() {
+        // Break caught: treating a force-pushed unrelated base as an ordinary main advance.
+        let (fixture, mut state, snapshot, closeout) =
+            implementation_proof_fixture("proof-unrelated-base-drift");
+        commit_implementation(&state);
+        let tree = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD^{tree}"]);
+        let unrelated = Command::new("git")
+            .args(["commit-tree", &tree, "-m", "unrelated base"])
+            .current_dir(fixture.root.join("seed"))
+            .output()
+            .expect("create unrelated base");
+        assert!(unrelated.status.success());
+        let unrelated = String::from_utf8(unrelated.stdout).unwrap();
+        let force_refspec = format!("{}:refs/heads/main", unrelated.trim());
+        git(
+            &fixture.root.join("seed"),
+            &["push", "--force", "origin", &force_refspec],
+        );
+        let remote_before = git_stdout(
+            &fixture.root,
+            &[
+                "--git-dir",
+                fixture.root.join("remote.git").to_str().unwrap(),
+                "show-ref",
+            ],
+        );
+
+        let error = super::prove_implementation(
+            &fixture.root.join("state/invocation.json"),
+            &mut state,
+            &snapshot,
+            &closeout,
+        )
+        .expect_err("unrelated base drift must fail closed");
+
+        assert!(error.contains("unrelated"), "{error}");
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &[
+                    "--git-dir",
+                    fixture.root.join("remote.git").to_str().unwrap(),
+                    "show-ref",
+                ],
             ),
             remote_before
         );
@@ -36610,6 +37299,76 @@ exit 64
         assert!(unowned
             .refs
             .contains_key("refs/heads/feat/autonomous-issue-44"));
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_normalizes_descendant_base_remote_delta() {
+        // Break caught: ordinary main progress invalidating a create-once remote snapshot before
+        // the later Rust-owned base reconciliation phase can merge it.
+        let fixture = GitFixture::new("remote-descendant-base");
+        let current = supervision_state(&fixture);
+        let state_dir = fixture.root.join("state/executor");
+        super::ensure_private_directory(&state_dir).expect("private executor state");
+        let baseline = super::RemoteMutationSnapshot {
+            refs: BTreeMap::from([(
+                "refs/heads/main".to_string(),
+                current.identity.base_oid.clone(),
+            )]),
+            pull_requests: Vec::new(),
+        };
+        fs::write(fixture.root.join("seed/descendant.txt"), "descendant\n")
+            .expect("write descendant base");
+        git(&fixture.root.join("seed"), &["add", "descendant.txt"]);
+        git(
+            &fixture.root.join("seed"),
+            &["commit", "-m", "descendant base"],
+        );
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+        let descendant = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD"]);
+        let observed = super::RemoteMutationSnapshot {
+            refs: BTreeMap::from([("refs/heads/main".to_string(), descendant)]),
+            pull_requests: Vec::new(),
+        };
+
+        let normalized = super::normalize_authorized_sibling_remote_deltas_with_claim_lookup(
+            &state_dir.join("issue-42-current.json"),
+            &current,
+            &baseline,
+            observed,
+            |_| Ok(false),
+        )
+        .expect("descendant base advance must be deferred to reconciliation");
+
+        assert_eq!(normalized, baseline);
+
+        let tree = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD^{tree}"]);
+        let unrelated = Command::new("git")
+            .args(["commit-tree", &tree, "-m", "unrelated base"])
+            .current_dir(fixture.root.join("seed"))
+            .output()
+            .expect("create unrelated base");
+        assert!(unrelated.status.success());
+        let unrelated = String::from_utf8(unrelated.stdout).unwrap();
+        let force_refspec = format!("{}:refs/heads/main", unrelated.trim());
+        git(
+            &fixture.root.join("seed"),
+            &["push", "--force", "origin", &force_refspec],
+        );
+        let observed = super::RemoteMutationSnapshot {
+            refs: BTreeMap::from([("refs/heads/main".to_string(), unrelated.trim().to_string())]),
+            pull_requests: Vec::new(),
+        };
+
+        let normalized = super::normalize_authorized_sibling_remote_deltas_with_claim_lookup(
+            &state_dir.join("issue-42-current.json"),
+            &current,
+            &baseline,
+            observed.clone(),
+            |_| Ok(false),
+        )
+        .expect("unrelated base remains visible to draft admission");
+
+        assert_eq!(normalized, observed);
     }
 
     #[test]
@@ -41004,6 +41763,33 @@ exit 19
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn autonomous_executor_bridge_direct_supervisor_reaps_adopted_children() {
+        let fixture = GitFixture::new("direct-live-adopted-reap");
+        let artifact_root = fixture.root.join("evidence");
+        let executable = std::env::current_exe().expect("current test executable");
+        let plan = super::DirectCommandPlan {
+            commands: vec![super::DirectCommand::success(vec![
+                executable.display().to_string(),
+                "--exact".to_string(),
+                "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_cleanup_precedes_executable_validation".to_string(),
+                "--test-threads=1".to_string(),
+            ])],
+        };
+
+        let observed = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(15),
+        )
+        .expect("nested process-cleanup test must pass under direct supervision");
+
+        assert_eq!(observed[0].terminal, super::AttemptTerminal::Exited(0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn autonomous_executor_bridge_cleanup_precedes_executable_validation() {
         // Break caught: a missing/replaced current executable returning before an old live
         // quarantined tree is reconciled from its independently persisted intent and launch.
@@ -43456,6 +44242,182 @@ exit 19
     }
 
     #[test]
+    fn autonomous_executor_bridge_direct_proxy_argv_zero_helper() {
+        if std::env::var_os("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO").is_none() {
+            return;
+        }
+        assert_eq!(
+            std::env::args_os()
+                .next()
+                .as_deref()
+                .and_then(|arg0| Path::new(arg0).file_name()),
+            Some(std::ffi::OsStr::new("cargo-proxy"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_direct_proxy_preserves_argv_zero() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("direct-proxy-argv-zero");
+        let proxy = fixture.root.join("cargo-proxy");
+        let executable = std::env::current_exe()
+            .expect("current test executable")
+            .canonicalize()
+            .expect("canonical test executable");
+        std::os::unix::fs::symlink(&executable, &proxy).expect("test executable proxy");
+        let plan = super::parse_direct_command_plan(&format!(
+            "{} commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_direct_proxy_argv_zero_helper --exact --nocapture",
+            proxy.display()
+        ))
+        .expect("proxy command plan");
+        let previous = std::env::var_os("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO");
+        std::env::set_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO", "1");
+
+        let result = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &fixture.root.join("proxy-evidence"),
+            None,
+            Duration::from_secs(5),
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO"),
+        }
+        let observed = result.expect("validated proxy must preserve argv zero");
+        assert_eq!(observed[0].executable, executable);
+        assert_eq!(observed[0].process_executable, executable);
+        assert_eq!(observed[0].argv[0], proxy.display().to_string());
+        assert_eq!(observed[0].process_argv[0], proxy.display().to_string());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_failure() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let fixture = GitFixture::new("direct-proxy-retry");
+        let artifact_root = fixture.root.join("proxy-evidence");
+        let executable = std::env::current_exe()
+            .expect("current test executable")
+            .canonicalize()
+            .expect("canonical test executable");
+        let proxy = fixture.root.join("cargo-proxy");
+        std::os::unix::fs::symlink(&executable, &proxy).expect("test executable proxy");
+        let arguments = "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_direct_proxy_argv_zero_helper --exact --nocapture";
+        let canonical_plan =
+            super::parse_direct_command_plan(&format!("{} {arguments}", executable.display()))
+                .expect("canonical command plan");
+        let proxy_plan =
+            super::parse_direct_command_plan(&format!("{} {arguments}", proxy.display()))
+                .expect("proxy command plan");
+        let previous = std::env::var_os("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO");
+        std::env::set_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO", "1");
+
+        let first = super::execute_direct_plan(
+            &fixture.repo,
+            &canonical_plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        );
+        assert!(
+            first.is_err(),
+            "canonical argv zero must reproduce the proxy failure"
+        );
+        let result = super::execute_direct_plan(
+            &fixture.repo,
+            &proxy_plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_DIRECT_PROXY_ARGV_ZERO"),
+        }
+        let observed = result.expect("proxy correction must archive and retry prior failure");
+        assert_eq!(observed[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_eq!(observed[0].argv[0], proxy.display().to_string());
+        assert!(fs::read_dir(&artifact_root)
+            .expect("proxy failure archive")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_success() {
+        let fixture = GitFixture::new("direct-proxy-success-retry");
+        let artifact_root = fixture.root.join("proxy-evidence");
+        let executable = PathBuf::from("/usr/bin/true")
+            .canonicalize()
+            .expect("canonical true executable");
+        let proxy = fixture.root.join("true-proxy");
+        std::os::unix::fs::symlink(&executable, &proxy).expect("true executable proxy");
+        let canonical_plan = super::parse_direct_command_plan(&executable.display().to_string())
+            .expect("canonical command plan");
+        let proxy_plan = super::parse_direct_command_plan(&proxy.display().to_string())
+            .expect("proxy command plan");
+
+        let first = super::execute_direct_plan(
+            &fixture.repo,
+            &canonical_plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("canonical command success");
+        assert_eq!(first[0].terminal, super::AttemptTerminal::Exited(0));
+        let observed = super::execute_direct_plan(
+            &fixture.repo,
+            &proxy_plan,
+            &artifact_root,
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("proxy correction must archive and rerun prior success");
+
+        assert_eq!(observed[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_eq!(observed[0].argv[0], proxy.display().to_string());
+        assert!(fs::read_dir(&artifact_root)
+            .expect("proxy success archive")
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".archive-")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_cargo_proxy_dispatches_rustup() {
+        let fixture = GitFixture::new("cargo-rustup-proxy");
+        let Ok(rustup) = super::resolve_direct_executable(&fixture.repo, "rustup") else {
+            return;
+        };
+        let proxy = fixture.root.join("cargo");
+        std::os::unix::fs::symlink(&rustup.program, &proxy).expect("Cargo rustup proxy");
+        let plan = super::parse_direct_command_plan(&format!("{} --version", proxy.display()))
+            .expect("Cargo proxy command plan");
+
+        let observed = super::execute_direct_plan(
+            &fixture.repo,
+            &plan,
+            &fixture.root.join("cargo-evidence"),
+            None,
+            Duration::from_secs(5),
+        )
+        .expect("Cargo proxy dispatch through rustup");
+
+        assert_eq!(observed[0].terminal, super::AttemptTerminal::Exited(0));
+        assert_eq!(observed[0].executable, rustup.program);
+        assert_eq!(observed[0].argv[0], proxy.display().to_string());
+        assert!(fs::read_to_string(&observed[0].stdout_path)
+            .expect("Cargo version output")
+            .starts_with("cargo "));
+    }
+
+    #[test]
     fn autonomous_executor_bridge_codex_sandbox_fallback_children_have_no_sensitive_credentials() {
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let fixture = GitFixture::new("credentialless-direct-child");
@@ -44475,8 +45437,9 @@ exit 19
         fs::write(generated.join("bundle.js"), format!("{token}\n"))
             .expect("generated secret fixture");
         fs::write(source.join("source.js"), format!("{token}\n")).expect("source secret fixture");
-        let gitleaks =
-            super::resolve_direct_executable(&fixture.repo, "gitleaks").expect("real gitleaks");
+        let gitleaks = super::resolve_direct_executable(&fixture.repo, "gitleaks")
+            .expect("real gitleaks")
+            .program;
         let scanners = super::ScannerExecutables::from_paths(
             ["gitleaks", "semgrep", "trivy", "license-checker"]
                 .into_iter()
@@ -44560,8 +45523,9 @@ exit 19
             "AUTOSPEC_CUSTOM_SECRET_SOURCE\n",
         )
         .expect("source custom-rule fixture");
-        let gitleaks =
-            super::resolve_direct_executable(&fixture.repo, "gitleaks").expect("real gitleaks");
+        let gitleaks = super::resolve_direct_executable(&fixture.repo, "gitleaks")
+            .expect("real gitleaks")
+            .program;
         let scanners = super::ScannerExecutables::from_paths(
             ["gitleaks", "semgrep", "trivy", "license-checker"]
                 .into_iter()
@@ -44877,8 +45841,9 @@ exit 19
         .expect("clean feature larger than Semgrep's default 1 MB limit");
         git(&fixture.repo, &["add", "feature.js"]);
         git(&fixture.repo, &["commit", "-m", "clean feature"]);
-        let semgrep =
-            super::resolve_direct_executable(&fixture.repo, "semgrep").expect("real Semgrep");
+        let semgrep = super::resolve_direct_executable(&fixture.repo, "semgrep")
+            .expect("real Semgrep")
+            .program;
         let scan = |artifact: &str| {
             let mut command = super::DirectCommand::success(vec![
                 semgrep.display().to_string(),
@@ -45211,6 +46176,69 @@ exit 19
         })
         .expect_err("stale revalidation commit must fail closed");
         assert!(error.contains("commit mismatch"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_full_suite_accepts_descendant_remote_base_only() {
+        // Break caught: main advancing after draft creation stranded evidence that remained
+        // correctly bound to the sealed implementation and its still-ancestral base.
+        let fixture = GitFixture::new("full-suite-descendant-base");
+        let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        let env = BTreeMap::from([(
+            "AUTOSPEC_FULL_TEST_COMMAND".to_string(),
+            OsString::from("/usr/bin/true"),
+        )]);
+        fs::write(fixture.root.join("seed/base-advance.txt"), "advance\n")
+            .expect("write base advance");
+        git(&fixture.root.join("seed"), &["add", "base-advance.txt"]);
+        git(
+            &fixture.root.join("seed"),
+            &["commit", "-m", "base advance"],
+        );
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+
+        super::revalidate_full_suite(super::FullSuiteRevalidationRequest {
+            worktree: &fixture.repo,
+            issue_body: "",
+            spec_documents: &[],
+            env: &env,
+            artifact_root: &fixture.root.join("full-descendant"),
+            runtime: None,
+            stall_timeout: Duration::from_secs(5),
+            expected_base_ref: "origin/main",
+            expected_base_oid: &commit,
+            expected_commit: &commit,
+        })
+        .expect("descendant remote base must defer to later reconciliation");
+
+        let tree = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD^{tree}"]);
+        let unrelated = Command::new("git")
+            .args(["commit-tree", &tree, "-m", "unrelated base"])
+            .current_dir(fixture.root.join("seed"))
+            .output()
+            .expect("create unrelated base");
+        assert!(unrelated.status.success());
+        let unrelated = String::from_utf8(unrelated.stdout).expect("unrelated OID");
+        let force_refspec = format!("{}:refs/heads/main", unrelated.trim());
+        git(
+            &fixture.root.join("seed"),
+            &["push", "--force", "origin", &force_refspec],
+        );
+
+        let error = super::revalidate_full_suite(super::FullSuiteRevalidationRequest {
+            worktree: &fixture.repo,
+            issue_body: "",
+            spec_documents: &[],
+            env: &env,
+            artifact_root: &fixture.root.join("full-unrelated"),
+            runtime: None,
+            stall_timeout: Duration::from_secs(5),
+            expected_base_ref: "origin/main",
+            expected_base_oid: &commit,
+            expected_commit: &commit,
+        })
+        .expect_err("unrelated remote base must fail closed");
+        assert!(error.contains("unrelated"), "{error}");
     }
 
     #[test]
@@ -46858,6 +47886,88 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
             .status()
             .expect("ancestry");
         assert!(ancestor.success());
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_reconciles_draft_base_before_premerge_evidence() {
+        // Break caught: stale branches running scanners and the full suite before they receive
+        // process fixes already merged to their integration base.
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let previous_claim = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
+        std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("draft-premerge-base-drift");
+        commit_implementation(&state);
+        let original_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{original_head}:refs/heads/{}", state.identity.branch),
+            ],
+        );
+        state.phase = super::BridgePhase::DraftCreated;
+        state.pr = Some(17);
+        state.head_oid = Some(original_head.clone());
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("draft state");
+        let admission =
+            super::evaluate_patch_size_admission(&state, &original_head, DRAFT_ISSUE_BODY)
+                .expect("original admission");
+        super::persist_patch_size_admission(&state_path, &admission)
+            .expect("original admission receipt");
+
+        fs::write(fixture.root.join("seed/premerge-fix.txt"), "base fix\n")
+            .expect("base drift");
+        git(&fixture.root.join("seed"), &["add", "premerge-fix.txt"]);
+        git(
+            &fixture.root.join("seed"),
+            &["commit", "-m", "premerge fix"],
+        );
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+        let updated_base = git_stdout(&fixture.root.join("seed"), &["rev-parse", "HEAD"]);
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: state.identity.repository_path.clone(),
+            issue: state.identity.issue,
+            issue_title: "Reconcile stale implementation".to_string(),
+            issue_body: DRAFT_ISSUE_BODY.to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: fixture.root.join("events.jsonl"),
+        };
+        let proof = super::ImplementationProof {
+            head_oid: original_head.clone(),
+            closeout_body: String::new(),
+        };
+
+        let result = super::ensure_premerge_and_review(
+            &request,
+            &BTreeMap::new(),
+            &super::DraftPrAdapter::github_cli(),
+            &mut state,
+            &proof,
+            None,
+        );
+        match previous_claim {
+            Some(value) => std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", value),
+            None => std::env::remove_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM"),
+        }
+
+        assert_eq!(
+            result.expect("base drift must precede scanner resolution"),
+            None
+        );
+        assert_eq!(state.phase, super::BridgePhase::DraftCreated);
+        assert_eq!(state.identity.base_oid, updated_base);
+        assert_ne!(state.head_oid.as_deref(), Some(original_head.as_str()));
+        assert!(
+            !state.identity.worktree.join(".autospec/evidence").exists(),
+            "premerge evidence started before the stale branch was updated"
+        );
     }
 
     #[test]
