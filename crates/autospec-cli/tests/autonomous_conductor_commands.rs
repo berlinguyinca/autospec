@@ -1078,6 +1078,94 @@ fn foreground_claim_phase_with_orphaned_receipt_retires_without_claiming() {
 }
 
 #[test]
+fn foreground_dispatch_recovery_retires_exact_released_claim() {
+    let fixture = ForegroundFixture::new();
+    let worker = "rust-foreground-conductor-released";
+    let branch = "feat/autonomous-issue-42";
+    let dispatch = selected_foreground_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("enter dispatch phase");
+    seed_foreground_state(&fixture, &dispatch);
+    fixture.seed_claim_state_with_id(
+        worker,
+        branch,
+        "released",
+        &fresh_iso_timestamp(),
+        EXECUTOR_CLAIM_ID,
+    );
+    fixture.seed_claim_acquisition_receipt(worker, branch, EXECUTOR_CLAIM_ID);
+
+    let output = fixture
+        .command()
+        .output()
+        .expect("retire released dispatch acquisition");
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let recovered = fixture.read_state();
+    assert_eq!(recovered.phase(), ConductorPhase::Scan);
+    assert_eq!(recovered.selected_issue(), None);
+    assert!(
+        !fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists(),
+        "exact released acquisition must retire durably"
+    );
+    assert!(
+        !fs::read_to_string(&fixture.calls)
+            .expect("read GitHub calls")
+            .contains("\npr\ncreate\n"),
+        "released dispatch recovery must retire before executor launch"
+    );
+}
+
+#[test]
+fn foreground_dispatch_recovery_rejects_mismatched_terminal_claim() {
+    let fixture = ForegroundFixture::new();
+    let worker = "rust-foreground-conductor-released";
+    let branch = "feat/autonomous-issue-42";
+    let dispatch = selected_foreground_state()
+        .transition(ConductorEvent::Claimed)
+        .expect("enter dispatch phase");
+    seed_foreground_state(&fixture, &dispatch);
+    fixture.seed_claim_state_with_id(
+        worker,
+        branch,
+        "released",
+        &fresh_iso_timestamp(),
+        "successor-generation",
+    );
+    fixture.seed_claim_acquisition_receipt(worker, branch, EXECUTOR_CLAIM_ID);
+
+    let output = fixture
+        .command()
+        .output()
+        .expect("reject mismatched terminal claim");
+
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr)
+        .contains("terminal claim does not match the durable local claim acquisition"));
+    assert!(
+        fixture
+            .state_path()
+            .with_extension("claim-acquisition.json")
+            .exists(),
+        "mismatched terminal claim must not retire the local acquisition"
+    );
+    assert!(
+        !fs::read_to_string(&fixture.calls)
+            .expect("read GitHub calls")
+            .contains("\npr\ncreate\n"),
+        "mismatched terminal claim must fail before executor launch"
+    );
+}
+
+#[test]
 fn foreground_legacy_executor_pending_resumes_exact_local_acquisition_receipt() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
