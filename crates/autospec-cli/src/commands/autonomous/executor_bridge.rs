@@ -10146,6 +10146,7 @@ const EXECUTOR_INTERNAL_PATHSPECS: [&str; 3] = [
 #[derive(Debug)]
 struct TrustedWorktreeGit {
     active_hooks: Vec<PathBuf>,
+    common_dir: PathBuf,
     git_dir: PathBuf,
     hooks_dir: PathBuf,
     worktree: PathBuf,
@@ -10244,6 +10245,7 @@ fn trusted_worktree_git_paths(
 
     let mut binding = TrustedWorktreeGit {
         active_hooks: Vec::new(),
+        common_dir: common,
         git_dir,
         hooks_dir: PathBuf::new(),
         worktree,
@@ -10386,6 +10388,7 @@ fn contained_hook_profile(
             &binding.worktree.join(".autospec/original-git-pointer"),
             "read",
         )?,
+        toml_path_entry(&binding.common_dir, "read")?,
         toml_path_entry(&binding.git_dir, "read")?,
         toml_path_entry(&binding.hooks_dir, "read")?,
         toml_path_entry(bundle, "read")?,
@@ -34796,6 +34799,7 @@ exit 64
             .expect("installed Codex executable");
         let binding = super::TrustedWorktreeGit {
             active_hooks: Vec::new(),
+            common_dir: PathBuf::new(),
             git_dir: PathBuf::new(),
             hooks_dir: PathBuf::new(),
             worktree: codex.parent().expect("Codex parent").to_path_buf(),
@@ -34827,7 +34831,7 @@ exit 64
         fs::write(
             &hook,
             format!(
-                "#!/bin/sh\nset -eu\n[ \"$PWD\" = {} ]\nchmod 600 implementation.txt\n",
+                "#!/bin/sh\nset -eu\n[ \"$PWD\" = {} ]\ngit diff --cached --name-only | grep -qx implementation.txt\nchmod 600 implementation.txt\n",
                 super::posix_shell_quote(state.identity.worktree.to_string_lossy().as_ref())
             ),
         )
