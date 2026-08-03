@@ -10369,11 +10369,44 @@ fn trusted_codex_executable(binding: &TrustedWorktreeGit) -> Result<PathBuf, Str
 }
 
 #[cfg(unix)]
+fn trusted_linter_from(
+    binding: &TrustedWorktreeGit,
+    environment: &BTreeMap<String, OsString>,
+) -> Result<(PathBuf, PathBuf), String> {
+    let home = environment
+        .get("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .ok_or_else(|| "HOME must be absolute for contained Git hooks".to_string())?;
+    let scripts_dir = environment
+        .get("AUTOSPEC_SCRIPTS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".autospec/scripts"));
+    let scripts_dir = fs::canonicalize(&scripts_dir)
+        .map_err(|error| format!("canonicalize contained hook scripts: {error}"))?;
+    let candidate = scripts_dir.join("lint-implementation.sh");
+    let metadata = fs::symlink_metadata(&candidate)
+        .map_err(|error| format!("inspect contained hook linter: {error}"))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        return Err("contained hook linter must be a regular non-symlink file".to_string());
+    }
+    let linter = fs::canonicalize(&candidate)
+        .map_err(|error| format!("canonicalize contained hook linter: {error}"))?;
+    if scripts_dir.starts_with(&binding.worktree)
+        || linter.parent() != Some(scripts_dir.as_path())
+        || linter.starts_with(&binding.worktree)
+    {
+        return Err("contained hook linter must not be writable by the implementer".to_string());
+    }
+    Ok((scripts_dir, linter))
+}
+
+#[cfg(unix)]
 fn contained_hook_profile(
     binding: &TrustedWorktreeGit,
     bundle: &Path,
     codex: &Path,
-    scripts_dir: &Path,
+    linter: &Path,
     autospec: &Path,
 ) -> Result<String, String> {
     let mut entries = vec![
@@ -10393,7 +10426,7 @@ fn contained_hook_profile(
         toml_path_entry(&binding.common_dir, "read")?,
         toml_path_entry(&binding.git_dir, "read")?,
         toml_path_entry(&binding.hooks_dir, "read")?,
-        toml_path_entry(scripts_dir, "read")?,
+        toml_path_entry(linter, "read")?,
         toml_path_entry(bundle, "read")?,
         toml_path_entry(&bundle.join("tmp"), "write")?,
         toml_path_entry(codex, "read")?,
@@ -10445,21 +10478,21 @@ impl TrustedHookBundle {
             });
         }
         let codex = trusted_codex_executable(binding)?;
-        let home = std::env::var_os("HOME")
+        let environment = std::env::vars_os()
+            .filter_map(|(key, value)| key.into_string().ok().map(|key| (key, value)))
+            .collect::<BTreeMap<_, _>>();
+        let home = environment
+            .get("HOME")
             .map(PathBuf::from)
             .filter(|home| home.is_absolute())
             .ok_or_else(|| "HOME must be absolute for contained Git hooks".to_string())?;
-        let scripts_dir = std::env::var_os("AUTOSPEC_SCRIPTS_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".autospec/scripts"));
-        let scripts_dir = fs::canonicalize(&scripts_dir)
-            .map_err(|error| format!("canonicalize contained hook scripts: {error}"))?;
+        let (scripts_dir, linter) = trusted_linter_from(binding, &environment)?;
         let autospec = fs::canonicalize(
             std::env::current_exe()
                 .map_err(|error| format!("resolve contained hook Autospec binary: {error}"))?,
         )
         .map_err(|error| format!("canonicalize contained hook Autospec binary: {error}"))?;
-        if scripts_dir.starts_with(&binding.worktree) || autospec.starts_with(&binding.worktree) {
+        if autospec.starts_with(&binding.worktree) {
             return Err("contained hook tools must not be writable by the implementer".to_string());
         }
         let nonce = HOOK_BUNDLE_NONCE.fetch_add(1, Ordering::Relaxed);
@@ -10482,7 +10515,7 @@ impl TrustedHookBundle {
             issue_body.as_bytes(),
             "contained hook issue body",
         )?;
-        let profile = contained_hook_profile(binding, &path, &codex, &scripts_dir, &autospec)?;
+        let profile = contained_hook_profile(binding, &path, &codex, &linter, &autospec)?;
         for hook in &binding.active_hooks {
             let name = hook
                 .file_name()
@@ -34844,6 +34877,32 @@ exit 64
 
     #[cfg(unix)]
     #[test]
+    fn contained_hook_rejects_linter_symlink_into_worktree() {
+        let (fixture, state, _snapshot, _closeout) =
+            implementation_proof_fixture("contained-hook-linter-symlink");
+        let scripts = fixture.root.join("scripts");
+        fs::create_dir(&scripts).expect("create scripts directory");
+        let payload = state.identity.worktree.join("model-linter.sh");
+        fs::write(&payload, "#!/bin/sh\nexit 0\n").expect("write model linter");
+        std::os::unix::fs::symlink(&payload, scripts.join("lint-implementation.sh"))
+            .expect("link model linter");
+        let binding = super::trusted_worktree_git(&state).expect("trusted worktree");
+        let environment = BTreeMap::from([
+            ("HOME".to_string(), fixture.root.as_os_str().to_os_string()),
+            (
+                "AUTOSPEC_SCRIPTS_DIR".to_string(),
+                scripts.as_os_str().to_os_string(),
+            ),
+        ]);
+
+        let error = super::trusted_linter_from(&binding, &environment)
+            .expect_err("model-writable linter symlink must fail closed");
+
+        assert!(error.contains("non-symlink"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rust_commit_runs_trusted_validation_hook_inside_containment() {
         let (_fixture, state, _snapshot, _closeout) =
             implementation_proof_fixture("rust-commit-contained-hook");
@@ -34862,7 +34921,7 @@ exit 64
         fs::write(
             &hook,
             format!(
-                "#!/bin/sh\nset -eu\n[ \"$PWD\" = {} ]\n[ -r \"$AUTOSPEC_SCRIPTS_DIR/lint-implementation.sh\" ]\n[ -x \"$AUTOSPEC_BIN\" ]\ngrep -qx 'offline contained evidence' \"$AUTOSPEC_LINT_ISSUE_BODY_FILE\"\ngit diff --cached --name-only | grep -qx implementation.txt\nchmod 600 implementation.txt\n",
+                "#!/bin/sh\nset -eu\n[ \"$PWD\" = {} ]\n[ -r \"$AUTOSPEC_SCRIPTS_DIR/lint-implementation.sh\" ]\n[ -x \"$AUTOSPEC_BIN\" ]\ngrep -qx 'offline contained evidence' \"$AUTOSPEC_LINT_ISSUE_BODY_FILE\"\n[ ! -r \"$HOME/.config/gh/hosts.yml\" ]\n[ ! -x /usr/bin/curl ] || ! /usr/bin/curl --max-time 1 --silent https://github.com/\ngit diff --cached --name-only | grep -qx implementation.txt\nchmod 600 implementation.txt\n",
                 super::posix_shell_quote(state.identity.worktree.to_string_lossy().as_ref())
             ),
         )

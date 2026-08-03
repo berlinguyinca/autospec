@@ -528,7 +528,14 @@ EOF
 
 @test "lint-implementation: missing offline issue body fails closed" {
     run env AUTOSPEC_LINT_ISSUE_BODY_FILE="$PR_SIZE_TMP/missing.issue.md" \
-        bash "$LINT" --diff-file "$FIX/good.diff" --issue 42
+        bash "$LINT" --diff-file "$FIX/good.diff"
+
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q 'offline issue body file'
+}
+
+@test "lint-implementation: empty offline issue body path fails closed" {
+    run env AUTOSPEC_LINT_ISSUE_BODY_FILE= bash "$LINT" --diff-file "$FIX/good.diff"
 
     [ "$status" -ne 0 ]
     echo "$output" | grep -q 'offline issue body file'
