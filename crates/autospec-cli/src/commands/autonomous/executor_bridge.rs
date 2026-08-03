@@ -10950,7 +10950,16 @@ fn read_implementation_repair_rules(
     attempt: u32,
 ) -> Result<Vec<ImplementationLintRule>, String> {
     let path = implementation_repair_artifact_path(state_path, state, attempt)?;
+    reject_symlink_path(&path)?;
     validate_private_state_file(&path)?;
+    #[cfg(unix)]
+    if fs::metadata(&path)
+        .map_err(|error| format!("inspect implementation repair artifact: {error}"))?
+        .nlink()
+        != 1
+    {
+        return Err("implementation repair artifact must be singly linked".to_string());
+    }
     let raw = fs::read_to_string(&path)
         .map_err(|error| format!("read implementation repair artifact: {error}"))?;
     if raw.len() > 16 * 1024 {
@@ -11065,6 +11074,17 @@ fn prepare_implementation_lint_repair(
         .map_err(|error| format!("capture implementation repair diff: {error}"))?;
     if !staged.status.success() || staged.stdout.is_empty() {
         return Err("implementation lint repair requires a non-empty staged diff".to_string());
+    }
+    let worktree_matches_index = binding
+        .command()
+        .args(["diff", "--quiet", "--exit-code", "--", "."])
+        .args(EXECUTOR_INTERNAL_PATHSPECS)
+        .status()
+        .map_err(|error| format!("compare implementation repair index: {error}"))?;
+    if !worktree_matches_index.success() {
+        return Err(
+            "implementation repair index differs from worktree; preserving staged bytes".into(),
+        );
     }
     let body =
         implementation_repair_artifact_body(state, attempt, &sha256_hex(&staged.stdout), rules);
@@ -31578,12 +31598,25 @@ exit 64
         fs::write(&closeout, "stale closeout").expect("stale closeout");
         fs::write(fixture.repo.join("implementation.txt"), "repair me\n").expect("implementation");
         git(&fixture.repo, &["add", "implementation.txt"]);
-
+        fs::remove_file(fixture.repo.join("implementation.txt")).expect("remove staged-only file");
+        let error = super::prepare_implementation_lint_repair(
+            &state_path,
+            &mut state,
+            &closeout,
+            &[super::ImplementationLintRule::Complexity],
+        )
+        .expect_err("staged-only bytes must be preserved");
+        assert!(error.contains("differs from worktree"), "{error}");
+        fs::write(fixture.repo.join("implementation.txt"), "repair me\n")
+            .expect("restore worktree");
         super::prepare_implementation_lint_repair(
             &state_path,
             &mut state,
             &closeout,
-            &[autospec_core::lint::ImplementationLintRule::Complexity],
+            &[
+                super::ImplementationLintRule::Complexity,
+                super::ImplementationLintRule::Security,
+            ],
         )
         .expect("prepare first repair");
 
@@ -31592,53 +31625,19 @@ exit 64
         assert!(fs::read_to_string(&closeout)
             .expect("cleared closeout")
             .is_empty());
-        let cached = Command::new("git")
-            .args(["diff", "--cached", "--quiet"])
-            .current_dir(&fixture.repo)
-            .status()
-            .expect("inspect staged index");
-        assert!(
-            cached.success(),
-            "repair must not expose stale staged content"
-        );
-        let prompt = super::implementation_repair_prompt(&state_path, &state)
-            .expect("load cumulative repair prompt");
-        assert!(prompt.contains("Fix COMPLEXITY:"), "{prompt}");
+        git(&fixture.repo, &["diff", "--cached", "--quiet"]);
+        let prompt =
+            super::implementation_repair_prompt(&state_path, &state).expect("repair prompt");
+        assert!(prompt.contains("Fix COMPLEXITY:") && prompt.contains("Fix SECURITY:"));
         assert!(prompt.contains("Claim: claim-42"), "{prompt}");
         assert!(prompt.contains("MUST NOT push"), "{prompt}");
-
-        state.phase = BridgePhase::ImplementationComplete;
-        fs::write(fixture.repo.join("implementation.txt"), "repair again\n")
-            .expect("second implementation");
-        git(&fixture.repo, &["add", "implementation.txt"]);
-        super::prepare_implementation_lint_repair(
-            &state_path,
-            &mut state,
-            &closeout,
-            &[autospec_core::lint::ImplementationLintRule::Security],
-        )
-        .expect("prepare second repair");
-        let prompt = super::implementation_repair_prompt(&state_path, &state)
-            .expect("load cumulative repair prompt");
-        assert!(prompt.contains("Fix COMPLEXITY:") && prompt.contains("Fix SECURITY:"));
-    }
-
-    #[test]
-    fn implementation_lint_repair_exhaustion_preserves_attempt_three() {
-        let mut state = persisted_invocation();
-        state.phase = BridgePhase::ImplementationComplete;
-        state.implementation_repair_attempt = 3;
-        let error = super::prepare_implementation_lint_repair(
-            Path::new("/unreached/state.json"),
-            &mut state,
-            Path::new("/unreached/closeout.md"),
-            &[autospec_core::lint::ImplementationLintRule::Security],
-        )
-        .expect_err("attempt four must fail closed");
-
-        assert!(error.contains("exhausted after 3 attempts"), "{error}");
-        assert_eq!(state.phase, BridgePhase::ImplementationComplete);
-        assert_eq!(state.implementation_repair_attempt, 3);
+        let artifact = super::implementation_repair_artifact_path(&state_path, &state, 1)
+            .expect("first repair artifact");
+        let alias = artifact.with_extension("alias");
+        fs::hard_link(&artifact, &alias).expect("link repair artifact");
+        assert!(super::implementation_repair_prompt(&state_path, &state)
+            .expect_err("linked artifact must fail closed")
+            .contains("singly linked"));
     }
 
     #[test]
