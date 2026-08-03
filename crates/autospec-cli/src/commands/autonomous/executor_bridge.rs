@@ -36,6 +36,9 @@ use autospec_core::claim::{
     RemoteComment,
 };
 use autospec_core::coordination::ConductorOutcome;
+use autospec_core::lint::implementation::{
+    directive_for, parse_blocking_hook_failure, ImplementationLintRule,
+};
 use autospec_core::lint::{
     evaluate_patch_size, lint_implementation, lint_issue_implementation_contract,
     parse_unified_diff, ImplementationLintContext, ImplementationLintOptions,
@@ -1169,12 +1172,13 @@ fn run_executor_bridge_with_codex_probe(
     if launch_phase || state.phase == BridgePhase::ImplementationComplete {
         prepare_private_closeout_sink(&state.identity.worktree, &closeout_path)?;
     }
-    let prompt = build_implementer_prompt(
+    let mut prompt = build_implementer_prompt(
         &state.identity,
         &request.issue_title,
         &request.issue_body,
         &closeout_path,
     )?;
+    prompt.push_str(&implementation_repair_prompt(&request.state_path, &state)?);
     if resolved_harness.is_none()
         && launch_phase
         && has_durable_harness_recovery_evidence(&request.state_path, &state)?
@@ -1300,8 +1304,23 @@ fn run_executor_bridge_with_codex_probe(
         protected
             .verify(&state.identity.repository_path, &state.identity.branch)
             .map_err(BridgeRunFailure::from)?;
-        commit_sandboxed_executor_diff(&state, &request.issue_title, &request.issue_body)
-            .map_err(BridgeRunFailure::from)?;
+        if let Err(error) =
+            commit_sandboxed_executor_diff(&state, &request.issue_title, &request.issue_body)
+        {
+            let Some(hook_failure) = error.strip_prefix("commit sandboxed executor diff: ") else {
+                return Err(error.into());
+            };
+            let rules = parse_blocking_hook_failure(hook_failure)
+                .map_err(|parse| BridgeRunFailure::invariant(format!("{error}; {parse}")))?;
+            prepare_implementation_lint_repair(
+                &request.state_path,
+                &mut state,
+                &closeout_path,
+                &rules,
+            )
+            .map_err(BridgeRunFailure::invariant)?;
+            return Ok(pending_bridge_receipt(request)?);
+        }
     }
     let proof = match recover_or_prove_implementation(
         &request.state_path,
@@ -10890,6 +10909,195 @@ fn stage_sandboxed_executor_diff(
         ));
     }
     Ok(())
+}
+
+fn implementation_repair_artifact_path(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    attempt: u32,
+) -> Result<PathBuf, String> {
+    let root = state_path
+        .parent()
+        .ok_or_else(|| "executor state path requires a parent".to_string())?
+        .join("implementation-repair");
+    ensure_private_directory(&root)?;
+    let scope = &sha256_hex(state.identity.invocation_id.as_bytes())[..16];
+    Ok(root.join(format!("{scope}.attempt-{attempt}.json")))
+}
+
+fn implementation_repair_artifact_body(
+    state: &PersistedInvocation,
+    attempt: u32,
+    staged_diff_digest: &str,
+    rules: &[ImplementationLintRule],
+) -> String {
+    serde_json::json!({
+        "schema": 1,
+        "claim_id": state.identity.claim_id,
+        "invocation_id": state.identity.invocation_id,
+        "base_oid": state.identity.base_oid,
+        "branch": state.identity.branch,
+        "attempt": attempt,
+        "staged_diff_digest": staged_diff_digest,
+        "rules": rules.iter().map(|rule| rule.id()).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+fn read_implementation_repair_rules(
+    state_path: &Path,
+    state: &PersistedInvocation,
+    attempt: u32,
+) -> Result<Vec<ImplementationLintRule>, String> {
+    let path = implementation_repair_artifact_path(state_path, state, attempt)?;
+    validate_private_state_file(&path)?;
+    let raw = fs::read_to_string(&path)
+        .map_err(|error| format!("read implementation repair artifact: {error}"))?;
+    if raw.len() > 16 * 1024 {
+        return Err("implementation repair artifact exceeds 16384 bytes".to_string());
+    }
+    let object = strict_object(
+        serde_json::from_str(&raw)
+            .map_err(|error| format!("parse implementation repair artifact: {error}"))?,
+        &[
+            "schema",
+            "claim_id",
+            "invocation_id",
+            "base_oid",
+            "branch",
+            "attempt",
+            "staged_diff_digest",
+            "rules",
+        ],
+        "implementation repair artifact",
+    )?;
+    if number(&object, "schema")? != 1
+        || text(&object, "claim_id")? != state.identity.claim_id
+        || text(&object, "invocation_id")? != state.identity.invocation_id
+        || text(&object, "base_oid")? != state.identity.base_oid
+        || text(&object, "branch")? != state.identity.branch
+        || checked_u32(&object, "attempt")? != attempt
+    {
+        return Err("implementation repair artifact binding mismatch".to_string());
+    }
+    let digest = text(&object, "staged_diff_digest")?;
+    if !canonical_sha256(&digest) {
+        return Err("implementation repair artifact diff digest is invalid".to_string());
+    }
+    let values = required(&object, "rules")?
+        .as_array()
+        .filter(|rules| !rules.is_empty() && rules.len() <= 64)
+        .ok_or_else(|| "implementation repair artifact rules are invalid".to_string())?;
+    let rules = values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .and_then(ImplementationLintRule::from_id)
+                .ok_or_else(|| "implementation repair artifact has an unknown rule".to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if raw != implementation_repair_artifact_body(state, attempt, &digest, &rules) {
+        return Err("implementation repair artifact is not canonical".to_string());
+    }
+    Ok(rules)
+}
+
+fn implementation_repair_prompt(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<String, String> {
+    if state.implementation_repair_attempt == 0 {
+        return Ok(String::new());
+    }
+    let mut seen = BTreeSet::new();
+    let mut directives = Vec::new();
+    for attempt in 1..=state.implementation_repair_attempt {
+        for rule in read_implementation_repair_rules(state_path, state, attempt)? {
+            if seen.insert(rule.id()) {
+                directives.push(format!("Fix {}: {}", rule.id(), directive_for(rule)));
+            }
+        }
+    }
+    Ok(format!(
+        "\nImplementation lint repair attempt {attempt} of {maximum}.\n\
+         Claim: {claim}\nInvocation: {invocation}\n\
+         The authority boundary is unchanged: you MUST NOT push or mutate remote state.\n\
+         Correct every cumulative deterministic finding below, rerun tests, and replace the Closeout report:\n{directives}\n",
+        attempt = state.implementation_repair_attempt,
+        maximum = MAX_IMPLEMENTATION_REPAIR_ATTEMPTS,
+        claim = state.identity.claim_id,
+        invocation = state.identity.invocation_id,
+        directives = directives.join("\n"),
+    ))
+}
+
+fn prepare_implementation_lint_repair(
+    state_path: &Path,
+    state: &mut PersistedInvocation,
+    closeout: &Path,
+    rules: &[ImplementationLintRule],
+) -> Result<(), String> {
+    if state.phase != BridgePhase::ImplementationComplete {
+        return Err("implementation lint repair requires completed implementation output".into());
+    }
+    let attempt = state.implementation_repair_attempt + 1;
+    if attempt > MAX_IMPLEMENTATION_REPAIR_ATTEMPTS {
+        return Err(format!(
+            "executor implementation lint repair exhausted after {MAX_IMPLEMENTATION_REPAIR_ATTEMPTS} attempts"
+        ));
+    }
+    let binding = trusted_worktree_git(state)?;
+    let staged = binding
+        .command()
+        .args([
+            "diff",
+            "--cached",
+            "--binary",
+            "--full-index",
+            "--no-ext-diff",
+            "HEAD",
+            "--",
+            ".",
+        ])
+        .args(EXECUTOR_INTERNAL_PATHSPECS)
+        .output()
+        .map_err(|error| format!("capture implementation repair diff: {error}"))?;
+    if !staged.status.success() || staged.stdout.is_empty() {
+        return Err("implementation lint repair requires a non-empty staged diff".to_string());
+    }
+    let body =
+        implementation_repair_artifact_body(state, attempt, &sha256_hex(&staged.stdout), rules);
+    write_private_create_once(
+        &implementation_repair_artifact_path(state_path, state, attempt)?,
+        body.as_bytes(),
+        "implementation lint repair artifact",
+    )?;
+    let unstage = binding
+        .command()
+        .args(["restore", "--source=HEAD", "--staged", "--", "."])
+        .output()
+        .map_err(|error| format!("unstage implementation repair diff: {error}"))?;
+    if !unstage.status.success() {
+        return Err(format!(
+            "unstage implementation repair diff: {}",
+            String::from_utf8_lossy(&unstage.stderr).trim()
+        ));
+    }
+    prepare_private_closeout_sink(&state.identity.worktree, closeout)?;
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(closeout)
+        .and_then(|file| file.sync_all())
+        .map_err(|error| format!("clear implementation repair Closeout report: {error}"))?;
+    state.phase = BridgePhase::Interrupted;
+    state.implementation_repair_attempt = attempt;
+    state.head_oid = None;
+    state.closeout_path = None;
+    state.closeout_digest = None;
+    state.progress_at = unix_now()?;
+    write_invocation_atomic(state_path, state)
 }
 
 fn commit_sandboxed_executor_diff(
@@ -31353,6 +31561,84 @@ exit 64
                 .expect("recover current repair attempt")
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn implementation_lint_repair_persists_bound_evidence_and_cumulative_prompt() {
+        let fixture = GitFixture::new("implementation-lint-repair");
+        git(
+            &fixture.repo,
+            &["checkout", "-b", "feat/autonomous-issue-42"],
+        );
+        let mut state = supervision_state(&fixture);
+        state.phase = BridgePhase::ImplementationComplete;
+        let state_path = fixture.root.join("state/invocation.json");
+        let closeout = fixture.repo.join(".autospec/executor-closeout.md");
+        super::prepare_private_closeout_sink(&fixture.repo, &closeout).expect("closeout sink");
+        fs::write(&closeout, "stale closeout").expect("stale closeout");
+        fs::write(fixture.repo.join("implementation.txt"), "repair me\n").expect("implementation");
+        git(&fixture.repo, &["add", "implementation.txt"]);
+
+        super::prepare_implementation_lint_repair(
+            &state_path,
+            &mut state,
+            &closeout,
+            &[autospec_core::lint::ImplementationLintRule::Complexity],
+        )
+        .expect("prepare first repair");
+
+        assert_eq!(state.phase, BridgePhase::Interrupted);
+        assert_eq!(state.implementation_repair_attempt, 1);
+        assert!(fs::read_to_string(&closeout)
+            .expect("cleared closeout")
+            .is_empty());
+        let cached = Command::new("git")
+            .args(["diff", "--cached", "--quiet"])
+            .current_dir(&fixture.repo)
+            .status()
+            .expect("inspect staged index");
+        assert!(
+            cached.success(),
+            "repair must not expose stale staged content"
+        );
+        let prompt = super::implementation_repair_prompt(&state_path, &state)
+            .expect("load cumulative repair prompt");
+        assert!(prompt.contains("Fix COMPLEXITY:"), "{prompt}");
+        assert!(prompt.contains("Claim: claim-42"), "{prompt}");
+        assert!(prompt.contains("MUST NOT push"), "{prompt}");
+
+        state.phase = BridgePhase::ImplementationComplete;
+        fs::write(fixture.repo.join("implementation.txt"), "repair again\n")
+            .expect("second implementation");
+        git(&fixture.repo, &["add", "implementation.txt"]);
+        super::prepare_implementation_lint_repair(
+            &state_path,
+            &mut state,
+            &closeout,
+            &[autospec_core::lint::ImplementationLintRule::Security],
+        )
+        .expect("prepare second repair");
+        let prompt = super::implementation_repair_prompt(&state_path, &state)
+            .expect("load cumulative repair prompt");
+        assert!(prompt.contains("Fix COMPLEXITY:") && prompt.contains("Fix SECURITY:"));
+    }
+
+    #[test]
+    fn implementation_lint_repair_exhaustion_preserves_attempt_three() {
+        let mut state = persisted_invocation();
+        state.phase = BridgePhase::ImplementationComplete;
+        state.implementation_repair_attempt = 3;
+        let error = super::prepare_implementation_lint_repair(
+            Path::new("/unreached/state.json"),
+            &mut state,
+            Path::new("/unreached/closeout.md"),
+            &[autospec_core::lint::ImplementationLintRule::Security],
+        )
+        .expect_err("attempt four must fail closed");
+
+        assert!(error.contains("exhausted after 3 attempts"), "{error}");
+        assert_eq!(state.phase, BridgePhase::ImplementationComplete);
+        assert_eq!(state.implementation_repair_attempt, 3);
     }
 
     #[test]
