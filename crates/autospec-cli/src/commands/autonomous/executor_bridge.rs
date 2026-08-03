@@ -21,9 +21,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::commands::claim::{
     authoritative_executor_result, observe_terminal_bridge_claim,
     record_executor_result_with_receipt, recover_released_bridge_claim, refresh_claim_generation,
-    transition_bridge_claim, BridgeClaimDisposition, BridgeClaimTransition, ClaimMutationIdentity,
-    ClaimRefreshResult, ExecutorResultAuthorityBinding, ExecutorResultRecord,
-    ExecutorSuccessBinding,
+    transition_bridge_claim, with_released_bridge_predecessor_authority, BridgeClaimDisposition,
+    BridgeClaimTransition, ClaimMutationIdentity, ClaimRefreshResult,
+    ExecutorResultAuthorityBinding, ExecutorResultRecord, ExecutorSuccessBinding,
 };
 use crate::commands::CommandFailureKind;
 use autospec_core::autonomous::premerge::{
@@ -1064,9 +1064,13 @@ fn run_executor_bridge_with_codex_probe(
             &repository_path,
             request.issue,
             &canonical_branch,
-            |predecessor| {
-                recover_released_bridge_claim(bridge_claim_identity(predecessor))
-                    .map_err(|error| error.message)
+            |predecessor, transfer| {
+                with_released_bridge_predecessor_authority(
+                    bridge_claim_identity(predecessor),
+                    || transfer().map_err(crate::commands::CommandFailure::diagnostic),
+                )
+                .map(|result| result.is_some())
+                .map_err(|error| error.message)
             },
         )
         .map_err(bridge_provision_failure)?;
@@ -13467,16 +13471,17 @@ pub(crate) fn finalize_ownership_loss_local(state_path: &Path) -> Result<(), Str
     prepare_available_worktree_transfer(state_path, &state, None)
 }
 
-fn recover_released_interrupted_predecessor_transfer<Released>(
+fn recover_released_interrupted_predecessor_transfer<Authorized>(
     state_dir: &Path,
     repository: &str,
     repository_path: &Path,
     issue: u64,
     branch: &str,
-    mut released: Released,
+    mut authorize: Authorized,
 ) -> Result<bool, String>
 where
-    Released: FnMut(&PersistedInvocation) -> Result<bool, String>,
+    Authorized:
+        FnMut(&PersistedInvocation, &mut dyn FnMut() -> Result<(), String>) -> Result<bool, String>,
 {
     if !state_dir.exists() {
         return Ok(false);
@@ -13537,10 +13542,20 @@ where
     if !executor_terminal_processes_are_quiescent(&state)? {
         return Err("interrupted executor predecessor process is still live".to_string());
     }
-    if !released(&state)? {
+    let mut transferred = false;
+    let authorized = authorize(&state, &mut || {
+        prepare_available_worktree_transfer(&state_path, &state, None)?;
+        transferred = true;
+        Ok(())
+    })?;
+    if !authorized {
         return Err("interrupted executor predecessor claim is not released".to_string());
     }
-    prepare_available_worktree_transfer(&state_path, &state, None)?;
+    if !transferred {
+        return Err(
+            "interrupted executor predecessor authority did not transfer ownership".to_string(),
+        );
+    }
     Ok(true)
 }
 
@@ -27069,7 +27084,7 @@ exit 64
             &fixture.repo.canonicalize().expect("canonical repo"),
             42,
             &worktree.branch,
-            |_| panic!("malformed predecessor must fail before the remote release check"),
+            |_, _| panic!("malformed predecessor must fail before the release check"),
         )
         .expect_err("malformed predecessor fails closed");
         assert!(
@@ -27093,7 +27108,7 @@ exit 64
             &fixture.repo.canonicalize().expect("canonical repo"),
             42,
             &worktree.branch,
-            |_| panic!("symlink predecessor must fail before the remote release check"),
+            |_, _| panic!("symlink predecessor must fail before the release check"),
         )
         .expect_err("symlink predecessor fails closed");
         assert!(symlink_error.contains("symlink"), "{symlink_error}");
@@ -27113,7 +27128,7 @@ exit 64
             &fixture.repo.canonicalize().expect("canonical repo"),
             42,
             &worktree.branch,
-            |_| panic!("ambiguous predecessors must fail before the remote release check"),
+            |_, _| panic!("ambiguous predecessors must fail before the release check"),
         )
         .expect_err("ambiguous predecessors fail closed");
         assert!(
@@ -27128,7 +27143,7 @@ exit 64
             &fixture.repo.canonicalize().expect("canonical repo"),
             42,
             &worktree.branch,
-            |_| Ok(false),
+            |_, _| Ok(false),
         )
         .expect_err("unreleased predecessor stays owned");
         assert!(unreleased.contains("claim is not released"), "{unreleased}");
@@ -27152,22 +27167,50 @@ exit 64
             &fixture.repo.canonicalize().expect("canonical repo"),
             42,
             &worktree.branch,
-            |_| panic!("live predecessor must be rejected before the remote release check"),
+            |_, _| panic!("live predecessor must be rejected before the release check"),
         )
         .expect_err("live predecessor stays owned");
         assert!(live.contains("process is still live"), "{live}");
 
         state.process = None;
         super::write_invocation_atomic(&state_path, &state).expect("persist quiescent invocation");
+        let withheld = super::recover_released_interrupted_predecessor_transfer(
+            &state_dir,
+            "owner/repo",
+            &fixture.repo.canonicalize().expect("canonical repo"),
+            42,
+            &worktree.branch,
+            |_, _| Ok(true),
+        )
+        .expect_err("authority cannot escape without owning the transfer");
+        assert!(
+            withheld.contains("did not transfer ownership"),
+            "{withheld}"
+        );
+        let unchanged = fs::read_to_string(&wip).expect("withheld authority preserves WIP");
+        assert_eq!(unchanged, "preserve me\n");
+        let release_checks = std::cell::Cell::new(0usize);
         assert!(super::recover_released_interrupted_predecessor_transfer(
             &state_dir,
             "owner/repo",
             &fixture.repo.canonicalize().expect("canonical repo"),
             42,
             &worktree.branch,
-            |candidate| Ok(candidate.identity.claim_id == "old-claim"),
+            |candidate, transfer| {
+                release_checks.set(release_checks.get() + 1);
+                if candidate.identity.claim_id != "old-claim" {
+                    return Ok(false);
+                }
+                transfer()?;
+                Ok(true)
+            },
         )
         .expect("recover released interrupted predecessor"));
+        assert_eq!(
+            release_checks.get(),
+            1,
+            "one authority gate must own the transfer operation"
+        );
         assert_eq!(
             fs::read_to_string(&wip).expect("old WIP remains"),
             "preserve me\n"
