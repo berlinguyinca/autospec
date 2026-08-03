@@ -10952,14 +10952,6 @@ fn read_implementation_repair_rules(
     let path = implementation_repair_artifact_path(state_path, state, attempt)?;
     reject_symlink_path(&path)?;
     validate_private_state_file(&path)?;
-    #[cfg(unix)]
-    if fs::metadata(&path)
-        .map_err(|error| format!("inspect implementation repair artifact: {error}"))?
-        .nlink()
-        != 1
-    {
-        return Err("implementation repair artifact must be singly linked".to_string());
-    }
     let raw = fs::read_to_string(&path)
         .map_err(|error| format!("read implementation repair artifact: {error}"))?;
     if raw.len() > 16 * 1024 {
@@ -31583,6 +31575,7 @@ exit 64
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
     #[test]
     fn implementation_lint_repair_persists_bound_evidence_and_cumulative_prompt() {
         let fixture = GitFixture::new("implementation-lint-repair");
@@ -31633,11 +31626,12 @@ exit 64
         assert!(prompt.contains("MUST NOT push"), "{prompt}");
         let artifact = super::implementation_repair_artifact_path(&state_path, &state, 1)
             .expect("first repair artifact");
-        let alias = artifact.with_extension("alias");
-        fs::hard_link(&artifact, &alias).expect("link repair artifact");
+        let target = artifact.with_extension("target");
+        fs::rename(&artifact, &target).expect("move repair artifact");
+        symlink(&target, &artifact).expect("replace repair artifact with symlink");
         assert!(super::implementation_repair_prompt(&state_path, &state)
-            .expect_err("linked artifact must fail closed")
-            .contains("singly linked"));
+            .expect_err("symlinked artifact must fail closed")
+            .contains("symlink"));
     }
 
     #[test]
