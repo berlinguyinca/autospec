@@ -23109,7 +23109,12 @@ fn committed_implementation_remote_and_branch_are_exact(
     .next()
     .ok_or_else(|| "executor remote base ref returned no OID".to_string())?
     .to_string();
-    if remote_base != state.identity.base_oid {
+    if !recovery_base_is_equal_or_descendant(
+        &state.identity.repository_path,
+        base_branch,
+        &state.identity.base_oid,
+        &remote_base,
+    )? {
         return Ok(false);
     }
     let branch_ref = format!("refs/heads/{}", state.identity.branch);
@@ -23141,6 +23146,43 @@ fn committed_implementation_remote_and_branch_are_exact(
         return Ok(false);
     }
     remote_snapshot_with_feature_head_is_exact(state_path, state, Some(&head))
+}
+
+fn recovery_base_is_equal_or_descendant(
+    repository: &Path,
+    base_branch: &str,
+    invocation_base: &str,
+    remote_base: &str,
+) -> Result<bool, String> {
+    if remote_base == invocation_base {
+        return Ok(true);
+    }
+    if !canonical_git_oid(invocation_base) || !canonical_git_oid(remote_base) {
+        return Err("executor recovery base OID is malformed".to_string());
+    }
+    let fetch = Command::new("git")
+        .args([
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "origin",
+            &format!("refs/heads/{base_branch}"),
+        ])
+        .current_dir(repository)
+        .output()
+        .map_err(|error| format!("fetch recovered executor base advance: {error}"))?;
+    if !fetch.status.success() {
+        return Err(format!(
+            "fetch recovered executor base advance failed: {}",
+            String::from_utf8_lossy(&fetch.stderr).trim()
+        ));
+    }
+    let status = Command::new("git")
+        .args(["merge-base", "--is-ancestor", invocation_base, remote_base])
+        .current_dir(repository)
+        .status()
+        .map_err(|error| format!("verify recovered executor base advance: {error}"))?;
+    Ok(status.success())
 }
 
 fn adopted_transfer_reaches_recovered_head(
@@ -26743,6 +26785,68 @@ One likely hidden failure: The fixture does not exercise a pull request.\n",
             super::recoverable_implementation_completion_for_state(&state_path, &state)
                 .expect("classify exact adopted base-reconciliation merge"),
             "the transfer head may be the first parent of the exact base merge"
+        );
+
+        fs::write(
+            seed.join("post-crash-base.txt"),
+            "post-crash base advance\n",
+        )
+        .expect("advance base after executor crash");
+        git(&seed, &["add", "post-crash-base.txt"]);
+        git(
+            &seed,
+            &["commit", "-m", "test: advance base after executor crash"],
+        );
+        git(&seed, &["push", "origin", "main"]);
+        let post_crash_base = git_stdout(&seed, &["rev-parse", "HEAD"]);
+        assert!(
+            super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("classify adopted implementation after base advance"),
+            "a descendant main advance must remain recoverable for the later base-drift gate"
+        );
+
+        git(&seed, &["checkout", "--orphan", "unrelated-main"]);
+        fs::write(seed.join("unrelated-main.txt"), "unrelated main\n")
+            .expect("write unrelated main");
+        git(&seed, &["add", "-A"]);
+        git(&seed, &["commit", "-m", "test: create unrelated main"]);
+        let unrelated_main = git_stdout(&seed, &["rev-parse", "HEAD"]);
+        let remote = fixture.root.join("remote.git");
+        git(&seed, &["push", "origin", "HEAD:refs/heads/unrelated-main"]);
+        git(
+            &fixture.root,
+            &[
+                "--git-dir",
+                remote.to_str().expect("remote path"),
+                "update-ref",
+                "refs/heads/main",
+                &unrelated_main,
+            ],
+        );
+        git(
+            &fixture.root,
+            &[
+                "--git-dir",
+                remote.to_str().expect("remote path"),
+                "update-ref",
+                "-d",
+                "refs/heads/unrelated-main",
+            ],
+        );
+        assert!(
+            !super::recoverable_implementation_completion_for_state(&state_path, &state)
+                .expect("reject unrelated post-crash base"),
+            "a non-descendant main replacement must stay fail-closed"
+        );
+        git(
+            &fixture.root,
+            &[
+                "--git-dir",
+                remote.to_str().expect("remote path"),
+                "update-ref",
+                "refs/heads/main",
+                &post_crash_base,
+            ],
         );
 
         let mut mismatched: serde_json::Value =
