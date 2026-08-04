@@ -19310,6 +19310,33 @@ impl OwnedProcess {
         Ok(result == 0)
     }
 
+    fn reap_if_child(&self) -> Result<bool, String> {
+        loop {
+            // SAFETY: waitid writes one siginfo_t, and P_PIDFD binds the wait to this owned
+            // descriptor rather than to a recyclable numeric PID.
+            let mut info = unsafe { std::mem::zeroed::<nix::libc::siginfo_t>() };
+            // SAFETY: pidfd is live for this call; WEXITED requests only terminal status and
+            // omitting WNOWAIT consumes it when this process is the descendant's current parent.
+            let result = unsafe {
+                nix::libc::waitid(
+                    nix::libc::P_PIDFD,
+                    self.pidfd.as_raw_fd() as nix::libc::id_t,
+                    &mut info,
+                    nix::libc::WEXITED | nix::libc::WNOHANG,
+                )
+            };
+            if result == 0 {
+                return Ok(true);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(nix::libc::ECHILD) => return Ok(false),
+                Some(nix::libc::EINTR) => continue,
+                _ => return Err(format!("wait on owned executor pidfd: {error}")),
+            }
+        }
+    }
+
     fn signal(&self, signal: Signal) -> Result<(), String> {
         if cleanup_failpoint() == CLEANUP_FAILPOINT_SIGNAL {
             return Err("injected cleanup signal failure".to_string());
@@ -19727,46 +19754,17 @@ impl OwnedProcessSet {
         let mut exited = Vec::new();
         for (key, process) in &self.descendants {
             if !process.is_live()? {
-                exited.push((key.clone(), process.birth.clone()));
+                exited.push(key.clone());
             }
         }
-        for (key, birth) in exited {
-            let pid = Pid::from_raw(
-                i32::try_from(key.0)
-                    .map_err(|_| "exited executor descendant PID is out of range".to_string())?,
-            );
-            let mut retain_for_reap = false;
-            loop {
-                match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
-                    Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..))
-                    | Err(nix::errno::Errno::ESRCH) => break,
-                    Err(nix::errno::Errno::ECHILD) => {
-                        retain_for_reap =
-                            observe_process_birth(birth.pid)?.as_ref() == Some(&birth);
-                        break;
-                    }
-                    Err(nix::errno::Errno::EINTR) => continue,
-                    Ok(WaitStatus::StillAlive) => {
-                        return Err(format!(
-                            "exited executor descendant {} remained live during reap",
-                            key.0
-                        ));
-                    }
-                    Ok(status) => {
-                        return Err(format!(
-                            "exited executor descendant {} was not terminal during reap: {status:?}",
-                            key.0
-                        ));
-                    }
-                    Err(error) => {
-                        return Err(format!(
-                            "reap exited executor descendant {}: {error}",
-                            key.0
-                        ));
-                    }
-                }
-            }
-            if retain_for_reap {
+        for key in exited {
+            let process = self
+                .descendants
+                .get(&key)
+                .expect("exited descendant key came from the owned map");
+            let birth = process.birth.clone();
+            let retain_for_reap = !process.reap_if_child()?;
+            if retain_for_reap && observe_process_birth(birth.pid)?.as_ref() == Some(&birth) {
                 self.exited_descendants.insert(key.clone(), birth);
             }
             self.descendants.remove(&key);
@@ -34193,6 +34191,45 @@ exit 64
         }
         assert!(!zombie.is_live().expect("observe unreaped fixture"));
         processes.descendants.insert(zombie_key.clone(), zombie);
+
+        let nonchild_root = test_root("unreaped-non-child-descendant");
+        let nonchild_pid_path = nonchild_root.join("pid");
+        let mut intermediary = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30 & printf '%s\\n' \"$!\" > \"$1\"; exec sleep 30")
+            .arg("sh")
+            .arg(&nonchild_pid_path)
+            .spawn()
+            .expect("spawn intermediary descendant fixture");
+        let _intermediary_cleanup = DetachedForkedCleanup::new(intermediary.id())
+            .expect("arm intermediary fixture cleanup");
+        let mut nonchild_pid = None;
+        for _ in 0..100 {
+            if let Ok(pid) = fs::read_to_string(&nonchild_pid_path) {
+                nonchild_pid = Some(
+                    pid.trim()
+                        .parse::<u32>()
+                        .expect("parse non-child descendant PID"),
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let nonchild_pid = nonchild_pid.expect("intermediary published descendant PID");
+        let nonchild = super::OwnedProcess::capture_forked_child(nonchild_pid)
+            .expect("capture non-child descendant pidfd");
+        let nonchild_key = (nonchild.birth.pid, nonchild.birth.start_identity.clone());
+        nonchild
+            .signal(Signal::SIGKILL)
+            .expect("stop non-child descendant fixture");
+        for _ in 0..100 {
+            if !nonchild.is_live().expect("observe non-child fixture") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!nonchild.is_live().expect("observe non-child fixture"));
+        processes.descendants.insert(nonchild_key.clone(), nonchild);
         let mut live_child = Command::new("/usr/bin/sleep")
             .arg("30")
             .spawn()
@@ -34215,12 +34252,38 @@ exit 64
             .iter()
             .all(|key| !processes.descendants.contains_key(key)));
         assert!(!processes.descendants.contains_key(&zombie_key));
+        assert!(!processes.descendants.contains_key(&nonchild_key));
+        assert!(processes.exited_descendants.contains_key(&nonchild_key));
         assert!(processes.descendants.contains_key(&live_key));
         match zombie_child.wait() {
             Ok(_) => {}
             Err(error) if error.raw_os_error() == Some(nix::libc::ECHILD) => {}
             Err(error) => panic!("reap unreaped fixture: {error}"),
         }
+        super::OwnedProcess::capture_forked_child(intermediary.id())
+            .expect("capture intermediary cleanup pidfd")
+            .signal(Signal::SIGKILL)
+            .expect("stop intermediary fixture");
+        intermediary.wait().expect("reap intermediary fixture");
+        for _ in 0..100 {
+            processes
+                .reap_descendants()
+                .expect("reap retained non-child fixture");
+            if super::observe_process_birth(nonchild_pid)
+                .expect("observe reparented non-child fixture")
+                .is_none()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(super::observe_process_birth(nonchild_pid)
+            .expect("observe reaped non-child fixture")
+            .is_none());
+        processes
+            .capture_descendants_while_leader_live()
+            .expect("forget reaped non-child tombstone");
+        assert!(!processes.exited_descendants.contains_key(&nonchild_key));
         processes
             .descendants
             .get(&live_key)
