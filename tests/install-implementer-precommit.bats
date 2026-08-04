@@ -67,6 +67,17 @@ stage_complexity_violation() {
     [ "$status" -eq 0 ]
 }
 
+@test "installed hook rejects a noncanonical autonomous lookalike branch" {
+    export AUTOSPEC_SCRIPTS_DIR="$REPO_ROOT/scripts"
+    git -C "$WORKTREE" checkout -q -b fix/autonomous-issue-2371
+    bash "$INSTALL_SCRIPT" "$WORKTREE"
+    stage_complexity_violation
+
+    run git -C "$WORKTREE" commit -m "test autonomous lookalike"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q '^COMPLEXITY:scripts/lint-implementation.sh:'
+}
+
 @test "installed hook omits issue arguments on a branch without a numeric issue segment" {
     export AUTOSPEC_SCRIPTS_DIR="$REPO_ROOT/scripts"
     git -C "$WORKTREE" checkout -q -b fix/hook-without-issue

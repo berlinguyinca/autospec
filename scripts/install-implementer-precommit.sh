@@ -64,7 +64,7 @@ ISSUE_ARGS=()
 BRANCH=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 BRANCH_SEGMENT=${BRANCH##*/}
 case "$BRANCH" in
-  */autonomous-issue-[0-9]*)
+  feat/autonomous-issue-[0-9]*)
     ISSUE_NUMBER=${BRANCH_SEGMENT#autonomous-issue-}
     case "$ISSUE_NUMBER" in
       ''|*[!0-9]*) ;;
