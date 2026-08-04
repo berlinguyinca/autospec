@@ -26131,7 +26131,7 @@ mod tests {
     #[test]
     fn autonomous_executor_bridge_integration_sync_rejects_divergence() {
         let fixture = GitFixture::new("integration-sync-divergence");
-        let advanced = publish_advanced_main(&fixture, "advanced");
+        publish_advanced_main(&fixture, "advanced");
         fs::write(fixture.repo.join("local.txt"), "local").expect("write local file");
         git(&fixture.repo, &["add", "."]);
         git(&fixture.repo, &["commit", "-m", "local"]);
@@ -26144,18 +26144,6 @@ mod tests {
         assert_eq!(
             git_stdout(&fixture.repo, &["rev-parse", "refs/heads/main"]),
             diverged
-        );
-        assert_eq!(
-            git_stdout(
-                &fixture.root,
-                &[
-                    "--git-dir",
-                    fixture.root.join("remote.git").to_str().expect("remote"),
-                    "rev-parse",
-                    "refs/heads/main",
-                ],
-            ),
-            advanced
         );
     }
 

@@ -2124,6 +2124,8 @@ fn load_autonomous_config(repo_dir: &str) -> Result<AutonomousConfig, String> {
 
 fn repository_config_path(repo_dir: &str) -> PathBuf {
     git_top_level(repo_dir)
+        .ok()
+        .flatten()
         .unwrap_or_else(|| PathBuf::from(repo_dir))
         .join(".autospec/autonomous.yml")
 }
@@ -3004,10 +3006,13 @@ fn synchronize_fresh_selection_base(
     if phase != ConductorPhase::Scan || selected_issue.is_some() {
         return Ok(None);
     }
-    if !repo_dir.join(".git").exists() {
+    let repo_dir = repo_dir
+        .to_str()
+        .ok_or_else(|| "autonomous repository path is not UTF-8".to_string())?;
+    let Some(repo_root) = git_top_level(repo_dir)? else {
         return Ok(None);
-    }
-    executor_bridge::synchronize_integration_base(repo_dir, branch).map(Some)
+    };
+    executor_bridge::synchronize_integration_base(&repo_root, branch).map(Some)
 }
 
 fn issue_is_open_for_autonomous_work(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
@@ -6049,7 +6054,7 @@ fn wait_for_scope_stopped(layout: &RunLayout) {
 }
 
 fn validate_repo_dir(options: &Options) -> Result<(), String> {
-    let top = git_top_level(&options.repo_dir).ok_or_else(|| {
+    let top = git_top_level(&options.repo_dir)?.ok_or_else(|| {
         format!(
             "--repo-dir {} is not a git checkout",
             Path::new(&options.repo_dir).display()
@@ -6069,21 +6074,22 @@ fn validate_repo_dir(options: &Options) -> Result<(), String> {
     Ok(())
 }
 
-fn git_top_level(repo_dir: &str) -> Option<PathBuf> {
+fn git_top_level(repo_dir: &str) -> Result<Option<PathBuf>, String> {
     let output = Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(repo_dir)
         .output()
-        .ok()?;
+        .map_err(|error| format!("inspect repository worktree: {error}"))?;
     if !output.status.success() {
-        return None;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return if stderr.contains("not a git repository") {
+            Ok(None)
+        } else {
+            Err(format!("inspect repository worktree: {}", stderr.trim()))
+        };
     }
     let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
+    Ok((!path.is_empty()).then(|| PathBuf::from(path)))
 }
 
 fn monitor_state_metadata(layout: &RunLayout) -> StateMetadata {
@@ -7647,7 +7653,7 @@ mod foreground_tests {
     }
 
     #[test]
-    fn recovered_lease_does_not_repeat_fresh_selection_base_synchronization() {
+    fn recovered_lease_bypasses_sync_but_fresh_subdirectory_does_not() {
         let (root, repo, advanced) = behind_integration_checkout("recovered-lease-sync");
         let behind = git_fixture_stdout(&repo, &["rev-parse", "refs/heads/main"]);
         assert_ne!(behind, advanced);
@@ -7678,8 +7684,10 @@ mod foreground_tests {
             behind
         );
 
+        let nested = repo.join("nested");
+        fs::create_dir(&nested).expect("create repository subdirectory");
         let synchronized =
-            synchronize_fresh_selection_base(&repo, "main", ConductorPhase::Scan, None)
+            synchronize_fresh_selection_base(&nested, "main", ConductorPhase::Scan, None)
                 .expect("fresh selection sync");
 
         assert_eq!(synchronized, Some(advanced.clone()));
