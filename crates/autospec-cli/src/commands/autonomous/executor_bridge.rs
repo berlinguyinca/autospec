@@ -1718,8 +1718,7 @@ fn ensure_premerge_and_review(
     proof: &ImplementationProof,
     runtime: Option<&DirectRuntimeAdapter>,
 ) -> Result<Option<String>, BridgeRunFailure> {
-    if state.phase == BridgePhase::DraftCreated
-        && reconcile_base_drift(&request.state_path, state)?
+    if state.phase == BridgePhase::DraftCreated && reconcile_base_drift(&request.state_path, state)?
     {
         return Ok(None);
     }
@@ -16578,6 +16577,27 @@ fn publish_continuation_children(
     Ok((umbrella, parent.map_or(children[0], |_| receipt.issue)))
 }
 
+fn recover_bound_continuation(state: &PersistedInvocation) -> Result<Option<(u64, u64)>, String> {
+    let (Some(umbrella), Some(current_child)) = (state.umbrella, state.current_child) else {
+        return Ok(None);
+    };
+    let children = continuation_child_list(&state.identity.repository, umbrella)?;
+    let expected_child = if umbrella == state.identity.issue {
+        children.first().copied()
+    } else if children.contains(&state.identity.issue) {
+        Some(state.identity.issue)
+    } else {
+        None
+    };
+    if expected_child != Some(current_child) {
+        return Err(
+            "executor continuation binding does not match the authoritative child order"
+                .to_string(),
+        );
+    }
+    Ok(Some((umbrella, current_child)))
+}
+
 fn bind_continuation_part(
     state_path: &Path,
     state: &mut PersistedInvocation,
@@ -16611,7 +16631,10 @@ fn require_continuation_checkpoint(
     };
     emit_continuation_events(state_path, event_log, state, &checkpoint)?;
     if publish_children {
-        let binding = publish_continuation_children(state_path, &checkpoint.receipt)?;
+        let binding = match recover_bound_continuation(state)? {
+            Some(binding) => binding,
+            None => publish_continuation_children(state_path, &checkpoint.receipt)?,
+        };
         let mut bound = state.clone();
         bind_continuation_part(state_path, &mut bound, binding)?;
     }
@@ -39347,7 +39370,7 @@ exit 64
 
     #[cfg(unix)]
     #[test]
-    fn hard_oversized_publication_and_continuation_publication_are_ordered_and_restart_safe() {
+    fn bound_continuation_publication_is_ordered_and_restart_safe() {
         // Break caught: proactive receipts existed locally but never became ordered GitHub work.
         let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
         let (fixture, mut state, _, _) = implementation_proof_fixture("continuation-publication");
@@ -39425,6 +39448,9 @@ esac
         assert_eq!((bound.umbrella, bound.current_child), (Some(42), Some(101)));
         let parent = fs::read_to_string(store.join("comments/42")).unwrap();
         assert!(parent.contains("append-only-parent-extension"));
+        let mut sibling_misbinding = bound.clone();
+        sibling_misbinding.current_child = Some(102);
+        assert!(super::recover_bound_continuation(&sibling_misbinding).is_err());
         let receipt =
             super::continuation_receipt_path(&state_path, &proof.head_oid).expect("receipt path");
         assert!(receipt.exists(), "seven files must plan a continuation");
@@ -39439,6 +39465,60 @@ esac
         assert!(!fs::read_to_string(store.join("calls"))
             .expect("restart calls")
             .contains("issue create"));
+
+        git(
+            &state.identity.worktree,
+            &[
+                "push",
+                "origin",
+                &format!("{}:refs/heads/{}", proof.head_oid, state.identity.branch),
+            ],
+        );
+        let mut rebound = bound.clone();
+        rebound.phase = super::BridgePhase::DraftCreated;
+        rebound.pr = Some(17);
+        super::write_invocation_atomic(&state_path, &rebound).expect("bound draft state");
+        fs::write(
+            fixture.root.join("seed/continuation-base.txt"),
+            "base drift\n",
+        )
+        .expect("advance continuation base");
+        git(
+            &fixture.root.join("seed"),
+            &["add", "continuation-base.txt"],
+        );
+        git(
+            &fixture.root.join("seed"),
+            &["commit", "-m", "test: advance continuation base"],
+        );
+        git(&fixture.root.join("seed"), &["push", "origin", "main"]);
+        let old_base = rebound.identity.base_oid.clone();
+        assert!(
+            super::reconcile_base_drift_with_refresh(&state_path, &mut rebound, || Ok(
+                super::BridgeClaimOwnership::Refreshed { ttl_seconds: 60 }
+            ))
+            .expect("reconcile bound continuation base")
+        );
+        assert_ne!(rebound.identity.base_oid, old_base);
+        let next_head = rebound.head_oid.clone().expect("reconciled head");
+        let next_proof = super::ImplementationProof {
+            head_oid: next_head,
+            closeout_body: proof.closeout_body.clone(),
+        };
+        fs::write(store.join("calls"), "").expect("clear calls");
+        super::require_continuation_checkpoint(
+            &state_path,
+            &event_log,
+            &rebound,
+            &next_proof,
+            "",
+            true,
+        )
+        .expect("bound exact-head recovery");
+        let recovery_calls = fs::read_to_string(store.join("calls")).expect("recovery calls");
+        assert!(!recovery_calls.contains("issue create"));
+        assert_eq!(fs::read_to_string(store.join("next")).unwrap(), "103");
+
         let mut adverse = super::load_continuation_receipt(&state_path, &state).expect("receipt");
         adverse.unmet = vec!["Improve quality should feel nice".into()];
         adverse.content_digest = adverse.digest();
@@ -39472,6 +39552,7 @@ esac
         let title = fs::read_to_string(store.join("issues/102.title")).unwrap();
         assert!(title.trim().len() <= 120);
 
+        let remote_before_hard = super::remote_head_refs(&fixture.repo).expect("remote refs");
         state.identity.issue = 44;
         let worktree = &state.identity.worktree;
         fs::write(worktree.join("hard.txt"), "changed\n".repeat(401)).expect("hard slice");
@@ -39510,7 +39591,7 @@ esac
         assert_eq!(calls.matches("issue create").count(), 3);
         assert!(!calls.contains("pr create"));
         let refs = super::remote_head_refs(&fixture.repo).expect("remote refs");
-        assert!(!refs.contains_key(&format!("refs/heads/{}", state.identity.branch)));
+        assert_eq!(refs, remote_before_hard);
         fs::write(store.join("calls"), "").expect("clear calls");
         assert!(publish().is_err());
         assert!(!fs::read_to_string(store.join("calls"))
@@ -47918,8 +47999,7 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
         super::persist_patch_size_admission(&state_path, &admission)
             .expect("original admission receipt");
 
-        fs::write(fixture.root.join("seed/premerge-fix.txt"), "base fix\n")
-            .expect("base drift");
+        fs::write(fixture.root.join("seed/premerge-fix.txt"), "base fix\n").expect("base drift");
         git(&fixture.root.join("seed"), &["add", "premerge-fix.txt"]);
         git(
             &fixture.root.join("seed"),
