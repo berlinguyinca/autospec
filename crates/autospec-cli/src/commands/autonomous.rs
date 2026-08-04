@@ -2699,7 +2699,7 @@ fn run_foreground_with_lease(
             CommandFailure::diagnostic("foreground recovery has no selected issue")
         })?;
         let mut local_acquisition =
-            load_claim_acquisition_receipt(&state_path, &layout.repo, issue)
+            recover_claim_acquisition_receipt_for_selection(&state_path, &layout.repo, issue)
                 .map_err(CommandFailure::diagnostic)?;
         if state.phase() == ConductorPhase::Claim
             && local_acquisition.is_none()
@@ -4297,6 +4297,19 @@ fn load_claim_acquisition_receipt(
     repo: &str,
     issue: u64,
 ) -> Result<Option<claim::ClaimLease>, String> {
+    let Some(receipt) = read_claim_acquisition_receipt(state_path)? else {
+        return Ok(None);
+    };
+    if receipt.repo != repo || receipt.issue != issue {
+        return Err(
+            "claim acquisition receipt does not match the selected repository and issue"
+                .to_string(),
+        );
+    }
+    Ok(Some(receipt))
+}
+
+fn read_claim_acquisition_receipt(state_path: &Path) -> Result<Option<claim::ClaimLease>, String> {
     let path = claim_acquisition_receipt_path(state_path);
     if path.exists() {
         validate_claim_acquisition_parent(&path)?;
@@ -4356,11 +4369,23 @@ fn load_claim_acquisition_receipt(
         claim_id: text("claim_id")?,
         session_id: None,
     };
-    if receipt.repo != repo || receipt.issue != issue {
-        return Err(
-            "claim acquisition receipt does not match the selected repository and issue"
-                .to_string(),
-        );
+    Ok(Some(receipt))
+}
+
+fn recover_claim_acquisition_receipt_for_selection(
+    state_path: &Path,
+    repo: &str,
+    issue: u64,
+) -> Result<Option<claim::ClaimLease>, String> {
+    let Some(receipt) = read_claim_acquisition_receipt(state_path)? else {
+        return Ok(None);
+    };
+    if receipt.repo != repo {
+        return Err("claim acquisition receipt does not match the selected repository".to_string());
+    }
+    if receipt.issue != issue {
+        clear_claim_acquisition_receipt(state_path)?;
+        return Ok(None);
     }
     Ok(Some(receipt))
 }
@@ -7557,6 +7582,69 @@ mod autonomous_metadata_tests {
 #[cfg(test)]
 mod foreground_tests {
     use super::*;
+
+    fn claim_receipt_fixture(repo: &str, issue: u64) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "autospec-claim-receipt-{}-{}",
+            std::process::id(),
+            ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).expect("create claim receipt fixture");
+        #[cfg(unix)]
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700))
+            .expect("make claim receipt fixture private");
+        let state_path = root.join("foreground-conductor-repository.json");
+        let receipt_path = claim_acquisition_receipt_path(&state_path);
+        fs::write(
+            &receipt_path,
+            format!(
+                "{{\"schema\":1,\"repo\":{repo:?},\"issue\":{issue},\"worker_id\":\"worker\",\"branch\":\"feat/issue-{issue}\",\"claim_id\":\"claim-{issue}\"}}\n"
+            ),
+        )
+        .expect("write claim receipt fixture");
+        #[cfg(unix)]
+        fs::set_permissions(&receipt_path, fs::Permissions::from_mode(0o600))
+            .expect("make claim receipt private");
+        (root, state_path)
+    }
+
+    #[test]
+    fn stale_claim_receipt_for_prior_issue_is_retired_before_new_selection() {
+        let (root, state_path) = claim_receipt_fixture("test/repo", 41);
+
+        let receipt = recover_claim_acquisition_receipt_for_selection(&state_path, "test/repo", 42)
+            .expect("retire stale same-repository receipt");
+
+        assert!(receipt.is_none());
+        assert!(!claim_acquisition_receipt_path(&state_path).exists());
+        fs::remove_dir_all(root).expect("remove claim receipt fixture");
+    }
+
+    #[test]
+    fn stale_claim_receipt_from_another_repository_remains_fail_closed() {
+        let (root, state_path) = claim_receipt_fixture("other/repo", 41);
+
+        let error = recover_claim_acquisition_receipt_for_selection(&state_path, "test/repo", 42)
+            .expect_err("reject foreign repository receipt");
+
+        assert!(error.contains("repository"), "error={error}");
+        assert!(claim_acquisition_receipt_path(&state_path).exists());
+        fs::remove_dir_all(root).expect("remove claim receipt fixture");
+    }
+
+    #[test]
+    fn stale_claim_receipt_with_malformed_json_remains_fail_closed() {
+        let (root, state_path) = claim_receipt_fixture("test/repo", 41);
+        let receipt_path = claim_acquisition_receipt_path(&state_path);
+        fs::write(&receipt_path, "{not-json\n").expect("corrupt claim receipt fixture");
+
+        let error = recover_claim_acquisition_receipt_for_selection(&state_path, "test/repo", 42)
+            .expect_err("reject malformed receipt");
+
+        assert!(error.contains("invalid claim acquisition receipt JSON"));
+        assert!(receipt_path.exists());
+        fs::remove_dir_all(root).expect("remove claim receipt fixture");
+    }
 
     fn git_fixture(directory: &Path, args: &[&str]) {
         let output = Command::new("git")
