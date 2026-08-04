@@ -15001,7 +15001,9 @@ fn close_merged_integration_issue(
         .base_ref
         .strip_prefix("origin/")
         .filter(|branch| !branch.is_empty())
-        .ok_or_else(|| BridgeRunFailure::invariant("executor merged base is not an origin branch"))?;
+        .ok_or_else(|| {
+            BridgeRunFailure::invariant("executor merged base is not an origin branch")
+        })?;
     validate_branch(base_branch).map_err(BridgeRunFailure::invariant)?;
     let base_reference = format!("refs/heads/{base_branch}");
     let output = Command::new("git")
@@ -15018,7 +15020,9 @@ fn close_merged_integration_issue(
         )));
     }
     let advertisement = String::from_utf8(output.stdout).map_err(|error| {
-        BridgeRunFailure::invariant(format!("remote default branch evidence is not UTF-8: {error}"))
+        BridgeRunFailure::invariant(format!(
+            "remote default branch evidence is not UTF-8: {error}"
+        ))
     })?;
     let mut default_branch = None;
     let mut base_oid = None;
@@ -15077,12 +15081,9 @@ fn close_merged_integration_issue(
                 String::from_utf8_lossy(&output.stderr).trim()
             )));
         }
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout)
-            .map_err(|error| {
-                BridgeRunFailure::invariant(format!(
-                    "invalid merged issue observation: {error}"
-                ))
-            })?;
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            BridgeRunFailure::invariant(format!("invalid merged issue observation: {error}"))
+        })?;
         if value.get("number").and_then(serde_json::Value::as_u64) != Some(issue) {
             return Err(BridgeRunFailure::invariant(
                 "merged issue observation returned a mismatched issue number",
@@ -15097,7 +15098,11 @@ fn close_merged_integration_issue(
     match observe()?.as_str() {
         "CLOSED" => return Ok(()),
         "OPEN" => {}
-        _ => return Err(BridgeRunFailure::invariant("merged issue has an unknown state")),
+        _ => {
+            return Err(BridgeRunFailure::invariant(
+                "merged issue has an unknown state",
+            ))
+        }
     }
     let output = Command::new(&adapter.gh)
         .args([
@@ -15109,13 +15114,9 @@ fn close_merged_integration_issue(
         ])
         .envs(&adapter.environment)
         .output()
-        .map_err(|error| {
-            BridgeRunFailure::transient(format!("close merged issue: {error}"))
-        })?;
+        .map_err(|error| BridgeRunFailure::transient(format!("close merged issue: {error}")))?;
     let observed = observe();
-    if !output.status.success()
-        && !matches!(observed.as_ref(), Ok(state) if state == "CLOSED")
-    {
+    if !output.status.success() && !matches!(observed.as_ref(), Ok(state) if state == "CLOSED") {
         return Err(BridgeRunFailure::transient(format!(
             "close merged issue failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
@@ -49178,9 +49179,9 @@ esac
         };
 
         super::close_merged_integration_issue(&state, &adapter).expect("close continuation");
-        let calls = fs::read_to_string(&calls).expect("calls");
-        assert_eq!(calls.matches("issue close 101").count(), 1, "{calls}");
-        assert!(!calls.contains("issue close 42"), "{calls}");
+        let call_log = fs::read_to_string(&calls).expect("calls");
+        assert_eq!(call_log.matches("issue close 101").count(), 1, "{call_log}");
+        assert!(!call_log.contains("issue close 42"), "{call_log}");
         assert_eq!(state.phase, super::BridgePhase::Merged);
 
         fs::write(&calls, "").expect("clear calls");
@@ -49202,7 +49203,9 @@ esac
 
         state.identity.base_ref = "origin/integration".into();
         let mut mismatched = adapter.clone();
-        mismatched.environment.insert("RETURN_NUMBER".into(), "99".into());
+        mismatched
+            .environment
+            .insert("RETURN_NUMBER".into(), "99".into());
         assert!(super::close_merged_integration_issue(&state, &mismatched).is_err());
         assert_eq!(state.phase, super::BridgePhase::Merged);
 
