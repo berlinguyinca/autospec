@@ -22432,12 +22432,9 @@ fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
             .get(19)
             .ok_or_else(|| "executor process stat lacks start identity".to_string())?
             .to_string();
-        let process_group = getpgid(Some(Pid::from_raw(
-            i32::try_from(pid).map_err(|_| "executor PID is out of range".to_string())?,
-        )))
-        .map_err(|error| format!("observe executor process group: {error}"))?;
-        let process_group = u32::try_from(process_group.as_raw())
-            .map_err(|_| "executor process group is negative".to_string())?;
+        let Some(process_group) = observe_process_group(pid)? else {
+            return Ok(None);
+        };
         let boot_id = current_boot_identity()?;
         Ok(Some(ProcessBirth {
             pid,
@@ -22445,6 +22442,19 @@ fn observe_process_birth(pid: u32) -> Result<Option<ProcessBirth>, String> {
             boot_id,
             start_identity,
         }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn observe_process_group(pid: u32) -> Result<Option<u32>, String> {
+    let pid =
+        Pid::from_raw(i32::try_from(pid).map_err(|_| "executor PID is out of range".to_string())?);
+    match getpgid(Some(pid)) {
+        Ok(group) => u32::try_from(group.as_raw())
+            .map(Some)
+            .map_err(|_| "executor process group is negative".to_string()),
+        Err(nix::errno::Errno::ESRCH) => Ok(None),
+        Err(error) => Err(format!("observe executor process group: {error}")),
     }
 }
 
@@ -26870,6 +26880,17 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
             &active_draft
         )
         .expect("live draft child remains fail-closed"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_group_observation_treats_esrch_as_absent() {
+        // Break caught: a process exiting between /proc stat and getpgid being reported as an
+        // infrastructure failure instead of a completed observation.
+        assert_eq!(
+            super::observe_process_group(i32::MAX as u32).expect("observe absent process group"),
+            None
+        );
     }
 
     #[test]
