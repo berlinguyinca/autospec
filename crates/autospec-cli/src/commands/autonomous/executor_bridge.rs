@@ -19682,6 +19682,13 @@ impl OwnedProcessSet {
                         exact_harness.birth.pid,
                         exact_harness.birth.start_identity.clone(),
                     );
+                    if !exact_harness.is_live()? {
+                        guard
+                            .processes_mut()
+                            .exited_descendants
+                            .insert(key, exact_harness.birth);
+                        return Ok(SupervisedCleanupPreparation::Ready);
+                    }
                     if !guard.processes_mut().descendants.contains_key(&key) {
                         return Ok(SupervisedCleanupPreparation::OwnershipDisproven);
                     }
@@ -43138,6 +43145,8 @@ exit 19
     #[cfg(target_os = "linux")]
     #[test]
     fn autonomous_executor_bridge_descendant_capture_failure_cannot_retire_identity() {
+        // Break caught: a terminal exact harness omitted from the live descendant map being
+        // misclassified as foreign instead of retained for exact reaping during cleanup.
         let fixture = GitFixture::new("direct-descendant-capture-quarantine");
         let artifact_root = fixture.root.join("evidence");
         let descendant = fixture.root.join("descendant.pid");
