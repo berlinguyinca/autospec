@@ -19388,6 +19388,7 @@ fn immutable_process_instance_is_live(expected: &ProcessIdentity) -> Result<bool
 struct OwnedProcessSet {
     leader: OwnedProcess,
     descendants: BTreeMap<(u32, String), OwnedProcess>,
+    exited_descendants: BTreeMap<(u32, String), ProcessBirth>,
 }
 
 #[cfg(target_os = "linux")]
@@ -19442,6 +19443,7 @@ fn terminate_cleanup_instance(harness: &ProcessIdentity) -> Result<(), AdoptionF
     let mut guard = AdoptedProcessGuard::new(OwnedProcessSet {
         leader,
         descendants: BTreeMap::new(),
+        exited_descendants: BTreeMap::new(),
     });
     if let Err(reason) = guard
         .processes_mut()
@@ -19471,6 +19473,7 @@ impl OwnedProcessSet {
         Ok(Self {
             leader: OwnedProcess::capture_forked_child(pid)?,
             descendants: BTreeMap::new(),
+            exited_descendants: BTreeMap::new(),
         })
     }
 
@@ -19478,6 +19481,7 @@ impl OwnedProcessSet {
         Ok(Self {
             leader: OwnedProcess::capture_identity(expected)?,
             descendants: BTreeMap::new(),
+            exited_descendants: BTreeMap::new(),
         })
     }
 
@@ -19508,6 +19512,7 @@ impl OwnedProcessSet {
                         }
                     })?,
                     descendants: BTreeMap::new(),
+                    exited_descendants: BTreeMap::new(),
                 }
             }
             Err(supervisor_error)
@@ -19629,6 +19634,7 @@ impl OwnedProcessSet {
             let mut guard = AdoptedProcessGuard::new(Self {
                 leader,
                 descendants: BTreeMap::new(),
+                exited_descendants: BTreeMap::new(),
             });
             let prepare = (|| -> Result<SupervisedCleanupPreparation, String> {
                 guard
@@ -19709,13 +19715,60 @@ impl OwnedProcessSet {
         if !self.leader.is_live()? {
             return Ok(());
         }
+        let mut forgotten = Vec::new();
+        for (key, birth) in &self.exited_descendants {
+            if observe_process_birth(birth.pid)?.as_ref() != Some(birth) {
+                forgotten.push(key.clone());
+            }
+        }
+        for key in forgotten {
+            self.exited_descendants.remove(&key);
+        }
         let mut exited = Vec::new();
         for (key, process) in &self.descendants {
             if !process.is_live()? {
-                exited.push(key.clone());
+                exited.push((key.clone(), process.birth.clone()));
             }
         }
-        for key in exited {
+        for (key, birth) in exited {
+            let pid = Pid::from_raw(
+                i32::try_from(key.0)
+                    .map_err(|_| "exited executor descendant PID is out of range".to_string())?,
+            );
+            let mut retain_for_reap = false;
+            loop {
+                match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                    Ok(WaitStatus::Exited(..) | WaitStatus::Signaled(..))
+                    | Err(nix::errno::Errno::ESRCH) => break,
+                    Err(nix::errno::Errno::ECHILD) => {
+                        retain_for_reap =
+                            observe_process_birth(birth.pid)?.as_ref() == Some(&birth);
+                        break;
+                    }
+                    Err(nix::errno::Errno::EINTR) => continue,
+                    Ok(WaitStatus::StillAlive) => {
+                        return Err(format!(
+                            "exited executor descendant {} remained live during reap",
+                            key.0
+                        ));
+                    }
+                    Ok(status) => {
+                        return Err(format!(
+                            "exited executor descendant {} was not terminal during reap: {status:?}",
+                            key.0
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "reap exited executor descendant {}: {error}",
+                            key.0
+                        ));
+                    }
+                }
+            }
+            if retain_for_reap {
+                self.exited_descendants.insert(key.clone(), birth);
+            }
             self.descendants.remove(&key);
         }
         let table = process_table_entries()?;
@@ -19739,6 +19792,9 @@ impl OwnedProcessSet {
                 && !self
                     .descendants
                     .contains_key(&(birth.pid, birth.start_identity.clone()))
+                && !self
+                    .exited_descendants
+                    .contains_key(&(birth.pid, birth.start_identity.clone()))
             {
                 let capture = {
                     #[cfg(test)]
@@ -19753,7 +19809,11 @@ impl OwnedProcessSet {
                     }
                 };
                 match capture {
-                    Ok(process) => captured.push(process),
+                    Ok(process) => {
+                        if process.is_live()? {
+                            captured.push(process);
+                        }
+                    }
                     Err(error) => {
                         if observe_process_birth(birth.pid)?.as_ref() == Some(&birth) {
                             return Err(format!(
@@ -19818,6 +19878,21 @@ impl OwnedProcessSet {
             match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
                 Ok(_) | Err(nix::errno::Errno::ECHILD) | Err(nix::errno::Errno::ESRCH) => {}
                 Err(error) => return Err(format!("reap owned executor descendant: {error}")),
+            }
+        }
+        for descendant in self.exited_descendants.values() {
+            if observe_process_birth(descendant.pid)?.as_ref() != Some(descendant) {
+                continue;
+            }
+            let pid = Pid::from_raw(
+                i32::try_from(descendant.pid)
+                    .map_err(|_| "exited executor descendant PID is out of range".to_string())?,
+            );
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(_) | Err(nix::errno::Errno::ECHILD) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(error) => {
+                    return Err(format!("reap retained exited executor descendant: {error}"));
+                }
             }
         }
         Ok(())
@@ -25459,6 +25534,7 @@ mod tests {
             let mut processes = super::OwnedProcessSet {
                 leader,
                 descendants: BTreeMap::new(),
+                exited_descendants: BTreeMap::new(),
             };
             let _ = processes.capture_descendants_while_leader_live();
             let _ = processes.terminate();
@@ -34078,6 +34154,7 @@ exit 64
         let mut processes = super::OwnedProcessSet {
             leader,
             descendants: BTreeMap::new(),
+            exited_descendants: BTreeMap::new(),
         };
         let mut exited_keys = Vec::new();
         for _ in 0..32 {
@@ -34096,6 +34173,26 @@ exit 64
             processes.descendants.insert(key.clone(), owned);
             exited_keys.push(key);
         }
+        let mut zombie_child = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn unreaped descendant fixture");
+        let _zombie_cleanup =
+            DetachedForkedCleanup::new(zombie_child.id()).expect("arm unreaped fixture cleanup");
+        let zombie = super::OwnedProcess::capture_forked_child(zombie_child.id())
+            .expect("capture unreaped descendant pidfd");
+        let zombie_key = (zombie.birth.pid, zombie.birth.start_identity.clone());
+        zombie
+            .signal(Signal::SIGKILL)
+            .expect("stop unreaped fixture");
+        for _ in 0..100 {
+            if !zombie.is_live().expect("observe unreaped fixture") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!zombie.is_live().expect("observe unreaped fixture"));
+        processes.descendants.insert(zombie_key.clone(), zombie);
         let mut live_child = Command::new("/usr/bin/sleep")
             .arg("30")
             .spawn()
@@ -34117,7 +34214,13 @@ exit 64
         assert!(exited_keys
             .iter()
             .all(|key| !processes.descendants.contains_key(key)));
+        assert!(!processes.descendants.contains_key(&zombie_key));
         assert!(processes.descendants.contains_key(&live_key));
+        match zombie_child.wait() {
+            Ok(_) => {}
+            Err(error) if error.raw_os_error() == Some(nix::libc::ECHILD) => {}
+            Err(error) => panic!("reap unreaped fixture: {error}"),
+        }
         processes
             .descendants
             .get(&live_key)
