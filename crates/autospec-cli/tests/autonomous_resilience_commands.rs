@@ -10,6 +10,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[test]
+fn resilience_fixture_git_remote_has_a_real_main() {
+    let fixture = ResilienceFixture::new();
+    let local = git_fixture(&fixture.repo_dir, &["rev-parse", "refs/heads/main"]);
+    let remote = git_fixture(
+        &fixture.repo_dir,
+        &["ls-remote", "--heads", "origin", "main"],
+    );
+
+    assert!(remote.starts_with(&local), "local={local} remote={remote}");
+}
+
 /// Returns the first non-empty line following a `LABEL:` header in `--help`
 /// output. Reusing the labeled-block parsing pattern from
 /// `cli_commands.rs::help_usage_invocation` (which reads the line after
@@ -2262,27 +2274,25 @@ esac
     }
 
     fn initialize_git_remote(&self) {
-        let init = Command::new("git")
-            .args([
-                "init",
-                "-q",
-                self.repo_dir.to_str().expect("repo directory"),
-            ])
-            .output()
-            .expect("initialize fixture repository");
-        assert!(init.status.success());
-        let remote = Command::new("git")
-            .args([
-                "-C",
-                self.repo_dir.to_str().expect("repo directory"),
-                "remote",
-                "add",
-                "origin",
-                "https://github.com/owner/repo.git",
-            ])
-            .output()
-            .expect("set fixture remote");
-        assert!(remote.status.success());
+        let remote = self.root.join("github.com/owner/repo.git");
+        fs::create_dir_all(remote.parent().expect("integration remote parent"))
+            .expect("create integration remote parent");
+        fs::create_dir_all(&self.repo_dir).expect("create fixture repository");
+        git_fixture(&self.root, &["init", "--bare", remote.to_str().unwrap()]);
+        git_fixture(&self.repo_dir, &["init", "-b", "main"]);
+        git_fixture(&self.repo_dir, &["config", "user.name", "Autospec Test"]);
+        git_fixture(
+            &self.repo_dir,
+            &["config", "user.email", "autospec@example.invalid"],
+        );
+        fs::write(self.repo_dir.join("README.md"), "fixture\n").expect("write Git fixture");
+        git_fixture(&self.repo_dir, &["add", "README.md"]);
+        git_fixture(&self.repo_dir, &["commit", "-m", "fixture"]);
+        git_fixture(
+            &self.repo_dir,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git_fixture(&self.repo_dir, &["push", "-u", "origin", "main"]);
     }
 
     fn canonical_state_path(&self) -> PathBuf {
@@ -2427,6 +2437,21 @@ fn path_with(bin: &Path) -> String {
 
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn git_fixture(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .expect("run fixture git command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 fn workspace_root() -> PathBuf {
