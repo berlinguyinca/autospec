@@ -26834,11 +26834,17 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
 
     #[test]
     fn autonomous_executor_bridge_interrupted_harness_receipt_requires_durable_exit() {
-        let (_fixture, mut state, state_path, _) =
+        let (_fixture, mut state, original_state_path, _) =
             zero_effect_classifier_fixture("interrupted-harness-receipt", false, false);
         state.phase = BridgePhase::Interrupted;
         state.supervisor = None;
         state.process = None;
+        state.identity.invocation_id =
+            format!("{}-{}", state.identity.issue, state.identity.claim_id);
+        let state_dir = original_state_path.parent().expect("state directory");
+        let generation = &super::sha256_hex(state.identity.claim_id.as_bytes())[..16];
+        let state_path =
+            state_dir.join(format!("issue-{}-{generation}.json", state.identity.issue));
         super::write_invocation_atomic(&state_path, &state).expect("persist interrupted state");
         let sinks = super::output_sink_paths_for_state(&state_path, &state)
             .expect("interrupted output sinks");
@@ -26850,10 +26856,24 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
             }
         }
 
+        let lease = crate::commands::claim::ClaimLease {
+            issue: state.identity.issue,
+            repo: state.identity.repository.clone(),
+            worker_id: state.identity.worker_id.clone(),
+            branch: state.identity.branch.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            session_id: None,
+        };
         assert!(
-            !super::interrupted_harness_receipt_is_recoverable(&state_path, &state)
+            !super::recoverable_interrupted_harness_receipt(state_dir, &lease)
                 .expect("classify missing exit evidence")
         );
+
+        let mut foreign = lease.clone();
+        foreign.repo = "other/repo".to_string();
+        let error = super::recoverable_interrupted_harness_receipt(state_dir, &foreign)
+            .expect_err("foreign lease must fail closed");
+        assert!(error.contains("does not match"), "error={error}");
 
         fs::create_dir_all(sinks.exit_status.parent().expect("exit parent"))
             .expect("create exit parent");
@@ -26867,7 +26887,7 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
             .expect("secure exit receipt");
 
         assert!(
-            super::interrupted_harness_receipt_is_recoverable(&state_path, &state)
+            super::recoverable_interrupted_harness_receipt(state_dir, &lease)
                 .expect("classify durable exit evidence")
         );
     }
