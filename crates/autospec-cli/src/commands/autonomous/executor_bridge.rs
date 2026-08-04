@@ -19709,6 +19709,15 @@ impl OwnedProcessSet {
         if !self.leader.is_live()? {
             return Ok(());
         }
+        let mut exited = Vec::new();
+        for (key, process) in &self.descendants {
+            if !process.is_live()? {
+                exited.push(key.clone());
+            }
+        }
+        for key in exited {
+            self.descendants.remove(&key);
+        }
         let table = process_table_entries()?;
         let mut descendants = BTreeSet::new();
         descendants.insert(self.leader.birth.pid);
@@ -34059,6 +34068,63 @@ exit 64
             super::OwnedProcess::capture_forked_child(child.id()).expect("capture cleanup pidfd");
         owned.signal(Signal::SIGKILL).expect("clean replacement");
         let _ = child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_prunes_exited_descendant_pidfds() {
+        let leader = super::OwnedProcess::capture_forked_child(std::process::id())
+            .expect("capture test process");
+        let mut processes = super::OwnedProcessSet {
+            leader,
+            descendants: BTreeMap::new(),
+        };
+        let mut exited_keys = Vec::new();
+        for _ in 0..32 {
+            let mut child = Command::new("/usr/bin/sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn exited descendant fixture");
+            let _cleanup =
+                DetachedForkedCleanup::new(child.id()).expect("arm exited fixture cleanup");
+            let owned = super::OwnedProcess::capture_forked_child(child.id())
+                .expect("capture exited descendant pidfd");
+            let key = (owned.birth.pid, owned.birth.start_identity.clone());
+            owned.signal(Signal::SIGKILL).expect("stop exited fixture");
+            child.wait().expect("reap exited fixture");
+            assert!(!owned.is_live().expect("observe exited fixture"));
+            processes.descendants.insert(key.clone(), owned);
+            exited_keys.push(key);
+        }
+        let mut live_child = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn live descendant fixture");
+        let _live_cleanup =
+            DetachedForkedCleanup::new(live_child.id()).expect("arm live fixture cleanup");
+        let live = super::OwnedProcess::capture_forked_child(live_child.id())
+            .expect("capture live descendant pidfd");
+        let live_key = (live.birth.pid, live.birth.start_identity.clone());
+        processes.descendants.insert(live_key.clone(), live);
+
+        processes
+            .capture_descendants_while_leader_live()
+            .expect("first bounded capture");
+        processes
+            .capture_descendants_while_leader_live()
+            .expect("second bounded capture");
+
+        assert!(exited_keys
+            .iter()
+            .all(|key| !processes.descendants.contains_key(key)));
+        assert!(processes.descendants.contains_key(&live_key));
+        processes
+            .descendants
+            .get(&live_key)
+            .expect("retained live pidfd")
+            .signal(Signal::SIGKILL)
+            .expect("stop live fixture");
+        live_child.wait().expect("reap live fixture");
     }
 
     #[cfg(target_os = "linux")]
