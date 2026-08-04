@@ -2606,10 +2606,13 @@ fn run_foreground_with_lease(
     {
         if let Some(issue) = state.selected_issue() {
             if !issue_is_open_for_autonomous_work(&layout.repo, issue)? {
-                let recoverable_receipt = state.pause_reason() == Some("executor_receipt_failed")
+                // A closed terminal claim is not new work: finish its exact in-flight bridge
+                // proof before retiring the selection.
+                let terminal_receipt_recovery = state.pause_reason()
+                    == Some("executor_receipt_failed")
                     && claim::conductor_claim_is_terminal(&layout.repo, issue)?
                     && executor_receipt_failure_is_recoverable(layout, &state_path, issue)?;
-                if recoverable_receipt {
+                if terminal_receipt_recovery {
                     state = state
                         .transition(ConductorEvent::Resume)
                         .map_err(CommandFailure::diagnostic)?;
