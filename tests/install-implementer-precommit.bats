@@ -13,7 +13,14 @@ setup() {
     git -C "$SOURCE_REPO" config user.name "Test User"
     git -C "$SOURCE_REPO" remote add origin https://github.com/berlinguyinca/autospec.git
     touch "$SOURCE_REPO/README.md"
-    git -C "$SOURCE_REPO" add README.md
+    mkdir -p "$SOURCE_REPO/scripts"
+    printf '%s\n' '#!/usr/bin/env bash' > "$SOURCE_REPO/scripts/lint-implementation.sh"
+    local line=1
+    while [ "$line" -le 400 ]; do
+        printf '# baseline fixture line %s\n' "$line" >> "$SOURCE_REPO/scripts/lint-implementation.sh"
+        line=$((line + 1))
+    done
+    git -C "$SOURCE_REPO" add README.md scripts/lint-implementation.sh
     git -C "$SOURCE_REPO" commit -q -m "initial"
     git -C "$SOURCE_REPO" worktree add -q -b fix/2371-hook "$WORKTREE"
 }
@@ -23,14 +30,8 @@ teardown() {
 }
 
 stage_complexity_violation() {
-    mkdir -p "$WORKTREE/scripts"
     local fixture="$WORKTREE/scripts/lint-implementation.sh"
-    printf '%s\n' '#!/usr/bin/env bash' > "$fixture"
-    local line=1
-    while [ "$line" -le 401 ]; do
-        printf '# fixture line %s\n' "$line" >> "$fixture"
-        line=$((line + 1))
-    done
+    printf '%s\n' '# staged fixture line' >> "$fixture"
     git -C "$WORKTREE" add scripts/lint-implementation.sh
 }
 
@@ -53,6 +54,16 @@ stage_complexity_violation() {
     stage_complexity_violation
 
     run git -C "$WORKTREE" commit -m "test numeric issue"
+    [ "$status" -eq 0 ]
+}
+
+@test "installed hook passes the autonomous branch issue to staged lint" {
+    export AUTOSPEC_SCRIPTS_DIR="$REPO_ROOT/scripts"
+    git -C "$WORKTREE" checkout -q -b feat/autonomous-issue-2371
+    bash "$INSTALL_SCRIPT" "$WORKTREE"
+    stage_complexity_violation
+
+    run git -C "$WORKTREE" commit -m "test autonomous issue"
     [ "$status" -eq 0 ]
 }
 
