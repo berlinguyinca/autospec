@@ -129,6 +129,9 @@ static EXECUTOR_ROOT_HARDEN_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 static IMPLEMENTATION_COMMIT_FAILPOINT: AtomicU8 = AtomicU8::new(0);
 #[cfg(test)]
 static NPM_MANIFEST_OPEN_FAILPOINT: AtomicU8 = AtomicU8::new(0);
+#[cfg(test)]
+static INTEGRATION_SYNC_RACE: std::sync::Mutex<Option<(PathBuf, PathBuf, String, String)>> =
+    std::sync::Mutex::new(None);
 
 #[derive(Clone, Copy)]
 enum ZeroEffectRecoveryFailpoint {
@@ -17519,42 +17522,112 @@ fn list_bridge_pull_requests_typed(
 /// Fast-forward the configured integration branch onto the tip advertised by
 /// `origin`.
 ///
-/// The operation is bounded: one remote observation, one fetch of the exact
-/// advertised ref, and one fast-forward. Divergence, ambiguous advertisement, a
+/// The operation is bounded: at most two remote observations and fetches, then
+/// one fast-forward. Divergence, ambiguous advertisement, a
 /// dirty or foreign integration checkout, and a missing local branch all fail
 /// closed. The operation never merges histories, rebases, resets, or pushes.
 pub(crate) fn synchronize_integration_base(repo: &Path, branch: &str) -> Result<String, String> {
-    validate_branch(branch)?;
+    validate_integration_branch(repo, branch)?;
     let reference = format!("refs/heads/{branch}");
-    let refs = remote_head_refs(repo)?;
-    let Some(remote_oid) = refs.get(&reference).cloned() else {
-        return Err(format!(
-            "origin does not advertise integration base {branch}"
-        ));
-    };
-    if refs.contains_key(&format!("refs/tags/{branch}")) {
-        return Err(format!(
-            "origin advertises integration base {branch} ambiguously"
-        ));
+    let remote_oid = fetch_stable_integration_base(repo, branch, &reference)?;
+    fast_forward_integration_base(repo, branch, &reference, &remote_oid)?;
+    Ok(remote_oid)
+}
+
+fn validate_integration_branch(repo: &Path, branch: &str) -> Result<(), String> {
+    if branch.trim() != branch || branch.is_empty() || branch.starts_with('-') {
+        return Err(format!("invalid integration base branch: {branch}"));
     }
-    if !canonical_git_oid(&remote_oid) {
-        return Err(format!(
-            "origin advertises a malformed integration base {branch}"
-        ));
+    git(repo, &["check-ref-format", "--branch", branch])
+        .map_err(|_| format!("invalid integration base branch: {branch}"))
+}
+
+fn fetch_stable_integration_base(
+    repo: &Path,
+    branch: &str,
+    reference: &str,
+) -> Result<String, String> {
+    for attempt in 0..2 {
+        let refs = remote_head_refs(repo)?;
+        let Some(remote_oid) = refs.get(reference).cloned() else {
+            return Err(format!(
+                "origin does not advertise integration base {branch}"
+            ));
+        };
+        if refs.contains_key(&format!("refs/tags/{branch}")) {
+            return Err(format!(
+                "origin advertises integration base {branch} ambiguously"
+            ));
+        }
+        if !canonical_git_oid(&remote_oid) {
+            return Err(format!(
+                "origin advertises a malformed integration base {branch}"
+            ));
+        }
+        integration_sync_race_failpoint(repo);
+        git(
+            repo,
+            &[
+                "fetch",
+                "--no-tags",
+                "origin",
+                &format!("{reference}:refs/remotes/origin/{branch}"),
+            ],
+        )?;
+        let fetched = integration_base_oid(repo, &format!("refs/remotes/origin/{branch}"))?;
+        if fetched == remote_oid {
+            return Ok(remote_oid);
+        }
+        if attempt == 1 {
+            return Err(format!(
+                "origin integration base {branch} advanced during synchronization"
+            ));
+        }
     }
-    git(
-        repo,
-        &[
-            "fetch",
-            "--no-tags",
-            "origin",
-            &format!("{reference}:refs/remotes/origin/{branch}"),
-        ],
-    )?;
+    unreachable!("bounded synchronization returns on its final attempt")
+}
+
+fn fast_forward_integration_base(
+    repo: &Path,
+    branch: &str,
+    reference: &str,
+    remote_oid: &str,
+) -> Result<(), String> {
     let local_oid = integration_base_oid(repo, &reference)?;
     if !canonical_git_oid(&local_oid) {
         return Err(format!("integration base {branch} has no local branch"));
     }
+    let checkouts = validate_integration_base_checkouts(repo, branch, reference)?;
+    if local_oid == remote_oid {
+        return Ok(());
+    }
+    if git(
+        repo,
+        &["merge-base", "--is-ancestor", &local_oid, &remote_oid],
+    )
+    .is_err()
+    {
+        return Err(format!("integration base {branch} diverged from origin"));
+    }
+    if checkouts.is_empty() {
+        // Compare-and-swap onto the proven descendant; never a forced update.
+        git(repo, &["update-ref", reference, remote_oid, &local_oid])?;
+    } else {
+        git(repo, &["merge", "--ff-only", remote_oid])?;
+    }
+    if integration_base_oid(repo, reference)? != remote_oid {
+        return Err(format!(
+            "integration base {branch} did not fast-forward to origin"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_integration_base_checkouts(
+    repo: &Path,
+    branch: &str,
+    reference: &str,
+) -> Result<Vec<PathBuf>, String> {
     let canonical_repo = fs::canonicalize(repo)
         .map_err(|error| format!("canonicalize {}: {error}", repo.display()))?;
     let checkouts = integration_base_checkouts(repo, &reference)?;
@@ -17569,30 +17642,25 @@ pub(crate) fn synchronize_integration_base(repo: &Path, branch: &str) -> Result<
             "integration base {branch} checkout has uncommitted work"
         ));
     }
-    if local_oid == remote_oid {
-        return Ok(remote_oid);
-    }
-    if git(
-        repo,
-        &["merge-base", "--is-ancestor", &local_oid, &remote_oid],
-    )
-    .is_err()
-    {
-        return Err(format!("integration base {branch} diverged from origin"));
-    }
-    if checkouts.is_empty() {
-        // Compare-and-swap onto the proven descendant; never a forced update.
-        git(repo, &["update-ref", &reference, &remote_oid, &local_oid])?;
-    } else {
-        git(repo, &["merge", "--ff-only", &remote_oid])?;
-    }
-    if integration_base_oid(repo, &reference)? != remote_oid {
-        return Err(format!(
-            "integration base {branch} did not fast-forward to origin"
-        ));
-    }
-    Ok(remote_oid)
+    Ok(checkouts)
 }
+
+#[cfg(test)]
+fn integration_sync_race_failpoint(repo: &Path) {
+    let mut race = INTEGRATION_SYNC_RACE.lock().unwrap();
+    if race.as_ref().map(|race| race.0.as_path()) != Some(repo) {
+        return;
+    }
+    let (_, remote, old_oid, new_oid) = race.take().expect("matching integration race");
+    git(
+        &remote,
+        &["update-ref", "refs/heads/main", &new_oid, &old_oid],
+    )
+    .expect("advance integration remote at synchronization boundary");
+}
+
+#[cfg(not(test))]
+fn integration_sync_race_failpoint(_repo: &Path) {}
 
 fn integration_base_oid(repo: &Path, reference: &str) -> Result<String, String> {
     git_stdout(repo, &["for-each-ref", "--format=%(objectname)", reference])
@@ -26253,6 +26321,33 @@ mod tests {
         git_stdout(&publisher, &["rev-parse", "HEAD"])
     }
 
+    fn stage_remote_advance(fixture: &GitFixture, marker: &str) -> (String, String) {
+        let old_oid = git_stdout(&fixture.repo, &["rev-parse", "refs/remotes/origin/main"]);
+        let publisher = fixture.root.join(format!("race-publisher-{marker}"));
+        git(
+            &fixture.root,
+            &[
+                "clone",
+                fixture.root.join("remote.git").to_str().expect("remote"),
+                publisher.to_str().expect("publisher path"),
+            ],
+        );
+        git(
+            &publisher,
+            &["config", "user.email", "autospec@example.invalid"],
+        );
+        git(&publisher, &["config", "user.name", "Autospec Test"]);
+        fs::write(publisher.join(format!("{marker}.txt")), marker).expect("write race marker");
+        git(&publisher, &["add", "."]);
+        git(&publisher, &["commit", "-m", marker]);
+        let new_oid = git_stdout(&publisher, &["rev-parse", "HEAD"]);
+        git(
+            &publisher,
+            &["push", "origin", "HEAD:refs/heads/race-candidate"],
+        );
+        (old_oid, new_oid)
+    }
+
     #[test]
     fn autonomous_executor_bridge_integration_sync_is_idempotent() {
         let fixture = GitFixture::new("integration-sync");
@@ -26330,6 +26425,69 @@ mod tests {
             git_stdout(&fixture.repo, &["rev-parse", "refs/heads/main"]),
             diverged
         );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_conflict_fails_closed() {
+        let fixture = GitFixture::new("integration-sync-conflict");
+        let remote_oid = publish_advanced_main(&fixture, "remote-conflict");
+        fs::write(fixture.repo.join("README.md"), "local conflict\n")
+            .expect("write conflicting local change");
+        git(&fixture.repo, &["add", "README.md"]);
+        git(&fixture.repo, &["commit", "-m", "local conflict"]);
+        let local_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+
+        let error = super::synchronize_integration_base(&fixture.repo, "main")
+            .expect_err("conflicting integration histories must fail closed");
+
+        assert!(error.contains("diverged from origin"), "{error}");
+        assert_eq!(git_stdout(&fixture.repo, &["rev-parse", "HEAD"]), local_oid);
+        assert_eq!(
+            git_stdout(
+                &fixture.root,
+                &["--git-dir", "remote.git", "rev-parse", "main"]
+            ),
+            remote_oid,
+            "synchronization must not push or rewrite the remote"
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_rejects_ambiguous_default_ref() {
+        let fixture = GitFixture::new("integration-sync-ambiguous");
+        let local_oid = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+        git(&fixture.repo, &["tag", "main"]);
+        git(&fixture.repo, &["push", "origin", "refs/tags/main"]);
+
+        let error = super::synchronize_integration_base(&fixture.repo, "main")
+            .expect_err("two matching default refs must fail closed");
+
+        assert!(error.contains("ambiguously"), "{error}");
+        assert_eq!(git_stdout(&fixture.repo, &["rev-parse", "HEAD"]), local_oid);
+        assert_eq!(
+            git_stdout(&fixture.repo, &["ls-remote", "--refs", "origin", "main"])
+                .lines()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_retries_default_race() {
+        let fixture = GitFixture::new("integration-sync-race");
+        let (old_oid, new_oid) = stage_remote_advance(&fixture, "second");
+        *super::INTEGRATION_SYNC_RACE.lock().unwrap() = Some((
+            fixture.repo.clone(),
+            fixture.root.join("remote.git"),
+            old_oid,
+            new_oid.clone(),
+        ));
+
+        let synchronized = super::synchronize_integration_base(&fixture.repo, "main")
+            .expect("bounded retry must follow the remote advance");
+
+        assert_eq!(synchronized, new_oid);
+        assert_eq!(git_stdout(&fixture.repo, &["rev-parse", "HEAD"]), new_oid);
     }
 
     #[cfg(unix)]
