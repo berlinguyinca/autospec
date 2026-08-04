@@ -2600,6 +2600,18 @@ fn run_foreground_with_lease(
     }
     if state.phase() == ConductorPhase::Paused {
         if let Some(issue) = state.selected_issue() {
+            if !issue_is_open_for_autonomous_work(&layout.repo, issue)? {
+                state = state
+                    .transition(ConductorEvent::RetireObsoleteSelection)
+                    .map_err(CommandFailure::diagnostic)?;
+                persist_foreground_state(&state_path, &state)
+                    .map_err(CommandFailure::diagnostic)?;
+                return Ok(ForegroundCompletion::State(Box::new(state)));
+            }
+        }
+    }
+    if state.phase() == ConductorPhase::Paused {
+        if let Some(issue) = state.selected_issue() {
             let claim_terminal = claim::conductor_claim_is_terminal(&layout.repo, issue)?;
             if state.pause_reason() == Some(OWNERSHIP_RETIREMENT_PAUSE) {
                 clear_claim_acquisition_receipt(&state_path).map_err(CommandFailure::diagnostic)?;
@@ -2789,18 +2801,6 @@ fn run_foreground_with_lease(
                 Ok(ForegroundCompletion::Lifecycle(lifecycle))
             }
         };
-    }
-    if state.phase() == ConductorPhase::Paused {
-        if let Some(issue) = state.selected_issue() {
-            if !issue_is_open_for_autonomous_work(&layout.repo, issue)? {
-                state = state
-                    .transition(ConductorEvent::RetireObsoleteSelection)
-                    .map_err(CommandFailure::diagnostic)?;
-                persist_foreground_state(&state_path, &state)
-                    .map_err(CommandFailure::diagnostic)?;
-                return Ok(ForegroundCompletion::State(Box::new(state)));
-            }
-        }
     }
     if foreground_state_is_retained(&state) {
         return Ok(ForegroundCompletion::State(Box::new(state)));

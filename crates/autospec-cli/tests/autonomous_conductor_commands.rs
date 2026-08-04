@@ -640,6 +640,29 @@ fn foreground_records_a_typed_deferred_receipt_and_keeps_the_selected_issue() {
 }
 
 #[test]
+fn foreground_closed_selected_issue_retires_before_receipt_recovery() {
+    let fixture = ForegroundFixture::new();
+    assert!(fixture.run_foreground().status.success());
+    assert_eq!(
+        fixture.read_state().pause_reason(),
+        Some("executor_receipt_failed")
+    );
+
+    let output = fixture
+        .command()
+        .env("FOREGROUND_ISSUE_STATE", "closed")
+        .output()
+        .expect("retire closed receipt-failure selection");
+
+    assert!(
+        output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fixture.read_state().selected_issue(), None);
+}
+
+#[test]
 fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
     let _bridge_e2e = REAL_BRIDGE_E2E.lock().expect("real bridge E2E lock");
     let fixture = ForegroundFixture::new();
