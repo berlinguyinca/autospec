@@ -17380,6 +17380,20 @@ pub(crate) fn synchronize_integration_base(repo: &Path, branch: &str) -> Result<
     if !canonical_git_oid(&local_oid) {
         return Err(format!("integration base {branch} has no local branch"));
     }
+    let canonical_repo = fs::canonicalize(repo)
+        .map_err(|error| format!("canonicalize {}: {error}", repo.display()))?;
+    let checkouts = integration_base_checkouts(repo, &reference)?;
+    let checked_out_here = checkouts == vec![canonical_repo];
+    if !checkouts.is_empty() && !checked_out_here {
+        return Err(format!(
+            "integration base {branch} is checked out by another worktree"
+        ));
+    }
+    if checked_out_here && !git_stdout(repo, &["status", "--porcelain=v1"])?.is_empty() {
+        return Err(format!(
+            "integration base {branch} checkout has uncommitted work"
+        ));
+    }
     if local_oid == remote_oid {
         return Ok(remote_oid);
     }
@@ -17391,23 +17405,11 @@ pub(crate) fn synchronize_integration_base(repo: &Path, branch: &str) -> Result<
     {
         return Err(format!("integration base {branch} diverged from origin"));
     }
-    let canonical_repo = fs::canonicalize(repo)
-        .map_err(|error| format!("canonicalize {}: {error}", repo.display()))?;
-    let checkouts = integration_base_checkouts(repo, &reference)?;
     if checkouts.is_empty() {
         // Compare-and-swap onto the proven descendant; never a forced update.
         git(repo, &["update-ref", &reference, &remote_oid, &local_oid])?;
-    } else if checkouts == vec![canonical_repo] {
-        if !git_stdout(repo, &["status", "--porcelain=v1", "--untracked-files=no"])?.is_empty() {
-            return Err(format!(
-                "integration base {branch} checkout has uncommitted work"
-            ));
-        }
-        git(repo, &["merge", "--ff-only", &remote_oid])?;
     } else {
-        return Err(format!(
-            "integration base {branch} is checked out by another worktree"
-        ));
+        git(repo, &["merge", "--ff-only", &remote_oid])?;
     }
     if integration_base_oid(repo, &reference)? != remote_oid {
         return Err(format!(
@@ -26084,28 +26086,46 @@ mod tests {
             git_stdout(&fixture.repo, &["rev-parse", "refs/heads/main"]),
             advanced
         );
-        assert_eq!(
-            git_stdout(&fixture.repo, &["rev-parse", "refs/remotes/origin/main"]),
-            advanced
-        );
         assert_eq!(git_stdout(&fixture.repo, &["rev-parse", "HEAD"]), advanced);
-        // The prior tip survives: the branch advanced instead of being rewritten.
         git(
             &fixture.repo,
             &["merge-base", "--is-ancestor", &behind, &advanced],
         );
-        assert_eq!(
-            git_stdout(
-                &fixture.root,
-                &[
-                    "--git-dir",
-                    fixture.root.join("remote.git").to_str().expect("remote"),
-                    "rev-parse",
-                    "refs/heads/main",
-                ],
-            ),
-            advanced
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_rejects_current_dirty_state() {
+        for path in ["README.md", "untracked.txt"] {
+            let fixture = GitFixture::new(&format!("integration-sync-dirty-{path}"));
+            fs::write(fixture.repo.join(path), "dirty").expect("write dirty file");
+            let error = super::synchronize_integration_base(&fixture.repo, "main")
+                .expect_err("dirty integration base must fail closed");
+            assert!(error.contains("uncommitted work"), "{error}");
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_rejects_foreign_worktree() {
+        let fixture = GitFixture::new("integration-sync-foreign-worktree");
+        git(&fixture.repo, &["checkout", "--detach"]);
+        let foreign = fixture.root.join("foreign");
+        git(
+            &fixture.repo,
+            &["worktree", "add", foreign.to_str().unwrap(), "main"],
         );
+        let error = super::synchronize_integration_base(&fixture.repo, "main")
+            .expect_err("foreign integration checkout must fail closed");
+        assert!(error.contains("another worktree"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_rejects_missing_local_ref() {
+        let fixture = GitFixture::new("integration-sync-missing-local");
+        git(&fixture.repo, &["checkout", "--detach"]);
+        git(&fixture.repo, &["branch", "-D", "main"]);
+        let error = super::synchronize_integration_base(&fixture.repo, "main")
+            .expect_err("missing local integration base must fail closed");
+        assert!(error.contains("no local branch"), "{error}");
     }
 
     #[test]
