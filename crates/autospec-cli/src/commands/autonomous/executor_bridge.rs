@@ -17341,6 +17341,108 @@ fn list_bridge_pull_requests_typed(
     Ok(pull_requests)
 }
 
+/// Fast-forward the configured integration branch onto the tip advertised by
+/// `origin`.
+///
+/// The operation is bounded: one remote observation, one fetch of the exact
+/// advertised ref, and one fast-forward. Divergence, ambiguous advertisement, a
+/// dirty or foreign integration checkout, and a missing local branch all fail
+/// closed. The operation never merges histories, rebases, resets, or pushes.
+pub(crate) fn synchronize_integration_base(repo: &Path, branch: &str) -> Result<String, String> {
+    validate_branch(branch)?;
+    let reference = format!("refs/heads/{branch}");
+    let refs = remote_head_refs(repo)?;
+    let Some(remote_oid) = refs.get(&reference).cloned() else {
+        return Err(format!(
+            "origin does not advertise integration base {branch}"
+        ));
+    };
+    if refs.contains_key(&format!("refs/tags/{branch}")) {
+        return Err(format!(
+            "origin advertises integration base {branch} ambiguously"
+        ));
+    }
+    if !canonical_git_oid(&remote_oid) {
+        return Err(format!(
+            "origin advertises a malformed integration base {branch}"
+        ));
+    }
+    git(
+        repo,
+        &[
+            "fetch",
+            "--no-tags",
+            "origin",
+            &format!("{reference}:refs/remotes/origin/{branch}"),
+        ],
+    )?;
+    let local_oid = integration_base_oid(repo, &reference)?;
+    if !canonical_git_oid(&local_oid) {
+        return Err(format!("integration base {branch} has no local branch"));
+    }
+    let canonical_repo = fs::canonicalize(repo)
+        .map_err(|error| format!("canonicalize {}: {error}", repo.display()))?;
+    let checkouts = integration_base_checkouts(repo, &reference)?;
+    let checked_out_here = checkouts == vec![canonical_repo];
+    if !checkouts.is_empty() && !checked_out_here {
+        return Err(format!(
+            "integration base {branch} is checked out by another worktree"
+        ));
+    }
+    if checked_out_here && !git_stdout(repo, &["status", "--porcelain=v1"])?.is_empty() {
+        return Err(format!(
+            "integration base {branch} checkout has uncommitted work"
+        ));
+    }
+    if local_oid == remote_oid {
+        return Ok(remote_oid);
+    }
+    if git(
+        repo,
+        &["merge-base", "--is-ancestor", &local_oid, &remote_oid],
+    )
+    .is_err()
+    {
+        return Err(format!("integration base {branch} diverged from origin"));
+    }
+    if checkouts.is_empty() {
+        // Compare-and-swap onto the proven descendant; never a forced update.
+        git(repo, &["update-ref", &reference, &remote_oid, &local_oid])?;
+    } else {
+        git(repo, &["merge", "--ff-only", &remote_oid])?;
+    }
+    if integration_base_oid(repo, &reference)? != remote_oid {
+        return Err(format!(
+            "integration base {branch} did not fast-forward to origin"
+        ));
+    }
+    Ok(remote_oid)
+}
+
+fn integration_base_oid(repo: &Path, reference: &str) -> Result<String, String> {
+    git_stdout(repo, &["for-each-ref", "--format=%(objectname)", reference])
+}
+
+fn integration_base_checkouts(repo: &Path, reference: &str) -> Result<Vec<PathBuf>, String> {
+    let porcelain = git_stdout(repo, &["worktree", "list", "--porcelain"])?;
+    let mut checkouts = Vec::new();
+    let mut worktree: Option<PathBuf> = None;
+    for line in porcelain.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            worktree = Some(PathBuf::from(path));
+        } else if line.strip_prefix("branch ") == Some(reference) {
+            let path = worktree
+                .clone()
+                .ok_or_else(|| "worktree registry block has no canonical path".to_string())?;
+            checkouts.push(
+                fs::canonicalize(&path)
+                    .map_err(|error| format!("canonicalize {}: {error}", path.display()))?,
+            );
+        }
+    }
+    Ok(checkouts)
+}
+
 fn remote_head_refs(repo: &Path) -> Result<BTreeMap<String, String>, String> {
     let output = git_stdout(repo, &["ls-remote", "--refs", "origin"])?;
     parse_bridge_remote_refs(&output)
@@ -25940,6 +26042,109 @@ mod tests {
         let error = resolve_base(&fixture.repo, &BTreeMap::new())
             .expect_err("diverged explore head must fail closed");
         assert!(error.contains("explore head mismatch"), "{error}");
+    }
+
+    /// Advance `origin/main` from an independent clone so the fixture checkout
+    /// observes a real behind-the-remote integration base.
+    fn publish_advanced_main(fixture: &GitFixture, marker: &str) -> String {
+        let publisher = fixture.root.join(format!("publisher-{marker}"));
+        git(
+            &fixture.root,
+            &[
+                "clone",
+                fixture.root.join("remote.git").to_str().expect("remote"),
+                publisher.to_str().expect("publisher path"),
+            ],
+        );
+        git(
+            &publisher,
+            &["config", "user.email", "autospec@example.invalid"],
+        );
+        git(&publisher, &["config", "user.name", "Autospec Test"]);
+        fs::write(publisher.join(format!("{marker}.txt")), marker).expect("write publisher file");
+        git(&publisher, &["add", "."]);
+        git(&publisher, &["commit", "-m", marker]);
+        git(&publisher, &["push", "origin", "main"]);
+        git_stdout(&publisher, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_is_idempotent() {
+        let fixture = GitFixture::new("integration-sync");
+        assert_eq!(git_stdout(&fixture.repo, &["remote"]), "origin");
+        let behind = git_stdout(&fixture.repo, &["rev-parse", "refs/heads/main"]);
+        let advanced = publish_advanced_main(&fixture, "advanced");
+        assert_ne!(behind, advanced);
+
+        let first = super::synchronize_integration_base(&fixture.repo, "main").expect("first sync");
+        let second =
+            super::synchronize_integration_base(&fixture.repo, "main").expect("second sync");
+
+        assert_eq!(first, advanced);
+        assert_eq!(second, advanced);
+        assert_eq!(
+            git_stdout(&fixture.repo, &["rev-parse", "refs/heads/main"]),
+            advanced
+        );
+        assert_eq!(git_stdout(&fixture.repo, &["rev-parse", "HEAD"]), advanced);
+        git(
+            &fixture.repo,
+            &["merge-base", "--is-ancestor", &behind, &advanced],
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_rejects_current_dirty_state() {
+        for path in ["README.md", "untracked.txt"] {
+            let fixture = GitFixture::new(&format!("integration-sync-dirty-{path}"));
+            fs::write(fixture.repo.join(path), "dirty").expect("write dirty file");
+            let error = super::synchronize_integration_base(&fixture.repo, "main")
+                .expect_err("dirty integration base must fail closed");
+            assert!(error.contains("uncommitted work"), "{error}");
+        }
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_rejects_foreign_worktree() {
+        let fixture = GitFixture::new("integration-sync-foreign-worktree");
+        git(&fixture.repo, &["checkout", "--detach"]);
+        let foreign = fixture.root.join("foreign");
+        git(
+            &fixture.repo,
+            &["worktree", "add", foreign.to_str().unwrap(), "main"],
+        );
+        let error = super::synchronize_integration_base(&fixture.repo, "main")
+            .expect_err("foreign integration checkout must fail closed");
+        assert!(error.contains("another worktree"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_rejects_missing_local_ref() {
+        let fixture = GitFixture::new("integration-sync-missing-local");
+        git(&fixture.repo, &["checkout", "--detach"]);
+        git(&fixture.repo, &["branch", "-D", "main"]);
+        let error = super::synchronize_integration_base(&fixture.repo, "main")
+            .expect_err("missing local integration base must fail closed");
+        assert!(error.contains("no local branch"), "{error}");
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_integration_sync_rejects_divergence() {
+        let fixture = GitFixture::new("integration-sync-divergence");
+        publish_advanced_main(&fixture, "advanced");
+        fs::write(fixture.repo.join("local.txt"), "local").expect("write local file");
+        git(&fixture.repo, &["add", "."]);
+        git(&fixture.repo, &["commit", "-m", "local"]);
+        let diverged = git_stdout(&fixture.repo, &["rev-parse", "refs/heads/main"]);
+
+        let error = super::synchronize_integration_base(&fixture.repo, "main")
+            .expect_err("diverged integration base must fail closed");
+
+        assert!(error.contains("diverged from origin"), "{error}");
+        assert_eq!(
+            git_stdout(&fixture.repo, &["rev-parse", "refs/heads/main"]),
+            diverged
+        );
     }
 
     #[cfg(unix)]
