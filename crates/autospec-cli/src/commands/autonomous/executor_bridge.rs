@@ -850,6 +850,29 @@ pub(crate) fn recoverable_implementation_completion(
     recoverable_implementation_completion_for_state(&state_path, &state)
 }
 
+pub(crate) fn recoverable_interrupted_harness_receipt(
+    state_dir: &Path,
+    lease: &crate::commands::claim::ClaimLease,
+) -> Result<bool, String> {
+    let generation = &sha256_hex(lease.claim_id.as_bytes())[..16];
+    let state_path = state_dir.join(format!("issue-{}-{generation}.json", lease.issue));
+    if !state_path.exists() {
+        return Ok(false);
+    }
+    validate_private_state_file(&state_path)?;
+    let state = PersistedInvocation::from_json(
+        &fs::read_to_string(&state_path)
+            .map_err(|error| format!("read interrupted executor invocation: {error}"))?,
+    )?;
+    if !invocation_matches_lease(&state, lease) {
+        return Err(
+            "interrupted executor invocation does not match the durable local acquisition"
+                .to_string(),
+        );
+    }
+    interrupted_harness_receipt_is_recoverable(&state_path, &state)
+}
+
 pub(crate) fn exact_invocation_exists(
     state_dir: &Path,
     lease: &crate::commands::claim::ClaimLease,
@@ -18598,6 +18621,16 @@ fn has_durable_harness_recovery_evidence(
     Ok(read_executor_exit_status(&sinks.exit_status)?.is_some())
 }
 
+fn interrupted_harness_receipt_is_recoverable(
+    state_path: &Path,
+    state: &PersistedInvocation,
+) -> Result<bool, String> {
+    if state.phase != BridgePhase::Interrupted {
+        return Ok(false);
+    }
+    has_durable_harness_recovery_evidence(state_path, state)
+}
+
 fn supervise_resolved_harness_in_runtime(
     state_path: &Path,
     event_log: &Path,
@@ -26796,6 +26829,66 @@ One likely hidden failure: The focused fixture does not exercise a remote push.\
                 .mode()
                 & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn autonomous_executor_bridge_interrupted_harness_receipt_requires_durable_exit() {
+        let (_fixture, mut state, original_state_path, _) =
+            zero_effect_classifier_fixture("interrupted-harness-receipt", false, false);
+        state.phase = BridgePhase::Interrupted;
+        state.supervisor = None;
+        state.process = None;
+        state.identity.invocation_id =
+            format!("{}-{}", state.identity.issue, state.identity.claim_id);
+        let state_dir = original_state_path.parent().expect("state directory");
+        let generation = &super::sha256_hex(state.identity.claim_id.as_bytes())[..16];
+        let state_path =
+            state_dir.join(format!("issue-{}-{generation}.json", state.identity.issue));
+        super::write_invocation_atomic(&state_path, &state).expect("persist interrupted state");
+        let sinks = super::output_sink_paths_for_state(&state_path, &state)
+            .expect("interrupted output sinks");
+        for path in [&sinks.exit_status, &sinks.supervisor_identity] {
+            match fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => panic!("clear recovery evidence {}: {error}", path.display()),
+            }
+        }
+
+        let lease = crate::commands::claim::ClaimLease {
+            issue: state.identity.issue,
+            repo: state.identity.repository.clone(),
+            worker_id: state.identity.worker_id.clone(),
+            branch: state.identity.branch.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            session_id: None,
+        };
+        assert!(
+            !super::recoverable_interrupted_harness_receipt(state_dir, &lease)
+                .expect("classify missing exit evidence")
+        );
+
+        let mut foreign = lease.clone();
+        foreign.repo = "other/repo".to_string();
+        let error = super::recoverable_interrupted_harness_receipt(state_dir, &foreign)
+            .expect_err("foreign lease must fail closed");
+        assert!(error.contains("does not match"), "error={error}");
+
+        fs::create_dir_all(sinks.exit_status.parent().expect("exit parent"))
+            .expect("create exit parent");
+        let mut exit = [0_u8; 16];
+        exit[..4].copy_from_slice(&0_i32.to_ne_bytes());
+        exit[4..8].copy_from_slice(b"EXIT");
+        exit[8..12].copy_from_slice(&0_i32.to_ne_bytes());
+        exit[12..].copy_from_slice(b"DONE");
+        fs::write(&sinks.exit_status, exit).expect("write completed exit receipt");
+        fs::set_permissions(&sinks.exit_status, fs::Permissions::from_mode(0o600))
+            .expect("secure exit receipt");
+
+        assert!(
+            super::recoverable_interrupted_harness_receipt(state_dir, &lease)
+                .expect("classify durable exit evidence")
         );
     }
 

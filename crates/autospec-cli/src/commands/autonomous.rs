@@ -2905,6 +2905,11 @@ fn executor_receipt_failure_is_recoverable(
         return Ok(false);
     };
     let executor_state = layout.state_dir.join("executor");
+    if executor_bridge::recoverable_interrupted_harness_receipt(&executor_state, &active)
+        .map_err(CommandFailure::diagnostic)?
+    {
+        return Ok(true);
+    }
     if executor_bridge::recoverable_implementation_completion(&executor_state, &active)
         .map_err(CommandFailure::diagnostic)?
     {
