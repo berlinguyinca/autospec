@@ -14921,6 +14921,9 @@ pub(crate) fn finalize_merged_executor(
                 .into(),
         );
     }
+    if state.phase == BridgePhase::Merged {
+        close_merged_integration_issue(state, &DraftPrAdapter::github_cli())?;
+    }
     let binding = cleanup_binding(state);
     let finalization_intent = cleanup_record_path(state_path, "intent");
     ensure_cleanup_record(
@@ -14975,6 +14978,162 @@ pub(crate) fn finalize_merged_executor(
     state.phase = BridgePhase::Complete;
     state.progress_at = unix_now()?;
     write_invocation_atomic(state_path, state).map_err(BridgeRunFailure::invariant)
+}
+
+fn close_merged_integration_issue(
+    state: &PersistedInvocation,
+    adapter: &DraftPrAdapter,
+) -> Result<(), BridgeRunFailure> {
+    if state.phase != BridgePhase::Merged {
+        return Err(BridgeRunFailure::invariant(
+            "executor issue closure requires persisted merged state",
+        ));
+    }
+    let merge_oid = state
+        .terminal_result
+        .as_deref()
+        .filter(|oid| canonical_git_oid(oid))
+        .ok_or_else(|| {
+            BridgeRunFailure::invariant("executor merged state has no canonical merge OID")
+        })?;
+    let base_branch = state
+        .identity
+        .base_ref
+        .strip_prefix("origin/")
+        .filter(|branch| !branch.is_empty())
+        .ok_or_else(|| {
+            BridgeRunFailure::invariant("executor merged base is not an origin branch")
+        })?;
+    validate_branch(base_branch).map_err(BridgeRunFailure::invariant)?;
+    let base_reference = format!("refs/heads/{base_branch}");
+    let output = Command::new("git")
+        .args(["ls-remote", "--symref", "origin", "HEAD", &base_reference])
+        .current_dir(&state.identity.repository_path)
+        .output()
+        .map_err(|error| {
+            BridgeRunFailure::transient(format!("observe remote default branch: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(BridgeRunFailure::transient(format!(
+            "observe remote default branch failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let advertisement = String::from_utf8(output.stdout).map_err(|error| {
+        BridgeRunFailure::invariant(format!(
+            "remote default branch evidence is not UTF-8: {error}"
+        ))
+    })?;
+    let mut default_branch = None;
+    for line in advertisement.lines() {
+        if let Some(reference) = line
+            .strip_prefix("ref: ")
+            .and_then(|line| line.strip_suffix("\tHEAD"))
+        {
+            if default_branch.replace(reference).is_some() {
+                return Err(BridgeRunFailure::invariant(
+                    "remote advertised more than one default branch",
+                ));
+            }
+        }
+    }
+    let default_branch = default_branch.ok_or_else(|| {
+        BridgeRunFailure::invariant("remote did not authoritatively advertise a default branch")
+    })?;
+    if default_branch == base_reference {
+        return Ok(());
+    }
+    let base_oid = fetch_stable_integration_base(
+        &state.identity.repository_path,
+        base_branch,
+        &base_reference,
+    )
+    .map_err(|error| {
+        BridgeRunFailure::transient(format!("fetch stable merged integration branch: {error}"))
+    })?;
+    let ancestor = Command::new("git")
+        .args(["merge-base", "--is-ancestor", merge_oid, &base_oid])
+        .current_dir(&state.identity.repository_path)
+        .status()
+        .map_err(|error| {
+            BridgeRunFailure::transient(format!("verify merged integration ancestry: {error}"))
+        })?;
+    if !ancestor.success() {
+        return Err(BridgeRunFailure::invariant(
+            "persisted merge OID is not an ancestor of the advertised integration branch",
+        ));
+    }
+
+    let issue = state.current_child.unwrap_or(state.identity.issue);
+    let observe = || -> Result<String, BridgeRunFailure> {
+        let output = Command::new(&adapter.gh)
+            .args([
+                "issue",
+                "view",
+                &issue.to_string(),
+                "--repo",
+                &state.identity.repository,
+                "--json",
+                "number,state",
+            ])
+            .envs(&adapter.environment)
+            .output()
+            .map_err(|error| {
+                BridgeRunFailure::transient(format!("observe merged issue: {error}"))
+            })?;
+        if !output.status.success() {
+            return Err(BridgeRunFailure::transient(format!(
+                "observe merged issue failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+            BridgeRunFailure::invariant(format!("invalid merged issue observation: {error}"))
+        })?;
+        if value.get("number").and_then(serde_json::Value::as_u64) != Some(issue) {
+            return Err(BridgeRunFailure::invariant(
+                "merged issue observation returned a mismatched issue number",
+            ));
+        }
+        value
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| BridgeRunFailure::invariant("merged issue observation omitted state"))
+    };
+    match observe()?.as_str() {
+        "CLOSED" => return Ok(()),
+        "OPEN" => {}
+        _ => {
+            return Err(BridgeRunFailure::invariant(
+                "merged issue has an unknown state",
+            ))
+        }
+    }
+    let output = Command::new(&adapter.gh)
+        .args([
+            "issue",
+            "close",
+            &issue.to_string(),
+            "--repo",
+            &state.identity.repository,
+        ])
+        .envs(&adapter.environment)
+        .output()
+        .map_err(|error| BridgeRunFailure::transient(format!("close merged issue: {error}")))?;
+    let observed = observe();
+    if !output.status.success() && !matches!(observed.as_ref(), Ok(state) if state == "CLOSED") {
+        return Err(BridgeRunFailure::transient(format!(
+            "close merged issue failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    if observed?.as_str() != "CLOSED" {
+        return Err(BridgeRunFailure::invariant(
+            "merged issue remained open after close",
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn finalize_failed_executor(
@@ -48971,5 +49130,134 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
             super::failure_disposition(false, false),
             crate::commands::claim::BridgeClaimDisposition::NeedsHuman
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_closes_integration_issue() {
+        let (fixture, mut state, _snapshot, _) =
+            implementation_proof_fixture("close-integration-issue");
+        state.phase = super::BridgePhase::Merged;
+        state.terminal_result = Some(git_stdout(&fixture.repo, &["rev-parse", "origin/main"]));
+        state.identity.base_ref = "origin/integration".into();
+        state.current_child = Some(101);
+        git(
+            &fixture.repo,
+            &[
+                "--git-dir",
+                fixture
+                    .root
+                    .join("remote.git")
+                    .to_str()
+                    .expect("remote path"),
+                "update-ref",
+                "refs/heads/integration",
+                state.terminal_result.as_deref().expect("merge OID"),
+            ],
+        );
+
+        let calls = fixture.root.join("issue-calls");
+        let issue_state = fixture.root.join("issue-state");
+        fs::write(&issue_state, "OPEN\n").expect("issue state");
+        let gh = fixture.root.join("gh-close-issue");
+        write_executable(
+            &gh,
+            r#"#!/bin/sh
+set -eu
+printf '%s\n' "$*" >> "$ISSUE_CALLS"
+number=${RETURN_NUMBER:-$3}
+case "$1 $2" in
+  "issue view") printf '{"number":%s,"state":"%s"}\n' "$number" "$(cat "$ISSUE_STATE")" ;;
+  "issue close")
+    [ "${CLOSE_FAIL:-0}" = 0 ] || exit 65
+    printf '%s\n' CLOSED > "$ISSUE_STATE"
+    ;;
+  *) exit 64 ;;
+esac
+"#,
+        );
+        let adapter = super::DraftPrAdapter {
+            gh,
+            environment: BTreeMap::from([
+                ("ISSUE_CALLS".into(), calls.clone().into_os_string()),
+                ("ISSUE_STATE".into(), issue_state.clone().into_os_string()),
+            ]),
+        };
+
+        super::close_merged_integration_issue(&state, &adapter).expect("close continuation");
+        let call_log = fs::read_to_string(&calls).expect("calls");
+        assert_eq!(call_log.matches("issue close 101").count(), 1, "{call_log}");
+        assert!(!call_log.contains("issue close 42"), "{call_log}");
+        assert_eq!(state.phase, super::BridgePhase::Merged);
+
+        fs::write(fixture.repo.join("integration-advance"), "next\n")
+            .expect("integration advance fixture");
+        git(&fixture.repo, &["add", "integration-advance"]);
+        git(&fixture.repo, &["commit", "-m", "advance integration"]);
+        git(
+            &fixture.repo,
+            &["push", "origin", "HEAD:refs/heads/integration"],
+        );
+        fs::write(&calls, "").expect("clear advanced-tip calls");
+        fs::write(&issue_state, "OPEN\n").expect("reopen advanced-tip issue");
+        super::close_merged_integration_issue(&state, &adapter)
+            .expect("descendant integration tip preserves closure proof");
+        let advanced_calls = fs::read_to_string(&calls).expect("advanced-tip calls");
+        assert_eq!(
+            advanced_calls.matches("issue close 101").count(),
+            1,
+            "{advanced_calls}"
+        );
+
+        fs::write(&calls, "").expect("clear calls");
+        fs::write(&issue_state, "OPEN\n").expect("reopen legacy issue");
+        state.current_child = None;
+        super::close_merged_integration_issue(&state, &adapter).expect("close legacy issue");
+        let legacy_calls = fs::read_to_string(&calls).expect("legacy calls");
+        assert_eq!(
+            legacy_calls.matches("issue close 42").count(),
+            1,
+            "{legacy_calls}"
+        );
+        assert!(!legacy_calls.contains("issue close 101"), "{legacy_calls}");
+
+        fs::write(&calls, "").expect("clear default-branch calls");
+        state.identity.base_ref = "origin/main".into();
+        super::close_merged_integration_issue(&state, &adapter).expect("default branch merge");
+        assert_eq!(fs::read_to_string(&calls).expect("default calls"), "");
+
+        state.identity.base_ref = "origin/integration".into();
+        let mut mismatched = adapter.clone();
+        mismatched
+            .environment
+            .insert("RETURN_NUMBER".into(), "99".into());
+        assert!(super::close_merged_integration_issue(&state, &mismatched).is_err());
+        assert_eq!(state.phase, super::BridgePhase::Merged);
+
+        let mut failing = adapter.clone();
+        failing.environment.insert("CLOSE_FAIL".into(), "1".into());
+        fs::write(&issue_state, "OPEN\n").expect("reopen failed-close issue");
+        assert!(super::close_merged_integration_issue(&state, &failing).is_err());
+        assert_eq!(state.phase, super::BridgePhase::Merged);
+
+        let rewrite_tree = git_stdout(&fixture.repo, &["rev-parse", "HEAD^{tree}"]);
+        let rewritten_integration = git_stdout(
+            &fixture.repo,
+            &["commit-tree", &rewrite_tree, "-m", "rewrite integration"],
+        );
+        git(
+            &fixture.repo,
+            &[
+                "push",
+                "--force",
+                "origin",
+                &format!("{rewritten_integration}:refs/heads/integration"),
+            ],
+        );
+        fs::write(&calls, "").expect("clear rewritten-tip calls");
+        let error = super::close_merged_integration_issue(&state, &adapter)
+            .expect_err("rewritten integration tip must fail closed");
+        assert!(format!("{error:?}").contains("not an ancestor"));
+        assert_eq!(fs::read_to_string(&calls).expect("rewritten-tip calls"), "");
     }
 }
