@@ -3004,6 +3004,9 @@ fn synchronize_fresh_selection_base(
     if phase != ConductorPhase::Scan || selected_issue.is_some() {
         return Ok(None);
     }
+    if !repo_dir.join(".git").exists() {
+        return Ok(None);
+    }
     executor_bridge::synchronize_integration_base(repo_dir, branch).map(Some)
 }
 
