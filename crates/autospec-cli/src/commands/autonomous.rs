@@ -2598,15 +2598,34 @@ fn run_foreground_with_lease(
             .map_err(CommandFailure::diagnostic)?;
         persist_foreground_state(&state_path, &state).map_err(CommandFailure::diagnostic)?;
     }
-    if state.phase() == ConductorPhase::Paused {
+    if state.phase() == ConductorPhase::Paused
+        && !matches!(
+            state.pause_reason(),
+            Some(OWNERSHIP_RETIREMENT_PAUSE) | Some(TERMINAL_RETIREMENT_PAUSE)
+        )
+    {
         if let Some(issue) = state.selected_issue() {
             if !issue_is_open_for_autonomous_work(&layout.repo, issue)? {
-                state = state
-                    .transition(ConductorEvent::RetireObsoleteSelection)
-                    .map_err(CommandFailure::diagnostic)?;
-                persist_foreground_state(&state_path, &state)
-                    .map_err(CommandFailure::diagnostic)?;
-                return Ok(ForegroundCompletion::State(Box::new(state)));
+                // A closed terminal claim is not new work: finish its exact in-flight bridge
+                // proof before retiring the selection.
+                let terminal_receipt_recovery = state.pause_reason()
+                    == Some("executor_receipt_failed")
+                    && claim::conductor_claim_is_terminal(&layout.repo, issue)?
+                    && executor_receipt_failure_is_recoverable(layout, &state_path, issue)?;
+                if terminal_receipt_recovery {
+                    state = state
+                        .transition(ConductorEvent::Resume)
+                        .map_err(CommandFailure::diagnostic)?;
+                    persist_foreground_state(&state_path, &state)
+                        .map_err(CommandFailure::diagnostic)?;
+                } else {
+                    state = state
+                        .transition(ConductorEvent::RetireObsoleteSelection)
+                        .map_err(CommandFailure::diagnostic)?;
+                    persist_foreground_state(&state_path, &state)
+                        .map_err(CommandFailure::diagnostic)?;
+                    return Ok(ForegroundCompletion::State(Box::new(state)));
+                }
             }
         }
     }
