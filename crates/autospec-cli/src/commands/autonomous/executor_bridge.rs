@@ -19410,6 +19410,33 @@ impl OwnedProcess {
         Ok(result == 0)
     }
 
+    fn reap_if_child(&self) -> Result<bool, String> {
+        loop {
+            // SAFETY: waitid writes one siginfo_t, and P_PIDFD binds the wait to this owned
+            // descriptor rather than to a recyclable numeric PID.
+            let mut info = unsafe { std::mem::zeroed::<nix::libc::siginfo_t>() };
+            // SAFETY: pidfd is live for this call; WEXITED requests only terminal status and
+            // omitting WNOWAIT consumes it when this process is the descendant's current parent.
+            let result = unsafe {
+                nix::libc::waitid(
+                    nix::libc::P_PIDFD,
+                    self.pidfd.as_raw_fd() as nix::libc::id_t,
+                    &mut info,
+                    nix::libc::WEXITED | nix::libc::WNOHANG,
+                )
+            };
+            if result == 0 {
+                return Ok(true);
+            }
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(nix::libc::ECHILD) => return Ok(false),
+                Some(nix::libc::EINTR) => continue,
+                _ => return Err(format!("wait on owned executor pidfd: {error}")),
+            }
+        }
+    }
+
     fn signal(&self, signal: Signal) -> Result<(), String> {
         if cleanup_failpoint() == CLEANUP_FAILPOINT_SIGNAL {
             return Err("injected cleanup signal failure".to_string());
@@ -19488,6 +19515,7 @@ fn immutable_process_instance_is_live(expected: &ProcessIdentity) -> Result<bool
 struct OwnedProcessSet {
     leader: OwnedProcess,
     descendants: BTreeMap<(u32, String), OwnedProcess>,
+    exited_descendants: BTreeMap<(u32, String), ProcessBirth>,
 }
 
 #[cfg(target_os = "linux")]
@@ -19542,6 +19570,7 @@ fn terminate_cleanup_instance(harness: &ProcessIdentity) -> Result<(), AdoptionF
     let mut guard = AdoptedProcessGuard::new(OwnedProcessSet {
         leader,
         descendants: BTreeMap::new(),
+        exited_descendants: BTreeMap::new(),
     });
     if let Err(reason) = guard
         .processes_mut()
@@ -19571,6 +19600,7 @@ impl OwnedProcessSet {
         Ok(Self {
             leader: OwnedProcess::capture_forked_child(pid)?,
             descendants: BTreeMap::new(),
+            exited_descendants: BTreeMap::new(),
         })
     }
 
@@ -19578,6 +19608,7 @@ impl OwnedProcessSet {
         Ok(Self {
             leader: OwnedProcess::capture_identity(expected)?,
             descendants: BTreeMap::new(),
+            exited_descendants: BTreeMap::new(),
         })
     }
 
@@ -19608,6 +19639,7 @@ impl OwnedProcessSet {
                         }
                     })?,
                     descendants: BTreeMap::new(),
+                    exited_descendants: BTreeMap::new(),
                 }
             }
             Err(supervisor_error)
@@ -19729,6 +19761,7 @@ impl OwnedProcessSet {
             let mut guard = AdoptedProcessGuard::new(Self {
                 leader,
                 descendants: BTreeMap::new(),
+                exited_descendants: BTreeMap::new(),
             });
             let prepare = (|| -> Result<SupervisedCleanupPreparation, String> {
                 guard
@@ -19809,6 +19842,33 @@ impl OwnedProcessSet {
         if !self.leader.is_live()? {
             return Ok(());
         }
+        let mut forgotten = Vec::new();
+        for (key, birth) in &self.exited_descendants {
+            if observe_process_birth(birth.pid)?.as_ref() != Some(birth) {
+                forgotten.push(key.clone());
+            }
+        }
+        for key in forgotten {
+            self.exited_descendants.remove(&key);
+        }
+        let mut exited = Vec::new();
+        for (key, process) in &self.descendants {
+            if !process.is_live()? {
+                exited.push(key.clone());
+            }
+        }
+        for key in exited {
+            let process = self
+                .descendants
+                .get(&key)
+                .expect("exited descendant key came from the owned map");
+            let birth = process.birth.clone();
+            let retain_for_reap = !process.reap_if_child()?;
+            if retain_for_reap && observe_process_birth(birth.pid)?.as_ref() == Some(&birth) {
+                self.exited_descendants.insert(key.clone(), birth);
+            }
+            self.descendants.remove(&key);
+        }
         let table = process_table_entries()?;
         let mut descendants = BTreeSet::new();
         descendants.insert(self.leader.birth.pid);
@@ -19830,6 +19890,9 @@ impl OwnedProcessSet {
                 && !self
                     .descendants
                     .contains_key(&(birth.pid, birth.start_identity.clone()))
+                && !self
+                    .exited_descendants
+                    .contains_key(&(birth.pid, birth.start_identity.clone()))
             {
                 let capture = {
                     #[cfg(test)]
@@ -19844,7 +19907,11 @@ impl OwnedProcessSet {
                     }
                 };
                 match capture {
-                    Ok(process) => captured.push(process),
+                    Ok(process) => {
+                        if process.is_live()? {
+                            captured.push(process);
+                        }
+                    }
                     Err(error) => {
                         if observe_process_birth(birth.pid)?.as_ref() == Some(&birth) {
                             return Err(format!(
@@ -19909,6 +19976,21 @@ impl OwnedProcessSet {
             match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
                 Ok(_) | Err(nix::errno::Errno::ECHILD) | Err(nix::errno::Errno::ESRCH) => {}
                 Err(error) => return Err(format!("reap owned executor descendant: {error}")),
+            }
+        }
+        for descendant in self.exited_descendants.values() {
+            if observe_process_birth(descendant.pid)?.as_ref() != Some(descendant) {
+                continue;
+            }
+            let pid = Pid::from_raw(
+                i32::try_from(descendant.pid)
+                    .map_err(|_| "exited executor descendant PID is out of range".to_string())?,
+            );
+            match waitpid(pid, Some(WaitPidFlag::WNOHANG)) {
+                Ok(_) | Err(nix::errno::Errno::ECHILD) | Err(nix::errno::Errno::ESRCH) => {}
+                Err(error) => {
+                    return Err(format!("reap retained exited executor descendant: {error}"));
+                }
             }
         }
         Ok(())
@@ -25550,6 +25632,7 @@ mod tests {
             let mut processes = super::OwnedProcessSet {
                 leader,
                 descendants: BTreeMap::new(),
+                exited_descendants: BTreeMap::new(),
             };
             let _ = processes.capture_descendants_while_leader_live();
             let _ = processes.terminate();
@@ -34256,6 +34339,155 @@ exit 64
             super::OwnedProcess::capture_forked_child(child.id()).expect("capture cleanup pidfd");
         owned.signal(Signal::SIGKILL).expect("clean replacement");
         let _ = child.wait();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autonomous_executor_bridge_prunes_exited_descendant_pidfds() {
+        let leader = super::OwnedProcess::capture_forked_child(std::process::id())
+            .expect("capture test process");
+        let mut processes = super::OwnedProcessSet {
+            leader,
+            descendants: BTreeMap::new(),
+            exited_descendants: BTreeMap::new(),
+        };
+        let mut exited_keys = Vec::new();
+        for _ in 0..32 {
+            let mut child = Command::new("/usr/bin/sleep")
+                .arg("30")
+                .spawn()
+                .expect("spawn exited descendant fixture");
+            let _cleanup =
+                DetachedForkedCleanup::new(child.id()).expect("arm exited fixture cleanup");
+            let owned = super::OwnedProcess::capture_forked_child(child.id())
+                .expect("capture exited descendant pidfd");
+            let key = (owned.birth.pid, owned.birth.start_identity.clone());
+            owned.signal(Signal::SIGKILL).expect("stop exited fixture");
+            child.wait().expect("reap exited fixture");
+            assert!(!owned.is_live().expect("observe exited fixture"));
+            processes.descendants.insert(key.clone(), owned);
+            exited_keys.push(key);
+        }
+        let mut zombie_child = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn unreaped descendant fixture");
+        let _zombie_cleanup =
+            DetachedForkedCleanup::new(zombie_child.id()).expect("arm unreaped fixture cleanup");
+        let zombie = super::OwnedProcess::capture_forked_child(zombie_child.id())
+            .expect("capture unreaped descendant pidfd");
+        let zombie_key = (zombie.birth.pid, zombie.birth.start_identity.clone());
+        zombie
+            .signal(Signal::SIGKILL)
+            .expect("stop unreaped fixture");
+        for _ in 0..100 {
+            if !zombie.is_live().expect("observe unreaped fixture") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!zombie.is_live().expect("observe unreaped fixture"));
+        processes.descendants.insert(zombie_key.clone(), zombie);
+
+        let nonchild_root = test_root("unreaped-non-child-descendant");
+        let nonchild_pid_path = nonchild_root.join("pid");
+        let mut intermediary = Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 30 & printf '%s\\n' \"$!\" > \"$1\"; exec sleep 30")
+            .arg("sh")
+            .arg(&nonchild_pid_path)
+            .spawn()
+            .expect("spawn intermediary descendant fixture");
+        let _intermediary_cleanup = DetachedForkedCleanup::new(intermediary.id())
+            .expect("arm intermediary fixture cleanup");
+        let mut nonchild_pid = None;
+        for _ in 0..100 {
+            if let Ok(pid) = fs::read_to_string(&nonchild_pid_path) {
+                nonchild_pid = Some(
+                    pid.trim()
+                        .parse::<u32>()
+                        .expect("parse non-child descendant PID"),
+                );
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let nonchild_pid = nonchild_pid.expect("intermediary published descendant PID");
+        let nonchild = super::OwnedProcess::capture_forked_child(nonchild_pid)
+            .expect("capture non-child descendant pidfd");
+        let nonchild_key = (nonchild.birth.pid, nonchild.birth.start_identity.clone());
+        nonchild
+            .signal(Signal::SIGKILL)
+            .expect("stop non-child descendant fixture");
+        for _ in 0..100 {
+            if !nonchild.is_live().expect("observe non-child fixture") {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!nonchild.is_live().expect("observe non-child fixture"));
+        processes.descendants.insert(nonchild_key.clone(), nonchild);
+        let mut live_child = Command::new("/usr/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn live descendant fixture");
+        let _live_cleanup =
+            DetachedForkedCleanup::new(live_child.id()).expect("arm live fixture cleanup");
+        let live = super::OwnedProcess::capture_forked_child(live_child.id())
+            .expect("capture live descendant pidfd");
+        let live_key = (live.birth.pid, live.birth.start_identity.clone());
+        processes.descendants.insert(live_key.clone(), live);
+
+        processes
+            .capture_descendants_while_leader_live()
+            .expect("first bounded capture");
+        processes
+            .capture_descendants_while_leader_live()
+            .expect("second bounded capture");
+
+        assert!(exited_keys
+            .iter()
+            .all(|key| !processes.descendants.contains_key(key)));
+        assert!(!processes.descendants.contains_key(&zombie_key));
+        assert!(!processes.descendants.contains_key(&nonchild_key));
+        assert!(processes.exited_descendants.contains_key(&nonchild_key));
+        assert!(processes.descendants.contains_key(&live_key));
+        match zombie_child.wait() {
+            Ok(_) => {}
+            Err(error) if error.raw_os_error() == Some(nix::libc::ECHILD) => {}
+            Err(error) => panic!("reap unreaped fixture: {error}"),
+        }
+        super::OwnedProcess::capture_forked_child(intermediary.id())
+            .expect("capture intermediary cleanup pidfd")
+            .signal(Signal::SIGKILL)
+            .expect("stop intermediary fixture");
+        intermediary.wait().expect("reap intermediary fixture");
+        for _ in 0..100 {
+            processes
+                .reap_descendants()
+                .expect("reap retained non-child fixture");
+            if super::observe_process_birth(nonchild_pid)
+                .expect("observe reparented non-child fixture")
+                .is_none()
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(super::observe_process_birth(nonchild_pid)
+            .expect("observe reaped non-child fixture")
+            .is_none());
+        processes
+            .capture_descendants_while_leader_live()
+            .expect("forget reaped non-child tombstone");
+        assert!(!processes.exited_descendants.contains_key(&nonchild_key));
+        processes
+            .descendants
+            .get(&live_key)
+            .expect("retained live pidfd")
+            .signal(Signal::SIGKILL)
+            .expect("stop live fixture");
+        live_child.wait().expect("reap live fixture");
     }
 
     #[cfg(target_os = "linux")]
