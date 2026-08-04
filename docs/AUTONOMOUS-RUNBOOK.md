@@ -5,8 +5,9 @@
 When an executor restarts from `BridgePhase::Merged`, recovery completes in this
 order:
 
-1. Validate the persisted merge OID and resolve the remote default branch from
-   the remote's authoritative `HEAD` advertisement.
+1. Resolve the remote default branch from its authoritative `HEAD`
+   advertisement, fetch a stable integration tip, and prove the persisted
+   merge OID is its ancestor.
 2. For a merge into a non-default integration branch, select exactly
    `current_child`, falling back to legacy `identity.issue` state, and observe
    that same issue number with `gh issue view`.
@@ -16,9 +17,10 @@ order:
    `BridgePhase::CleanupPending` and removing local resources.
 
 Default-branch merges rely on the pull request's closing reference and do not
-run an explicit `gh issue close`. Any ambiguous branch advertisement, merge-OID
-mismatch, issue-number mismatch, observation failure, or close failure leaves
-the durable phase at `BridgePhase::Merged` so the next run can replay safely.
+run an explicit `gh issue close`. Any ambiguous branch advertisement,
+non-descendant integration rewrite, issue-number mismatch, observation failure,
+or close failure leaves the durable phase at `BridgePhase::Merged` so the next
+run can replay safely.
 
 ## Independent review
 

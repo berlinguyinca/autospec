@@ -15025,7 +15025,6 @@ fn close_merged_integration_issue(
         ))
     })?;
     let mut default_branch = None;
-    let mut base_oid = None;
     for line in advertisement.lines() {
         if let Some(reference) = line
             .strip_prefix("ref: ")
@@ -15036,14 +15035,6 @@ fn close_merged_integration_issue(
                     "remote advertised more than one default branch",
                 ));
             }
-        } else if let Some((oid, reference)) = line.split_once('\t') {
-            if reference == base_reference {
-                if base_oid.replace(oid).is_some() {
-                    return Err(BridgeRunFailure::invariant(
-                        "remote advertised the integration branch more than once",
-                    ));
-                }
-            }
         }
     }
     let default_branch = default_branch.ok_or_else(|| {
@@ -15052,9 +15043,24 @@ fn close_merged_integration_issue(
     if default_branch == base_reference {
         return Ok(());
     }
-    if base_oid != Some(merge_oid) {
+    let base_oid = fetch_stable_integration_base(
+        &state.identity.repository_path,
+        base_branch,
+        &base_reference,
+    )
+    .map_err(|error| {
+        BridgeRunFailure::transient(format!("fetch stable merged integration branch: {error}"))
+    })?;
+    let ancestor = Command::new("git")
+        .args(["merge-base", "--is-ancestor", merge_oid, &base_oid])
+        .current_dir(&state.identity.repository_path)
+        .status()
+        .map_err(|error| {
+            BridgeRunFailure::transient(format!("verify merged integration ancestry: {error}"))
+        })?;
+    if !ancestor.success() {
         return Err(BridgeRunFailure::invariant(
-            "persisted merge OID does not match the advertised integration branch",
+            "persisted merge OID is not an ancestor of the advertised integration branch",
         ));
     }
 
@@ -49184,6 +49190,25 @@ esac
         assert!(!call_log.contains("issue close 42"), "{call_log}");
         assert_eq!(state.phase, super::BridgePhase::Merged);
 
+        fs::write(fixture.repo.join("integration-advance"), "next\n")
+            .expect("integration advance fixture");
+        git(&fixture.repo, &["add", "integration-advance"]);
+        git(&fixture.repo, &["commit", "-m", "advance integration"]);
+        git(
+            &fixture.repo,
+            &["push", "origin", "HEAD:refs/heads/integration"],
+        );
+        fs::write(&calls, "").expect("clear advanced-tip calls");
+        fs::write(&issue_state, "OPEN\n").expect("reopen advanced-tip issue");
+        super::close_merged_integration_issue(&state, &adapter)
+            .expect("descendant integration tip preserves closure proof");
+        let advanced_calls = fs::read_to_string(&calls).expect("advanced-tip calls");
+        assert_eq!(
+            advanced_calls.matches("issue close 101").count(),
+            1,
+            "{advanced_calls}"
+        );
+
         fs::write(&calls, "").expect("clear calls");
         fs::write(&issue_state, "OPEN\n").expect("reopen legacy issue");
         state.current_child = None;
@@ -49214,5 +49239,25 @@ esac
         fs::write(&issue_state, "OPEN\n").expect("reopen failed-close issue");
         assert!(super::close_merged_integration_issue(&state, &failing).is_err());
         assert_eq!(state.phase, super::BridgePhase::Merged);
+
+        let rewrite_tree = git_stdout(&fixture.repo, &["rev-parse", "HEAD^{tree}"]);
+        let rewritten_integration = git_stdout(
+            &fixture.repo,
+            &["commit-tree", &rewrite_tree, "-m", "rewrite integration"],
+        );
+        git(
+            &fixture.repo,
+            &[
+                "push",
+                "--force",
+                "origin",
+                &format!("{rewritten_integration}:refs/heads/integration"),
+            ],
+        );
+        fs::write(&calls, "").expect("clear rewritten-tip calls");
+        let error = super::close_merged_integration_issue(&state, &adapter)
+            .expect_err("rewritten integration tip must fail closed");
+        assert!(format!("{error:?}").contains("not an ancestor"));
+        assert_eq!(fs::read_to_string(&calls).expect("rewritten-tip calls"), "");
     }
 }
