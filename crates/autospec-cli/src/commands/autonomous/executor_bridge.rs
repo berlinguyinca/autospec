@@ -1181,11 +1181,34 @@ fn run_executor_bridge_with_codex_probe(
         write_invocation_atomic(&request.state_path, &state)?;
         resolved_harness = Some(resolved);
     }
+    if state.phase == BridgePhase::Merged {
+        if !executor_terminal_processes_are_quiescent(&state)? {
+            return Err("executor merged recovery still owns a live process"
+                .to_string()
+                .into());
+        }
+        finalize_merged_executor(&request.state_path, &mut state, runtime.take())?;
+        return publish_complete_receipt(request, &state, &terminal_path);
+    }
     if state.phase == BridgePhase::CleanupPending {
         finalize_merged_executor(&request.state_path, &mut state, runtime.take())?;
         return publish_complete_receipt(request, &state, &terminal_path);
     }
     let remote = DraftPrAdapter::github_cli();
+    if matches!(
+        state.phase,
+        BridgePhase::DraftCreated
+            | BridgePhase::Ready
+            | BridgePhase::CiPassed
+            | BridgePhase::ReviewPassed
+            | BridgePhase::ResultAccepted
+            | BridgePhase::MergeRequested
+    ) && executor_terminal_processes_are_quiescent(&state)?
+        && reconcile_exact_merged_invocation(&request.state_path, &mut state, &remote)?
+    {
+        finalize_merged_executor(&request.state_path, &mut state, runtime.take())?;
+        return publish_complete_receipt(request, &state, &terminal_path);
+    }
     if state.phase == BridgePhase::Pending && state.remote_snapshot_digest.is_none() {
         RemoteMutationSnapshot::capture_and_persist_for_run(
             &request.state_path,
@@ -48141,6 +48164,201 @@ printf '%s\n' '[[{"id":100,"body":"page one","updated_at":"2026-07-27T00:00:00Z"
             "main",
         )
         .is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn autonomous_executor_bridge_reconciles_merged_existing_worktree_before_stale_proof() {
+        let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+        let (fixture, mut state, _snapshot, closeout) =
+            implementation_proof_fixture("merged-existing-worktree-entrypoint");
+        commit_implementation(&state);
+        let persisted_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+        state.phase = super::BridgePhase::DraftCreated;
+        state.pr = Some(17);
+        state.head_oid = Some(persisted_head.clone());
+        state.closeout_path = Some(fs::canonicalize(&closeout).expect("canonical closeout"));
+        let closeout_body = fs::read_to_string(&closeout).expect("read closeout");
+        state.closeout_digest = Some(super::sha256_hex(closeout_body.as_bytes()));
+        state.identity.runtime_environment_dir = None;
+        state.identity.runtime_session_id = None;
+        state.supervisor = None;
+        state.process = None;
+        state.draft_process = None;
+        super::record_worktree_creation_identity(
+            &state.identity.repository_path,
+            &state.identity.branch,
+            &ResolvedBase {
+                base_ref: state.identity.base_ref.clone(),
+                base_oid: state.identity.base_oid.clone(),
+                explore_mode: false,
+            },
+        )
+        .expect("record worktree creation identity");
+        let claimed = autospec_core::claim::RunStateRecord::new(
+            state.identity.repository.clone(),
+            state.identity.issue,
+            state.identity.worker_id.clone(),
+            "claimed",
+            state.identity.branch.clone(),
+            "",
+            "claimed",
+            Vec::new(),
+            "2026-08-04T00:00:00Z",
+            "2026-08-04T00:00:00Z",
+            999_999,
+        )
+        .with_claim_id(state.identity.claim_id.clone());
+        assert!(crate::commands::claim::advance_claim_ref_for_test(
+            &state.identity.repository_path,
+            &claimed,
+        )
+        .expect("seed claimed generation"));
+
+        fs::write(
+            state.identity.worktree.join("reviewer-follow-up.txt"),
+            "reviewer follow-up\n",
+        )
+        .expect("reviewer follow-up");
+        git(&state.identity.worktree, &["add", "reviewer-follow-up.txt"]);
+        git(
+            &state.identity.worktree,
+            &["commit", "-m", "test: reviewer follow-up"],
+        );
+        let merged_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);
+
+        let state_path = fixture.root.join("state/invocation.json");
+        super::write_invocation_atomic(&state_path, &state).expect("persist stale draft state");
+        let observation = fixture.root.join("merged-observation.json");
+        fs::write(
+            &observation,
+            serde_json::json!({
+                "number": 17,
+                "state": "MERGED",
+                "isDraft": false,
+                "headRefName": state.identity.branch,
+                "headRefOid": merged_head,
+                "baseRefName": "main",
+                "mergeCommit": {"oid": "b".repeat(40)},
+                "body": super::canonical_pull_request_body(&state, &closeout_body).unwrap(),
+            })
+            .to_string(),
+        )
+        .expect("merged observation");
+        let gh = fixture.root.join("gh");
+        fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\nset -eu\n\
+                 if [ \"$1 $2\" = 'pr view' ]; then cat '{}'; exit 0; fi\n\
+                 if [ \"$1 $2\" = 'issue view' ]; then printf '%s\\n' '{{\"labels\":[]}}'; exit 0; fi\n\
+                 if [ \"$1 $2\" = 'issue edit' ] || [ \"$1 $2\" = 'issue comment' ]; then exit 0; fi\n\
+                 if [ \"$1\" = 'api' ]; then printf '%s\\n' '[]'; exit 0; fi\n\
+                 exit 64\n",
+                observation.display()
+            ),
+        )
+        .expect("gh fixture");
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).expect("gh mode");
+        let failpoint = fixture.root.join("merged-reconciliation-failpoint");
+        let previous_path = std::env::var_os("PATH");
+        let previous_claim = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
+        let previous_failpoint = std::env::var_os("AUTOSPEC_TEST_MERGED_RECONCILIATION_FAIL_ONCE");
+        let previous_claim_remote = std::env::var_os("AUTOSPEC_CLAIM_GIT_REMOTE");
+        let previous_claim_state = std::env::var_os("AUTOSPEC_CLAIM_GIT_STATE_DIR");
+        let previous_retry_sleep = std::env::var_os("AUTOSPEC_CLAIM_RETRY_SLEEP_MS");
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                fixture.root.display(),
+                previous_path
+                    .as_deref()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+            ),
+        );
+        std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
+        std::env::set_var("AUTOSPEC_TEST_MERGED_RECONCILIATION_FAIL_ONCE", &failpoint);
+        std::env::set_var("AUTOSPEC_CLAIM_GIT_REMOTE", fixture.root.join("remote.git"));
+        std::env::set_var(
+            "AUTOSPEC_CLAIM_GIT_STATE_DIR",
+            fixture.root.join("claim-state"),
+        );
+        std::env::set_var("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "0");
+        let request = super::ExecutorBridgeRequest {
+            repository: state.identity.repository.clone(),
+            repository_path: state.identity.repository_path.clone(),
+            issue: state.identity.issue,
+            issue_title: "Retire merged executor".to_string(),
+            issue_body: DRAFT_ISSUE_BODY.to_string(),
+            worker_id: state.identity.worker_id.clone(),
+            claim_id: state.identity.claim_id.clone(),
+            invocation_id: state.identity.invocation_id.clone(),
+            state_path: state_path.clone(),
+            event_log: fixture.root.join("events.jsonl"),
+        };
+
+        let outcome = super::run_executor_bridge_with_codex_probe(&request, |_| {
+            panic!("merged recovery must precede Codex probing")
+        });
+        let error = outcome.expect_err("failpoint stops after merged reconciliation");
+        assert!(
+            error.to_string().contains("injected executor crash"),
+            "{error}"
+        );
+        let durable = super::PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("read reconciled invocation"),
+        )
+        .expect("parse reconciled invocation");
+        assert_eq!(durable.phase, super::BridgePhase::Merged);
+        assert_eq!(durable.head_oid.as_deref(), Some(merged_head.as_str()));
+        assert_eq!(
+            durable.terminal_result.as_deref(),
+            Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+        );
+        assert!(super::cleanup_record_path(&state_path, "merged-reconciliation").exists());
+        assert!(
+            state.identity.worktree.exists(),
+            "failpoint must precede cleanup"
+        );
+        let receipt = super::run_executor_bridge_with_codex_probe(&request, |_| {
+            panic!("merged restart must finalize before Codex probing")
+        })
+        .expect("restart finalizes the reconciled merge");
+        let complete = super::PersistedInvocation::from_json(
+            &fs::read_to_string(&state_path).expect("read completed invocation"),
+        )
+        .expect("parse completed invocation");
+
+        for (key, previous) in [
+            ("PATH", previous_path),
+            ("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", previous_claim),
+            (
+                "AUTOSPEC_TEST_MERGED_RECONCILIATION_FAIL_ONCE",
+                previous_failpoint,
+            ),
+            ("AUTOSPEC_CLAIM_GIT_REMOTE", previous_claim_remote),
+            ("AUTOSPEC_CLAIM_GIT_STATE_DIR", previous_claim_state),
+            ("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", previous_retry_sleep),
+        ] {
+            match previous {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert!(matches!(
+            receipt.status,
+            super::BridgeRunStatus::Merged {
+                pull_request: 17,
+                ref head_oid,
+                ref merge_oid,
+            } if head_oid == &merged_head && merge_oid == &"b".repeat(40)
+        ));
+        assert_eq!(complete.phase, super::BridgePhase::Complete);
+        assert!(!state.identity.worktree.exists());
+        assert!(state_path.with_extension("terminal.json").is_file());
     }
 
     #[cfg(unix)]
