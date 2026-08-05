@@ -281,6 +281,27 @@ optionally `max_wall_clock_ms:` — before a local profile can be routed to.
 | `AUTOSPEC_ROUTING_FIRST_PASS_FLOOR` | `0.6` | Quality floor; the cheapest profile *clearing this* wins, not the cheapest outright. |
 | `AUTOSPEC_ROUTING_CACHE_BETA` | `0.5` | Strength of the prompt-cache penalty. |
 | `AUTOSPEC_ROUTING_EXPLORE_PCT` | `0` (off) | Cold-start exploration percent. Confined to the lowest-stakes cell (`ctx:32k` + `reasoning:shallow`). |
+| `AUTOSPEC_ROUTING_PREFIX_TOKENS` | `0` (unknown) | Prefix size this dispatch will stage, tested against each profile's `cache_min_tokens`. `0` fails open and scores exactly as before. |
+
+**Prompt-cache minimums (`cache_min_tokens`).** A prompt cache only engages above a
+per-model token floor, and the floors differ sharply — Haiku 4.5 needs **4096**
+tokens where Opus 5 needs **512** — which makes the cheapest per-token profile the
+easiest one to fall under. When `AUTOSPEC_ROUTING_PREFIX_TOKENS` is below a
+profile's `cache_min_tokens`, its measured `cache_hit_ratio` is zeroed (and
+`cache_floor_unmet` is reported), because a hit ratio recorded under a larger prefix
+must not be credited to a dispatch that cannot cache at all. Without this, Haiku
+looks cheaper than it is on short prefixes.
+
+**Effort (`effort`).** An optional per-profile reasoning tier, surfaced by
+`route-decide.sh --print-effort` and `select-model-profile.sh --print-effort`. It is
+often a better dial than swapping models, because **switching model invalidates the
+whole prompt cache** across all three tiers while raising effort on the same model
+keeps the cached prefix intact. It is *reported*, never modelled as a cost
+multiplier: two profiles differing only in effort are separate catalog rows, so the
+ledger measures the difference instead of the scorer guessing a factor. A profile
+that states no effort exits 3, so the caller keeps its own default rather than being
+handed a guess — and on an override, effort follows the winning profile, never the
+baseline it replaced.
 
 **Which dispatch kinds may be re-routed.** `route-decide.sh` holds an
 **allowlist**, so a kind added to the ledger vocabulary later is baseline-only
