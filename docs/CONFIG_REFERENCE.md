@@ -254,6 +254,39 @@ Two fields decide whether a local model is usable, and both fail closed:
 Context ceilings come from `ollama show`, never from the model name: a tag can
 misreport its parameter count, and two tags can share one set of weights.
 
+## Evidence-based model routing
+`scripts/routing-ledger.sh` records what each dispatch cost and how it turned out;
+`scripts/routing-cost.sh` scores candidate profiles on measured **effective** cost;
+`scripts/route-decide.sh` makes the call.
+
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_ROUTING_LEDGER` | `.autospec/routing-ledger.jsonl` | Append-only outcome-ledger path. |
+| `AUTOSPEC_ROUTING_POLICY` | `auto` | `off` = always the baseline (no ledger read); `auto` = override only when strictly cheaper; `on` = override whenever a candidate is eligible. |
+| `AUTOSPEC_ROUTING_ALPHA` | `5` | Bayesian smoothing pseudo-count. Larger keeps rates closer to their priors. |
+| `AUTOSPEC_ROUTING_MIN_SAMPLES` | `10` | Dispatches in a cell before a profile may win it. |
+| `AUTOSPEC_ROUTING_FIRST_PASS_FLOOR` | `0.6` | Quality floor; the cheapest profile *clearing this* wins, not the cheapest outright. |
+| `AUTOSPEC_ROUTING_CACHE_BETA` | `0.5` | Strength of the prompt-cache penalty. |
+| `AUTOSPEC_ROUTING_EXPLORE_PCT` | `0` (off) | Cold-start exploration percent. Confined to the lowest-stakes cell (`ctx:32k` + `reasoning:shallow`). |
+
+Two properties are deliberate and worth relying on:
+
+- **No data means no change.** With an empty or thin ledger, `route-decide.sh` prints
+  exactly what `select-model-profile.sh` prints. A router that silently re-routed on a
+  host with no telemetry would be worse than no router.
+- **Cheap per token is not cheap per merged PR.** A local model that fails often and
+  escalates costs *more* than one dispatch of a reliable cheaper-tier cloud model. Cost
+  is scored as
+  `unit × (1 + E[retries]) × cache_penalty + P(escalate)×advisor + P(fail)×fallback`,
+  and unproven profiles shrink toward **pessimistic** priors so no-data never looks cheap.
+
+Profiles carry their own prices in `model-profiles.yml`: `cost_in`/`cost_out` (USD per
+Mtok) for cloud, `cost_minute` for local. A profile with no cost keys is never chosen
+over the baseline — routing fails closed rather than guessing a price.
+
+Only `implementer` dispatches are re-routable. The reviewer keeps its own tier, which
+also keeps every safety gate and all spec/decompose work on its existing tier.
+
 ## Automation lifecycle toggles
 | Var | Default | Effect |
 |---|---|---|
