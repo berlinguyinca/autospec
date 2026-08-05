@@ -61,6 +61,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 
 - [Background pipeline exit masking](feedback_background_pipeline_exit_masking.md) — `cmd | tail; echo` background tasks report exit 0 even when the gate failed; parse the gate's own final status line, and zsh uses lowercase `pipestatus`
 - [No tree mutation during background validate](feedback_no_tree_mutation_during_bg_validate.md) — switching/deleting branches while a background validate.sh runs corrupts its checkout mid-run → false "required file missing"; run it in a dedicated detached worktree and confirm the gate's OK line, not just the (echo-masked) exit code
+- [Validate baseline diffing](feedback_validate_baseline_diff.md) — validate is red on main, so compare failure SETS against a clean origin/main worktree; per-suite spot checks gave a false all-clear and let 2 regressions through CI
 
 - [Installer excludes runtime libs](feedback_installer_excludes_runtime_libs.md) — install.sh drops scripts/lib/ runtime libs; autospec-explore hard-crashes on a clean install; ship-completeness doesn't catch it
 - [Explore codebase-signals false positives](feedback_explore_codebase_signals_false_positives.md) — TODO/FIXME grep matches prose, assets, and its own source; noise dominates ranking; constitution gate drops 0/45
