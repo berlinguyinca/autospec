@@ -282,6 +282,22 @@ optionally `max_wall_clock_ms:` — before a local profile can be routed to.
 | `AUTOSPEC_ROUTING_CACHE_BETA` | `0.5` | Strength of the prompt-cache penalty. |
 | `AUTOSPEC_ROUTING_EXPLORE_PCT` | `0` (off) | Cold-start exploration percent. Confined to the lowest-stakes cell (`ctx:32k` + `reasoning:shallow`). |
 
+**Which dispatch kinds may be re-routed.** `route-decide.sh` holds an
+**allowlist**, so a kind added to the ledger vocabulary later is baseline-only
+until someone deliberately opens it:
+
+| Kind | Re-routable | Why |
+|---|---|---|
+| `implementer` | yes | Works from a Tier-A contract; output is gated by tests, lint, and review. |
+| `explore-researcher` | yes | High fan-out read-and-report; findings are re-checked by a later gate. |
+| `refine-lens` | yes | Same shape as explore. |
+| `qa-sweep` | yes | Same shape as explore. |
+| `lgtm-reviewer` | no | Reviewer tier must stay ≥ implementer tier — a cheap model LGTM'ing its own tier's output degrades quality invisibly, and the ledger records that as a first-pass success, *rewarding* the pairing. |
+| `verify-voter` | no | Voter independence is a vendor question, not a cost one (see `verify-voter-vendor.sh`). Cost-ordering voters converges them onto one model, which is exactly what a second vote is supposed to rule out. |
+| `secaudit-pass` | no | Safety gate. Never local, never downgraded. |
+| `spec-decompose` | no | Spec quality is the upstream bottleneck; a cheap model here costs N implementer cycles correcting it. |
+| `growth-lens` | no | No ledger evidence yet. |
+
 Two properties are deliberate and worth relying on:
 
 - **No data means no change.** With an empty or thin ledger, `route-decide.sh` prints
