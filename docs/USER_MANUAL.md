@@ -379,3 +379,20 @@ re-running on unchanged hardware is a no-op and swapping a GPU invalidates it.
 than retried into submission. On a host whose GPU is unusable, zero is the correct
 answer, and a harness that kept trying until it got a pass would be manufacturing
 evidence.
+
+## Deterministic PR bodies
+
+`scripts/compose-pr-body.sh --issue <n> [--summary-file <path>]` assembles the PR
+body from the branch rather than having a model write it out. The closing
+reference is the issue number, the change list is the commit subjects
+(oldest-first), and the verification line is the acceptance-criteria suite's
+`@test` count — read, never run, so composing stays side-effect free. Given the
+same branch it emits byte-identical output.
+
+The **summary is not templated**. Which alternative a change rejected, and which
+failure mode a guard prevents, cannot be derived from a diff — pass it via
+`--summary-file` and it is emitted verbatim. Commit messages are untouched for the
+same reason.
+
+Exit 3 means the commit range is empty: there is nothing to open a PR for, and the
+caller must not run `gh pr create`.
