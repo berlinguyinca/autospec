@@ -71,7 +71,7 @@ Use line-oriented heading/fence parsing shared by all issue rules. Represent fin
 
 - [ ] **Step 4: Verify core parity.**
 
-Run: `cargo test -p autospec-core --test issue_lint && bats tests/unit/test_lint_issue.bats tests/lint/test_lint_issue_sections.bats tests/lint/test_lint_issue_ui_sections.bats`
+Run: `cargo test -p autospec-core --test issue_lint --test issue_lint_ui_sections && bats tests/unit/test_lint_issue.bats tests/lint/test_lint_issue_sections.bats tests/lint/test_lint_issue_ui_sections.bats`
 
 - [ ] **Step 5: Commit the pure issue policy.**
 

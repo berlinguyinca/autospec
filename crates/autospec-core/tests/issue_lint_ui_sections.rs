@@ -117,3 +117,63 @@ fn issue_lint_reports_incomplete_ui_sections_with_the_shell_message() {
     );
 }
 
+#[test]
+fn issue_lint_detects_a_ui_marker_after_an_earlier_html_comment() {
+    let body = format!(
+        "{}\n<!-- note --> <!-- ui-feature -->\n",
+        valid_issue_body(
+            "Add `lint_issue_body` parity fixtures.",
+            "- [ ] `cargo test issue_lint` passes.",
+            "cargo test issue_lint",
+        )
+    );
+
+    assert_findings(
+        &body,
+        &[ (
+            "UI_SECTIONS_INCOMPLETE",
+            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' '## Motion & feedback' '## Device & viewport' (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)",
+        )],
+    );
+}
+
+#[test]
+fn issue_lint_detects_a_ui_marker_nested_in_a_malformed_comment() {
+    let body = format!(
+        "{}\n<!-- malformed <!-- ui-feature -->\n",
+        valid_issue_body(
+            "Add `lint_issue_body` parity fixtures.",
+            "- [ ] `cargo test issue_lint` passes.",
+            "cargo test issue_lint",
+        )
+    );
+
+    assert_findings(
+        &body,
+        &[ (
+            "UI_SECTIONS_INCOMPLETE",
+            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' '## Motion & feedback' '## Device & viewport' (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)",
+        )],
+    );
+}
+
+#[test]
+fn issue_lint_preserves_ui_missing_section_order() {
+    let body = format!(
+        "{}\n## Interaction states\n- Loading\n",
+        valid_issue_body(
+            "Add `lint_issue_body` parity fixtures.",
+            "- [ ] `cargo test issue_lint` passes.",
+            "cargo test issue_lint",
+        )
+    );
+
+    assert_findings(
+        &body,
+        &[ (
+            "UI_SECTIONS_INCOMPLETE",
+            "UI feature detected; missing required section(s): '## Design reference' '## UX flows' '## Motion & feedback' '## Device & viewport' (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)",
+        )],
+    );
+}
+
