@@ -287,6 +287,23 @@ over the baseline — routing fails closed rather than guessing a price.
 Only `implementer` dispatches are re-routable. The reviewer keeps its own tier, which
 also keeps every safety gate and all spec/decompose work on its existing tier.
 
+## Local model dispatch
+`scripts/local-dispatch.sh` runs a dispatch on a local model via Codex CLI's native
+`--oss --local-provider` support. It is chosen over a bespoke HTTP client because
+autospec already depends on Codex for peer review.
+
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_LOCAL_PROVIDER` | `ollama` | Local provider (`ollama` or `lmstudio`). |
+| `AUTOSPEC_LOCAL_TIMEOUT_SECS` | `600` | Wall-clock ceiling per local dispatch. |
+| `AUTOSPEC_LOCAL_LOCK_DIR` | `~/.autospec/locks` | Lock dir serializing the capacity-1 GPU. |
+
+It exits **3** — meaning *keep the cloud tier* — when Codex is absent, when Codex does
+not advertise `--oss` (an older build would ignore the flag and silently bill a **paid**
+cloud model, the most expensive possible failure), when the capability probe reports the
+model is not `dispatch_recommended`, or when no wall-clock bound can be applied. Exit
+**4** means the dispatch hit its ceiling, kept distinct from a wrong answer.
+
 ## Automation lifecycle toggles
 | Var | Default | Effect |
 |---|---|---|
