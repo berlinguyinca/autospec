@@ -177,3 +177,41 @@ fn issue_lint_preserves_ui_missing_section_order() {
     );
 }
 
+
+/// A UI heading carrying trailing whitespace is still excluded from the word count.
+/// `has_heading` accepts trailing whitespace when deciding the section is present, so
+/// the exclusion has to accept it too; if the two disagree the section counts against
+/// the cap it is exempt from. Markdown's hard line break is two trailing spaces, so a
+/// heading written that way is ordinary rather than pathological.
+#[test]
+fn issue_lint_excludes_ui_sections_whose_headings_have_trailing_whitespace() {
+    let body = format!(
+        "{base}\n## Design reference  \n\n{a}\n## Interaction states \n\n{b}\n## UX flows   \n\n{c}\n## Motion & feedback  \n\n{d}\n## Device & viewport  \n\n{e}\n",
+        base = valid_issue_body(
+            "Add `lint_issue_body` parity fixtures.",
+            "- [ ] `cargo test issue_lint` passes.",
+            "cargo test issue_lint",
+        ),
+        a = "uiword ".repeat(100),
+        b = "uiword ".repeat(100),
+        c = "uiword ".repeat(100),
+        d = "uiword ".repeat(100),
+        e = "uiword ".repeat(100),
+    );
+
+    // Sanity: counted raw, this body is far past the cap, so a pass cannot be an
+    // accident of a body that was under 400 words anyway.
+    assert!(body.split_whitespace().count() > 500);
+
+    let found = findings(&body);
+    assert!(
+        !found.iter().any(|(rule, _)| rule == "BODY_TOO_LONG"),
+        "trailing whitespace on a UI heading must not reinstate the word cap: {found:?}"
+    );
+    // And the headings must still register as present, or this would pass because the
+    // sections went invisible to both checks rather than because they are exempt.
+    assert!(
+        !found.iter().any(|(rule, _)| rule == "UI_SECTIONS_INCOMPLETE"),
+        "the same headings must satisfy the section-presence check: {found:?}"
+    );
+}

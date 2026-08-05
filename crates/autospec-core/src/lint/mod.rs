@@ -3,6 +3,7 @@
 pub mod diff;
 pub mod implementation;
 pub mod pr_size;
+mod text;
 
 pub use diff::{parse_unified_diff, DiffFile, DiffHunk, DiffLine, DiffLineKind, UnifiedDiff};
 pub use implementation::{
@@ -17,6 +18,11 @@ pub use pr_size::{
 };
 
 use std::collections::BTreeSet;
+
+use text::{
+    count_sentence_terminals, first_word_match, has_concrete_goal_object, is_path_character,
+    is_word_boundary,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueQualityRule {
@@ -405,6 +411,18 @@ const UI_SECTION_HEADINGS: [&str; 5] = [
     "## Device & viewport",
 ];
 
+/// True when `line` is one of the UI section headings. Trailing whitespace is
+/// tolerated, matching `has_heading`, which is what decides the section is present.
+/// The two must agree: a heading accepted there but rejected here would be counted
+/// against the word cap it is supposed to be exempt from — and markdown's own
+/// hard-line-break convention is two trailing spaces, so this is not hypothetical.
+fn is_ui_section_heading(line: &str) -> bool {
+    UI_SECTION_HEADINGS.iter().any(|heading| {
+        line.strip_prefix(heading)
+            .is_some_and(|suffix| suffix.chars().all(char::is_whitespace))
+    })
+}
+
 /// Mirrors the shell `strip_ui_sections` helper: drop each UI section heading
 /// line plus its body (up to but excluding the next `## ` heading), then count
 /// words over what remains. Line-by-line summation is equivalent to splitting
@@ -413,7 +431,7 @@ fn word_count_excluding_ui_sections(document: &IssueDocument<'_>) -> usize {
     let mut skip = false;
     let mut count = 0usize;
     for line in &document.lines {
-        if UI_SECTION_HEADINGS.contains(line) {
+        if is_ui_section_heading(line) {
             skip = true;
             continue;
         }
@@ -496,129 +514,6 @@ fn collapse_lines(lines: &[&str]) -> String {
 
 fn section_command_output(lines: &[&str]) -> String {
     lines.join("\n").trim_end_matches('\n').to_owned()
-}
-
-fn count_sentence_terminals(text: &str) -> usize {
-    let chars = text.chars().collect::<Vec<_>>();
-    chars
-        .iter()
-        .enumerate()
-        .filter(|(index, character)| match character {
-            '?' | '!' => true,
-            '.' => chars.get(index + 1).is_none_or(|next| next.is_whitespace()),
-            _ => false,
-        })
-        .count()
-}
-
-fn has_concrete_goal_object(text: &str) -> bool {
-    has_backtick_span(text)
-        || has_standalone_number(text)
-        || text
-            .split(|character: char| !is_word_character(character))
-            .any(is_upper_snake_label)
-        || has_path_token(text)
-}
-
-fn has_backtick_span(text: &str) -> bool {
-    let mut remainder = text;
-    while let Some(open) = remainder.find('`') {
-        let after_open = &remainder[open + 1..];
-        let Some(close) = after_open.find('`') else {
-            return false;
-        };
-        if close > 0 {
-            return true;
-        }
-        remainder = &after_open[close + 1..];
-    }
-    false
-}
-
-fn has_standalone_number(text: &str) -> bool {
-    let mut characters = text.char_indices().peekable();
-    while let Some((start, character)) = characters.next() {
-        if !character.is_ascii_digit() {
-            continue;
-        }
-        let mut end = start + character.len_utf8();
-        while let Some(&(index, next)) = characters.peek() {
-            if !next.is_ascii_digit() {
-                break;
-            }
-            end = index + next.len_utf8();
-            characters.next();
-        }
-        if is_word_boundary(text, start, end) {
-            return true;
-        }
-    }
-    false
-}
-
-fn has_path_token(text: &str) -> bool {
-    text.as_bytes().iter().enumerate().any(|(index, byte)| {
-        (*byte == b'/'
-            && text[index + 1..]
-                .bytes()
-                .next()
-                .is_some_and(is_path_character))
-            || (*byte == b'*'
-                && text[index + 1..]
-                    .bytes()
-                    .next()
-                    .is_some_and(|next| next == b'.')
-                && text[index + 2..]
-                    .bytes()
-                    .next()
-                    .is_some_and(|next| next.is_ascii_alphabetic()))
-    })
-}
-
-fn is_upper_snake_label(token: &str) -> bool {
-    token.len() >= 2
-        && token.starts_with(|character: char| character.is_ascii_uppercase())
-        && token.chars().all(|character| {
-            character.is_ascii_uppercase() || character.is_ascii_digit() || character == '_'
-        })
-}
-
-fn is_path_character(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'/' | b'-')
-}
-
-fn first_word_match(text: &str, candidates: &[&str]) -> Option<String> {
-    let lower = text.to_ascii_lowercase();
-    let mut first = None;
-    for candidate in candidates {
-        let mut offset = 0;
-        while let Some(found) = lower[offset..].find(candidate) {
-            let start = offset + found;
-            let end = start + candidate.len();
-            if is_word_boundary(&lower, start, end) {
-                let value = text.get(start..end)?.to_owned();
-                if first
-                    .as_ref()
-                    .is_none_or(|(existing, _): &(usize, String)| start < *existing)
-                {
-                    first = Some((start, value));
-                }
-                break;
-            }
-            offset = end;
-        }
-    }
-    first.map(|(_, value)| value)
-}
-
-fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
-    let before = text[..start].chars().next_back();
-    let after = text[end..].chars().next();
-    !before.is_some_and(is_word_character) && !after.is_some_and(is_word_character)
-}
-
-fn is_word_character(character: char) -> bool {
-    character.is_alphanumeric() || character == '_'
 }
 
 fn starts_with_checkbox(line: &str) -> bool {
