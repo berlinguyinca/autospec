@@ -528,86 +528,6 @@ fn issue_lint_keeps_the_30_line_outline_limit_inclusive() {
 }
 
 #[test]
-fn issue_lint_reports_incomplete_ui_sections_with_the_shell_message() {
-    let body = format!(
-        "{}\n<!-- ui-feature -->\n",
-        valid_issue_body(
-            "Add `lint_issue_body` parity fixtures.",
-            "- [ ] `cargo test issue_lint` passes.",
-            "cargo test issue_lint",
-        )
-    );
-
-    assert_findings(
-        &body,
-        &[(
-            "UI_SECTIONS_INCOMPLETE",
-            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' (UI issues need Design reference + Interaction states + UX flows)",
-        )],
-    );
-}
-
-#[test]
-fn issue_lint_detects_a_ui_marker_after_an_earlier_html_comment() {
-    let body = format!(
-        "{}\n<!-- note --> <!-- ui-feature -->\n",
-        valid_issue_body(
-            "Add `lint_issue_body` parity fixtures.",
-            "- [ ] `cargo test issue_lint` passes.",
-            "cargo test issue_lint",
-        )
-    );
-
-    assert_findings(
-        &body,
-        &[ (
-            "UI_SECTIONS_INCOMPLETE",
-            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' (UI issues need Design reference + Interaction states + UX flows)",
-        )],
-    );
-}
-
-#[test]
-fn issue_lint_detects_a_ui_marker_nested_in_a_malformed_comment() {
-    let body = format!(
-        "{}\n<!-- malformed <!-- ui-feature -->\n",
-        valid_issue_body(
-            "Add `lint_issue_body` parity fixtures.",
-            "- [ ] `cargo test issue_lint` passes.",
-            "cargo test issue_lint",
-        )
-    );
-
-    assert_findings(
-        &body,
-        &[ (
-            "UI_SECTIONS_INCOMPLETE",
-            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' (UI issues need Design reference + Interaction states + UX flows)",
-        )],
-    );
-}
-
-#[test]
-fn issue_lint_preserves_ui_missing_section_order() {
-    let body = format!(
-        "{}\n## Interaction states\n- Loading\n",
-        valid_issue_body(
-            "Add `lint_issue_body` parity fixtures.",
-            "- [ ] `cargo test issue_lint` passes.",
-            "cargo test issue_lint",
-        )
-    );
-
-    assert_findings(
-        &body,
-        &[ (
-            "UI_SECTIONS_INCOMPLETE",
-            "UI feature detected; missing required section(s): '## Design reference' '## UX flows' (UI issues need Design reference + Interaction states + UX flows)",
-        )],
-    );
-}
-
-#[test]
 fn issue_lint_preserves_the_shell_rule_order_for_multiple_findings() {
     let outline = (1..=31)
         .map(|index| format!("{index}. Implement step {index}."))
@@ -701,7 +621,7 @@ fn issue_lint_preserves_the_shell_rule_order_for_multiple_findings() {
             ),
             (
                 "UI_SECTIONS_INCOMPLETE".to_string(),
-                "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' (UI issues need Design reference + Interaction states + UX flows)".to_string(),
+                "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' '## Motion & feedback' '## Device & viewport' (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)".to_string(),
             ),
         ]
     );

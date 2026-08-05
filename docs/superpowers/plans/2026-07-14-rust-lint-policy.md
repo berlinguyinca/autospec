@@ -2,6 +2,22 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **Amendment (Wave 3 define-time, docs/superpowers/specs/2026-08-04-autospec-web-ui-design.md §L1/§L1a):**
+> `UI_SECTIONS_INCOMPLETE` now enforces five `ui-feature` sections — `Design
+> reference`, `Interaction states`, `UX flows`, `Motion & feedback`, `Device &
+> viewport` — instead of three, in both `scripts/lint-issue.sh` and
+> `crates/autospec-core/src/lint/mod.rs`. The `BODY_TOO_LONG` word count
+> excludes all five sections (§L1a) so classified UI children do not
+> systematically trip `needs-quality-bar` once the two new sections became
+> mandatory. `tests/lint/test_lint_issue_ui_sections.bats` (split out of
+> `test_lint_issue_sections.bats`, which had grown past the file-size limit) and
+> `crates/autospec-core/tests/issue_lint_ui_sections.rs` (likewise split out of
+> `issue_lint.rs`) gained coverage for the two new
+> sections' presence/absence detection and a positive/negative word-cap
+> exclusion pair (a ~400-word non-UI body with all five sections present
+> passes; the same non-UI prose alone over 400 words still trips
+> `BODY_TOO_LONG`).
+
 **Goal:** Replace `scripts/lint-issue.sh` and `scripts/lint-implementation.sh` with Rust-owned `autospec lint issue` and `autospec lint implementation` commands, then remove every live dependency on the shell linters.
 
 **Architecture:** `autospec-core::lint` becomes the pure policy engine: issue-body section parsing, deterministic findings, diff parsing, escape-hatch parsing, and directive rendering. `autospec-cli::commands::lint` owns CLI parsing and the small impure adapters required to read a diff, staged changes, or GitHub issue/PR data. Callers, generated installer payloads, and pre-commit hooks invoke the installed `autospec` binary directly. Shell scripts are deleted only after source-reachability and behavior-parity gates pass.
@@ -36,7 +52,8 @@
 **Files:**
 - Modify: `crates/autospec-core/src/lint/mod.rs`
 - Modify: `crates/autospec-core/tests/issue_lint.rs`
-- Test: `tests/unit/test_lint_issue.bats`, `tests/lint/test_lint_issue_sections.bats`
+- Test: `tests/unit/test_lint_issue.bats`, `tests/lint/test_lint_issue_sections.bats`,
+  `tests/lint/test_lint_issue_ui_sections.bats`
 
 - [ ] **Step 1: Add failing Rust cases for the shell-only rules.**
 
@@ -54,7 +71,7 @@ Use line-oriented heading/fence parsing shared by all issue rules. Represent fin
 
 - [ ] **Step 4: Verify core parity.**
 
-Run: `cargo test -p autospec-core --test issue_lint && bats tests/unit/test_lint_issue.bats tests/lint/test_lint_issue_sections.bats`
+Run: `cargo test -p autospec-core --test issue_lint --test issue_lint_ui_sections && bats tests/unit/test_lint_issue.bats tests/lint/test_lint_issue_sections.bats tests/lint/test_lint_issue_ui_sections.bats`
 
 - [ ] **Step 5: Commit the pure issue policy.**
 

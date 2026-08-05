@@ -46,11 +46,14 @@ Rules enforced (§3 quality contract):
   DEPS_MALFORMED        A '## Dependencies' section exists but a content line is neither
                         'Depends on issue #N' nor exactly 'none'.
   TOO_MANY_FILES        A '## Files touched' section lists more than 3 file paths.
-  BODY_TOO_LONG         Whole body exceeds 400 words.
+  BODY_TOO_LONG         Whole body exceeds 400 words (the five ui-feature
+    sections — Design reference, Interaction states, UX flows, Motion &
+    feedback, Device & viewport — are excluded from this count when present).
   OUTLINE_TOO_LONG      '## Implementation outline' section exceeds 30 non-blank lines.
-  UI_SECTIONS_INCOMPLETE A UI feature (a '<!-- ui-feature -->' marker or any one of
-                        '## Design reference' / '## Interaction states' / '## UX flows')
-                        is missing one or more of those three required UI sections.
+  UI_SECTIONS_INCOMPLETE A UI feature (a '<!-- ui-feature -->' marker or any
+    one of the five required sections present) is missing one or more of:
+    Design reference, Interaction states, UX flows, Motion & feedback,
+    Device & viewport.
 
 Exit code = number of findings (capped at 64). Exit 0 means all rules pass."
 
@@ -119,6 +122,37 @@ extract_subsection() {
         $0 ~ h { in_section=1; next }
         in_section && /^##/ { exit }
         in_section { print }
+    ' "$file"
+}
+
+# Strip the five ui-feature sections (heading line + body, up to but excluding
+# the next '## ' heading) from a file. Used by check_body_size so the ≤400-word
+# cap (§L1a of docs/superpowers/specs/2026-08-04-autospec-web-ui-design.md)
+# excludes required UI sections rather than counting them against classified
+# children. Uses exact string membership (not regex) so literal '&' in
+# 'Motion & feedback' needs no escaping.
+strip_ui_sections() {
+    local file="$1"
+    awk '
+        BEGIN {
+            headings["## Design reference"] = 1
+            headings["## Interaction states"] = 1
+            headings["## UX flows"] = 1
+            headings["## Motion & feedback"] = 1
+            headings["## Device & viewport"] = 1
+        }
+        {
+            # Trailing whitespace is trimmed before the lookup, because the
+            # check_ui_sections greps accept it when deciding the section is
+            # present. The two must agree, or a heading written with markdown’s
+            # two-space hard line break counts against the cap it is exempt from.
+            line = $0
+            sub(/[[:space:]]+$/, "", line)
+            if (line in headings) { skip = 1; next }
+            if (skip && substr($0, 1, 3) == "## ") { skip = 0 }
+            if (skip) { next }
+            print
+        }
     ' "$file"
 }
 
@@ -424,7 +458,7 @@ EOF
 
 check_body_size() {
     local body_words
-    body_words="$(wc -w < "$BODY_FILE" | tr -d ' ')"
+    body_words="$(strip_ui_sections "$BODY_FILE" | wc -w | tr -d ' ')"
     if [ "$body_words" -gt 400 ]; then
         add_finding "BODY_TOO_LONG" "Body is ${body_words} words (max 400); a small-LLM implementer cannot hold an over-long issue"
     fi
@@ -445,21 +479,27 @@ check_outline_size() {
 # the full set of UI sections so a small-LLM implementer (and the visual-fidelity
 # QA loop) have design + behavior to work against. Detection is opt-in: a
 # `<!-- ui-feature -->` marker OR the presence of any one UI section flags the
-# issue as UI; then ALL of Design reference + Interaction states + UX flows are
-# required (enforced as a coherent group — no false positives on non-UI issues).
+# issue as UI; then ALL of Design reference + Interaction states + UX flows +
+# Motion & feedback + Device & viewport are required (enforced as a coherent
+# group — no false positives on non-UI issues).
 check_ui_sections() {
-    local has_marker=0 has_dr=0 has_is=0 has_ux=0
+    local has_marker=0 has_dr=0 has_is=0 has_ux=0 has_mf=0 has_dv=0
     grep -qE '<!--[[:space:]]*ui-feature[[:space:]]*-->' "$BODY_FILE" && has_marker=1
     grep -qE '^## Design reference[[:space:]]*$' "$BODY_FILE" && has_dr=1
     grep -qE '^## Interaction states[[:space:]]*$' "$BODY_FILE" && has_is=1
     grep -qE '^## UX flows[[:space:]]*$' "$BODY_FILE" && has_ux=1
-    if [ "$has_marker" = 1 ] || [ "$has_dr" = 1 ] || [ "$has_is" = 1 ] || [ "$has_ux" = 1 ]; then
+    grep -qE '^## Motion & feedback[[:space:]]*$' "$BODY_FILE" && has_mf=1
+    grep -qE '^## Device & viewport[[:space:]]*$' "$BODY_FILE" && has_dv=1
+    if [ "$has_marker" = 1 ] || [ "$has_dr" = 1 ] || [ "$has_is" = 1 ] || [ "$has_ux" = 1 ] \
+        || [ "$has_mf" = 1 ] || [ "$has_dv" = 1 ]; then
         local missing=""
         [ "$has_dr" = 1 ] || missing="$missing '## Design reference'"
         [ "$has_is" = 1 ] || missing="$missing '## Interaction states'"
         [ "$has_ux" = 1 ] || missing="$missing '## UX flows'"
+        [ "$has_mf" = 1 ] || missing="$missing '## Motion & feedback'"
+        [ "$has_dv" = 1 ] || missing="$missing '## Device & viewport'"
         if [ -n "$missing" ]; then
-            add_finding "UI_SECTIONS_INCOMPLETE" "UI feature detected; missing required section(s):${missing} (UI issues need Design reference + Interaction states + UX flows)"
+            add_finding "UI_SECTIONS_INCOMPLETE" "UI feature detected; missing required section(s):${missing} (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)"
         fi
     fi
 }
