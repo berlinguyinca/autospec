@@ -318,3 +318,23 @@ Generated artifacts committed to every target repo:
 | `docs/.llm-manifest.json` | Structured per-symbol manifest |
 | `llms.txt` | Short curated index (≤200 lines) |
 | `llms-full.txt` | Full concatenated doc content |
+
+## Inspecting model-routing decisions
+
+`scripts/route-decide.sh --labels "<issue-labels>" --explain` prints the routing
+decision and the reason for it on stderr, without dispatching anything. Use it to
+answer "why did this issue run on that model?".
+
+- `--print-profile` prints the profile name instead of the model id.
+- Exit 3 means nothing was resolvable, and the caller keeps its harness-detected
+  tier — the same fail-closed contract `select-model-profile.sh` uses.
+- `scripts/routing-cost.sh ... --explain` shows the per-candidate arithmetic:
+  sample count, unit cost, expected retries, escalation rate, cache penalty, and
+  the resulting effective cost.
+- `scripts/routing-ledger.sh --stats` shows what the decisions are being learned
+  from, per dispatch kind and routing cell.
+
+With an empty ledger the decision is identical to the pre-existing behaviour, so
+`--explain` on a fresh install reports the baseline and why no override applied.
+Knobs are listed under
+[`CONFIG_REFERENCE.md`](CONFIG_REFERENCE.md#evidence-based-model-routing).
