@@ -26,7 +26,9 @@ teardown() { rm -rf "$TMP"; }
 @test "an awk failure reports an error instead of passing the file silently" {
     printf '.b { color: #3a7bd5; }\n' > "$TMP/a.css"
     AUTOSPEC_LINT_UI_AWK=false run bash "$L" "$TMP/a.css"
-    [ "$status" -eq 2 ]
+    # 99, not 2: the finding count occupies the low codes, so 2 meant both "two
+    # findings" and "the linter is broken".
+    [ "$status" -eq 99 ]
     printf '%s\n' "$output" | grep -q 'lint-ui:.*awk'
 }
 
@@ -190,4 +192,99 @@ teardown() { rm -rf "$TMP"; }
     printf '<meta name="viewport" content="user-scalable=no">\n' > "$TMP/b.html"
     run bash "$L" --directives "$TMP/b.html"
     printf '%s\n' "$output" | grep -q '^Fix UI_FIXED_VIEWPORT:'
+}
+
+# ── comments are not code ─────────────────────────────────────────────────────
+# Found by running the gate over berlinguyinca/autospec-ui-pilot. The rules matched
+# their own subject matter inside comments, in both directions: a comment naming a
+# banned viewport directive was reported, and a comment naming the reduced-motion
+# media feature silenced a real finding.
+
+@test "a comment naming prefers-reduced-motion does not silence the motion rule" {
+    # The worst of the pair: the note about the missing guard removed the finding about
+    # the missing guard, and the file read as compliant from then on.
+    printf '/* TODO: add prefers-reduced-motion here */\n@keyframes s { from { transform: translateY(4px); } }\n.a { animation: s 200ms ease-out; }\n' > "$TMP/a.css"
+    run bash "$L" "$TMP/a.css"
+    printf '%s\n' "$output" | grep -q '^UI_NO_REDUCED_MOTION:'
+}
+
+@test "a real prefers-reduced-motion guard still clears the motion rule" {
+    printf '@keyframes s { from { transform: translateY(4px); } }\n.a { animation: s 200ms ease-out; }\n@media (prefers-reduced-motion: reduce) { .a { animation-name: none; } }\n' > "$TMP/a.css"
+    run bash "$L" "$TMP/a.css"
+    ! printf '%s\n' "$output" | grep -q 'UI_NO_REDUCED_MOTION'
+}
+
+@test "a multi-line CSS comment does not silence the motion rule" {
+    printf '/*\n * Motion here has no fallback for prefers-reduced-motion yet.\n */\n@keyframes s { from { transform: translateY(4px); } }\n.a { animation: s 200ms ease-out; }\n' > "$TMP/a.css"
+    run bash "$L" "$TMP/a.css"
+    printf '%s\n' "$output" | grep -q '^UI_NO_REDUCED_MOTION:'
+}
+
+@test "an HTML comment naming a banned viewport directive is not flagged" {
+    printf '<!-- Never use user-scalable=no or maximum-scale=1 -->\n<meta name="viewport" content="width=device-width, initial-scale=1">\n' > "$TMP/a.html"
+    run bash "$L" "$TMP/a.html"
+    ! printf '%s\n' "$output" | grep -q 'UI_FIXED_VIEWPORT'
+}
+
+@test "prose naming a banned viewport directive is not flagged" {
+    # A style guide documenting the anti-pattern is not committing it.
+    printf '<meta name="viewport" content="width=device-width, initial-scale=1">\n<p>Never set user-scalable=no: it blocks zoom.</p>\n' > "$TMP/a.html"
+    run bash "$L" "$TMP/a.html"
+    ! printf '%s\n' "$output" | grep -q 'UI_FIXED_VIEWPORT'
+}
+
+@test "a zoom-blocking viewport split across lines is still flagged" {
+    # The directive rarely shares a line with name="viewport" once a formatter has been
+    # through the file, so the rule has to carry the meta tag's context across lines.
+    printf '<meta\n  name="viewport"\n  content="width=device-width, maximum-scale=1, user-scalable=no"\n/>\n' > "$TMP/a.html"
+    run bash "$L" "$TMP/a.html"
+    printf '%s\n' "$output" | grep -q '^UI_FIXED_VIEWPORT:'
+}
+
+@test "a banned directive outside any meta tag is not flagged" {
+    printf '<script>\n  const help = "do not pass user-scalable=no";\n</script>\n' > "$TMP/a.html"
+    run bash "$L" "$TMP/a.html"
+    ! printf '%s\n' "$output" | grep -q 'UI_FIXED_VIEWPORT'
+}
+
+# ── raw hex beyond the first token ────────────────────────────────────────────
+
+@test "UI_RAW_HEX: hex inside a shorthand value is flagged" {
+    printf '.a { border: 1px solid #cccccc; }\n' > "$TMP/a.css"
+    run bash "$L" "$TMP/a.css"
+    printf '%s\n' "$output" | grep -q '^UI_RAW_HEX:'
+}
+
+@test "UI_RAW_HEX: hex inside a gradient and a var() fallback is flagged" {
+    printf '.a { background: linear-gradient(to bottom, #ffffff, #eeeeee); }\n.b { color: var(--x, #333333); }\n' > "$TMP/a.css"
+    run bash "$L" "$TMP/a.css"
+    [ "$(printf '%s\n' "$output" | grep -c '^UI_RAW_HEX:')" -eq 2 ]
+}
+
+@test "UI_RAW_HEX: the four- and eight-digit alpha forms are flagged" {
+    # Matching exactly three or six digits let #RRGGBBAA through, which is the form a
+    # shadow or overlay colour usually takes.
+    printf '.a { box-shadow: 0 1px 2px #00000022; }\n.b { color: #abcd; }\n' > "$TMP/a.css"
+    run bash "$L" "$TMP/a.css"
+    [ "$(printf '%s\n' "$output" | grep -c '^UI_RAW_HEX:')" -eq 2 ]
+}
+
+@test "UI_RAW_HEX: hex inside a comment is not flagged" {
+    printf '/* the old value was #3a7bd5 */\n.a { color: var(--brand); }\n' > "$TMP/a.css"
+    run bash "$L" "$TMP/a.css"
+    ! printf '%s\n' "$output" | grep -q 'UI_RAW_HEX'
+}
+
+# ── exit codes ────────────────────────────────────────────────────────────────
+
+@test "a broken interpreter is distinguishable from a two-finding file" {
+    # Both used to exit 2, so a caller could not tell a dead gate from an ordinary
+    # result — which is most of what the fail-loud check was added to prevent.
+    printf '.a { color: #abc; padding: 13px; }\n' > "$TMP/two.css"
+    run bash "$L" "$TMP/two.css"
+    [ "$status" -eq 2 ]
+
+    AUTOSPEC_LINT_UI_AWK=false run bash "$L" "$TMP/two.css"
+    [ "$status" -eq 99 ]
+    printf '%s\n' "$output" | grep -q 'lint-ui:.*awk'
 }

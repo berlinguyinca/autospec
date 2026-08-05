@@ -41,8 +41,22 @@
 # Token/theme source files (basename matching design|token|theme|palette, or DESIGN.md)
 # are skipped — they legitimately declare raw values.
 #
+# Comments are stripped before any rule runs, so prose about a rule is not read as a
+# violation of it. That cut both ways before: a comment naming a banned viewport
+# directive was reported, and a comment naming the reduced-motion media feature cleared
+# the guard flag and silenced a real finding. CSS/JS block comments and HTML comments are
+# handled, including multi-line ones. `//` line comments are left alone, because they are
+# indistinguishable from the middle of a URL at this level of parsing.
+#
+# UI_FIXED_VIEWPORT judges markup rather than text: the directives are only read inside a
+# <meta> tag whose name is viewport, tracked across lines so a formatted multi-line tag
+# still reports. Prose and scripts naming the directive are ignored.
+#
 # Exit code = number of findings (0 = clean), capped at 200.
-# Exit 2 = invocation error, or the awk interpreter failed (never a silent clean pass).
+# Exit 99 = the linter could not run: invocation error, or the awk interpreter failed
+# (never a silent clean pass). It is deliberately outside the finding-count range — the
+# previous value of 2 was indistinguishable from a file with two findings, which is most
+# of what the fail-loud check exists to prevent.
 #
 # Env:
 #   AUTOSPEC_LINT_UI_AWK  awk binary to use (default: awk). Rules are written for
@@ -58,7 +72,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --directives) DIRECTIVES=1 ;;
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    --*) echo "lint-ui: unknown option: $1" >&2; exit 2 ;;
+    --*) echo "lint-ui: unknown option: $1" >&2; exit 99 ;;
     *) FILES="$FILES $1" ;;
   esac
   shift
@@ -100,11 +114,50 @@ for f in $FILES; do
   esac
   # One awk pass per file emits TAB-separated RULE\tline\tdesc records.
   recs="$("$AWK" '
+    # Remove comment spans so no rule reads prose about itself as code. in_block and
+    # in_html persist across lines to carry a multi-line comment.
+    function strip_comments(s,   out, i, b, h) {
+      while (1) {
+        if (in_block) {
+          i = index(s, "*/")
+          if (i == 0) return ""
+          s = substr(s, i + 2); in_block = 0
+        } else if (in_html) {
+          i = index(s, "-->")
+          if (i == 0) return ""
+          s = substr(s, i + 3); in_html = 0
+        } else break
+      }
+      out = ""
+      while (1) {
+        b = index(s, "/*"); h = index(s, "<!--")
+        if (b == 0 && h == 0) return out s
+        if (b != 0 && (h == 0 || b < h)) {
+          out = out substr(s, 1, b - 1); s = substr(s, b + 2)
+          i = index(s, "*/")
+          if (i == 0) { in_block = 1; return out }
+          s = substr(s, i + 2)
+        } else {
+          out = out substr(s, 1, h - 1); s = substr(s, h + 4)
+          i = index(s, "-->")
+          if (i == 0) { in_html = 1; return out }
+          s = substr(s, i + 3)
+        }
+      }
+    }
     {
-      line=$0; n=NR
-      # UI_RAW_HEX: hex as a CSS value (": #abc") or a JS/TS string literal.
-      if (line ~ /:[[:space:]]*#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]([0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])?([^0-9a-fA-F]|$)/ \
-          || line ~ /["'"'"']#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]([0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])?["'"'"']/) {
+      n=NR; line=strip_comments($0)
+      # UI_RAW_HEX: hex anywhere in a declaration value, or a JS/TS string literal.
+      # The value side is matched up to the next ; { or }, so shorthand, gradient stops
+      # and var() fallbacks count. Requiring the hex to follow the colon directly caught
+      # only `color: #abc` and missed `border: 1px solid #ccc`, which is where colours
+      # more often sit. Any run of three or more hex digits counts, so the four- and
+      # eight-digit alpha forms (#RGBA, #RRGGBBAA) are caught as well; matching exactly
+      # three or six let `#00000022` through. Intervals stay out of the pattern: mawk
+      # aborts on an interval combined with a group, and did so silently here until
+      # 2026-08-04.
+      if (line ~ /:[^;{}]*#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*([^0-9a-fA-F]|$)/ \
+          || line ~ /["'"'"']#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*["'"'"']/) {
         print "UI_RAW_HEX\t" n "\traw hex color literal — use a DESIGN.md token/CSS variable"
       }
       # UI_OFF_GRID_SPACING: margin/padding/gap px not a multiple of 4 (and > 2px).
@@ -149,16 +202,26 @@ for f in $FILES; do
         print "UI_INFINITE_ANIMATION\t" n "\tinfinite animation with no pause control — WCAG 2.2.2"
       }
       # UI_FIXED_VIEWPORT: a viewport meta that blocks zoom (defeats WCAG 1.4.4).
-      fixed_vp = 0
-      if (line ~ /user-scalable[[:space:]]*=[[:space:]]*["'"'"']?[[:space:]]*no/) fixed_vp = 1
-      if (match(line, /maximum-scale[[:space:]]*=[[:space:]]*["'"'"']?[0-9.]+/)) {
-        ms = substr(line, RSTART, RLENGTH)
-        sub(/.*=[[:space:]]*["'"'"']?/, "", ms)
-        if (ms + 0 <= 1) fixed_vp = 1
+      # Only markup counts. The tag is tracked across lines, because a formatter puts
+      # name= and content= on separate lines and the directives then share a line with
+      # neither `<meta` nor `viewport`. Without this, the rule matched the directive
+      # names anywhere — in prose, in a script string, in a style guide documenting the
+      # anti-pattern.
+      if (line ~ /<meta/) { in_meta = 1; meta_vp = 0 }
+      if (in_meta && line ~ /viewport/) meta_vp = 1
+      if (in_meta && meta_vp) {
+        fixed_vp = 0
+        if (line ~ /user-scalable[[:space:]]*=[[:space:]]*["'"'"']?[[:space:]]*no/) fixed_vp = 1
+        if (match(line, /maximum-scale[[:space:]]*=[[:space:]]*["'"'"']?[0-9.]+/)) {
+          ms = substr(line, RSTART, RLENGTH)
+          sub(/.*=[[:space:]]*["'"'"']?/, "", ms)
+          if (ms + 0 <= 1) fixed_vp = 1
+        }
+        if (fixed_vp) {
+          print "UI_FIXED_VIEWPORT\t" n "\tviewport blocks zoom — remove user-scalable=no / maximum-scale=1 (WCAG 1.4.4)"
+        }
       }
-      if (fixed_vp) {
-        print "UI_FIXED_VIEWPORT\t" n "\tviewport blocks zoom — remove user-scalable=no / maximum-scale=1 (WCAG 1.4.4)"
-      }
+      if (in_meta && line ~ />/) { in_meta = 0; meta_vp = 0 }
     }
     END {
       if (anim_line && !has_rm) {
@@ -175,7 +238,7 @@ for f in $FILES; do
     printf 'lint-ui: awk failed on %s (exit %s): %s\n' \
       "$f" "$awk_status" "$(cat "$ERRFILE")" >&2
     rm -f "$ERRFILE"
-    exit 2
+    exit 99
   fi
   [ -n "$recs" ] || continue
   while IFS="$(printf '\t')" read -r rule ln desc; do
