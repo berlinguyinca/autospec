@@ -254,6 +254,19 @@ Two fields decide whether a local model is usable, and both fail closed:
 Context ceilings come from `ollama show`, never from the model name: a tag can
 misreport its parameter count, and two tags can share one set of weights.
 
+`--profiles` prints a paste-able `model-profiles.yml` fragment, and
+`--profiles --only <profile>` narrows it to a single entry. Prefer **one** local
+profile: a local GPU is capacity-1, so a second local profile at a different size
+buys no parallelism and alternating between them evicts and reloads weights
+between dispatches. `--only` filters the *output*; the probe still discovers
+every model, because hiding models from discovery is the blindness this tool
+exists to fix. Naming a profile the probe did not find is an error rather than an
+empty mapping, so a typo cannot masquerade as "nothing found".
+
+The emitted fragment carries no prices, and `routing-cost.sh` refuses a profile
+with no cost keys. Add `cost_minute:` (USD-equivalent per GPU-minute) — and
+optionally `max_wall_clock_ms:` — before a local profile can be routed to.
+
 ## Evidence-based model routing
 `scripts/routing-ledger.sh` records what each dispatch cost and how it turned out;
 `scripts/routing-cost.sh` scores candidate profiles on measured **effective** cost;
@@ -268,6 +281,71 @@ misreport its parameter count, and two tags can share one set of weights.
 | `AUTOSPEC_ROUTING_FIRST_PASS_FLOOR` | `0.6` | Quality floor; the cheapest profile *clearing this* wins, not the cheapest outright. |
 | `AUTOSPEC_ROUTING_CACHE_BETA` | `0.5` | Strength of the prompt-cache penalty. |
 | `AUTOSPEC_ROUTING_EXPLORE_PCT` | `0` (off) | Cold-start exploration percent. Confined to the lowest-stakes cell (`ctx:32k` + `reasoning:shallow`). |
+| `AUTOSPEC_ROUTING_PREFIX_TOKENS` | `0` (unknown) | Prefix size this dispatch will stage, tested against each profile's `cache_min_tokens`. `0` fails open and scores exactly as before. |
+
+**Prompt-cache minimums (`cache_min_tokens`).** A prompt cache only engages above a
+per-model token floor, and the floors differ sharply — Haiku 4.5 needs **4096**
+tokens where Opus 5 needs **512** — which makes the cheapest per-token profile the
+easiest one to fall under. When `AUTOSPEC_ROUTING_PREFIX_TOKENS` is below a
+profile's `cache_min_tokens`, its measured `cache_hit_ratio` is zeroed (and
+`cache_floor_unmet` is reported), because a hit ratio recorded under a larger prefix
+must not be credited to a dispatch that cannot cache at all. Without this, Haiku
+looks cheaper than it is on short prefixes.
+
+**Effort (`effort`).** An optional per-profile reasoning tier, surfaced by
+`route-decide.sh --print-effort` and `select-model-profile.sh --print-effort`. It is
+often a better dial than swapping models, because **switching model invalidates the
+whole prompt cache** across all three tiers while raising effort on the same model
+keeps the cached prefix intact. It is *reported*, never modelled as a cost
+multiplier: two profiles differing only in effort are separate catalog rows, so the
+ledger measures the difference instead of the scorer guessing a factor. A profile
+that states no effort exits 3, so the caller keeps its own default rather than being
+handed a guess — and on an override, effort follows the winning profile, never the
+baseline it replaced.
+
+**Which dispatch kinds may be re-routed.** `route-decide.sh` holds an
+**allowlist**, so a kind added to the ledger vocabulary later is baseline-only
+until someone deliberately opens it:
+
+| Kind | Re-routable | Why |
+|---|---|---|
+| `implementer` | yes | Works from a Tier-A contract; output is gated by tests, lint, and review. |
+| `explore-researcher` | yes | High fan-out read-and-report; findings are re-checked by a later gate. |
+| `refine-lens` | yes | Same shape as explore. |
+| `qa-sweep` | yes | Same shape as explore. |
+| `lgtm-reviewer` | no | Reviewer tier must stay ≥ implementer tier — a cheap model LGTM'ing its own tier's output degrades quality invisibly, and the ledger records that as a first-pass success, *rewarding* the pairing. |
+| `verify-voter` | no | Voter independence is a vendor question, not a cost one (see `verify-voter-vendor.sh`). Cost-ordering voters converges them onto one model, which is exactly what a second vote is supposed to rule out. |
+| `secaudit-pass` | no | Safety gate. Never local, never downgraded. |
+| `spec-decompose` | no | Spec quality is the upstream bottleneck; a cheap model here costs N implementer cycles correcting it. |
+| `growth-lens` | no | No ledger evidence yet. |
+
+### Cross-vendor verify voters
+`scripts/verify-voter-vendor.sh --proposer <vendor>` names the vendor for the next
+verify voter. Two dispatches to the same model family share training data and
+failure modes, so they tend to be wrong together — the one case a second vote
+exists to catch — and the script therefore never returns the proposer's own vendor.
+
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_VOTER_VENDORS` | host PATH probe of `claude`/`codex`/`opencode` | Explicit candidate list, e.g. `claude,codex`. An unknown name is an error, not a smaller fleet. |
+
+It narrows in four steps: installed vendors → minus any `--unavailable` vendor →
+minus the proposer's vendor → least ledger spend of what remains. **Step 2 is the
+load-bearing mechanism.** `scripts/usage-observe.sh` reports `observable=false`
+for all three harnesses, so remaining quota is not measurable — a 429 is ground
+truth, while ledger spend is an estimate that is wrong by however much the
+operator used that harness outside autospec. Treat the spend comparison as a
+tiebreak between vendors that are both fine.
+
+Exit 3 means no *independent* vendor is available (single-harness host, or
+failover exhausted the alternatives). It fails closed to the caller's current
+same-vendor `TIER_B` voter rather than printing the proposer's vendor, which would
+claim an independence the host cannot provide.
+
+The voter's *tier* is not chosen here — it is the selected harness's own `TIER_B`.
+`verify-voter` is deliberately absent from `route-decide.sh`'s overridable
+allowlist: cost-ordering voters converges them onto one cheapest model, which is
+exactly the correlation this script exists to break.
 
 Two properties are deliberate and worth relying on:
 

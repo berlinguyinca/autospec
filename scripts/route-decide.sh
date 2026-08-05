@@ -12,11 +12,22 @@
 # be worse than the status quo, so "no data" must mean "no change".
 #
 # Invariants enforced here (see the design doc's invariants section):
-#   * Only `implementer` dispatches are overridable. A reviewer must never be
-#     downgraded — a cheap model reviewing its own tier's output degrades quality
-#     invisibly, and the ledger would RECORD that as a first-pass success and
-#     reward the pairing. This also keeps every safety gate (secaudit, premerge)
-#     and all spec/decompose work on its existing tier by construction.
+#   * Only the kinds named in OVERRIDABLE_KINDS are re-routable, and the list is
+#     an ALLOWLIST: any kind not on it — including a kind added to the ledger
+#     vocabulary later — falls through to the baseline. A blocklist would open
+#     every future kind by default and silently delete this invariant.
+#     Deliberately absent, each for its own reason:
+#       lgtm-reviewer  a cheap model reviewing its own tier's output degrades
+#                      quality invisibly, and the ledger RECORDS that as a
+#                      first-pass success — it would reward the pairing.
+#       verify-voter   voter independence is a vendor question, not a cost one;
+#                      see verify-voter-vendor.sh. Cost-ordering voters would
+#                      converge them onto one model and destroy the independence
+#                      that makes a second vote worth anything.
+#       secaudit-pass  safety gate; never local, never downgraded.
+#       spec-decompose spec quality is the upstream bottleneck — a cheap model
+#                      here costs N implementer cycles correcting it downstream.
+#       growth-lens    unproven against a ledger; add it when there is evidence.
 #   * A profile is only a candidate if it FITS the cell on both ordinals
 #     (ctx and reasoning); effective cost only orders profiles that already fit.
 #   * Cold-start exploration is OFF by default and, when enabled, is confined to
@@ -25,7 +36,8 @@
 #
 # Usage:
 #   route-decide.sh --labels "<comma-separated-issue-labels>"
-#                   [--kind <dispatch_kind>] [--print-profile] [--explain]
+#                   [--kind <dispatch_kind>] [--print-profile] [--print-effort]
+#                   [--explain]
 #                   [--profiles-file <path>] [--stats-file <path>]
 #
 # Exit codes:
@@ -54,6 +66,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 LABELS=""
 KIND="implementer"
 PRINT_PROFILE=0
+PRINT_EFFORT=0
 EXPLAIN=0
 PROFILES_FILE="${AUTOSPEC_MODEL_PROFILES:-$HOME/.autospec/model-profiles.yml}"
 STATS_FILE=""
@@ -68,6 +81,7 @@ while [ $# -gt 0 ]; do
         --profiles-file) PROFILES_FILE="${2:-}"; shift 2 ;;
         --stats-file)    STATS_FILE="${2:-}"; shift 2 ;;
         --print-profile) PRINT_PROFILE=1; shift ;;
+        --print-effort)  PRINT_EFFORT=1; shift ;;
         --explain)       EXPLAIN=1; shift ;;
         *) _die "unknown option: $1" ;;
     esac
@@ -93,8 +107,16 @@ fi
 # ── baseline (always computed; the override must beat it or stand aside) ───────
 baseline_profile="$(AUTOSPEC_MODEL_PROFILES="$PROFILES_FILE" bash "$SELECTOR" --labels "$LABELS" 2>/dev/null || printf '')"
 baseline_model="$(AUTOSPEC_MODEL_PROFILES="$PROFILES_FILE" bash "$SELECTOR" --labels "$LABELS" --print-model 2>/dev/null || printf '')"
+baseline_effort="$(AUTOSPEC_MODEL_PROFILES="$PROFILES_FILE" bash "$SELECTOR" --labels "$LABELS" --print-effort 2>/dev/null || printf '')"
 
 _emit_baseline() {
+    # Effort is per-profile and optional: exit 3 when the catalog does not state
+    # one, so the caller keeps its own default rather than being handed a guess.
+    if [ "$PRINT_EFFORT" -eq 1 ]; then
+        if [ -z "$baseline_effort" ]; then exit 3; fi
+        printf '%s\n' "$baseline_effort"
+        exit 0
+    fi
     if [ "$PRINT_PROFILE" -eq 1 ]; then
         if [ -z "$baseline_profile" ]; then exit 3; fi
         printf '%s\n' "$baseline_profile"
@@ -114,8 +136,20 @@ if [ "$POLICY" = "off" ]; then
     _emit_baseline
 fi
 
-# Only the implementer may be re-routed (see invariants above).
-if [ "$KIND" != "implementer" ]; then
+# Allowlist, not a blocklist (see invariants above). These four are the
+# high-fan-out read-and-report kinds: they consume a lot of tokens producing
+# findings that a later gate re-checks anyway, so a wrong answer is caught
+# downstream rather than merged. Every other kind, present or future, is baseline.
+OVERRIDABLE_KINDS="implementer explore-researcher refine-lens qa-sweep"
+
+_is_overridable() {
+    for _ok in $OVERRIDABLE_KINDS; do
+        if [ "$1" = "$_ok" ]; then return 0; fi
+    done
+    return 1
+}
+
+if ! _is_overridable "$KIND"; then
     _log "kind=$KIND is not overridable -> baseline $baseline_profile"
     _emit_baseline
 fi
@@ -158,7 +192,7 @@ PROFILE_ROWS=""
 if [ -f "$PROFILES_FILE" ]; then
     PROFILE_ROWS="$(awk '
         function lead_ws(s) { match(s, /^ */); return RLENGTH }
-        function flush() { if (cur != "") print cur "\t" cx "\t" rs "\t" md }
+        function flush() { if (cur != "") print cur "\t" cx "\t" rs "\t" md "\t" ef }
         {
             line = $0
             sub(/[[:space:]]*#.*$/, "", line)
@@ -167,7 +201,7 @@ if [ -f "$PROFILES_FILE" ]; then
             if (cur != "" && i <= blocki) { flush(); cur = "" }
             if (key ~ /^[^:]+:[[:space:]]*$/) {
                 name = key; sub(/:[[:space:]]*$/, "", name)
-                if (name != "profiles") { cur = name; blocki = i; cx = ""; rs = ""; md = "" }
+                if (name != "profiles") { cur = name; blocki = i; cx = ""; rs = ""; md = ""; ef = "" }
                 next
             }
             if (cur == "") next
@@ -175,6 +209,7 @@ if [ -f "$PROFILES_FILE" ]; then
             if (key ~ /^ctx:/) cx = v
             if (key ~ /^reasoning:/) rs = v
             if (key ~ /^model:/) { gsub(/["\047]/, "", v); md = v }
+            if (key ~ /^effort:/) { gsub(/["\047]/, "", v); ef = v }
         }
         END { flush() }
     ' "$PROFILES_FILE")"
@@ -289,9 +324,11 @@ winner_model=""
 _old_ifs="$IFS"
 IFS='
 '
+winner_effort=""
 for _row in $PROFILE_ROWS; do
     if [ "$(printf '%s' "$_row" | cut -f1)" = "$winner" ]; then
         winner_model="$(printf '%s' "$_row" | cut -f4)"
+        winner_effort="$(printf '%s' "$_row" | cut -f5)"
         break
     fi
 done
@@ -300,6 +337,15 @@ IFS="$_old_ifs"
 if [ -z "$winner_model" ]; then
     _log "winner $winner has no model: key -> baseline"
     _emit_baseline
+fi
+
+# Effort follows the SAME winner the model does. Reporting the baseline's effort
+# alongside an overridden model would pair a tier with a model it was never
+# measured on, which is worse than reporting nothing.
+if [ "$PRINT_EFFORT" -eq 1 ]; then
+    if [ -z "$winner_effort" ]; then exit 3; fi
+    printf '%s\n' "$winner_effort"
+    exit 0
 fi
 
 printf '%s\n' "$winner_model"

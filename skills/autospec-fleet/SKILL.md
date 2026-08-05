@@ -119,11 +119,11 @@ Git-backed control repository:
 ```yaml
 version: 1
 workspace: .autospec-fleet/repos
-default_profile: qwen3-32b-laptop
+default_profile: qwen3-6-35b-a3b-laptop
 parallel_repos: 2
 repos:
   - url: https://github.com/org/repo-a.git
-    profile: qwen3-32b-laptop
+    profile: qwen3-6-35b-a3b-laptop
     enabled: true
 ```
 
@@ -134,7 +134,7 @@ node_id: mac-mini-01
 workspace: ~/.autospec/fleet/repos
 max_parallel_repos: 2
 profiles:
-  - qwen3-32b-laptop
+  - qwen3-6-35b-a3b-laptop
 ```
 
 Never store tokens or secrets in either file. Use `gh` and git credential

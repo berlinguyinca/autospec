@@ -38,17 +38,17 @@ write_fleet_config() {
     cat > "$TEST_TMPDIR/fleet.yml" <<'YAML'
 version: 1
 workspace: .autospec-fleet/repos
-default_profile: qwen3-32b-laptop
+default_profile: qwen3-6-35b-a3b-laptop
 parallel_repos: 2
 repos:
   - url: https://github.com/org/repo-a.git
-    profile: qwen3-32b-laptop
+    profile: qwen3-6-35b-a3b-laptop
     enabled: true
   - url: git@github.com:org/repo-b.git
-    profile: qwen3-32b-laptop
+    profile: qwen3-6-35b-a3b-laptop
     enabled: true
   - url: https://github.com/org/repo-c.git
-    profile: qwen3-32b-laptop
+    profile: qwen3-6-35b-a3b-laptop
     enabled: true
 YAML
 }
@@ -59,7 +59,7 @@ node_id: test-node
 workspace: /tmp/fleet/repos
 max_parallel_repos: 2
 profiles:
-  - qwen3-32b-laptop
+  - qwen3-6-35b-a3b-laptop
 YAML
 }
 
@@ -74,7 +74,7 @@ YAML
         --queue-bin "$TEST_TMPDIR/autospec"
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"/autospec-run --profile qwen3-32b-laptop"* ]]
+    [[ "$output" == *"/autospec-run --profile qwen3-6-35b-a3b-laptop"* ]]
     [[ "$output" == *"--worker-id fleet:test-node:org__repo-a"* ]]
     [[ "$output" == *"--worker-id fleet:test-node:org__repo-b"* ]]
 }

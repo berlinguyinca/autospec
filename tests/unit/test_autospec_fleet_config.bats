@@ -29,7 +29,7 @@ node_id: mac-mini-01
 workspace: ~/.autospec/fleet/repos
 max_parallel_repos: 2
 profiles:
-  - qwen3-32b-laptop
+  - qwen3-6-35b-a3b-laptop
 YAML
 
     run bash "$LINT" --config "$REPO_ROOT/examples/fleet.yml" --node-config "$node"
@@ -57,7 +57,7 @@ version: 1
 workspace: .autospec-fleet/repos
 repos:
   - url: https://example.com/org/repo.git
-    profile: qwen3-32b-laptop
+    profile: qwen3-6-35b-a3b-laptop
 YAML
 
     run bash "$LINT" --config "$config"
@@ -74,7 +74,7 @@ workspace: .autospec-fleet/repos
 default_profile: missing-laptop
 repos:
   - url: https://github.com/org/repo.git
-    profile: qwen3-32b-laptop
+    profile: qwen3-6-35b-a3b-laptop
 YAML
 
     run bash "$LINT" --config "$config"

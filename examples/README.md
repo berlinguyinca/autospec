@@ -19,13 +19,13 @@ Two-profile sample shipped here:
 
 ```yaml
 claude-sonnet-cloud:
-  model: claude-sonnet-4-6
+  model: claude-sonnet-5
   ctx: 200000
   reasoning: medium
   allowed: ctx:small,ctx:medium,reasoning:low,reasoning:medium
 
-qwen3-32b-laptop:
-  model: qwen3-32b-instruct
+qwen3-6-35b-a3b-laptop:
+  model: qwen3.6:35b-a3b
   ctx: 32000
   reasoning: low
   allowed: ctx:small,reasoning:low
