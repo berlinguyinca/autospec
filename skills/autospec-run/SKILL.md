@@ -1155,12 +1155,20 @@ do not fall back to an inline label-swap path.
 >    reference, the change list, and the verification line are all already in the
 >    branch, and restating them costs output tokens to reproduce what git holds:
 >    ```bash
+>    # mktemp, not a fixed /tmp/...-<ISSUE> path: two implementers working the same
+>    # issue NUMBER in different repos would otherwise overwrite each other's body.
+>    PR_SUMMARY_FILE=$(mktemp -t autospec-pr-summary-XXXXXX) || exit 1
+>    PR_BODY_FILE=$(mktemp -t autospec-pr-body-XXXXXX) || exit 1
 >    # Write ONLY the summary — the part no template can derive: what this change
 >    # does and which alternative it rejected. Everything else is assembled.
->    printf '%s\n' "<summary>" > "/tmp/autospec-pr-summary-<ISSUE>.md"
->    PR_BODY_FILE="/tmp/autospec-pr-body-<ISSUE>.md"
+>    # A quoted heredoc, because the summary is MULTI-PARAGRAPH markdown: printf
+>    # '%s\n' would flatten it to one line, and any literal % in it is a format
+>    # string. 'EOF' is quoted so backticks and $ in the prose are not expanded.
+>    cat > "$PR_SUMMARY_FILE" <<'PR_SUMMARY_EOF'
+>    <summary>
+>    PR_SUMMARY_EOF
 >    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/compose-pr-body.sh" \
->      --issue "<ISSUE>" --summary-file "/tmp/autospec-pr-summary-<ISSUE>.md" \
+>      --issue "<ISSUE>" --summary-file "$PR_SUMMARY_FILE" \
 >      > "$PR_BODY_FILE" || exit 1
 >    ```
 >    Exit 3 from the composer means the commit range is empty: do NOT run
@@ -1263,6 +1271,13 @@ do not fall back to an inline label-swap path.
 >        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings. A reuse `BLOCK` is provisional until it survives the refute pass below.
 >
 >      **Reuse-BLOCK refute pass (before consuming the verdict):** If the findings list contains a build-vs-buy / reuse `BLOCK`, do NOT halt on it yet. Dispatch a **cheap refute pass** — one short `TIER_B` second voter (≤5 tool calls) whose only job is to *kill* the BLOCK: `rg`-search the repo for the named util/library and confirm the claimed reuse target actually exists, is reachable, and fits this call site. **Majority rules:** keep the BLOCK only if the refuter also upholds it; if the refuter refutes it (the named target is absent, unreachable, or ill-fitting), demote that BLOCK to `ADVISE`, drop it from the blocking findings, and continue. If demotion leaves no remaining blocking findings, treat the verdict as `LGTM`. This keeps a hallucinated "library exists" from stalling the merge (`feedback_llm_validator_adaptive_retry`). **Record the outcome of this reuse `BLOCK` decision to the reuse-lens ledger HERE** (issue #1442) — at the decision point, so precision = upheld ÷ total is computed only over real reuse BLOCKs and never from phantom rows on clean passes. Set `_reuse_block_raised=1`, `_reuse_trigger` to the flagged RULE_ID, and `_reuse_upheld=true` when the refuter upheld the BLOCK or `_reuse_upheld=false` when it was refuted/demoted-to-ADVISE, then:
+>      **Draw the refuter from a different vendor than the proposer.** Two dispatches to the same model family share failure modes and tend to be wrong together, which is the one case this second vote exists to catch — so resolve the refuter's vendor before dispatching it, passing the harness you detected in step 1 of Phase 0 as `--proposer`:
+>        ```bash
+>        REFUTE_VENDOR=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/verify-voter-vendor.sh" \
+>          --proposer "<HARNESS>") || REFUTE_VENDOR=
+>        ```
+>        Run the refute pass on `$REFUTE_VENDOR`'s own `TIER_B` — vendor is the independence lever, tier is the quality lever, and this changes only the former. An **empty** `REFUTE_VENDOR` (exit 3: single-harness host, or every alternative already failed over) means keep the same-harness `TIER_B` refuter: a same-vendor second vote is weaker than a cross-vendor one but still better than none, and the script refuses to name the proposer's own vendor rather than report an independence the host cannot provide.
+>        **On a quota failure, re-resolve rather than give up.** If the refuter's dispatch fails with a 429 / quota / capacity error, call the script again adding `--unavailable <that vendor>` and dispatch to what it returns; a 429 is the only ground-truth quota signal available, since `usage-observe.sh` reports `observable=false` for all three harnesses. Repeat until it exits 3, then fall back to the same-harness refuter.
 >        ```bash
 >        if [ "${AUTOSPEC_REUSE_LENS:-}" = "1" ] && [ "${_reuse_block_raised:-0}" = "1" ]; then
 >          bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/interrogation-ledger.sh" record \
