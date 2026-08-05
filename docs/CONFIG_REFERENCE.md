@@ -320,6 +320,25 @@ model is not `dispatch_recommended`, or when no wall-clock bound can be applied.
 | `AUTOSPEC_CUSTOM_VERIFY_CMD` / `_SNAPSHOT_CMD` / `_RESTORE_CMD` | (unset) | Custom verify/snapshot/restore hooks for E2E reset. |
 | `AUTOSPEC_WITH_DOCS` | (unset) | Include the docs dimension in sweeps/reviews. |
 
+## Implementation size gates
+`scripts/lint-implementation-gates.sh` wraps `lint-implementation.sh` and corrects its
+size rules; the implementer pre-commit hook calls the wrapper, not the linter directly.
+The file-LOC rule is a ratchet — an oversized file may be edited and shrunk but not
+grown — and `PR_SIZE`'s changed-line cap is waived for a change that removes at least as
+many lines as it adds. A new file holding relocated code is reported without blocking,
+since rejecting an extraction would preserve the larger original. `PR_SIZE`'s unit count
+excludes doc files, because `DOC_OUT_OF_SYNC` compels a public-surface change to touch
+one; see `docs/API_REFERENCE.md`.
+`.github/workflows/file-size-ratchet.yml` applies the same ratchet in CI against the
+merge base, which is where growth actually enters: the rule previously ran only as a
+local hook, so files grew freely through the merge path.
+
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_MAX_FILE_LOC` | `600` | File-length limit the ratchet enforces. Rough guidance meant to stop multi-thousand-line files, not to police a modest overage. Keep in step with `MAX_LOC` in the CI workflow. |
+| `AUTOSPEC_MAX_CYCLOMATIC` | `10` | Cyclomatic-complexity limit, measured per function. |
+| `AUTOSPEC_MAX_FUNC_LOC` | `50` | Per-function length limit. |
+
 ## Crash-resume & watchdog
 | Var | Default | Effect |
 |---|---|---|
