@@ -62,7 +62,10 @@ matches the adopted design language. It runs only when the repo has a root
 0. **Deterministic token-drift lint (cheap pre-pass)** — before spending a vision
    call, run the objective design-token linter on the changed UI files; it catches
    what regex can prove (raw hex outside the palette, off-grid spacing, ad-hoc
-   z-index, banned fonts) and emits `file:line` findings:
+   z-index, banned fonts) plus the motion and input rules (motion with no
+   `prefers-reduced-motion` fallback, infinite animation with no pause control,
+   a viewport blocking zoom, `:hover` with no `:focus` equivalent) and emits
+   `file:line` findings:
    ```bash
    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-ui.sh" $(git diff --name-only main...HEAD -- '*.css' '*.scss' '*.tsx' '*.jsx' '*.vue' '*.html')
    ```

@@ -74,7 +74,7 @@ implementer's retry prompt as cumulative context:
 | `DOC_OUT_OF_SYNC` | "Update the doc file(s) covering the changed public surface in this same PR." |
 | `INVENTED_CONFIG` | "Remove the invented flag/env/key, or amend the issue body to introduce it as scope." |
 | `PR_SIZE` | "Freeze the completed capped slice and move unmet acceptance criteria to ordered continuation issues; never push or merge this oversized diff." |
-| `DESIGN_DRIFT` | "If the repo has a DESIGN.md, use its tokens (color/spacing/typography/component) instead of hardcoding values; match the adopted design language for any user-facing UI. Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-ui.sh` on changed UI files — it deterministically flags raw hex, off-grid spacing, ad-hoc z-index, and banned fonts." |
+| `DESIGN_DRIFT` | "If the repo has a DESIGN.md, use its tokens (color/spacing/typography/component) instead of hardcoding values; match the adopted design language for any user-facing UI. Run `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-ui.sh` on changed UI files — it deterministically flags raw hex, off-grid spacing, ad-hoc z-index, and banned fonts. It also flags motion and input defects: motion with no `prefers-reduced-motion` fallback, infinite animation with no pause control (WCAG 2.2.2), a viewport blocking zoom (WCAG 1.4.4), and `:hover` styled without a `:focus` equivalent. Ship a reduced-motion fallback with every animation." |
 
 ### Enforcement and opt-out
 
