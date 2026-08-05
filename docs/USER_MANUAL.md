@@ -266,6 +266,12 @@ Passive listener — fires mid-conversation when the user mentions filing an iss
 Defines `TIER_A` (spec work) and `TIER_B` (implementation work) model references per harness.
 See `examples/model-profiles.yml`.
 
+Keep **one** local profile, not a size ladder — a local GPU is capacity-1, so a
+second local profile adds weight-swap thrash without adding parallelism. Generate
+the entry from what is actually installed with
+`scripts/discover-model-supply.sh --profiles --only <profile>`, and rate its `ctx`
+for the window that fits alongside the weights rather than the advertised one.
+
 ### Project map (`~/.autospec/project-map.yml`)
 
 Maps repo slugs to local paths. See `examples/project-map.yml`.

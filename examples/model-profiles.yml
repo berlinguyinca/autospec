@@ -13,18 +13,30 @@
 #                 labels before scheduling work onto the profile.
 #
 # Two reference profiles are shipped: a cloud Claude Sonnet target with a
-# generous context window, and a 32B-class local Qwen target sized for a
-# laptop.  The laptop profile intentionally restricts itself to small-context
-# / low-reasoning issues so it never gets handed a job it cannot complete.
+# generous context window, and one local Qwen target.  The local profile
+# intentionally restricts itself to small-context / low-reasoning issues so it
+# never gets handed a job it cannot complete.
+#
+# ONE local model, not a ladder.  A local GPU is capacity-1, so a second local
+# profile at a different size buys nothing: dispatches serialize on the same
+# device anyway, and alternating between two models evicts and reloads weights
+# between dispatches.  Pick the largest model that fits with KV-cache headroom
+# and route everything local through it.  Generate the entry for whatever is
+# actually installed with:
+#     discover-model-supply.sh --profiles --only <profile>
 
 claude-sonnet-cloud:
-  model: claude-sonnet-4-6
+  model: claude-sonnet-5
   ctx: 200000
   reasoning: medium
   allowed: ctx:small,ctx:medium,reasoning:low,reasoning:medium
 
-qwen3-32b-laptop:
-  model: qwen3-32b-instruct
+# ctx is the USABLE window, not the advertised one. qwen3.6:35b-a3b advertises
+# 262144, but 23 GB of weights on a 24 GB card leaves almost no KV-cache
+# headroom, so the probe's ctx_ordinal() snaps it down. Rate the profile for what
+# fits; an over-rated profile gets handed issues it will OOM on.
+qwen3-6-35b-a3b-laptop:
+  model: qwen3.6:35b-a3b
   ctx: 32000
   reasoning: low
   allowed: ctx:small,reasoning:low
