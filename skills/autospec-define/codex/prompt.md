@@ -477,7 +477,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 > | `TOO_MANY_FILES` | `SPLIT: \`## Files touched\` exceeds 3 logical units; split into a parent + child with a \`Depends on\` edge. NOTE: a skill trio (SKILL.md + codex/prompt.md + opencode/agent.md) plus its derived skill-goldens is ONE unit — keep them together, do not split a trio from its golden regen.` |
 > | `BODY_TOO_LONG` | `SHORTEN: body exceeds 400 words; cut prose or split the issue into a \`Depends on\` pair.` |
 > | `OUTLINE_TOO_LONG` | `SHORTEN: \`## Implementation outline\` exceeds 30 lines; compress signatures or split the issue.` |
-> | `UI_SECTIONS_INCOMPLETE` | `ADD: this is a UI feature — include \`## Design reference\`, \`## Interaction states\`, and \`## UX flows\` (all three).` |
+> | `UI_SECTIONS_INCOMPLETE` | `ADD: this is a UI feature — include \`## Design reference\`, \`## Interaction states\`, \`## UX flows\`, \`## Motion & feedback\`, and \`## Device & viewport\` (all five).` |
 
 > **Pre-filing safety loop (adaptive, MAX_SAFETY_RETRIES=5):** For each candidate child body, after the issue-quality lint passes and before `gh issue create`, run `"${AUTOSPEC_BIN:-autospec}" lint issue safety --title "<candidate title>" /tmp/draft-<slug>.md`. If the exit code is `1` or `2`, append the safety findings to the next generation prompt as cumulative directives:
 >
@@ -495,7 +495,7 @@ Dispatch a **foreground subagent** with this prompt (substitute the spec path an
 When a child issue builds or changes user-facing UI, treat it as more than generic
 code: a small-LLM implementer needs the design and the behavior spelled out, and
 the visual-fidelity QA loop needs something to judge against. Mark such issues with
-a `<!-- ui-feature -->` comment and add these three sections (the linter's
+a `<!-- ui-feature -->` comment and add these five sections (the linter's
 `UI_SECTIONS_INCOMPLETE` rule enforces them as a group once any one is present):
 
 - **Design reference** — the `DESIGN.md` section/tokens (or mockup link) the screen
@@ -505,10 +505,22 @@ a `<!-- ui-feature -->` comment and add these three sections (the linter's
   / empty / error / disabled, plus responsive breakpoints if they change layout.
 - **UX flows** — the happy path, the failure scenarios, and the edge cases (one
   line each; this is where most UI defects hide).
+- **Motion & feedback** — which catalog motion patterns this screen uses, and its
+  reduced-motion fallback, one line per item, e.g.
+  `Motion: fade-in + 40ms stagger; reduced: opacity-only`. Pairs with the
+  implementer's `MOTION_DRIFT` directive.
+- **Device & viewport** — which device profiles must pass, plus reflow-at-320 and
+  200%-zoom expectations, one line per item, e.g.
+  `Devices: iPhone SE, Pixel 7, 1280×800 laptop; reflow-320: no h-scroll; zoom-200%: no clipped text`.
 
-Non-UI issues omit all three (the rule never fires without the marker or a section).
-Keep these within the same ≤400-word / ≤3-files caps — split a large screen into a
-parent + per-component children with `Depends on` edges rather than one giant issue.
+Non-UI issues omit all five (the rule never fires without the marker or a section).
+The five `ui-feature` sections are **excluded from the ≤400-word body count** (they
+still count toward the ≤3-files cap where relevant) — Phase 3.5/3.75 append
+Model-fit and Shared-contracts blocks after the trim, so a body that spent its
+whole budget on prose would systematically trip `needs-quality-bar` once these two
+mandatory sections were added. The word cap continues to apply to the rest of the
+body unchanged. Split a large screen into a parent + per-component children with
+`Depends on` edges rather than one giant issue.
 
 ### Fab-feature decomposition (only for 3D-printable / fab projects)
 
