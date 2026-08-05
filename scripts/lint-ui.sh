@@ -27,6 +27,11 @@
 # are skipped — they legitimately declare raw values.
 #
 # Exit code = number of findings (0 = clean), capped at 200.
+# Exit 2 = invocation error, or the awk interpreter failed (never a silent clean pass).
+#
+# Env:
+#   AUTOSPEC_LINT_UI_AWK  awk binary to use (default: awk). Rules are written for
+#                         mawk/gawk/BSD awk; set this to prefer a specific one.
 #
 # Requires: bash 3.2+, awk.
 
@@ -45,6 +50,12 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$FILES" ] || { echo "Usage: scripts/lint-ui.sh <file> [<file> ...]" >&2; exit 0; }
+
+# Rule patterns avoid POSIX interval quantifiers ({n}) — mawk 1.3.4 panics with
+# "REcompile() - panic: values still on machine stack" when an interval is combined
+# with a group, and the panic previously left every file reported clean.
+AWK="${AUTOSPEC_LINT_UI_AWK:-awk}"
+ERRFILE="$(mktemp)"
 
 emit() { # emit RULE_ID file line desc
   if [ "$DIRECTIVES" -eq 1 ]; then
@@ -69,12 +80,12 @@ for f in $FILES; do
     *design*|*token*|*theme*|*palette*) continue ;;
   esac
   # One awk pass per file emits TAB-separated RULE\tline\tdesc records.
-  recs="$(awk '
+  recs="$("$AWK" '
     {
       line=$0; n=NR
       # UI_RAW_HEX: hex as a CSS value (": #abc") or a JS/TS string literal.
-      if (line ~ /:[[:space:]]*#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?([^0-9a-fA-F]|$)/ \
-          || line ~ /["'"'"']#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?["'"'"']/) {
+      if (line ~ /:[[:space:]]*#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]([0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])?([^0-9a-fA-F]|$)/ \
+          || line ~ /["'"'"']#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]([0-9a-fA-F][0-9a-fA-F][0-9a-fA-F])?["'"'"']/) {
         print "UI_RAW_HEX\t" n "\traw hex color literal — use a DESIGN.md token/CSS variable"
       }
       # UI_OFF_GRID_SPACING: margin/padding/gap px not a multiple of 4 (and > 2px).
@@ -101,7 +112,15 @@ for f in $FILES; do
         print "UI_BANNED_FONT\t" n "\tbanned/generic font in font-family — use DESIGN.md font tokens"
       }
     }
-  ' "$f")"
+  ' "$f" 2>"$ERRFILE")"
+  awk_status=$?
+  # Fail loud: a broken interpreter must never be reported as a clean file.
+  if [ "$awk_status" -ne 0 ] || [ -s "$ERRFILE" ]; then
+    printf 'lint-ui: awk failed on %s (exit %s): %s\n' \
+      "$f" "$awk_status" "$(cat "$ERRFILE")" >&2
+    rm -f "$ERRFILE"
+    exit 2
+  fi
   [ -n "$recs" ] || continue
   while IFS="$(printf '\t')" read -r rule ln desc; do
     [ -n "$rule" ] || continue
@@ -115,6 +134,7 @@ EOF
   [ "$count" -ge 200 ] && break
 done
 
+rm -f "$ERRFILE"
 [ -n "$out" ] && printf '%s' "$out"
 [ "$count" -gt 200 ] && count=200
 exit "$count"
