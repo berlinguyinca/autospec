@@ -70,11 +70,38 @@ impl PatchSizeEvaluation {
     }
 }
 
+/// Mirrors `is_doc_file` in scripts/lint-implementation.sh.
+fn is_doc_path(path: &str) -> bool {
+    path.starts_with("README")
+        || path == "AGENTS.md"
+        || path.starts_with("docs/")
+        || path == "SKILL.md"
+        || path.ends_with("/SKILL.md")
+}
+
+/// A doc file is not a logical unit of its own. DOC_OUT_OF_SYNC requires any
+/// public-surface change to touch one, and charging the unit cap for it put the two
+/// rules in direct tension: a change sitting at the three-unit limit failed at four the
+/// moment it was documented. Docs still count toward changed lines and raw files.
+///
+/// Applied after `normalize_logical_unit`, not before: a skill's SKILL.md is also a doc
+/// file, so excluding first would drop an adapter trio from the count entirely rather
+/// than collapsing it to one unit. Scoped to PR_SIZE rather than pushed into
+/// `normalize_logical_unit`, because the issue lint's TooManyFiles shares that helper
+/// and has no doc-touch requirement to be in tension with.
+fn pr_size_logical_unit(path: &str) -> Option<String> {
+    let unit = normalize_logical_unit(path)?;
+    if unit == path && is_doc_path(path) {
+        return None;
+    }
+    Some(unit)
+}
+
 pub fn evaluate_patch_size(diff: &UnifiedDiff, limits: PatchSizeLimits) -> PatchSizeEvaluation {
     let logical_units = diff
         .files
         .iter()
-        .filter_map(|file| normalize_logical_unit(&file.path))
+        .filter_map(|file| pr_size_logical_unit(&file.path))
         .collect::<BTreeSet<_>>()
         .len();
     let size = PatchSize {
@@ -216,6 +243,49 @@ mod tests {
             "skills/autospec/codex/prompt.md",
             "skills/autospec/opencode/agent.md",
             "tests/fixtures/skill-goldens/autospec.sha256",
+        ]
+        .into_iter()
+        .map(empty_file)
+        .collect();
+
+        assert_eq!(
+            evaluate_patch_size(&UnifiedDiff { files }, PatchSizeLimits::default())
+                .size()
+                .logical_units,
+            1
+        );
+    }
+
+    #[test]
+    fn doc_files_are_not_logical_units() {
+        // DOC_OUT_OF_SYNC requires any public-surface change to touch a doc file, and
+        // charging the unit cap for it put the two rules in direct tension: a change at
+        // the three-unit limit failed at four the moment it was documented.
+        let files = [
+            "src/a.rs",
+            "src/b.rs",
+            "src/c.rs",
+            "docs/CONFIG_REFERENCE.md",
+            "README.md",
+            "AGENTS.md",
+        ]
+        .into_iter()
+        .map(empty_file)
+        .collect();
+
+        let evaluation = evaluate_patch_size(&UnifiedDiff { files }, PatchSizeLimits::default());
+        assert_eq!(evaluation.size().logical_units, 3);
+        assert!(evaluation.hard_dimensions().is_empty());
+    }
+
+    #[test]
+    fn doc_exclusion_does_not_swallow_a_skill_trio() {
+        // A skill's SKILL.md is also a doc file, so the trio must be collapsed to one
+        // unit before the doc exclusion is applied — not dropped from the count.
+        let files = [
+            "skills/autospec/SKILL.md",
+            "skills/autospec/codex/prompt.md",
+            "skills/autospec/opencode/agent.md",
         ]
         .into_iter()
         .map(empty_file)

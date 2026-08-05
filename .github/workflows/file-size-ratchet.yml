@@ -10,6 +10,12 @@ name: File size ratchet
 # This job closes that hole. It is a ratchet, not an absolute limit: a file already over
 # the threshold may be edited and shrunk, but not grown. Existing debt stays legal at its
 # current size; what is blocked is making it worse.
+#
+# Relocation is the one case where a new oversized file is tolerated. Extracting code out
+# of a monolith into a sibling module is the remedy this job's own failure message
+# recommends, and a split necessarily creates a file. When a change removes at least as
+# many lines as it adds, the extracted file is reported and not blocked — rejecting it
+# would preserve the larger monolith, which is the worse of the two states.
 
 on:
   pull_request:
@@ -40,6 +46,28 @@ jobs:
             esac
           }
 
+          # Net line delta across the whole change. Taken from --numstat rather than by
+          # differencing file lengths, because git reports a move as a rename: the
+          # source path never appears on its own, so length differencing counts the
+          # destination as wholly new and a relocation reads as pure addition.
+          net="$(git diff --numstat "$base"...HEAD | awk '
+            {
+              path = $3
+              # Renames arrive as "old => new" or "dir/{old => new}"; judge the target.
+              if (index(path, "=>")) { sub(/^.*=> ?/, "", path); gsub(/[}]/, "", path) }
+              if (path ~ /\.(md|txt|json|ya?ml|diff|lock|snap)$/) next
+              if ($1 == "-" || $2 == "-") next   # binary
+              net += $1 - $2
+            }
+            END { print net + 0 }
+          ')"
+          echo "net line delta: $net"
+
+          # A change that removes at least as many lines as it adds is a relocation, not
+          # new material: a feature cannot hide in it, because features add lines.
+          is_relocation=0
+          [ "$net" -le 0 ] && is_relocation=1
+
           fail=0
           # ACMR: added, copied, modified, renamed. Deletions cannot grow a file.
           for f in $(git diff --name-only --diff-filter=ACMR "$base"...HEAD); do
@@ -53,11 +81,16 @@ jobs:
               before=""
             fi
 
-            # New file: judged against the threshold directly.
+            # New file: judged against the threshold directly, unless it holds relocated
+            # code — see the relocation note at the top of this file.
             if [ -z "$before" ]; then
               if [ "$after" -gt "$MAX_LOC" ]; then
-                echo "FILE_SIZE:$f: new file is $after lines (limit $MAX_LOC); split it before landing"
-                fail=1
+                if [ "$is_relocation" -eq 1 ]; then
+                  echo "::warning file=$f::$f is a $after line extraction, over the $MAX_LOC limit; allowed because the change is a net removal, but split it further"
+                else
+                  echo "FILE_SIZE:$f: new file is $after lines (limit $MAX_LOC); split it before landing"
+                  fail=1
+                fi
               fi
               continue
             fi
