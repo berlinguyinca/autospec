@@ -227,6 +227,33 @@ they have a skill/shared canonical source.
 | `AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER` | (unset) | Absolute proven containment adapter required before the native executor may launch OpenCode. |
 | `AUTOSPEC_NO_GUARDIAN` | (unset) | Disable the guardian RULE_ID pass (not recommended). |
 
+## Local model supply discovery
+`scripts/discover-model-supply.sh` measures what this host can actually run and
+writes a capability document consumed by `/autospec-run`'s profile auto-init.
+
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_MODEL_CAPABILITY` | `~/.autospec/model-capability.json` | Capability-document path. |
+| `AUTOSPEC_OLLAMA_HOST` | `127.0.0.1:11434` | Ollama host:port probed for local models. |
+
+The document is cached on a hardware fingerprint (accelerator identity + VRAM +
+the installed model set) plus a TTL; a fingerprint change forces a re-probe, and
+the model set is **replaced** rather than merged so stale entries cannot persist.
+
+Two fields decide whether a local model is usable, and both fail closed:
+
+- `accelerator.usable` / `accelerator.reason` — a present `nvidia-smi` and a
+  present `/dev/nvidia0` do *not* mean a usable GPU. When `usable` is `false`,
+  `reason` names the cause (`nvml_driver_library_mismatch`,
+  `nvidia_smi_query_failed`, `no_accelerator_detected`, …). Surface it: a driver
+  mismatch is a quick fix, whereas a silent fall back to CPU inference is not.
+- `local_models[].dispatch_recommended` — `false` means the model was found but
+  the host cannot run it usefully (no usable accelerator, or weights exceeding
+  the memory budget). `--profiles` emits those entries commented out.
+
+Context ceilings come from `ollama show`, never from the model name: a tag can
+misreport its parameter count, and two tags can share one set of weights.
+
 ## Automation lifecycle toggles
 | Var | Default | Effect |
 |---|---|---|
