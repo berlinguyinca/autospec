@@ -281,6 +281,26 @@ FILTERED="$(printf '%s\n' "$DELEGATE_OUT" | awk -v shrink="$IS_SHRINK" -v safe="
       next
     }
   }
+  # Per-line findings on a file that holds relocated code. Same root cause as the two
+  # size rules above, in rules that judge individual lines: a new file has nothing to
+  # diff against, so every one of its lines reads as freshly authored and a per-line
+  # rule fires on code that merely moved. Nesting depth is the common case — moved code
+  # keeps its indentation — and DOC_OUT_OF_SYNC trips on flag-shaped tokens carried
+  # along inside moved test fixtures.
+  #
+  # Downgraded rather than dropped, so the lines stay on the record. Matches only
+  # line-numbered findings; the whole-file ones are handled above. A relocation that
+  # also introduces a genuinely new flag could be masked here, but that requires the
+  # change to stay net-removing, and the alternative is rejecting every extraction.
+  /^(COMPLEXITY|DOC_OUT_OF_SYNC):/ {
+    p = $0
+    sub(/^[A-Z_]+:/, "", p)
+    sub(/:[0-9]+:.*$/, "", p)
+    if (p in radd) {
+      print "INFO:" $0 " — relocated content, not new material"
+      next
+    }
+  }
   # Changed-line cap waived for a pure shrink; other PR_SIZE breaches still print.
   shrink == 1 && /PR_SIZE/ && /exceeded=changed_lines$/ { next }
   # Unit cap waived when the count without doc files fits. Anchored, so a combined

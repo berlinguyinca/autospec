@@ -273,6 +273,50 @@ open('big.py', 'w').write('\n'.join(lines) + '\n')
     printf '%s\n' "$output" | grep -q 'INFO:COMPLEXITY:big_tests.py'
 }
 
+# Writes a file of $2 lines at path $1 where every 7th line carries 24 spaces of
+# indentation, deep enough to trip the COMPLEXITY nesting-depth rule.
+write_deep_lines() {
+    python3 -c "
+import sys
+path, count = sys.argv[1], int(sys.argv[2])
+out = []
+for i in range(count):
+    if i % 7 == 0:
+        out.append('                        deep_%d = 1' % i)
+    else:
+        out.append('    plain_%d = %d' % (i, i))
+open(path, 'w').write('\n'.join(out) + '\n')
+" "$1" "$2"
+}
+
+@test "relocation: per-line findings on relocated code do not block" {
+    # A new file has nothing to diff against, so every line reads as freshly authored
+    # and per-line rules fire on code that only moved. Moved code keeps its indentation,
+    # so nesting depth is the common case.
+    write_deep_lines parent.py 900
+    git add parent.py
+    git commit -q -m "parent with deep indentation"
+    write_deep_lines parent.py 100
+    write_deep_lines parent_tests.py 795
+    git add parent.py parent_tests.py
+    run bash "$GATES" --staged
+    [ "$status" -eq 0 ]
+    # Recorded, not silently dropped.
+    printf '%s\n' "$output" | grep -q 'INFO:COMPLEXITY:parent_tests.py:.*nesting depth'
+    ! printf '%s\n' "$output" | grep -qE '^COMPLEXITY:parent_tests.py:[0-9]+: nesting depth'
+}
+
+@test "relocation: per-line findings on genuinely new code still block" {
+    write_deep_lines parent.py 900
+    git add parent.py
+    git commit -q -m "parent with deep indentation"
+    write_deep_lines feature.py 200
+    git add feature.py
+    run bash "$GATES" --staged
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -qE '^COMPLEXITY:feature.py:[0-9]+: nesting depth'
+}
+
 @test "relocation: a new oversized file that adds material still blocks" {
     write_lines big.py 900
     git add big.py
