@@ -1146,7 +1146,21 @@ do not fall back to an inline label-swap path.
 >      exit 0
 >    fi
 >    ```
-> 6. PR: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body "Closes #<ISSUE>\n\n<summary>". Capture PR. Immediately after the PR opens, release the claim-guard lease taken in step 1a: `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh release $TARGETS`.
+> 6. PR: build the body deterministically instead of writing it out — the closing
+>    reference, the change list, and the verification line are all already in the
+>    branch, and restating them costs output tokens to reproduce what git holds:
+>    ```bash
+>    # Write ONLY the summary — the part no template can derive: what this change
+>    # does and which alternative it rejected. Everything else is assembled.
+>    printf '%s\n' "<summary>" > "/tmp/autospec-pr-summary-<ISSUE>.md"
+>    PR_BODY_FILE="/tmp/autospec-pr-body-<ISSUE>.md"
+>    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/compose-pr-body.sh" \
+>      --issue "<ISSUE>" --summary-file "/tmp/autospec-pr-summary-<ISSUE>.md" \
+>      > "$PR_BODY_FILE" || exit 1
+>    ```
+>    Exit 3 from the composer means the commit range is empty: do NOT run
+>    `gh pr create`, and investigate why the branch has no commits.
+>    Then: gh pr create --base main --head <BRANCH> --title "<TITLE>" --body-file "$PR_BODY_FILE". Capture PR. Immediately after the PR opens, release the claim-guard lease taken in step 1a: `bash ${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/claim-guard.sh release $TARGETS`.
 >    Fire the transition notification: `case "$_notify_fired" in *:pr_created:*) ;; *) _notify_fired="${_notify_fired}:pr_created:"; bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/notify.sh" "autospec #<ISSUE>: pr_created" "PR #<PR> opened on {repo}" || true ;; esac`
 >    After the LLM subagent returns, record telemetry (tokens JSON written by the harness to `.autospec/tokens-<ISSUE>.json` if present):
 >    ```bash
