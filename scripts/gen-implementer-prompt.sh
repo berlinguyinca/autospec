@@ -54,6 +54,7 @@ BRANCH=""
 ISSUE_LABELS=""
 REPO="${AUTOSPEC_REPO:-}"
 BODY_FILE=""
+STACK_PROFILE="${PWD}/.autospec/state/stack-profile.json"
 
 usage() {
   cat <<'EOF'
@@ -73,6 +74,10 @@ Optional:
   --repo <owner/repo>   Repository slug (default: from AUTOSPEC_REPO env)
   --body-file <file>    Prompt body emitted below the cached prefix, ahead of the
                         issue assignment (e.g. the v2-flow phase4-implementer.md).
+  --stack-profile <f>  Read ui_capabilities.gaps from this stack profile and add a
+    UI adoption directive when gaps exist, so missing accessible primitives are not
+    hand-rolled. Default ./.autospec/state/stack-profile.json; a missing or gap-free
+    profile emits nothing.
 
 Exit: 0=success 1=error
 EOF
@@ -96,6 +101,9 @@ while [ $# -gt 0 ]; do
     --body-file)
       [ -z "${2:-}" ] && { printf 'gen-implementer-prompt.sh: --body-file requires a value\n' >&2; exit 1; }
       BODY_FILE="$2"; shift 2 ;;
+    --stack-profile)
+      [ -z "${2:-}" ] && { printf 'gen-implementer-prompt.sh: --stack-profile requires a value\n' >&2; exit 1; }
+      STACK_PROFILE="$2"; shift 2 ;;
     *)
       printf 'gen-implementer-prompt.sh: unknown option: %s\n' "$1" >&2; exit 1 ;;
   esac
@@ -155,6 +163,34 @@ printf '\n\n'
 if [ -n "$BODY_FILE" ]; then
   cat "$BODY_FILE"
   printf '\n\n'
+fi
+
+# UI capability adoption directive. Hand-rolled widgets are where most
+# judgment-class accessibility defects come from, so a repo missing accessible
+# primitives is told to adopt them rather than write its own. Silent when the
+# profile is absent, the repo is not a web UI, or there are no gaps.
+if [ -f "$STACK_PROFILE" ]; then
+  UI_GAPS="$(python3 -c '
+import json, sys
+try:
+    caps = json.load(open(sys.argv[1])).get("ui_capabilities") or {}
+except Exception:
+    caps = {}
+print(" ".join(caps.get("gaps") or []))
+' "$STACK_PROFILE" 2>/dev/null || true)"
+  if [ -n "$UI_GAPS" ]; then
+    cat <<UIGAPS
+### UI capability gaps
+
+This repo is missing: ${UI_GAPS}
+
+Do not hand-roll dialogs, menus, tooltips, comboboxes, tabs, or focus handling.
+Adopt an accessible primitive library and a motion library, and add a global
+\`prefers-reduced-motion\` reset. If adopting a dependency is out of scope for
+this issue, say so and file a follow-up issue instead of writing your own.
+
+UIGAPS
+  fi
 fi
 
 cat <<SUFFIX
