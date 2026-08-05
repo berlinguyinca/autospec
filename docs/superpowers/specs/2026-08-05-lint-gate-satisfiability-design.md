@@ -192,9 +192,53 @@ exception:
 3. **Now the ratchet is active**, so edits that *shrink* an oversized file are
    permitted. Remove the superseded checks from `lint-implementation.sh` — a
    shrinking change, therefore allowed — and trim its test file the same way.
-4. **Finish the autonomy-lib split** that this work was blocking. The completed,
-   verified patch is preserved at `scratchpad/lib-slimming.patch`; under ratchet
-   semantics it lands as one shrinking commit.
+4. **Finish the autonomy-lib split** that this work was blocking. Until then,
+   `tests/unit/test_autonomy_module_parity.bats` keeps the extracted modules from
+   drifting away from the lib's still-present copies. The recipe is in §3.1.
+
+### 3.1 Reproducing the autonomy-lib slimming
+
+This was completed and verified once — 391 LOC, every function under 50, artifacts
+byte-identical to `origin/main` across ten commands — and could not be committed.
+The diff itself cannot be stored in the repo either: at 513 lines it exceeds
+`PR_SIZE`, the same rule this spec fixes. It is mechanical to regenerate:
+
+```python
+# Delete the functions now living in the extracted modules.
+import ast
+p = 'scripts/autospec-autonomy-v2-lib.py'
+lines = open(p).read().split('\n')
+MOVED = ['default_capabilities', 'capability_yaml', 'load_capability_statuses',
+         'ensure_capabilities', 'built_in_recipes', 'write_recipe_files',
+         'recipe_index', 'detect_stack', 'stack_confidence', 'recipes',
+         'rule_results', 'find_recipe', 'rule_to_recipe']
+spans = sorted(((n.lineno, n.end_lineno) for n in ast.parse('\n'.join(lines)).body
+                if isinstance(n, ast.FunctionDef) and n.name in MOVED), reverse=True)
+for start, end in spans:                      # swallow trailing blank separators
+    e = end
+    while e < len(lines) and lines[e].strip() == '':
+        e += 1
+    del lines[start - 1:e]
+open(p, 'w').write('\n'.join(lines))
+```
+
+Then, by hand:
+
+1. Add the four module imports (`capabilities`, `recipes`, `rulemap`, `stack`),
+   importing only the names still referenced — `load_capability_statuses`,
+   `recipe_index`, `find_recipe`, `recipes`, `rule_results`, `rule_to_recipe`,
+   `detect_stack`, `stack_confidence`.
+2. Delete the lib's now-unused `yaml_scalar`; `slug` is still used by `decompose`.
+3. Split `worker_recipe` (58 LOC) into `_worker_refusal_reason` and
+   `_worker_execution_markdown` plus a short orchestrator.
+4. Split `autonomy_status` (67 LOC) into `_status_data` and `_status_markdown`.
+5. Delete `tests/unit/test_autonomy_module_parity.bats` — it would then compare a
+   module to itself.
+
+Verify by running both versions over `recipe_index`, `detect_stack`,
+`rule_to_recipe`, `decompose`, `patch_plan`, two `worker_recipe` calls,
+`evidence_tests`, `rule_recheck`, and `autonomy_status`, and diffing the two
+`.autospec` trees.
 
 Each step is independently committable and green. This is the strangler pattern:
 a new small module takes over the broken rules, and the oversized original is
