@@ -132,6 +132,42 @@ MD
   [ "$status" -ne 0 ]
 }
 
+@test "stack profile reports UI capability gaps so implementers adopt primitives instead of hand-rolling" {
+  mkdir -p "$TEST_TMPDIR/bare" "$TEST_TMPDIR/equipped" "$TEST_TMPDIR/cli"
+  write_react_repo "$TEST_TMPDIR/bare"
+  write_react_repo "$TEST_TMPDIR/equipped"
+  cat > "$TEST_TMPDIR/equipped/package.json" <<'JSON'
+{"dependencies":{"react":"latest","@radix-ui/react-dialog":"latest","framer-motion":"latest","typescript":"latest"},"devDependencies":{"vite":"latest"}}
+JSON
+  printf '@media (prefers-reduced-motion: reduce) { * { animation: none; } }\n' > "$TEST_TMPDIR/equipped/src/reset.css"
+
+  # A repo with a web UI but no accessible primitives, no motion library, no reset.
+  run bash "$STACK" --repo-root "$TEST_TMPDIR/bare"
+  [ "$status" -eq 0 ]
+  run jq -r '.ui_capabilities.is_web_ui' "$TEST_TMPDIR/bare/.autospec/state/stack-profile.json"
+  [ "$output" = "true" ]
+  run jq -r '.ui_capabilities.gaps | sort | join(",")' "$TEST_TMPDIR/bare/.autospec/state/stack-profile.json"
+  [ "$output" = "accessible_primitives,motion_library,reduced_motion_reset" ]
+
+  # A repo that already has all three reports no gaps.
+  run bash "$STACK" --repo-root "$TEST_TMPDIR/equipped"
+  [ "$status" -eq 0 ]
+  run jq -r '.ui_capabilities.gaps | length' "$TEST_TMPDIR/equipped/.autospec/state/stack-profile.json"
+  [ "$output" = "0" ]
+  run jq -r '.ui_capabilities.accessible_primitives.evidence | length > 0' "$TEST_TMPDIR/equipped/.autospec/state/stack-profile.json"
+  [ "$output" = "true" ]
+
+  # A non-UI repo is never nagged about UI primitives.
+  mkdir -p "$TEST_TMPDIR/cli/.autospec/state" "$TEST_TMPDIR/cli/.autospec/reports"
+  echo 'print("hi")' > "$TEST_TMPDIR/cli/main.py"
+  run bash "$STACK" --repo-root "$TEST_TMPDIR/cli"
+  [ "$status" -eq 0 ]
+  run jq -r '.ui_capabilities.is_web_ui' "$TEST_TMPDIR/cli/.autospec/state/stack-profile.json"
+  [ "$output" = "false" ]
+  run jq -r '.ui_capabilities.gaps | length' "$TEST_TMPDIR/cli/.autospec/state/stack-profile.json"
+  [ "$output" = "0" ]
+}
+
 @test "worker v3 dry-run executes safe recipe and refuses unsupported stack scaffold" {
   mkdir -p "$TEST_TMPDIR/react" "$TEST_TMPDIR/unknown"
   write_react_repo "$TEST_TMPDIR/react"

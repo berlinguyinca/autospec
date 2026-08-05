@@ -5,6 +5,22 @@ the continuous accessibility and adjacent web-standards tier introduced by issue
 #1539. The operative target is **WCAG 2.2 Level AA**. WCAG 3.0/APCA design-time guidance only applies during design review; it is not used as a merge-blocking
 legal benchmark while it remains draft guidance.
 
+## What the gate does and does not prove
+
+The deterministic gate below is a **WCAG 2.2 AA machine-verifiable gate**. It
+proves the **machine-verifiable subset** of Level AA — the criteria that
+axe-core, pa11y, Lighthouse, and IBM Equal Access can decide by inspecting a
+rendered page. Automated engines decide only a minority of the AA success
+criteria, so a green gate is **necessary but not sufficient** for Level AA
+conformance.
+
+Do not report a passing gate as "WCAG AA compliant". Full conformance also
+requires the judgment class below, which is routed to human review. The
+accessibility-tree, keyboard-traversal, and live-region assertion tier specified
+in `docs/superpowers/specs/2026-08-04-autospec-web-ui-design.md` is what will
+convert most of that judgment class into machine-verifiable evidence; until it
+lands, the residual is human-reviewed and the stronger claim is unearned.
+
 ## Source canon
 
 - W3C WCAG 2.2 is the normative target for Level AA checks, including focus not
@@ -87,4 +103,4 @@ human review and rejects `auto_merged` judgment findings.
 Continuous compliance also tracks adjacent web standards: schema.org JSON-LD for
 SEO structured data, security headers shared with the security tier, privacy/cookie UX for GDPR/ePrivacy consent and withdrawal, i18n/l10n for `lang`, `dir`/RTL and
 translated ARIA, and ISO 9241 ergonomics. These standards inform issue filing and
-review routing; they do not weaken the WCAG 2.2 Level AA gate.
+review routing; they do not weaken the WCAG 2.2 AA machine-verifiable gate.
