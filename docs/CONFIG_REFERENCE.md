@@ -298,6 +298,34 @@ until someone deliberately opens it:
 | `spec-decompose` | no | Spec quality is the upstream bottleneck; a cheap model here costs N implementer cycles correcting it. |
 | `growth-lens` | no | No ledger evidence yet. |
 
+### Cross-vendor verify voters
+`scripts/verify-voter-vendor.sh --proposer <vendor>` names the vendor for the next
+verify voter. Two dispatches to the same model family share training data and
+failure modes, so they tend to be wrong together — the one case a second vote
+exists to catch — and the script therefore never returns the proposer's own vendor.
+
+| Var | Default | Effect |
+|---|---|---|
+| `AUTOSPEC_VOTER_VENDORS` | host PATH probe of `claude`/`codex`/`opencode` | Explicit candidate list, e.g. `claude,codex`. An unknown name is an error, not a smaller fleet. |
+
+It narrows in four steps: installed vendors → minus any `--unavailable` vendor →
+minus the proposer's vendor → least ledger spend of what remains. **Step 2 is the
+load-bearing mechanism.** `scripts/usage-observe.sh` reports `observable=false`
+for all three harnesses, so remaining quota is not measurable — a 429 is ground
+truth, while ledger spend is an estimate that is wrong by however much the
+operator used that harness outside autospec. Treat the spend comparison as a
+tiebreak between vendors that are both fine.
+
+Exit 3 means no *independent* vendor is available (single-harness host, or
+failover exhausted the alternatives). It fails closed to the caller's current
+same-vendor `TIER_B` voter rather than printing the proposer's vendor, which would
+claim an independence the host cannot provide.
+
+The voter's *tier* is not chosen here — it is the selected harness's own `TIER_B`.
+`verify-voter` is deliberately absent from `route-decide.sh`'s overridable
+allowlist: cost-ordering voters converges them onto one cheapest model, which is
+exactly the correlation this script exists to break.
+
 Two properties are deliberate and worth relying on:
 
 - **No data means no change.** With an empty or thin ledger, `route-decide.sh` prints
