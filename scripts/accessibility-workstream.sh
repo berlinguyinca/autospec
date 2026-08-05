@@ -314,7 +314,7 @@ def cmd_validate_doc(args):
         return 1
     text = path.read_text(encoding="utf-8")
     missing = [token for token in SOURCE_TOKENS if token not in text]
-    for token in ["WCAG 2.2 Level AA", "4.5:1", "3:1", "light", "dark", "human review", "auto-remediate"]:
+    for token in ["WCAG 2.2 Level AA", "machine-verifiable subset", "4.5:1", "3:1", "light", "dark", "human review", "auto-remediate"]:
         if token not in text:
             missing.append(token)
     if missing:

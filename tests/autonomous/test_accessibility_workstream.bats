@@ -83,6 +83,14 @@ JSONL
     grep -q 'dark judgment findings routed to human review' "$WORK/report.md"
 }
 
+@test "validate-design-doc rejects a doc that drops the machine-verifiable scope caveat" {
+    DOC="$WORK/runbook.md"
+    grep -v 'machine-verifiable subset' "$REPO_ROOT/docs/runbooks/accessibility-workstream.md" > "$DOC"
+    run bash "$SCRIPT" validate-design-doc --doc "$DOC"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"DOC_MISSING:machine-verifiable subset"* ]]
+}
+
 @test "design doc and validation glob cite WCAG 2.2, WAI-ARIA APG, Section508.gov, Deque axe-core, and adjacent standards" {
     run bash "$SCRIPT" validate-design-doc --doc "$REPO_ROOT/docs/runbooks/accessibility-workstream.md"
     [ "$status" -eq 0 ]
