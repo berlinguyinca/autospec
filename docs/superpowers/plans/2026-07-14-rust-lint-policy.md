@@ -11,7 +11,8 @@
 > systematically trip `needs-quality-bar` once the two new sections became
 > mandatory. `tests/lint/test_lint_issue_ui_sections.bats` (split out of
 > `test_lint_issue_sections.bats`, which had grown past the file-size limit) and
-> `crates/autospec-core/tests/issue_lint.rs` gained coverage for the two new
+> `crates/autospec-core/tests/issue_lint_ui_sections.rs` (likewise split out of
+> `issue_lint.rs`) gained coverage for the two new
 > sections' presence/absence detection and a positive/negative word-cap
 > exclusion pair (a ~400-word non-UI body with all five sections present
 > passes; the same non-UI prose alone over 400 words still trips
