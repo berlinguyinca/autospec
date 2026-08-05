@@ -1187,11 +1187,11 @@ _vacuous_grep_or_true() {
     fi
 }
 
-# _vacuous_tautology_and_stubs FILE LINENO CONTENT — check TAUTOLOGY, AC_STUB, EMPTY_TEST
+# _vacuous_tautology_and_stubs FILE LINENO CONTENT — TAUTOLOGY, AC_STUB, EMPTY_TEST. The xit pattern is anchored; unanchored it also matched sys.exit and SystemExit.
 _vacuous_tautology_and_stubs() {
     local diff_file="$1" lineno="$2" content="$3"
-    local taut_pat='expect\((true|1)\)\.(toBe|toEqual|toStrictEqual)\(\1\)|assert\(1\s*===?\s*1\)|assert True[[:space:]]*$|xit\(|assert\.ok\(true\)|t\.true\(true\)'
-    if printf '%s' "$content" | grep -qE "$taut_pat"; then
+    local taut_pat='expect\((true|1)\)\.(toBe|toEqual|toStrictEqual)\(\1\)|assert\(1\s*===?\s*1\)|assert True[[:space:]]*$|(^|[^A-Za-z0-9_.])xit\(|assert\.ok\(true\)|t\.true\(true\)'
+    if printf '%s' "$content" | grep -qE "$taut_pat" && ! is_line_allowed VACUOUS_TAUTOLOGY "$diff_file" "$lineno"; then
         emit_capped "VACUOUS_TAUTOLOGY" "$diff_file" "$lineno" \
             "Tautological assertion — always passes regardless of code under test."
     fi
