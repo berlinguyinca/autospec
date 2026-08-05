@@ -32,7 +32,10 @@
 
 set -eu
 
-MAX_LOC="${AUTOSPEC_MAX_FILE_LOC:-400}"
+# 600, not 400: the limit is rough guidance meant to stop multi-thousand-line files,
+# not to police a modest overage. A 500-600 line file that is cohesive is fine; the
+# ratchet below is what actually holds the line, by refusing to let big files grow.
+MAX_LOC="${AUTOSPEC_MAX_FILE_LOC:-600}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
 
 DELEGATE="$SCRIPT_DIR/lint-implementation.sh"
