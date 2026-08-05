@@ -86,6 +86,14 @@ instead of making the operator hand-parse heartbeat JSON.
 
 If the file is missing on run start:
 
+**Dispatching to a local model.** A profile resolved to a local model is executed via
+`bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/local-dispatch.sh" --model <tag>
+--prompt-file <path>`, never by calling a runtime directly. It refuses (exit 3) when
+Codex CLI is absent or does not advertise `--oss`, when the capability probe reports the
+model is not `dispatch_recommended`, or when no wall-clock bound can be applied — on any
+refusal, keep the cloud tier. The local GPU is capacity-1, so the helper serializes
+dispatches; never run two local dispatches concurrently.
+
 1. **Discover local supply with the probe — never enumerate models yourself.**
    ```bash
    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/discover-model-supply.sh" --profiles
@@ -171,6 +179,7 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 | Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
 | Self-paced future wakeup    | `ScheduleWakeup` inside a `/loop`    | a recurring `task` or local `cron`       | local `cron`/`launchd` calling the CLI   | The user runs a status-update prompt manually      |
 | Subagent model tier         | Tier A: `opus` + `ultrathink`; Tier B: `sonnet` + medium thinking | Tier A: top `task` model + high reasoning; Tier B: smaller-tier `task` + medium reasoning | Tier A: top GPT + `reasoning_effort=high`; Tier B: `gpt-5.1-codex-spark` + `reasoning_effort=medium` | Honor the per-phase tier mapping in AGENTS.md; retry the same subagent UP on unavailability |
+| Local model dispatch        | not native — `Agent(model:)` takes Claude tiers only; shell out to `local-dispatch.sh` | provider pointed at `:11434/v1` (or `:8000` for vLLM) | `codex exec --oss --local-provider ollama` | cloud tier (fail closed) |
 <!-- autospec-block:harness-adapter-core -->
 
 **Persistent project notes**: write durable preferences to **`AGENTS.md`** in the repo root — this is the de-facto standard recognized by Claude Code (also reads `CLAUDE.md`), OpenCode, and Codex. If your harness has its own private memory (e.g. Claude Code's `~/.claude/.../memory/`), mirror the same content there. Per AGENTS.md, subagent dispatches use a **two-tier policy**: Tier A (top model + extended thinking) for spec work (research, decompose, review/label — not used by this skill); Tier B (cheaper model + medium thinking) for implementation work (Phase 4 implementer + LGTM review). The orchestrator keeps the user's invoked model. Fall back UP the tier on quota/capacity or other unavailability by retrying the same subagent with the stronger tier while preserving parent context.

@@ -313,6 +313,13 @@ Implementation-lint results can be cached by content with
 `scripts/lint-implementation-cached.sh --staged`; unchanged staged diffs reuse
 the prior result from `.autospec/cache/lint/`.
 
+### Local model dispatch
+
+Once a model is discovered and qualified, `scripts/calibrate-profile.sh --profile <name>`
+replays already-merged issues against it and records the verdict, and
+`scripts/local-dispatch.sh` runs real dispatches through Codex CLI's `--oss` local
+provider. Both fail closed to the cloud tier rather than guessing.
+
 ### Local model discovery
 
 Run `scripts/discover-model-supply.sh --profiles` to see what this host can
