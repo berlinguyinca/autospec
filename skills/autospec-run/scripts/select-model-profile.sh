@@ -3,7 +3,7 @@
 #
 # Usage:
 #   select-model-profile.sh --labels <comma-separated-labels> [--profiles-file <path>]
-#                           [--print-model]
+#                           [--print-model] [--print-effort]
 #
 # Prints the profile name to stdout (e.g. "claude-haiku-cloud" or "claude-sonnet-cloud").
 #
@@ -28,12 +28,14 @@
 # Exit codes:
 #   0  profile name (or model id) printed
 #   1  usage error
-#   3  --print-model only: no model id resolvable (caller must keep TIER_B)
+#   3  --print-model / --print-effort only: nothing resolvable in the catalog
+#      (caller must keep its harness-detected TIER_B / its default effort)
 
 set -eu
 
 LABELS=""
 PRINT_MODEL=0
+PRINT_EFFORT=0
 PROFILES_FILE="${AUTOSPEC_MODEL_PROFILES:-$HOME/.autospec/model-profiles.yml}"
 
 while [ $# -gt 0 ]; do
@@ -46,12 +48,16 @@ while [ $# -gt 0 ]; do
             PROFILES_FILE="${2:-}"
             shift 2
             ;;
+        --print-effort)
+            PRINT_EFFORT=1
+            shift
+            ;;
         --print-model)
             PRINT_MODEL=1
             shift
             ;;
         --help|-h)
-            printf 'Usage: select-model-profile.sh --labels <labels> [--profiles-file <path>] [--print-model]\n'
+            printf 'Usage: select-model-profile.sh --labels <labels> [--profiles-file <path>] [--print-model] [--print-effort]\n'
             exit 0
             ;;
         *)
@@ -81,8 +87,11 @@ _haiku_available() {
 # output). Scoped to the matched profile's own block so a `model:` belonging to
 # an adjacent profile is never harvested. Prints nothing when unresolvable and
 # always exits 0 — the caller decides what an empty result means.
-_profile_model() {
-    awk -v want="$2" '
+# Generalised over the key ($3) rather than duplicated per key: two awk programs
+# in one file that both define indent_of() trip the duplicate-function gate, and
+# the block-scoping logic is the part worth having exactly once.
+_profile_field() {
+    awk -v want="$2" -v field="$3" '
         function indent_of(s) { match(s, /^ */); return RLENGTH }
         {
             line = $0
@@ -101,9 +110,9 @@ _profile_model() {
                 next
             }
 
-            if (in_block && key ~ /^model:[[:space:]]*[^[:space:]]/) {
+            if (in_block && key ~ "^" field ":[[:space:]]*[^[:space:]]") {
                 val = key
-                sub(/^model:[[:space:]]*/, "", val)
+                sub("^" field ":[[:space:]]*", "", val)
                 sub(/[[:space:]]+$/, "", val)
                 gsub(/[\"\047]/, "", val)
                 if (val != "") { print val; exit }
@@ -147,6 +156,25 @@ esac
 # Default: the profile name. With --print-model: the profile's `model:` id, or
 # exit 3 so the caller keeps its harness-detected TIER_B (fail closed — never
 # guess a model id).
+# --print-effort resolves the profile's `effort:` tier. Effort is a routable
+# dimension in its own right, and often a BETTER dial than swapping models:
+# switching model invalidates the entire prompt cache across all three tiers,
+# while raising effort on the same model keeps the cached prefix intact. It is
+# reported, never modelled as a cost multiplier — two profiles that differ only in
+# effort are separate catalog rows, so the ledger MEASURES the difference instead
+# of the scorer guessing a factor.
+if [ "$PRINT_EFFORT" -eq 1 ]; then
+    resolved_effort=""
+    if [ -f "$PROFILES_FILE" ]; then
+        resolved_effort="$(_profile_field "$PROFILES_FILE" "$RESOLVED_PROFILE" effort)"
+    fi
+    if [ -z "$resolved_effort" ]; then
+        exit 3
+    fi
+    printf '%s\n' "$resolved_effort"
+    exit 0
+fi
+
 if [ "$PRINT_MODEL" -eq 0 ]; then
     printf '%s\n' "$RESOLVED_PROFILE"
     exit 0
@@ -154,7 +182,7 @@ fi
 
 resolved_model=""
 if [ -f "$PROFILES_FILE" ]; then
-    resolved_model="$(_profile_model "$PROFILES_FILE" "$RESOLVED_PROFILE")"
+    resolved_model="$(_profile_field "$PROFILES_FILE" "$RESOLVED_PROFILE" model)"
 fi
 
 if [ -z "$resolved_model" ]; then
