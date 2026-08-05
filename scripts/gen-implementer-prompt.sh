@@ -170,13 +170,18 @@ fi
 # primitives is told to adopt them rather than write its own. Silent when the
 # profile is absent, the repo is not a web UI, or there are no gaps.
 if [ -f "$STACK_PROFILE" ]; then
+  # Only the three known capability names are echoed. The profile is a repo-local
+  # file, so an arbitrary string from it would be injected into the implementer
+  # prompt; allow-listing keeps a crafted stack-profile.json from writing prompt text.
   UI_GAPS="$(python3 -c '
 import json, sys
+KNOWN = ("accessible_primitives", "motion_library", "reduced_motion_reset")
 try:
     caps = json.load(open(sys.argv[1])).get("ui_capabilities") or {}
 except Exception:
     caps = {}
-print(" ".join(caps.get("gaps") or []))
+gaps = caps.get("gaps") or []
+print(" ".join(g for g in KNOWN if g in gaps))
 ' "$STACK_PROFILE" 2>/dev/null || true)"
   if [ -n "$UI_GAPS" ]; then
     cat <<UIGAPS
