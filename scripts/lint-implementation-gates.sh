@@ -101,6 +101,60 @@ for f in $CHANGED; do
   fi
 done
 
+# ── per-function cyclomatic complexity ────────────────────────────────────────
+# The delegate's fallback counts decision keywords across a whole file and compares
+# the total to a per-function threshold — its own comment says "per function". That
+# punishes decomposition, which is the remedy the size rule prescribes: a module of
+# eleven single-branch functions fails while one function with ten nested branches
+# passes. Measure per function instead, and suppress the delegate's file-level
+# finding only when no function actually exceeds the limit. Suppression stays with
+# the delegate whenever a real violation exists, so its opt-outs keep working.
+MAX_CC="${AUTOSPEC_MAX_CYCLOMATIC:-10}"
+CC_CLEAN=""
+CC_DETAIL=""
+for f in $CHANGED; do
+  case "$f" in *.py) ;; *) continue ;; esac
+  [ -f "$f" ] || continue
+  offenders="$(python3 - "$f" "$MAX_CC" <<'PY' 2>/dev/null || true
+import ast, sys
+DECISION = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.ExceptHandler, ast.IfExp,
+            ast.Assert, ast.With)
+def cc(fn):
+    n = 1
+    for node in ast.walk(fn):
+        if isinstance(node, DECISION):
+            n += 1
+        elif isinstance(node, ast.BoolOp):
+            n += len(node.values) - 1
+        elif isinstance(node, ast.comprehension):
+            n += len(node.ifs)
+    return n
+try:
+    tree = ast.parse(open(sys.argv[1], encoding="utf-8", errors="ignore").read())
+except SyntaxError:
+    sys.exit(0)
+limit = int(sys.argv[2])
+for node in ast.walk(tree):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        score = cc(node)
+        if score > limit:
+            print(f"{node.lineno}:{node.name}:{score}")
+PY
+)"
+  if [ -z "$offenders" ]; then
+    CC_CLEAN="${CC_CLEAN}${f}
+"
+  else
+    while IFS=: read -r ln name score; do
+      [ -n "$name" ] || continue
+      CC_DETAIL="${CC_DETAIL}INFO:COMPLEXITY:$f:$ln: function '${name}' has cyclomatic complexity ${score} (limit ${MAX_CC})
+"
+    done <<EOF
+$offenders
+EOF
+  fi
+done
+
 # ── delegate, then drop the findings this wrapper supersedes ───────────────────
 set +e
 DELEGATE_OUT="$(bash "$DELEGATE" "$@" 2>&1)"
@@ -112,8 +166,16 @@ if [ "$GREW" -eq 0 ] && [ "$SHRANK" -eq 1 ]; then
   IS_SHRINK=1
 fi
 
-FILTERED="$(printf '%s\n' "$DELEGATE_OUT" | awk -v shrink="$IS_SHRINK" -v safe="$NOT_GROWN" '
-  BEGIN { n = split(safe, rows, "\n"); for (i = 1; i <= n; i++) if (rows[i] != "") ok[rows[i]] = 1 }
+FILTERED="$(printf '%s\n' "$DELEGATE_OUT" | awk -v shrink="$IS_SHRINK" -v safe="$NOT_GROWN" -v ccok="$CC_CLEAN" '
+  BEGIN {
+    n = split(safe, rows, "\n"); for (i = 1; i <= n; i++) if (rows[i] != "") ok[rows[i]] = 1
+    m = split(ccok, crows, "\n"); for (i = 1; i <= m; i++) if (crows[i] != "") ccclean[crows[i]] = 1
+  }
+  # File-wide keyword proxy dropped when no function actually exceeds the limit.
+  /^COMPLEXITY:.*keyword-proxy cyclomatic/ {
+    path = $0; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
+    if (path in ccclean) next
+  }
   # Absolute file-LOC finding is dropped only for a file that did not get longer.
   /^COMPLEXITY:.*: file is [0-9]+ LOC/ {
     path = $0; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
@@ -125,6 +187,10 @@ FILTERED="$(printf '%s\n' "$DELEGATE_OUT" | awk -v shrink="$IS_SHRINK" -v safe="
 ')"
 
 OUT="$(printf '%s' "$FILTERED" | sed '/^$/d')"
+if [ -n "$CC_DETAIL" ]; then
+  OUT="${OUT:+$OUT
+}$(printf '%s' "$CC_DETAIL" | sed '/^$/d')"
+fi
 
 [ -n "$OUT" ] && printf '%s\n' "$OUT"
 
