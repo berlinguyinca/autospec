@@ -483,6 +483,72 @@ fn issue_lint_keeps_the_400_word_body_limit_inclusive() {
     assert!(lint_issue_body(&body).is_empty());
 }
 
+/// Spec §L1a (docs/superpowers/specs/2026-08-04-autospec-web-ui-design.md):
+/// the five `ui-feature` sections are excluded from the ≤400-word body count.
+/// A ~400-word non-UI body plus all five sections' own content — which alone
+/// would push the raw word count past 400 — must still pass.
+#[test]
+fn issue_lint_excludes_ui_sections_from_the_400_word_body_count() {
+    let mut body = valid_issue_body(
+        "Add `lint_issue_body` parity fixtures.",
+        "- [ ] `cargo test issue_lint` passes.",
+        "cargo test issue_lint",
+    );
+    let extra_words = 400 - body.split_whitespace().count();
+    body.push(' ');
+    body.push_str(&"word ".repeat(extra_words));
+    assert_eq!(body.split_whitespace().count(), 400);
+
+    body.push_str(&format!(
+        "\n## Design reference\n\n{a}\n\n## Interaction states\n\n{b}\n\n## UX flows\n\n{c}\n\n## Motion & feedback\n\n{d}\n\n## Device & viewport\n\n{e}\n",
+        a = "uiword ".repeat(10),
+        b = "uiword ".repeat(10),
+        c = "uiword ".repeat(10),
+        d = "uiword ".repeat(10),
+        e = "uiword ".repeat(10),
+    ));
+
+    // Sanity: without the §L1a exclusion the raw word count would exceed 400.
+    assert!(body.split_whitespace().count() > 400);
+
+    assert!(lint_issue_body(&body).is_empty());
+}
+
+/// Negative pair for the exclusion above: non-UI prose that itself exceeds 400
+/// words must still trip BODY_TOO_LONG even with all five UI sections present —
+/// the exclusion narrows the count, it does not disable the cap.
+#[test]
+fn issue_lint_still_reports_body_too_long_when_non_ui_prose_exceeds_400_words() {
+    let mut body = valid_issue_body(
+        "Add `lint_issue_body` parity fixtures.",
+        "- [ ] `cargo test issue_lint` passes.",
+        "cargo test issue_lint",
+    );
+    let extra_words = 401 - body.split_whitespace().count();
+    body.push(' ');
+    body.push_str(&"word ".repeat(extra_words));
+    let non_ui_word_count = body.split_whitespace().count();
+    assert_eq!(non_ui_word_count, 401);
+
+    body.push_str(
+        "\n## Design reference\n\nDESIGN.md#buttons\n\n## Interaction states\n\ndefault/hover/focus\n\n## UX flows\n\nhappy: click -> submit\n\n## Motion & feedback\n\nMotion: fade-in; reduced: opacity-only\n\n## Device & viewport\n\nDevices: iPhone SE; reflow-320: no h-scroll\n",
+    );
+
+    let rows = findings(&body);
+    assert!(
+        rows.iter().any(|(rule, message)| rule == "BODY_TOO_LONG"
+            && *message
+                == format!(
+                    "Body is {non_ui_word_count} words (max 400); a small-LLM implementer cannot hold an over-long issue"
+                )),
+        "expected BODY_TOO_LONG at {non_ui_word_count} words, got {rows:?}"
+    );
+    assert!(
+        !rows.iter().any(|(rule, _)| rule == "UI_SECTIONS_INCOMPLETE"),
+        "all five UI sections are present; UI_SECTIONS_INCOMPLETE should not fire: {rows:?}"
+    );
+}
+
 #[test]
 fn issue_lint_reports_outline_too_long_with_the_shell_message() {
     let outline = (1..=31)
@@ -542,7 +608,7 @@ fn issue_lint_reports_incomplete_ui_sections_with_the_shell_message() {
         &body,
         &[(
             "UI_SECTIONS_INCOMPLETE",
-            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' (UI issues need Design reference + Interaction states + UX flows)",
+            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' '## Motion & feedback' '## Device & viewport' (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)",
         )],
     );
 }
@@ -562,7 +628,7 @@ fn issue_lint_detects_a_ui_marker_after_an_earlier_html_comment() {
         &body,
         &[ (
             "UI_SECTIONS_INCOMPLETE",
-            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' (UI issues need Design reference + Interaction states + UX flows)",
+            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' '## Motion & feedback' '## Device & viewport' (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)",
         )],
     );
 }
@@ -582,7 +648,7 @@ fn issue_lint_detects_a_ui_marker_nested_in_a_malformed_comment() {
         &body,
         &[ (
             "UI_SECTIONS_INCOMPLETE",
-            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' (UI issues need Design reference + Interaction states + UX flows)",
+            "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' '## Motion & feedback' '## Device & viewport' (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)",
         )],
     );
 }
@@ -602,7 +668,7 @@ fn issue_lint_preserves_ui_missing_section_order() {
         &body,
         &[ (
             "UI_SECTIONS_INCOMPLETE",
-            "UI feature detected; missing required section(s): '## Design reference' '## UX flows' (UI issues need Design reference + Interaction states + UX flows)",
+            "UI feature detected; missing required section(s): '## Design reference' '## UX flows' '## Motion & feedback' '## Device & viewport' (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)",
         )],
     );
 }
@@ -701,7 +767,7 @@ fn issue_lint_preserves_the_shell_rule_order_for_multiple_findings() {
             ),
             (
                 "UI_SECTIONS_INCOMPLETE".to_string(),
-                "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' (UI issues need Design reference + Interaction states + UX flows)".to_string(),
+                "UI feature detected; missing required section(s): '## Design reference' '## Interaction states' '## UX flows' '## Motion & feedback' '## Device & viewport' (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)".to_string(),
             ),
         ]
     );

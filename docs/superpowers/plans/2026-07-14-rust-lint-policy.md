@@ -9,7 +9,12 @@
 > `crates/autospec-core/src/lint/mod.rs`. The `BODY_TOO_LONG` word count
 > excludes all five sections (§L1a) so classified UI children do not
 > systematically trip `needs-quality-bar` once the two new sections became
-> mandatory.
+> mandatory. `tests/lint/test_lint_issue_sections.bats` and
+> `crates/autospec-core/tests/issue_lint.rs` gained coverage for the two new
+> sections' presence/absence detection and a positive/negative word-cap
+> exclusion pair (a ~400-word non-UI body with all five sections present
+> passes; the same non-UI prose alone over 400 words still trips
+> `BODY_TOO_LONG`).
 
 **Goal:** Replace `scripts/lint-issue.sh` and `scripts/lint-implementation.sh` with Rust-owned `autospec lint issue` and `autospec lint implementation` commands, then remove every live dependency on the shell linters.
 

@@ -435,24 +435,56 @@ MD
     printf '%s\n' "$output" | grep -E 'UI_SECTIONS_INCOMPLETE' | grep -q 'Design reference'
 }
 
-@test "UI_SECTIONS_INCOMPLETE: one UI section present requires the other two" {
+@test "UI_SECTIONS_INCOMPLETE: one UI section present requires the other four" {
     write_good_body "$TMP/b.md"
     printf '\n## Interaction states\n\ndefault/hover/focus/loading/empty/error\n' >> "$TMP/b.md"
     run bash "$LINT" "$TMP/b.md"
     [ "$status" -ne 0 ]
     out="$(printf '%s\n' "$output" | grep 'UI_SECTIONS_INCOMPLETE')"
     # Inspect only the missing-list portion (before the explanatory parenthetical,
-    # which always names all three sections).
+    # which always names all five sections).
     missing="$(printf '%s' "$out" | sed 's/ (UI issues.*//')"
     printf '%s' "$missing" | grep -q 'Design reference'
     printf '%s' "$missing" | grep -q 'UX flows'
+    printf '%s' "$missing" | grep -q 'Motion & feedback'
+    printf '%s' "$missing" | grep -q 'Device & viewport'
     ! printf '%s' "$missing" | grep -q 'Interaction states'
 }
 
-@test "UI_SECTIONS_INCOMPLETE: complete UI section set passes" {
+@test "UI_SECTIONS_INCOMPLETE: missing only Motion & feedback is flagged" {
     write_good_body "$TMP/b.md"
-    printf '\n<!-- ui-feature -->\n\n## Design reference\n\nDESIGN.md#buttons\n\n## Interaction states\n\ndefault/hover/focus/loading/empty/error/disabled\n\n## UX flows\n\nhappy: click -> submit; failure: 500 -> toast; edge: empty list\n' >> "$TMP/b.md"
+    printf '\n<!-- ui-feature -->\n\n## Design reference\n\nDESIGN.md#buttons\n\n## Interaction states\n\ndefault/hover/focus\n\n## UX flows\n\nhappy: click -> submit\n\n## Device & viewport\n\nDevices: iPhone SE; reflow-320: no h-scroll\n' >> "$TMP/b.md"
     run bash "$LINT" "$TMP/b.md"
+    [ "$status" -ne 0 ]
+    out="$(printf '%s\n' "$output" | grep 'UI_SECTIONS_INCOMPLETE')"
+    missing="$(printf '%s' "$out" | sed 's/ (UI issues.*//')"
+    printf '%s' "$missing" | grep -q 'Motion & feedback'
+    ! printf '%s' "$missing" | grep -q 'Design reference'
+    ! printf '%s' "$missing" | grep -q 'Interaction states'
+    ! printf '%s' "$missing" | grep -q 'UX flows'
+    ! printf '%s' "$missing" | grep -q 'Device & viewport'
+}
+
+@test "UI_SECTIONS_INCOMPLETE: missing only Device & viewport is flagged" {
+    write_good_body "$TMP/b.md"
+    printf '\n<!-- ui-feature -->\n\n## Design reference\n\nDESIGN.md#buttons\n\n## Interaction states\n\ndefault/hover/focus\n\n## UX flows\n\nhappy: click -> submit\n\n## Motion & feedback\n\nMotion: fade-in; reduced: opacity-only\n' >> "$TMP/b.md"
+    run bash "$LINT" "$TMP/b.md"
+    [ "$status" -ne 0 ]
+    out="$(printf '%s\n' "$output" | grep 'UI_SECTIONS_INCOMPLETE')"
+    missing="$(printf '%s' "$out" | sed 's/ (UI issues.*//')"
+    printf '%s' "$missing" | grep -q 'Device & viewport'
+    ! printf '%s' "$missing" | grep -q 'Design reference'
+    ! printf '%s' "$missing" | grep -q 'Interaction states'
+    ! printf '%s' "$missing" | grep -q 'UX flows'
+    ! printf '%s' "$missing" | grep -q 'Motion & feedback'
+}
+
+@test "UI_SECTIONS_INCOMPLETE: complete UI section set (all five) passes" {
+    write_good_body "$TMP/b.md"
+    printf '\n<!-- ui-feature -->\n\n## Design reference\n\nDESIGN.md#buttons\n\n## Interaction states\n\ndefault/hover/focus/loading/empty/error/disabled\n\n## UX flows\n\nhappy: click -> submit; failure: 500 -> toast; edge: empty list\n\n## Motion & feedback\n\nMotion: fade-in + 40ms stagger; reduced: opacity-only\n\n## Device & viewport\n\nDevices: iPhone SE, Pixel 7, 1280x800 laptop; reflow-320: no h-scroll; zoom-200%%: no clipped text\n' >> "$TMP/b.md"
+    # 2>&1 (distinct from the neighboring test) so this assertion line is its
+    # own diff hunk rather than reusing unmodified context.
+    run bash "$LINT" "$TMP/b.md" 2>&1
     [ "$status" -eq 0 ]
     ! printf '%s\n' "$output" | grep -q 'UI_SECTIONS_INCOMPLETE'
 }
@@ -461,5 +493,152 @@ MD
     write_good_body "$TMP/b.md"
     run bash "$LINT" "$TMP/b.md"
     [ "$status" -eq 0 ]
+    ! printf '%s\n' "$output" | grep -q 'UI_SECTIONS_INCOMPLETE'
+}
+
+# ── word-cap exclusion for ui-feature sections (spec §L1a) ───────────────────
+
+@test "BODY_TOO_LONG: ui-feature body with ~400-word prose plus all five sections passes" {
+    {
+        echo "## Goal"
+        echo ""
+        echo "Add a deterministic gate to \`scripts/lint-issue.sh\` for required sections."
+        echo ""
+        echo "## Files to read first"
+        echo ""
+        echo "- scripts/lint-issue.sh"
+        echo ""
+        echo "## Implementation outline"
+        echo ""
+        echo "1. Add the section-presence checks."
+        echo ""
+        echo "## Tests required"
+        echo ""
+        echo "- bats tests/lint/test_lint_issue_sections.bats"
+        echo ""
+        echo "## Dependencies"
+        echo ""
+        echo "none"
+        echo ""
+        echo "## Files touched"
+        echo ""
+        echo "- scripts/lint-issue.sh"
+        echo ""
+        echo "## Acceptance criteria"
+        echo ""
+        echo "- [ ] \`bash scripts/lint-issue.sh body.md\` exits 0."
+        echo ""
+        echo "## Notes"
+        echo ""
+        # 320 filler words + this body's own ~72 structural words puts the
+        # non-UI prose just under the ≤400-word cap (~392); the five UI
+        # sections below add ~64 more words that must NOT count toward it.
+        for i in $(seq 1 320); do printf 'word '; done
+        echo ""
+        echo ""
+        echo "## Verification"
+        echo ""
+        echo "### Primary smoke test (inner loop)"
+        echo ""
+        echo '```bash'
+        echo "bash scripts/lint-issue.sh body.md && echo OK"
+        echo '```'
+        echo ""
+        echo "<!-- ui-feature -->"
+        echo ""
+        echo "## Design reference"
+        echo ""
+        echo "DESIGN.md#buttons tokens spacing color type scale variant state"
+        echo ""
+        echo "## Interaction states"
+        echo ""
+        echo "default hover focus loading empty error disabled breakpoints changed"
+        echo ""
+        echo "## UX flows"
+        echo ""
+        echo "happy click submit failure toast edge empty list retry cancel"
+        echo ""
+        echo "## Motion & feedback"
+        echo ""
+        echo "Motion: fade-in plus stagger timing curve; reduced: opacity-only fallback"
+        echo ""
+        echo "## Device & viewport"
+        echo ""
+        echo "Devices: iPhone SE Pixel 7 laptop desktop; reflow-320 zoom-200 no clip"
+    } > "$TMP/b.md"
+    run bash -c "bash '$LINT' '$TMP/b.md' 2>&1"
+    [ "$status" -eq 0 ]
+    ! printf '%s\n' "$output" | grep -q 'BODY_TOO_LONG'
+}
+
+@test "BODY_TOO_LONG: non-UI prose over 400 words still trips the cap despite all five sections" {
+    {
+        echo "## Goal"
+        echo ""
+        echo "Add a deterministic gate to \`scripts/lint-issue.sh\` for required sections."
+        echo ""
+        echo "## Files to read first"
+        echo ""
+        echo "- scripts/lint-issue.sh"
+        echo ""
+        echo "## Implementation outline"
+        echo ""
+        echo "1. Add the section-presence checks."
+        echo ""
+        echo "## Tests required"
+        echo ""
+        echo "- bats tests/lint/test_lint_issue_sections.bats"
+        echo ""
+        echo "## Dependencies"
+        echo ""
+        echo "none"
+        echo ""
+        echo "## Files touched"
+        echo ""
+        echo "- scripts/lint-issue.sh"
+        echo ""
+        echo "## Acceptance criteria"
+        echo ""
+        echo "- [ ] \`bash scripts/lint-issue.sh body.md\` exits 0."
+        echo ""
+        echo "## Notes"
+        echo ""
+        # 450 words of non-UI filler — over cap on its own.
+        for i in $(seq 1 450); do printf 'word '; done
+        echo ""
+        echo ""
+        echo "## Verification"
+        echo ""
+        echo "### Primary smoke test (inner loop)"
+        echo ""
+        echo '```bash'
+        echo "bash scripts/lint-issue.sh body.md && echo OK"
+        echo '```'
+        echo ""
+        echo "<!-- ui-feature -->"
+        echo ""
+        echo "## Design reference"
+        echo ""
+        echo "DESIGN.md#buttons"
+        echo ""
+        echo "## Interaction states"
+        echo ""
+        echo "default/hover/focus"
+        echo ""
+        echo "## UX flows"
+        echo ""
+        echo "happy: click -> submit"
+        echo ""
+        echo "## Motion & feedback"
+        echo ""
+        echo "Motion: fade-in; reduced: opacity-only"
+        echo ""
+        echo "## Device & viewport"
+        echo ""
+        echo "Devices: iPhone SE; reflow-320: no h-scroll"
+    } > "$TMP/b.md"
+    run bash -c "bash '$LINT' '$TMP/b.md' 2>&1"
+    [ "$status" -ge 1 ]
+    printf '%s\n' "$output" | grep -q 'BODY_TOO_LONG'
     ! printf '%s\n' "$output" | grep -q 'UI_SECTIONS_INCOMPLETE'
 }
