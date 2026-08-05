@@ -9,7 +9,8 @@
 > `crates/autospec-core/src/lint/mod.rs`. The `BODY_TOO_LONG` word count
 > excludes all five sections (§L1a) so classified UI children do not
 > systematically trip `needs-quality-bar` once the two new sections became
-> mandatory. `tests/lint/test_lint_issue_sections.bats` and
+> mandatory. `tests/lint/test_lint_issue_ui_sections.bats` (split out of
+> `test_lint_issue_sections.bats`, which had grown past the file-size limit) and
 > `crates/autospec-core/tests/issue_lint.rs` gained coverage for the two new
 > sections' presence/absence detection and a positive/negative word-cap
 > exclusion pair (a ~400-word non-UI body with all five sections present
@@ -50,7 +51,8 @@
 **Files:**
 - Modify: `crates/autospec-core/src/lint/mod.rs`
 - Modify: `crates/autospec-core/tests/issue_lint.rs`
-- Test: `tests/unit/test_lint_issue.bats`, `tests/lint/test_lint_issue_sections.bats`
+- Test: `tests/unit/test_lint_issue.bats`, `tests/lint/test_lint_issue_sections.bats`,
+  `tests/lint/test_lint_issue_ui_sections.bats`
 
 - [ ] **Step 1: Add failing Rust cases for the shell-only rules.**
 
@@ -68,7 +70,7 @@ Use line-oriented heading/fence parsing shared by all issue rules. Represent fin
 
 - [ ] **Step 4: Verify core parity.**
 
-Run: `cargo test -p autospec-core --test issue_lint && bats tests/unit/test_lint_issue.bats tests/lint/test_lint_issue_sections.bats`
+Run: `cargo test -p autospec-core --test issue_lint && bats tests/unit/test_lint_issue.bats tests/lint/test_lint_issue_sections.bats tests/lint/test_lint_issue_ui_sections.bats`
 
 - [ ] **Step 5: Commit the pure issue policy.**
 

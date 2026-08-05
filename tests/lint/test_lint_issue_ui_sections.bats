@@ -205,6 +205,62 @@ MD
     ! printf '%s\n' "$output" | grep -q 'BODY_TOO_LONG'
 }
 
+@test "BODY_TOO_LONG: UI headings with trailing whitespace are still excluded" {
+    # check_ui_sections accepts a heading with trailing whitespace when deciding the
+    # section is present, so strip_ui_sections has to accept it too. If the two
+    # disagree, the section counts against the very cap it is exempt from — and
+    # markdown's hard line break is two trailing spaces, so this really occurs.
+    # Sized far from the boundary on purpose: the UI bodies alone are ~500 words while
+    # the non-UI prose is ~30, so the outcome cannot hinge on counting arithmetic.
+    # Every required section is present so the linter runs to completion — an
+    # incomplete body makes this pass for the wrong reason, on empty output.
+    local filler
+    filler="$(for i in $(seq 1 100); do printf 'filler '; done)"
+    {
+        echo "## Goal"
+        echo ""
+        echo "Add a deterministic gate to \`scripts/lint-issue.sh\` for required sections."
+        echo ""
+        echo "## Files to read first"
+        echo ""
+        echo "- scripts/lint-issue.sh"
+        echo ""
+        echo "## Implementation outline"
+        echo ""
+        echo "1. Add the section-presence checks."
+        echo ""
+        echo "## Tests required"
+        echo ""
+        echo "- bats tests/lint/test_lint_issue_sections.bats"
+        echo ""
+        echo "## Verification"
+        echo ""
+        echo "### Primary smoke test (inner loop)"
+        echo ""
+        echo '```bash'
+        echo "bash scripts/lint-issue.sh body.md && echo OK"
+        echo '```'
+        echo ""
+        echo "## Acceptance criteria"
+        echo ""
+        echo "- [ ] \`bash scripts/lint-issue.sh body.md\` exits 0."
+        echo ""
+        # Each heading carries two trailing spaces: markdown's hard line break, and the
+        # case at issue. Written out rather than looped so the fixture stays flat.
+        printf '## Design reference  \n\n%s\n\n' "$filler"
+        printf '## Interaction states  \n\n%s\n\n' "$filler"
+        printf '## UX flows  \n\n%s\n\n' "$filler"
+        printf '## Motion & feedback  \n\n%s\n\n' "$filler"
+        printf '## Device & viewport  \n\n%s\n\n' "$filler"
+    } > "$TMP/b.md"
+    run bash -c "bash '$LINT' '$TMP/b.md' 2>&1"
+    [ "$status" -eq 0 ]
+    ! printf '%s\n' "$output" | grep -q 'BODY_TOO_LONG'
+    # The same headings must still register as present, or this would pass because the
+    # sections went invisible to both checks rather than because they are exempt.
+    ! printf '%s\n' "$output" | grep -q 'UI_SECTIONS_INCOMPLETE'
+}
+
 @test "BODY_TOO_LONG: non-UI prose over 400 words still trips the cap despite all five sections" {
     {
         echo "## Goal"

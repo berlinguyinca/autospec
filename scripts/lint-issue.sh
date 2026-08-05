@@ -142,7 +142,13 @@ strip_ui_sections() {
             headings["## Device & viewport"] = 1
         }
         {
-            if ($0 in headings) { skip = 1; next }
+            # Trailing whitespace is trimmed before the lookup, because the
+            # check_ui_sections greps accept it when deciding the section is
+            # present. The two must agree, or a heading written with markdown’s
+            # two-space hard line break counts against the cap it is exempt from.
+            line = $0
+            sub(/[[:space:]]+$/, "", line)
+            if (line in headings) { skip = 1; next }
             if (skip && substr($0, 1, 3) == "## ") { skip = 0 }
             if (skip) { next }
             print
