@@ -121,9 +121,9 @@ def approved_unsafe_boundary(relative_path, source, match):
                 break
     body = " ".join(code[match.start():end].split()) if end else ""
     reviewed = {
-        ("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs", "autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(subreaper), 0, 0, 0, ) }",
-        ("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs", "autonomous_executor_bridge_clean_supervision_restores_prior_subreaper_state"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(observed), 0, 0, 0, ) }",
-        ("crates/autospec-cli/src/commands/autonomous/executor_bridge.rs", "autonomous_executor_bridge_clean_supervision_preserves_enabled_subreaper_state"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(observed), 0, 0, 0, ) }",
+        ("crates/autospec-cli/src/commands/autonomous/executor_bridge/tests.rs", "autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(subreaper), 0, 0, 0, ) }",
+        ("crates/autospec-cli/src/commands/autonomous/executor_bridge/tests.rs", "autonomous_executor_bridge_clean_supervision_restores_prior_subreaper_state"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(observed), 0, 0, 0, ) }",
+        ("crates/autospec-cli/src/commands/autonomous/executor_bridge/tests.rs", "autonomous_executor_bridge_clean_supervision_preserves_enabled_subreaper_state"): "unsafe { nix::libc::prctl( nix::libc::PR_GET_CHILD_SUBREAPER, std::ptr::addr_of_mut!(observed), 0, 0, 0, ) }",
         ("crates/autospec-cli/src/commands/runtime/env/session.rs", "verify_active"): "unsafe { nix::libc::geteuid() }",
         ("crates/autospec-cli/src/commands/runtime/env/worker.rs", "capture"): "unsafe { nix::libc::tcgetpgrp(nix::libc::STDIN_FILENO) }",
         ("crates/autospec-cli/src/commands/runtime/env/worker.rs", "configure_process_group"): "unsafe { command.pre_exec(setup_foreground_child); }",
