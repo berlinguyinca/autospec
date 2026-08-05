@@ -8,6 +8,14 @@
 #     model:      Model identifier the harness should resolve at dispatch time.
 #     ctx:        Context-window budget (tokens) the profile is rated for.
 #     reasoning:  Reasoning tier hint — one of `low`, `medium`, `high`.
+#     effort:     Optional reasoning-effort tier for the dispatch. Often a better
+#                 dial than swapping models: a model switch invalidates the whole
+#                 prompt cache, while raising effort on the same model does not.
+#     cache_min_tokens:
+#                 The model's prompt-cache minimum. These differ sharply — Haiku
+#                 4.5 needs 4096 tokens where Opus 5 needs 512 — so the cheapest
+#                 per-token profile is the easiest one to fall under. Declare it
+#                 and routing-cost.sh stops crediting a cache that cannot engage.
 #     allowed:    Comma-separated list of issue labels this profile may pick up.
 #                 The Phase 4 dispatcher filters auto-implement issues by these
 #                 labels before scheduling work onto the profile.
@@ -29,6 +37,8 @@ claude-sonnet-cloud:
   model: claude-sonnet-5
   ctx: 200000
   reasoning: medium
+  effort: medium
+  cache_min_tokens: 1024
   allowed: ctx:small,ctx:medium,reasoning:low,reasoning:medium
 
 # ctx is the USABLE window, not the advertised one. qwen3.6:35b-a3b advertises
@@ -39,6 +49,9 @@ qwen3-6-35b-a3b-laptop:
   model: qwen3.6:35b-a3b
   ctx: 32000
   reasoning: low
+  # No cache_min_tokens: most local runtimes have no cross-request prompt cache at
+  # all, so there is no floor to clear — the cache_hit_ratio term already carries
+  # that, and declaring a floor would imply a cache that does not exist.
   allowed: ctx:small,reasoning:low
 
 # Phase 2 Haiku trial — cost-optimised tier for shallow/medium-reasoning implementer dispatches.
@@ -48,6 +61,11 @@ claude-haiku-cloud:
   model: claude-haiku-4-5
   ctx: 64000
   reasoning: medium
+  effort: low
+  # 4096 is the highest floor of any current model. On a short prefix Haiku cannot
+  # cache at all, which makes it dearer than $1/$5 implies — declare it so the
+  # scorer sees that rather than crediting a hit ratio measured on a long prefix.
+  cache_min_tokens: 4096
   allowed: ctx:small,ctx:medium,reasoning:shallow,reasoning:medium
 
 # ── Advisor pattern (docs/specs/2026-07-08-autospec-advisor-pattern-design.md) ──
