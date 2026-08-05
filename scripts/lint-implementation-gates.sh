@@ -13,22 +13,23 @@
 # freely through the merge path while local cleanup was rejected. It permitted the
 # one direction that made the problem worse.
 #
-# This wrapper replaces two rules and delegates everything else untouched:
+# This wrapper corrects two rules and delegates everything else untouched:
 #
-#   FILE_GROWTH   replaces the absolute file-LOC check. A file at or under the limit
-#                 passes. A new file over the limit fails. An existing oversized file
-#                 passes as long as it does not get longer.
+#   file LOC      becomes a ratchet. A file at or under the limit passes. An existing
+#                 oversized file passes as long as it does not get longer. A new file
+#                 over the limit fails, unless it holds relocated code — see the
+#                 relocation note below.
 #
-#   PR_SIZE       its changed-line cap is waived for a pure shrink: no changed file
-#                 gains lines and the net line count falls. A shrink cannot smuggle
-#                 in a feature, because features add lines. The file-count and
-#                 logical-unit caps still apply.
+#   PR_SIZE       its changed-line cap is waived for a pure shrink: no pre-existing
+#                 file gains lines and the change removes at least as many lines as it
+#                 adds. A shrink cannot smuggle in a feature, because features add
+#                 lines. The file-count and logical-unit caps still apply.
 #
 # Usage: lint-implementation-gates.sh [args...]     # args pass through unchanged
 #
 # Exit: 0 clean, 1 blocking findings remain, 2 invocation error.
 #
-# Env: AUTOSPEC_MAX_FILE_LOC (default 400)
+# Env: AUTOSPEC_MAX_FILE_LOC (default 600), AUTOSPEC_MAX_CYCLOMATIC (default 10)
 
 set -eu
 
@@ -75,12 +76,15 @@ CHANGED="$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null || true)
 
 # ── the ratchet, as a filter ──────────────────────────────────────────────────
 # Implemented by suppressing the delegate's absolute file-LOC finding for files that
-# did not get longer, rather than by emitting a replacement finding. That keeps every
-# existing suppression path — the per-issue `Guardian: skip-COMPLEXITY` opt-out and
-# the inline `linter:allow` hatch — owned by the delegate. A separate rule id here
-# would silently bypass those opt-outs.
+# did not get longer, rather than by emitting a replacement finding. That keeps the
+# per-issue `Guardian: skip-COMPLEXITY` opt-out — the only one that reaches this
+# finding, since it is emitted with no line number and so no inline `linter:allow`
+# comment can attach to it — owned by the delegate. A separate rule id here would
+# silently bypass it.
 NOT_GROWN=""
-GREW=0
+NEW_FILES=""
+NEW_OVERSIZED=""
+PREEXISTING_GREW=0
 SHRANK=0
 for f in $CHANGED; do
   [ -n "$f" ] || continue
@@ -90,19 +94,91 @@ for f in $CHANGED; do
   [ -n "$after" ] || continue
 
   if [ "$before" = "-" ]; then
-    # A new file has nothing to ratchet against; the delegate's limit stands.
-    GREW=1
+    # A new file has nothing to ratchet against. Judged below: against the limit
+    # outright, unless the change as a whole is a relocation.
+    NEW_FILES="${NEW_FILES}${f}
+"
+    if [ "$after" -gt "$MAX_LOC" ]; then
+      NEW_OVERSIZED="${NEW_OVERSIZED}${f}
+"
+    fi
     continue
   fi
 
   if [ "$after" -gt "$before" ]; then
-    GREW=1
+    PREEXISTING_GREW=1
   else
     NOT_GROWN="${NOT_GROWN}${f}
 "
     [ "$after" -lt "$before" ] && SHRANK=1
   fi
 done
+
+# ── relocation ────────────────────────────────────────────────────────────────
+# Extracting code out of a monolith into a sibling module is the remedy the size rule
+# prescribes, and a split necessarily creates a file. Counting any new file as growth
+# therefore rejects the prescribed remedy, which is the §1.1 defect again: the gate
+# permits the direction that makes things worse and blocks the one that helps.
+#
+# A change that removes at least as many lines as it adds is a relocation, not new
+# material — a feature cannot hide inside one, because features add lines. The delta
+# comes from --numstat rather than from differencing file lengths, because git reports
+# a move as a rename: the source path never appears on its own, so length differencing
+# counts the destination as wholly new and a pure move reads as pure addition.
+NET_DELTA="$(git diff --cached --numstat 2>/dev/null | awk '
+  {
+    path = $3
+    # Renames arrive as "old => new" or "dir/{old => new}"; judge the target.
+    if (index(path, "=>")) { sub(/^.*=> ?/, "", path); gsub(/[}]/, "", path) }
+    if (path ~ /\.(md|txt|json|ya?ml|diff|lock)$/) next
+    if ($1 == "-" || $2 == "-") next   # binary
+    net += $1 - $2
+  }
+  END { print net + 0 }
+')"
+IS_RELOCATION=0
+MOVED=""
+MOVED_ADDS=""
+if [ "$PREEXISTING_GREW" -eq 0 ] && [ "${NET_DELTA:-0}" -le 0 ]; then
+  IS_RELOCATION=1
+  MOVED="$NEW_OVERSIZED"
+  # Every new file in a net-removing change holds relocated content, whether or not
+  # it lands over the limit — so the delegate's separate "file adds N lines" rule
+  # needs the same treatment. That rule has its own hard-coded 500-line threshold, so
+  # a 590-line extraction trips it even when it is comfortably under MAX_LOC.
+  MOVED_ADDS="$NEW_FILES"
+fi
+
+# ── logical units, excluding docs ─────────────────────────────────────────────
+# DOC_OUT_OF_SYNC requires any public-surface change — a flag, an env var, an exported
+# function, a config key — to touch a doc file. PR_SIZE then charged its three-unit cap
+# for that same file, so a change sitting at the limit failed the moment it was
+# documented and the only way to satisfy both rules was to leave the change
+# undocumented. Recount without docs and drop the breach when the real count fits.
+#
+# Docs still count toward the changed-line and raw-file caps, so a large documentation
+# change is not free. 3 mirrors PR_SIZE_MAX_UNITS in the delegate.
+MAX_UNITS=3
+UNITS_NO_DOCS="$(
+  for f in $CHANGED; do
+    [ -n "$f" ] || continue
+    case "$f" in
+      tests/fixtures/skill-goldens/*.sha256) continue ;;
+      # Before the doc case: a skill's SKILL.md is also a doc file, and a trio must
+      # collapse to one unit rather than drop out of the count entirely.
+      skills/*/SKILL.md|skills/*/codex/prompt.md|skills/*/opencode/agent.md)
+        printf 'skills/%s/<trio>\n' "$(printf '%s' "$f" | cut -d/ -f2)" ;;
+      README*|AGENTS.md|docs/*|*/SKILL.md|SKILL.md) continue ;;
+      *) printf '%s\n' "$f" ;;
+    esac
+  done | sort -u | sed '/^$/d' | wc -l | tr -d ' '
+)"
+# Requires a non-empty staged file list: in --diff-file and PR modes this wrapper has no
+# staged paths to count, and an empty count must not read as "within cap".
+UNITS_OK=0
+if [ -n "$CHANGED" ] && [ "${UNITS_NO_DOCS:-0}" -le "$MAX_UNITS" ]; then
+  UNITS_OK=1
+fi
 
 # ── per-function cyclomatic complexity ────────────────────────────────────────
 # The delegate's fallback counts decision keywords across a whole file and compares
@@ -159,33 +235,57 @@ EOF
 done
 
 # ── delegate, then drop the findings this wrapper supersedes ───────────────────
+# MAX_LOC is exported rather than merely read: the delegate has its own default, so
+# without this the threshold documented here would have no effect and the local gate
+# would disagree with the CI ratchet in .github/workflows/file-size-ratchet.yml.
 set +e
-DELEGATE_OUT="$(bash "$DELEGATE" "$@" 2>&1)"
+DELEGATE_OUT="$(AUTOSPEC_MAX_FILE_LOC="$MAX_LOC" bash "$DELEGATE" "$@" 2>&1)"
 set -e
 
-# A pure shrink: nothing grew, something did, and no new content was introduced.
+# A pure shrink: no existing file grew, something did shrink, and the change as a
+# whole introduced no new material.
 IS_SHRINK=0
-if [ "$GREW" -eq 0 ] && [ "$SHRANK" -eq 1 ]; then
+if [ "$IS_RELOCATION" -eq 1 ] && [ "$SHRANK" -eq 1 ]; then
   IS_SHRINK=1
 fi
 
-FILTERED="$(printf '%s\n' "$DELEGATE_OUT" | awk -v shrink="$IS_SHRINK" -v safe="$NOT_GROWN" -v ccok="$CC_CLEAN" '
+FILTERED="$(printf '%s\n' "$DELEGATE_OUT" | awk -v shrink="$IS_SHRINK" -v safe="$NOT_GROWN" \
+    -v ccok="$CC_CLEAN" -v moved="$MOVED" -v movedadds="$MOVED_ADDS" -v unitsok="$UNITS_OK" '
   BEGIN {
     n = split(safe, rows, "\n"); for (i = 1; i <= n; i++) if (rows[i] != "") ok[rows[i]] = 1
     m = split(ccok, crows, "\n"); for (i = 1; i <= m; i++) if (crows[i] != "") ccclean[crows[i]] = 1
+    r = split(moved, mrows, "\n"); for (i = 1; i <= r; i++) if (mrows[i] != "") reloc[mrows[i]] = 1
+    a = split(movedadds, arows, "\n"); for (i = 1; i <= a; i++) if (arows[i] != "") radd[arows[i]] = 1
   }
   # File-wide keyword proxy dropped when no function actually exceeds the limit.
   /^COMPLEXITY:.*keyword-proxy cyclomatic/ {
     path = $0; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
     if (path in ccclean) next
   }
-  # Absolute file-LOC finding is dropped only for a file that did not get longer.
+  # Absolute file-LOC finding is dropped only for a file that did not get longer, and
+  # downgraded to an audit-trail entry for a file created by relocating existing code.
   /^COMPLEXITY:.*: file is [0-9]+ LOC/ {
     path = $0; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
     if (path in ok) next
+    if (path in reloc) {
+      print "INFO:" $0 " — holds relocated code, so it does not block; split it further"
+      next
+    }
+  }
+  # "file adds N lines" is a second absolute size rule, with its own hard-coded
+  # threshold. A file holding relocated content adds lines by definition.
+  /^COMPLEXITY:.*: file adds [0-9]+ lines/ {
+    path = $0; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
+    if (path in radd) {
+      print "INFO:" $0 " — relocated content, not new material"
+      next
+    }
   }
   # Changed-line cap waived for a pure shrink; other PR_SIZE breaches still print.
   shrink == 1 && /PR_SIZE/ && /exceeded=changed_lines$/ { next }
+  # Unit cap waived when the count without doc files fits. Anchored, so a combined
+  # breach such as exceeded=changed_lines,logical_units still prints.
+  unitsok == 1 && /PR_SIZE/ && /exceeded=logical_units$/ { next }
   { print }
 ')"
 

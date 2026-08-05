@@ -14,9 +14,14 @@ setup() {
     git -C "$SOURCE_REPO" remote add origin https://github.com/berlinguyinca/autospec.git
     touch "$SOURCE_REPO/README.md"
     mkdir -p "$SOURCE_REPO/scripts"
+    # Sized to sit over AUTOSPEC_MAX_FILE_LOC so that appending one line produces a
+    # COMPLEXITY finding — these tests are about whether the issue argument reaches the
+    # linter and suppresses that finding, not about the threshold itself. The count
+    # tracks the limit: at 401 lines the fixture stopped tripping the rule when the
+    # default moved from 400 to 600, and the tests silently passed on an empty result.
     printf '%s\n' '#!/usr/bin/env bash' > "$SOURCE_REPO/scripts/lint-implementation.sh"
     local line=1
-    while [ "$line" -le 400 ]; do
+    while [ "$line" -le 700 ]; do
         printf '# baseline fixture line %s\n' "$line" >> "$SOURCE_REPO/scripts/lint-implementation.sh"
         line=$((line + 1))
     done

@@ -45,11 +45,31 @@ open(sys.argv[1], 'w').write(''.join('line %d\n' % i for i in range(int(sys.argv
 }
 
 @test "ratchet: a brand new oversized file is still rejected" {
-    write_lines huge.py 500
+    write_lines huge.py 700
     git add huge.py
     run bash "$GATES" --staged
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q 'COMPLEXITY:huge.py'
+    printf '%s\n' "$output" | grep -q 'file is 700 LOC'
+}
+
+@test "threshold: the wrapper's limit is the one the delegate applies" {
+    # The wrapper reads AUTOSPEC_MAX_FILE_LOC and defaults it to 600. If it does not
+    # pass that through, the delegate falls back to its own 400 and a 500-line file
+    # is rejected locally while the CI ratchet — which uses 600 — accepts it.
+    write_lines mid.py 500
+    git add mid.py
+    run bash "$GATES" --staged
+    # PR_SIZE still caps the 500 changed lines — that is a different rule, and this
+    # test is about the size threshold only.
+    ! printf '%s\n' "$output" | grep -q 'file is '
+}
+
+@test "threshold: an explicit AUTOSPEC_MAX_FILE_LOC still overrides the default" {
+    write_lines mid.py 500
+    git add mid.py
+    run env AUTOSPEC_MAX_FILE_LOC=400 bash "$GATES" --staged
+    [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q 'file is 500 LOC'
 }
 
@@ -170,4 +190,110 @@ open('big.py', 'w').write('\n'.join(lines) + '\n')
     run bash "$GATES" --staged
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q 'TODO_LEFT'
+}
+
+# ── logical units vs docs ─────────────────────────────────────────────────────
+# DOC_OUT_OF_SYNC requires a public-surface change to touch a doc file; PR_SIZE then
+# charged its three-unit cap for that file. A change at the limit failed the moment it
+# was documented, so the two rules together had no solution.
+
+@test "units: a doc file does not consume a logical unit" {
+    for i in 1 2 3; do write_lines "src$i.py" 5; done
+    mkdir -p docs
+    write_lines docs/NOTES.md 5
+    git add -A
+    run bash "$GATES" --staged
+    [ "$status" -eq 0 ]
+    ! printf '%s\n' "$output" | grep -q 'exceeded=logical_units'
+}
+
+@test "units: four non-doc files still breach the cap" {
+    for i in 1 2 3 4; do write_lines "src$i.py" 5; done
+    mkdir -p docs
+    write_lines docs/NOTES.md 5
+    git add -A
+    run bash "$GATES" --staged
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q 'exceeded=logical_units'
+}
+
+@test "units: a skill trio collapses to one unit rather than vanishing" {
+    # is_doc_file also matches skills/*/SKILL.md, so the trio case has to be handled
+    # before the doc exclusion. Handled after, a trio would drop out of the count and
+    # four real units would read as three.
+    mkdir -p skills/demo/codex skills/demo/opencode
+    write_lines skills/demo/SKILL.md 5
+    write_lines skills/demo/codex/prompt.md 5
+    write_lines skills/demo/opencode/agent.md 5
+    for i in 1 2 3; do write_lines "src$i.py" 5; done
+    git add -A
+    run bash "$GATES" --staged
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q 'exceeded=logical_units'
+}
+
+@test "units: the waiver does not leak into diff-file mode, which has no staged paths" {
+    for i in 1 2 3 4; do write_lines "src$i.py" 5; done
+    git add -A
+    git diff --cached --output=change.diff
+    run bash "$GATES" --diff-file change.diff
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q 'exceeded=logical_units'
+}
+
+# ── relocation ────────────────────────────────────────────────────────────────
+# Extracting code out of a monolith into a sibling module is the remedy the size
+# rule prescribes, and the CI ratchet's failure message recommends it by name. A
+# split necessarily creates a file, so counting "any new file" as growth rejects the
+# prescribed remedy — the §1.1 satisfiability defect, relocated to new files.
+
+@test "relocation: extracting into a sibling module keeps the shrink waiver" {
+    write_lines big.py 900
+    git add big.py
+    git commit -q -m "pre-existing oversized file"
+    write_lines big.py 300
+    write_lines big_tests.py 590
+    git add big.py big_tests.py
+    run bash "$GATES" --staged
+    [ "$status" -eq 0 ]
+    ! printf '%s\n' "$output" | grep -q 'exceeded=changed_lines'
+}
+
+@test "relocation: a new oversized file is reported but does not block a pure move" {
+    write_lines big.py 900
+    git add big.py
+    git commit -q -m "pre-existing oversized file"
+    write_lines big.py 150
+    write_lines big_tests.py 740
+    git add big.py big_tests.py
+    run bash "$GATES" --staged
+    [ "$status" -eq 0 ]
+    # Still visible — the extracted file is over the limit and needs splitting further
+    # — but not blocking, because rejecting it would preserve the 900-line monolith.
+    printf '%s\n' "$output" | grep -q 'INFO:COMPLEXITY:big_tests.py'
+}
+
+@test "relocation: a new oversized file that adds material still blocks" {
+    write_lines big.py 900
+    git add big.py
+    git commit -q -m "pre-existing oversized file"
+    write_lines big.py 890
+    write_lines feature.py 700
+    git add big.py feature.py
+    run bash "$GATES" --staged
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q 'COMPLEXITY:feature.py'
+    printf '%s\n' "$output" | grep -q 'file is 700 LOC'
+}
+
+@test "relocation: growing a pre-existing file forfeits the waiver even alongside a move" {
+    write_lines big.py 900
+    git add big.py
+    git commit -q -m "pre-existing oversized file"
+    write_lines big.py 901
+    write_lines extracted.py 10
+    git add big.py extracted.py
+    run bash "$GATES" --staged
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q 'file is 901 LOC'
 }
