@@ -1,6 +1,8 @@
 #!/usr/bin/env bats
 # tests/lint/lint-ui.bats — deterministic design-token-drift linter (scripts/lint-ui.sh).
 
+bats_require_minimum_version 1.5.0
+
 setup() {
     REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     L="$REPO_ROOT/scripts/lint-ui.sh"
