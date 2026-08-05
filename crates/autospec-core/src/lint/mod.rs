@@ -105,14 +105,12 @@ pub fn lint_issue_body(body: &str) -> Vec<IssueLintFinding> {
 }
 
 struct IssueDocument<'a> {
-    source: &'a str,
     lines: Vec<&'a str>,
 }
 
 impl<'a> IssueDocument<'a> {
     fn parse(source: &'a str) -> Self {
         Self {
-            source,
             lines: source.lines().collect(),
         }
     }
@@ -394,8 +392,44 @@ fn check_files_touched(document: &IssueDocument<'_>, findings: &mut Vec<IssueLin
     }
 }
 
+/// The five `ui-feature` sections (spec §L1a,
+/// docs/superpowers/specs/2026-08-04-autospec-web-ui-design.md): excluded from
+/// the ≤400-word body count because Phase 3.5/3.75 append Model-fit and
+/// Shared-contracts blocks after the trim, so classified UI children would
+/// otherwise systematically trip `needs-quality-bar`.
+const UI_SECTION_HEADINGS: [&str; 5] = [
+    "## Design reference",
+    "## Interaction states",
+    "## UX flows",
+    "## Motion & feedback",
+    "## Device & viewport",
+];
+
+/// Mirrors the shell `strip_ui_sections` helper: drop each UI section heading
+/// line plus its body (up to but excluding the next `## ` heading), then count
+/// words over what remains. Line-by-line summation is equivalent to splitting
+/// the whole source on whitespace, since word boundaries never span a newline.
+fn word_count_excluding_ui_sections(document: &IssueDocument<'_>) -> usize {
+    let mut skip = false;
+    let mut count = 0usize;
+    for line in &document.lines {
+        if UI_SECTION_HEADINGS.contains(line) {
+            skip = true;
+            continue;
+        }
+        if skip && line.starts_with("## ") {
+            skip = false;
+        }
+        if skip {
+            continue;
+        }
+        count += line.split_whitespace().count();
+    }
+    count
+}
+
 fn check_body_size(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
-    let word_count = document.source.split_whitespace().count();
+    let word_count = word_count_excluding_ui_sections(document);
     if word_count > 400 {
         findings.push(IssueLintFinding::new(
             IssueQualityRule::BodyTooLong,
@@ -428,13 +462,8 @@ fn check_outline_size(document: &IssueDocument<'_>, findings: &mut Vec<IssueLint
 }
 
 fn check_ui_sections(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintFinding>) {
-    let sections = [
-        "## Design reference",
-        "## Interaction states",
-        "## UX flows",
-    ];
     let has_marker = document.lines.iter().any(|line| is_ui_feature_marker(line));
-    let has_sections = sections
+    let has_sections = UI_SECTION_HEADINGS
         .iter()
         .map(|section| document.has_heading(section))
         .collect::<Vec<_>>();
@@ -442,7 +471,7 @@ fn check_ui_sections(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintF
         return;
     }
 
-    let missing = sections
+    let missing = UI_SECTION_HEADINGS
         .iter()
         .zip(has_sections)
         .filter_map(|(section, present)| (!present).then_some(format!(" '{section}'")))
@@ -451,7 +480,7 @@ fn check_ui_sections(document: &IssueDocument<'_>, findings: &mut Vec<IssueLintF
         findings.push(IssueLintFinding::new(
             IssueQualityRule::UiSectionsIncomplete,
             format!(
-                "UI feature detected; missing required section(s):{missing} (UI issues need Design reference + Interaction states + UX flows)"
+                "UI feature detected; missing required section(s):{missing} (UI issues need Design reference + Interaction states + UX flows + Motion & feedback + Device & viewport)"
             ),
         ));
     }
