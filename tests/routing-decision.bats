@@ -265,3 +265,64 @@ EOF
     [ "$status" -eq 0 ]
     [ "$output" = "claude-haiku-4-5" ]
 }
+
+# stats_row_kind <kind> <profile> <ctx> <reasoning> <n> <first_pass> <fail> <esc> <retries> <cache>
+# Same shape as stats_row but for a dispatch_kind other than implementer, so
+# evidence for one kind can be shown NOT to leak into another.
+stats_row_kind() {
+    printf '{"dispatch_kind":"%s","profile":"%s","cell_ctx":"%s","cell_reasoning":"%s","dispatches":%s,"first_pass_rate":%s,"failure_rate":%s,"escalation_rate":%s,"mean_retries":%s,"cache_hit_ratio":%s}' \
+        "$1" "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9" "${10}"
+}
+
+# ── the overridable set is an allowlist ───────────────────────────────────────
+
+@test "high-fan-out read-and-report kinds are re-routed on their own evidence" {
+    # explore-researcher / refine-lens / qa-sweep produce findings a later gate
+    # re-checks, so a wrong answer is caught downstream rather than merged.
+    for k in explore-researcher refine-lens qa-sweep; do
+        jq -n --argjson a "$(stats_row_kind "$k" qwen3-32b-laptop 120k deep 50 0.90 0.05 0.05 0.2 0.0)" \
+              --argjson b "$(stats_row_kind "$k" claude-sonnet-cloud 120k deep 50 0.60 0.20 0.20 1.0 0.0)" \
+              '[$a,$b]' > "$TMP/s.json"
+        run env AUTOSPEC_MODEL_PROFILES="$PROF" bash "$DECIDE" --profiles-file "$PROF" \
+            --labels "auto-implement,reasoning:deep,ctx:120k" --stats-file "$TMP/s.json" --kind "$k"
+        [ "$status" -eq 0 ]
+        [ "$output" = "qwen3:32b" ]
+    done
+}
+
+@test "a dispatch kind nobody has allowlisted falls through to the baseline" {
+    # The guard is an ALLOWLIST: a kind added to the ledger vocabulary later must
+    # be baseline-only until someone deliberately opens it. A blocklist would
+    # open every future kind by default and silently delete the invariant.
+    jq -n --argjson a "$(stats_row_kind bogus-future-kind qwen3-32b-laptop 120k deep 50 0.90 0.05 0.05 0.2 0.0)" \
+          --argjson b "$(stats_row_kind bogus-future-kind claude-sonnet-cloud 120k deep 50 0.60 0.20 0.20 1.0 0.0)" \
+          '[$a,$b]' > "$TMP/s.json"
+    run env AUTOSPEC_MODEL_PROFILES="$PROF" bash "$DECIDE" --profiles-file "$PROF" \
+        --labels "auto-implement,reasoning:deep,ctx:120k" --stats-file "$TMP/s.json" --kind bogus-future-kind
+    [ "$status" -eq 0 ]
+    [ "$output" = "claude-sonnet-4-6" ]
+}
+
+@test "opening explore-researcher does not open the lgtm reviewer with it" {
+    # Both kinds now appear in one ledger; the reviewer must still be baseline
+    # even when the cheaper profile has a strong record on the explore rows.
+    jq -n --argjson a "$(stats_row_kind explore-researcher qwen3-32b-laptop 120k deep 50 0.95 0.02 0.02 0.1 0.0)" \
+          --argjson b "$(stats_row_kind lgtm-reviewer qwen3-32b-laptop 120k deep 50 0.95 0.02 0.02 0.1 0.0)" \
+          '[$a,$b]' > "$TMP/s.json"
+    run env AUTOSPEC_MODEL_PROFILES="$PROF" bash "$DECIDE" --profiles-file "$PROF" \
+        --labels "auto-implement,reasoning:deep,ctx:120k" --stats-file "$TMP/s.json" --kind lgtm-reviewer
+    [ "$output" = "claude-sonnet-4-6" ]
+    run env AUTOSPEC_MODEL_PROFILES="$PROF" bash "$DECIDE" --profiles-file "$PROF" \
+        --labels "auto-implement,reasoning:deep,ctx:120k" --stats-file "$TMP/s.json" --kind explore-researcher
+    [ "$output" = "qwen3:32b" ]
+}
+
+@test "evidence for one overridable kind does not leak into another" {
+    # Rows are keyed by (dispatch_kind, profile, cell). qa-sweep having no rows
+    # must mean qa-sweep gets the baseline, not that it inherits explore's record.
+    jq -n --argjson a "$(stats_row_kind explore-researcher qwen3-32b-laptop 120k deep 50 0.95 0.02 0.02 0.1 0.0)" \
+          '[$a]' > "$TMP/s.json"
+    run env AUTOSPEC_MODEL_PROFILES="$PROF" bash "$DECIDE" --profiles-file "$PROF" \
+        --labels "auto-implement,reasoning:deep,ctx:120k" --stats-file "$TMP/s.json" --kind qa-sweep
+    [ "$output" = "claude-sonnet-4-6" ]
+}
