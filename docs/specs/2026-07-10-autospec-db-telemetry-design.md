@@ -137,6 +137,18 @@ Event payload contract `autospec.events.v1` (JSON, one object per event):
 | `host` | string | `hostname -s` |
 | `repo` | string | `owner/name` |
 | `tier`, `issue`, `pr`, `branch`, `step`, `outcome`, `detail` | optional | kind-specific; collector accepts unknown fields silently (agents may run ahead of the hub) |
+| `dispatch_kind` | optional | `implementer` \| `lgtm-reviewer` \| `explore-researcher` \| `verify-voter` \| `refine-lens` \| `qa-sweep` \| `secaudit-pass` \| `growth-lens` \| `spec-decompose` — which dispatch surface spent the tokens. Without it, cost is attributable only to the low-volume Phase 4 loop and not to the explore/refine/qa fan-out that dominates a run. |
+| `profile` | optional | `model-profiles.yml` profile that served the dispatch (the `tier` field names the policy tier; this names the concrete profile). |
+| `input_tokens`, `output_tokens`, `cached_tokens` | optional | per-dispatch token counts. `cached_tokens` is the prompt-cache hit portion of `input_tokens` and is what makes cache behaviour attributable: autospec pre-stages large context into every dispatch, a cloud tier reuses that prefix while most local runtimes have no cross-request cache at all, so two profiles at the same per-token price can differ materially in real cost. |
+| `wall_clock_ms` | optional | dispatch duration. Required to price a local profile at all: GPU-minutes have an opportunity cost, and a profile that is free per token but slow is a throughput regression, not a saving. |
+| `retries`, `escalated` | optional | retry index reached, and whether the dispatch pulled in a stronger advisor/tier. Both feed the effective-cost formula. |
+
+These routing fields are **additive within v1** — no shim change is needed, because
+`emit-event.sh` forwards `key=value` pairs verbatim and the collector ignores fields it
+does not know. Repo-local routing decisions are scored from
+`scripts/routing-ledger.sh` (see
+[`2026-08-05-self-discovering-model-routing-design.md`](2026-08-05-self-discovering-model-routing-design.md));
+these event fields exist so the same numbers are visible in the fleet-wide hub.
 
 Contract rules: additive-only within v1; unknown fields ignored; a v2 bump requires the
 database to keep accepting v1. The contract doc lives in this repo (single source of

@@ -1641,7 +1641,7 @@ skills/autospec-run/scripts/invoke-review.sh::invoke-review.sh \
 skills/autospec-run/scripts/fab-completeness.sh::fab-completeness.sh \
 skills/autospec-run/scripts/fab-route.sh::fab-route.sh \
 skills/autospec-run/scripts/post-token-report.sh::post-token-report.sh \
-skills/autospec-run/scripts/run-groom-preflight.sh::run-groom-preflight.sh \
+skills/autospec-run/scripts/run-groom-preflight.sh::run-groom-preflight.sh skills/autospec-run/scripts/select-model-profile.sh::select-model-profile.sh \
 skills/autospec-resume/scripts/resume-scan.sh::resume-scan.sh \
 skills/autospec-compose-normalize/scripts/workflow-guard.sh::autospec-compose-normalize-guard.sh \
 skills/autospec-doc/scripts/doc-orchestrator-entry.mjs::doc-orchestrator.mjs \
@@ -1692,7 +1692,7 @@ skills/autospec-doc/scripts/gen-llms-full.mjs \
 skills/autospec-doc/scripts/verify-examples.mjs"
 
     if [ "$DRY_RUN" -eq 1 ]; then
-        info "[dry-run] copy_runtime_skill_scripts: would copy 11 per-skill runtime scripts to $autospec_scripts_dir/"
+        info "[dry-run] copy_runtime_skill_scripts: would copy 12 per-skill runtime scripts to $autospec_scripts_dir/"
         info "[dry-run] copy_runtime_skill_scripts: would copy autospec-doc module closure to $(dirname "$autospec_scripts_dir")/skills/autospec-doc/scripts/"
         info "[dry-run] copy_runtime_skill_scripts: would mirror shared scripts to $(dirname "$autospec_scripts_dir")/skills/autospec-shared/scripts/"
         return 0
@@ -1828,7 +1828,7 @@ copy_runtime_subdirs() {
     autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
 
     # Runtime libs sourced/exec'd by installed scripts at $SCRIPT_DIR/lib/<name>.
-    runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh"
+    runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh model-supply-probe.sh"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] copy_runtime_subdirs: would copy runtime libs + harness table + scripts/explore-research/ to $autospec_scripts_dir/"

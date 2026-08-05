@@ -90,23 +90,38 @@ instead of making the operator hand-parse heartbeat JSON.
 
 If the file is missing on run start:
 
-1. Probe local Ollama availability directly:
-   - Detect the binary robustly:
-     - macOS/Linux: `command -v ollama`
-     - Windows: `where.exe ollama`
-   - If present, run `ollama list 2>/dev/null` once and parse returned model rows
-     (ignore header/blank lines, capture first column only).
-   - For each discovered model, write a local profile using conservative defaults:
-     `ctx: 64k`, `reasoning: medium`.
-   - Normalize the profile key by lowercasing and replacing each of `:`, `/`, `.`,
-     and whitespace with `-`, then append `-laptop` (e.g. `qwen3:32b` →
-     `qwen3-32b-laptop`, `library/llama3:latest` → `library-llama3-latest-laptop`).
-   - If `ollama list` exits non-zero (e.g. daemon not running) or returns zero
-     usable model rows, treat as no local models (do not force a false-positive
-     local profile).
+1. **Discover local supply with the probe — never enumerate models yourself.**
+   ```bash
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/discover-model-supply.sh" --profiles
+   ```
+   Paste its `profiles:` fragment into the file verbatim. The probe measures each
+   model's real context length via `ollama show`, keeps only completion-capable
+   models, writes the original runtime tag as `model:`, and normalizes the profile
+   key (`qwen3:32b` → `qwen3-32b-laptop`).
+
+   Do **not** list models from memory, from the model names you happen to know, or
+   from an inferred parameter count. An earlier revision of this section asked the
+   orchestrator to do exactly that, and on a live host it produced nine local
+   profiles for four real models — including an unrunnable `qwen3-coder-480b` — and
+   rated every one of them `ctx: 64k` when the measured values were 131072 and
+   262144. Enumerating ground truth is the probe's job.
+
+   Read these fields off the probe rather than guessing:
+   - `accelerator.usable` / `accelerator.reason` — a present `nvidia-smi` and a
+     present `/dev/nvidia0` do **not** mean a usable GPU. When `usable` is false,
+     surface `reason` to the operator (e.g. `nvml_driver_library_mismatch` is a
+     five-minute fix) instead of silently accepting CPU inference.
+   - `dispatch_recommended` per model — false means the probe found the model but
+     the host cannot run it usefully (no accelerator, or weights exceed the memory
+     budget). Leave those profiles commented out; the probe already does this.
+   - A model set that comes back empty (no `ollama`, daemon down, or zero
+     completion models) means **no local profiles**. Never synthesize one.
 2. If `ANTHROPIC_API_KEY` is set in the environment, append two cloud profiles:
    `claude-sonnet-cloud` and `claude-opus-cloud`, both `ctx: 120k`,
-   `reasoning: deep`.
+   `reasoning: deep`, each with its `model:` id. Also append `claude-haiku-cloud`
+   (`ctx: 64k`, `reasoning: medium`) — `select-model-profile.sh` routes
+   `reasoning:shallow|medium` issues to it, so omitting it silently disables the
+   cheap implementer tier.
 3. If neither Ollama nor `ANTHROPIC_API_KEY` is detected, write a single
    `claude-sonnet-cloud` default with `ctx: 120k, reasoning: deep` and an
    `# edit-and-rerun` comment near the top of the file.
@@ -127,9 +142,15 @@ Sample auto-init output:
 default: claude-sonnet-cloud
 profiles:
   qwen3-32b-laptop:
-    ctx: 64k         # one of: 32k | 64k | 120k
+    model: qwen3:32b   # original runtime tag — what a dispatch sends
+    ctx: 64k           # one of: 32k | 64k | 120k
     reasoning: medium  # one of: shallow | medium | deep
+  claude-haiku-cloud:
+    model: claude-haiku-4-5
+    ctx: 64k
+    reasoning: medium
   claude-sonnet-cloud:
+    model: claude-sonnet-4-6
     ctx: 120k
     reasoning: deep
 ```
@@ -809,6 +830,23 @@ do not fall back to an inline label-swap path.
 >
 > 2. **Dynamic uncached suffix** — appended by `bundle-and-dispatch.sh` after the cached prefix:
 >    the issue body, per-iteration findings (if retry > 1), branch name, and "begin coding now".
+>
+> 3. **Resolve the implementer model (deterministic — do this before dispatching)** — the issue's
+>    `reasoning:*` label decides which profile implements it, and the profile carries the concrete
+>    model id. Ask the selector rather than deciding yourself:
+>    ```bash
+>    _impl_model=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/select-model-profile.sh" \
+>      --labels "<ISSUE_LABELS>" \
+>      --print-model) || _impl_model=""
+>    ```
+>    If `_impl_model` is **non-empty**, dispatch the implementer subagent with that model in place of
+>    the harness-detected `TIER_B`. If the selector exits 3 (empty output — no `model:` key is
+>    resolvable, which is the case for an auto-initialised `~/.autospec/model-profiles.yml`), keep
+>    `TIER_B` exactly as detected. Never invent a model id, and never widen this override:
+>    - It applies to the **implementer dispatch only**. The reviewer keeps its own tier — a reviewer
+>      must never run on a weaker model than the implementer it is checking.
+>    - The fall-back-**up** rule still holds: if the resolved model is unavailable at dispatch time
+>      (quota, capacity, authorization), silently retry the same dispatch at `TIER_B`, then `TIER_A`.
 >
 > The combined prompt sent to the subagent is:
 >
