@@ -48,6 +48,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [Generic failure diagnostics flow](feedback_generic_failure_diagnostics_flow.md) — separate state from reason, group correlated failures, and excerpt logs around high-signal anchors
 - [ROI-check new components](feedback_roi_check_new_components.md) — every new skill/fork/schema needs a named consumer that benefits today; default to invoking upstream over forking
 - [LLM validator + adaptive retry](feedback_llm_validator_adaptive_retry.md) — pair every LLM-output validator with a 5-attempt retry loop that feeds findings back as directives
+- [Pre-commit gate shapes the commit split](feedback_precommit_gate_commit_shaping.md) — logical_units=3 binds before the 400-line cap; every source commit needs its own doc touch; oversized files may not gain a line; never wrap bats `run` in a helper
 - [validate.sh has named-content checks](feedback_validate_sh_lockstep_checks.md) — renaming SKILL.md prose sections requires updating validate.sh checks too
 - [validate.sh lockstep duo gap](feedback_validate_sh_lockstep_duo_gap.md) — check_lockstep() must guard SKILL.md+codex/prompt.md duos, not just full trios
 - [Skill golden + derivation workflow](feedback_skill_golden_derivation_workflow.md) — editing any trio skill (esp. with autospec-block markers) needs re-derive codex/opencode AND regenerate tests/fixtures/skill-goldens sha256, or validate.sh fails closed
