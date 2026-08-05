@@ -35,6 +35,8 @@
 #   cost_in / cost_out    USD per million input / output tokens (cloud)
 #   cost_minute           USD-equivalent opportunity cost per wall-clock minute
 #                         (local; GPU-minutes are not free, see R9)
+#   max_wall_clock_ms     per-profile latency ceiling; a profile whose MEASURED mean
+#                         exceeds it is ineligible however cheap it looks (R9)
 # A profile with NO cost keys is NOT scoreable and is reported ineligible, so the
 # caller falls back to its existing choice rather than guessing a price.
 #
@@ -56,6 +58,14 @@
 #   AUTOSPEC_ROUTING_MIN_SAMPLES   samples before a profile may win (default 10)
 #   AUTOSPEC_ROUTING_FIRST_PASS_FLOOR  quality floor (default 0.6)
 #   AUTOSPEC_ROUTING_CACHE_BETA    cache-penalty strength (default 0.5)
+#   AUTOSPEC_ROUTING_CLOUD_MULTIPLIER  penalty on token-priced (cloud) profiles as
+#                         the token budget runs down; from routing-budget-hint.sh (R10).
+#                         Default 1.0 = no distortion. Local profiles are priced in
+#                         wall clock and consume no token budget, so they are exempt.
+#   AUTOSPEC_ROUTING_MAX_WALL_CLOCK_MS  global latency ceiling, 0 = none (default 0).
+#                         For a weeks-long autonomous run, 40 GPU-minutes on an issue a
+#                         cheap cloud tier finishes in 90s is a throughput REGRESSION,
+#                         not a saving. A per-profile max_wall_clock_ms overrides this.
 #
 # Exit codes: 0 ok | 1 bad arguments | 2 jq missing (fail-closed)
 
@@ -75,6 +85,8 @@ ALPHA="${AUTOSPEC_ROUTING_ALPHA:-5}"
 MIN_SAMPLES="${AUTOSPEC_ROUTING_MIN_SAMPLES:-10}"
 FLOOR="${AUTOSPEC_ROUTING_FIRST_PASS_FLOOR:-0.6}"
 CACHE_BETA="${AUTOSPEC_ROUTING_CACHE_BETA:-0.5}"
+MAX_WALL_MS="${AUTOSPEC_ROUTING_MAX_WALL_CLOCK_MS:-0}"
+CLOUD_MULT="${AUTOSPEC_ROUTING_CLOUD_MULTIPLIER:-1.0}"
 JSON_OUT=0
 EXPLAIN=0
 
@@ -91,6 +103,8 @@ while [ $# -gt 0 ]; do
         --min-samples)   MIN_SAMPLES="${2:-}"; shift 2 ;;
         --floor)         FLOOR="${2:-}"; shift 2 ;;
         --cache-beta)    CACHE_BETA="${2:-}"; shift 2 ;;
+        --max-wall-clock-ms) MAX_WALL_MS="${2:-}"; shift 2 ;;
+        --cloud-multiplier)  CLOUD_MULT="${2:-}"; shift 2 ;;
         --json)          JSON_OUT=1; shift ;;
         --explain)       EXPLAIN=1; shift ;;
         *) _die "unknown option: $1" ;;
@@ -130,7 +144,7 @@ _catalog() {
             k = kv[1]
             v = key; sub(/^[^:]*:[[:space:]]*/, "", v)
             gsub(/[[:space:]]+$/, "", v)
-            if (k == "cost_in" || k == "cost_out" || k == "cost_minute") {
+            if (k == "cost_in" || k == "cost_out" || k == "cost_minute" || k == "max_wall_clock_ms") {
                 printf "%s\t%s\t%s\n", cur, k, v
             }
         }
@@ -166,7 +180,8 @@ result="$(jq -n \
     --argjson stats "$stats_json" \
     --arg kind "$KIND" --arg ctx "$CTX" --arg reasoning "$REASONING" \
     --argjson alpha "$ALPHA" --argjson min_samples "$MIN_SAMPLES" \
-    --argjson floor "$FLOOR" --argjson cache_beta "$CACHE_BETA" '
+    --argjson floor "$FLOOR" --argjson cache_beta "$CACHE_BETA" \
+    --argjson max_wall_ms "$MAX_WALL_MS" --argjson cloud_mult "$CLOUD_MULT" '
     def cell($p): ($stats | map(select(
         .dispatch_kind == $kind and .profile == $p and
         .cell_ctx == $ctx and .cell_reasoning == $reasoning)) | first);
@@ -176,7 +191,7 @@ result="$(jq -n \
     def unit($p):
         ($catalog[$p] // {}) as $c
         | if ($c.cost_in != null and $c.cost_out != null)
-          then ($c.cost_in + $c.cost_out)
+          then (($c.cost_in + $c.cost_out) * $cloud_mult)
           elif ($c.cost_minute != null)
           then ($c.cost_minute * 10)   # a dispatch is priced at ten GPU-minutes
           else null end;
@@ -192,7 +207,9 @@ result="$(jq -n \
           mean_retries:    smooth(((.row.mean_retries // 0) * .n); .n; 1.0),
           escalation_rate: smooth(((.row.escalation_rate // 0) * .n); .n; 0.5),
           failure_rate:    smooth(((.row.failure_rate // 0) * .n); .n; 0.5),
-          cache_hit_ratio: (.row.cache_hit_ratio // 0)
+          cache_hit_ratio: (.row.cache_hit_ratio // 0),
+          mean_wall_clock_ms: (.row.mean_wall_clock_ms // 0),
+          wall_clock_ceiling_ms: ((($catalog[.profile] // {}).max_wall_clock_ms) // $max_wall_ms)
         })
       | map(. + { cache_penalty: (1 + ($cache_beta * (1 - .cache_hit_ratio))) })
     ) as $scored
@@ -209,11 +226,14 @@ result="$(jq -n \
       | map(. + {
           eligible: (
             .unit != null and .effective_cost != null and
-            .n >= $min_samples and .first_pass_rate >= $floor),
+            .n >= $min_samples and .first_pass_rate >= $floor and
+            (.wall_clock_ceiling_ms == 0 or .mean_wall_clock_ms <= .wall_clock_ceiling_ms)),
           reason: (
             if .unit == null then "no cost keys in profile catalog"
             elif .n < $min_samples then "insufficient samples (\(.n)/\($min_samples))"
             elif .first_pass_rate < $floor then "first-pass rate \(.first_pass_rate) below floor \($floor)"
+            elif (.wall_clock_ceiling_ms != 0 and .mean_wall_clock_ms > .wall_clock_ceiling_ms)
+              then "mean wall clock \(.mean_wall_clock_ms)ms exceeds ceiling \(.wall_clock_ceiling_ms)ms"
             else "" end)
         })
       | map(del(.row))
