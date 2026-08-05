@@ -264,3 +264,79 @@ assert e['reasoning'] == 'shallow', e
     run grep -n "conservative defaults:" "$f"
     [ "$status" -ne 0 ]
 }
+
+# ── --only: a paste-time filter, never a probe restriction ────────────────────
+
+@test "--only narrows the fragment to one profile and drops the others" {
+    stub_nvidia_healthy
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" \
+        --out "$OUT" --profiles --only qwen3-32b-laptop
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qwen3-32b-laptop:"* ]]
+    [[ "$output" != *"qwen3-5-latest-laptop"* ]]
+    [[ "$output" == *"--only qwen3-32b-laptop"* ]]
+}
+
+@test "--only does not narrow discovery — the document still holds every model" {
+    stub_nvidia_healthy
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" \
+        --out "$OUT" --profiles --only qwen3-32b-laptop
+    [ "$status" -eq 0 ]
+    # Hiding models from the probe is the blindness bug this tool exists to fix.
+    [ "$(jq '.local_models | length' "$OUT")" -eq 2 ]
+}
+
+@test "--only naming an undiscovered profile is a usage error, not an empty map" {
+    stub_nvidia_healthy
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" \
+        --out "$OUT" --profiles --only no-such-profile
+    [ "$status" -eq 1 ]
+    # `profiles: {}` here would read as "the probe found nothing".
+    [[ "$output" == *"no discovered profile named 'no-such-profile'"* ]]
+    [[ "$output" != *"profiles: {}"* ]]
+}
+
+@test "--only a discovered but non-dispatchable profile yields an empty mapping" {
+    stub_nvidia_nvml_mismatch
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" \
+        --out "$OUT" --profiles --only qwen3-32b-laptop
+    [ "$status" -eq 0 ]
+    # The profile exists, so this is not an error — but a CPU-only host must not
+    # emit it as routable.
+    [[ "$output" == *"profiles: {}"* ]]
+    [[ "$output" == *"not dispatch-recommended"* ]]
+}
+
+@test "--only without --profiles is rejected rather than silently ignored" {
+    stub_nvidia_healthy
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" \
+        --out "$OUT" --only qwen3-32b-laptop
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"--only is only meaningful with --profiles"* ]]
+}
+
+@test "--only rejects a profile name carrying regex metacharacters" {
+    stub_nvidia_healthy
+    stub_ollama_mixed
+    # A name reaching jq as an expression rather than as data would match
+    # everything here and emit the whole catalog (feedback_jq_test_regex_metachar).
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" \
+        --out "$OUT" --profiles --only '.*'
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"qwen3-32b-laptop:"* ]]
+}
+
+@test "the emitted fragment says a local profile needs cost keys to route" {
+    stub_nvidia_healthy
+    stub_ollama_mixed
+    run env PATH="$PROBE_PATH" HOME="$TMP" bash "$SCRIPT" --out "$OUT" --profiles
+    [ "$status" -eq 0 ]
+    # routing-cost.sh refuses a profile with no cost keys, so a pasted fragment
+    # that looks routable but is inert would be a silent dead end.
+    [[ "$output" == *"cost_minute"* ]]
+}

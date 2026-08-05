@@ -34,8 +34,8 @@ Reasoning: spec/issue quality is the bottleneck. A cheap model here costs you N 
 
 | Harness     | Preferred model | Thinking budget | Fallback (next-tier UP on unavailability) |
 |-------------|-----------------|-----------------|--------------------------------------------|
-| Claude Code | `opus` (current Claude Opus — e.g. `claude-opus-4-7`) | `ultrathink` (max thinking budget) | latest available top model |
-| Codex CLI   | current top non-spark GPT (e.g. `gpt-5.1` or latest top-tier variant) | `reasoning_effort=high` | latest top variant |
+| Claude Code | `opus` — the alias, which resolves to the current Claude Opus generation (`claude-opus-5` as of 2026-08) | `ultrathink` (max thinking budget) | latest available top model |
+| Codex CLI   | the configured top non-spark model from `~/.codex/config.toml` (`gpt-5.6-sol` as of 2026-08) | `reasoning_effort=high` | latest top variant |
 | OpenCode    | top tier configured for `task` agents | provider-equivalent of "high" reasoning | next available |
 
 ### Tier B — Implementation work (cheaper model + medium thinking)
@@ -46,8 +46,8 @@ Reasoning: implementation follows a well-specified contract from Tier A. The wor
 
 | Harness     | Preferred model | Thinking budget | Fallback (UP on unavailability) |
 |-------------|-----------------|-----------------|----------------------------------|
-| Claude Code | `sonnet` (current Claude Sonnet — e.g. `claude-sonnet-4-6`) | medium thinking | `opus` → latest |
-| Codex CLI   | `gpt-5.1-codex-spark` (or current spark/cost-optimized variant) | `reasoning_effort=medium` | next-larger Codex → latest |
+| Claude Code | `sonnet` — the alias, which resolves to the current Claude Sonnet generation (`claude-sonnet-5` as of 2026-08) | medium thinking | `opus` → latest |
+| Codex CLI   | the spark / cost-optimized variant of the configured model when one exists, else the configured model | `reasoning_effort=medium` | next-larger Codex → latest |
 | OpenCode    | smaller-tier task model | medium reasoning | next-larger configured tier |
 
 ### Harness detection protocol
@@ -66,8 +66,8 @@ maps to these harness-specific values.
 
 3. **Codex CLI** — neither `Agent` nor a configurable `task` tool is available; `apply_patch`
    is the primary edit tool.
-   - `TIER_A` = current top GPT model + `reasoning_effort=high`
-   - `TIER_B` = `gpt-5.1-codex-spark` + `reasoning_effort=medium`
+   - `TIER_A` = configured top model (see Tier A table row above) + `reasoning_effort=high`
+   - `TIER_B` = spark variant if present, else configured model + `reasoning_effort=medium`
 
 **Fallback rule:** If TIER_B is unavailable in your harness (model unknown, quota/capacity
 failure, authorization failure, or tool call returns an error for that model), silently

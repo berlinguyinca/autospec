@@ -16,11 +16,11 @@ write_config() {
     cat > "$TEST_TMPDIR/fleet.yml" <<YAML
 version: 1
 workspace: $TEST_TMPDIR/repos
-default_profile: qwen3-32b-laptop
+default_profile: qwen3-6-35b-a3b-laptop
 parallel_repos: 2
 repos:
   - url: https://github.com/org/repo-a.git
-    profile: qwen3-32b-laptop
+    profile: qwen3-6-35b-a3b-laptop
     enabled: true
   - url: git@github.com:org/repo-b.git
     profile: claude-sonnet-cloud

@@ -37,6 +37,12 @@
 #                         (local; GPU-minutes are not free, see R9)
 #   max_wall_clock_ms     per-profile latency ceiling; a profile whose MEASURED mean
 #                         exceeds it is ineligible however cheap it looks (R9)
+#   cache_min_tokens      the model's prompt-cache MINIMUM. Below it nothing is
+#                         cached, so a hit ratio measured under a larger prefix
+#                         must not be credited to a dispatch that cannot cache.
+#                         These differ sharply — Haiku 4.5 needs 4096 tokens where
+#                         Opus 5 needs 512 — which makes the cheapest per-token
+#                         profile the easiest one to fall under.
 # A profile with NO cost keys is NOT scoreable and is reported ineligible, so the
 # caller falls back to its existing choice rather than guessing a price.
 #
@@ -62,6 +68,11 @@
 #                         the token budget runs down; from routing-budget-hint.sh (R10).
 #                         Default 1.0 = no distortion. Local profiles are priced in
 #                         wall clock and consume no token budget, so they are exempt.
+#   AUTOSPEC_ROUTING_PREFIX_TOKENS  size of the prefix this dispatch will stage,
+#                         used only to test it against each profile's
+#                         cache_min_tokens. 0 (default) = unknown, which FAILS OPEN
+#                         and scores exactly as before; a telemetry gap must never
+#                         invent a penalty.
 #   AUTOSPEC_ROUTING_MAX_WALL_CLOCK_MS  global latency ceiling, 0 = none (default 0).
 #                         For a weeks-long autonomous run, 40 GPU-minutes on an issue a
 #                         cheap cloud tier finishes in 90s is a throughput REGRESSION,
@@ -87,6 +98,7 @@ FLOOR="${AUTOSPEC_ROUTING_FIRST_PASS_FLOOR:-0.6}"
 CACHE_BETA="${AUTOSPEC_ROUTING_CACHE_BETA:-0.5}"
 MAX_WALL_MS="${AUTOSPEC_ROUTING_MAX_WALL_CLOCK_MS:-0}"
 CLOUD_MULT="${AUTOSPEC_ROUTING_CLOUD_MULTIPLIER:-1.0}"
+PREFIX_TOKENS="${AUTOSPEC_ROUTING_PREFIX_TOKENS:-0}"
 JSON_OUT=0
 EXPLAIN=0
 
@@ -105,6 +117,7 @@ while [ $# -gt 0 ]; do
         --cache-beta)    CACHE_BETA="${2:-}"; shift 2 ;;
         --max-wall-clock-ms) MAX_WALL_MS="${2:-}"; shift 2 ;;
         --cloud-multiplier)  CLOUD_MULT="${2:-}"; shift 2 ;;
+        --prefix-tokens)     PREFIX_TOKENS="${2:-}"; shift 2 ;;
         --json)          JSON_OUT=1; shift ;;
         --explain)       EXPLAIN=1; shift ;;
         *) _die "unknown option: $1" ;;
@@ -144,7 +157,7 @@ _catalog() {
             k = kv[1]
             v = key; sub(/^[^:]*:[[:space:]]*/, "", v)
             gsub(/[[:space:]]+$/, "", v)
-            if (k == "cost_in" || k == "cost_out" || k == "cost_minute" || k == "max_wall_clock_ms") {
+            if (k == "cost_in" || k == "cost_out" || k == "cost_minute" || k == "max_wall_clock_ms" || k == "cache_min_tokens") {
                 printf "%s\t%s\t%s\n", cur, k, v
             }
         }
@@ -181,7 +194,8 @@ result="$(jq -n \
     --arg kind "$KIND" --arg ctx "$CTX" --arg reasoning "$REASONING" \
     --argjson alpha "$ALPHA" --argjson min_samples "$MIN_SAMPLES" \
     --argjson floor "$FLOOR" --argjson cache_beta "$CACHE_BETA" \
-    --argjson max_wall_ms "$MAX_WALL_MS" --argjson cloud_mult "$CLOUD_MULT" '
+    --argjson max_wall_ms "$MAX_WALL_MS" --argjson cloud_mult "$CLOUD_MULT" \
+    --argjson prefix_tokens "$PREFIX_TOKENS" '
     def cell($p): ($stats | map(select(
         .dispatch_kind == $kind and .profile == $p and
         .cell_ctx == $ctx and .cell_reasoning == $reasoning)) | first);
@@ -207,7 +221,22 @@ result="$(jq -n \
           mean_retries:    smooth(((.row.mean_retries // 0) * .n); .n; 1.0),
           escalation_rate: smooth(((.row.escalation_rate // 0) * .n); .n; 0.5),
           failure_rate:    smooth(((.row.failure_rate // 0) * .n); .n; 0.5),
-          cache_hit_ratio: (.row.cache_hit_ratio // 0),
+          # A prompt cache has a per-model MINIMUM: below it, nothing is cached
+          # however large the prefix feels. Haiku 4.5 needs 4096 tokens where
+          # Opus 5 needs 512, so the cheapest per-token profile is the easiest one
+          # to fall under — and a measured cache_hit_ratio recorded under a LARGER
+          # prefix would otherwise be credited to a dispatch that cannot cache at
+          # all. Zero it when the prefix provably cannot clear the floor.
+          # Fails open: prefix_tokens 0 (unknown) leaves the measured value alone,
+          # so a host that does not report prefix size scores exactly as before.
+          cache_hit_ratio: (
+            (($catalog[.profile] // {}).cache_min_tokens) as $floor_tok
+            | if ($prefix_tokens > 0 and $floor_tok != null and $prefix_tokens < $floor_tok)
+              then 0
+              else (.row.cache_hit_ratio // 0) end),
+          cache_floor_unmet: (
+            (($catalog[.profile] // {}).cache_min_tokens) as $floor_tok
+            | ($prefix_tokens > 0 and $floor_tok != null and $prefix_tokens < $floor_tok)),
           mean_wall_clock_ms: (.row.mean_wall_clock_ms // 0),
           wall_clock_ceiling_ms: ((($catalog[.profile] // {}).max_wall_clock_ms) // $max_wall_ms)
         })

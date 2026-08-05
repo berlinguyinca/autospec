@@ -218,7 +218,7 @@ EOF
 
     # POST a config with managed keys + one unmanaged key
     local post_body
-    post_body='{"version":1,"workspace":".autospec-fleet/repos","default_profile":"qwen3-32b-laptop","parallel_repos":2,"repos":[],"experimental_thing":42}'
+    post_body='{"version":1,"workspace":".autospec-fleet/repos","default_profile":"qwen3-6-35b-a3b-laptop","parallel_repos":2,"repos":[],"experimental_thing":42}'
 
     local post_resp
     post_resp="$(api_post "$port" "/api/config" "$post_body")"
@@ -499,7 +499,7 @@ EOF
     cat > "$config_file" <<'EOF'
 version: 1
 workspace: .autospec-fleet/repos
-default_profile: qwen3-32b-laptop
+default_profile: qwen3-6-35b-a3b-laptop
 parallel_repos: 2
 repos:
   - url: https://github.com/org/seeded-repo

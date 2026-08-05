@@ -80,7 +80,14 @@ case "$BRANCH" in
     ;;
 esac
 
-if ! bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh" --pre-commit --staged "${STAGED_BASE_ARGS[@]}" "${ISSUE_ARGS[@]}" > "$OUT" 2>&1; then
+# lint-implementation-gates.sh applies the corrected size rules (FILE_GROWTH ratchet,
+# and the PR_SIZE changed-line cap waived for a pure shrink) and delegates every other
+# rule to lint-implementation.sh unchanged. Falls back to the delegate when the gates
+# wrapper is absent, so an older install keeps working.
+LINTER="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation-gates.sh"
+[ -f "$LINTER" ] || LINTER="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lint-implementation.sh"
+
+if ! bash "$LINTER" --pre-commit --staged "${STAGED_BASE_ARGS[@]}" "${ISSUE_ARGS[@]}" > "$OUT" 2>&1; then
   echo "Pre-commit lint FAILED. Findings:" >&2
   cat "$OUT" >&2
   echo "" >&2

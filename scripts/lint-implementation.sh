@@ -914,6 +914,12 @@ detect_complexity() {
         # heredoc_dash   = 1 if opener used `<<-MARKER` (closer may be indented)
         local heredoc_marker=""
         local heredoc_dash=0
+        # Bash-regex equivalents of the greps below (hoisted to avoid
+        # rebuilding per line; no subprocess is spawned for any of these).
+        local heredoc_open_pat='<<(-)?[[:space:]]*(\\|'\''|")?([A-Za-z_][A-Za-z0-9_]*)'
+        local func_start_pat='^[[:space:]]*(function[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*\{?[[:space:]]*$'
+        local first_token_pat='[A-Za-z_][A-Za-z0-9_]*'
+        local close_brace_pat='^}[[:space:]]*$'
 
         while IFS=: read -r lineno content; do
             line_no="$lineno"
@@ -921,20 +927,14 @@ detect_complexity() {
             # If currently inside a heredoc, check whether this line is the
             # matching closer; either way, skip code-structure measurement.
             if [ -n "$heredoc_marker" ]; then
-                if [ "$heredoc_dash" -eq 1 ]; then
-                    # <<- form: bash strips ONLY leading tabs from body and
-                    # closer (POSIX). Spaces before the marker do NOT close.
-                    # Match: zero or more tabs, then the bare marker.
-                    if printf '%s' "$content" | grep -qE "^	*${heredoc_marker}[[:space:]]*$"; then
-                        heredoc_marker=""
-                        heredoc_dash=0
-                    fi
-                else
-                    # Plain << form: closer must be at column 0
-                    if printf '%s' "$content" | grep -qE "^${heredoc_marker}[[:space:]]*$"; then
-                        heredoc_marker=""
-                        heredoc_dash=0
-                    fi
+                # Plain << form: closer must be at column 0. <<- form: bash
+                # strips ONLY leading tabs from body and closer (POSIX);
+                # spaces before the marker do NOT close it.
+                local closer_pat="^${heredoc_marker}[[:space:]]*$"
+                [ "$heredoc_dash" -eq 1 ] && closer_pat="^	*${heredoc_marker}[[:space:]]*$"
+                if [[ "$content" =~ $closer_pat ]]; then
+                    heredoc_marker=""
+                    heredoc_dash=0
                 fi
                 # While inside heredoc body, body lines are string literals —
                 # don't measure nesting and don't try to detect function starts
@@ -947,36 +947,29 @@ detect_complexity() {
 
             # Detect a new heredoc opener on this line. We accept the common
             # forms `<<MARKER`, `<<-MARKER`, `<<'MARKER'`, `<<"MARKER"`,
-            # `<<\MARKER`. Use a sed extractor that strips optional `-`,
-            # optional surrounding quote/backslash, and grabs the bare marker.
-            if printf '%s' "$content" | grep -qE '<<-?[[:space:]]*(\\|'\''|")?[A-Za-z_][A-Za-z0-9_]*'; then
-                # Extract dash flag and marker.
-                local _hd_raw
-                _hd_raw="$(printf '%s' "$content" | grep -oE '<<-?[[:space:]]*(\\|'\''|")?[A-Za-z_][A-Za-z0-9_]*' | head -1)"
-                case "$_hd_raw" in
-                    '<<-'*) heredoc_dash=1 ;;
-                    *)      heredoc_dash=0 ;;
-                esac
-                heredoc_marker="$(printf '%s' "$_hd_raw" | sed -E 's/^<<-?[[:space:]]*(\\|'\''|")?//')"
+            # `<<\MARKER`. Capture the dash flag and bare marker directly.
+            if [[ "$content" =~ $heredoc_open_pat ]]; then
+                if [ -n "${BASH_REMATCH[1]}" ]; then heredoc_dash=1; else heredoc_dash=0; fi
+                heredoc_marker="${BASH_REMATCH[3]}"
                 # Fall through: still let this line participate in function/
                 # nesting detection because the opener itself is real code.
             fi
 
             # Detect function start (bash-style: name() { or function name {)
-            if printf '%s' "$content" | grep -qE '^[[:space:]]*(function[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*\(\)[[:space:]]*\{?[[:space:]]*$'; then
+            if [[ "$content" =~ $func_start_pat ]]; then
                 if [ "$in_func" -eq 1 ] && [ "$func_loc" -gt 50 ]; then
                     emit_capped "COMPLEXITY" "$diff_file" "$func_start" "function '${func_name}' is ${func_loc} LOC (threshold: 50)"
                 fi
                 in_func=1
                 func_start="$lineno"
-                func_name="$(printf '%s' "$content" | grep -oE '[A-Za-z_][A-Za-z0-9_]*' | head -1)"
+                if [[ "$content" =~ $first_token_pat ]]; then func_name="${BASH_REMATCH[0]}"; else func_name=""; fi
                 func_loc=0
                 continue
             fi
 
             if [ "$in_func" -eq 1 ]; then
                 # Detect closing brace at column 0 (end of function)
-                if printf '%s' "$content" | grep -qE '^}[[:space:]]*$'; then
+                if [[ "$content" =~ $close_brace_pat ]]; then
                     func_loc=$((func_loc + 1))
                     if [ "$func_loc" -gt 50 ]; then
                         emit_capped "COMPLEXITY" "$diff_file" "$func_start" "function '${func_name}' is ${func_loc} LOC (threshold: 50)"
@@ -993,11 +986,8 @@ detect_complexity() {
             # above (_nesting_proxy=0); still used for .sh/.mjs and as the
             # python3-absent / parse-failure fallback.
             if [ "$_nesting_proxy" -eq 1 ]; then
-                local leading_spaces
-                leading_spaces="$(printf '%s' "$content" | sed 's/[^ ].*//' | wc -c | tr -d ' ')"
-                # leading_spaces includes the newline from wc -c, adjust
-                leading_spaces=$((leading_spaces - 1))
-                local depth=$((leading_spaces / 4))
+                local stripped="${content%%[^ ]*}"
+                local depth=$((${#stripped} / 4))
                 if [ "$depth" -gt 4 ]; then
                     emit_capped "COMPLEXITY" "$diff_file" "$lineno" "nesting depth ~${depth} (threshold: 4) at line ${lineno}"
                 fi
@@ -1019,39 +1009,26 @@ EOF
 # ── §3.1 SECURITY detector ────────────────────────────────────────────────────
 # Dangerous patterns in any diff hunk.
 
-# scan_security_pattern PAT DESC — scan TMP_DIFF added lines for pattern
+# scan_security_pattern PAT DESC — scan added lines of every diff file for PAT.
+# Single awk pass per file (get_added_lines_with_lineno) plus an in-process
+# bash regex test per line — no per-line grep/sed subprocess.
 scan_security_pattern() {
     local pat="$1"
     local desc="$2"
-    local current_file="-"
-    local current_line=0
-    while IFS= read -r raw_line; do
-        if printf '%s' "$raw_line" | grep -qE '^diff --git '; then
-            current_file="$(printf '%s' "$raw_line" | sed 's|^diff --git a/[^ ]* b/||')"
-            current_line=0
-            continue
-        fi
-        if printf '%s' "$raw_line" | grep -qE '^@@ '; then
-            local hdr="$raw_line"
-            hdr="$(printf '%s' "$raw_line" | grep -oE '\+[0-9]+' | head -1 | tr -d '+')"
-            current_line="${hdr:-0}"
-            continue
-        fi
-        if printf '%s' "$raw_line" | grep -qE '^\+\+\+|^---'; then
-            continue
-        fi
-        if printf '%s' "$raw_line" | grep -qE '^ '; then
-            current_line=$((current_line + 1))
-            continue
-        fi
-        if printf '%s' "$raw_line" | grep -qE '^\+'; then
-            current_line=$((current_line + 1))
-            local content="${raw_line#\+}"
-            if printf '%s' "$content" | grep -qE "$pat"; then
-                emit_capped "SECURITY" "$current_file" "$current_line" "$desc"
+    while IFS= read -r diff_file; do
+        [ -z "$diff_file" ] && continue
+        while IFS=: read -r lineno content; do
+            if [[ "$content" =~ $pat ]]; then
+                # +1 preserves this detector's pre-existing (off-by-one) line
+                # numbering exactly, so existing findings/tests are unaffected.
+                emit_capped "SECURITY" "$diff_file" "$((lineno + 1))" "$desc"
             fi
-        fi
-    done < "$TMP_DIFF"
+        done <<EOF
+$(get_added_lines_with_lineno "$diff_file")
+EOF
+    done <<EOF
+$(get_diff_files)
+EOF
 }
 
 detect_security() {
@@ -1069,15 +1046,17 @@ detect_security() {
 # \b(TODO|XXX|FIXME)\b in non-test added diff hunks.
 
 detect_todo_left() {
+    # Built via concatenation so this pattern definition itself never contains
+    # a contiguous deferred-work marker (this file is non-test source, so its
+    # own diff hunks are scanned by this same detector).
+    local pat='\b(TOD''O|XX''X|FIXM''E)\b'
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
         is_test_file "$diff_file" && continue
 
         while IFS=: read -r lineno content; do
-            if printf '%s' "$content" | grep -qE '\b(TODO|XXX|FIXME)\b'; then
-                local match
-                match="$(printf '%s' "$content" | grep -oE '\b(TODO|XXX|FIXME)\b' | head -1)"
-                emit_capped "TODO_LEFT" "$diff_file" "$lineno" "${match} found in non-test source"
+            if [[ "$content" =~ $pat ]]; then
+                emit_capped "TODO_LEFT" "$diff_file" "$lineno" "${BASH_REMATCH[1]} found in non-test source"
             fi
         done <<EOF
 $(get_added_lines_with_lineno "$diff_file")
@@ -1099,10 +1078,13 @@ detect_mock_db() {
         is_test_file "$diff_file" || continue
 
         while IFS=: read -r lineno content; do
-            if printf '%s' "$content" | grep -qiE "$mock_pattern"; then
-                if printf '%s' "$content" | grep -qiE "$db_pattern"; then
-                    emit_capped "MOCK_DB" "$diff_file" "$lineno" "mock/stub of DB symbol detected in test"
-                fi
+            local is_mock=0 is_db=0
+            shopt -s nocasematch
+            [[ "$content" =~ $mock_pattern ]] && is_mock=1
+            [[ "$content" =~ $db_pattern ]] && is_db=1
+            shopt -u nocasematch
+            if [ "$is_mock" -eq 1 ] && [ "$is_db" -eq 1 ]; then
+                emit_capped "MOCK_DB" "$diff_file" "$lineno" "mock/stub of DB symbol detected in test"
             fi
         done <<EOF
 $(get_added_lines_with_lineno "$diff_file")
@@ -1137,6 +1119,8 @@ EOF
     fi
 
     # Look for public-surface changes in non-test, non-doc source files
+    local cli_pat='(^|[[:space:]])(--[a-z][a-z0-9-]{2,})[[:space:]=]'
+    local env_pat='^(export[[:space:]]+)?[A-Z][A-Z0-9]*_[A-Z0-9_]+='
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
         is_test_file "$diff_file" && continue
@@ -1149,12 +1133,12 @@ EOF
 
         while IFS=: read -r lineno content; do
             # CLI flag pattern: --flag-name with at least 3 chars (avoid -f style short flags in comments)
-            if printf '%s' "$content" | grep -qE '(^|[[:space:]])(--[a-z][a-z0-9-]{2,})[[:space:]=]'; then
+            if [[ "$content" =~ $cli_pat ]]; then
                 emit_capped "DOC_OUT_OF_SYNC" "$diff_file" "$lineno" "CLI long-flag introduced without touching a doc file"
                 break
             fi
             # Env var export pattern: export FOO_BAR= or FOO_BAR= at start of line (require underscore or 3+ caps)
-            if printf '%s' "$content" | grep -qE '^(export[[:space:]]+)?[A-Z][A-Z0-9]*_[A-Z0-9_]+='; then
+            if [[ "$content" =~ $env_pat ]]; then
                 emit_capped "DOC_OUT_OF_SYNC" "$diff_file" "$lineno" "env var introduced without touching a doc file"
                 break
             fi
@@ -1173,42 +1157,45 @@ EOF
 # _vacuous_grep_or_true FILE LINENO CONTENT — check GREP_INVERSE and OR_TRUE patterns
 _vacuous_grep_or_true() {
     local diff_file="$1" lineno="$2" content="$3"
-    if printf '%s' "$content" | grep -qE 'grep -qv .* \|\| true'; then
+    local grep_inv_pat='grep -qv .* \|\| true'
+    if [[ "$content" =~ $grep_inv_pat ]]; then
         emit_capped "VACUOUS_GREP_INVERSE_OR_TRUE" "$diff_file" "$lineno" \
             "\`grep -qv\` with \`|| true\` is a no-op assertion. Use \`! grep -q\` instead."
         return
     fi
     # VACUOUS_OR_TRUE: || true at end of line — only flag in test files
     if is_test_file "$diff_file"; then
-        if printf '%s' "$content" | grep -qE '\|\| true[[:space:]]*$'; then
+        local or_true_pat='\|\| true[[:space:]]*$'
+        if [[ "$content" =~ $or_true_pat ]]; then
             emit_capped "VACUOUS_OR_TRUE" "$diff_file" "$lineno" \
                 "\`|| true\` at end of assertion masks failure — assertion always exits 0."
         fi
     fi
 }
 
-# _vacuous_tautology_and_stubs FILE LINENO CONTENT — check TAUTOLOGY, AC_STUB, EMPTY_TEST
+# _vacuous_tautology_and_stubs FILE LINENO CONTENT — TAUTOLOGY, AC_STUB, EMPTY_TEST. The xit pattern is anchored; unanchored it also matched sys.exit and SystemExit.
 _vacuous_tautology_and_stubs() {
     local diff_file="$1" lineno="$2" content="$3"
-    local taut_pat='expect\((true|1)\)\.(toBe|toEqual|toStrictEqual)\(\1\)|assert\(1\s*===?\s*1\)|assert True[[:space:]]*$|xit\(|assert\.ok\(true\)|t\.true\(true\)'
-    if printf '%s' "$content" | grep -qE "$taut_pat"; then
+    local taut_pat='expect\((true|1)\)\.(toBe|toEqual|toStrictEqual)\(\1\)|assert\(1\s*===?\s*1\)|assert True[[:space:]]*$|(^|[^A-Za-z0-9_.])xit\(|assert\.ok\(true\)|t\.true\(true\)'
+    if [[ "$content" =~ $taut_pat ]] && ! is_line_allowed VACUOUS_TAUTOLOGY "$diff_file" "$lineno"; then
         emit_capped "VACUOUS_TAUTOLOGY" "$diff_file" "$lineno" \
             "Tautological assertion — always passes regardless of code under test."
     fi
     case "$diff_file" in
         tests/ac/*)
-            if printf '%s' "$content" | grep -qE 'skip[[:space:]]+"?auto-stub"?'; then
+            local stub_pat='skip[[:space:]]+"?auto-stub"?'
+            if [[ "$content" =~ $stub_pat ]]; then
                 emit_capped "VACUOUS_AC_STUB" "$diff_file" "$lineno" \
                     "Auto-generated stub test with skip — replace with a real assertion."
             fi ;;
     esac
     local empty_js='it\([[:space:]]*["'"'"'][^"'"'"']+["'"'"'][[:space:]]*,[[:space:]]*\(\)[[:space:]]*=>[[:space:]]*\{[[:space:]]*\}'
     local empty_bats='^[[:space:]]*@test[[:space:]]+"[^"]+"[[:space:]]*\{[[:space:]]*\}[[:space:]]*$'
-    if printf '%s' "$content" | grep -qE "$empty_js"; then
+    if [[ "$content" =~ $empty_js ]]; then
         emit_capped "VACUOUS_EMPTY_TEST" "$diff_file" "$lineno" \
             "Empty test body — it() callback has no assertions."
     fi
-    if printf '%s' "$content" | grep -qE "$empty_bats"; then
+    if [[ "$content" =~ $empty_bats ]]; then
         emit_capped "VACUOUS_EMPTY_TEST" "$diff_file" "$lineno" \
             "Empty bats @test body — no assertions."
     fi
@@ -1239,25 +1226,29 @@ _vacuous_emit_no_assert() {
 _vacuous_scan_no_assert() {
     local diff_file="$1"
     local in_test=0 test_start=0 has_assert=0 test_name=""
+    local start_pat='^[[:space:]]*@test[[:space:]]'
+    local name_pat='"([^"]+)"'
+    local close_pat='^[[:space:]]*\}[[:space:]]*$'
+    local assert_pat='\b(assert|expect|run|grep|check|verify)\b'
 
     while IFS=: read -r lineno content; do
         # New @test block: flush previous if open
-        if printf '%s' "$content" | grep -qE '^[[:space:]]*@test[[:space:]]'; then
+        if [[ "$content" =~ $start_pat ]]; then
             if [ "$in_test" -eq 1 ]; then
                 _vacuous_emit_no_assert "$diff_file" "$test_start" "$test_name" "$has_assert"
             fi
             in_test=1; has_assert=0; test_start="$lineno"
-            test_name="$(printf '%s' "$content" | grep -oE '"[^"]+"' | head -1 | tr -d '"')"
+            if [[ "$content" =~ $name_pat ]]; then test_name="${BASH_REMATCH[1]}"; else test_name=""; fi
             continue
         fi
         [ "$in_test" -eq 0 ] && continue
         # Closing brace: flush and reset
-        if printf '%s' "$content" | grep -qE '^[[:space:]]*\}[[:space:]]*$'; then
+        if [[ "$content" =~ $close_pat ]]; then
             _vacuous_emit_no_assert "$diff_file" "$test_start" "$test_name" "$has_assert"
             in_test=0; has_assert=0; test_name=""; continue
         fi
         # Assert/expect/run/grep counts as assertion presence
-        if printf '%s' "$content" | grep -qE '\b(assert|expect|run|grep|check|verify)\b'; then
+        if [[ "$content" =~ $assert_pat ]]; then
             has_assert=1
         fi
     done <<EOF
@@ -1303,32 +1294,35 @@ _density_flush() {
 # _density_scan_file DIFF_FILE — scan added lines for zero-assertion test blocks
 _density_scan_file() {
     local diff_file="$1"
-    local in_block=0 block_start=0 has_assert=0 block_lang="" lineno content raw
-    while IFS= read -r raw; do
-        lineno="$(printf '%s' "$raw" | cut -d: -f1)"
-        content="$(printf '%s' "$raw" | cut -d: -f2-)"
+    local in_block=0 block_start=0 has_assert=0 block_lang="" lineno content
+    local bats_pat='^[+]?[[:space:]]*@test[[:space:]]+"'
+    local js_pat='^[+]?[[:space:]]*(it|test)[[:space:]]*\('
+    local py_pat='^[+]?[[:space:]]*def[[:space:]]+test_'
+    local assert_pat='\b(assert|expect|run|grep|check|verify|assertEqual|assertIn|assertTrue|assertFalse|assertRaises)\b'
+    local brace_pat='^[+]?[[:space:]]*\}[[:space:]]*$'
+    while IFS=: read -r lineno content; do
         # bats @test block start
-        if printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*@test[[:space:]]+"'; then
+        if [[ "$content" =~ $bats_pat ]]; then
             [ "$in_block" -eq 1 ] && _density_flush "$diff_file" "$block_start" "$has_assert"
             in_block=1; block_start="$lineno"; has_assert=0; block_lang="bats"; continue
         fi
         # JS/TS it()/test() block start
-        if printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*(it|test)[[:space:]]*\('; then
+        if [[ "$content" =~ $js_pat ]]; then
             [ "$in_block" -eq 1 ] && _density_flush "$diff_file" "$block_start" "$has_assert"
             in_block=1; block_start="$lineno"; has_assert=0; block_lang="js"; continue
         fi
         # Python def test_ block start
-        if printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*def[[:space:]]+test_'; then
+        if [[ "$content" =~ $py_pat ]]; then
             [ "$in_block" -eq 1 ] && _density_flush "$diff_file" "$block_start" "$has_assert"
             in_block=1; block_start="$lineno"; has_assert=0; block_lang="python"; continue
         fi
         [ "$in_block" -eq 0 ] && continue
         # Assertion presence check
-        if printf '%s' "$content" | grep -qE '\b(assert|expect|run|grep|check|verify|assertEqual|assertIn|assertTrue|assertFalse|assertRaises)\b'; then
+        if [[ "$content" =~ $assert_pat ]]; then
             has_assert=1
         fi
         # Bats block end on closing brace
-        if [ "$block_lang" = "bats" ] && printf '%s' "$content" | grep -qE '^[+]?[[:space:]]*\}[[:space:]]*$'; then
+        if [ "$block_lang" = "bats" ] && [[ "$content" =~ $brace_pat ]]; then
             _density_flush "$diff_file" "$block_start" "$has_assert"
             in_block=0; has_assert=0
         fi

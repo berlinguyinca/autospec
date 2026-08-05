@@ -157,6 +157,27 @@ INVENTED_CONFIG). Also supports `--vacuous-assertions` mode (bundled in `--pre-c
 that detects 6 vacuous-test RULE_IDs: VACUOUS_GREP_INVERSE_OR_TRUE, VACUOUS_OR_TRUE,
 VACUOUS_TAUTOLOGY, VACUOUS_AC_STUB, VACUOUS_EMPTY_TEST, VACUOUS_NO_ASSERT.
 
+`PR_SIZE` counts logical units, capped at three. A doc file does not consume one: since
+`DOC_OUT_OF_SYNC` requires every public-surface change to touch a doc file, charging the
+unit cap for that file put the two rules in direct tension — a change sitting at the
+limit failed the moment it was documented. Doc files still count toward the changed-line
+and raw-file caps. A skill adapter trio still collapses to a single unit and a derived
+golden to none; the trio is resolved before the doc exclusion, because a skill's
+`SKILL.md` is itself a doc file.
+
+The exclusion lives in two places, and neither is `normalize_logical_unit` — the issue
+lint's `TOO_MANY_FILES` shares that helper and has no doc-touch requirement to be in
+tension with. For local commits, `lint-implementation-gates.sh` recounts units without
+docs and drops the breach when the real count fits. For the executor's patch-size
+admission, `pr_size_logical_unit` in `crates/autospec-core/src/lint/pr_size.rs` applies
+the same rule. The two must stay in step.
+
+The per-added-line detectors (SECURITY, TODO_LEFT, MOCK_DB, DOC_OUT_OF_SYNC, the
+VACUOUS_* family, ASSERTION_DENSITY, COMPLEXITY) test each line with an in-process
+bash `[[ =~ ]]` regex instead of spawning a `grep`/`sed`/`cut` subprocess per line,
+so a ~20,000-added-line diff (e.g. hoisting a large inline test module out of a
+huge file) lints in seconds instead of not finishing within several minutes.
+
 ```
 Usage: bash lint-implementation.sh <pr-number> [--repo <owner/repo>]
        bash lint-implementation.sh --diff-file <path>
@@ -187,8 +208,8 @@ are written to standard error while classifier findings are written to standard
 output as RULE_ID records.
 
 <!-- autospec-doc-scope:
-  src: ["tests/unit/test_lint_implementation.bats"]
-  reason: "Bats unit tests for lint-implementation.sh rule detectors including vacuous-assertions"
+  src: ["tests/unit/test_lint_implementation.bats", "tests/unit/test_lint_implementation_perf.bats"]
+  reason: "Bats unit tests for lint-implementation.sh rule detectors including vacuous-assertions and per-added-line detector scale"
   mismatch_action: warn
   generated: false
 -->

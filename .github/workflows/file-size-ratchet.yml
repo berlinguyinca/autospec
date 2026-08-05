@@ -1,0 +1,124 @@
+name: File size ratchet
+
+# The size rule previously ran only as a local pre-commit hook. Nothing in CI invoked
+# it, so oversized files grew freely through the PR merge path — which never executes
+# local hooks — while local cleanup was the only thing ever rejected.
+#
+# crates/autospec-cli/src/commands/autonomous/executor_bridge.rs reached 49,482 lines in
+# nine days across 80 merged commits, roughly 5,500 lines a day, without one objection.
+#
+# This job closes that hole. It is a ratchet, not an absolute limit: a file already over
+# the threshold may be edited and shrunk, but not grown. Existing debt stays legal at its
+# current size; what is blocked is making it worse.
+#
+# Relocation is the one case where a new oversized file is tolerated. Extracting code out
+# of a monolith into a sibling module is the remedy this job's own failure message
+# recommends, and a split necessarily creates a file. When a change removes at least as
+# many lines as it adds, the extracted file is reported and not blocked — rejecting it
+# would preserve the larger monolith, which is the worse of the two states.
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  file-size-ratchet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ratchet changed files against the merge base
+        env:
+          MAX_LOC: "600"
+          HARD_LOC: "2000"
+        run: |
+          set -eu
+          base="$(git merge-base "origin/${GITHUB_BASE_REF:-main}" HEAD)"
+          echo "merge base: $base"
+
+          # Extensions the size rules do not apply to.
+          skip_ext() {
+            case "$1" in
+              *.md|*.txt|*.json|*.yaml|*.yml|*.diff|*.lock|*.snap) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          # Net line delta across the whole change. Taken from --numstat rather than by
+          # differencing file lengths, because git reports a move as a rename: the
+          # source path never appears on its own, so length differencing counts the
+          # destination as wholly new and a relocation reads as pure addition.
+          net="$(git diff --numstat "$base"...HEAD | awk '
+            {
+              path = $3
+              # Renames arrive as "old => new" or "dir/{old => new}"; judge the target.
+              if (index(path, "=>")) { sub(/^.*=> ?/, "", path); gsub(/[}]/, "", path) }
+              if (path ~ /\.(md|txt|json|ya?ml|diff|lock|snap)$/) next
+              if ($1 == "-" || $2 == "-") next   # binary
+              net += $1 - $2
+            }
+            END { print net + 0 }
+          ')"
+          echo "net line delta: $net"
+
+          # A change that removes at least as many lines as it adds is a relocation, not
+          # new material: a feature cannot hide in it, because features add lines.
+          is_relocation=0
+          [ "$net" -le 0 ] && is_relocation=1
+
+          fail=0
+          # ACMR: added, copied, modified, renamed. Deletions cannot grow a file.
+          for f in $(git diff --name-only --diff-filter=ACMR "$base"...HEAD); do
+            [ -f "$f" ] || continue
+            skip_ext "$f" && continue
+
+            after="$(wc -l < "$f" | tr -d ' ')"
+            if git cat-file -e "$base:$f" 2>/dev/null; then
+              before="$(git show "$base:$f" | wc -l | tr -d ' ')"
+            else
+              before=""
+            fi
+
+            # New file: judged against the threshold directly, unless it holds relocated
+            # code — see the relocation note at the top of this file.
+            if [ -z "$before" ]; then
+              if [ "$after" -gt "$MAX_LOC" ]; then
+                if [ "$is_relocation" -eq 1 ]; then
+                  echo "::warning file=$f::$f is a $after line extraction, over the $MAX_LOC limit; allowed because the change is a net removal, but split it further"
+                else
+                  echo "FILE_SIZE:$f: new file is $after lines (limit $MAX_LOC); split it before landing"
+                  fail=1
+                fi
+              fi
+              continue
+            fi
+
+            # Existing file at or under the threshold: unconstrained.
+            [ "$after" -le "$MAX_LOC" ] && continue
+
+            # Existing oversized file: may shrink or hold, may not grow.
+            if [ "$after" -gt "$before" ]; then
+              echo "FILE_SIZE:$f: grew from $before to $after lines and is over the $MAX_LOC limit"
+              echo "  an oversized file may be edited and shrunk, but not made longer"
+              fail=1
+            else
+              echo "ok (not grown): $f  $before -> $after"
+            fi
+
+            # Past the hard ceiling, say so even when the change shrinks the file, so the
+            # worst offenders stay visible in every PR that touches them.
+            if [ "$after" -gt "$HARD_LOC" ]; then
+              echo "::warning file=$f::$f is $after lines, past the $HARD_LOC hard ceiling; it needs splitting"
+            fi
+          done
+
+          if [ "$fail" -ne 0 ]; then
+            echo ""
+            echo "A file over $MAX_LOC lines got longer. Move code out rather than adding to it;"
+            echo "extracting an inline #[cfg(test)] mod tests into a sibling file is usually the"
+            echo "cheapest first cut and carries no production risk."
+            exit 1
+          fi
+          echo "file size ratchet: OK"

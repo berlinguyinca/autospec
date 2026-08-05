@@ -327,6 +327,47 @@ harness exposes it to subagent dispatch, only the dispatch contract's top rung
 changes — `advisor-escalate.sh` (cap/curation/validation/telemetry) and all four
 gate preconditions are untouched.
 
+### Amendment 2026-08-05 — the native tool now exists, but not where autospec is
+
+`advisor_20260301` has shipped as a beta server-side tool. This section records its
+verified contract so nobody re-derives it, and states precisely why rung 1 is still
+not reachable.
+
+Contract, as of 2026-08-05:
+
+- Tool definition `{"type": "advisor_20260301", "name": "advisor", "model": "<advisor>"}`.
+  The executor is the request's top-level `model`; the advisor is the model inside
+  the tool definition.
+- Beta header / flag: `advisor-tool-2026-03-01`.
+- **The advisor must be at least as capable as the executor**, or the request is
+  rejected with `400 invalid_request_error`. The pairings this design cares about
+  are valid: executor Haiku 4.5 or Sonnet 5 → advisor Opus 5 or Fable 5.
+- Multi-turn: append the full `response.content`, *including* `advisor_tool_result`
+  blocks, back into `messages`. Removing the advisor tool from `tools` on a later
+  turn while the history still contains those blocks is a 400.
+
+One gotcha will silently produce empty advice if missed. The response block is
+always `advisor_tool_result`, but its `content` is a **discriminated union** that
+varies by advisor model: `advisor_result` carries `text`, while
+`advisor_redacted_result` carries `encrypted_content` — and Opus 5 and Fable 5, the
+two advisors this design would actually use, both return the *encrypted* form.
+Code must switch on `advisor_tool_result.content` type, never read `.text`
+unconditionally. Encrypted content cannot be inspected, only replayed on the next
+turn, which also means the validation step in `advisor-escalate.sh` cannot inspect
+an Opus 5 advisor's answer directly — a constraint the emulated rung does not have.
+
+**Blocking dependency: this is a Messages-API feature, and autospec does not call
+the Messages API.** Every autospec dispatch goes through a harness — Claude Code's
+`Agent` tool, `codex exec`, or OpenCode's `task` — and none of them currently
+exposes an executor/advisor pairing to a subagent dispatch. Rung 1 therefore stays
+future work; the trigger to revisit is a harness surfacing the pairing, not a
+further API change. Rungs 2 and 3 (harness-native TIER_A subagent, CLI shell-out)
+remain the implementable path, exactly as this design assumed.
+
+Consequence for the cost model: the "emulated cost inversion" risk below is not
+mitigated by the tool shipping. Until a harness exposes it, an advisor call still
+re-loads context, so the deterministic gates and the hard cap remain load-bearing.
+
 ## Risks & open questions
 
 - **Emulated cost inversion** — an emulated advisor call re-loads context and is

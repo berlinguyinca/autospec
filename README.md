@@ -326,8 +326,13 @@ Run `scripts/discover-model-supply.sh --profiles` to see what this host can
 actually run — usable accelerator, reachable local runtimes (Ollama, vLLM,
 llama.cpp, LM Studio), and each installed model's *measured* context length —
 and to emit a `model-profiles.yml` fragment. Models the host cannot run
-usefully are emitted commented out rather than silently offered. See
+usefully are emitted commented out rather than silently offered. Add `--only
+<profile>` for a single-profile fragment. See
 [`docs/CONFIG_REFERENCE.md`](docs/CONFIG_REFERENCE.md#local-model-supply-discovery).
+
+A profile may also declare an `effort:` tier, reported by `route-decide.sh
+--print-effort`. Raising effort on the same model is often a better dial than
+swapping models, because a model switch invalidates the whole prompt cache.
 
 The autonomous research-cycle preview wiring is maintained alongside this
 documentation so its environment contract remains discoverable.
