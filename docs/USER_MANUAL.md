@@ -318,3 +318,58 @@ Generated artifacts committed to every target repo:
 | `docs/.llm-manifest.json` | Structured per-symbol manifest |
 | `llms.txt` | Short curated index (≤200 lines) |
 | `llms-full.txt` | Full concatenated doc content |
+
+## Inspecting model-routing decisions
+
+`scripts/route-decide.sh --labels "<issue-labels>" --explain` prints the routing
+decision and the reason for it on stderr, without dispatching anything. Use it to
+answer "why did this issue run on that model?".
+
+- `--print-profile` prints the profile name instead of the model id.
+- Exit 3 means nothing was resolvable, and the caller keeps its harness-detected
+  tier — the same fail-closed contract `select-model-profile.sh` uses.
+- `scripts/routing-cost.sh ... --explain` shows the per-candidate arithmetic:
+  sample count, unit cost, expected retries, escalation rate, cache penalty, and
+  the resulting effective cost.
+- `scripts/routing-ledger.sh --stats` shows what the decisions are being learned
+  from, per dispatch kind and routing cell.
+
+With an empty ledger the decision is identical to the pre-existing behaviour, so
+`--explain` on a fresh install reports the baseline and why no override applied.
+Knobs are listed under
+[`CONFIG_REFERENCE.md`](CONFIG_REFERENCE.md#evidence-based-model-routing).
+
+## Budget-aware routing and latency ceilings
+
+As the token budget runs down, paid tiers should get more expensive so eligible work
+shifts to local models and the runway extends — rather than the run simply parking.
+`scripts/routing-budget-hint.sh --json` reports the current bias:
+
+```
+{"used_pct":80,"remaining_pct":20.0,"cloud_multiplier":2.5,"hint":"prefer-cheap"}
+```
+
+Feed `cloud_multiplier` to the scorer via `AUTOSPEC_ROUTING_CLOUD_MULTIPLIER`. It
+penalises **token-priced** profiles only: local profiles are priced in wall clock and
+consume no token budget, so scaling them would be incoherent. The usage governor keeps
+sole authority over the decision to park; this only makes park arrive later, and it
+fails open (multiplier `1.0`) whenever the spend signal is unreadable, so a telemetry
+gap can never distort routing.
+
+`AUTOSPEC_ROUTING_MAX_WALL_CLOCK_MS`, or a per-profile `max_wall_clock_ms`, makes a
+profile ineligible once its **measured** mean latency exceeds the ceiling, however
+cheap and reliable it is. For a weeks-long autonomous run, 40 GPU-minutes on an issue a
+cheap cloud tier finishes in 90 seconds is a throughput regression, not a saving.
+
+## Qualifying a profile before trusting it
+
+`scripts/calibrate-profile.sh --profile <name>` replays previously-merged issues against
+a candidate profile in a throwaway worktree and scores each attempt with the repo's own
+gate, writing the results into the routing ledger as ordinary rows so calibration and
+live evidence share one formula. The verdict is cached per hardware fingerprint, so
+re-running on unchanged hardware is a no-op and swapping a GPU invalidates it.
+
+**"Qualified for zero tiers" is a legitimate result**, reported as a clean exit rather
+than retried into submission. On a host whose GPU is unusable, zero is the correct
+answer, and a harness that kept trying until it got a pass would be manufacturing
+evidence.

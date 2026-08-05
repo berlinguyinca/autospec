@@ -157,6 +157,12 @@ INVENTED_CONFIG). Also supports `--vacuous-assertions` mode (bundled in `--pre-c
 that detects 6 vacuous-test RULE_IDs: VACUOUS_GREP_INVERSE_OR_TRUE, VACUOUS_OR_TRUE,
 VACUOUS_TAUTOLOGY, VACUOUS_AC_STUB, VACUOUS_EMPTY_TEST, VACUOUS_NO_ASSERT.
 
+The per-added-line detectors (SECURITY, TODO_LEFT, MOCK_DB, DOC_OUT_OF_SYNC, the
+VACUOUS_* family, ASSERTION_DENSITY, COMPLEXITY) test each line with an in-process
+bash `[[ =~ ]]` regex instead of spawning a `grep`/`sed`/`cut` subprocess per line,
+so a ~20,000-added-line diff (e.g. hoisting a large inline test module out of a
+huge file) lints in seconds instead of not finishing within several minutes.
+
 ```
 Usage: bash lint-implementation.sh <pr-number> [--repo <owner/repo>]
        bash lint-implementation.sh --diff-file <path>
@@ -187,8 +193,8 @@ are written to standard error while classifier findings are written to standard
 output as RULE_ID records.
 
 <!-- autospec-doc-scope:
-  src: ["tests/unit/test_lint_implementation.bats"]
-  reason: "Bats unit tests for lint-implementation.sh rule detectors including vacuous-assertions"
+  src: ["tests/unit/test_lint_implementation.bats", "tests/unit/test_lint_implementation_perf.bats"]
+  reason: "Bats unit tests for lint-implementation.sh rule detectors including vacuous-assertions and per-added-line detector scale"
   mismatch_action: warn
   generated: false
 -->

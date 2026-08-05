@@ -313,6 +313,22 @@ Implementation-lint results can be cached by content with
 `scripts/lint-implementation-cached.sh --staged`; unchanged staged diffs reuse
 the prior result from `.autospec/cache/lint/`.
 
+### Local model dispatch
+
+Once a model is discovered and qualified, `scripts/calibrate-profile.sh --profile <name>`
+replays already-merged issues against it and records the verdict, and
+`scripts/local-dispatch.sh` runs real dispatches through Codex CLI's `--oss` local
+provider. Both fail closed to the cloud tier rather than guessing.
+
+### Local model discovery
+
+Run `scripts/discover-model-supply.sh --profiles` to see what this host can
+actually run — usable accelerator, reachable local runtimes (Ollama, vLLM,
+llama.cpp, LM Studio), and each installed model's *measured* context length —
+and to emit a `model-profiles.yml` fragment. Models the host cannot run
+usefully are emitted commented out rather than silently offered. See
+[`docs/CONFIG_REFERENCE.md`](docs/CONFIG_REFERENCE.md#local-model-supply-discovery).
+
 The autonomous research-cycle preview wiring is maintained alongside this
 documentation so its environment contract remains discoverable.
 For companion repository boundaries, see
