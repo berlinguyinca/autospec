@@ -254,6 +254,19 @@ Two fields decide whether a local model is usable, and both fail closed:
 Context ceilings come from `ollama show`, never from the model name: a tag can
 misreport its parameter count, and two tags can share one set of weights.
 
+`--profiles` prints a paste-able `model-profiles.yml` fragment, and
+`--profiles --only <profile>` narrows it to a single entry. Prefer **one** local
+profile: a local GPU is capacity-1, so a second local profile at a different size
+buys no parallelism and alternating between them evicts and reloads weights
+between dispatches. `--only` filters the *output*; the probe still discovers
+every model, because hiding models from discovery is the blindness this tool
+exists to fix. Naming a profile the probe did not find is an error rather than an
+empty mapping, so a typo cannot masquerade as "nothing found".
+
+The emitted fragment carries no prices, and `routing-cost.sh` refuses a profile
+with no cost keys. Add `cost_minute:` (USD-equivalent per GPU-minute) — and
+optionally `max_wall_clock_ms:` — before a local profile can be routed to.
+
 ## Evidence-based model routing
 `scripts/routing-ledger.sh` records what each dispatch cost and how it turned out;
 `scripts/routing-cost.sh` scores candidate profiles on measured **effective** cost;
