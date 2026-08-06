@@ -365,6 +365,35 @@ Exit: 0 = success, 1 = missing required input or file not found.
   generated: false
 -->
 
+### `ui-motion-evidence.mjs`
+
+Runtime motion evidence (design spec L4b). Renders each route twice — once normally,
+once with `prefers-reduced-motion: reduce` — and asserts that motion exists by default,
+stops under the preference, and does not run unbounded.
+
+```
+Usage: node ui-motion-evidence.mjs --base-url <url> --routes <path> [<path>…]
+                                   [--json <report-path>]
+
+Exit: 0 clean, 1 findings, 3 Playwright unavailable (evidence not collected).
+Env:  PLAYWRIGHT_CHROMIUM_PATH   launch this chromium instead of the bundled one.
+```
+
+Findings are `MOTION_ABSENT`, `MOTION_NOT_REDUCED` and `MOTION_UNBOUNDED`.
+
+`MOTION_ABSENT` is the one to understand. Every other gate in the pipeline — the token
+lint, the vision fidelity judge, axe, the aesthetic rubric — passes a static page
+cleanly, so a correct, accessible, entirely lifeless UI reaches production with every
+check green. This assertion is the only one that objects, which is what makes it the
+pipeline's defence against blandness rather than against error.
+
+It requires an animation that moves or resizes something. A colour or opacity fade does
+not satisfy it, matching what `lint-ui.sh` counts as motion for `UI_NO_REDUCED_MOTION` —
+the two definitions are deliberately the same, since a crossfade should not clear an
+anti-blandness gate in one place and fail a motion rule in another.
+
+Exit 3 means no evidence was collected and must be recorded as unknown, never as a pass.
+
 ## End-of-run gap remediation (`$AUTOSPEC_SCRIPTS_DIR`)
 
 Backs `/autospec-run` Phase 5.5. See `docs/specs/2026-05-24-autospec-end-of-run-gap-remediation-design.md`.
