@@ -496,7 +496,11 @@ Order is judged over the first cycle only. Tab wraps from the last control back 
 first, which is a move up the page by definition and would otherwise fail every correctly
 ordered page.
 
-Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0d.
+Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0d, which also
+records which questions the evidence steps settle outright and which honestly remain
+judgement calls. `skills/autospec-shared/tests/unit/ui-keyboard-evidence.test.mjs` covers
+the assertions against recorded traversals and drives a live browser against a clean page,
+a focus trap, a suppressed focus ring, and a control under a sticky header.
 
 ## End-of-run gap remediation (`$AUTOSPEC_SCRIPTS_DIR`)
 
