@@ -26,8 +26,21 @@
 // Growth is deliberately advisory. Shipping a feature adds nodes; failing a build for that is
 // exactly how a baseline gate earns a reputation for noise.
 //
-// This commit is the pure half: parsing a snapshot and classifying a diff, which take text
-// and return findings. Capturing the trees, and the CLI, follow.
+// Usage:
+//   ui-a11y-baseline.mjs --base-url http://localhost:3000 --routes / /runs [--update]
+//
+// Exit: 0 clean or recorded, 1 regressions, 3 Playwright unavailable.
+//
+// Env:
+//   PLAYWRIGHT_CHROMIUM_PATH  launch this chromium binary instead of the bundled one.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { loadPlaywright, OBSERVER, QUIET_MS, MAX_SETTLE_MS } from './ui-liveregion-core.mjs';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const DEFAULT_BASELINE_DIR = '.autospec/a11y-baselines';
 
@@ -198,4 +211,169 @@ export function classifyDiff(baselineText, currentText) {
   }
 
   return findings;
+}
+
+// ── baselines on disk ─────────────────────────────────────────────────────────
+
+/** Where a route's baseline lives. Content-derived so a route rename is visible as one. */
+export function baselineFile(dir, route) {
+  const slug = route === '/' ? 'root' : route.replace(/^\//, '').replace(/\//g, '-').replace(/[^a-zA-Z0-9_-]/g, '_');
+  return path.join(dir, `${slug || 'root'}.aria.txt`);
+}
+
+// ── collection ────────────────────────────────────────────────────────────────
+
+/**
+ * Snapshot every route and compare against its committed baseline. A route with no baseline
+ * is recorded, not judged: the first run establishes, it does not accuse.
+ */
+export async function collectBaselines(browser, baseUrl, routes, dir, opts = {}) {
+  const findings = [];
+  const compared = [];
+  const recorded = [];
+
+  for (const route of routes) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    let snapshot;
+    let settled = true;
+    try {
+      await page.goto(new URL(route, baseUrl).toString(), { waitUntil: 'load' });
+
+      // Snapshot the settled tree, not whatever exists at `load`. A data-driven route is
+      // still showing its skeleton then — /runs.html in the pilot recorded 8 nodes instead
+      // of its loaded 14 — and which one you get is a race against the page's own fetch.
+      // Baselining the loser of a race is how a baseline starts flapping in CI.
+      //
+      // The clock is seeded *after* the observer installs, because installing it zeroes the
+      // clock; seeded before, the wait is satisfied the instant it is asked.
+      await page.evaluate(OBSERVER);
+      await page.evaluate('window.__autospecLastMutation = performance.now()');
+      settled = await page
+        .waitForFunction(
+          `performance.now() - window.__autospecLastMutation > ${QUIET_MS}`,
+          null,
+          { timeout: MAX_SETTLE_MS },
+        )
+        .then(() => true)
+        .catch(() => false);
+
+      snapshot = await page.locator('body').ariaSnapshot();
+    } finally {
+      await context.close();
+    }
+
+    const file = baselineFile(dir, route);
+    if (!fs.existsSync(file) || opts.update) {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, `${snapshot.trimEnd()}\n`);
+      recorded.push({
+        route,
+        file,
+        nodes: parseSnapshot(snapshot).length,
+        settled: settled ? 'quiet' : `capped at ${MAX_SETTLE_MS}ms`,
+      });
+      continue;
+    }
+
+    const baseline = fs.readFileSync(file, 'utf8');
+    const routeFindings = classifyDiff(baseline, snapshot).map((f) => ({ ...f, route }));
+    findings.push(...routeFindings);
+    compared.push({
+      route,
+      file,
+      nodes: parseSnapshot(snapshot).length,
+      // A capped snapshot is weaker evidence: the page was still changing when it was taken.
+      settled: settled ? 'quiet' : `capped at ${MAX_SETTLE_MS}ms`,
+      regressions: routeFindings.filter((f) => !f.advisory).length,
+    });
+  }
+
+  return { compared, recorded, findings };
+}
+
+// ── CLI ───────────────────────────────────────────────────────────────────────
+
+function parseArgs(argv) {
+  const opts = { baseUrl: '', routes: [], dir: DEFAULT_BASELINE_DIR, json: '', update: false };
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--base-url') opts.baseUrl = argv[++i];
+    else if (argv[i] === '--baseline-dir') opts.dir = argv[++i];
+    else if (argv[i] === '--json') opts.json = argv[++i];
+    else if (argv[i] === '--update') opts.update = true;
+    else if (argv[i] === '--routes') {
+      while (i + 1 < argv.length && !argv[i + 1].startsWith('--')) opts.routes.push(argv[++i]);
+    }
+  }
+  return opts;
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (!opts.baseUrl || opts.routes.length === 0) {
+    process.stderr.write(
+      'Usage: ui-a11y-baseline.mjs --base-url URL --routes / [/more] [--update]\n',
+    );
+    process.exit(3);
+  }
+
+  const writeReport = (report) => {
+    if (!opts.json) return;
+    fs.mkdirSync(path.dirname(path.resolve(opts.json)), { recursive: true });
+    fs.writeFileSync(opts.json, `${JSON.stringify(report, null, 2)}\n`);
+  };
+
+  const playwright = await loadPlaywright();
+  if (!playwright) {
+    writeReport({
+      schema: 1,
+      status: 'blocked_missing_playwright',
+      detail: 'Playwright is not installed; no accessibility trees were captured',
+      compared: [],
+      recorded: [],
+      findings: [],
+    });
+    process.stderr.write('ui-a11y-baseline: Playwright unavailable; no evidence collected\n');
+    process.exit(3);
+  }
+
+  const launch = {};
+  if (process.env.PLAYWRIGHT_CHROMIUM_PATH) {
+    launch.executablePath = process.env.PLAYWRIGHT_CHROMIUM_PATH;
+  }
+  const browser = await playwright.chromium.launch(launch);
+  let result;
+  try {
+    result = await collectBaselines(browser, opts.baseUrl, opts.routes, path.resolve(opts.dir), {
+      update: opts.update,
+    });
+  } finally {
+    await browser.close();
+  }
+
+  writeReport({ schema: 1, status: 'ok', ...result });
+
+  for (const finding of result.findings) {
+    const tag = finding.advisory ? 'advisory ' : '';
+    process.stdout.write(`${tag}${finding.rule}:${finding.route}: ${finding.detail}\n`);
+  }
+  for (const row of result.recorded) {
+    process.stdout.write(`recorded ${row.route}: ${row.nodes} nodes → ${row.file}\n`);
+  }
+  for (const row of result.compared) {
+    if (!result.findings.some((f) => f.route === row.route)) {
+      process.stdout.write(`ok ${row.route}: ${row.nodes} nodes match the baseline\n`);
+    }
+  }
+  if (result.recorded.length > 0 && result.findings.length === 0) {
+    process.stdout.write('commit the baseline files so the next run has something to compare\n');
+  }
+
+  // Advisory findings do not fail: growth is normal, and a gate that blocks on it stops
+  // being read.
+  process.exit(result.findings.some((f) => !f.advisory) ? 1 : 0);
+}
+
+if (process.argv[1] && process.argv[1].endsWith('ui-a11y-baseline.mjs')) {
+  await main();
 }

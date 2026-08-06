@@ -24,15 +24,24 @@
 //          usable on an app with live content
 //   10b.   a list with fewer rows is not a lost role
 //   10c.   purely additive growth is advisory, not a regression
-//
-// The real-browser cases arrive with the capture half.
+//   11.    a missing baseline is recorded, not judged
+//   12-13. real browser: four cosmetic refactors move nothing
+//   14.    real browser: each semantic regression is named
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { createServer } from 'node:http';
+
 import {
   parseSnapshot,
   classifyDiff,
+  baselineFile,
+  collectBaselines,
 } from '../../scripts/ui-a11y-baseline.mjs';
+import { loadPlaywright } from '../../scripts/ui-liveregion-core.mjs';
 
 // Recorded verbatim from scratchpad/probe_tree.mjs.
 const BASELINE = `- link "Skip to content":
@@ -175,4 +184,124 @@ test('a tree that only gained nodes is advisory, not a regression', () => {
   const findings = classifyDiff(BASELINE, after);
   assert.deepEqual(rules(findings), ['A11Y_TREE_CHANGED']);
   assert.equal(findings[0].advisory, true);
+});
+
+// ── recording ─────────────────────────────────────────────────────────────────
+
+test('a route with no baseline is recorded rather than judged', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'a11yb-'));
+  try {
+    const file = baselineFile(dir, '/runs');
+    assert.equal(fs.existsSync(file), false);
+    assert.match(path.basename(file), /^runs\./);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ── real browser ──────────────────────────────────────────────────────────────
+
+const PAGE = `<!doctype html><html lang="en"><body>
+  <a href="#main" class="skip">Skip to content</a>
+  <header><nav aria-label="Primary"><ul><li><a href="/">Runs</a></li></ul></nav></header>
+  <main id="main">
+    <h1>Runs</h1>
+    <section aria-labelledby="filters-h">
+      <h2 id="filters-h">Filters</h2>
+      <label for="branch">Branch</label>
+      <input id="branch" type="text" value="main">
+      <button type="submit" class="btn btn--primary">Apply</button>
+    </section>
+    <h2>Recent</h2>
+  </main>
+</body></html>`;
+
+const VARIANTS = {
+  '/base': PAGE,
+  // Cosmetic — the churn guarantee. Each must leave the tree byte-identical.
+  '/cosmetic-class': PAGE.replace('class="btn btn--primary"', 'class="Button Button-primary"'),
+  '/cosmetic-wrapper': PAGE.replace('<main id="main">', '<main id="main"><div class="shell">')
+    .replace('</main>', '</div></main>'),
+  '/cosmetic-attrs': PAGE.replace('<input id="branch" type="text" value="main">',
+    '<input\n  type="text"\n  value="main"\n  id="branch"\n>'),
+  '/cosmetic-ids': PAGE.replace(/filters-h/g, 'filtersHeading'),
+  // Semantic — each must be named.
+  '/semantic-unlabelled': PAGE.replace('<label for="branch">Branch</label>', ''),
+  '/semantic-heading': PAGE.replace('<h2>Recent</h2>', '<h3>Recent</h3>'),
+  '/semantic-div-button': PAGE.replace(
+    '<button type="submit" class="btn btn--primary">Apply</button>', '<div>Apply</div>'),
+  '/semantic-unnamed-nav': PAGE.replace('<nav aria-label="Primary">', '<nav>'),
+  '/semantic-disabled': PAGE.replace('<input id="branch" type="text"',
+    '<input id="branch" type="text" disabled'),
+};
+
+async function serve() {
+  const server = createServer((req, res) => {
+    const body = VARIANTS[req.url.split('?')[0]];
+    res.writeHead(body ? 200 : 404, { 'content-type': 'text/html' });
+    res.end(body || 'not found');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return { server, base: `http://127.0.0.1:${server.address().port}` };
+}
+
+/**
+ * Record `/base` as the baseline, then check `route` against it — which is exactly what a
+ * refactor does to a committed baseline.
+ */
+async function checkAgainstBase(route) {
+  const playwright = await loadPlaywright();
+  if (!playwright) return null;
+  const launch = {};
+  if (process.env.PLAYWRIGHT_CHROMIUM_PATH) {
+    launch.executablePath = process.env.PLAYWRIGHT_CHROMIUM_PATH;
+  }
+  const browser = await playwright.chromium.launch(launch);
+  const { server, base } = await serve();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'a11yb-'));
+  try {
+    const recorded = await collectBaselines(browser, base, ['/base'], dir, { update: true });
+    assert.equal(recorded.recorded.length, 1);
+    // Reuse the same baseline file for the variant, so the only difference is the markup.
+    fs.renameSync(baselineFile(dir, '/base'), baselineFile(dir, route));
+    return await collectBaselines(browser, base, [route], dir, { update: false });
+  } finally {
+    await browser.close();
+    server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('real browser: cosmetic refactors leave the baseline untouched', async () => {
+  for (const route of ['/cosmetic-class', '/cosmetic-wrapper']) {
+    const report = await checkAgainstBase(route);
+    if (!report) return;
+    assert.deepEqual(report.findings, [], `${route} must not move the tree`);
+  }
+});
+
+test('real browser: reordered attributes and renamed ids leave it untouched too', async () => {
+  for (const route of ['/cosmetic-attrs', '/cosmetic-ids']) {
+    const report = await checkAgainstBase(route);
+    if (!report) return;
+    assert.deepEqual(report.findings, [], `${route} must not move the tree`);
+  }
+});
+
+test('real browser: each semantic regression is caught and named', async () => {
+  const expected = {
+    '/semantic-unlabelled': 'A11Y_NAME_LOST',
+    '/semantic-heading': 'A11Y_HEADING_LEVEL_CHANGED',
+    '/semantic-div-button': 'A11Y_ROLE_LOST',
+    '/semantic-unnamed-nav': 'A11Y_NAME_LOST',
+    '/semantic-disabled': 'A11Y_CONTROL_DISABLED',
+  };
+  for (const [route, rule] of Object.entries(expected)) {
+    const report = await checkAgainstBase(route);
+    if (!report) return;
+    assert.ok(
+      rules(report.findings).includes(rule),
+      `${route} should report ${rule}, got ${JSON.stringify(rules(report.findings))}`,
+    );
+  }
 });

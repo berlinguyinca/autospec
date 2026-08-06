@@ -630,6 +630,52 @@ on, which the alternative did: with the judge living in the evidence module, the
 would import it while the evidence CLI's top-level await was mid-evaluation, and each would
 wait on the other forever.
 
+### `ui-a11y-baseline.mjs`
+
+Accessibility-tree baselines (design spec L4c, third phase). Snapshots each route's
+accessibility tree and compares it against a committed baseline.
+
+```
+Usage: node ui-a11y-baseline.mjs --base-url <url> --routes <path> [<path>…]
+                                 [--baseline-dir <dir>] [--update] [--json <report-path>]
+
+Default baseline dir: .autospec/a11y-baselines
+Exit: 0 clean or recorded, 1 regressions, 3 Playwright unavailable.
+```
+
+Findings are `A11Y_NAME_LOST`, `A11Y_ROLE_LOST`, `A11Y_HEADING_LEVEL_CHANGED`,
+`A11Y_CONTROL_DISABLED`, and the advisory `A11Y_TREE_CHANGED`.
+
+Every other runtime gate asks a question with a fixed answer. This one asks whether a route
+still exposes what it used to, which is the only way to catch a regression rather than a
+violation: a `<button>` refactored into a clickable `<div>` satisfies the lint, the device
+profiles, the keyboard robot and axe, and is reported here as `A11Y_ROLE_LOST`.
+
+**Churn was measured before this was designed**, because it decides whether the tier is worth
+having — a baseline that moves under ordinary refactoring gets ignored within a week, and an
+ignored gate is worse than none. Against a real `ariaSnapshot()`: a class rename, an added
+wrapper div, reordered attributes and a renamed id all leave the tree **byte-identical**,
+while six semantic regressions all move it. Those cosmetic cases are checked in as tests
+rather than noted, because they are the guarantee the tier rests on.
+
+Data changes are advisory too, and for a structural reason worth knowing: the snapshot format
+puts an accessible *name* in quotes and mere *content* after a colon, so `listitem: run-104`
+carries no name and a list whose rows change cannot report `A11Y_NAME_LOST`.
+
+Growth is advisory on purpose. Shipping a feature adds nodes; failing a build for that is how
+a baseline gate gets approved unread, which trains reviewers to click past accessibility
+findings. Only the four named losses exit non-zero.
+
+Snapshots are taken after the page goes quiet, not at `load`. A data-driven route is still
+showing its skeleton then, and which state you capture is a race against the page's own
+fetch — baselining the loser of a race is how a baseline starts flapping in CI. A capped
+settle is recorded in the report as weaker evidence.
+
+A route with no baseline is recorded rather than judged; `--update` re-records, so accepting
+an intentional change is a reviewable commit rather than a silent one.
+`skills/autospec-shared/tests/unit/ui-a11y-baseline.test.mjs` drives a real browser through
+four cosmetic refactors and five semantic regressions.
+
 ## End-of-run gap remediation (`$AUTOSPEC_SCRIPTS_DIR`)
 
 Backs `/autospec-run` Phase 5.5. See `docs/specs/2026-05-24-autospec-end-of-run-gap-remediation-design.md`.

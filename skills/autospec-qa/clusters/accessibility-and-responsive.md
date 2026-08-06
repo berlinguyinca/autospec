@@ -15,6 +15,7 @@ Responsibilities:
   media queries a responsive UI is built on.
 - Traverse each route by keyboard via step 0d.
 - Drive each declared app state and check what is announced, via step 0e.
+- Compare each route's accessibility tree against its committed baseline, via step 0f.
 - Validate browser variance across Chromium, WebKit, Firefox where applicable.
 - Defer functional-coverage gaps to `functional-coverage`.
 
@@ -31,6 +32,7 @@ and do not record a pass without their output:
 | Can a keyboard reach everything, see where it is, and get out? | step 0d |
 | Is focus painted over by a sticky header? | step 0d |
 | When the app changes state, is a screen-reader user told? | step 0e |
+| Did a control quietly stop being a control? | step 0f |
 
 What remains a judgement call, honestly:
 
@@ -192,6 +194,36 @@ matches the adopted design language. It runs only when the repo has a root
    references: `runs.html` for induction, `states.html` for the declared hook.
 
    Treat the findings as blocking, and exit 3 as unknown.
+
+0f. **Accessibility-tree baselines** — snapshot each route's accessibility tree and compare
+   it against the committed baseline:
+   ```bash
+   node "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ui-a11y-baseline.mjs" \
+     --base-url "$APP_URL" --routes / /runs \
+     --json .autospec/reports/a11y-baseline.json
+   ```
+   Findings: `A11Y_NAME_LOST`, `A11Y_ROLE_LOST`, `A11Y_HEADING_LEVEL_CHANGED`,
+   `A11Y_CONTROL_DISABLED`, and the advisory `A11Y_TREE_CHANGED`.
+
+   This catches what the steps above cannot: a regression rather than a violation. Steps
+   0b–0e each ask a question with a fixed answer. This one asks whether the page still
+   exposes what it used to — a `<button>` refactored into a clickable `<div>` passes every
+   other gate in this cluster and is reported here as `A11Y_ROLE_LOST`.
+
+   A route with no baseline is **recorded, not judged**: the first run establishes, it does
+   not accuse. Commit the files under `.autospec/a11y-baselines/`. Accepting an intentional
+   change means re-running with `--update` and committing the diff, which is a reviewable
+   act rather than a silent one.
+
+   `A11Y_TREE_CHANGED` is advisory and does not block. Shipping a feature adds nodes, and a
+   gate that fails on growth gets approved unread — which is worse than no gate, because it
+   trains reviewers to click past accessibility findings. Only the four named losses block.
+
+   Churn was measured before this was built, and it is why the tier is worth having: a class
+   rename, an added wrapper div, reordered attributes and a renamed id all leave the tree
+   byte-identical. Data changes are advisory too — the snapshot format puts an accessible
+   name in quotes and mere content after a colon, so a list whose rows change is not a lost
+   name.
 
 1. **Capture** — screenshot each spec route at the viewport matrix using the
    existing `gen-screenshots.mjs` (Mode-II forbidden-URL safety already built in):
