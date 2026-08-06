@@ -427,6 +427,35 @@ anti-blandness gate in one place and fail a motion rule in another.
 
 Exit 3 means no evidence was collected and must be recorded as unknown, never as a pass.
 
+### `ui-device-evidence.mjs`
+
+Runtime device evidence (design spec L4a). Renders each route across Playwright device
+descriptors rather than a width sweep, and adds the two dedicated WCAG runs.
+
+```
+Usage: node ui-device-evidence.mjs --base-url <url> --routes <path> [<path>…]
+                                   [--json <report-path>]
+
+Exit: 0 clean, 1 findings, 3 Playwright unavailable.
+```
+
+Findings are `DEVICE_OVERFLOW`, `DEVICE_REFLOW` (320 CSS px, WCAG 1.4.10),
+`DEVICE_ZOOM_CLIP` (200% zoom, 1.4.4), `DEVICE_TARGET_TOO_SMALL` (24px on a coarse
+pointer, 2.5.8) and `DEVICE_HOVER_ONLY_INPUT`.
+
+A device profile is not a viewport. The descriptors carry user agent, device pixel ratio
+and touch, so `pointer: coarse` and `any-hover: none` resolve as they do on the device —
+an iPhone 13 context reports `coarse=true, noHover=true, dpr=3`, while a 390px desktop
+viewport reports none of it. A width sweep exercises none of that.
+
+200% zoom is emulated by halving the viewport, since Playwright exposes no page-zoom
+control and the two are equivalent for reflow at 1280 CSS px.
+
+This is the tier that catches what stylesheets cannot describe. A rendered control's size
+depends on the user agent: the reference page in `autospec-ui-pilot` passed every static
+rule while its text input rendered 21px tall, under the 2.5.8 minimum, and only the
+measured run found it.
+
 Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0b, where it is
 blocking. `skills/autospec-shared/tests/unit/ui-motion-evidence.test.mjs` covers the
 assertions against probe objects recorded from a real browser run, and drives a live
