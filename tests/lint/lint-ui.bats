@@ -45,6 +45,29 @@ teardown() { rm -rf "$TMP"; }
     ! printf '%s\n' "$output" | grep -q 'UI_RAW_HEX'
 }
 
+@test "UI_RAW_HEX: a custom-property definition is the token source, not a violation" {
+    # Measured on berlinguyinca/autospec-gui: 11 of its 21 raw-hex findings were the :root
+    # block that *defines* its palette. Telling an author to replace those with a token is
+    # circular — they are the token. The pilot corpus never caught it because its palette
+    # lives in styles/tokens.css, whose name matches the filename skip list, so the fixture
+    # quietly encoded the gate's own assumption.
+    printf ':root {\n  --accent: #0f766e;\n  --bad: #dc2626;\n}\n' > "$TMP/a.css"
+    run bash "$L" "$TMP/a.css"
+    ! printf '%s\n' "$output" | grep -q 'UI_RAW_HEX'
+}
+
+@test "UI_RAW_HEX: a real usage beside a definition on one line is still flagged" {
+    printf '.b { --accent: #0f766e; color: #3a7bd5; }\n' > "$TMP/a.css"
+    run bash "$L" "$TMP/a.css"
+    printf '%s\n' "$output" | grep -q '^UI_RAW_HEX:'
+}
+
+@test "UI_RAW_HEX: a hardcoded var() fallback is still a raw hex" {
+    printf '.b { color: var(--primary, #3a7bd5); }\n' > "$TMP/a.css"
+    run bash "$L" "$TMP/a.css"
+    printf '%s\n' "$output" | grep -q '^UI_RAW_HEX:'
+}
+
 @test "UI_RAW_HEX: quoted hex in a JS string is flagged" {
     printf 'const c = "#ff0066";\n' > "$TMP/a.js"
     run bash "$L" "$TMP/a.js"
