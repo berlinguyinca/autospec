@@ -419,8 +419,12 @@ local hook, so files grew freely through the merge path.
 
 ## UI evidence tests
 `.github/workflows/ui-evidence-tests.yml` runs the `node:test` suites for the runtime UI
-gates — `ui-motion-evidence`, `ui-device-evidence`, `ui-keyboard-evidence` and
-`ui-liveregion-evidence` — on any PR touching those scripts or their tests. Nothing ran
+gates — `ui-motion-evidence`, `ui-device-evidence`, `ui-keyboard-evidence`,
+`ui-liveregion-evidence`, `ui-liveregion-induce` and `ui-a11y-baseline` — on any PR touching
+those scripts or their tests. It globs `ui-*.test.mjs`, the directory's whole naming
+convention, after a narrower `ui-*-evidence.test.mjs` pattern silently excluded a new suite
+and ran 65 of 76 tests while reporting green. A floor on the suite count fails the job if
+fewer are found than expected. Nothing ran
 them before: no workflow invoked `node --test` and no validate script did, so the
 assertions existed without ever executing on the merge path.
 
