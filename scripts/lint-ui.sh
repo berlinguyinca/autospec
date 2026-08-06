@@ -34,9 +34,17 @@
 #                             users lose the affordance.
 #
 # UI_NO_REDUCED_MOTION and UI_HOVER_ONLY_AFFORDANCE are whole-file rules: they report the
-# first offending line and are cleared by a guard anywhere in the same file. A repo whose
-# reduced-motion reset or focus styles live in a separate global stylesheet will see them
-# fire per file; scope the linter to changed files, or co-locate the guard.
+# first offending line and are cleared by a guard anywhere in the same file.
+#
+# UI_NO_REDUCED_MOTION is additionally cleared for every file in one invocation when any
+# of them carries a global reset — a prefers-reduced-motion block targeting the universal
+# selector — since such a reset guards every element on the page. A block scoped to one
+# class does not count, and linting a single file still reports, because one file cannot
+# carry evidence of a reset living in another.
+#
+# UI_HOVER_ONLY_AFFORDANCE has no equivalent: focus styling is per component, and a
+# global focus rule is not the common pattern that a global motion reset is. A repo
+# whose focus styles live in a separate stylesheet will still see it fire per file.
 #
 # Token/theme source files (basename matching design|token|theme|palette, or DESIGN.md)
 # are skipped — they legitimately declare raw values.
@@ -103,6 +111,52 @@ emit() { # emit RULE_ID file line desc
   fi
 }
 
+# ── global reduced-motion reset ───────────────────────────────────────────────
+# UI_NO_REDUCED_MOTION is decided per file, so a project that keeps its reset in one
+# global stylesheet and animates in components — the ordinary way to organise CSS — saw
+# a finding on every component. A reset targeting the universal selector genuinely
+# guards every element on the page, so when one appears in this invocation the rule is
+# satisfied for the whole set.
+#
+# The universal selector is what makes it safe: a `prefers-reduced-motion` block scoped
+# to `.panel` guards `.panel` and nothing else, and must not clear the rule elsewhere.
+# Linting a single file still reports, because one file cannot show evidence of a reset
+# living in another — the rule is answered by evidence, not by assumption.
+GLOBAL_RM=0
+for f in $FILES; do
+  [ -f "$f" ] || continue
+  if "$AWK" '
+      {
+        line = $0
+        # Block comments are removed here for the same reason the main pass removes
+        # them, and the need is sharper: a comment continuation line begins with `*`,
+        # which is exactly the universal selector this scan looks for. Reading comments
+        # would let a note about a missing guard masquerade as a global reset — the
+        # silencing bug, rebuilt in a second place.
+        if (in_block) {
+          i = index(line, "*/")
+          if (i == 0) next
+          line = substr(line, i + 2); in_block = 0
+        }
+        b = index(line, "/*")
+        if (b > 0) {
+          rest = substr(line, b + 2); i = index(rest, "*/")
+          if (i == 0) { in_block = 1; line = substr(line, 1, b - 1) }
+          else { line = substr(line, 1, b - 1) substr(rest, i + 2) }
+        }
+        # A short window after the media query: the selector list follows within a line
+        # or two in practice, and a bounded window cannot mistake a later unrelated `*`
+        # rule for part of this block.
+        if (line ~ /prefers-reduced-motion/) window = 8
+        if (window > 0) { if (line ~ /^[[:space:]]*\*/) found = 1; window-- }
+      }
+      END { exit(found ? 0 : 1) }
+    ' "$f" 2>/dev/null; then
+    GLOBAL_RM=1
+    break
+  fi
+done
+
 count=0
 out=""
 for f in $FILES; do
@@ -113,7 +167,7 @@ for f in $FILES; do
     *design*|*token*|*theme*|*palette*) continue ;;
   esac
   # One awk pass per file emits TAB-separated RULE\tline\tdesc records.
-  recs="$("$AWK" '
+  recs="$("$AWK" -v globalrm="$GLOBAL_RM" '
     # Remove comment spans so no rule reads prose about itself as code. in_block and
     # in_html persist across lines to carry a multi-line comment.
     function strip_comments(s,   out, i, b, h) {
@@ -224,7 +278,7 @@ for f in $FILES; do
       if (in_meta && line ~ />/) { in_meta = 0; meta_vp = 0 }
     }
     END {
-      if (anim_line && !has_rm) {
+      if (anim_line && !has_rm && globalrm != 1) {
         print "UI_NO_REDUCED_MOTION\t" anim_line "\tmotion declared with no prefers-reduced-motion fallback in this file"
       }
       if (hover_line && !has_focus) {

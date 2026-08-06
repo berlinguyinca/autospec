@@ -288,3 +288,58 @@ teardown() { rm -rf "$TMP"; }
     [ "$status" -eq 99 ]
     printf '%s\n' "$output" | grep -q 'lint-ui:.*awk'
 }
+
+# ── global reduced-motion reset across files ──────────────────────────────────
+# UI_NO_REDUCED_MOTION is decided per file, so a project keeping its reset in one global
+# stylesheet and animating in components — the ordinary way to organise CSS — saw a
+# finding on every component. A reset that targets the universal selector genuinely
+# guards every element on the page, so when one is present in the same invocation the
+# rule is satisfied.
+
+@test "a global reset in the same invocation clears the motion rule" {
+    printf '@media (prefers-reduced-motion: reduce) {\n  *,\n  *::before {\n    animation-duration: 0.01ms !important;\n  }\n}\n' > "$TMP/reset.css"
+    printf '@keyframes s { from { transform: translateY(4px); } }\n.a { animation: s 200ms ease-out; }\n' > "$TMP/card.css"
+    run bash "$L" "$TMP/reset.css" "$TMP/card.css"
+    ! printf '%s\n' "$output" | grep -q 'UI_NO_REDUCED_MOTION'
+}
+
+@test "the same component alone is still flagged" {
+    # Linting one file cannot see a reset that lives in another, so the pre-commit path
+    # still reports it. The rule is satisfied by evidence, not by assumption.
+    printf '@keyframes s { from { transform: translateY(4px); } }\n.a { animation: s 200ms ease-out; }\n' > "$TMP/card.css"
+    run bash "$L" "$TMP/card.css"
+    printf '%s\n' "$output" | grep -q '^UI_NO_REDUCED_MOTION:'
+}
+
+@test "a scoped reduced-motion block does not count as a global reset" {
+    # Guarding one component does not guard the others; only a universal selector does.
+    printf '@media (prefers-reduced-motion: reduce) {\n  .panel {\n    animation-name: none;\n  }\n}\n' > "$TMP/reset.css"
+    printf '@keyframes s { from { transform: translateY(4px); } }\n.a { animation: s 200ms ease-out; }\n' > "$TMP/card.css"
+    run bash "$L" "$TMP/reset.css" "$TMP/card.css"
+    printf '%s\n' "$output" | grep -q '^UI_NO_REDUCED_MOTION:'
+}
+
+@test "a universal selector unrelated to reduced motion does not count" {
+    printf '*,\n*::before {\n  box-sizing: border-box;\n}\n' > "$TMP/reset.css"
+    printf '@keyframes s { from { transform: translateY(4px); } }\n.a { animation: s 200ms ease-out; }\n' > "$TMP/card.css"
+    run bash "$L" "$TMP/reset.css" "$TMP/card.css"
+    printf '%s\n' "$output" | grep -q '^UI_NO_REDUCED_MOTION:'
+}
+
+@test "a block comment is not mistaken for a global reset" {
+    # A comment continuation line begins with '*', which is the shape the global-reset
+    # scan looks for. Reading comments would let a note about a missing guard pose as a
+    # reset — the silencing bug rebuilt in a second place, which is what happened when
+    # this scan was first written.
+    printf '/*\n * No prefers-reduced-motion fallback here yet.\n */\n.a { color: var(--c); }\n' > "$TMP/notes.css"
+    printf '@keyframes s { from { transform: translateY(4px); } }\n.b { animation: s 200ms ease-out; }\n' > "$TMP/card.css"
+    run bash "$L" "$TMP/notes.css" "$TMP/card.css"
+    printf '%s\n' "$output" | grep -q '^UI_NO_REDUCED_MOTION:'
+}
+
+@test "a global reset does not suppress the other motion rules" {
+    printf '@media (prefers-reduced-motion: reduce) {\n  * {\n    animation-duration: 0.01ms !important;\n  }\n}\n' > "$TMP/reset.css"
+    printf '.a { animation: spin 2s linear infinite; }\n' > "$TMP/spin.css"
+    run bash "$L" "$TMP/reset.css" "$TMP/spin.css"
+    printf '%s\n' "$output" | grep -q '^UI_INFINITE_ANIMATION:'
+}
