@@ -55,7 +55,21 @@ emit() {
 # finding emission.
 ORCHESTRATOR="${REPO_DIR}/skills/autospec-doc/scripts/doc-orchestrator.mjs"
 if [ -r "$ORCHESTRATOR" ] && command -v node >/dev/null 2>&1; then
-    FULL_OUT="$(node "$ORCHESTRATOR" --full 2>&1)"; full_rc=$?
+    # `|| full_rc=$?` rather than `; full_rc=$?`: under `set -e` a failing command
+    # substitution in an assignment aborts the script immediately, so full_rc was
+    # never assigned and this adapter died right here with status 1 — despite its
+    # own contract above promising "Exit: always 0". That is why a crashing doc
+    # orchestrator produced a silent exit 1: the handling below never ran.
+    full_rc=0
+    FULL_OUT="$(node "$ORCHESTRATOR" --full 2>&1)" || full_rc=$?
+    # An engine ERROR (rc not 0 and not 2) was previously scanned for `missing:`
+    # lines and then discarded, so a crashing orchestrator produced a silent exit 1
+    # with no diagnostic whatsoever — the failure was real but unreadable. Surface
+    # it on stderr; a gate that fails without saying why costs more than the bug.
+    if [ "$full_rc" != "0" ] && [ "$full_rc" != "2" ]; then
+        printf 'dogfood-adapter-doc-drift: doc orchestrator exited %s:\n' "$full_rc" >&2
+        printf '%s\n' "$FULL_OUT" | sed 's/^/  /' >&2
+    fi
     if [ "$full_rc" != "2" ]; then
         # rc 0 = regen+audit ran; rc !=0,!=2 = engine error (still surface gaps).
         printf '%s\n' "$FULL_OUT" \

@@ -441,6 +441,12 @@ non-blocking by design, but the lens then detects nothing. That is now announced
 indistinguishable from a repo with no reuse problems: build-vs-buy BLOCKs simply stop
 being raised and the precision ledger records nothing rather than a miss.
 
+**Dogfood detector adapters exit 0 by contract.** `scripts/dogfood-detectors.sh`
+decides PASS/FAIL by diffing each adapter's findings against its allowlist under
+`tests/dogfood/allowlist/`, so an adapter that exits non-zero is a bug in the adapter,
+not a finding. When an adapter's underlying engine fails it must print the error and
+still exit 0 — a bare non-zero exit gives the driver nothing to report.
+
 Check with `command -v rg` **in a non-interactive shell**. Several agent harnesses
 inject `rg` as a *shell function* proxying to a bundled copy, and shell functions are
 not exported to child processes — so `rg` can work at your prompt and be missing
