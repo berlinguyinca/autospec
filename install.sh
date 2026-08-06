@@ -50,7 +50,7 @@ SUPERPOWERS_CODEX_SKILLS_DIR="${SUPERPOWERS_CODEX_SKILLS_DIR:-$HOME/.agents/skil
 SUPERPOWERS_OPENCODE_PLUGIN="${SUPERPOWERS_OPENCODE_PLUGIN:-superpowers@git+https://github.com/obra/superpowers.git}"
 OPENCODE_CONFIG_ROOT="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 if [ -z "${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-}" ]; then
-    AUTOSPEC_REQUIRED_SYSTEM_TOOLS="git bash curl cargo python3 gh jq npm"
+    AUTOSPEC_REQUIRED_SYSTEM_TOOLS="git bash curl cargo python3 gh jq npm rg"
 fi
 AUTOSPEC_EXECUTOR_SCANNERS="gitleaks semgrep trivy license-checker"
 readonly AUTOSPEC_EXECUTOR_SCANNERS
@@ -1828,7 +1828,7 @@ copy_runtime_subdirs() {
     autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
 
     # Runtime libs sourced/exec'd by installed scripts at $SCRIPT_DIR/lib/<name>.
-    runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh model-supply-probe.sh"
+    runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh lint-reuse-lens.sh model-supply-probe.sh"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] copy_runtime_subdirs: would copy runtime libs + harness table + scripts/explore-research/ to $autospec_scripts_dir/"
