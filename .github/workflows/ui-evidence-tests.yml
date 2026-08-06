@@ -1,6 +1,6 @@
 name: UI evidence tests
 
-# The runtime UI gates — motion, device, keyboard, live regions — each ship a node:test
+# The runtime UI gates — motion, device, keyboard, live regions, a11y baselines — each ship a node:test
 # suite under skills/autospec-shared/tests/unit/. Nothing ran them.
 #
 # No workflow invoked `node --test` and neither did any validate script, so three tiers of
@@ -54,8 +54,11 @@ jobs:
           # forgotten again, so it now matches the directory's whole naming convention.
           suites="$(find skills/autospec-shared/tests/unit -name 'ui-*.test.mjs' | sort)"
           count="$(printf '%s\n' "$suites" | grep -c .)"
-          if [ "$count" -lt 5 ]; then
-            echo "expected at least 5 UI suites, found $count — a suite was renamed, moved," >&2
+          # Raise this with each new tier. It is a floor against a catastrophic glob or
+          # layout break, not a per-suite inventory — the test count in the log above is what
+          # shows a single suite going missing.
+          if [ "$count" -lt 6 ]; then
+            echo "expected at least 6 UI suites, found $count — a suite was renamed, moved," >&2
             echo "or the glob no longer matches the convention:" >&2
             printf '%s\n' "$suites" >&2
             exit 1
