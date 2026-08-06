@@ -42,23 +42,28 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
+import {
+  announced,
+  judgeState,
+  loadPlaywright,
+  OBSERVER,
+  REGIONS_PROBE,
+  QUIET_MS,
+  MAX_SETTLE_MS,
+} from './ui-liveregion-core.mjs';
+
+import { collectInduced } from './ui-liveregion-induce.mjs';
+
+// Re-exported so callers keep one import site for the whole tier.
+export { announced, judgeState, loadPlaywright, OBSERVER, REGIONS_PROBE, QUIET_MS, MAX_SETTLE_MS };
 
 export const DEFAULT_MANIFEST = '.autospec/ui-test-hooks.json';
 export const DEFAULT_HOOK = '__autospec.setState';
 
-// A fixed sleep flakes in both directions, so a state is settled by quiescence: this long
-// with no mutation at all, capped so a page that never goes quiet still terminates.
-export const QUIET_MS = 150;
-export const MAX_SETTLE_MS = 3000;
 // The hook may be registered by a deferred bundle, so its absence is only concluded after
 // a bounded wait.
 export const HOOK_TIMEOUT_MS = 5000;
-
-const LIVE_SELECTOR =
-  '[aria-live], [role="status"], [role="alert"], [role="log"], output';
 
 // ── manifest ──────────────────────────────────────────────────────────────────
 
@@ -103,218 +108,8 @@ export function loadManifest(file) {
   return parseManifest(JSON.parse(fs.readFileSync(file, 'utf8')));
 }
 
-// ── assertions ────────────────────────────────────────────────────────────────
-
-/**
- * The events a screen reader would actually announce.
- *
- * A region that already carried text when the observer's records were delivered was not
- * announced, and neither was anything else written into it in that same batch — hence the
- * region id, without which the same-task case would be masked by its own content event.
- */
-export function announced(events) {
-  const bornFull = new Set(
-    events.filter((e) => e.kind === 'region-inserted' && e.text).map((e) => e.rid),
-  );
-  return events.filter(
-    (e) =>
-      (e.kind === 'content-added' || e.kind === 'text-changed') &&
-      e.text &&
-      !bornFull.has(e.rid),
-  );
-}
-
-const uniqueBy = (items, key) => {
-  const seen = new Set();
-  return items.filter((item) => {
-    if (seen.has(item[key])) return false;
-    seen.add(item[key]);
-    return true;
-  });
-};
-
-/**
- * Judge one driven state. Pure: takes the recorded observation, returns findings, touches
- * no browser.
- */
-export function judgeState(route, state, observation) {
-  const { hookFound, hookError, mutations, events, regions } = observation;
-  const at = { route, state: state.name };
-
-  // A hook that was never exposed and a hook that did nothing are different bugs, and
-  // reporting either as a silent live region sends the author after the wrong one.
-  if (!hookFound) {
-    return [{
-      ...at,
-      rule: 'TEST_HOOK_MISSING',
-      detail: `the manifest declares a test hook that '${route}' never exposes`,
-    }];
-  }
-  if (hookError) {
-    return [{ ...at, rule: 'TEST_HOOK_FAILED', detail: `driving '${state.name}' threw: ${hookError}` }];
-  }
-  if (!mutations && events.length === 0) {
-    return [{
-      ...at,
-      rule: 'TEST_HOOK_NO_EFFECT',
-      detail: `driving '${state.name}' changed nothing in the page`,
-    }];
-  }
-
-  const findings = [];
-  const all = announced(events);
-  const heard = all.filter((e) => e.display !== 'none');
-  const unheard = all.filter((e) => e.display === 'none');
-  const bornFull = events.filter((e) => e.kind === 'region-inserted' && e.text);
-
-  for (const event of uniqueBy(bornFull, 'rid')) {
-    findings.push({
-      ...at,
-      rule: 'LIVE_REGION_INSERTED_WITH_CONTENT',
-      detail:
-        `the region carrying '${event.text}' entered the page already holding that text, ` +
-        'in the same task — a region created and filled together is not announced; add ' +
-        'the region to the markup and fill it when the state changes',
-    });
-  }
-  for (const event of uniqueBy(unheard, 'rid')) {
-    findings.push({
-      ...at,
-      rule: 'LIVE_REGION_HIDDEN',
-      detail: `'${event.text}' was written into a display:none region, which no screen reader announces`,
-    });
-  }
-  // Only when nothing else explains the silence: the two rules above are the diagnosis, and
-  // repeating them as a bare absence would bury it.
-  if (heard.length === 0 && bornFull.length === 0 && unheard.length === 0) {
-    findings.push({
-      ...at,
-      rule: 'LIVE_REGION_ABSENT',
-      detail: `driving '${state.name}' changed the page and announced nothing`,
-    });
-  }
-
-  for (const region of state.busy ? [] : regions.filter((r) => r.busy)) {
-    findings.push({
-      ...at,
-      rule: 'LIVE_REGION_STUCK_BUSY',
-      detail:
-        `a live region is still aria-busy="true" after '${state.name}' settled` +
-        (region.text ? `, holding '${region.text}'` : ''),
-    });
-  }
-
-  const want = state.kind === 'alert' ? 'assertive' : 'polite';
-  for (const event of uniqueBy(heard.filter((e) => e.politeness !== want), 'rid')) {
-    findings.push({
-      ...at,
-      rule: 'LIVE_REGION_WRONG_POLITENESS',
-      detail:
-        `'${state.name}' is declared as a ${state.kind} but announced ${event.politeness}; ` +
-        `expected ${want}`,
-    });
-  }
-
-  return findings;
-}
-
-// ── browser collection ────────────────────────────────────────────────────────
-
-// Region identity comes from a WeakMap rather than a DOM attribute, so observing the page
-// never mutates it.
-const OBSERVER = `(() => {
-  const LIVE = ${JSON.stringify(LIVE_SELECTOR)};
-  const rids = new WeakMap();
-  let n = 0;
-  const rid = (el) => {
-    if (!rids.has(el)) rids.set(el, 'r' + (n += 1));
-    return rids.get(el);
-  };
-  const politeness = (el) => {
-    const explicit = el.getAttribute('aria-live');
-    if (explicit) return explicit;
-    const role = el.getAttribute('role');
-    if (role === 'alert') return 'assertive';
-    if (role === 'status' || role === 'log' || el.tagName === 'OUTPUT') return 'polite';
-    return '';
-  };
-  const host = (node) => {
-    let el = node.nodeType === 1 ? node : node.parentElement;
-    while (el) {
-      if (el.matches && el.matches(LIVE)) return el;
-      el = el.parentElement;
-    }
-    return null;
-  };
-  const at = (el, kind, text) => ({
-    kind,
-    rid: rid(el),
-    politeness: politeness(el),
-    busy: el.getAttribute('aria-busy') === 'true',
-    display: getComputedStyle(el).display,
-    text: String(text || '').replace(/\\s+/g, ' ').trim().slice(0, 60),
-  });
-
-  window.__autospecEvents = [];
-  window.__autospecMutations = 0;
-  window.__autospecLastMutation = 0;
-
-  new MutationObserver((records) => {
-    // Counted apart from the live-region events: a state that legitimately updates only a
-    // live region still did something, and must not read as a hook that did nothing.
-    window.__autospecMutations += records.length;
-    window.__autospecLastMutation = performance.now();
-    for (const rec of records) {
-      for (const node of rec.addedNodes) {
-        if (node.nodeType === 1 && node.matches && node.matches(LIVE)) {
-          window.__autospecEvents.push(at(node, 'region-inserted', node.textContent));
-          continue;
-        }
-        const h = host(node);
-        if (h) window.__autospecEvents.push(at(h, 'content-added', node.textContent));
-      }
-      if (rec.type === 'characterData') {
-        const h = host(rec.target);
-        if (h) window.__autospecEvents.push(at(h, 'text-changed', rec.target.data));
-      }
-      if (rec.type === 'attributes' && rec.target.matches && rec.target.matches(LIVE)) {
-        window.__autospecEvents.push(at(rec.target, 'attr-' + rec.attributeName, ''));
-      }
-    }
-  }).observe(document.body, {
-    childList: true,
-    subtree: true,
-    characterData: true,
-    attributes: true,
-    attributeFilter: ['aria-live', 'aria-busy', 'role', 'hidden'],
-  });
-  return true;
-})()`;
-
-// Live regions as they stand once the state has settled, for the judgements that are about
-// end state rather than about the transition.
-const REGIONS_PROBE = `(() => {
-  const LIVE = ${JSON.stringify(LIVE_SELECTOR)};
-  return Array.from(document.querySelectorAll(LIVE)).map((el) => ({
-    politeness: el.getAttribute('aria-live')
-      || (el.getAttribute('role') === 'alert' ? 'assertive'
-        : (el.getAttribute('role') === 'status' || el.getAttribute('role') === 'log'
-          || el.tagName === 'OUTPUT' ? 'polite' : '')),
-    busy: el.getAttribute('aria-busy') === 'true',
-    display: getComputedStyle(el).display,
-    text: (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 60),
-  }));
-})()`;
-
 const resolveHook = (hook) =>
   `${JSON.stringify(hook)}.split('.').reduce((o, k) => (o ? o[k] : undefined), window)`;
-
-export async function loadPlaywright() {
-  const { findPlaywrightPath } = await import(path.resolve(__dirname, 'gen-screenshots.mjs'));
-  const found = findPlaywrightPath();
-  if (!found) return null;
-  return import(found);
-}
 
 /**
  * Drive one state and record what happened.
@@ -373,27 +168,12 @@ export async function driveState(browser, url, hook, state) {
   }
 }
 
-export async function collectEvidence(baseUrl, manifest) {
-  const playwright = await loadPlaywright();
-  if (!playwright) {
-    return {
-      schema: 1,
-      status: 'blocked_missing_playwright',
-      detail: 'Playwright is not installed; live-region evidence was not collected',
-      states: [],
-      findings: [],
-    };
-  }
-
-  const launch = {};
-  if (process.env.PLAYWRIGHT_CHROMIUM_PATH) {
-    launch.executablePath = process.env.PLAYWRIGHT_CHROMIUM_PATH;
-  }
-  const browser = await playwright.chromium.launch(launch);
+/** Drive the states a manifest declares. The browser is the caller's. */
+export async function collectDeclared(browser, baseUrl, manifest) {
   const states = [];
   const findings = [];
 
-  try {
+  {
     for (const entry of manifest.routes) {
       const url = new URL(entry.route, baseUrl).toString();
       for (const state of entry.states) {
@@ -410,21 +190,51 @@ export async function collectEvidence(baseUrl, manifest) {
         });
       }
     }
+  }
+
+  return { states, findings };
+}
+
+/**
+ * Back-compatible wrapper: opens its own browser and drives only the declared states.
+ * Induction is the CLI's job, since it needs routes rather than a manifest.
+ */
+export async function collectEvidence(baseUrl, manifest) {
+  const playwright = await loadPlaywright();
+  if (!playwright) {
+    return {
+      schema: 1,
+      status: 'blocked_missing_playwright',
+      detail: 'Playwright is not installed; live-region evidence was not collected',
+      states: [],
+      findings: [],
+    };
+  }
+  const launch = {};
+  if (process.env.PLAYWRIGHT_CHROMIUM_PATH) {
+    launch.executablePath = process.env.PLAYWRIGHT_CHROMIUM_PATH;
+  }
+  const browser = await playwright.chromium.launch(launch);
+  try {
+    const { states, findings } = await collectDeclared(browser, baseUrl, manifest);
+    return { schema: 1, status: 'ok', states, findings };
   } finally {
     await browser.close();
   }
-
-  return { schema: 1, status: 'ok', states, findings };
 }
 
 // ── CLI ───────────────────────────────────────────────────────────────────────
 
 function parseArgs(argv) {
-  const opts = { baseUrl: '', manifest: DEFAULT_MANIFEST, json: '' };
+  const opts = { baseUrl: '', manifest: DEFAULT_MANIFEST, json: '', routes: [], noInduce: false };
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === '--base-url') opts.baseUrl = argv[++i];
     else if (argv[i] === '--manifest') opts.manifest = argv[++i];
     else if (argv[i] === '--json') opts.json = argv[++i];
+    else if (argv[i] === '--no-induce') opts.noInduce = true;
+    else if (argv[i] === '--routes') {
+      while (i + 1 < argv.length && !argv[i + 1].startsWith('--')) opts.routes.push(argv[++i]);
+    }
   }
   return opts;
 }
@@ -432,7 +242,9 @@ function parseArgs(argv) {
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (!opts.baseUrl) {
-    process.stderr.write('Usage: ui-liveregion-evidence.mjs --base-url URL [--manifest PATH]\n');
+    process.stderr.write(
+      'Usage: ui-liveregion-evidence.mjs --base-url URL --routes / [/more] [--manifest PATH]\n',
+    );
     process.exit(3);
   }
 
@@ -442,41 +254,70 @@ async function main() {
     fs.writeFileSync(opts.json, `${JSON.stringify(report, null, 2)}\n`);
   };
 
-  const manifest = loadManifest(path.resolve(opts.manifest));
-  if (!manifest) {
-    // A skip writes its report too. Leaving the file absent makes "this repo has not
-    // adopted the hook" indistinguishable from "the step never ran" to anything reading
-    // the report, which is exactly the gap the skip is supposed to make visible.
+  const playwright = await loadPlaywright();
+  if (!playwright) {
     writeReport({
       schema: 1,
-      status: 'skipped',
-      detail: `no ${opts.manifest}; no states are declared to drive`,
+      status: 'blocked_missing_playwright',
+      detail: 'Playwright is not installed; live-region evidence was not collected',
       states: [],
       findings: [],
+      skipped: [],
     });
-    process.stdout.write(
-      `ui-liveregion-evidence: SKIPPED (no ${opts.manifest}; no states are declared to drive)\n`,
-    );
-    process.exit(0);
-  }
-
-  const report = await collectEvidence(opts.baseUrl, manifest);
-  writeReport(report);
-
-  if (report.status === 'blocked_missing_playwright') {
     process.stderr.write('ui-liveregion-evidence: Playwright unavailable; no evidence collected\n');
     process.exit(3);
   }
+
+  const launch = {};
+  if (process.env.PLAYWRIGHT_CHROMIUM_PATH) {
+    launch.executablePath = process.env.PLAYWRIGHT_CHROMIUM_PATH;
+  }
+  const browser = await playwright.chromium.launch(launch);
+
+  const states = [];
+  const findings = [];
+  const skipped = [];
+
+  try {
+    // Induction first, and unconditionally. It needs nothing from the repo, so every route
+    // given is measured whether or not anyone has adopted the hook.
+    if (opts.routes.length > 0 && !opts.noInduce) {
+      const induced = await collectInduced(browser, opts.baseUrl, opts.routes);
+      states.push(...induced.states);
+      findings.push(...induced.findings);
+      skipped.push(...induced.skipped);
+    }
+
+    // The manifest is additive: states no request can produce — form validation, optimistic
+    // updates, client-side route changes — are unreachable by induction, and this is where a
+    // repo declares them.
+    const manifest = loadManifest(path.resolve(opts.manifest));
+    if (manifest) {
+      const declared = await collectDeclared(browser, opts.baseUrl, manifest);
+      states.push(...declared.states);
+      findings.push(...declared.findings);
+    }
+  } finally {
+    await browser.close();
+  }
+
+  const report = { schema: 1, status: 'ok', states, findings, skipped };
+  writeReport(report);
 
   for (const finding of report.findings) {
     process.stdout.write(`${finding.rule}:${finding.route}[${finding.state}]: ${finding.detail}\n`);
   }
   for (const row of report.states) {
     if (!report.findings.some((f) => f.route === row.route && f.state === row.state)) {
-      process.stdout.write(
-        `ok ${row.route}[${row.state}]: ${row.announcements} announcement(s), settled ${row.settled}\n`,
-      );
+      const how = row.induced ? 'induced' : 'declared';
+      process.stdout.write(`ok ${row.route}[${row.state}]: ${how}, settled ${row.settled}\n`);
     }
+  }
+  for (const row of report.skipped) {
+    process.stdout.write(`skip ${row.route}: ${row.reason}\n`);
+  }
+  if (report.states.length === 0 && report.skipped.length === 0) {
+    process.stdout.write('ui-liveregion-evidence: no routes given and no manifest found\n');
   }
   process.exit(report.findings.length > 0 ? 1 : 0);
 }

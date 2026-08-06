@@ -509,11 +509,12 @@ declared state through a test hook it exposes and asserts a screen-reader user i
 happened.
 
 ```
-Usage: node ui-liveregion-evidence.mjs --base-url <url> [--manifest <path>]
+Usage: node ui-liveregion-evidence.mjs --base-url <url> --routes <path> [<path>…]
+                                       [--manifest <path>] [--no-induce]
                                        [--json <report-path>]
 
-Default manifest: .autospec/ui-test-hooks.json
-Exit: 0 clean or skipped, 1 findings, 3 Playwright unavailable.
+Default manifest: .autospec/ui-test-hooks.json  (read when present; purely additive)
+Exit: 0 clean, 1 findings, 3 Playwright unavailable.
 ```
 
 Findings are `LIVE_REGION_ABSENT`, `LIVE_REGION_INSERTED_WITH_CONTENT`,
