@@ -417,6 +417,23 @@ local hook, so files grew freely through the merge path.
 | `AUTOSPEC_MAX_CYCLOMATIC` | `10` | Cyclomatic-complexity limit, measured per function. |
 | `AUTOSPEC_MAX_FUNC_LOC` | `50` | Per-function length limit. |
 
+## UI evidence tests
+`.github/workflows/ui-evidence-tests.yml` runs the `node:test` suites for the runtime UI
+gates — `ui-motion-evidence`, `ui-device-evidence`, `ui-keyboard-evidence` and
+`ui-liveregion-evidence` — on any PR touching those scripts or their tests. Nothing ran
+them before: no workflow invoked `node --test` and no validate script did, so the
+assertions existed without ever executing on the merge path.
+
+The job installs Playwright and then asserts chromium launched. Each suite falls back to
+its pure assertions when no browser is present and still reports green, so a missing
+install would look identical to a pass while leaving the browser half unrun — which is the
+half that has historically caught the defects, since a rendered control's size and a focus
+ring's computed style cannot be reached by source analysis.
+
+| Var | Default | Effect |
+|---|---|---|
+| `PLAYWRIGHT_CHROMIUM_PATH` | (unset) | Launch this chromium binary instead of the bundled one. Honoured by every `ui-*-evidence.mjs` script; useful when a system browser is already present. |
+
 ## Crash-resume & watchdog
 | Var | Default | Effect |
 |---|---|---|
