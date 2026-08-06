@@ -104,6 +104,36 @@ matches the adopted design language. It runs only when the repo has a root
    the deterministic half of the implementer's `DESIGN_DRIFT` directive). The
    vision judge below then handles the *subjective* fidelity the linter can't.
 
+0a. **Run all five runtime gates** — one command, one report, one status line:
+   ```bash
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ui-evidence-gates.sh" \
+     --base-url "$APP_URL" --routes "/ /runs /issues"
+   ```
+   ```
+   ok device
+   ok keyboard
+   motion: findings
+     MOTION_ABSENT:/: nothing moves on this route by default
+   liveregion: UNKNOWN — the gate ran and verified nothing
+   ui-evidence-gates: FAIL (4 ran, 1 with findings, 1 unknown)
+   ```
+   **Prefer this over invoking 0b–0f separately.** Five commands with five report shapes and
+   five exit conventions get run once and then not again; the sections below stay as the
+   description of what each gate decides, not as five things to type.
+
+   Parse the final line, not the exit code alone. `PASS`/`FAIL`/`UNKNOWN` and the three
+   counts are the authoritative summary, and `.autospec/reports/ui-evidence-gates.json`
+   carries every gate's full output.
+
+   Three distinctions the runner preserves, each of which is a way a gate run can lie:
+   - **`UNKNOWN` is not `PASS`.** A gate that could not launch a browser (exit 3) or is not
+     installed answered none of its questions. Exit code 2, never 0.
+   - **A gate that ran and verified nothing is also `UNKNOWN`.** Live-region induction against
+     a server-rendered app skips every route and exits 0; reporting that as `ok` is zero
+     coverage wearing a pass.
+   - **Findings outrank unknown.** A missing browser on one gate never masks a defect another
+     gate actually found.
+
 0b. **Runtime motion evidence** — render each route twice, once normally and once
    with `prefers-reduced-motion: reduce`, and assert that motion exists by default,
    stops under the preference, and does not run unbounded:

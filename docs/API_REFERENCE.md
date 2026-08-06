@@ -620,6 +620,11 @@ Every gate runs even after one fails; stopping early would hide the rest and an 
 fix one defect per run. `tests/lint/ui-evidence-gates.bats` covers the orchestration contract
 with stub gates, so every outcome is exercised without a browser.
 
+`--routes` takes one space-separated string rather than a list, so it survives being passed
+through a shell variable. `--gates-dir` points at the installed scripts and defaults to
+`$AUTOSPEC_SCRIPTS_DIR`; `--update-baselines` forwards `--update` to the a11y gate alone,
+which is how an intentional tree change is accepted without touching the other four.
+
 ### `ui-liveregion-induce.mjs`
 
 Drives app states with **zero app cooperation**, by controlling the network. Consumed by
