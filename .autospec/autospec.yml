@@ -118,21 +118,29 @@ documentation:
   audiences:
     - id: users
       label: End users
+      # gen-audience-docs.mjs validates { name, path } and renders `name` as the
+      # document heading; `id`/`label` are the config-side vocabulary that other
+      # readers use. Mirroring label into name keeps both contracts satisfied
+      # rather than renaming a key whose other consumers are unknown.
+      name: End users
       path: docs/USER_MANUAL.md
       focus: Installation, daily workflows, troubleshooting, and success criteria.
       require_scope: true
     - id: developers
       label: Developers
+      name: Developers
       path: docs/API_REFERENCE.md
       focus: CLI, helper scripts, config schema, and extension points.
       require_scope: true
     - id: operators
       label: Operators
+      name: Operators
       path: docs/runbooks/OPERATIONS.md
       focus: Deployment, monitoring, recovery, scheduling, and safe rollback.
       require_scope: true
     - id: security-reviewers
       label: Security reviewers
+      name: Security reviewers
       path: docs/SECURITY.md
       focus: Trust boundaries, secret handling, production access, and abuse cases.
       require_scope: true
