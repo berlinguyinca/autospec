@@ -10,10 +10,15 @@
 //
 // Tests:
 //   1-2.  isDataRequest: fetch and xhr are held, documents and stylesheets are not
-//   3.    discovery finds the data request a route makes
-//   4.    discovery returns nothing for a static route
-//
-// The induction cases arrive with the holding half.
+//   3.    INDUCED_STATES: error is an alert, success is a status
+//   4.    discovery finds the data request a route makes
+//   5.    discovery returns nothing for a static route
+//   6.    a well-behaved app announces its success
+//   7.    a well-behaved app announces its failure, assertively
+//   8.    an app that renders data silently is caught
+//   9.    an app with no error path at all is caught, and named for that
+//   10.   a static route is skipped with a reason rather than passed
+//   11.   an app that leaves aria-busy set after the response is caught
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -21,7 +26,9 @@ import { createServer } from 'node:http';
 
 import {
   isDataRequest,
+  INDUCED_STATES,
   discoverEndpoints,
+  collectInduced,
 } from '../../scripts/ui-liveregion-induce.mjs';
 import { loadPlaywright } from '../../scripts/ui-liveregion-core.mjs';
 
@@ -97,6 +104,8 @@ async function withApp(fn) {
   }
 }
 
+const rules = (findings) => findings.map((f) => f.rule);
+
 // ── pure ──────────────────────────────────────────────────────────────────────
 
 test('data requests are held and page resources are not', () => {
@@ -108,6 +117,14 @@ test('documents, styles and scripts are left alone', () => {
   for (const type of ['document', 'stylesheet', 'script', 'image', 'font']) {
     assert.equal(isDataRequest(type), false, `${type} must not be intercepted`);
   }
+});
+
+test('an induced error is an alert and an induced success is a status', () => {
+  assert.deepEqual(INDUCED_STATES.map((s) => [s.name, s.kind]), [
+    ['success', 'status'],
+    ['error', 'alert'],
+  ]);
+  assert.ok(INDUCED_STATES.every((s) => s.induced));
 });
 
 // ── discovery ─────────────────────────────────────────────────────────────────
@@ -123,4 +140,55 @@ test('discovery finds nothing on a route that fetches nothing', async () => {
   const found = await withApp((browser, base) => discoverEndpoints(browser, `${base}/static`));
   if (!found) return;
   assert.deepEqual(found, []);
+});
+
+// ── induction ─────────────────────────────────────────────────────────────────
+
+test('an app that announces both outcomes induces clean', async () => {
+  const report = await withApp((browser, base) => collectInduced(browser, base, ['/good']));
+  if (!report) return;
+  assert.deepEqual(report.findings, []);
+  assert.equal(report.states.length, 2);
+});
+
+test('the induced error reaches the assertive region, and success the polite one', async () => {
+  // The politeness rule holds without a manifest because the inducer named the state: a
+  // request it made fail is an error, and correct code routes that to an alert.
+  const report = await withApp((browser, base) => collectInduced(browser, base, ['/good']));
+  if (!report) return;
+  assert.deepEqual(
+    report.states.map((s) => [s.state, s.kind]),
+    [['success', 'status'], ['error', 'alert']],
+  );
+  assert.deepEqual(report.findings, []);
+});
+
+test('an app that renders data without announcing it is caught', async () => {
+  const report = await withApp((browser, base) => collectInduced(browser, base, ['/silent']));
+  if (!report) return;
+  // Success renders the list and says nothing; the failure is not handled at all.
+  assert.ok(rules(report.findings).includes('LIVE_REGION_ABSENT'));
+});
+
+test('an app with no error path is named for that, not for a missing announcement', async () => {
+  const report = await withApp((browser, base) => collectInduced(browser, base, ['/silent']));
+  if (!report) return;
+  const errorFindings = report.findings.filter((f) => f.state === 'error');
+  assert.deepEqual(rules(errorFindings), ['INDUCED_STATE_IGNORED']);
+  assert.match(errorFindings[0].detail, /stale content/);
+});
+
+test('a route with nothing to induce is skipped with a reason, not passed', async () => {
+  const report = await withApp((browser, base) => collectInduced(browser, base, ['/static']));
+  if (!report) return;
+  assert.deepEqual(report.findings, []);
+  assert.deepEqual(report.states, []);
+  assert.equal(report.skipped.length, 1);
+  assert.match(report.skipped[0].reason, /nothing to induce/);
+});
+
+test('aria-busy left set after the response arrives is caught', async () => {
+  const report = await withApp((browser, base) => collectInduced(browser, base, ['/busy']));
+  if (!report) return;
+  assert.ok(rules(report.findings).includes('LIVE_REGION_STUCK_BUSY'));
 });
