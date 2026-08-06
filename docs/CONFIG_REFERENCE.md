@@ -433,6 +433,27 @@ local hook, so files grew freely through the merge path.
 |---|---|---|
 | `AUTOSPEC_SEC_MAX_ROUNDS` | `3` | Phase 4 security gate fix/re-scan loop cap. |
 | `AUTOSPEC_REQUIRED_SYSTEM_TOOLS` | core tools + `npm` | Override required core installer commands; the immutable executor scanner set is always added and verified. |
+
+**`rg` (ripgrep) is an optional-but-recommended dependency of the reuse lens**, and
+deliberately *not* in `AUTOSPEC_REQUIRED_SYSTEM_TOOLS` — a required tool that is
+missing aborts the install, and the lens fails open rather than failing hard, so a
+missing `rg` must degrade the lens rather than block installation. `REINVENT_REPO_UTIL` and
+`NEW_ABSTRACTION_SINGLE_CALLER` shell out to it and **fail open** when it is absent —
+non-blocking by design, but the lens then detects nothing. That is now announced as
+`INFO:REUSE_LENS_DISABLED` once per run, because a silently inert lens is
+indistinguishable from a repo with no reuse problems: build-vs-buy BLOCKs simply stop
+being raised and the precision ledger records nothing rather than a miss.
+
+**Dogfood detector adapters exit 0 by contract.** `scripts/dogfood-detectors.sh`
+decides PASS/FAIL by diffing each adapter's findings against its allowlist under
+`tests/dogfood/allowlist/`, so an adapter that exits non-zero is a bug in the adapter,
+not a finding. When an adapter's underlying engine fails it must print the error and
+still exit 0 — a bare non-zero exit gives the driver nothing to report.
+
+Check with `command -v rg` **in a non-interactive shell**. Several agent harnesses
+inject `rg` as a *shell function* proxying to a bundled copy, and shell functions are
+not exported to child processes — so `rg` can work at your prompt and be missing
+inside every script autospec runs.
 | `AUTOSPEC_SKIP_ENSURE_TOOL` / `_<TOOL>` | (unset) | Disable scanner auto-install (all, or one tool); required scanners remain verified and fail closed by exact name. |
 
 ## Explore (autospec-explore RSI)

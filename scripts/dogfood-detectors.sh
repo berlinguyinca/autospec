@@ -186,8 +186,19 @@ run_one_detector() {
 
     local verdict_tuples_file="$workdir/verdict.tuples"
     local allow_tuples_file="$workdir/allow.tuples"
-    verdict_tuples "$verdict_file"   > "$verdict_tuples_file"
-    allowlist_tuples "$allowlist_file" > "$allow_tuples_file"
+    # Sorted, because both consumers below require it and neither said so:
+    #   * `diff -q` compares SEQUENCES, so an unchanged allowlist whose scan simply
+    #     emitted the same tuples in a different order reported FAIL. An allowlist
+    #     comparison is a SET comparison; detector output order is not a contract.
+    #   * `comm` requires sorted input, in the SAME collation. Sorting with
+    #     LC_ALL=C while comm compared in the ambient locale still tripped
+    #     "not in sorted order", so both sides are pinned to C below.
+    #   * `comm` requires sorted input and silently emits nonsense otherwise — it
+    #     was printing "comm: file 1 is not in sorted order" onto the triage output,
+    #     so the unexpected/missing lists a maintainer reads to fix a failure were
+    #     themselves unreliable.
+    verdict_tuples "$verdict_file"   | LC_ALL=C sort > "$verdict_tuples_file"
+    allowlist_tuples "$allowlist_file" | LC_ALL=C sort > "$allow_tuples_file"
 
     local found expected
     found="$(wc -l < "$verdict_tuples_file" | tr -d ' ')"
@@ -202,9 +213,9 @@ run_one_detector() {
     printf 'dogfood: %s findings=%s expected=%s status=FAIL\n' "$detector_base" "$found" "$expected"
     printf '  allowlist: %s\n' "$allowlist_file"
     printf '  unexpected findings (in scan, not in allowlist):\n'
-    comm -23 "$verdict_tuples_file" "$allow_tuples_file" | sed 's/^/    /'
+    LC_ALL=C comm -23 "$verdict_tuples_file" "$allow_tuples_file" | sed 's/^/    /'
     printf '  missing allowlisted entries (in allowlist, not in scan):\n'
-    comm -13 "$verdict_tuples_file" "$allow_tuples_file" | sed 's/^/    /'
+    LC_ALL=C comm -13 "$verdict_tuples_file" "$allow_tuples_file" | sed 's/^/    /'
     # Surface stderr for triage.
     if [ -s "$workdir/stderr.log" ]; then
         printf '  detector stderr (head):\n'
