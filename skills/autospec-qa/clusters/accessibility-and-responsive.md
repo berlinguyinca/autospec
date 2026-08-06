@@ -92,6 +92,25 @@ matches the adopted design language. It runs only when the repo has a root
    Exit 3 means Playwright is unavailable and no evidence was collected — record
    that as unknown, never as a pass.
 
+0c. **Runtime device evidence** — render each route across real device descriptors
+   and run the two dedicated WCAG checks:
+   ```bash
+   node "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ui-device-evidence.mjs" \
+     --base-url "$APP_URL" --routes / /runs --json .autospec/reports/device-evidence.json
+   ```
+   Findings: `DEVICE_OVERFLOW`, `DEVICE_REFLOW` (320px, WCAG 1.4.10),
+   `DEVICE_ZOOM_CLIP` (200% zoom, 1.4.4), `DEVICE_TARGET_TOO_SMALL` (24px on a
+   coarse pointer, 2.5.8), `DEVICE_HOVER_ONLY_INPUT`.
+
+   This replaces judging responsiveness by width alone. The descriptors carry user
+   agent, DPR and touch, so `pointer: coarse` and `any-hover: none` resolve as they
+   do on the device — a 390px desktop viewport resolves none of them, so a width
+   sweep never exercises the media queries a responsive UI is built on.
+
+   It also catches what no stylesheet can state: a control's rendered size depends
+   on the user agent, so a text input can pass every static rule and still render
+   under the 24px minimum. Treat these as blocking, and exit 3 as unknown.
+
 1. **Capture** — screenshot each spec route at the viewport matrix using the
    existing `gen-screenshots.mjs` (Mode-II forbidden-URL safety already built in):
    ```bash

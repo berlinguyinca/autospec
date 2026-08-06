@@ -427,6 +427,11 @@ anti-blandness gate in one place and fail a motion rule in another.
 
 Exit 3 means no evidence was collected and must be recorded as unknown, never as a pass.
 
+Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0b, where it is
+blocking. `skills/autospec-shared/tests/unit/ui-motion-evidence.test.mjs` covers the
+assertions against probe objects recorded from a real browser run, and drives a live
+browser against an animated and an inert fixture.
+
 ### `ui-device-evidence.mjs`
 
 Runtime device evidence (design spec L4a). Renders each route across Playwright device
@@ -456,10 +461,10 @@ depends on the user agent: the reference page in `autospec-ui-pilot` passed ever
 rule while its text input rendered 21px tall, under the 2.5.8 minimum, and only the
 measured run found it.
 
-Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0b, where it is
-blocking. `skills/autospec-shared/tests/unit/ui-motion-evidence.test.mjs` covers the
-assertions against probe objects recorded from a real browser run, and drives a live
-browser against an animated and an inert fixture.
+Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0c, where it is
+blocking. `skills/autospec-shared/tests/unit/ui-device-evidence.test.mjs` covers the
+assertions against recorded probe objects and drives a live browser across a responsive
+page, a fixed-width one, undersized targets, and a hover affordance with no focus pair.
 
 ## End-of-run gap remediation (`$AUTOSPEC_SCRIPTS_DIR`)
 
