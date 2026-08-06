@@ -73,6 +73,25 @@ matches the adopted design language. It runs only when the repo has a root
    the deterministic half of the implementer's `DESIGN_DRIFT` directive). The
    vision judge below then handles the *subjective* fidelity the linter can't.
 
+0b. **Runtime motion evidence** — render each route twice, once normally and once
+   with `prefers-reduced-motion: reduce`, and assert that motion exists by default,
+   stops under the preference, and does not run unbounded:
+   ```bash
+   node "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ui-motion-evidence.mjs" \
+     --base-url "$APP_URL" --routes / /runs --json .autospec/reports/motion-evidence.json
+   ```
+   `MOTION_ABSENT` is the one worth understanding. Every other gate in this
+   pipeline — the lint above, the vision judge below, axe, the aesthetic rubric —
+   passes a static, animation-free page cleanly. This is the only check that fails
+   a UI for being *inert* rather than wrong, so it is the sole defence against a
+   correct, accessible, entirely lifeless implementation. Treat it as blocking, not
+   advisory.
+
+   Colour and opacity fades do not satisfy it: the assertion requires an animation
+   that moves or resizes something, matching what `lint-ui.sh` counts as motion.
+   Exit 3 means Playwright is unavailable and no evidence was collected — record
+   that as unknown, never as a pass.
+
 1. **Capture** — screenshot each spec route at the viewport matrix using the
    existing `gen-screenshots.mjs` (Mode-II forbidden-URL safety already built in):
    ```bash
