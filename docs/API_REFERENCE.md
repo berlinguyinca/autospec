@@ -502,6 +502,66 @@ judgement calls. `skills/autospec-shared/tests/unit/ui-keyboard-evidence.test.mj
 the assertions against recorded traversals and drives a live browser against a clean page,
 a focus trap, a suppressed focus ring, and a control under a sticky header.
 
+### `ui-liveregion-evidence.mjs`
+
+Live-region announcements (design spec L4c, second phase). Drives the app into each
+declared state through a test hook it exposes and asserts a screen-reader user is told what
+happened.
+
+```
+Usage: node ui-liveregion-evidence.mjs --base-url <url> [--manifest <path>]
+                                       [--json <report-path>]
+
+Default manifest: .autospec/ui-test-hooks.json
+Exit: 0 clean or skipped, 1 findings, 3 Playwright unavailable.
+```
+
+Findings are `LIVE_REGION_ABSENT`, `LIVE_REGION_INSERTED_WITH_CONTENT`,
+`LIVE_REGION_HIDDEN`, `LIVE_REGION_STUCK_BUSY` and `LIVE_REGION_WRONG_POLITENESS`, plus
+`TEST_HOOK_MISSING`, `TEST_HOOK_FAILED` and `TEST_HOOK_NO_EFFECT` — which name a broken
+manifest rather than an accessibility defect, and are kept separate so a no-op hook does not
+send the author after a live region that is fine.
+
+This is the first tier that requires the app under test to cooperate, and it has to: what
+is worth checking about a live region is a *transition*, and content already present when a
+page loads is never announced, so a state reached by reloading with a query parameter can
+only be inspected statically. The manifest declares routes and states; the page exposes
+`window.__autospec.setState`. `berlinguyinca/autospec-ui-pilot`'s `states.html` is the
+reference implementation.
+
+```json
+{ "schema": 1,
+  "hook": "__autospec.setState",
+  "routes": [ { "route": "/runs",
+                "states": [ { "name": "loading", "kind": "status", "busy": true },
+                            { "name": "error",   "kind": "alert" },
+                            "success" ] } ] }
+```
+
+A bare string is shorthand for `{"name": …, "kind": "status"}`. Both optional fields are
+declared rather than inferred: `kind` decides assertive against polite, and reading that off
+a state *name* is a regex pretending to be a judgement ("error" is obvious, "timeout" and
+"partial" are not); `busy` exists because a loading state is *supposed* to leave `aria-busy`
+set, which within a single driven state cannot be told from a flag left stuck.
+
+An absent manifest is a **skip, not a pass** — the script exits 0, and the QA cluster
+records the gap as a non-blocking `LIVE_REGION_UNMEASURED` finding so an unadopted repo
+does not read as covered.
+
+Three behaviours are worth knowing when reading a report. A fresh browser context is opened
+per *state*, not per route, so states never inherit each other's DOM. States settle by
+quiescence — no mutation for `QUIET_MS`, capped at `MAX_SETTLE_MS` — and the report records
+which of the two was hit. And a region appended empty then filled on a later task is *not* a
+finding: the discriminator is whether it carried text when the observer's records were
+delivered, which is the boundary a screen reader uses. The script header documents why each
+was measured rather than assumed.
+
+Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0e.
+`skills/autospec-shared/tests/unit/ui-liveregion-evidence.test.mjs` covers the assertions
+against probe objects recorded from Chromium and drives a live browser against a correct
+page, a region inserted carrying its text, the same-task variant, a silent update, an absent
+hook, and the append-then-fill-later pattern that must not be a false positive.
+
 ## End-of-run gap remediation (`$AUTOSPEC_SCRIPTS_DIR`)
 
 Backs `/autospec-run` Phase 5.5. See `docs/specs/2026-05-24-autospec-end-of-run-gap-remediation-design.md`.

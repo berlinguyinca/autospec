@@ -25,20 +25,24 @@
 //   15.    judgeState: a state that declares itself busy is exempt
 //   16-17. judgeState: LIVE_REGION_WRONG_POLITENESS, both directions
 //   18.    judgeState: a correct announcement draws nothing
-//
-// The real-browser cases arrive with the collection half.
+//   19-24. real browser: correct page clean; inserted-with-content, same-task, silent and
+//          absent-hook caught; the append-then-fill-later pattern not a false positive
+//   25.    an absent manifest loads as null so the caller can skip rather than pass
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createServer } from 'node:http';
 
 import {
   parseManifest,
   loadManifest,
   announced,
   judgeState,
+  collectEvidence,
+  loadPlaywright,
 } from '../../scripts/ui-liveregion-evidence.mjs';
 
 const ev = (kind, over = {}) => ({
@@ -174,6 +178,112 @@ test('a state declared as an alert but announced politely is reported', () => {
 
 test('a correct announcement draws nothing', () => {
   assert.deepEqual(judgeState('/runs', { name: 'success', kind: 'status' }, observation()), []);
+});
+
+// ── real browser ──────────────────────────────────────────────────────────────
+
+const PAGE_HEAD = '<!doctype html><html><head><style>.gone{display:none}</style>'
+  + '<script>window.__autospec={setState:(s)=>window.__drive(s)};</script></head><body>'
+  + '<div id="live" role="status" aria-live="polite"></div><main id="host"><p id="body">nothing yet</p></main>';
+
+const PAGES = {
+  // Correct: the region exists at load and is filled when the state is driven.
+  '/good': `${PAGE_HEAD}<script>window.__drive=()=>{
+      document.getElementById('body').textContent='Loaded 3 runs.';
+      document.getElementById('live').textContent='Loaded 3 runs.';
+    };</script></body></html>`,
+  // Bug: the region is created already carrying its text.
+  '/inserted': `${PAGE_HEAD}<script>window.__drive=()=>{
+      document.getElementById('body').textContent='Loaded 3 runs.';
+      const d=document.createElement('div');
+      d.setAttribute('role','status'); d.textContent='Loaded 3 runs.';
+      document.getElementById('host').appendChild(d);
+    };</script></body></html>`,
+  // Bug: appended empty, then filled in the SAME task. Reaches the judge as a
+  // region-inserted carrying text plus a content-added on the same region, which is the
+  // only shape where the region id decides the verdict.
+  '/sametask': `${PAGE_HEAD}<script>window.__drive=()=>{
+      document.getElementById('body').textContent='Loaded 3 runs.';
+      const d=document.createElement('div');
+      d.setAttribute('aria-live','polite');
+      document.getElementById('host').appendChild(d);
+      d.textContent='Loaded 3 runs.';
+    };</script></body></html>`,
+  // Correct: appended empty, filled on a LATER task. Emits region-inserted too, so a rule
+  // reading insertion alone would fail this page.
+  '/latertask': `${PAGE_HEAD}<script>window.__drive=()=>{
+      document.getElementById('body').textContent='Loaded 3 runs.';
+      const d=document.createElement('div');
+      d.setAttribute('aria-live','polite');
+      document.getElementById('host').appendChild(d);
+      setTimeout(()=>{ d.textContent='Loaded 3 runs.'; }, 20);
+    };</script></body></html>`,
+  // Bug: the page updates and says nothing.
+  '/silent': `${PAGE_HEAD}<script>window.__drive=()=>{
+      document.getElementById('body').textContent='Loaded 3 runs.';
+    };</script></body></html>`,
+  // Bug: no hook at all.
+  '/nohook': '<!doctype html><html><body><p>nothing to drive</p></body></html>',
+};
+
+async function serve() {
+  const server = createServer((req, res) => {
+    const body = PAGES[req.url.split('?')[0]];
+    res.writeHead(body ? 200 : 404, { 'content-type': 'text/html' });
+    res.end(body || 'not found');
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  return { server, base: `http://127.0.0.1:${server.address().port}` };
+}
+
+const withBrowser = async (routes, fn) => {
+  if (!(await loadPlaywright())) return null;
+  const { server, base } = await serve();
+  try {
+    const manifest = parseManifest({
+      schema: 1,
+      routes: routes.map((route) => ({ route, states: ['success'] })),
+    });
+    return await fn(await collectEvidence(base, manifest));
+  } finally {
+    server.close();
+  }
+};
+
+test('real browser: a page that fills a region already present announces cleanly', async () => {
+  const report = await withBrowser(['/good'], (r) => r);
+  if (!report) return;
+  assert.deepEqual(report.findings, []);
+});
+
+test('real browser: a region inserted carrying its text is caught', async () => {
+  const report = await withBrowser(['/inserted'], (r) => r);
+  if (!report) return;
+  assert.deepEqual(rules(report.findings), ['LIVE_REGION_INSERTED_WITH_CONTENT']);
+});
+
+test('real browser: a region appended empty and filled in the same task is caught', async () => {
+  const report = await withBrowser(['/sametask'], (r) => r);
+  if (!report) return;
+  assert.deepEqual(rules(report.findings), ['LIVE_REGION_INSERTED_WITH_CONTENT']);
+});
+
+test('real browser: a region appended empty and filled later is not a false positive', async () => {
+  const report = await withBrowser(['/latertask'], (r) => r);
+  if (!report) return;
+  assert.deepEqual(report.findings, []);
+});
+
+test('real browser: a page that updates silently is caught', async () => {
+  const report = await withBrowser(['/silent'], (r) => r);
+  if (!report) return;
+  assert.deepEqual(rules(report.findings), ['LIVE_REGION_ABSENT']);
+});
+
+test('real browser: a declared hook the page never exposes is caught', async () => {
+  const report = await withBrowser(['/nohook'], (r) => r);
+  if (!report) return;
+  assert.deepEqual(rules(report.findings), ['TEST_HOOK_MISSING']);
 });
 
 test('an absent manifest loads as null, so the caller can skip rather than pass', () => {

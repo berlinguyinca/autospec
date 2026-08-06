@@ -32,14 +32,33 @@
 //     on the frame boundary a screen reader uses: a region created and filled within one
 //     task is not announced either.
 //
-// This commit is the pure half: the manifest and the judgements, which take a recorded
-// observation and touch no browser. The collection that produces those observations, and
-// the CLI, follow.
+// Usage:
+//   ui-liveregion-evidence.mjs --base-url http://localhost:3000 [--manifest PATH]
+//
+// Exit: 0 clean or skipped, 1 findings, 3 Playwright unavailable.
+//
+// Env:
+//   PLAYWRIGHT_CHROMIUM_PATH  launch this chromium binary instead of the bundled one.
 
 import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export const DEFAULT_MANIFEST = '.autospec/ui-test-hooks.json';
 export const DEFAULT_HOOK = '__autospec.setState';
+
+// A fixed sleep flakes in both directions, so a state is settled by quiescence: this long
+// with no mutation at all, capped so a page that never goes quiet still terminates.
+export const QUIET_MS = 150;
+export const MAX_SETTLE_MS = 3000;
+// The hook may be registered by a deferred bundle, so its absence is only concluded after
+// a bounded wait.
+export const HOOK_TIMEOUT_MS = 5000;
+
+const LIVE_SELECTOR =
+  '[aria-live], [role="status"], [role="alert"], [role="log"], output';
 
 // ── manifest ──────────────────────────────────────────────────────────────────
 
@@ -197,4 +216,201 @@ export function judgeState(route, state, observation) {
   }
 
   return findings;
+}
+
+// ── browser collection ────────────────────────────────────────────────────────
+
+// Region identity comes from a WeakMap rather than a DOM attribute, so observing the page
+// never mutates it.
+const OBSERVER = `(() => {
+  const LIVE = ${JSON.stringify(LIVE_SELECTOR)};
+  const rids = new WeakMap();
+  let n = 0;
+  const rid = (el) => {
+    if (!rids.has(el)) rids.set(el, 'r' + (n += 1));
+    return rids.get(el);
+  };
+  const politeness = (el) => {
+    const explicit = el.getAttribute('aria-live');
+    if (explicit) return explicit;
+    const role = el.getAttribute('role');
+    if (role === 'alert') return 'assertive';
+    if (role === 'status' || role === 'log' || el.tagName === 'OUTPUT') return 'polite';
+    return '';
+  };
+  const host = (node) => {
+    let el = node.nodeType === 1 ? node : node.parentElement;
+    while (el) {
+      if (el.matches && el.matches(LIVE)) return el;
+      el = el.parentElement;
+    }
+    return null;
+  };
+  const at = (el, kind, text) => ({
+    kind,
+    rid: rid(el),
+    politeness: politeness(el),
+    busy: el.getAttribute('aria-busy') === 'true',
+    display: getComputedStyle(el).display,
+    text: String(text || '').replace(/\\s+/g, ' ').trim().slice(0, 60),
+  });
+
+  window.__autospecEvents = [];
+  window.__autospecMutations = 0;
+  window.__autospecLastMutation = 0;
+
+  new MutationObserver((records) => {
+    // Counted apart from the live-region events: a state that legitimately updates only a
+    // live region still did something, and must not read as a hook that did nothing.
+    window.__autospecMutations += records.length;
+    window.__autospecLastMutation = performance.now();
+    for (const rec of records) {
+      for (const node of rec.addedNodes) {
+        if (node.nodeType === 1 && node.matches && node.matches(LIVE)) {
+          window.__autospecEvents.push(at(node, 'region-inserted', node.textContent));
+          continue;
+        }
+        const h = host(node);
+        if (h) window.__autospecEvents.push(at(h, 'content-added', node.textContent));
+      }
+      if (rec.type === 'characterData') {
+        const h = host(rec.target);
+        if (h) window.__autospecEvents.push(at(h, 'text-changed', rec.target.data));
+      }
+      if (rec.type === 'attributes' && rec.target.matches && rec.target.matches(LIVE)) {
+        window.__autospecEvents.push(at(rec.target, 'attr-' + rec.attributeName, ''));
+      }
+    }
+  }).observe(document.body, {
+    childList: true,
+    subtree: true,
+    characterData: true,
+    attributes: true,
+    attributeFilter: ['aria-live', 'aria-busy', 'role', 'hidden'],
+  });
+  return true;
+})()`;
+
+// Live regions as they stand once the state has settled, for the judgements that are about
+// end state rather than about the transition.
+const REGIONS_PROBE = `(() => {
+  const LIVE = ${JSON.stringify(LIVE_SELECTOR)};
+  return Array.from(document.querySelectorAll(LIVE)).map((el) => ({
+    politeness: el.getAttribute('aria-live')
+      || (el.getAttribute('role') === 'alert' ? 'assertive'
+        : (el.getAttribute('role') === 'status' || el.getAttribute('role') === 'log'
+          || el.tagName === 'OUTPUT' ? 'polite' : '')),
+    busy: el.getAttribute('aria-busy') === 'true',
+    display: getComputedStyle(el).display,
+    text: (el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 60),
+  }));
+})()`;
+
+const resolveHook = (hook) =>
+  `${JSON.stringify(hook)}.split('.').reduce((o, k) => (o ? o[k] : undefined), window)`;
+
+export async function loadPlaywright() {
+  const { findPlaywrightPath } = await import(path.resolve(__dirname, 'gen-screenshots.mjs'));
+  const found = findPlaywrightPath();
+  if (!found) return null;
+  return import(found);
+}
+
+/**
+ * Drive one state and record what happened.
+ *
+ * A fresh context per state, not per route: driving loading → error → success on one page
+ * leaves state 2 inheriting state 1's DOM, so regions already present never re-fire
+ * `region-inserted` and the bug this tier exists to find goes silently undetected on every
+ * state after the first.
+ */
+export async function driveState(browser, url, hook, state) {
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    await page.goto(url, { waitUntil: 'load' });
+    await page.evaluate(OBSERVER);
+
+    const hookFound = await page
+      .waitForFunction(`typeof (${resolveHook(hook)}) === 'function'`, null, {
+        timeout: HOOK_TIMEOUT_MS,
+      })
+      .then(() => true)
+      .catch(() => false);
+    if (!hookFound) return { hookFound: false, mutations: 0, events: [], regions: [], settled: true };
+
+    // Quiescence is measured from the moment the hook is driven, so a page that was already
+    // idle does not read as instantly settled.
+    await page.evaluate('window.__autospecLastMutation = performance.now()');
+    let hookError = '';
+    try {
+      await page.evaluate(`(async () => { await (${resolveHook(hook)})(${JSON.stringify(state.name)}); })()`);
+    } catch (error) {
+      hookError = String(error.message || error).split('\n')[0].slice(0, 200);
+    }
+
+    const settled = await page
+      .waitForFunction(
+        `performance.now() - window.__autospecLastMutation > ${QUIET_MS}`,
+        null,
+        { timeout: MAX_SETTLE_MS },
+      )
+      .then(() => true)
+      .catch(() => false);
+
+    return {
+      hookFound: true,
+      hookError,
+      mutations: await page.evaluate('window.__autospecMutations'),
+      events: await page.evaluate('window.__autospecEvents'),
+      regions: await page.evaluate(REGIONS_PROBE),
+      settled,
+    };
+  } finally {
+    await context.close();
+  }
+}
+
+export async function collectEvidence(baseUrl, manifest) {
+  const playwright = await loadPlaywright();
+  if (!playwright) {
+    return {
+      schema: 1,
+      status: 'blocked_missing_playwright',
+      detail: 'Playwright is not installed; live-region evidence was not collected',
+      states: [],
+      findings: [],
+    };
+  }
+
+  const launch = {};
+  if (process.env.PLAYWRIGHT_CHROMIUM_PATH) {
+    launch.executablePath = process.env.PLAYWRIGHT_CHROMIUM_PATH;
+  }
+  const browser = await playwright.chromium.launch(launch);
+  const states = [];
+  const findings = [];
+
+  try {
+    for (const entry of manifest.routes) {
+      const url = new URL(entry.route, baseUrl).toString();
+      for (const state of entry.states) {
+        const observation = await driveState(browser, url, manifest.hook, state);
+        findings.push(...judgeState(entry.route, state, observation));
+        states.push({
+          route: entry.route,
+          state: state.name,
+          kind: state.kind,
+          mutations: observation.mutations,
+          announcements: announced(observation.events).length,
+          // Recorded so a report read later says whether the page went quiet or hit the cap.
+          settled: observation.settled ? 'quiet' : `capped at ${MAX_SETTLE_MS}ms`,
+        });
+      }
+    }
+  } finally {
+    await browser.close();
+  }
+
+  return { schema: 1, status: 'ok', states, findings };
 }
