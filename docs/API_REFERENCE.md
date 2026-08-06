@@ -612,6 +612,12 @@ appearing reads as every live region being inserted at once.
 off a name someone else chose is a regex pretending to be a judgement, but `error` here means
 a request this module made fail.
 
+A **server-rendered app skips every route**, and that is zero coverage rather than a pass:
+measured against `berlinguyinca/autospec-gui`, all six of its routes render their data on the
+server, so nothing is fetched client-side and nothing can be held. The CLI says
+`0 of N route(s) measured` in that case, because exiting 0 on a fully skipped run otherwise
+reads as clean. Those routes need the manifest.
+
 Only `fetch` and `xhr` are held; intercepting everything would break the page's own HTML,
 styles and scripts. Discovery avoids `networkidle`, which an app that polls or holds a socket
 never reaches, in favour of a bounded quiet window. A route with no data request is returned

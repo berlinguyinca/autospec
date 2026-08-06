@@ -210,8 +210,18 @@ for f in $FILES; do
       # three or six let `#00000022` through. Intervals stay out of the pattern: mawk
       # aborts on an interval combined with a group, and did so silently here until
       # 2026-08-04.
-      if (line ~ /:[^;{}]*#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*([^0-9a-fA-F]|$)/ \
-          || line ~ /["'"'"']#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*["'"'"']/) {
+      # A custom-property declaration IS the token definition, so its hex is the source
+      # of truth rather than a violation of it: `--accent: #0f766e` cannot be rewritten
+      # to use a token without becoming circular. Measured on berlinguyinca/autospec-gui,
+      # where 11 of its 21 findings were the :root block defining its palette.
+      #
+      # Only the declaration is stripped, not the whole line, so a real usage sharing a
+      # line is still caught. A `var(--x, #fff)` fallback is a usage rather than a
+      # declaration and stays flagged.
+      hexline = line
+      gsub(/--[A-Za-z0-9_-]+[[:space:]]*:[^;]*/, "", hexline)
+      if (hexline ~ /:[^;{}]*#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*([^0-9a-fA-F]|$)/ \
+          || hexline ~ /["'"'"']#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]*["'"'"']/) {
         print "UI_RAW_HEX\t" n "\traw hex color literal — use a DESIGN.md token/CSS variable"
       }
       # UI_OFF_GRID_SPACING: margin/padding/gap px not a multiple of 4 (and > 2px).

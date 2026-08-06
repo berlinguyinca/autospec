@@ -318,6 +318,16 @@ async function main() {
   }
   if (report.states.length === 0 && report.skipped.length === 0) {
     process.stdout.write('ui-liveregion-evidence: no routes given and no manifest found\n');
+  } else if (report.states.length === 0 && report.skipped.length > 0) {
+    // Every route skipped is zero coverage, and exiting 0 on it reads as a pass. Measured on
+    // berlinguyinca/autospec-gui: all six routes are server-rendered, so their data arrives
+    // with the HTML and there is no request to hold. That is the norm for App Router and
+    // every other SSR framework, so this says what to do rather than only what happened.
+    process.stdout.write(
+      `ui-liveregion-evidence: 0 of ${report.skipped.length} route(s) measured — none makes a ` +
+      'client-side data request, which is normal for a server-rendered app. Announcements on ' +
+      `these routes are only reachable by declaring their states in ${DEFAULT_MANIFEST}.\n`,
+    );
   }
   process.exit(report.findings.length > 0 ? 1 : 0);
 }
