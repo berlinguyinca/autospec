@@ -365,6 +365,39 @@ Exit: 0 = success, 1 = missing required input or file not found.
   generated: false
 -->
 
+### `lint-ui.sh`
+
+Deterministic design-token and motion lint for UI files — the objective half of the
+implementer's `DESIGN_DRIFT` directive, complementing the vision fidelity judge.
+
+```
+Usage: bash lint-ui.sh <file> [<file>…]
+       bash lint-ui.sh --directives <file>…
+       bash lint-ui.sh --help
+
+Exit: 0 clean, N findings (capped 200), 99 the linter could not run.
+Env:  AUTOSPEC_LINT_UI_AWK   awk binary to use (default: awk).
+```
+
+Rules: `UI_RAW_HEX`, `UI_OFF_GRID_SPACING`, `UI_AD_HOC_ZINDEX`, `UI_BANNED_FONT`,
+`UI_NO_REDUCED_MOTION`, `UI_INFINITE_ANIMATION`, `UI_FIXED_VIEWPORT`,
+`UI_HOVER_ONLY_AFFORDANCE`.
+
+Exit 99 is deliberately outside the finding-count range, so a caller can tell a broken
+interpreter from a file with two findings. Comments are stripped before any rule runs —
+without that, prose naming a banned viewport directive was reported, and a comment naming
+the reduced-motion media feature silenced a real finding.
+
+`UI_NO_REDUCED_MOTION` is cleared for every file in one invocation when any of them
+carries a global reset: a `prefers-reduced-motion` block targeting the universal selector,
+which guards every element on the page. A block scoped to a single class does not count,
+and linting one file at a time still reports, since one file cannot show evidence of a
+reset living in another. Pass the whole changed-file set to get the intended behaviour.
+
+Calibrated against [`autospec-ui-pilot`](https://github.com/berlinguyinca/autospec-ui-pilot),
+which holds a compliant reference plus one deliberate violation per rule and records the
+expected verdicts, so a rule that stops firing shows up as a diff.
+
 ### `ui-motion-evidence.mjs`
 
 Runtime motion evidence (design spec L4b). Renders each route twice — once normally,
@@ -398,6 +431,40 @@ Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0b, wh
 blocking. `skills/autospec-shared/tests/unit/ui-motion-evidence.test.mjs` covers the
 assertions against probe objects recorded from a real browser run, and drives a live
 browser against an animated and an inert fixture.
+
+### `ui-device-evidence.mjs`
+
+Runtime device evidence (design spec L4a). Renders each route across Playwright device
+descriptors rather than a width sweep, and adds the two dedicated WCAG runs.
+
+```
+Usage: node ui-device-evidence.mjs --base-url <url> --routes <path> [<path>…]
+                                   [--json <report-path>]
+
+Exit: 0 clean, 1 findings, 3 Playwright unavailable.
+```
+
+Findings are `DEVICE_OVERFLOW`, `DEVICE_REFLOW` (320 CSS px, WCAG 1.4.10),
+`DEVICE_ZOOM_CLIP` (200% zoom, 1.4.4), `DEVICE_TARGET_TOO_SMALL` (24px on a coarse
+pointer, 2.5.8) and `DEVICE_HOVER_ONLY_INPUT`.
+
+A device profile is not a viewport. The descriptors carry user agent, device pixel ratio
+and touch, so `pointer: coarse` and `any-hover: none` resolve as they do on the device —
+an iPhone 13 context reports `coarse=true, noHover=true, dpr=3`, while a 390px desktop
+viewport reports none of it. A width sweep exercises none of that.
+
+200% zoom is emulated by halving the viewport, since Playwright exposes no page-zoom
+control and the two are equivalent for reflow at 1280 CSS px.
+
+This is the tier that catches what stylesheets cannot describe. A rendered control's size
+depends on the user agent: the reference page in `autospec-ui-pilot` passed every static
+rule while its text input rendered 21px tall, under the 2.5.8 minimum, and only the
+measured run found it.
+
+Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0c, where it is
+blocking. `skills/autospec-shared/tests/unit/ui-device-evidence.test.mjs` covers the
+assertions against recorded probe objects and drives a live browser across a responsive
+page, a fixed-width one, undersized targets, and a hover affordance with no focus pair.
 
 ## End-of-run gap remediation (`$AUTOSPEC_SCRIPTS_DIR`)
 
