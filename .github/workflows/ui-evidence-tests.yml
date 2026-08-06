@@ -1,0 +1,64 @@
+name: UI evidence tests
+
+# The runtime UI gates — motion, device, keyboard, live regions — each ship a node:test
+# suite under skills/autospec-shared/tests/unit/. Nothing ran them.
+#
+# No workflow invoked `node --test` and neither did any validate script, so three tiers of
+# assertions had never executed in CI. That is the same hole the file-size ratchet closed:
+# a rule that only runs locally does not run on the merge path, which is the path every
+# change actually takes.
+#
+# Playwright is installed here on purpose. Each suite falls back to its pure assertions
+# when no browser is present, and every one of these tiers had a defect that only a real
+# browser surfaced — a focus ring reporting `auto`, an input rendering under the touch
+# minimum, a live region emitting an insertion event for the *correct* dynamic pattern.
+# Running the unit half alone would pass while leaving exactly those cases unchecked.
+
+on:
+  pull_request:
+    paths:
+      - 'skills/autospec-shared/scripts/ui-*.mjs'
+      - 'skills/autospec-shared/scripts/gen-screenshots.mjs'
+      - 'skills/autospec-shared/tests/unit/ui-*.test.mjs'
+      - '.github/workflows/ui-evidence-tests.yml'
+  workflow_dispatch:
+
+jobs:
+  ui-evidence-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Playwright chromium
+        run: |
+          set -eu
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+
+      - name: Run the UI evidence suites
+        run: |
+          set -eu
+          suites="$(find skills/autospec-shared/tests/unit -name 'ui-*-evidence.test.mjs' | sort)"
+          if [ -z "$suites" ]; then
+            echo "no UI evidence suites found — the glob or the layout changed" >&2
+            exit 1
+          fi
+          echo "$suites"
+          # shellcheck disable=SC2086
+          node --test $suites
+
+      - name: Confirm the browser half actually ran
+        run: |
+          set -eu
+          # A suite with no browser returns early from its real-browser tests and still
+          # reports green, so a silently missing Playwright would look identical to a pass.
+          # Assert the browser is reachable rather than trusting the exit code.
+          node -e "
+            const { chromium } = require('playwright');
+            chromium.launch().then(async (b) => { await b.close(); console.log('chromium launched'); })
+              .catch((e) => { console.error('chromium did not launch:', e.message); process.exit(1); });
+          "
