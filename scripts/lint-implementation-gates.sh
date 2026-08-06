@@ -125,14 +125,37 @@ done
 # comes from --numstat rather than from differencing file lengths, because git reports
 # a move as a rename: the source path never appears on its own, so length differencing
 # counts the destination as wholly new and a pure move reads as pure addition.
-NET_DELTA="$(git diff --cached --numstat 2>/dev/null | awk '
-  {
-    path = $3
-    # Renames arrive as "old => new" or "dir/{old => new}"; judge the target.
-    if (index(path, "=>")) { sub(/^.*=> ?/, "", path); gsub(/[}]/, "", path) }
-    if (path ~ /\.(md|txt|json|ya?ml|diff|lock)$/) next
-    if ($1 == "-" || $2 == "-") next   # binary
-    net += $1 - $2
+#
+# Counted over the diff body rather than --numstat, and over CODE lines only. An extraction
+# cannot avoid adding a module declaration, an import and a header explaining the split, so
+# counting those made every honest extraction read as net growth and forfeited the waiver.
+# Measured on the real case: lifting the harness cluster out of executor_bridge.rs moved 595
+# lines out and 626 in — a raw net of +31, of which the code-line net was exactly 0.
+#
+# A feature cannot hide in a comment, a blank line or a `mod`/`use`/`import` declaration, so
+# excluding them costs the rule none of what it protects. Statements still count, which is
+# what stops the waiver laundering a feature through a refactor.
+NET_DELTA="$(git diff --cached -U0 2>/dev/null | awk '
+  # Track the file each hunk belongs to, so documentation and data stay exempt exactly as
+  # they were under --numstat. Dropping that exemption would make a docs-heavy change read as
+  # growth and quietly forfeit a waiver it should have kept.
+  /^\+\+\+ / {
+    path = $2
+    sub(/^b\//, "", path)
+    skip = (path ~ /\.(md|txt|json|ya?ml|diff|lock)$/)
+    next
+  }
+  /^--- / { next }
+  skip { next }
+  /^(\+|-)/ {
+    sign = substr($0, 1, 1)
+    body = substr($0, 2)
+    stripped = body
+    sub(/^[[:space:]]+/, "", stripped)
+    if (stripped == "") next                                   # blank
+    if (stripped ~ /^(\/\/|#|\*|\/\*|--|;;)/) next             # comment, any of the usual markers
+    if (stripped ~ /^(pub[(][a-z]+[)] )?(mod|use|import|export|from|require|package) /) next
+    if (sign == "+") net += 1; else net -= 1
   }
   END { print net + 0 }
 ')"

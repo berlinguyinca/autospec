@@ -259,6 +259,45 @@ open('big.py', 'w').write('\n'.join(lines) + '\n')
     ! printf '%s\n' "$output" | grep -q 'exceeded=changed_lines'
 }
 
+@test "relocation: module scaffolding and comments do not forfeit the waiver" {
+    # Measured on the real thing: extracting the harness cluster out of executor_bridge.rs
+    # moved 595 lines out and 626 in, a net +31 — and every one of those 31 was a comment, a
+    # blank line, or a `mod`/`use` declaration. Net *code* lines: exactly 0.
+    #
+    # The rule's own rationale is that a feature cannot hide in a relocation because features
+    # add lines. A feature cannot hide in a module declaration or a header comment either, so
+    # counting them makes the test reject the extraction it exists to permit — the §1.1 defect
+    # once more, in the waiver rather than in the rule.
+    #
+    # The arithmetic below is deliberate: 900 lines leave big.py, 900 lines of code arrive in
+    # moved.py, and the scaffolding pushes the raw net positive while the code net stays zero.
+    write_lines big.py 900
+    git add big.py
+    git commit -q -m "pre-existing oversized file"
+    write_lines big.py 300
+    write_lines moved.py 600
+    printf '# why this module exists\n# and what it holds\nimport os\n\n' >> moved.py
+    printf 'import moved\n' >> big.py
+    git add big.py moved.py
+    run bash "$GATES" --staged
+    [ "$status" -eq 0 ]
+    ! printf '%s\n' "$output" | grep -q 'exceeded=changed_lines'
+}
+
+@test "relocation: adding real code alongside a move still forfeits the waiver" {
+    # The counterpart. Comments and imports are free; statements are not, or the waiver would
+    # launder a feature through a refactor.
+    write_lines big.py 900
+    git add big.py
+    git commit -q -m "pre-existing oversized file"
+    write_lines big.py 300
+    write_lines moved.py 600
+    write_lines extra.py 200
+    git add big.py moved.py extra.py
+    run bash "$GATES" --staged
+    printf '%s\n' "$output" | grep -q 'exceeded=changed_lines'
+}
+
 @test "relocation: a new oversized file is reported but does not block a pure move" {
     write_lines big.py 900
     git add big.py

@@ -407,6 +407,12 @@ many lines as it adds. A new file holding relocated code is reported without blo
 since rejecting an extraction would preserve the larger original. `PR_SIZE`'s unit count
 excludes doc files, because `DOC_OUT_OF_SYNC` compels a public-surface change to touch
 one; see `docs/API_REFERENCE.md`.
+The relocation test counts **code** lines only. An extraction cannot avoid adding a module
+declaration, an import and a header explaining the split, so counting those made every honest
+extraction read as net growth and forfeited the waiver written for it — measured at +31 raw
+and 0 code lines when the harness cluster left `executor_bridge.rs`. Comments, blank lines and
+`mod`/`use`/`import` declarations are excluded; statements are not, which is what stops the
+waiver laundering a feature through a refactor.
 `.github/workflows/file-size-ratchet.yml` applies the same ratchet in CI against the
 merge base, which is where growth actually enters: the rule previously ran only as a
 local hook, so files grew freely through the merge path.
