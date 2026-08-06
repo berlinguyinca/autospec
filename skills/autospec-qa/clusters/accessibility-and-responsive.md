@@ -9,10 +9,37 @@ Inputs:
 
 Responsibilities:
 - Run axe-core (or equivalent) on key routes; collect violations.
-- Walk viewport matrix (mobile 375, tablet 768, desktop 1280, wide 1920);
-  detect content overflow + horizontal-scroll regressions.
+- Render each route across device profiles — user agent, DPR and touch, not widths —
+  via step 0c, which also runs the 320px reflow and 200% zoom checks. A width sweep
+  resolves neither `pointer: coarse` nor `any-hover: none`, so it never exercises the
+  media queries a responsive UI is built on.
+- Traverse each route by keyboard via step 0d.
 - Validate browser variance across Chromium, WebKit, Firefox where applicable.
 - Defer functional-coverage gaps to `functional-coverage`.
+
+## What is machine-verifiable, and what is not
+
+The evidence steps below decide these outright. Do not spend a judgement call on them,
+and do not record a pass without their output:
+
+| Question | Settled by |
+|---|---|
+| Does the UI move at all, and does it stop when asked? | step 0b |
+| Does it fit at 320px and at 200% zoom? | step 0c |
+| Are touch targets big enough on a coarse pointer? | step 0c |
+| Can a keyboard reach everything, see where it is, and get out? | step 0d |
+| Is focus painted over by a sticky header? | step 0d |
+
+What remains a judgement call, honestly:
+
+- whether an accessible name is *meaningful* — a robot confirms one exists, not that it
+  describes the control
+- whether link text makes sense read out of context
+- plain language, reading level, and tone
+- subjective visual fidelity, which the vision judge below handles
+
+When one of the steps below exits 3, its question is **unknown**, not answered. Record it
+that way; an absent browser is not a passing grade.
 
 ## Screenshot audit
 
@@ -110,6 +137,23 @@ matches the adopted design language. It runs only when the repo has a root
    It also catches what no stylesheet can state: a control's rendered size depends
    on the user agent, so a text input can pass every static rule and still render
    under the 24px minimum. Treat these as blocking, and exit 3 as unknown.
+
+0d. **Keyboard traversal** — tab through each route and assert a keyboard user can
+   work it:
+   ```bash
+   node "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ui-keyboard-evidence.mjs" \
+     --base-url "$APP_URL" --routes / /runs --json .autospec/reports/keyboard-evidence.json
+   ```
+   Findings: `KEYBOARD_TRAP`, `NO_KEYBOARD_PATH`, `FOCUS_NOT_VISIBLE` (WCAG 2.4.7),
+   `FOCUS_OBSCURED` (2.4.11), `FOCUS_ORDER_JUMPS` (2.4.3).
+
+   `KEYBOARD_TRAP` is the severe one: a user who tabs into a region and cannot tab
+   out has no way forward without a mouse. It is distinguished from merely
+   unreachable content by whether the traversal cycles — focus handed back
+   repeatedly repeats a short cycle while other controls sit outside it.
+
+   The browser's default focus ring counts as visible; only a suppressed indicator
+   is reported. Treat these as blocking, and exit 3 as unknown.
 
 1. **Capture** — screenshot each spec route at the viewport matrix using the
    existing `gen-screenshots.mjs` (Mode-II forbidden-URL safety already built in):
