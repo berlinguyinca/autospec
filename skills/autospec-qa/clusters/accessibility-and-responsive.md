@@ -186,6 +186,13 @@ matches the adopted design language. It runs only when the repo has a root
    A route that makes no `fetch` or `xhr` request is reported under `skipped` with a reason.
    That is honest: a static page has no state to drive. It is not a finding.
 
+   **A server-rendered app skips every route, and that is zero coverage rather than a pass.**
+   Measured against `berlinguyinca/autospec-gui`: all six of its routes render their data on
+   the server, so nothing is fetched client-side and nothing can be held. This is the norm
+   for Next.js App Router and every comparable framework, so when the run reports
+   `0 of N route(s) measured`, treat it as the signal to declare states in the manifest —
+   not as a clean bill of health. It is the one case where induction alone leaves a real gap.
+
    States no request can produce — form validation, optimistic updates, client-side route
    changes, empty states — are unreachable this way. Those are declared in
    `.autospec/ui-test-hooks.json`, which the implementer writes as it builds them (see

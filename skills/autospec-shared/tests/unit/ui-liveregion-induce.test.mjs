@@ -18,7 +18,8 @@
 //   8.    an app that renders data silently is caught
 //   9.    an app with no error path at all is caught, and named for that
 //   10.   a static route is skipped with a reason rather than passed
-//   11.   an app that leaves aria-busy set after the response is caught
+//   11.   a server-rendered app yields zero measured routes, distinguishably from clean
+//   12.   an app that leaves aria-busy set after the response is caught
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -185,6 +186,18 @@ test('a route with nothing to induce is skipped with a reason, not passed', asyn
   assert.deepEqual(report.states, []);
   assert.equal(report.skipped.length, 1);
   assert.match(report.skipped[0].reason, /nothing to induce/);
+});
+
+test('a whole app with no client-side fetching yields zero measured routes', async () => {
+  // Measured on berlinguyinca/autospec-gui: all six routes are server-rendered, so their data
+  // arrives with the HTML and there is nothing to hold. Induction reaching zero routes is the
+  // normal outcome for an App Router app, not a malfunction — but it is also zero coverage,
+  // so the caller has to be able to tell it apart from a clean run.
+  const report = await withApp((browser, base) => collectInduced(browser, base, ['/static', '/static']));
+  if (!report) return;
+  assert.deepEqual(report.states, []);
+  assert.deepEqual(report.findings, []);
+  assert.equal(report.skipped.length, 2);
 });
 
 test('aria-busy left set after the response arrives is caught', async () => {
