@@ -556,8 +556,10 @@ finding: the discriminator is whether it carried text when the observer's record
 delivered, which is the boundary a screen reader uses. The script header documents why each
 was measured rather than assumed.
 
-`--json` writes the full report. `status` is `ok` or `blocked_missing_playwright`; a skip
-never reaches this file, because an absent manifest exits before the browser starts.
+`--json` writes the full report. `status` is `ok`, `skipped` (no manifest) or
+`blocked_missing_playwright`. A skip writes the report too — leaving the file absent would
+make "this repo has not adopted the hook" indistinguishable from "the step never ran" to
+anything reading it, which is the gap the skip exists to make visible.
 
 ```json
 { "schema": 1, "status": "ok",

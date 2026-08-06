@@ -8,11 +8,16 @@ name: UI evidence tests
 # a rule that only runs locally does not run on the merge path, which is the path every
 # change actually takes.
 #
-# Playwright is installed here on purpose. Each suite falls back to its pure assertions
-# when no browser is present, and every one of these tiers had a defect that only a real
-# browser surfaced — a focus ring reporting `auto`, an input rendering under the touch
-# minimum, a live region emitting an insertion event for the *correct* dynamic pattern.
-# Running the unit half alone would pass while leaving exactly those cases unchecked.
+# Playwright is installed here on purpose. Each suite skips its real-browser cases when the
+# playwright *module* cannot be resolved, and still reports green — so without the install
+# step this job would pass while running only the pure half. The browser half is the one
+# that has historically caught things: every tier here had a defect only a real browser
+# surfaced — a focus ring reporting outline style `auto`, an input rendering under the 24px
+# touch minimum, a live region emitting an insertion event for the *correct* dynamic pattern.
+#
+# The module present but its browser binary missing is the louder failure: the suites throw
+# rather than skip. The final step exists to name that case directly, because a launch error
+# buried inside six test failures reads as a broken tier rather than a broken install.
 
 on:
   pull_request:

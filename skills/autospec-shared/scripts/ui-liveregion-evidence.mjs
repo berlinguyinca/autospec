@@ -337,7 +337,9 @@ export async function driveState(browser, url, hook, state) {
       })
       .then(() => true)
       .catch(() => false);
-    if (!hookFound) return { hookFound: false, mutations: 0, events: [], regions: [], settled: true };
+    if (!hookFound) {
+      return { hookFound: false, hookError: '', mutations: 0, events: [], regions: [], settled: true };
+    }
 
     // Quiescence is measured from the moment the hook is driven, so a page that was already
     // idle does not read as instantly settled.
@@ -434,8 +436,24 @@ async function main() {
     process.exit(3);
   }
 
+  const writeReport = (report) => {
+    if (!opts.json) return;
+    fs.mkdirSync(path.dirname(path.resolve(opts.json)), { recursive: true });
+    fs.writeFileSync(opts.json, `${JSON.stringify(report, null, 2)}\n`);
+  };
+
   const manifest = loadManifest(path.resolve(opts.manifest));
   if (!manifest) {
+    // A skip writes its report too. Leaving the file absent makes "this repo has not
+    // adopted the hook" indistinguishable from "the step never ran" to anything reading
+    // the report, which is exactly the gap the skip is supposed to make visible.
+    writeReport({
+      schema: 1,
+      status: 'skipped',
+      detail: `no ${opts.manifest}; no states are declared to drive`,
+      states: [],
+      findings: [],
+    });
     process.stdout.write(
       `ui-liveregion-evidence: SKIPPED (no ${opts.manifest}; no states are declared to drive)\n`,
     );
@@ -443,10 +461,7 @@ async function main() {
   }
 
   const report = await collectEvidence(opts.baseUrl, manifest);
-  if (opts.json) {
-    fs.mkdirSync(path.dirname(path.resolve(opts.json)), { recursive: true });
-    fs.writeFileSync(opts.json, `${JSON.stringify(report, null, 2)}\n`);
-  }
+  writeReport(report);
 
   if (report.status === 'blocked_missing_playwright') {
     process.stderr.write('ui-liveregion-evidence: Playwright unavailable; no evidence collected\n');

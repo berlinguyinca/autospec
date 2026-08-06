@@ -122,6 +122,14 @@ test('a hook that changes nothing at all is reported as a no-op', () => {
   assert.deepEqual(rules(f), ['TEST_HOOK_NO_EFFECT']);
 });
 
+test('a hook that throws is reported as a failed hook, not as a missing announcement', () => {
+  const f = judgeState('/runs', { name: 'success', kind: 'status' }, observation({
+    hookError: 'unknown state: sucess', events: [], mutations: 0,
+  }));
+  assert.deepEqual(rules(f), ['TEST_HOOK_FAILED']);
+  assert.match(f[0].detail, /unknown state/);
+});
+
 test('a page that changed with nothing announced is LIVE_REGION_ABSENT', () => {
   const f = judgeState('/runs', { name: 'success', kind: 'status' }, observation({ mutations: 1, events: [] }));
   assert.deepEqual(rules(f), ['LIVE_REGION_ABSENT']);
