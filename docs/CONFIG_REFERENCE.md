@@ -432,9 +432,12 @@ local hook, so files grew freely through the merge path.
 | Var | Default | Effect |
 |---|---|---|
 | `AUTOSPEC_SEC_MAX_ROUNDS` | `3` | Phase 4 security gate fix/re-scan loop cap. |
-| `AUTOSPEC_REQUIRED_SYSTEM_TOOLS` | core tools + `npm` + `rg` | Override required core installer commands; the immutable executor scanner set is always added and verified. |
+| `AUTOSPEC_REQUIRED_SYSTEM_TOOLS` | core tools + `npm` | Override required core installer commands; the immutable executor scanner set is always added and verified. |
 
-**`rg` (ripgrep) is a hard dependency of the reuse lens.** `REINVENT_REPO_UTIL` and
+**`rg` (ripgrep) is an optional-but-recommended dependency of the reuse lens**, and
+deliberately *not* in `AUTOSPEC_REQUIRED_SYSTEM_TOOLS` — a required tool that is
+missing aborts the install, and the lens fails open rather than failing hard, so a
+missing `rg` must degrade the lens rather than block installation. `REINVENT_REPO_UTIL` and
 `NEW_ABSTRACTION_SINGLE_CALLER` shell out to it and **fail open** when it is absent —
 non-blocking by design, but the lens then detects nothing. That is now announced as
 `INFO:REUSE_LENS_DISABLED` once per run, because a silently inert lens is

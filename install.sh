@@ -50,7 +50,7 @@ SUPERPOWERS_CODEX_SKILLS_DIR="${SUPERPOWERS_CODEX_SKILLS_DIR:-$HOME/.agents/skil
 SUPERPOWERS_OPENCODE_PLUGIN="${SUPERPOWERS_OPENCODE_PLUGIN:-superpowers@git+https://github.com/obra/superpowers.git}"
 OPENCODE_CONFIG_ROOT="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
 if [ -z "${AUTOSPEC_REQUIRED_SYSTEM_TOOLS:-}" ]; then
-    AUTOSPEC_REQUIRED_SYSTEM_TOOLS="git bash curl cargo python3 gh jq npm rg"
+    AUTOSPEC_REQUIRED_SYSTEM_TOOLS="git bash curl cargo python3 gh jq npm"
 fi
 AUTOSPEC_EXECUTOR_SCANNERS="gitleaks semgrep trivy license-checker"
 readonly AUTOSPEC_EXECUTOR_SCANNERS
