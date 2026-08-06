@@ -394,6 +394,11 @@ anti-blandness gate in one place and fail a motion rule in another.
 
 Exit 3 means no evidence was collected and must be recorded as unknown, never as a pass.
 
+Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0b, where it is
+blocking. `skills/autospec-shared/tests/unit/ui-motion-evidence.test.mjs` covers the
+assertions against probe objects recorded from a real browser run, and drives a live
+browser against an animated and an inert fixture.
+
 ## End-of-run gap remediation (`$AUTOSPEC_SCRIPTS_DIR`)
 
 Backs `/autospec-run` Phase 5.5. See `docs/specs/2026-05-24-autospec-end-of-run-gap-remediation-design.md`.
