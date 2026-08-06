@@ -590,6 +590,41 @@ against probe objects recorded from Chromium and drives a live browser against a
 page, a region inserted carrying its text, the same-task variant, a silent update, an absent
 hook, and the append-then-fill-later pattern that must not be a false positive.
 
+### `ui-evidence-gates.sh`
+
+Runs all five runtime UI gates and merges them into one report. Backs QA step 0a.
+
+```
+Usage: ui-evidence-gates.sh --base-url <url> [--routes "/ /runs …"]
+                            [--gates-dir <dir>] [--report-dir <dir>]
+                            [--manifest <path>] [--baseline-dir <dir>]
+                            [--update-baselines]
+
+Writes: <report-dir>/ui-evidence-gates.json
+Exit:   0 PASS, 1 FAIL (findings), 2 UNKNOWN (a gate could not run or verified nothing)
+Final line: ui-evidence-gates: PASS|FAIL|UNKNOWN (<ran> ran, <n> with findings, <n> unknown)
+```
+
+The gates shipped over four merges with nothing invoking them — five prose steps, five CLIs,
+five report shapes and five exit conventions, reconciled by hand. Steps that cost five manual
+invocations get run once and then not again.
+
+Three distinctions it preserves, each a way a gate run can lie. `UNKNOWN` is never folded into
+`PASS`: a gate that could not launch a browser answered none of its questions. A gate that ran
+and *verified nothing* is `UNKNOWN` too — live-region induction skips every route of a
+server-rendered app and exits 0, which is zero coverage wearing a pass, detected by a
+`measured: 0` in the gate's own report. And findings outrank unknown, so a missing browser on
+one gate never masks a defect another found.
+
+Every gate runs even after one fails; stopping early would hide the rest and an operator would
+fix one defect per run. `tests/lint/ui-evidence-gates.bats` covers the orchestration contract
+with stub gates, so every outcome is exercised without a browser.
+
+`--routes` takes one space-separated string rather than a list, so it survives being passed
+through a shell variable. `--gates-dir` points at the installed scripts and defaults to
+`$AUTOSPEC_SCRIPTS_DIR`; `--update-baselines` forwards `--update` to the a11y gate alone,
+which is how an intentional tree change is accepted without touching the other four.
+
 ### `ui-liveregion-induce.mjs`
 
 Drives app states with **zero app cooperation**, by controlling the network. Consumed by

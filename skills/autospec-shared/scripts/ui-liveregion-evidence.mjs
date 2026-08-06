@@ -301,7 +301,10 @@ async function main() {
     await browser.close();
   }
 
-  const report = { schema: 1, status: 'ok', states, findings, skipped };
+  // `measured` is the count a caller needs to tell a clean run from a run that checked
+  // nothing. Without it an orchestrator reports "ok liveregion" for six skipped routes, which
+  // is the same silent gap this tier exists to close, one level up.
+  const report = { schema: 1, status: 'ok', measured: states.length, states, findings, skipped };
   writeReport(report);
 
   for (const finding of report.findings) {
