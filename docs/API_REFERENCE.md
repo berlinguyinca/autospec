@@ -466,6 +466,38 @@ blocking. `skills/autospec-shared/tests/unit/ui-device-evidence.test.mjs` covers
 assertions against recorded probe objects and drives a live browser across a responsive
 page, a fixed-width one, undersized targets, and a hover affordance with no focus pair.
 
+### `ui-keyboard-evidence.mjs`
+
+Keyboard robot (design spec L4c, first phase). Tab-traverses every route and asserts what
+a keyboard user needs.
+
+```
+Usage: node ui-keyboard-evidence.mjs --base-url <url> --routes <path> [<path>…]
+                                     [--json <report-path>]
+
+Exit: 0 clean, 1 findings, 3 Playwright unavailable.
+```
+
+Findings are `KEYBOARD_TRAP`, `NO_KEYBOARD_PATH`, `FOCUS_NOT_VISIBLE` (WCAG 2.4.7),
+`FOCUS_OBSCURED` (2.4.11) and `FOCUS_ORDER_JUMPS` (2.4.3).
+
+This tier moves checks out of the judgement class. What honestly stays human-reviewed is
+whether an accessible name is *meaningful*, whether link text makes sense out of context,
+and plain language — none of which a robot can settle.
+
+Two details that decide whether the assertions mean anything, both measured rather than
+assumed. A suppressed indicator reports outline **style** `none` while keeping its width,
+and the browser default ring reports `auto`, so the check reads style and treats the
+default ring as visible. And a trap is distinguished from unreachable content by whether
+the traversal cycles: focus that keeps being handed back repeats a short cycle while
+controls sit outside it.
+
+Order is judged over the first cycle only. Tab wraps from the last control back to the
+first, which is a move up the page by definition and would otherwise fail every correctly
+ordered page.
+
+Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0d.
+
 ## End-of-run gap remediation (`$AUTOSPEC_SCRIPTS_DIR`)
 
 Backs `/autospec-run` Phase 5.5. See `docs/specs/2026-05-24-autospec-end-of-run-gap-remediation-design.md`.
