@@ -14,6 +14,7 @@ Responsibilities:
   resolves neither `pointer: coarse` nor `any-hover: none`, so it never exercises the
   media queries a responsive UI is built on.
 - Traverse each route by keyboard via step 0d.
+- Drive each declared app state and check what is announced, via step 0e.
 - Validate browser variance across Chromium, WebKit, Firefox where applicable.
 - Defer functional-coverage gaps to `functional-coverage`.
 
@@ -29,6 +30,7 @@ and do not record a pass without their output:
 | Are touch targets big enough on a coarse pointer? | step 0c |
 | Can a keyboard reach everything, see where it is, and get out? | step 0d |
 | Is focus painted over by a sticky header? | step 0d |
+| When the app changes state, is a screen-reader user told? | step 0e |
 
 What remains a judgement call, honestly:
 
@@ -154,6 +156,32 @@ matches the adopted design language. It runs only when the repo has a root
 
    The browser's default focus ring counts as visible; only a suppressed indicator
    is reported. Treat these as blocking, and exit 3 as unknown.
+
+0e. **Live-region announcements** — drive each declared state and assert a screen-reader
+   user is told what happened:
+   ```bash
+   node "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ui-liveregion-evidence.mjs" \
+     --base-url "$APP_URL" --manifest .autospec/ui-test-hooks.json \
+     --json .autospec/reports/liveregion-evidence.json
+   ```
+   Findings: `LIVE_REGION_ABSENT`, `LIVE_REGION_INSERTED_WITH_CONTENT`,
+   `LIVE_REGION_HIDDEN`, `LIVE_REGION_STUCK_BUSY`, `LIVE_REGION_WRONG_POLITENESS`,
+   plus `TEST_HOOK_MISSING` / `TEST_HOOK_FAILED` / `TEST_HOOK_NO_EFFECT`, which name a
+   broken manifest rather than an accessibility defect and should be routed as such.
+
+   This is the only step that requires the app under test to cooperate, and it has to:
+   content present when a page loads is never announced, so a state reached by reloading
+   with a query parameter can only be inspected statically. The repo declares drivable
+   states in `.autospec/ui-test-hooks.json` and exposes `window.__autospec.setState`;
+   `berlinguyinca/autospec-ui-pilot`'s `states.html` is the reference to copy.
+
+   **When the manifest is absent the script exits 0 and reports SKIPPED — that is a gap,
+   not a pass.** Record it as one non-blocking `category:"a11y_violation"` finding with
+   rule `LIVE_REGION_UNMEASURED`, the same way step 1 of the design-gates section keeps
+   `unmapped` blockers visible. A repo that never adopts the manifest otherwise reads as
+   covered on the one question no other step in this cluster asks.
+
+   Treat the findings as blocking, and exit 3 as unknown.
 
 1. **Capture** — screenshot each spec route at the viewport matrix using the
    existing `gen-screenshots.mjs` (Mode-II forbidden-URL safety already built in):

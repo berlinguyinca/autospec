@@ -556,6 +556,21 @@ finding: the discriminator is whether it carried text when the observer's record
 delivered, which is the boundary a screen reader uses. The script header documents why each
 was measured rather than assumed.
 
+`--json` writes the full report. `status` is `ok` or `blocked_missing_playwright`; a skip
+never reaches this file, because an absent manifest exits before the browser starts.
+
+```json
+{ "schema": 1, "status": "ok",
+  "states":   [ { "route": "/runs", "state": "success", "kind": "status",
+                  "mutations": 4, "announcements": 1, "settled": "quiet" } ],
+  "findings": [ { "route": "/runs", "state": "success",
+                  "rule": "LIVE_REGION_ABSENT", "detail": "…" } ] }
+```
+
+`settled` reads `quiet` or `capped at <n>ms`, so a report read later says whether the page
+actually went quiet or the wait ran out — a capped state is weaker evidence, since a
+mutation may have been still in flight.
+
 Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0e.
 `skills/autospec-shared/tests/unit/ui-liveregion-evidence.test.mjs` covers the assertions
 against probe objects recorded from Chromium and drives a live browser against a correct

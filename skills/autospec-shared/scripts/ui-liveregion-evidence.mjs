@@ -414,3 +414,58 @@ export async function collectEvidence(baseUrl, manifest) {
 
   return { schema: 1, status: 'ok', states, findings };
 }
+
+// ── CLI ───────────────────────────────────────────────────────────────────────
+
+function parseArgs(argv) {
+  const opts = { baseUrl: '', manifest: DEFAULT_MANIFEST, json: '' };
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--base-url') opts.baseUrl = argv[++i];
+    else if (argv[i] === '--manifest') opts.manifest = argv[++i];
+    else if (argv[i] === '--json') opts.json = argv[++i];
+  }
+  return opts;
+}
+
+async function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (!opts.baseUrl) {
+    process.stderr.write('Usage: ui-liveregion-evidence.mjs --base-url URL [--manifest PATH]\n');
+    process.exit(3);
+  }
+
+  const manifest = loadManifest(path.resolve(opts.manifest));
+  if (!manifest) {
+    process.stdout.write(
+      `ui-liveregion-evidence: SKIPPED (no ${opts.manifest}; no states are declared to drive)\n`,
+    );
+    process.exit(0);
+  }
+
+  const report = await collectEvidence(opts.baseUrl, manifest);
+  if (opts.json) {
+    fs.mkdirSync(path.dirname(path.resolve(opts.json)), { recursive: true });
+    fs.writeFileSync(opts.json, `${JSON.stringify(report, null, 2)}\n`);
+  }
+
+  if (report.status === 'blocked_missing_playwright') {
+    process.stderr.write('ui-liveregion-evidence: Playwright unavailable; no evidence collected\n');
+    process.exit(3);
+  }
+
+  for (const finding of report.findings) {
+    process.stdout.write(`${finding.rule}:${finding.route}[${finding.state}]: ${finding.detail}\n`);
+  }
+  for (const row of report.states) {
+    if (!report.findings.some((f) => f.route === row.route && f.state === row.state)) {
+      process.stdout.write(
+        `ok ${row.route}[${row.state}]: ${row.announcements} announcement(s), settled ${row.settled}\n`,
+      );
+    }
+  }
+  process.exit(report.findings.length > 0 ? 1 : 0);
+}
+
+if (process.argv[1] && process.argv[1].endsWith('ui-liveregion-evidence.mjs')) {
+  await main();
+}
