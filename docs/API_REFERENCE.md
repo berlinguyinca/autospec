@@ -504,30 +504,41 @@ a focus trap, a suppressed focus ring, and a control under a sticky header.
 
 ### `ui-liveregion-evidence.mjs`
 
-Live-region announcements (design spec L4c, second phase). Drives the app into each
-declared state through a test hook it exposes and asserts a screen-reader user is told what
-happened.
+Live-region announcements (design spec L4c, second phase). Drives the app into its loading,
+error and success states and asserts a screen-reader user is told what happened.
 
 ```
-Usage: node ui-liveregion-evidence.mjs --base-url <url> [--manifest <path>]
+Usage: node ui-liveregion-evidence.mjs --base-url <url> --routes <path> [<path>…]
+                                       [--manifest <path>] [--no-induce]
                                        [--json <report-path>]
 
-Default manifest: .autospec/ui-test-hooks.json
-Exit: 0 clean or skipped, 1 findings, 3 Playwright unavailable.
+Default manifest: .autospec/ui-test-hooks.json  (read when present; purely additive)
+Exit: 0 clean, 1 findings, 3 Playwright unavailable.
 ```
 
 Findings are `LIVE_REGION_ABSENT`, `LIVE_REGION_INSERTED_WITH_CONTENT`,
-`LIVE_REGION_HIDDEN`, `LIVE_REGION_STUCK_BUSY` and `LIVE_REGION_WRONG_POLITENESS`, plus
-`TEST_HOOK_MISSING`, `TEST_HOOK_FAILED` and `TEST_HOOK_NO_EFFECT` — which name a broken
-manifest rather than an accessibility defect, and are kept separate so a no-op hook does not
-send the author after a live region that is fine.
+`LIVE_REGION_HIDDEN`, `LIVE_REGION_STUCK_BUSY`, `LIVE_REGION_WRONG_POLITENESS` and
+`INDUCED_STATE_IGNORED`, plus `TEST_HOOK_MISSING`, `TEST_HOOK_FAILED` and
+`TEST_HOOK_NO_EFFECT` — which name a broken manifest rather than an accessibility defect,
+and are kept separate so a no-op hook does not send the author after a live region that is
+fine.
 
-This is the first tier that requires the app under test to cooperate, and it has to: what
-is worth checking about a live region is a *transition*, and content already present when a
-page loads is never announced, so a state reached by reloading with a query parameter can
-only be inspected statically. The manifest declares routes and states; the page exposes
-`window.__autospec.setState`. `berlinguyinca/autospec-ui-pilot`'s `states.html` is the
-reference implementation.
+**Requires nothing of the app.** What is worth checking about a live region is a
+*transition*, and content already present at page load is never announced — but the states
+that matter are network-driven, so `ui-liveregion-induce.mjs` produces them by controlling
+the network rather than by asking the repo to cooperate. See its entry below.
+
+`INDUCED_STATE_IGNORED` deserves its own note: the app did nothing at all when a request
+failed, leaving the user on stale content with no indication anything went wrong. Usually a
+missing `catch`, and a worse defect than the missing announcement beside it.
+
+The manifest reaches what induction cannot — form validation, optimistic updates,
+client-side route changes, empty states, all of which no request produces. It is read
+automatically when present, adds to the induced results rather than replacing them, and is
+written by the implementer as it builds those states (`ANNOUNCE_STATE_CHANGE` in
+`skills/autospec-run/prompts/implementer-contract.md`). `--no-induce` runs the declared half
+alone. `berlinguyinca/autospec-ui-pilot` carries both references: `runs.html` for induction,
+`states.html` for the declared hook.
 
 ```json
 { "schema": 1,
@@ -578,6 +589,46 @@ Invoked by the `autospec-qa` accessibility-and-responsive cluster as step 0e.
 against probe objects recorded from Chromium and drives a live browser against a correct
 page, a region inserted carrying its text, the same-task variant, a silent update, an absent
 hook, and the append-then-fill-later pattern that must not be a false positive.
+
+### `ui-liveregion-induce.mjs`
+
+Drives app states with **zero app cooperation**, by controlling the network. Consumed by
+`ui-liveregion-evidence.mjs`; not a CLI of its own.
+
+A manifest makes coverage opt-in, and a gate nobody adopts measures nothing. The states
+worth checking are network-driven, so this holds a route's own data requests to watch its
+pending state, then releases one normally and one as a 500. The app runs its own state
+machine — nothing is clicked and nothing is mutated, which is what makes it safe against a
+deployed app.
+
+The sequence is the design: register the hold, navigate, let the app settle into its pending
+state, install the observer *then*, and only then release. Holding manufactures a stable
+"before" that no DOM heuristic could infer — watching from document-start instead makes a
+framework's initial mount indistinguishable from a state change, because the whole page
+appearing reads as every live region being inserted at once.
+
+`INDUCED_STATES` fixes the politeness each induced state implies (`error` → alert, `success`
+→ status). That is not the judgement this tier refused for the manifest: reading "assertive"
+off a name someone else chose is a regex pretending to be a judgement, but `error` here means
+a request this module made fail.
+
+Only `fetch` and `xhr` are held; intercepting everything would break the page's own HTML,
+styles and scripts. Discovery avoids `networkidle`, which an app that polls or holds a socket
+never reaches, in favour of a bounded quiet window. A route with no data request is returned
+under `skipped` with a reason rather than passing.
+
+`skills/autospec-shared/tests/unit/ui-liveregion-induce.test.mjs` drives real pages for
+almost every case, since what is under test *is* the interplay of interception, mount timing
+and the observer.
+
+### `ui-liveregion-core.mjs`
+
+What both live-region collectors share: the mutation observer, the two page probes,
+`announced()` and `judgeState()`. Neither collector owns them — they must agree on what
+counts as an announcement — and a shared leaf module also has no import cycle to deadlock
+on, which the alternative did: with the judge living in the evidence module, the inducer
+would import it while the evidence CLI's top-level await was mid-evaluation, and each would
+wait on the other forever.
 
 ## End-of-run gap remediation (`$AUTOSPEC_SCRIPTS_DIR`)
 

@@ -157,29 +157,39 @@ matches the adopted design language. It runs only when the repo has a root
    The browser's default focus ring counts as visible; only a suppressed indicator
    is reported. Treat these as blocking, and exit 3 as unknown.
 
-0e. **Live-region announcements** — drive each declared state and assert a screen-reader
-   user is told what happened:
+0e. **Live-region announcements** — drive each route into its loading, error and success
+   states and assert a screen-reader user is told what happened:
    ```bash
    node "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ui-liveregion-evidence.mjs" \
-     --base-url "$APP_URL" --manifest .autospec/ui-test-hooks.json \
+     --base-url "$APP_URL" --routes / /runs \
      --json .autospec/reports/liveregion-evidence.json
    ```
    Findings: `LIVE_REGION_ABSENT`, `LIVE_REGION_INSERTED_WITH_CONTENT`,
    `LIVE_REGION_HIDDEN`, `LIVE_REGION_STUCK_BUSY`, `LIVE_REGION_WRONG_POLITENESS`,
-   plus `TEST_HOOK_MISSING` / `TEST_HOOK_FAILED` / `TEST_HOOK_NO_EFFECT`, which name a
-   broken manifest rather than an accessibility defect and should be routed as such.
+   `INDUCED_STATE_IGNORED`, plus `TEST_HOOK_MISSING` / `TEST_HOOK_FAILED` /
+   `TEST_HOOK_NO_EFFECT`, which name a broken manifest rather than an accessibility defect
+   and should be routed as such.
 
-   This is the only step that requires the app under test to cooperate, and it has to:
-   content present when a page loads is never announced, so a state reached by reloading
-   with a query parameter can only be inspected statically. The repo declares drivable
-   states in `.autospec/ui-test-hooks.json` and exposes `window.__autospec.setState`;
-   `berlinguyinca/autospec-ui-pilot`'s `states.html` is the reference to copy.
+   **No setup is required and none should be requested.** The states worth checking are
+   network-driven, so the gate induces them: it holds each route's own data requests to
+   watch the pending state, then releases one normally and one as a 500. The app runs its
+   own state machine. Nothing is clicked and nothing is mutated, so this is safe against a
+   deployed app.
 
-   **When the manifest is absent the script exits 0 and reports SKIPPED — that is a gap,
-   not a pass.** Record it as one non-blocking `category:"a11y_violation"` finding with
-   rule `LIVE_REGION_UNMEASURED`, the same way step 1 of the design-gates section keeps
-   `unmapped` blockers visible. A repo that never adopts the manifest otherwise reads as
-   covered on the one question no other step in this cluster asks.
+   `INDUCED_STATE_IGNORED` is the one to read carefully. It means the app did *nothing* when
+   a request failed — no render, no message — so the user is left on stale content with no
+   indication anything went wrong. It is usually a missing `catch`, and it is a worse defect
+   than the missing announcement it sits beside.
+
+   A route that makes no `fetch` or `xhr` request is reported under `skipped` with a reason.
+   That is honest: a static page has no state to drive. It is not a finding.
+
+   States no request can produce — form validation, optimistic updates, client-side route
+   changes, empty states — are unreachable this way. Those are declared in
+   `.autospec/ui-test-hooks.json`, which the implementer writes as it builds them (see
+   `ANNOUNCE_STATE_CHANGE` in the implementer contract); the manifest is read automatically
+   when present and is purely additive. `berlinguyinca/autospec-ui-pilot` carries both
+   references: `runs.html` for induction, `states.html` for the declared hook.
 
    Treat the findings as blocking, and exit 3 as unknown.
 

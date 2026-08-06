@@ -47,9 +47,17 @@ jobs:
       - name: Run the UI evidence suites
         run: |
           set -eu
-          suites="$(find skills/autospec-shared/tests/unit -name 'ui-*-evidence.test.mjs' | sort)"
-          if [ -z "$suites" ]; then
-            echo "no UI evidence suites found — the glob or the layout changed" >&2
+          # Every ui-*.test.mjs, not just ui-*-evidence.test.mjs. The narrower pattern
+          # silently excluded ui-liveregion-induce.test.mjs the moment it was added: the job
+          # ran 65 tests instead of 76 and passed, which is the exact hole this workflow was
+          # written to close. A glob that has to be widened for each new suite will be
+          # forgotten again, so it now matches the directory's whole naming convention.
+          suites="$(find skills/autospec-shared/tests/unit -name 'ui-*.test.mjs' | sort)"
+          count="$(printf '%s\n' "$suites" | grep -c .)"
+          if [ "$count" -lt 5 ]; then
+            echo "expected at least 5 UI suites, found $count — a suite was renamed, moved," >&2
+            echo "or the glob no longer matches the convention:" >&2
+            printf '%s\n' "$suites" >&2
             exit 1
           fi
           echo "$suites"

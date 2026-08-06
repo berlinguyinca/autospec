@@ -130,6 +130,17 @@ test('a hook that throws is reported as a failed hook, not as a missing announce
   assert.match(f[0].detail, /unknown state/);
 });
 
+test('an induced state the app ignored entirely is named as that, not as a dead hook', () => {
+  // Measured: a page with no error path makes zero mutations when its request fails. The
+  // user is left looking at stale content forever. That is a worse defect than a missing
+  // announcement, and it is not the manifest problem TEST_HOOK_NO_EFFECT describes.
+  const f = judgeState('/runs', { name: 'error', kind: 'alert', induced: true }, observation({
+    mutations: 0, events: [],
+  }));
+  assert.deepEqual(rules(f), ['INDUCED_STATE_IGNORED']);
+  assert.match(f[0].detail, /error/);
+});
+
 test('a page that changed with nothing announced is LIVE_REGION_ABSENT', () => {
   const f = judgeState('/runs', { name: 'success', kind: 'status' }, observation({ mutations: 1, events: [] }));
   assert.deepEqual(rules(f), ['LIVE_REGION_ABSENT']);
