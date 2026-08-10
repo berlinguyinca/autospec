@@ -129,7 +129,7 @@ def approved_unsafe_boundary(relative_path, source, match):
         ("crates/autospec-cli/src/commands/runtime/env/worker.rs", "configure_process_group"): "unsafe { command.pre_exec(setup_foreground_child); }",
         ("crates/autospec-cli/src/commands/runtime/env/worker.rs", "set_terminal_foreground"): "unsafe { nix::libc::tcsetpgrp(nix::libc::STDIN_FILENO, process_group) }",
     }
-    expected_body = reviewed.get((relative_path, function_name))
+    expected_body = reviewed.get((re.sub(r"(/executor_bridge/tests)/.+", r"\1.rs", relative_path), function_name))
     normalized_function = (
         " ".join(code[function_match.start():function_end].split())
         if function_match and function_end and match.start() < function_end
