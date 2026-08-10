@@ -4,10 +4,7 @@
 
 use super::super as bridge;
 use super::super::{BridgePhase, HarnessConfig, HarnessKind};
-use super::support_base::{
-    environment, git, installed_aliases, test_root, write_alias_table, write_executable,
-    TEST_ENVIRONMENT,
-};
+use super::support_base::{environment, git, installed_aliases, test_environment, test_root, write_alias_table, write_executable};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
@@ -206,7 +203,7 @@ fn autonomous_executor_bridge_codex_sandbox_success_selects_network_permission_p
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_allows_executable_inside_real_codex_home() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let root = test_root("codex-permission-profile-real-home");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).expect("workspace");
@@ -254,7 +251,7 @@ fn autonomous_executor_bridge_codex_sandbox_allows_executable_inside_real_codex_
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_permission_profile_denies_credential_files() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let root = test_root("codex-permission-profile");
     let home = root.join("home");
     let codex_home = root.join("custom-codex-home");

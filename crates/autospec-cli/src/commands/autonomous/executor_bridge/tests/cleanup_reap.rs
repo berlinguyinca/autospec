@@ -6,7 +6,7 @@ use super::super as bridge;
 use super::super::{
     supervise_harness, BridgePhase, MutationSnapshot, PersistedInvocation, SupervisionOutcome,
 };
-use super::support_base::{observe_spawned_identity, DetachedForkedCleanup, GitFixture};
+use super::support_base::{DetachedForkedCleanup, GitFixture, observe_spawned_identity, test_environment};
 use super::support_invocation::{
     detach_harness_for_adoption, shell_invocation, supervision_config, supervision_state,
 };
@@ -158,6 +158,7 @@ fn autonomous_executor_bridge_direct_poll_error_is_structured_and_cleared() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_parent_setup_failures_reap_supervisor_and_harness() {
+    let _environment = test_environment();
     for failpoint in [
         bridge::LaunchFailpoint::ParentAfterPidfd,
         bridge::LaunchFailpoint::ParentHarnessCapture,

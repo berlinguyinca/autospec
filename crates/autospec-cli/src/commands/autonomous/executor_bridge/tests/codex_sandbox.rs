@@ -4,9 +4,7 @@
 
 use super::super as bridge;
 use super::super::{resolve_base, BridgePhase};
-use super::support_base::{
-    git, git_stdout, DetachedSupervisorCleanup, GitFixture, TEST_ENVIRONMENT, TEST_SEQUENCE,
-};
+use super::support_base::{DetachedSupervisorCleanup, GitFixture, TEST_SEQUENCE, git, git_stdout, test_environment};
 use super::support_invocation::{detach_harness_for_adoption, supervision_state};
 use std::collections::BTreeMap;
 use std::fs;
@@ -16,7 +14,7 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_entrypoint_retries_pruned_worktree_repair() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("entrypoint-pruned-worktree-repair");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let scope = format!(
@@ -91,7 +89,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_retries_pruned_worktree_r
 
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_entrypoint_cleanup_ignores_missing_codex() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("entrypoint-cleanup-missing-codex");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let scope = format!(
@@ -171,7 +169,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_cleanup_ignores_missing_c
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_entrypoint_pending_sidecar_cleanup_skips_missing_harness(
 ) {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("entrypoint-pending-sidecar-recovery");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let scope = format!(
@@ -263,7 +261,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_pending_sidecar_cleanup_s
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_entrypoint_interrupted_partial_cleanup_skips_failing_probe(
 ) {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("entrypoint-interrupted-partial-recovery");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let scope = format!(
@@ -389,7 +387,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_interrupted_partial_clean
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_skips_failing_probe() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("entrypoint-live-recovery");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let scope = format!(
