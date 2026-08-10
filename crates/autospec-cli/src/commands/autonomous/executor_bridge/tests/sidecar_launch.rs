@@ -6,7 +6,7 @@ use super::super as bridge;
 use super::super::{
     BridgePhase, HarnessInvocation, MutationSnapshot, PersistedInvocation, SupervisionOutcome,
 };
-use super::support_base::{DetachedSupervisorCleanup, GitFixture};
+use super::support_base::{DetachedSupervisorCleanup, GitFixture, test_environment};
 use super::support_invocation::{
     detach_harness_for_adoption, shell_invocation, supervision_config, supervision_state,
 };
@@ -225,6 +225,7 @@ fn autonomous_executor_bridge_sidecar_cleanup_survives_unlinked_executable() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_adopts_fast_exit_after_harness_identity_disappears() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("adopt-fast-exit-race");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");

@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super as bridge;
-use super::support_base::{write_executable, zero_effect_classifier_fixture, TEST_ENVIRONMENT};
+use super::support_base::{test_environment, write_executable, zero_effect_classifier_fixture};
 use super::support_invocation::implementation_proof_fixture;
 use std::fs;
 use std::path::PathBuf;
@@ -106,7 +106,7 @@ fn run_complete_terminal_label_fixture(
     String,
     String,
 ) {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let (fixture, mut state, state_path, _) = zero_effect_classifier_fixture(name, false, true);
     bridge::ensure_zero_effect_recovery_marker(&state_path, &state)
         .expect("persist zero-effect recovery marker");
@@ -294,7 +294,7 @@ fn autonomous_executor_bridge_terminal_label_malformed_projection_remains_fail_c
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_publishes_complete_receipt_before_marker_recovery() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let (fixture, mut state, state_path, _) =
         zero_effect_classifier_fixture("complete-before-marker", false, true);
     bridge::ensure_zero_effect_recovery_marker(&state_path, &state)
