@@ -8,9 +8,7 @@ use super::super::{
     validate_trusted_ownership, write_invocation_atomic, BridgeIdentity, BridgePhase, HarnessKind,
     PersistedInvocation,
 };
-use super::support_base::{
-    git, observe_spawned_identity, GitFixture, TEST_ENVIRONMENT, TEST_SEQUENCE,
-};
+use super::support_base::{GitFixture, TEST_SEQUENCE, git, observe_spawned_identity, test_environment};
 use super::support_invocation::{persisted_invocation, session_record_ids};
 use autospec_core::runtime_env::{EnvironmentLifecycle, EnvironmentOwner};
 use std::collections::BTreeMap;
@@ -81,7 +79,7 @@ fn autonomous_executor_bridge_rejects_foreign_symlink_and_detached_reuse() {
 
 #[test]
 fn autonomous_executor_bridge_isolates_equal_issue_numbers_and_runtime_sessions() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let first = GitFixture::new("same-issue-first");
     let second = GitFixture::new("same-issue-second");
     let base_one = resolve_base(&first.repo, &BTreeMap::new()).expect("first base");
@@ -145,7 +143,7 @@ fn autonomous_executor_bridge_isolates_equal_issue_numbers_and_runtime_sessions(
 
 #[test]
 fn autonomous_executor_bridge_runtime_binding_mismatch_is_zero_mutation() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("runtime-drift");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let scope = format!(
@@ -216,7 +214,7 @@ fn autonomous_executor_bridge_observes_live_persisted_child_before_runtime_recov
 
 #[test]
 fn autonomous_executor_bridge_cleanup_failure_publication_holds_environment_lease() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("runtime-abort-failure");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let scope = format!(

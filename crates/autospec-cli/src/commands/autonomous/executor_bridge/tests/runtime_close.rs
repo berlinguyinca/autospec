@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super as bridge;
-use super::support_base::{git, git_stdout, write_executable, TEST_ENVIRONMENT};
+use super::support_base::{git, git_stdout, test_environment, write_executable};
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, session_record_ids,
 };
@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 
 #[test]
 fn autonomous_executor_bridge_runtime_close_recovers_after_receipt_gap() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("runtime-close-recovery");
     let autospec = state.identity.worktree.join(".autospec");
     fs::create_dir_all(&autospec).expect("runtime manifest directory");
@@ -78,7 +78,7 @@ fn autonomous_executor_bridge_runtime_close_recovers_after_receipt_gap() {
 
 #[test]
 fn autonomous_executor_bridge_reattaches_after_error_and_derives_cleanup_intent() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("runtime-reattach-cleanup-intent");
     let autospec = state.identity.worktree.join(".autospec");
@@ -145,7 +145,7 @@ fn autonomous_executor_bridge_reattaches_after_error_and_derives_cleanup_intent(
 
 #[test]
 fn autonomous_executor_bridge_runtime_close_retries_partial_teardown_failure() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("runtime-close-partial-retry");
     let autospec = state.identity.worktree.join(".autospec");

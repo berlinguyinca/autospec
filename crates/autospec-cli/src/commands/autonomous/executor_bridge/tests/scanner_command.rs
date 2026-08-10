@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super as bridge;
-use super::support_base::{git, git_stdout, write_executable, GitFixture, TEST_ENVIRONMENT};
+use super::support_base::{GitFixture, git, git_stdout, test_environment, write_executable};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -11,7 +11,7 @@ use std::time::Duration;
 
 #[test]
 fn autonomous_executor_bridge_restart_reruns_all_scanner_results() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     // Break caught: successful scanner records recovered from disk becoming authoritative
     // security evidence without re-executing each scanner in the current process.
     let fixture = GitFixture::new("scanner-recovery");
@@ -254,7 +254,7 @@ fn autonomous_executor_bridge_scanner_command_semgrep_is_private_and_baseline_sc
 
 #[test]
 fn autonomous_executor_bridge_scanner_command_semgrep_baseline_is_diff_scoped() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     // Break caught: a repository-wide scan blocking a feature on findings already present
     // in its claimed base commit, instead of evaluating only feature-introduced findings.
     let fixture = GitFixture::new("semgrep-baseline");
