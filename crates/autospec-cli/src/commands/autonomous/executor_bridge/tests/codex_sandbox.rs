@@ -419,7 +419,7 @@ fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_skips_faili
     let mut launcher = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
-            "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_helper",
+            "commands::autonomous::executor_bridge::tests::branch_predecessor::autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_helper",
             "--nocapture",
         ])
         .env("AUTOSPEC_TEST_RECOVERY_STATE", &state_path)

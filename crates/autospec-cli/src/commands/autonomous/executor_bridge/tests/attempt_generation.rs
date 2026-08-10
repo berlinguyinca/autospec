@@ -330,7 +330,7 @@ fn autonomous_executor_bridge_post_complete_process_crash_reruns_real_producer()
     let execution_count = fixture.root.join("execution-count");
     let scanners = fixture.root.join("scanner-binaries");
     let executable = std::env::current_exe().expect("test executable");
-    let test_name = "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_post_complete_process_crash_reruns_real_producer";
+    let test_name = "commands::autonomous::executor_bridge::tests::attempt_generation::autonomous_executor_bridge_post_complete_process_crash_reruns_real_producer";
     let first = Command::new(&executable)
         .args(["--exact", test_name, "--nocapture"])
         .env("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1")

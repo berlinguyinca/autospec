@@ -26,7 +26,7 @@ fn autonomous_executor_bridge_plan_shrink_cleans_removed_trailing_index() {
     let parent = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
-            "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_parent_crash_helper",
+            "commands::autonomous::executor_bridge::tests::restart_direct::autonomous_executor_bridge_parent_crash_helper",
             "--nocapture",
         ])
         .env("AUTOSPEC_TEST_CRASH_REPO", &fixture.repo)
@@ -97,7 +97,7 @@ fn autonomous_executor_bridge_restart_adopts_live_harness_after_supervisor_death
     let mut parent = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
-            "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_parent_crash_helper",
+            "commands::autonomous::executor_bridge::tests::restart_direct::autonomous_executor_bridge_parent_crash_helper",
             "--nocapture",
         ])
         .env("AUTOSPEC_TEST_CRASH_REPO", &fixture.repo)
@@ -159,7 +159,7 @@ fn assert_exec_replaced_direct_harness_recovers(
     let parent = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
-            "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_parent_crash_helper",
+            "commands::autonomous::executor_bridge::tests::restart_direct::autonomous_executor_bridge_parent_crash_helper",
             "--nocapture",
         ])
         .env("AUTOSPEC_TEST_CRASH_REPO", &fixture.repo)
