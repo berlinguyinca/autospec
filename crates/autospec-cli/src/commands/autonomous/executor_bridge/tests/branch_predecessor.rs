@@ -4,7 +4,7 @@
 
 use super::super as bridge;
 use super::super::{provision_issue_worktree, resolve_base, BridgePhase, MutationSnapshot};
-use super::support_base::{git, git_stdout, GitFixture, TEST_SEQUENCE};
+use super::support_base::{GitFixture, TEST_SEQUENCE, git, git_stdout, test_environment};
 use super::support_invocation::{
     prunable_zero_effect_branch_fixture, shell_invocation, supervision_config, supervision_state,
 };
@@ -18,6 +18,7 @@ use std::sync::atomic::Ordering;
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_entrypoint_live_recovery_helper() {
+    let _environment = test_environment();
     let Some(state_path) = std::env::var_os("AUTOSPEC_TEST_RECOVERY_STATE") else {
         return;
     };

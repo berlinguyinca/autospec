@@ -4,7 +4,7 @@
 
 use super::super as bridge;
 use super::super::HarnessInvocation;
-use super::support_base::GitFixture;
+use super::support_base::{GitFixture, test_environment};
 use super::support_invocation::shell_invocation;
 use super::support_launch::direct_launch_supervisor_pid;
 use std::fs;
@@ -15,6 +15,7 @@ use std::time::Duration;
 
 #[test]
 fn autonomous_executor_bridge_runtime_infrastructure_error_is_terminal_evidence() {
+    let _environment = test_environment();
     // Break caught: a runtime adapter error returning before command-000.json is persisted.
     let fixture = GitFixture::new("runtime-terminal-error");
     let artifact_root = fixture.root.join("evidence");
@@ -48,6 +49,7 @@ fn autonomous_executor_bridge_runtime_infrastructure_error_is_terminal_evidence(
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_retries_repaired_supervisor_resolution_failure() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-repaired-supervisor-resolution");
     let artifact_root = fixture.root.join("evidence");
     let plan = bridge::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
@@ -103,6 +105,7 @@ fn autonomous_executor_bridge_retries_repaired_supervisor_resolution_failure() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_failure_retains_identity_until_restart_reconciles() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-cleanup-quarantine");
     let artifact_root = fixture.root.join("evidence");
     let plan = bridge::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
@@ -151,6 +154,7 @@ fn autonomous_executor_bridge_cleanup_failure_retains_identity_until_restart_rec
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_resumes_failure_archive_before_one_fresh_attempt() {
+    let _environment = test_environment();
     for boundary in [
         bridge::LaunchFailpoint::ArchiveAfterManifest,
         bridge::LaunchFailpoint::ArchiveMidMove,
@@ -256,6 +260,7 @@ fn autonomous_executor_bridge_retirement_resumes_every_delete_boundary() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_complete_retirement_recovers_without_pending_pointer() {
+    let _environment = test_environment();
     // Break caught: pending removal followed by parent-sync failure losing the only
     // cleanup-proven locator and preventing the typed failure archive/fresh retry.
     let fixture = GitFixture::new("direct-retire-pointer-cleanup");
@@ -337,6 +342,7 @@ fn autonomous_executor_bridge_complete_retirement_recovers_without_pending_point
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_live_sidecar_beats_stale_completed_retirement() {
+    let _environment = test_environment();
     // Break caught: a completed retirement from an older attempt suppressing cleanup of a
     // newer live supervisor sidecar for the same command index.
     let fixture = GitFixture::new("direct-stale-retirement-live-sidecar");
@@ -405,6 +411,7 @@ fn autonomous_executor_bridge_live_sidecar_beats_stale_completed_retirement() {
 
 #[test]
 fn autonomous_executor_bridge_terminal_record_attempt_must_match_intent() {
+    let _environment = test_environment();
     // Break caught: a syntactically valid terminal record for another attempt being accepted
     // and archived solely because its argv and output digests were self-consistent.
     let fixture = GitFixture::new("direct-terminal-attempt-binding");

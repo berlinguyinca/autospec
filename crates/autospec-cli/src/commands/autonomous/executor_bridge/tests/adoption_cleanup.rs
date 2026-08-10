@@ -4,10 +4,7 @@
 
 use super::super as bridge;
 use super::super::{BridgePhase, MutationSnapshot, PersistedInvocation, SupervisionOutcome};
-use super::support_base::{
-    observe_spawned_identity, test_root, DetachedForkedCleanup, DetachedSupervisorCleanup,
-    GitFixture,
-};
+use super::support_base::{DetachedForkedCleanup, DetachedSupervisorCleanup, GitFixture, observe_spawned_identity, test_environment, test_root};
 use super::support_invocation::{
     detach_harness_for_adoption, supervision_config, supervision_state, NonDescendantDirectFixture,
 };
@@ -23,6 +20,7 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_partial_adoption_cleanup_failure_retains_identities() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("adopt-partial-quarantine");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -80,6 +78,7 @@ fn autonomous_executor_bridge_partial_adoption_cleanup_failure_retains_identitie
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_adoption_replays_ring_and_accounts_overwrite() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("adopt-ring-replay");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -208,6 +207,7 @@ fn autonomous_executor_bridge_event_log_rotation_has_a_hard_disk_cap() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_adopted_errors_are_structured_and_cleaned() {
+    let _environment = test_environment();
     for (name, failpoint) in [
         ("poll", bridge::LaunchFailpoint::AdoptedPoll),
         ("flush", bridge::LaunchFailpoint::AdoptedFlush),
@@ -283,6 +283,7 @@ fn autonomous_executor_bridge_adopted_errors_are_structured_and_cleaned() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cursor_failure_is_structured_and_cleaned() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("adopt-cursor-error");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
