@@ -7,7 +7,7 @@ use super::super::{
     supervise_harness, BridgePhase, MutationSnapshot, PersistedInvocation, ProcessIdentity,
     SupervisionOutcome,
 };
-use super::support_base::GitFixture;
+use super::support_base::{GitFixture, test_environment};
 use super::support_invocation::{
     detach_harness_for_adoption, persisted_invocation, shell_invocation, supervision_config,
     supervision_state,
@@ -199,6 +199,7 @@ fn autonomous_executor_bridge_fast_exit_is_observed_after_durable_handshake() {
 
 #[test]
 fn autonomous_executor_bridge_process_only_restart_proves_and_cleans_parent_supervisor() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-legacy-parent");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");

@@ -18,6 +18,7 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_missing_adopted_journal_fails_without_truncation() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("missing-adopted-journal");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -73,6 +74,7 @@ fn autonomous_executor_bridge_missing_adopted_journal_fails_without_truncation()
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_failure_keeps_durable_ownership() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("cleanup-quarantine");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");

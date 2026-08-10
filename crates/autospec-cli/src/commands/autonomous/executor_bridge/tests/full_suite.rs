@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 #[test]
 fn autonomous_executor_bridge_direct_runner_kills_stalls_and_bounded_output() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-bounds");
     let stalled = bridge::parse_direct_command_plan("/usr/bin/sleep 5").expect("sleep plan");
     let started = Instant::now();
@@ -54,6 +55,7 @@ fn autonomous_executor_bridge_direct_runner_kills_stalls_and_bounded_output() {
 
 #[test]
 fn autonomous_executor_bridge_persists_spawn_and_signal_terminal_attempts() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-terminal-attempts");
     let missing = bridge::parse_direct_command_plan("/definitely/missing/autospec-command")
         .expect("missing executable plan");
