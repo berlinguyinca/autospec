@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_plan_shrink_cleans_removed_trailing_index() {
+    let _environment = test_environment();
     // Break caught: cleanup preflight enumerating only the new shorter plan and abandoning a
     // live interrupted tree owned by a removed trailing command index.
     let fixture = GitFixture::new("direct-plan-shrink-cleanup");

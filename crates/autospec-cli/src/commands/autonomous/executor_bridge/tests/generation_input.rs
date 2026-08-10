@@ -213,6 +213,7 @@ fn autonomous_executor_bridge_partial_generation_rotation_resumes_crash_boundari
 
 #[test]
 fn autonomous_executor_bridge_rotation_rebases_changed_input_after_crash() {
+    let _environment = test_environment();
     // Break caught: a transparently reprovisioned runtime reusing the stale replacement
     // generation reserved by a rotation that began under the previous runtime input.
     for boundary in [
@@ -356,6 +357,7 @@ fn autonomous_executor_bridge_empty_active_generation_rebinds_current_input() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_input_rebind_cleans_nested_live_command() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("nested-live-input-rebind");
     let lane_root = fixture.root.join("lane");
     bridge::ensure_private_directory(&lane_root).expect("lane root");
@@ -449,6 +451,7 @@ fn autonomous_executor_bridge_input_rebind_cleans_nested_live_command() {
 
 #[test]
 fn autonomous_executor_bridge_completed_marker_selects_fresh_live_generation() {
+    let _environment = test_environment();
     // Break caught: a durable completed attempt permanently vetoing every later in-process
     // producer after the process that wrote it died before returning Pass.
     let fixture = GitFixture::new("completed-generation-recovery");

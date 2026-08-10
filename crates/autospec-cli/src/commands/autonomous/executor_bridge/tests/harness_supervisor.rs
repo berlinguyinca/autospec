@@ -333,6 +333,7 @@ fn autonomous_executor_bridge_persisted_recovery_cleans_immediate_exec_harness()
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_dead_supervisor_recovers_synced_exit_and_output() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("dead-supervisor-complete");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -395,6 +396,7 @@ fn autonomous_executor_bridge_dead_supervisor_recovers_synced_exit_and_output() 
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_restart_finalizes_done_after_anchor_clear_crashes() {
+    let _environment = test_environment();
     // Break caught: clearing durable anchors before drain/snapshot, then treating the dead
     // sidecar as unproven on restart even though strict whole-tree DONE is durable.
     for boundary in [
@@ -471,6 +473,7 @@ fn autonomous_executor_bridge_restart_finalizes_done_after_anchor_clear_crashes(
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_dead_supervisor_rejects_partial_exit_record() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("dead-supervisor-partial-exit");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
