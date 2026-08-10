@@ -7,9 +7,7 @@ use super::super::{
     provision_issue_worktree, recover_invocation, resolve_base, write_invocation_atomic,
     BridgeIdentity, BridgePhase, HarnessKind, PersistedInvocation,
 };
-use super::support_base::{
-    git, git_stdout, test_root, write_executable, GitFixture, TEST_SEQUENCE,
-};
+use super::support_base::{GitFixture, TEST_SEQUENCE, git, git_stdout, test_environment, test_root, write_executable};
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, persisted_invocation, supervision_state,
 };
@@ -23,6 +21,7 @@ use std::time::Duration;
 
 #[test]
 fn autonomous_executor_bridge_missing_worktree_post_ci_recovery() {
+    let _environment = test_environment();
     let mut fixture = GitFixture::new("missing-post-ci-worktree");
     let base = resolve_base(&fixture.repo, &BTreeMap::new()).expect("resolve base");
     let repository = format!(
