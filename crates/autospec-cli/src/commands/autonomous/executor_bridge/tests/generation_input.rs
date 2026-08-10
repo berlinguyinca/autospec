@@ -5,7 +5,7 @@
 use super::super as bridge;
 use super::super::super::premerge;
 use super::super::HarnessInvocation;
-use super::support_base::{git, git_stdout, GitFixture, TEST_ENVIRONMENT};
+use super::support_base::{GitFixture, git, git_stdout, test_environment};
 use super::support_invocation::shell_invocation;
 use super::support_launch::{completed_generation_bundle, run_process_generation_producer};
 use std::fs;
@@ -17,7 +17,7 @@ use std::time::Duration;
 fn autonomous_executor_bridge_partial_publication_allocates_fresh_generation() {
     // Break caught: observed/QA/security/seal create-once files in an incomplete generation
     // poisoning every restart instead of becoming an immutable diagnostic attempt.
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let previous_claim_override = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
     std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
     for poisoned in ["observed.json", "qa.json", "security.json", "seal.json"] {
@@ -99,7 +99,7 @@ fn autonomous_executor_bridge_partial_publication_allocates_fresh_generation() {
 fn autonomous_executor_bridge_partial_generation_rotation_resumes_crash_boundaries() {
     // Break caught: moving a poisoned generation before durably switching active.json leaves
     // restart free to recreate the old run identity or lose the diagnostic generation.
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let previous_claim_override = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
     std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
     for boundary in [

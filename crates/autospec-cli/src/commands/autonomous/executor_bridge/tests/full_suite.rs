@@ -4,7 +4,7 @@
 
 use super::super as bridge;
 use super::super::super::premerge;
-use super::support_base::{git, git_stdout, GitFixture, TEST_ENVIRONMENT};
+use super::support_base::{GitFixture, git, git_stdout, test_environment};
 use super::support_invocation::{implementation_proof_fixture, session_record_ids};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -209,7 +209,7 @@ fn autonomous_executor_bridge_full_suite_accepts_descendant_remote_base_only() {
 
 #[test]
 fn autonomous_executor_bridge_executes_smoke_through_real_runtime_session() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("runtime-qa-execution");
     fs::create_dir_all(fixture.repo.join(".autospec")).expect("runtime manifest directory");
     fs::write(

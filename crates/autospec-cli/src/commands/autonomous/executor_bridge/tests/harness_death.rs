@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super as bridge;
-use super::support_base::{write_executable, DirectCrashFixtureCleanup, GitFixture};
+use super::support_base::{DirectCrashFixtureCleanup, GitFixture, test_environment, write_executable};
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
 use std::fs;
@@ -86,6 +86,7 @@ fn autonomous_executor_bridge_plan_shrink_cleans_removed_trailing_index() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_restart_adopts_live_harness_after_supervisor_death() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-dead-supervisor");
     let artifact_root = fixture.root.join("evidence");
     let marker = fixture.root.join("command.pid");
@@ -251,6 +252,7 @@ fn assert_exec_replaced_direct_harness_recovers(
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_restart_cleans_shebang_harness_after_supervisor_death() {
+    let _environment = test_environment();
     // Break caught: cleanup recovery requiring the declared script path after Linux replaces
     // the live harness identity with its shebang interpreter.
     let fixture = GitFixture::new("direct-dead-supervisor-shebang");
@@ -275,6 +277,7 @@ fn autonomous_executor_bridge_restart_cleans_shebang_harness_after_supervisor_de
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_restart_cleans_immediate_exec_harness_after_supervisor_death() {
+    let _environment = test_environment();
     // Break caught: cleanup recovery rejecting a same-birth harness after the declared shell
     // immediately replaces itself with another executable.
     let fixture = GitFixture::new("direct-dead-supervisor-immediate-exec");
