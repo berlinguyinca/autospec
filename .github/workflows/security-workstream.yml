@@ -17,8 +17,13 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # An explicit refspec, because `git fetch origin main` writes FETCH_HEAD and updates
+      # refs/remotes/origin/main only opportunistically, through the remote's configured
+      # refspec. On a pull_request checkout that refspec does not map refs/heads/main, so
+      # origin/main never existed and every PR scan died on `merge-base origin/main HEAD`.
+      # Not shallow either: merge-base needs history the two refs share.
       - name: Fetch main for PR diff scans
-        run: git fetch origin main --depth=1
+        run: git fetch origin +refs/heads/main:refs/remotes/origin/main
       - name: Run proactive security scan
         run: |
           set -euo pipefail
