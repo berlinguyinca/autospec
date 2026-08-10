@@ -1126,9 +1126,9 @@ EOF
         is_test_file "$diff_file" && continue
         is_doc_file "$diff_file" && continue
 
-        # Skip binary-ish and fixture files
+        # Skip binary-ish files, and Rust tests: is_test_file only matches a repo-root tests/
         case "$diff_file" in
-            *.diff|*.png|*.jpg|*.gif) continue ;;
+            *.diff|*.png|*.jpg|*.gif|*/tests/*.rs|*/tests.rs) continue ;;
         esac
 
         while IFS=: read -r lineno content; do
