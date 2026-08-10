@@ -353,6 +353,7 @@ fn autonomous_executor_bridge_reconciles_draft_base_before_premerge_evidence() {
 
 #[test]
 fn autonomous_executor_bridge_base_drift_invalidates_accepted_and_requested_results() {
+    let _environment = test_environment();
     for phase in [
         bridge::BridgePhase::ResultAccepted,
         bridge::BridgePhase::MergeRequested,
@@ -447,6 +448,7 @@ fn autonomous_executor_bridge_claim_takeover_blocks_base_drift_push() {
 
 #[test]
 fn autonomous_executor_bridge_recovers_crash_after_owned_base_merge() {
+    let _environment = test_environment();
     let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("drift-crash");
     commit_implementation(&state);
     let original_head = git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]);

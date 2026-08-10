@@ -125,6 +125,7 @@ fn autonomous_executor_bridge_cleanup_failure_keeps_durable_ownership() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_direct_poll_error_is_structured_and_cleared() {
+    let _environment = test_environment();
     for failpoint in [
         bridge::LaunchFailpoint::PostReturnIdentity,
         bridge::LaunchFailpoint::DirectSetup,
@@ -214,6 +215,7 @@ fn autonomous_executor_bridge_parent_setup_failures_reap_supervisor_and_harness(
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_capture_failure_retries_interrupted_exact_reap() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("capture-reap-interrupted");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -251,6 +253,7 @@ fn autonomous_executor_bridge_capture_failure_retries_interrupted_exact_reap() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine() {
+    let _environment = test_environment();
     nix::sys::prctl::set_child_subreaper(false).expect("clear fixture subreaper");
     let fixture = GitFixture::new("capture-reap-quarantine");
     let mut state = supervision_state(&fixture);
@@ -325,6 +328,7 @@ fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine(
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_parent_cleanup_failure_persists_quarantine() {
+    let _environment = test_environment();
     for (parent_failpoint, harness_identity_expected) in [
         (bridge::LaunchFailpoint::ParentHarnessPidRead, false),
         (bridge::LaunchFailpoint::ParentHarnessBirth, false),
@@ -399,6 +403,7 @@ fn autonomous_executor_bridge_parent_cleanup_failure_persists_quarantine() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_fixture_cleanup_is_armed_before_identity_observation_panics() {
+    let _environment = test_environment();
     let mut child = Command::new("/bin/sh")
         .args(["-c", "sleep 30 & wait"])
         .spawn()

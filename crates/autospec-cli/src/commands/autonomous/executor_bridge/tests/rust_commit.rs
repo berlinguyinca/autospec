@@ -6,7 +6,7 @@ use super::super as bridge;
 use super::super::{
     supervise_harness, BridgePhase, MutationSnapshot, PersistedInvocation, SupervisionOutcome,
 };
-use super::support_base::{git, git_stdout, DirectCrashFixtureCleanup, GitFixture};
+use super::support_base::{DirectCrashFixtureCleanup, GitFixture, git, git_stdout, test_environment};
 use super::support_invocation::{
     implementation_proof_fixture, shell_invocation, supervision_config, supervision_state,
 };
@@ -73,6 +73,7 @@ fn autonomous_executor_bridge_direct_crash_guard_cleans_before_launch_journal_ex
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_ring_sync_failure_never_advances_durable_cursor() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("ring-sync-order");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
