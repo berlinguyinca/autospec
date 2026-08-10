@@ -212,6 +212,7 @@ fn autonomous_executor_bridge_resumes_failure_archive_before_one_fresh_attempt()
 
 #[test]
 fn autonomous_executor_bridge_retirement_resumes_every_delete_boundary() {
+    let _environment = test_environment();
     // Break caught: a crash after cleanup proof deleting launch ownership without leaving a
     // durable transaction that restart can finish.
     for boundary in [
