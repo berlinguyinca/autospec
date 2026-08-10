@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super as bridge;
-use super::support_base::{write_executable, DirectCrashFixtureCleanup, GitFixture};
+use super::support_base::{DirectCrashFixtureCleanup, GitFixture, test_environment, write_executable};
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
 use std::collections::BTreeMap;
@@ -40,6 +40,7 @@ fn autonomous_executor_bridge_requires_exact_normalized_evidence_headings() {
 
 #[test]
 fn autonomous_executor_bridge_executes_direct_segments_and_stops_on_first_failure() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-qa");
     let artifact_root = fixture.root.join("evidence");
     let stopped_marker = fixture.root.join("must-not-run");
@@ -73,6 +74,7 @@ fn autonomous_executor_bridge_executes_direct_segments_and_stops_on_first_failur
 
 #[test]
 fn autonomous_executor_bridge_restart_reruns_completed_disk_attempt() {
+    let _environment = test_environment();
     // Break caught: a successful record recovered from disk being treated as fresh runtime
     // evidence and authorizing Pass without executing the command in this process.
     let fixture = GitFixture::new("direct-recovery");
@@ -112,6 +114,7 @@ fn autonomous_executor_bridge_restart_reruns_completed_disk_attempt() {
 
 #[test]
 fn autonomous_executor_bridge_restart_recovers_partial_output_before_terminal_record() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-partial-recovery");
     let artifact_root = fixture.root.join("evidence");
     fs::create_dir_all(&artifact_root).expect("artifact root");
@@ -142,6 +145,7 @@ fn autonomous_executor_bridge_restart_recovers_partial_output_before_terminal_re
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_parent_crash_helper() {
+    let _environment = test_environment();
     let Some(repo) = std::env::var_os("AUTOSPEC_TEST_CRASH_REPO") else {
         return;
     };
@@ -161,6 +165,7 @@ fn autonomous_executor_bridge_parent_crash_helper() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_restart_reaps_exact_crashed_parent_group_before_retry() {
+    let _environment = test_environment();
     // Break caught: recovery deleting partial output while the command started by the dead
     // parent is still running.
     let fixture = GitFixture::new("direct-parent-crash");
@@ -219,6 +224,7 @@ fn autonomous_executor_bridge_restart_reaps_exact_crashed_parent_group_before_re
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_direct_supervisor_reaps_adopted_children() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-live-adopted-reap");
     let artifact_root = fixture.root.join("evidence");
     let executable = std::env::current_exe().expect("current test executable");
@@ -246,6 +252,7 @@ fn autonomous_executor_bridge_direct_supervisor_reaps_adopted_children() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_precedes_executable_validation() {
+    let _environment = test_environment();
     // Break caught: a missing/replaced current executable returning before an old live
     // quarantined tree is reconciled from its independently persisted intent and launch.
     let fixture = GitFixture::new("direct-cleanup-before-validation");

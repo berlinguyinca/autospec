@@ -177,6 +177,7 @@ fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_failure() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_success() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-proxy-success-retry");
     let artifact_root = fixture.root.join("proxy-evidence");
     let executable = PathBuf::from("/usr/bin/true")
@@ -218,6 +219,7 @@ fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_success() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_cargo_proxy_dispatches_rustup() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("cargo-rustup-proxy");
     let Ok(rustup) = bridge::resolve_direct_executable(&fixture.repo, "rustup") else {
         return;

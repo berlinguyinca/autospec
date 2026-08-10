@@ -238,6 +238,7 @@ fn autonomous_executor_bridge_quarantine_inventory_precedes_no_intent_return() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_quarantine_preflight_validates_all_indices_before_action() {
+    let _environment = test_environment();
     // Break caught: actionful reconciliation of command 000 cleaning its live supervisor
     // before a malformed retained marker at command 001 is discovered.
     let fixture = NonDescendantDirectFixture::new("quarantine-cross-index-preflight");
