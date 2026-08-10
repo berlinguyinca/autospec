@@ -7,7 +7,7 @@ use super::super::{
     build_implementer_prompt, write_invocation_atomic, BridgePhase, MutationSnapshot,
     PersistedInvocation, ProcessIdentity, SupervisionOutcome,
 };
-use super::support_base::{test_root, GitFixture};
+use super::support_base::{GitFixture, test_environment, test_root};
 use super::support_invocation::{
     detach_harness_for_adoption, persisted_invocation, supervision_config, supervision_state,
 };
@@ -352,6 +352,7 @@ fn autonomous_executor_bridge_exit_record_requires_complete_synced_fence() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_adopts_daemonizing_success_and_failure() {
+    let _environment = test_environment();
     for exit_code in [0, 7] {
         let fixture = GitFixture::new(&format!("adopt-daemon-{exit_code}"));
         let mut state = supervision_state(&fixture);
@@ -404,6 +405,7 @@ fn autonomous_executor_bridge_adopts_daemonizing_success_and_failure() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_adopted_restart_waits_for_delayed_stderr_tail() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("adopt-delayed-tail");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");

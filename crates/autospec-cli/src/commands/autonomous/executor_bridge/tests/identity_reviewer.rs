@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super as bridge;
-use super::support_base::{write_executable, GitFixture};
+use super::support_base::{GitFixture, test_environment, write_executable};
 use super::support_launch::{
     automatic_review_command, direct_failure_archive_count, direct_launch_supervisor_pid,
     rewrite_direct_terminal_as_signal,
@@ -18,6 +18,7 @@ use std::time::Duration;
 
 #[test]
 fn autonomous_executor_bridge_installed_tool_retries_spawn_failure() {
+    let _environment = test_environment();
     // Break caught: SpawnFailed records without a logical intent poisoning the command index
     // forever once the missing dependency becomes available.
     let fixture = GitFixture::new("direct-install-after-spawn-failure");
@@ -121,6 +122,7 @@ fn autonomous_executor_bridge_identical_failures_use_distinct_archives() {
 
 #[test]
 fn automatic_reviewer_identity_change_retries_signaled_failure_once() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("review-identity-retry");
     let evidence = fixture.root.join("review-evidence");
     let capture = fixture.root.join("review-capture");
@@ -205,6 +207,7 @@ fn automatic_reviewer_identity_change_retries_signaled_failure_once() {
 
 #[test]
 fn automatic_reviewer_identity_change_same_identity_keeps_terminal_failure() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("review-identity-same");
     let evidence = fixture.root.join("review-evidence");
     let capture = fixture.root.join("review-capture");
@@ -243,6 +246,7 @@ fn automatic_reviewer_identity_change_same_identity_keeps_terminal_failure() {
 
 #[test]
 fn automatic_reviewer_identity_change_never_retries_success() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("review-success-no-retry");
     let evidence = fixture.root.join("review-evidence");
     let capture = fixture.root.join("review-capture");
@@ -272,6 +276,7 @@ fn automatic_reviewer_identity_change_never_retries_success() {
 
 #[test]
 fn automatic_reviewer_identity_change_recovers_ci_passed_review() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("issue-52-ci-passed-review");
     let evidence = fixture.root.join("receipts/52/ci_passed/review");
     let capture = fixture.root.join("review-capture");
@@ -324,6 +329,7 @@ fn automatic_reviewer_identity_change_recovers_ci_passed_review() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_spawn_cleanup_failure_persists_quarantine_identity() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-spawn-quarantine");
     let artifact_root = fixture.root.join("evidence");
     let plan = bridge::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
@@ -362,6 +368,7 @@ fn autonomous_executor_bridge_spawn_cleanup_failure_persists_quarantine_identity
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_descendant_capture_failure_cannot_retire_identity() {
+    let _environment = test_environment();
     // Break caught: a terminal exact harness omitted from the live descendant map being
     // misclassified as foreign instead of retained for exact reaping during cleanup.
     let fixture = GitFixture::new("direct-descendant-capture-quarantine");
@@ -410,6 +417,7 @@ fn autonomous_executor_bridge_descendant_capture_failure_cannot_retire_identity(
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_success_with_descendant_is_typed_cleanup_failure() {
+    let _environment = test_environment();
     // Break caught: a successful unisolated leader returning Pass while its child survives.
     let fixture = GitFixture::new("unisolated-descendant");
     let artifact_root = fixture.root.join("evidence");

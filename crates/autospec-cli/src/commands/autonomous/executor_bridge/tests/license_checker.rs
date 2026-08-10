@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super as bridge;
-use super::support_base::{git, git_stdout, write_executable, GitFixture};
+use super::support_base::{GitFixture, git, git_stdout, test_environment, write_executable};
 use super::support_launch::completed_generation_bundle;
 use std::collections::BTreeMap;
 use std::fs;
@@ -324,6 +324,7 @@ fn autonomous_executor_bridge_license_checker_rejects_malformed_preexisting_reco
 
 #[test]
 fn autonomous_executor_bridge_license_checker_persisted_base_identity_fails_closed() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("license-persisted-base");
     git(
         &fixture.repo,
