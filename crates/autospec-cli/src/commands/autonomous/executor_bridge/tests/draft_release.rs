@@ -4,7 +4,7 @@
 
 use super::super as bridge;
 use super::super::{BridgePhase, PersistedInvocation};
-use super::support_base::{git, git_stdout};
+use super::support_base::{git, git_stdout, test_environment};
 use super::support_invocation::{commit_implementation, implementation_proof_fixture};
 use super::support_launch::{
     adapter_path, draft_pr_adapter_fixture, prepared_draft_transaction, DRAFT_ISSUE_BODY,
@@ -214,6 +214,7 @@ fn autonomous_executor_bridge_recovers_push_and_draft_creation_boundaries() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_restart_never_duplicates_inflight_draft_create() {
+    let _environment = test_environment();
     // Break caught: spawn returning before exact gh child identity is durable.
     let mut prepared = prepared_draft_transaction("draft-create-inflight");
     let delay = prepared.fixture.root.join("create.delay");

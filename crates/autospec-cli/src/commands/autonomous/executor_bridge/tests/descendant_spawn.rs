@@ -33,6 +33,7 @@ fn autonomous_executor_bridge_pending_and_interrupted_phases_round_trip_nontermi
 
 #[test]
 fn autonomous_executor_bridge_spawn_state_failure_cleans_owned_child() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-state-failure");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -67,6 +68,7 @@ fn autonomous_executor_bridge_spawn_state_failure_cleans_owned_child() {
 
 #[test]
 fn autonomous_executor_bridge_spawn_log_failure_cleans_without_releasing_child() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-log-failure");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -138,6 +140,7 @@ fn autonomous_executor_bridge_never_ready_handshake_times_out_and_reaps() {
 
 #[test]
 fn autonomous_executor_bridge_never_close_exec_status_times_out_and_reaps() {
+    let _environment = test_environment();
     // Break caught: a post-barrier child retaining the exec-status descriptor blocks forever.
     let fixture = GitFixture::new("supervise-never-exec");
     let mut state = supervision_state(&fixture);
@@ -176,6 +179,7 @@ fn autonomous_executor_bridge_never_close_exec_status_times_out_and_reaps() {
 
 #[test]
 fn autonomous_executor_bridge_fast_exit_is_observed_after_durable_handshake() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-fast-exit");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -276,6 +280,7 @@ fn autonomous_executor_bridge_dead_legacy_recovery_retains_permanent_quarantine(
 
 #[test]
 fn autonomous_executor_bridge_inherited_pipe_writer_blocks_success_and_is_cleaned() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-daemon-success");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -414,6 +419,7 @@ fn autonomous_executor_bridge_failing_leader_cleans_background_descendant() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_freeze_captures_descendant_forked_in_cleanup_window() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("cleanup-fork-race");
     let mut state = supervision_state(&fixture);
     let snapshot =

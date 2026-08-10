@@ -101,6 +101,7 @@ fn autonomous_executor_bridge_persists_spawn_and_signal_terminal_attempts() {
 
 #[test]
 fn autonomous_executor_bridge_full_suite_revalidation_is_commit_bound_and_repeatable() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("full-suite-revalidation");
     let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
     let env = BTreeMap::from([(
@@ -149,6 +150,7 @@ fn autonomous_executor_bridge_full_suite_revalidation_is_commit_bound_and_repeat
 
 #[test]
 fn autonomous_executor_bridge_full_suite_accepts_descendant_remote_base_only() {
+    let _environment = test_environment();
     // Break caught: main advancing after draft creation stranded evidence that remained
     // correctly bound to the sealed implementation and its still-ancestral base.
     let fixture = GitFixture::new("full-suite-descendant-base");
