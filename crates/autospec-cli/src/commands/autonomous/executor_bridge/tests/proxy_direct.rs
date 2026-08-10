@@ -95,7 +95,7 @@ fn autonomous_executor_bridge_direct_proxy_preserves_argv_zero() {
         .expect("canonical test executable");
     std::os::unix::fs::symlink(&executable, &proxy).expect("test executable proxy");
     let plan = bridge::parse_direct_command_plan(&format!(
-        "{} commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_direct_proxy_argv_zero_helper --exact --nocapture",
+        "{} commands::autonomous::executor_bridge::tests::proxy_direct::autonomous_executor_bridge_direct_proxy_argv_zero_helper --exact --nocapture",
         proxy.display()
     ))
     .expect("proxy command plan");
@@ -133,7 +133,7 @@ fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_failure() {
         .expect("canonical test executable");
     let proxy = fixture.root.join("cargo-proxy");
     std::os::unix::fs::symlink(&executable, &proxy).expect("test executable proxy");
-    let arguments = "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_direct_proxy_argv_zero_helper --exact --nocapture";
+    let arguments = "commands::autonomous::executor_bridge::tests::proxy_direct::autonomous_executor_bridge_direct_proxy_argv_zero_helper --exact --nocapture";
     let canonical_plan =
         bridge::parse_direct_command_plan(&format!("{} {arguments}", executable.display()))
             .expect("canonical command plan");

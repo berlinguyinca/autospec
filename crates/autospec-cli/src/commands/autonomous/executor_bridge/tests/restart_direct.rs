@@ -173,7 +173,7 @@ fn autonomous_executor_bridge_restart_reaps_exact_crashed_parent_group_before_re
     let mut parent = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
-            "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_parent_crash_helper",
+            "commands::autonomous::executor_bridge::tests::restart_direct::autonomous_executor_bridge_parent_crash_helper",
             "--nocapture",
         ])
         .env("AUTOSPEC_TEST_CRASH_REPO", &fixture.repo)
@@ -226,7 +226,7 @@ fn autonomous_executor_bridge_direct_supervisor_reaps_adopted_children() {
         commands: vec![bridge::DirectCommand::success(vec![
             executable.display().to_string(),
             "--exact".to_string(),
-            "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_cleanup_precedes_executable_validation".to_string(),
+            "commands::autonomous::executor_bridge::tests::restart_direct::autonomous_executor_bridge_cleanup_precedes_executable_validation".to_string(),
             "--test-threads=1".to_string(),
         ])],
     };
@@ -263,7 +263,7 @@ fn autonomous_executor_bridge_cleanup_precedes_executable_validation() {
     let parent = Command::new(std::env::current_exe().expect("test executable"))
         .args([
             "--exact",
-            "commands::autonomous::executor_bridge::tests::autonomous_executor_bridge_parent_crash_helper",
+            "commands::autonomous::executor_bridge::tests::restart_direct::autonomous_executor_bridge_parent_crash_helper",
             "--nocapture",
         ])
         .env("AUTOSPEC_TEST_CRASH_REPO", &fixture.repo)
