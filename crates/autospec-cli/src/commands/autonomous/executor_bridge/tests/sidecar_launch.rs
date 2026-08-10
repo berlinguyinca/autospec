@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_sidecar_only_writer_is_cleaned_before_fresh_launch() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("sidecar-only-writer");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -80,6 +81,7 @@ fn autonomous_executor_bridge_sidecar_only_writer_is_cleaned_before_fresh_launch
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_sidecar_cleanup_survives_pgid_transition() {
+    let _environment = test_environment();
     // Break caught: sidecar-only cleanup requiring the mutable process group stored at launch
     // and therefore leaving the exact live instance behind after it moves groups.
     let fixture = GitFixture::new("sidecar-pgid-transition");
@@ -161,6 +163,7 @@ fn autonomous_executor_bridge_sidecar_cleanup_survives_pgid_transition() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_sidecar_cleanup_survives_unlinked_executable() {
+    let _environment = test_environment();
     // Break caught: cleanup-only sidecar recovery requiring an executable path that no longer
     // exists even though PID, boot ID, and start identity still name the exact live instance.
     let fixture = GitFixture::new("sidecar-unlinked-executable");
@@ -293,6 +296,7 @@ fn autonomous_executor_bridge_adopts_fast_exit_after_harness_identity_disappears
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_pending_restart_reconciles_invocation_sidecar_before_launch() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("pending-sidecar-restart");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -344,6 +348,7 @@ fn autonomous_executor_bridge_pending_restart_reconciles_invocation_sidecar_befo
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_true_pre_sidecar_legacy_state_stays_quarantined() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("true-pre-sidecar-quarantine");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -420,6 +425,7 @@ fn autonomous_executor_bridge_true_pre_sidecar_legacy_state_stays_quarantined() 
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_partial_adoption_error_cleans_captured_supervisor_tree() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("adopt-partial-cleanup");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");

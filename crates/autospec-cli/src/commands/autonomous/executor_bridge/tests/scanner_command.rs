@@ -83,6 +83,7 @@ fn autonomous_executor_bridge_restart_reruns_all_scanner_results() {
 
 #[test]
 fn autonomous_executor_bridge_policy_digest_prevents_command_replay() {
+    let _environment = test_environment();
     // Break caught: an identical scanner argv recovering a terminal record created under
     // different generated-policy content.
     let fixture = GitFixture::new("scanner-policy-command-identity");
@@ -356,6 +357,7 @@ pattern-regex: dangerous_call
 
 #[test]
 fn autonomous_executor_bridge_command_artifact_digest_and_commit_tamper_block() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("command-evidence-tamper");
     let artifacts = fixture.root.join("evidence");
     let plan =
@@ -383,6 +385,7 @@ fn autonomous_executor_bridge_command_artifact_digest_and_commit_tamper_block() 
 
 #[test]
 fn autonomous_executor_bridge_observed_results_are_the_only_typed_pass_authority() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("typed-evidence");
     let commit = git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
     let lane = bridge::PremergeLaneIdentity::new(

@@ -6,10 +6,7 @@ use super::super as bridge;
 use super::super::{
     recover_invocation, runtime_session_adapter, BridgePhase, HarnessConfig, HarnessKind,
 };
-use super::support_base::{
-    environment, git_stdout, installed_aliases, test_root, write_alias_table, write_executable,
-    DetachedForkedCleanup, GitFixture,
-};
+use super::support_base::{DetachedForkedCleanup, GitFixture, environment, git_stdout, installed_aliases, test_environment, test_root, write_alias_table, write_executable};
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, persisted_invocation, reviewer_request,
 };
@@ -417,6 +414,7 @@ fn autonomous_executor_bridge_clears_stale_codex_verdict_before_retry() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_automatic_reviewer_normalizer_reaps_setsid_descendant_by_identity() {
+    let _environment = test_environment();
     // Break caught: numeric group cleanup missing a session escape or killing an unrelated PID.
     let fixture = GitFixture::new("automatic-reviewer-setsid-descendant");
     let harness = fixture.root.join("forking-reviewer");
