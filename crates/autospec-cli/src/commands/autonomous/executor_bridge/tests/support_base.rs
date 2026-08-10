@@ -21,6 +21,16 @@ pub(super) static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
 
+/// Orders the tests that arm process-wide failpoints.
+///
+/// Recovering a poisoned guard is right here: this mutex sequences tests and guards no data
+/// invariant, so a holder that panicked has left nothing corrupt for the next test to find.
+/// Without recovery a single genuine failure cascades into a run of spurious
+/// `test environment lock` panics that hide it.
+pub(super) fn test_environment() -> std::sync::MutexGuard<'static, ()> {
+    TEST_ENVIRONMENT.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 #[cfg(target_os = "linux")]
 pub(super) struct DetachedSupervisorCleanup(pub(super) ProcessIdentity);
 

@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super as bridge;
-use super::support_base::{git, git_stdout, TEST_ENVIRONMENT};
+use super::support_base::{git, git_stdout, test_environment};
 use super::support_invocation::{commit_implementation, implementation_proof_fixture};
 use super::support_launch::DRAFT_ISSUE_BODY;
 use std::collections::BTreeMap;
@@ -275,7 +275,7 @@ fn autonomous_executor_bridge_pr_size_base_drift_recomputes_exact_admission() {
 fn autonomous_executor_bridge_reconciles_draft_base_before_premerge_evidence() {
     // Break caught: stale branches running scanners and the full suite before they receive
     // process fixes already merged to their integration base.
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let previous_claim = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
     std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
     let (fixture, mut state, _snapshot, _) =

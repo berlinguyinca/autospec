@@ -4,7 +4,7 @@
 
 use super::super as bridge;
 use super::super::super::premerge;
-use super::support_base::{git, git_stdout, GitFixture, TEST_ENVIRONMENT};
+use super::support_base::{GitFixture, git, git_stdout, test_environment};
 use super::support_invocation::supervision_state;
 use super::support_launch::run_process_generation_producer;
 use std::collections::BTreeMap;
@@ -373,7 +373,7 @@ fn autonomous_executor_bridge_post_complete_process_crash_reruns_real_producer()
 fn autonomous_executor_bridge_prebundle_crash_reruns_every_diagnostic_record() {
     // Break caught: a crash after every command/scanner record but before bundle creation
     // allowing recovered disk bytes to originate Pass on restart.
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let previous_claim_override = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
     std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
     let fixture = GitFixture::new("producer-prebundle-crash");
