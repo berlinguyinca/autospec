@@ -4,7 +4,7 @@
 
 use super::super as bridge;
 use super::super::{HarnessKind, MutationSnapshot, SupervisionOutcome};
-use super::support_base::{git_stdout, write_executable, GitFixture, TEST_ENVIRONMENT};
+use super::support_base::{GitFixture, git_stdout, test_environment, write_executable};
 use super::support_invocation::{session_record_ids, supervision_config, supervision_state};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 #[test]
 fn autonomous_executor_bridge_runtime_adapter_binds_attempt_to_exact_session() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("runtime-qa-prefix");
     fs::create_dir_all(fixture.repo.join(".autospec")).expect("runtime manifest directory");
     fs::write(
@@ -86,7 +86,7 @@ fn autonomous_executor_bridge_direct_proxy_argv_zero_helper() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_direct_proxy_preserves_argv_zero() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-proxy-argv-zero");
     let proxy = fixture.root.join("cargo-proxy");
     let executable = std::env::current_exe()
@@ -124,7 +124,7 @@ fn autonomous_executor_bridge_direct_proxy_preserves_argv_zero() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_direct_proxy_change_retries_terminal_failure() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("direct-proxy-retry");
     let artifact_root = fixture.root.join("proxy-evidence");
     let executable = std::env::current_exe()
@@ -246,7 +246,7 @@ fn autonomous_executor_bridge_cargo_proxy_dispatches_rustup() {
 
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_fallback_children_have_no_sensitive_credentials() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("credentialless-direct-child");
     let keys = [
         "GH_TOKEN",
@@ -321,7 +321,7 @@ fn autonomous_executor_bridge_codex_sandbox_fallback_children_have_no_sensitive_
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_codex_sandbox_preserves_host_auth_for_codex_only() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = GitFixture::new("codex-host-auth");
     let fake_codex = fixture.root.join("codex");
     write_executable(

@@ -3,7 +3,7 @@
 // Split out of tests.rs; see the note in that file.
 
 use super::super as bridge;
-use super::support_base::{GitFixture, TEST_ENVIRONMENT};
+use super::support_base::{GitFixture, test_environment};
 use super::support_invocation::NonDescendantDirectFixture;
 use std::fs::{self, File};
 #[cfg(unix)]
@@ -16,7 +16,7 @@ use std::time::Duration;
 fn autonomous_executor_bridge_quarantine_crash_before_marker_leaves_both_anchors_live() {
     // Break caught: non-descendant classification signaling S before its durable quarantine
     // exists, allowing a restart to promote unrelated H into cleanup authority.
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = NonDescendantDirectFixture::new("quarantine-before-marker");
     bridge::set_launch_failpoint(bridge::LaunchFailpoint::OwnershipBeforeMarker);
     let error = bridge::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))
@@ -32,7 +32,7 @@ fn autonomous_executor_bridge_quarantine_crash_before_marker_leaves_both_anchors
 fn autonomous_executor_bridge_quarantine_crash_after_marker_retries_supervisor_only() {
     // Break caught: a crash after marker durability stranding S so a retry either kills H or
     // skips exact supervisor cleanup.
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let fixture = NonDescendantDirectFixture::new("quarantine-after-marker");
     bridge::set_launch_failpoint(bridge::LaunchFailpoint::OwnershipAfterMarker);
     let error = bridge::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))

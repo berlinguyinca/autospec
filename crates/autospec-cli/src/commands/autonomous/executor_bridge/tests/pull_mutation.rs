@@ -4,7 +4,7 @@
 
 use super::super as bridge;
 use super::super::{supervise_harness, BridgePhase, MutationSnapshot, SupervisionOutcome};
-use super::support_base::{git, git_stdout, write_executable, GitFixture, TEST_ENVIRONMENT};
+use super::support_base::{GitFixture, git, git_stdout, test_environment, write_executable};
 use super::support_invocation::{
     commit_implementation, implementation_proof_fixture, shell_invocation, supervision_config,
     supervision_state,
@@ -318,7 +318,7 @@ fn autonomous_executor_bridge_clean_supervision_preserves_enabled_subreaper_stat
 
 #[test]
 fn autonomous_executor_bridge_stops_completion_drain_after_ttl_one_claim_takeover() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     // Break caught: dense completion output crossing TTL after the exact claim was replaced.
     let fixture = GitFixture::new("supervise-claim-takeover");
     let mut state = supervision_state(&fixture);
