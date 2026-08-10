@@ -4,7 +4,7 @@
 
 use super::super as bridge;
 use super::super::ResolvedBase;
-use super::support_base::{git, git_stdout, DetachedForkedCleanup, TEST_ENVIRONMENT};
+use super::support_base::{DetachedForkedCleanup, git, git_stdout, test_environment};
 use super::support_invocation::{commit_implementation, implementation_proof_fixture};
 use super::support_launch::DRAFT_ISSUE_BODY;
 use std::collections::BTreeMap;
@@ -64,7 +64,7 @@ fn autonomous_executor_bridge_requires_observed_exact_merged_state() {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_reconciles_merged_existing_worktree_before_stale_proof() {
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let (fixture, mut state, _snapshot, closeout) =
         implementation_proof_fixture("merged-existing-worktree-entrypoint");
     commit_implementation(&state);

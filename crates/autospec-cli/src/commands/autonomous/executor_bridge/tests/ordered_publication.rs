@@ -4,7 +4,7 @@
 
 use super::super as bridge;
 use super::super::BridgePhase;
-use super::support_base::{git, git_stdout, write_executable, TEST_ENVIRONMENT};
+use super::support_base::{git, git_stdout, test_environment, write_executable};
 use super::support_invocation::implementation_proof_fixture;
 use super::support_launch::{adapter_path, draft_pr_adapter_fixture, prepared_draft_transaction};
 use std::fs;
@@ -13,7 +13,7 @@ use std::fs;
 #[test]
 fn bound_continuation_publication_is_ordered_and_restart_safe() {
     // Break caught: proactive receipts existed locally but never became ordered GitHub work.
-    let _environment = TEST_ENVIRONMENT.lock().expect("test environment lock");
+    let _environment = test_environment();
     let (fixture, mut state, _, _) = implementation_proof_fixture("continuation-publication");
     let state_path = fixture.root.join("state/invocation.json");
     let event_log = fixture.root.join("events.jsonl");

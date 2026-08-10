@@ -4,7 +4,7 @@
 
 use super::super as bridge;
 use super::super::{BridgePhase, MutationSnapshot, SupervisionOutcome};
-use super::support_base::{DetachedForkedCleanup, GitFixture};
+use super::support_base::{DetachedForkedCleanup, GitFixture, test_environment};
 use super::support_invocation::{
     detach_harness_for_adoption, supervision_config, supervision_state, NonDescendantDirectFixture,
 };
@@ -177,6 +177,7 @@ fn autonomous_executor_bridge_absent_anchors_do_not_prove_orphan_cleanup() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_dead_supervisor_cleans_live_harness_before_recovery() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("dead-supervisor-live-harness");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -293,6 +294,7 @@ fn assert_persisted_dead_supervisor_cleans_exec_replaced_harness(
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_persisted_recovery_cleans_shebang_harness() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("persisted-shebang-cleanup");
     let marker = fixture.root.join("shebang.ready");
     let program = fixture.root.join("shebang-harness");
@@ -317,6 +319,7 @@ fn autonomous_executor_bridge_persisted_recovery_cleans_shebang_harness() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_persisted_recovery_cleans_immediate_exec_harness() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("persisted-immediate-exec-cleanup");
     let marker = fixture.root.join("exec.ready");
     let script = format!(
