@@ -9758,7 +9758,6 @@ const EXECUTOR_INTERNAL_PATHSPECS: [&str; 3] = [
     ":(exclude).autospec/original-git-pointer",
 ];
 
-
 fn implementation_repair_artifact_path(
     state_path: &Path,
     state: &PersistedInvocation,
@@ -11199,7 +11198,7 @@ fn validate_private_directory(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        unsafe extern "C" {
+        unsafe extern "C" { // SAFETY: declaration only; geteuid takes no arguments.
             fn geteuid() -> u32;
         }
         // SAFETY: geteuid has no arguments or memory-safety preconditions.
@@ -11380,7 +11379,7 @@ fn validate_private_state_file(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        unsafe extern "C" {
+        unsafe extern "C" { // SAFETY: declaration only; geteuid takes no arguments.
             fn geteuid() -> u32;
         }
         // SAFETY: geteuid has no arguments or memory-safety preconditions.
@@ -15865,7 +15864,7 @@ where
     let child = match unsafe { fork() }
         .map_err(|error| format!("fork executor draft pull request: {error}"))?
     {
-        ForkResult::Child => unsafe {
+        ForkResult::Child => unsafe { // SAFETY: async-signal-safe calls only.
             nix::libc::close(release_write_fd);
             nix::libc::close(digest_write_fd);
             nix::libc::close(cleanup_status_read_fd);
@@ -18898,7 +18897,7 @@ fn read_pipe_until_deadline(
     // SAFETY: fcntl is called with a valid descriptor and integer commands.
     let flags = unsafe { nix::libc::fcntl(descriptor, nix::libc::F_GETFL) };
     if flags < 0
-        || unsafe {
+        || unsafe { // SAFETY: descriptor is owned; F_SETFL alters only its own flags.
             nix::libc::fcntl(
                 descriptor,
                 nix::libc::F_SETFL,
@@ -23054,7 +23053,7 @@ impl WorktreeLease {
         }
         #[cfg(unix)]
         {
-            unsafe extern "C" {
+            unsafe extern "C" { // SAFETY: declaration only; flock takes an owned fd.
                 fn flock(fd: i32, operation: i32) -> i32;
             }
             const LOCK_EX: i32 = 2;
@@ -23483,7 +23482,7 @@ fn validate_worktree_creation_identity(
 
 #[cfg(unix)]
 fn validate_executor_ownership(repo: &Path, candidates: &[&Path]) -> Result<(), String> {
-    unsafe extern "C" {
+    unsafe extern "C" { // SAFETY: declaration only; geteuid takes no arguments.
         fn geteuid() -> u32;
     }
 
