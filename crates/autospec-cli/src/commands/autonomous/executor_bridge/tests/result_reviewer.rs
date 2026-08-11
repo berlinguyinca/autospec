@@ -220,30 +220,7 @@ fn autonomous_executor_bridge_merge_revalidates_result_ci_and_review() {
     bridge::persist_patch_size_admission(&state_path, &admission).unwrap();
     bridge::persist_accepted_executor_result(&state_path, &mut state, &evidence)
         .expect("accepted result");
-    let review_artifact = fixture.root.join("review-LGTM");
-    let review_stderr = fixture.root.join("review-stderr");
-    fs::write(&review_artifact, "LGTM\n").expect("review artifact");
-    fs::write(&review_stderr, "").expect("review stderr");
-    fs::set_permissions(&review_artifact, fs::Permissions::from_mode(0o600))
-        .expect("private review");
-    fs::set_permissions(&review_stderr, fs::Permissions::from_mode(0o600))
-        .expect("private review stderr");
-    let review = serde_json::json!({
-        "schema": 2,
-        "binding": bridge::review_binding(&state).expect("review binding"),
-        "stdout_path": review_artifact,
-        "stdout_digest": autospec_core::autonomous::waterfall::sha256_hex(b"LGTM\n"),
-        "stderr_path": review_stderr,
-        "stderr_digest": autospec_core::autonomous::waterfall::sha256_hex(b""),
-    })
-    .to_string();
-    let review_path = bridge::review_receipt_path(&state_path, &state).expect("review path");
-    bridge::write_private_create_once(
-        &review_path,
-        format!("{review}\n").as_bytes(),
-        "test review receipt",
-    )
-    .expect("review receipt");
+    super::support_review::write_valid_schema4_review_receipt(&state_path, &state, &fixture.root);
     let pr_state = fixture.root.join("merge-pr.json");
     let comments = fixture.root.join("merge-comments.json");
     let checks = fixture.root.join("merge-checks.json");
