@@ -10,6 +10,7 @@ use std::path::PathBuf;
 
 #[test]
 fn autonomous_executor_bridge_zero_effect_marker_survives_repair_and_transfer_crashes() {
+    let _environment = test_environment();
     let (_fixture, state, state_path, _) =
         zero_effect_classifier_fixture("zero-effect-crash-windows", false, true);
 
@@ -439,6 +440,7 @@ fn autonomous_executor_bridge_terminal_phases_bypass_zero_effect_recovery() {
 
 #[test]
 fn autonomous_executor_bridge_resumes_failure_after_terminal_claim_transition_crash() {
+    let _environment = test_environment();
     let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("terminal-failure-crash");
     state.phase = bridge::BridgePhase::ImplementationComplete;
     state.identity.runtime_environment_dir = None;
