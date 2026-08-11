@@ -735,6 +735,19 @@ fn acquire(args: &[String]) -> Result<(), CommandFailure> {
     Ok(())
 }
 
+/// Whether the recorded owner still holds its lease, and so must not be displaced.
+///
+/// This is the same test `acquire_record` applies before refusing a claim: an owner
+/// mid heartbeat-publish is protected, and otherwise the lease must not have aged
+/// past its TTL. Without it the conductor pre-check refused every recorded owner
+/// outright, including one whose process was long dead, and the issue stayed wedged
+/// forever — a single failed GitHub call was enough to strand it, because the dead
+/// owner could never release its own claim.
+fn conductor_claim_owner_holds_lease(record: &RunStateRecord) -> bool {
+    record.step.starts_with("heartbeat-publishing:")
+        || !server_lease_is_stale(&record.updated_at, record.ttl_seconds)
+}
+
 pub(crate) fn acquire_for_conductor(
     repo: &str,
     issue: u64,
@@ -746,8 +759,9 @@ pub(crate) fn acquire_for_conductor(
     if !recovered {
         if let Some(owner) = read_claim_ref(repo, issue)?.and_then(|head| {
             (head.record.state == "claimed"
-                && (head.record.worker_id != worker_id || head.record.branch != branch))
-                .then_some(head.record.worker_id)
+                && (head.record.worker_id != worker_id || head.record.branch != branch)
+                && conductor_claim_owner_holds_lease(&head.record))
+            .then_some(head.record.worker_id)
         }) {
             return unavailable_claim_with_observed_owner(issue, repo, worker_id, &owner);
         }
