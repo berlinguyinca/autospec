@@ -746,8 +746,9 @@ pub(crate) fn acquire_for_conductor(
     if !recovered {
         if let Some(owner) = read_claim_ref(repo, issue)?.and_then(|head| {
             (head.record.state == "claimed"
-                && (head.record.worker_id != worker_id || head.record.branch != branch))
-                .then_some(head.record.worker_id)
+                && (head.record.worker_id != worker_id || head.record.branch != branch)
+                && conductor_claim_owner_holds_lease(&head.record))
+            .then_some(head.record.worker_id)
         }) {
             return unavailable_claim_with_observed_owner(issue, repo, worker_id, &owner);
         }
@@ -3067,15 +3068,6 @@ fn has_executor_claim_owner(record: &RunStateRecord, worker_id: &str, branch: &s
 fn has_active_executor_claim(record: &RunStateRecord, worker_id: &str, branch: &str) -> bool {
     has_executor_claim_owner(record, worker_id, branch)
         && server_lease_is_fresh(&record.updated_at, record.ttl_seconds)
-}
-
-fn server_lease_is_fresh(server_timestamp: &str, ttl_seconds: u64) -> bool {
-    let Some(updated_at) = parse_iso_timestamp(server_timestamp) else {
-        return false;
-    };
-    unix_now()
-        .map(|now| now.saturating_sub(updated_at) <= ttl_seconds)
-        .unwrap_or(false)
 }
 
 fn executor_result_step(outcome: &ConductorOutcome) -> &'static str {
@@ -7282,15 +7274,6 @@ fn program_on_path(program: &str) -> bool {
     })
 }
 
-fn server_lease_is_stale(server_timestamp: &str, ttl_seconds: u64) -> bool {
-    let Some(updated_at) = parse_iso_timestamp(server_timestamp) else {
-        return false;
-    };
-    unix_now()
-        .map(|now| now.saturating_sub(updated_at) > ttl_seconds)
-        .unwrap_or(false)
-}
-
 fn unix_now() -> Result<u64, CommandFailure> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -7488,5 +7471,7 @@ fn print_state_help() {
     );
 }
 
+mod lease;
+use lease::{conductor_claim_owner_holds_lease, server_lease_is_fresh, server_lease_is_stale};
 #[cfg(test)]
 mod tests;
