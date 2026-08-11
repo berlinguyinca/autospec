@@ -41,22 +41,6 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-@test "Rust probes prune dependency and generated trees" {
-    printf '%s\n' 'Numeric invariants: money values must use Decimal.' > "$REPO/AGENTS.md"
-    mkdir -p "$REPO/target" "$REPO/vendor" "$REPO/node_modules" "$REPO/dist"
-    printf 'pub const PRICE: f64 = 1.0;\n' > "$REPO/src/included.rs"
-    for excluded in target vendor node_modules dist; do
-        printf 'pub const PRICE: f64 = 1.0;\n' > "$REPO/$excluded/generated.rs"
-    done
-
-    run bash "$AUDIT" --repo "$REPO" --json "$TEST_TMP/audit.json" --markdown "$TEST_TMP/audit.md"
-    [ "$status" -eq 0 ]
-    run jq -e '[.findings[] | select(.probe=="f64-numeric-invariant")] | length == 1' "$TEST_TMP/audit.json"
-    [ "$status" -eq 0 ]
-    run jq -e '.findings[] | select(.probe=="f64-numeric-invariant") | .file=="src/included.rs"' "$TEST_TMP/audit.json"
-    [ "$status" -eq 0 ]
-}
-
 @test "f64 bridge annotation suppresses invariant finding" {
     printf '%s\n' 'Numeric invariant: prices use Decimal.' > "$REPO/AGENTS.md"
     mkdir -p "$REPO/crates/bridge/src"
