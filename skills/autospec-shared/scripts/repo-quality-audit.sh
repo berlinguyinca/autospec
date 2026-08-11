@@ -986,22 +986,11 @@ write_runtime_json() {
 }
 
 source_scan_find() {
-  # Two prune classes, deliberately different in reach.
-  #
-  # By NAME, at any depth: names that only ever denote a dependency or build tree.
-  # Anchoring these to the repo root missed every nested one -- a Cargo workspace puts a
-  # `target/` under each crate, and `.claude/worktrees/*/` holds entire repo copies with
-  # their own `target/`. Those were being scanned as if they were first-party source.
-  #
-  # By PATH, at the root only: names that a real source tree legitimately uses. `build`,
-  # `dist`, and `out` are generated at the root here, but pruning them by name would
-  # silently drop a `src/build/` or `cmd/out/` package in some other repo this shared
-  # audit runs against.
-  find "$REPO" \
-    \( -name .git -o -name node_modules -o -name .autospec -o -name .claude \
-      -o -name target -o -name vendor -o -name .angular -o -name .next \
-      -o -path "$REPO/dist" -o -path "$REPO/build" -o -path "$REPO/coverage" \
-      -o -path "$REPO/out" -o -path "$REPO/public/build" \) -prune -o "$@"
+  # -name prunes at any depth (per-crate target/, .claude worktrees are repo copies);
+  # -path stays root-anchored for names real source also uses, e.g. src/build/.
+  find "$REPO" \( -name .git -o -name node_modules -o -name .autospec -o -name .claude -o -name target \
+    -o -name vendor -o -name .angular -o -name .next -o -path "$REPO/dist" -o -path "$REPO/build" \
+    -o -path "$REPO/coverage" -o -path "$REPO/out" -o -path "$REPO/public/build" \) -prune -o "$@"
 }
 
 scan_text_files() {
