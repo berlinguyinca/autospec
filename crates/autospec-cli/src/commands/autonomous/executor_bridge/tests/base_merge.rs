@@ -314,6 +314,7 @@ fn autonomous_executor_bridge_reconciles_draft_base_before_premerge_evidence() {
         issue: state.identity.issue,
         issue_title: "Reconcile stale implementation".to_string(),
         issue_body: DRAFT_ISSUE_BODY.to_string(),
+        serialization_reasons: Vec::new(),
         worker_id: state.identity.worker_id.clone(),
         claim_id: state.identity.claim_id.clone(),
         invocation_id: state.identity.invocation_id.clone(),

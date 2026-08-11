@@ -187,6 +187,7 @@ fn autonomous_executor_bridge_reconciles_merged_existing_worktree_before_stale_p
         issue: state.identity.issue,
         issue_title: "Retire merged executor".to_string(),
         issue_body: DRAFT_ISSUE_BODY.to_string(),
+        serialization_reasons: Vec::new(),
         worker_id: state.identity.worker_id.clone(),
         claim_id: state.identity.claim_id.clone(),
         invocation_id: state.identity.invocation_id.clone(),
