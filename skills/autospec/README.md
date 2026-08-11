@@ -69,7 +69,9 @@ curl -fsSL https://raw.githubusercontent.com/berlinguyinca/codex-skills/main/ski
 
 The skill executes a 7-phase workflow (Phase 0 through Phase 6). The canonical body
 is harness-neutral; each phase delegates to subagents whenever the host harness
-supports them, and falls back to in-thread execution when it doesn't. The whole
+supports them. Non-review work may fall back to in-thread execution, but required
+independent review never does: unavailable foreground review produces a typed
+blocker, restores the issue to the queue, and forbids merge. The whole
 pipeline runs from a single user invocation — the only required interactive step is
 the optional repo-bootstrap question (name, visibility, owner) when no GitHub remote
 is detected. Generated child issues are pre-staged for 32B-class local LLMs (Ollama qwen3-style on Mac/Linux), not just cloud agents — file pointers, section anchors, checkbox AC, and a single Primary smoke test per inner loop.
@@ -104,7 +106,7 @@ Reach for this skill when:
 | **2** | Brainstorm + design | Selects a `Team personality` plus independent `Review counter-team`, then runs the structured 5-section brainstorm (architecture / API / data / errors / testing) with explicit per-section approval, written to `docs/specs/YYYY-MM-DD-<topic>-design.md`. |
 | **3** | Decompose into linked GitHub issues (delegate) | Foreground subagent creates labels, an EPIC umbrella, and N self-contained mini-specs sized for 32B-class local LLMs: team lens, review counter-team, file pointers, section anchors, checkbox AC, primary smoke test. |
 | **3.5** | Review and label (delegate) | Foreground subagent applies the `ctx:*` / `reasoning:*` rubric to each child, writes a `## Model fit` block into the body (idempotent), runs sibling-normalization across split children, and validates dep edges (closed-dep / child-less-tracker warnings; circular sibling-dep hard fail). Optional board assignment via `~/.autospec/project-map.yml` (full reader lands in PR B3 / #16). |
-| **4** | Background autonomous monitor | Background subagent loops: pick next ready issue → worktree → TDD → full-suite validation → push → PR → self-review → revalidate → admin-squash-merge → repeat until drained. |
+| **4** | Background autonomous monitor | Background subagent loops: pick next ready issue → worktree → TDD → full-suite validation → push → PR → independent structured review → revalidate → admin-squash-merge → repeat until drained. |
 | **5** | Periodic status updates | Self-paced ~25 min wakeups posting deltas (closed issues, merged PRs, failures, blockers); slows to ~50 min when quiet. |
 | **6** | Final report | When the monitor terminates, summarize every issue processed, PR merged, wall time, and any human-attention failures. |
 
@@ -113,7 +115,7 @@ Reach for this skill when:
 This skill spans both halves of the pipeline, so it dispatches subagents on **both tiers** per `AGENTS.md`:
 
 - **Tier A (top model + extended thinking)** for Phase 1 research, Phase 3 decomposition, and Phase 3.5 review-and-label. Spec quality is the bottleneck — Tier A pays for itself by saving N cheap-implementer cycles downstream.
-- **Tier B (cheaper model + medium thinking)** for Phase 4's `process(ISSUE)` implementer and the inner-loop LGTM self-review. Implementation follows a well-specified contract; this loop runs many times per spec.
+- **Tier B (cheaper model + medium thinking)** for Phase 4's `process(ISSUE)` implementer and normal-risk independent reviewer. Implementation follows a well-specified contract; this loop runs many times per spec. Higher-risk reviews use the stronger reasoning and provider-diversity rules below.
 
 Phase 2 has no subagent dispatch — the orchestrator's own model writes the spec, so invoke this skill with your top-tier model for best spec quality.
 
@@ -127,13 +129,24 @@ harness; if a capability is missing the listed fallback applies.
 | Capability                  | Claude Code                          | OpenCode                                 | Codex CLI                                | Fallback if missing                                |
 |-----------------------------|--------------------------------------|------------------------------------------|------------------------------------------|----------------------------------------------------|
 | Read-only codebase research | `Agent` (subagent_type=Explore)      | `task` agent in read-only mode           | `apply_patch` read-only / shell `grep`   | Do the search in-thread with `rg`/`grep`           |
-| Foreground delegation       | `Agent` (subagent_type=general-purpose) | nested `task` agent, await output     | spawn nested CLI session                 | Do the work in-thread (more context cost)          |
+| Foreground delegation       | `Agent` (subagent_type=general-purpose) | nested `task` agent, await output     | spawn nested CLI session                 | Non-review work may run in-thread; required independent review requeues and never self-approves |
 | Background delegation       | `Agent` with `run_in_background: true` | detached `task` agent                  | nohup'd CLI session writing to a logfile | Run the monitor in a separate terminal/tmux pane   |
 | Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
 | Self-paced future wakeup    | `ScheduleWakeup` inside a `/loop`    | a recurring `task` or local `cron`       | local `cron`/`launchd` calling the CLI   | The user runs a status-update prompt manually      |
 
 Persistent project notes are written to `AGENTS.md` in the target repo root — this is
 recognized by all three harnesses.
+
+### Independent review admission
+
+Normal changes use one fresh standard reviewer. High and integration-shaped
+changes use high reasoning and prefer a provider different from the implementer;
+critical changes require that provider diversity. Every reviewer runs in a fresh,
+external, read-only foreground context and returns the structured JSON verdict
+contract bound to the exact commit. The trusted adapter is the only component
+that converts a validated structured verdict to the outer exact `LGTM` token.
+Missing delegation, critical provider-diversity failure, malformed evidence, or
+commit drift requeues or blocks the issue and cannot reach a merge command.
 
 ## Dependencies
 
