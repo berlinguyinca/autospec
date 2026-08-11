@@ -47,6 +47,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
+mod blocked_cycle;
 mod one_shot_selector;
 use one_shot_selector::{
     load_one_shot_selector, one_shot_selector_consumed, persist_one_shot_selector,
@@ -2408,11 +2409,11 @@ fn run_foreground_cycles(
         // Without this the paused state is not loopable, the process exits, and a
         // supervisor restarts it straight back into the identical failure.
         if continuous {
-            completion = continue_after_blocked_cycle(layout, options, completion)
+            completion = blocked_cycle::continue_after_blocked_cycle(layout, options, completion)
                 .map_err(CommandFailure::diagnostic)?;
         }
         let loopable_state =
-            foreground_cycle_is_loopable(&completion).map_err(CommandFailure::diagnostic)?;
+            blocked_cycle::foreground_cycle_is_loopable(&completion).map_err(CommandFailure::diagnostic)?;
         let keep_running = continuous
             && cycle_limit.is_none_or(|limit| completed_cycles < limit)
             && loopable_state;
@@ -3505,71 +3506,6 @@ fn schedule_foreground_retry(state: ConductorState) -> Result<(ConductorState, b
     state
         .transition(ConductorEvent::RetryScheduled)
         .map(|state| (state, true))
-}
-
-/// Keep a continuous conductor alive across a blocked cycle.
-///
-/// A blocked dispatch pauses the state with a `Blocked` outcome. Left alone that
-/// state is not loopable, so `run_foreground_cycles` returns and the process
-/// exits — and a supervisor immediately restarts it into the identical failure.
-/// One issue that cannot clear its gate then costs the whole conductor instead
-/// of costing its own selection.
-///
-/// Count the cycle through the persisted blocked-backlog governor, abandon the
-/// selection so the next scan moves on, and report that the loop may continue.
-/// Repeating the same reason and issue set seals the state as `AllBlocked` at
-/// `BLOCKED_BACKLOG_THRESHOLD`, which bounds the retries without ending the run.
-/// A cycle that is not a blocked pause passes through untouched.
-/// Whether a finished cycle leaves the conductor in a phase the continuous loop
-/// may run again. `AllBlocked` counts: a sealed backlog stops Tier 1 selection,
-/// not the conductor itself.
-fn foreground_cycle_is_loopable(completion: &ForegroundCompletion) -> Result<bool, String> {
-    let ForegroundCompletion::State(state) = completion else {
-        return Ok(false);
-    };
-    if matches!(
-        state.phase(),
-        ConductorPhase::Scan | ConductorPhase::AllBlocked
-    ) {
-        return Ok(true);
-    }
-    no_ready_selection_pause(state)
-}
-
-/// Apply [`blocked_cycle_continuation`] to a finished cycle and persist the result
-/// so the bounded blocked-backlog count survives process death.
-fn continue_after_blocked_cycle(
-    layout: &RunLayout,
-    options: &Options,
-    completion: ForegroundCompletion,
-) -> Result<ForegroundCompletion, String> {
-    let ForegroundCompletion::State(state) = completion else {
-        return Ok(completion);
-    };
-    let (state, continued) = blocked_cycle_continuation(*state)?;
-    if continued {
-        let scope = foreground_scope(options, layout);
-        persist_foreground_state(&foreground_state_path(layout, scope), &state)?;
-    }
-    Ok(ForegroundCompletion::State(Box::new(state)))
-}
-
-fn blocked_cycle_continuation(state: ConductorState) -> Result<(ConductorState, bool), String> {
-    if state.phase() != ConductorPhase::Paused {
-        return Ok((state, false));
-    }
-    let Some(ConductorOutcome::Blocked(reason)) = state.last_outcome().cloned() else {
-        return Ok((state, false));
-    };
-    let Some(issue) = state.selected_issue() else {
-        return Ok((state, false));
-    };
-    let state = state.record_blocked_backlog_cycle(reason, vec![issue])?;
-    if state.phase() == ConductorPhase::AllBlocked {
-        return Ok((state, true));
-    }
-    let state = state.transition(ConductorEvent::AbandonTerminal)?;
-    Ok((state, true))
 }
 
 fn advance_foreground_after_terminal(
