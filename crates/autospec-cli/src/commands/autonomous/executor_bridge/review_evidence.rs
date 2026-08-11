@@ -1,8 +1,271 @@
 use super::*;
+use autospec_core::autonomous::blast_radius::{classify_paths, default_legacy_registry};
+use autospec_core::autonomous::review_policy::{
+    classify_review_requirements, ReviewPolicyInput, ReviewReasoning, ReviewRisk,
+};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct IntegrationSmokeEvidenceBinding {
+    pub(super) requirements_digest: String,
+    pub(super) evidence_digest: String,
+    pub(super) command_records: Vec<String>,
+}
+
+#[derive(Default)]
+pub(super) struct IntegrationSmokeEvidenceOutcome {
+    pub(super) canonical_plan: Option<DirectCommandPlan>,
+    pub(super) observations: Vec<ObservedDirectCommand>,
+    pub(super) binding: Option<IntegrationSmokeEvidenceBinding>,
+}
+
+pub(super) fn classify_executor_review_requirements(
+    request: &ExecutorBridgeRequest,
+    state: &PersistedInvocation,
+) -> Result<ReviewRequirements, String> {
+    let changed = changed_paths_since_base(&state.identity.worktree, &state.identity.base_oid)?;
+    let components = changed
+        .all
+        .iter()
+        .filter_map(|path| logical_review_component(path))
+        .collect::<BTreeSet<_>>();
+    let blast = classify_paths(&changed.all, &default_legacy_registry());
+    Ok(classify_review_requirements(&ReviewPolicyInput {
+        changed_paths: changed.all.into_iter().collect(),
+        serialization_reasons: request.serialization_reasons.clone(),
+        logical_component_count: components.len(),
+        has_producer_surface: false,
+        has_consumer_surface: false,
+        critical_boundary: blast.label == "blast:fenced",
+    }))
+}
+
+fn logical_review_component(path: &str) -> Option<String> {
+    let mut components = path.split('/').filter(|component| !component.is_empty());
+    let first = components.next()?;
+    let second = components.next();
+    Some(match (first, second) {
+        ("crates" | "skills" | "tests", Some(second)) => format!("{first}/{second}"),
+        _ => first.to_string(),
+    })
+}
 
 pub(super) fn parse_primary_smoke(issue_body: &str) -> Result<DirectCommandPlan, String> {
     let line = first_fenced_command_under(issue_body, "primary smoke test (inner loop)")?;
     parse_direct_command_plan(line)
+}
+
+pub(super) fn parse_required_integration_smoke(
+    issue_body: &str,
+    requirements: &ReviewRequirements,
+) -> Result<Option<DirectCommandPlan>, String> {
+    if !requirements.require_integration_smoke {
+        return Ok(None);
+    }
+    let explicit_count = issue_body
+        .lines()
+        .filter(|line| {
+            normalized_level_three_heading(line).as_deref()
+                == Some("integration smoke test (pre-merge)")
+        })
+        .count();
+    match explicit_count {
+        0 => compatible_primary_integration_smoke(issue_body),
+        1 => parse_explicit_integration_smoke(issue_body).map(Some),
+        _ => Err(
+            "executor integration smoke test (pre-merge) requires exactly one heading".to_string(),
+        ),
+    }
+}
+
+fn parse_explicit_integration_smoke(issue_body: &str) -> Result<DirectCommandPlan, String> {
+    let line = first_fenced_command_under(issue_body, "integration smoke test (pre-merge)")?;
+    let plan = parse_direct_command_plan(line)?;
+    if plan.commands.len() != 1 {
+        return Err(
+            "executor integration smoke test (pre-merge) requires exactly one direct command"
+                .to_string(),
+        );
+    }
+    Ok(plan)
+}
+
+fn compatible_primary_integration_smoke(
+    issue_body: &str,
+) -> Result<Option<DirectCommandPlan>, String> {
+    let primary = parse_primary_smoke(issue_body)?;
+    if primary.commands.iter().any(|command| {
+        command
+            .argv
+            .iter()
+            .any(|argument| repository_integration_test_path(argument))
+    }) {
+        Ok(Some(primary))
+    } else {
+        Err("executor integration smoke is required before independent review".to_string())
+    }
+}
+
+fn repository_integration_test_path(argument: &str) -> bool {
+    let normalized = argument.trim_start_matches("./").replace('\\', "/");
+    !normalized.split('/').any(|part| part == "..")
+        && ["tests/integration/", "tests/smoke/", "tests/e2e/"]
+            .iter()
+            .any(|prefix| normalized.starts_with(prefix))
+}
+
+pub(super) fn produce_integration_smoke_evidence(
+    request: &DeterministicEvidenceRequest<'_>,
+    primary_plan: &DirectCommandPlan,
+    primary_observations: &[ObservedDirectCommand],
+    attempt_root: &Path,
+) -> Result<IntegrationSmokeEvidenceOutcome, String> {
+    let Some(plan) =
+        parse_required_integration_smoke(request.issue_body, &request.review_requirements)?
+    else {
+        return Ok(IntegrationSmokeEvidenceOutcome::default());
+    };
+    if &plan == primary_plan {
+        let binding = bind_integration_smoke_evidence(
+            &request.review_requirements,
+            attempt_root,
+            primary_observations,
+        )?;
+        return Ok(IntegrationSmokeEvidenceOutcome {
+            binding: Some(binding),
+            ..IntegrationSmokeEvidenceOutcome::default()
+        });
+    }
+    let observations = execute_required_integration_smoke(
+        request.state,
+        &plan,
+        &attempt_root.join("qa/integration"),
+        request.runtime,
+        request.stall_timeout,
+    )?;
+    let binding =
+        bind_integration_smoke_evidence(&request.review_requirements, attempt_root, &observations)?;
+    Ok(IntegrationSmokeEvidenceOutcome {
+        canonical_plan: Some(plan),
+        observations,
+        binding: Some(binding),
+    })
+}
+
+pub(super) fn execute_required_integration_smoke(
+    state: &PersistedInvocation,
+    plan: &DirectCommandPlan,
+    artifact_root: &Path,
+    runtime: Option<&DirectRuntimeAdapter>,
+    stall_timeout: Duration,
+) -> Result<Vec<ObservedDirectCommand>, String> {
+    if state.phase != BridgePhase::DraftCreated || plan.commands.len() != 1 {
+        return Err(
+            "executor integration smoke requires one command at the created draft phase"
+                .to_string(),
+        );
+    }
+    execute_direct_plan(
+        &state.identity.worktree,
+        plan,
+        artifact_root,
+        runtime,
+        stall_timeout,
+    )
+}
+
+pub(super) fn bind_integration_smoke_evidence(
+    requirements: &ReviewRequirements,
+    artifact_root: &Path,
+    observations: &[ObservedDirectCommand],
+) -> Result<IntegrationSmokeEvidenceBinding, String> {
+    if !requirements.require_integration_smoke || observations.is_empty() {
+        return Err("executor integration smoke binding requires observed evidence".to_string());
+    }
+    let mut command_records = Vec::with_capacity(observations.len());
+    for observation in observations {
+        validate_private_state_file(&observation.record_path)
+            .map_err(|error| format!("executor integration smoke record is unsafe: {error}"))?;
+        let record = fs::read(&observation.record_path)
+            .map_err(|error| format!("read integration smoke record: {error}"))?;
+        if sha256_hex(&record) != observation.record_digest {
+            return Err("executor integration smoke record digest changed".to_string());
+        }
+        let relative = observation
+            .record_path
+            .strip_prefix(artifact_root)
+            .map_err(|_| "executor integration smoke record escapes evidence root".to_string())?;
+        command_records.push(relative.display().to_string());
+    }
+    let requirements_digest = canonical_review_requirements_digest(requirements);
+    let mut digest_input = requirements_digest.clone();
+    for observation in observations {
+        digest_input.push('\0');
+        digest_input.push_str(&observation.record_digest);
+    }
+    Ok(IntegrationSmokeEvidenceBinding {
+        requirements_digest,
+        evidence_digest: sha256_hex(digest_input.as_bytes()),
+        command_records,
+    })
+}
+
+pub(super) fn canonical_review_requirements_digest(requirements: &ReviewRequirements) -> String {
+    let risk = match requirements.risk {
+        ReviewRisk::Normal => "normal",
+        ReviewRisk::High => "high",
+        ReviewRisk::Integration => "integration",
+        ReviewRisk::Critical => "critical",
+    };
+    let reasoning = match requirements.reviewer_reasoning {
+        ReviewReasoning::Standard => "standard",
+        ReviewReasoning::High => "high",
+    };
+    sha256_hex(
+        format!(
+            "{risk}\0{reasoning}\0{}\0{}\0{}\0{}\0{}",
+            requirements.integration_shaped,
+            requirements.require_integration_smoke,
+            requirements.prefer_provider_diversity,
+            requirements.require_provider_diversity,
+            requirements.reasons.join("\0"),
+        )
+        .as_bytes(),
+    )
+}
+
+pub(super) fn evidence_input_digests(
+    lane: &PremergeLaneIdentity,
+    request: &DeterministicEvidenceRequest<'_>,
+) -> Result<(String, String), String> {
+    let scanner_policy_digest = gitleaks_policy_digest(&request.state.identity.worktree)?;
+    let review_requirements_digest =
+        canonical_review_requirements_digest(&request.review_requirements);
+    let semantic_input_digest = sha256_hex(
+        format!(
+            "{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            lane.lane_digest(),
+            request.state.identity.base_ref,
+            request.state.identity.base_oid,
+            request.issue_body,
+            request.spec_documents.join("\0"),
+            scanner_policy_digest,
+            REQUIRED_SCANNER_POLICY_SCHEMA,
+            review_requirements_digest,
+        )
+        .as_bytes(),
+    );
+    let input_digest = sha256_hex(
+        format!(
+            "{}\0{}",
+            semantic_input_digest,
+            request
+                .runtime
+                .map(DirectRuntimeAdapter::session_id)
+                .unwrap_or("")
+        )
+        .as_bytes(),
+    );
+    Ok((semantic_input_digest, input_digest))
 }
 
 fn first_fenced_command_under<'a>(body: &'a str, heading: &str) -> Result<&'a str, String> {

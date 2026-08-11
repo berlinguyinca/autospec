@@ -29,6 +29,7 @@ use crate::commands::CommandFailureKind;
 use autospec_core::autonomous::premerge::{
     EvidenceVerdict, PremergeDecision, PremergeLaneIdentity, QaEvidence, SecurityAuditEvidence,
 };
+use autospec_core::autonomous::review_policy::ReviewRequirements;
 use autospec_core::autonomous::waterfall::sha256_hex;
 use autospec_core::claim::{
     parse_open_pull_requests_json, parse_required_checks_json,
@@ -590,6 +591,7 @@ pub(crate) struct ExecutorBridgeRequest {
     pub(crate) issue: u64,
     pub(crate) issue_title: String,
     pub(crate) issue_body: String,
+    pub(crate) serialization_reasons: Vec<String>,
     pub(crate) worker_id: String,
     pub(crate) claim_id: String,
     pub(crate) invocation_id: String,
@@ -1778,6 +1780,7 @@ fn ensure_premerge_and_review(
         .state_path
         .with_extension(format!("premerge-{}.digest", proof.head_oid));
     if state.phase == BridgePhase::DraftCreated {
+        let review_requirements = classify_executor_review_requirements(request, state)?;
         let scanners = ScannerExecutables::resolve(environment)?;
         let artifact_root = state
             .identity
@@ -1797,6 +1800,7 @@ fn ensure_premerge_and_review(
         let evidence = produce_deterministic_premerge_evidence(DeterministicEvidenceRequest {
             state,
             proof,
+            review_requirements,
             issue_body: &request.issue_body,
             spec_documents: &[],
             env: environment,
@@ -3274,6 +3278,7 @@ fn scanner_evidence_run_id(lane: &PremergeLaneIdentity, scanners: &[ObservedScan
 pub(crate) struct DeterministicEvidenceRequest<'a> {
     pub(crate) state: &'a PersistedInvocation,
     pub(crate) proof: &'a ImplementationProof,
+    pub(crate) review_requirements: ReviewRequirements,
     pub(crate) issue_body: &'a str,
     pub(crate) spec_documents: &'a [&'a str],
     pub(crate) env: &'a BTreeMap<String, OsString>,
@@ -3960,38 +3965,6 @@ fn select_evidence_generation(lane_root: &Path, base_input_digest: &str) -> Resu
     fresh_evidence_generation_digest(base_input_digest)
 }
 
-fn evidence_input_digests(
-    lane: &PremergeLaneIdentity,
-    request: &DeterministicEvidenceRequest<'_>,
-) -> Result<(String, String), String> {
-    let scanner_policy_digest = gitleaks_policy_digest(&request.state.identity.worktree)?;
-    let semantic_input_digest = sha256_hex(
-        format!(
-            "{}\0{}\0{}\0{}\0{}\0{}\0{}",
-            lane.lane_digest(),
-            request.state.identity.base_ref,
-            request.state.identity.base_oid,
-            request.issue_body,
-            request.spec_documents.join("\0"),
-            scanner_policy_digest,
-            REQUIRED_SCANNER_POLICY_SCHEMA,
-        )
-        .as_bytes(),
-    );
-    let input_digest = sha256_hex(
-        format!(
-            "{}\0{}",
-            semantic_input_digest,
-            request
-                .runtime
-                .map(DirectRuntimeAdapter::session_id)
-                .unwrap_or("")
-        )
-        .as_bytes(),
-    );
-    Ok((semantic_input_digest, input_digest))
-}
-
 #[derive(Debug)]
 struct EvidenceAttemptLease {
     _file: File,
@@ -4028,6 +4001,7 @@ fn observed_evidence_bundle(
     qa_commands: &[ObservedDirectCommand],
     scanner_executables: &ScannerExecutables,
     scanners: &[ObservedScanner],
+    integration: Option<&IntegrationSmokeEvidenceBinding>,
 ) -> Result<ObservedEvidenceBundle, String> {
     if qa.lane != security.lane
         || !matches!(qa.verdict, EvidenceVerdict::Pass)
@@ -4201,6 +4175,9 @@ fn observed_evidence_bundle(
         "intent_digest": intent.digest,
         "qa_run_id": qa.run_id,
         "security_run_id": security.run_id,
+        "review_requirements_digest": integration.map(|binding| binding.requirements_digest.as_str()),
+        "integration_evidence_digest": integration.map(|binding| binding.evidence_digest.as_str()),
+        "integration_records": integration.map(|binding| binding.command_records.as_slice()).unwrap_or_default(),
         "qa_records": qa_records,
         "scanners": scanner_records,
         "artifacts": entries,
@@ -4525,6 +4502,13 @@ pub(crate) fn produce_deterministic_premerge_evidence(
             request.runtime,
             request.stall_timeout,
         )?;
+        let integration = produce_integration_smoke_evidence(
+            &request,
+            &smoke,
+            &observations,
+            &attempt_root,
+        )?;
+        observations.extend(integration.observations);
         verify_exact_evidence_lane(
             request.state,
             request.proof,
@@ -4589,6 +4573,9 @@ pub(crate) fn produce_deterministic_premerge_evidence(
             request.runtime,
         )?;
         let mut canonical_qa_plan = parse_primary_smoke(request.issue_body)?;
+        if let Some(plan) = integration.canonical_plan {
+            canonical_qa_plan.commands.extend(plan.commands);
+        }
         canonical_qa_plan.commands.extend(
             resolve_full_suite(
                 &request.state.identity.worktree,
@@ -4610,6 +4597,7 @@ pub(crate) fn produce_deterministic_premerge_evidence(
             &observations,
             request.scanners,
             &scanners,
+            integration.binding.as_ref(),
         )?;
         Ok((qa, security, bundle))
     })();
