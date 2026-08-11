@@ -192,6 +192,10 @@ is the only path that normalizes a closed-schema clean verdict to `LGTM`. The
 Claude, Codex, and OpenCode adapters share this behavior; none may substitute
 the author context when foreground delegation is unavailable.
 
+Both the end-to-end `autospec` workflow and the implementation-only
+`autospec-run` workflow consume this same admission rule, so entering Phase 4
+through either surface produces the same typed blocker and resume behavior.
+
 - Production `AUTOSPEC_EXECUTOR_REVIEW_COMMAND` either passes through the same structured adapter and identity checks or is removed; unstructured commands cannot authorize merge.
 - Skill adapters may not fall back to reviewing in the author/implementer context.
 - When independent delegation is unavailable, the issue is visibly requeued or blocked with a typed reason and no PR merge.
