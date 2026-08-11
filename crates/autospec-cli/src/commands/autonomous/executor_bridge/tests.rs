@@ -32,6 +32,7 @@ mod generation_input;
 mod harness_death;
 mod harness_supervisor;
 mod identity_reviewer;
+mod integration_smoke;
 mod json_identity;
 mod license_checker;
 mod merged_reconciliation;
