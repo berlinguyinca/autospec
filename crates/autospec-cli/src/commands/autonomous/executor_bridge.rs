@@ -102,6 +102,10 @@ mod review_evidence;
 use review_evidence::*;
 mod review_provider;
 use review_provider::*;
+mod review_receipt;
+use review_receipt::*;
+mod structured_review;
+pub(crate) use structured_review::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ImplementationLintRepairOutcome {
@@ -1847,7 +1851,7 @@ fn ensure_premerge_and_review(
             40,
         )?;
     }
-    if state.phase == BridgePhase::CiPassed
+    if matches!(state.phase, BridgePhase::CiPassed | BridgePhase::ReviewPassed)
         && review_receipt_path(&request.state_path, state)?.exists()
     {
         let snapshot = state.clone();
@@ -7794,6 +7798,8 @@ fn prepare_automatic_reviewer_normalizer(
     kind: HarnessKind,
     invocation: &ValidatedInvocation,
     artifact_root: &Path,
+    expected_commit: &str,
+    require_integration_paths: bool,
 ) -> Result<AutomaticReviewerArtifacts, String> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -7814,8 +7820,8 @@ fn prepare_automatic_reviewer_normalizer(
         .ok_or_else(|| "automatic reviewer executable must be valid UTF-8".to_string())?;
     let env_utility = trusted_reviewer_utility("env")?;
     let wc_utility = trusted_reviewer_utility("wc")?;
-    let cat_utility = trusted_reviewer_utility("cat")?;
     let truncate_utility = trusted_reviewer_utility("truncate")?;
+    let python_utility = trusted_reviewer_utility("python3")?;
     let mut command = format!(
         "{} -i",
         posix_shell_quote(
@@ -7848,6 +7854,34 @@ fn prepare_automatic_reviewer_normalizer(
     if kind == HarnessKind::Codex && result_arguments != 1 {
         return Err("automatic Codex reviewer result argument is missing or ambiguous".to_string());
     }
+    let validator = r#"import json
+import sys
+class RejectDuplicates(dict):
+    def __init__(self, pairs):
+        if len(pairs) != len(dict(pairs)):
+            raise ValueError("duplicate review verdict field")
+        super().__init__(pairs)
+with open(sys.argv[1], encoding="utf-8") as stream:
+    data = json.load(stream, object_pairs_hook=RejectDuplicates)
+allowed = ["schema", "commit", "verdict", "surfaces_examined", "tests_examined", "integration_paths_checked", "blocking_findings"]
+if not isinstance(data, dict) or set(data) != set(allowed):
+    raise ValueError("review verdict fields are invalid")
+if type(data["schema"]) is not int or data["schema"] != 1:
+    raise ValueError("review verdict schema is invalid")
+if data["commit"] != sys.argv[2] or data["verdict"] != "lgtm":
+    raise ValueError("review verdict identity is invalid")
+def strings(name):
+    value = data[name]
+    if type(value) is not list or any(type(item) is not str or not item.strip() for item in value):
+        raise ValueError(name + " is invalid")
+    return value
+surfaces = strings("surfaces_examined")
+tests = strings("tests_examined")
+integration = strings("integration_paths_checked")
+findings = strings("blocking_findings")
+if not surfaces or not tests or (sys.argv[3] == "1" and not integration) or findings:
+    raise ValueError("review verdict evidence is insufficient")
+print("LGTM")"#;
     let body = format!(
         "#!/bin/sh\n\
          set -u\n\
@@ -7868,19 +7902,19 @@ fn prepare_automatic_reviewer_normalizer(
          done\n\
          [ \"$overflow\" -eq 0 ] || exit 70\n\
          [ \"$status\" -eq 0 ] || exit \"$status\"\n\
-         result=$({cat} {result}) || exit 66\n\
-         [ \"$result\" = 'LGTM' ] || exit 67\n\
-         printf '%s\\n' 'LGTM'\n",
+         {python} - {result} {expected_commit} {require_integration_paths} <<'PY' || exit 67\n\
+         {validator}\n\
+         PY\n",
         output_bytes = MAX_DIRECT_OUTPUT_BYTES,
         wc = posix_shell_quote(
             wc_utility
                 .to_str()
                 .ok_or_else(|| "trusted wc path must be valid UTF-8".to_string())?
         ),
-        cat = posix_shell_quote(
-            cat_utility
+        python = posix_shell_quote(
+            python_utility
                 .to_str()
-                .ok_or_else(|| "trusted cat path must be valid UTF-8".to_string())?
+                .ok_or_else(|| "trusted python3 path must be valid UTF-8".to_string())?
         ),
         truncate = posix_shell_quote(
             truncate_utility
@@ -7902,6 +7936,9 @@ fn prepare_automatic_reviewer_normalizer(
                 .to_str()
                 .ok_or_else(|| "reviewer result path must be valid UTF-8".to_string())?
         ),
+        expected_commit = posix_shell_quote(expected_commit),
+        require_integration_paths = if require_integration_paths { "1" } else { "0" },
+        validator = validator,
     );
     let legacy_normalizer = artifact_root.join("review-normalizer.sh");
     let normalizer = if legacy_normalizer.exists() {
@@ -7962,6 +7999,8 @@ fn prepare_automatic_reviewer_normalizer(
     _kind: HarnessKind,
     _invocation: &ValidatedInvocation,
     _artifact_root: &Path,
+    _expected_commit: &str,
+    _require_integration_paths: bool,
 ) -> Result<AutomaticReviewerArtifacts, String> {
     Err("automatic reviewer normalization requires a POSIX host".to_string())
 }
@@ -7978,9 +8017,12 @@ fn independent_reviewer_prompt(
         "Independently review commit {head} in the current worktree against GitHub issue #{}: {}.\n\
          Acceptance contract:\n{}\n\
          Inspect the base-to-HEAD diff, tests, security boundaries, and issue scope without \
-         mutating local files, git state, GitHub state, or any external system. Return exactly \
-         LGTM only when no blocking finding remains. Otherwise return concise blocking findings \
-         and do not include LGTM.",
+         mutating local files, git state, GitHub state, or any external system. Return exactly one \
+         JSON object with only these fields: schema (1), commit (exactly {head}), verdict, \
+         surfaces_examined (nonempty string array), tests_examined (nonempty string array), \
+         integration_paths_checked (string array), and blocking_findings. Use verdict lgtm with \
+         an empty findings array only when no blocker remains; otherwise use verdict blocked with \
+         concrete findings. Do not wrap the JSON in Markdown or include any other text.",
         request.issue, request.issue_title, request.issue_body
     ))
 }
@@ -8396,7 +8438,7 @@ fn validate_automatic_reviewer_artifacts(
     private_reviewer_artifact_digest(&artifacts.inner_stdout)?;
     private_reviewer_artifact_digest(&artifacts.inner_stderr)?;
     private_reviewer_artifact_digest(&artifacts.result)?;
-    strict_lgtm_harness_result(&artifacts.result)
+    Ok(())
 }
 
 pub(crate) fn accept_executor_result(
@@ -14146,7 +14188,8 @@ where
     if let Some(automatic) = reviewer.automatic.as_ref() {
         validate_automatic_reviewer_artifacts(automatic)?;
     }
-    write_review_receipt(state_path, state, observation, reviewer)?;
+    let verdict = read_structured_review_verdict(state, reviewer)?;
+    write_review_receipt(state_path, state, observation, reviewer, &verdict)?;
     if refresh()? == BridgeClaimOwnership::Lost {
         return Err(BridgeRunFailure::ownership_lost(
             "executor independent review lost claim after verdict",
@@ -14155,171 +14198,6 @@ where
     state.phase = BridgePhase::ReviewPassed;
     state.progress_at = unix_now()?;
     write_invocation_atomic(state_path, state).map_err(BridgeRunFailure::invariant)
-}
-
-fn recover_existing_review_receipt(
-    state_path: &Path,
-    state: &mut PersistedInvocation,
-) -> Result<bool, BridgeRunFailure> {
-    if !review_receipt_path(state_path, state)?.exists() {
-        return Ok(false);
-    }
-    validate_review_receipt(state_path, state)?;
-    state.phase = BridgePhase::ReviewPassed;
-    state.progress_at = unix_now()?;
-    write_invocation_atomic(state_path, state).map_err(BridgeRunFailure::invariant)?;
-    Ok(true)
-}
-
-fn review_binding(state: &PersistedInvocation) -> Result<String, String> {
-    let head = state
-        .head_oid
-        .as_deref()
-        .ok_or_else(|| "executor review binding requires a stable head".to_string())?;
-    Ok(sha256_hex(
-        format!(
-            "{}\0{}\0{}\0{}\0{}\0{}",
-            state.identity.repository,
-            state.identity.issue,
-            state.identity.worker_id,
-            state.identity.claim_id,
-            state.identity.branch,
-            head
-        )
-        .as_bytes(),
-    ))
-}
-
-fn review_receipt_path(state_path: &Path, state: &PersistedInvocation) -> Result<PathBuf, String> {
-    let head = state
-        .head_oid
-        .as_deref()
-        .filter(|head| head.len() == 40 && head.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| "executor review receipt requires a canonical head".to_string())?;
-    Ok(state_path.with_extension(format!("review-{head}.json")))
-}
-
-fn write_review_receipt(
-    state_path: &Path,
-    state: &PersistedInvocation,
-    observation: &ObservedDirectCommand,
-    reviewer: &IndependentReviewer,
-) -> Result<(), String> {
-    let body = match reviewer.automatic.as_ref() {
-        Some(automatic) => serde_json::json!({
-            "schema": 3,
-            "binding": review_binding(state)?,
-            "stdout_path": observation.stdout_path,
-            "stdout_digest": observation.stdout_digest,
-            "stderr_path": observation.stderr_path,
-            "stderr_digest": observation.stderr_digest,
-            "normalizer_path": automatic.normalizer,
-            "normalizer_digest": private_reviewer_artifact_digest(&automatic.normalizer)?,
-            "inner_stdout_path": automatic.inner_stdout,
-            "inner_stdout_digest": private_reviewer_artifact_digest(&automatic.inner_stdout)?,
-            "inner_stderr_path": automatic.inner_stderr,
-            "inner_stderr_digest": private_reviewer_artifact_digest(&automatic.inner_stderr)?,
-            "result_path": automatic.result,
-            "result_digest": private_reviewer_artifact_digest(&automatic.result)?,
-        })
-        .to_string(),
-        None => serde_json::json!({
-            "schema": 2,
-            "binding": review_binding(state)?,
-            "stdout_path": observation.stdout_path,
-            "stdout_digest": observation.stdout_digest,
-            "stderr_path": observation.stderr_path,
-            "stderr_digest": observation.stderr_digest,
-        })
-        .to_string(),
-    };
-    write_private_create_once(
-        &review_receipt_path(state_path, state)?,
-        format!("{body}\n").as_bytes(),
-        "executor independent review receipt",
-    )
-}
-
-fn validate_review_receipt(state_path: &Path, state: &PersistedInvocation) -> Result<(), String> {
-    let path = review_receipt_path(state_path, state)?;
-    validate_private_state_file(&path)?;
-    let value: serde_json::Value = serde_json::from_str(
-        &fs::read_to_string(&path)
-            .map_err(|error| format!("read executor independent review receipt: {error}"))?,
-    )
-    .map_err(|error| format!("parse executor independent review receipt: {error}"))?;
-    let schema = value
-        .as_object()
-        .and_then(|object| object.get("schema"))
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| "executor independent review receipt schema is invalid".to_string())?;
-    let fields: &[&str] = match schema {
-        2 => &[
-            "schema",
-            "binding",
-            "stdout_path",
-            "stdout_digest",
-            "stderr_path",
-            "stderr_digest",
-        ],
-        3 => &[
-            "schema",
-            "binding",
-            "stdout_path",
-            "stdout_digest",
-            "stderr_path",
-            "stderr_digest",
-            "normalizer_path",
-            "normalizer_digest",
-            "inner_stdout_path",
-            "inner_stdout_digest",
-            "inner_stderr_path",
-            "inner_stderr_digest",
-            "result_path",
-            "result_digest",
-        ],
-        _ => return Err("executor independent review receipt schema is unsupported".to_string()),
-    };
-    let object = strict_object(value, fields, "executor independent review receipt")?;
-    if checked_u32(&object, "schema")? as u64 != schema
-        || text(&object, "binding")? != review_binding(state)?
-    {
-        return Err("executor independent review receipt identity mismatch".to_string());
-    }
-    let stdout_path = PathBuf::from(text(&object, "stdout_path")?);
-    reject_symlink_path(&stdout_path)?;
-    validate_private_state_file(&stdout_path)?;
-    let output = fs::read_to_string(&stdout_path)
-        .map_err(|error| format!("read executor independent review artifact: {error}"))?;
-    if sha256_hex(output.as_bytes()) != text(&object, "stdout_digest")? {
-        return Err("executor independent review artifact digest mismatch".to_string());
-    }
-    let stderr_path = PathBuf::from(text(&object, "stderr_path")?);
-    reject_symlink_path(&stderr_path)?;
-    validate_private_state_file(&stderr_path)?;
-    let stderr = fs::read(&stderr_path)
-        .map_err(|error| format!("read executor independent review stderr artifact: {error}"))?;
-    if !stderr.is_empty() || sha256_hex(&stderr) != text(&object, "stderr_digest")? {
-        return Err("executor independent review stderr artifact is not empty".to_string());
-    }
-    strict_lgtm(&output)?;
-    if schema == 3 {
-        for (path_field, digest_field) in [
-            ("normalizer_path", "normalizer_digest"),
-            ("inner_stdout_path", "inner_stdout_digest"),
-            ("inner_stderr_path", "inner_stderr_digest"),
-            ("result_path", "result_digest"),
-        ] {
-            let path = PathBuf::from(text(&object, path_field)?);
-            if private_reviewer_artifact_digest(&path)? != text(&object, digest_field)? {
-                return Err(format!(
-                    "executor independent review {path_field} digest mismatch"
-                ));
-            }
-        }
-        strict_lgtm_harness_result(&PathBuf::from(text(&object, "result_path")?))?;
-    }
-    Ok(())
 }
 
 fn run_implementation_lint(

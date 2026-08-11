@@ -149,8 +149,17 @@ pub(super) fn resolve_independent_reviewer(
     let mut validated = validate_invocation(&invocation, &state.identity.worktree)?;
     validated.environment_overrides =
         sanitized_reviewer_environment(resolved.kind, environment, state, &artifact_root)?;
-    let automatic =
-        prepare_automatic_reviewer_normalizer(resolved.kind, &validated, &artifact_root)?;
+    let head = state
+        .head_oid
+        .as_deref()
+        .ok_or_else(|| "executor structured review requires a stable head".to_string())?;
+    let automatic = prepare_automatic_reviewer_normalizer(
+        resolved.kind,
+        &validated,
+        &artifact_root,
+        head,
+        policy.requirements.require_integration_smoke,
+    )?;
     validate_external_reviewer_executable(state, &automatic.normalizer)?;
     Ok(IndependentReviewer {
         plan: DirectCommandPlan {
