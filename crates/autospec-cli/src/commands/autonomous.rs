@@ -48,6 +48,7 @@ use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
 mod blocked_cycle;
+mod gh_read;
 mod one_shot_selector;
 use one_shot_selector::{
     load_one_shot_selector, one_shot_selector_consumed, persist_one_shot_selector,
@@ -3048,25 +3049,17 @@ fn synchronize_fresh_selection_base(
 
 fn issue_is_open_for_autonomous_work(repo: &str, issue: u64) -> Result<bool, CommandFailure> {
     let endpoint = format!("repos/{repo}/issues/{issue}");
-    let output = Command::new("gh")
-        .args([
+    let output = gh_read::run_gh_read_with_retry(
+        &[
             "api",
             "--method",
             "GET",
             &endpoint,
             "--jq",
             r#"{labels:[.labels[].name], state:.state}"#,
-        ])
-        .output()
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("cannot run gh issue reread {issue}: {error}"))
-        })?;
-    output.status.success().then_some(()).ok_or_else(|| {
-        CommandFailure::diagnostic(format!(
-            "gh issue reread {issue} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
-    })?;
+        ],
+        &format!("gh issue reread {issue}"),
+    )?;
     let current = parse_dependency_issue_json(&String::from_utf8_lossy(&output.stdout), issue)
         .map_err(|error| {
             CommandFailure::diagnostic(format!(
