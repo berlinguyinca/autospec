@@ -735,19 +735,6 @@ fn acquire(args: &[String]) -> Result<(), CommandFailure> {
     Ok(())
 }
 
-/// Whether the recorded owner still holds its lease, and so must not be displaced.
-///
-/// This is the same test `acquire_record` applies before refusing a claim: an owner
-/// mid heartbeat-publish is protected, and otherwise the lease must not have aged
-/// past its TTL. Without it the conductor pre-check refused every recorded owner
-/// outright, including one whose process was long dead, and the issue stayed wedged
-/// forever — a single failed GitHub call was enough to strand it, because the dead
-/// owner could never release its own claim.
-fn conductor_claim_owner_holds_lease(record: &RunStateRecord) -> bool {
-    record.step.starts_with("heartbeat-publishing:")
-        || !server_lease_is_stale(&record.updated_at, record.ttl_seconds)
-}
-
 pub(crate) fn acquire_for_conductor(
     repo: &str,
     issue: u64,
@@ -3081,15 +3068,6 @@ fn has_executor_claim_owner(record: &RunStateRecord, worker_id: &str, branch: &s
 fn has_active_executor_claim(record: &RunStateRecord, worker_id: &str, branch: &str) -> bool {
     has_executor_claim_owner(record, worker_id, branch)
         && server_lease_is_fresh(&record.updated_at, record.ttl_seconds)
-}
-
-fn server_lease_is_fresh(server_timestamp: &str, ttl_seconds: u64) -> bool {
-    let Some(updated_at) = parse_iso_timestamp(server_timestamp) else {
-        return false;
-    };
-    unix_now()
-        .map(|now| now.saturating_sub(updated_at) <= ttl_seconds)
-        .unwrap_or(false)
 }
 
 fn executor_result_step(outcome: &ConductorOutcome) -> &'static str {
@@ -7296,15 +7274,6 @@ fn program_on_path(program: &str) -> bool {
     })
 }
 
-fn server_lease_is_stale(server_timestamp: &str, ttl_seconds: u64) -> bool {
-    let Some(updated_at) = parse_iso_timestamp(server_timestamp) else {
-        return false;
-    };
-    unix_now()
-        .map(|now| now.saturating_sub(updated_at) > ttl_seconds)
-        .unwrap_or(false)
-}
-
 fn unix_now() -> Result<u64, CommandFailure> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -7502,5 +7471,7 @@ fn print_state_help() {
     );
 }
 
+mod lease;
+use lease::{conductor_claim_owner_holds_lease, server_lease_is_fresh, server_lease_is_stale};
 #[cfg(test)]
 mod tests;

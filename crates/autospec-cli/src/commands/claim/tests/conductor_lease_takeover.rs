@@ -3,7 +3,8 @@
 //! A dead worker cannot release its own claim, and `claim release` validates the
 //! caller's identity, so an unconditional refusal wedged the issue permanently.
 
-use super::super::{conductor_claim_owner_holds_lease, RunStateRecord};
+use super::super::lease::conductor_claim_owner_holds_lease;
+use autospec_core::claim::RunStateRecord;
 
 fn owner_record(updated_at: &str, ttl_seconds: u64, step: &str) -> RunStateRecord {
     RunStateRecord::new(
