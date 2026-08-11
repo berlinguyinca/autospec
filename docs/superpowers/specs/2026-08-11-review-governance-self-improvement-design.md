@@ -195,6 +195,8 @@ the author context when foreground delegation is unavailable.
 Both the end-to-end `autospec` workflow and the implementation-only
 `autospec-run` workflow consume this same admission rule, so entering Phase 4
 through either surface produces the same typed blocker and resume behavior.
+The rule is stored as a generated skill block so future trio regeneration cannot
+quietly restore an in-thread review fallback in only one harness.
 
 - Production `AUTOSPEC_EXECUTOR_REVIEW_COMMAND` either passes through the same structured adapter and identity checks or is removed; unstructured commands cannot authorize merge.
 - Skill adapters may not fall back to reviewing in the author/implementer context.
