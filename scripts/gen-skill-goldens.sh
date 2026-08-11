@@ -48,7 +48,8 @@ Usage:
 For each markered trio member it writes
   tests/fixtures/skill-goldens/<skill>.<suffix>.sha256
 matching validate.sh's check_block_expansion. SKILL.md always gets a golden;
-codex/opencode mirrors get one only when they carry an autospec-block marker.
+codex/opencode mirrors get one when they carry an autospec-block marker, or when
+a golden already exists for them.
 Idempotent: an already-current golden is left untouched.
 EOF
 }
@@ -82,6 +83,16 @@ gen_one() {  # gen_one <skill> <src-file> <suffix>
     printf '%s: wrote %s\n' "$PROG" "$golden"
 }
 
+# Regenerate a mirror's golden when the gate would compare one: either the member
+# carries a marker, or a golden already exists for it.
+gen_mirror() {  # gen_mirror <skill> <src-file> <suffix>
+    skill="$1"; src="$2"; suffix="$3"
+    [ -f "$src" ] || return 0
+    if has_marker "$src" || [ -f "$GOLDEN_DIR/${skill}.${suffix}.sha256" ]; then
+        gen_one "$skill" "$src" "$suffix"
+    fi
+}
+
 # Regenerate every applicable golden for one skill directory.
 gen_skill() {  # gen_skill <skill-dir>
     dir="${1%/}"
@@ -89,13 +100,13 @@ gen_skill() {  # gen_skill <skill-dir>
     # SKILL.md: always gets a golden when present (check_block_expansion fails
     # closed on a missing SKILL.md golden).
     gen_one "$skill" "$dir/SKILL.md" "SKILL.md"
-    # codex/opencode mirrors: golden only when the member is markered.
-    if [ -f "$dir/codex/prompt.md" ] && has_marker "$dir/codex/prompt.md"; then
-        gen_one "$skill" "$dir/codex/prompt.md" "codex.prompt.md"
-    fi
-    if [ -f "$dir/opencode/agent.md" ] && has_marker "$dir/opencode/agent.md"; then
-        gen_one "$skill" "$dir/opencode/agent.md" "opencode.agent.md"
-    fi
+    # codex/opencode mirrors: a markered member needs a golden, and so does any
+    # member that already has one. check_block_expansion compares every golden it
+    # finds, marker or not, so refreshing only the markered ones left goldens the
+    # gate still checks and this tool would never update — stale and silent until
+    # some unrelated change tripped them.
+    gen_mirror "$skill" "$dir/codex/prompt.md" "codex.prompt.md"
+    gen_mirror "$skill" "$dir/opencode/agent.md" "opencode.agent.md"
 }
 
 main() {
