@@ -27,7 +27,7 @@ use autospec_core::coordination::{
     parse_dependency_issue_json, ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope,
     ConductorState,
 };
-use autospec_core::execution::{OneShotIssueSelector, QueueStatus};
+use autospec_core::execution::QueueStatus;
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
 #[cfg(unix)]
 use nix::errno::Errno;
@@ -47,6 +47,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
+mod one_shot_selector;
+use one_shot_selector::{
+    load_one_shot_selector, one_shot_selector_consumed, persist_one_shot_selector,
+};
 #[allow(dead_code)]
 mod executor_bridge;
 pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
@@ -5006,55 +5010,6 @@ fn foreground_scope(options: &Options, layout: &RunLayout) -> ConductorScope {
     }
 }
 
-fn one_shot_selector_path(layout: &RunLayout) -> PathBuf {
-    layout.state_dir.join("one-shot-selector.json")
-}
-
-/// Read the persisted one-shot selector's `consumed` flag.
-///
-/// This parses the document rather than probing it for `"consumed":true`. The substring
-/// form agreed with `OneShotIssueSelector::status_json`'s hand-built layout only by
-/// coincidence: any whitespace (`"consumed": true`) read as *not consumed*, and because
-/// "not consumed" is a legitimate state the mistake surfaced as a silently re-run one-shot
-/// issue rather than an error.
-///
-/// An unreadable or malformed document stays `false`, preserving the previous fail-safe:
-/// the caller only skips work when it can prove the selector was consumed.
-fn one_shot_selector_consumed_at(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok())
-        .and_then(|value| {
-            value
-                .get("consumed")
-                .and_then(serde_json::Value::as_bool)
-        })
-        .unwrap_or(false)
-}
-
-fn load_one_shot_selector(layout: &RunLayout, issue: u64) -> Result<OneShotIssueSelector, String> {
-    let mut selector = OneShotIssueSelector::new(issue)?;
-    if one_shot_selector_consumed_at(&one_shot_selector_path(layout)) {
-        let _ = selector.observe_status(issue, &QueueStatus::Passed)?;
-    }
-    Ok(selector)
-}
-
-fn persist_one_shot_selector(
-    layout: &RunLayout,
-    selector: &OneShotIssueSelector,
-) -> Result<(), String> {
-    fs::create_dir_all(&layout.state_dir)
-        .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
-    atomic_write(
-        &one_shot_selector_path(layout),
-        &format!("{}\n", selector.status_json()),
-    )
-}
-
-fn one_shot_selector_consumed(layout: &RunLayout) -> bool {
-    one_shot_selector_consumed_at(&one_shot_selector_path(layout))
-}
 
 fn command_error(error: super::CommandFailure) -> String {
     error.message
@@ -7685,76 +7640,6 @@ mod foreground_tests {
         assert!(error.contains("invalid claim acquisition receipt JSON"));
         assert!(receipt_path.exists());
         fs::remove_dir_all(root).expect("remove claim receipt fixture");
-    }
-
-    fn one_shot_selector_fixture(document: &str) -> (PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!(
-            "autospec-one-shot-selector-{}-{}",
-            std::process::id(),
-            ATOMIC_WRITE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&root).expect("create one-shot selector fixture");
-        let path = root.join("one-shot-selector.json");
-        fs::write(&path, document).expect("write one-shot selector fixture");
-        (root, path)
-    }
-
-    #[test]
-    fn one_shot_selector_consumed_reads_the_field_not_the_bytes() {
-        // The writer emits `"consumed":true` with no space, so a substring probe agreed with
-        // this by coincidence. Any whitespace is still the same document, and re-running a
-        // consumed one-shot issue is a silent wrong answer rather than an error.
-        for document in [
-            r#"{"issue":42,"consumed":true,"scope":"unscoped"}"#,
-            r#"{"issue": 42, "consumed": true, "scope": "unscoped"}"#,
-            "{\n  \"issue\": 42,\n  \"consumed\": true,\n  \"scope\": \"unscoped\"\n}\n",
-        ] {
-            let (root, path) = one_shot_selector_fixture(document);
-            assert!(
-                one_shot_selector_consumed_at(&path),
-                "consumed selector read as unconsumed: {document}"
-            );
-            fs::remove_dir_all(root).expect("remove one-shot selector fixture");
-        }
-    }
-
-    #[test]
-    fn one_shot_selector_unconsumed_and_unreadable_documents_stay_false() {
-        // `false` is the fail-safe: the caller only skips work when consumption is proven.
-        for document in [
-            r#"{"issue":42,"consumed":false,"scope":"active"}"#,
-            r#"{"issue": 42, "consumed": false}"#,
-            "{not-json\n",
-            "",
-        ] {
-            let (root, path) = one_shot_selector_fixture(document);
-            assert!(
-                !one_shot_selector_consumed_at(&path),
-                "unconsumed selector read as consumed: {document:?}"
-            );
-            fs::remove_dir_all(root).expect("remove one-shot selector fixture");
-        }
-        assert!(
-            !one_shot_selector_consumed_at(Path::new(
-                "/nonexistent/autospec/one-shot-selector.json"
-            )),
-            "absent selector read as consumed"
-        );
-    }
-
-    #[test]
-    fn one_shot_selector_consumed_reads_the_top_level_field_only() {
-        // A nested `consumed` puts the old probe's exact bytes in the document while the
-        // selector's own field is false. Escaping it into a string value would not
-        // discriminate — JSON escapes the quotes, so the naive substring never matched
-        // there and such a test would pass against the very code this replaces.
-        let (root, path) =
-            one_shot_selector_fixture(r#"{"issue":42,"consumed":false,"prior":{"consumed":true}}"#);
-        assert!(
-            !one_shot_selector_consumed_at(&path),
-            "a nested consumed flag was read as the selector's own"
-        );
-        fs::remove_dir_all(root).expect("remove one-shot selector fixture");
     }
 
     fn git_fixture(directory: &Path, args: &[&str]) {
