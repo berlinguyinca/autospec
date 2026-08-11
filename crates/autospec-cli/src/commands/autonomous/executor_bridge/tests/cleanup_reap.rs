@@ -438,3 +438,30 @@ fn autonomous_executor_bridge_fixture_cleanup_is_armed_before_identity_observati
         "observer panic leaked the spawned fixture"
     );
 }
+
+/// A fault armed by a test that dies must not outlive it.
+///
+/// Arming is a bare store, so before the guard reset, a test panicking between arming and
+/// disarming left the fault set for whatever launched next — surfacing as that test's bug, in
+/// another file, with nothing connecting the two. This holds no guard itself: the panicking
+/// closure takes it, and the mutex is not reentrant.
+#[test]
+fn autonomous_executor_bridge_environment_guard_disarms_after_a_panic() {
+    let none = bridge::LaunchFailpoint::None as u8;
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let outcome = std::panic::catch_unwind(|| {
+        let _environment = test_environment();
+        bridge::set_launch_failpoint(bridge::LaunchFailpoint::ParentAfterPidfd);
+        panic!("deliberate: dies between arming and disarming");
+    });
+    std::panic::set_hook(previous);
+
+    assert!(outcome.is_err(), "the closure must actually unwind");
+    let _environment = test_environment();
+    assert_eq!(
+        bridge::LAUNCH_FAILPOINT.load(Ordering::SeqCst),
+        none,
+        "a panicking armer left its failpoint set"
+    );
+}
