@@ -10,6 +10,7 @@ setup() {
   MAIN="$TMP/main.jsonl"
   ADV="$TMP/advisor-escalate.jsonl"
   BASE="$TMP/baseline.json"
+  OUTCOMES="$TMP/review-outcomes.jsonl"
 
   # One reviewer issue, warm-cache first pass → observed lgtm=1.0; tokens control cost.
   mk_main_good() {
@@ -22,6 +23,13 @@ EOF
     : > "$ADV"; local i=0
     while [ "$i" -lt "$1" ]; do
       printf '{"gate":"impl-haiku","verdict":"plan"}\n' >> "$ADV"; i=$((i+1))
+    done
+  }
+  mk_clean_outcomes() {
+    : > "$OUTCOMES"; local i=1
+    while [ "$i" -le "$1" ]; do
+      printf '{"schema":1,"outcome_digest":"sha256:o%d","pr":%d,"commit":"%040d","review_receipt_digest":"sha256:r%d","reviewer_harness":"codex","reviewer_reasoning":"standard","provider_diversified":false,"review_risk":"normal","first_pass_lgtm":true,"escaped_high_severity":0,"escaped_total":0,"review_cost":100,"phase55_run":"run"}\n' "$i" "$i" "$i" "$i" >> "$OUTCOMES"
+      i=$((i+1))
     done
   }
 }
@@ -95,4 +103,43 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" --main-telemetry "$MAIN" --advisor-telemetry "$ADV" --baseline-file "$BASE" --json
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.action == "hold"' >/dev/null
+}
+
+@test "literal high escape strengthens immediately without twenty samples" {
+  cat > "$OUTCOMES" <<'EOF'
+{"schema":1,"outcome_digest":"sha256:o1","pr":1,"commit":"1111111111111111111111111111111111111111","review_receipt_digest":"sha256:r1","reviewer_harness":"codex","reviewer_reasoning":"high","provider_diversified":true,"review_risk":"integration","first_pass_lgtm":true,"escaped_high_severity":1,"escaped_total":1,"review_cost":100,"phase55_run":"run"}
+{"schema":1,"outcome_digest":"sha256:o2","pr":2,"commit":"2222222222222222222222222222222222222222","review_receipt_digest":"sha256:r2","reviewer_harness":"codex","reviewer_reasoning":"standard","provider_diversified":false,"review_risk":"normal","first_pass_lgtm":true,"escaped_high_severity":0,"escaped_total":0,"review_cost":100,"phase55_run":"run"}
+{"schema":1,"outcome_digest":"sha256:o3","pr":3,"commit":"3333333333333333333333333333333333333333","review_receipt_digest":"sha256:r3","reviewer_harness":"codex","reviewer_reasoning":"standard","provider_diversified":false,"review_risk":"normal","first_pass_lgtm":true,"escaped_high_severity":0,"escaped_total":0,"review_cost":100,"phase55_run":"run"}
+{"schema":1,"outcome_digest":"sha256:o4","pr":4,"commit":"4444444444444444444444444444444444444444","review_receipt_digest":"sha256:r4","reviewer_harness":"codex","reviewer_reasoning":"standard","provider_diversified":false,"review_risk":"normal","first_pass_lgtm":true,"escaped_high_severity":0,"escaped_total":0,"review_cost":100,"phase55_run":"run"}
+EOF
+  printf '{"escaped_high_rate":0,"escaped_total_rate":0.25,"cost_per_reviewed_pr":100}' > "$BASE"
+  run bash "$SCRIPT" --review-outcomes "$OUTCOMES" --baseline-file "$BASE" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "strengthen" and .samples == 4' >/dev/null
+}
+
+@test "literal nineteen clean outcomes hold relaxation and twenty may relax within cost" {
+  mkdir -p "$AUTOSPEC_ADVISOR_STATE_DIR"
+  printf '{"active":["impl-haiku","retry"]}' > "$AUTOSPEC_ADVISOR_STATE_DIR/active-gates.json"
+  printf '{"escaped_high_rate":0,"escaped_total_rate":0.1,"cost_per_reviewed_pr":200}' > "$BASE"
+  mk_clean_outcomes 19
+  run bash "$SCRIPT" --review-outcomes "$OUTCOMES" --baseline-file "$BASE" --min-samples 20 --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "hold" and .samples == 19' >/dev/null
+  mk_clean_outcomes 20
+  run bash "$SCRIPT" --review-outcomes "$OUTCOMES" --baseline-file "$BASE" --min-samples 20 --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "relax" and .samples == 20 and .active == ["impl-haiku"]' >/dev/null
+}
+
+@test "literal review_unavailable outcome freezes relaxation" {
+  mkdir -p "$AUTOSPEC_ADVISOR_STATE_DIR"
+  printf '{"active":["impl-haiku","retry"]}' > "$AUTOSPEC_ADVISOR_STATE_DIR/active-gates.json"
+  printf '{"escaped_high_rate":0,"escaped_total_rate":0.1,"cost_per_reviewed_pr":200}' > "$BASE"
+  mk_clean_outcomes 20
+  printf '%s\n' '{"schema":1,"outcome_digest":"sha256:unavailable","outcome":"review_unavailable","pr":null,"phase55_run":"run"}' >> "$OUTCOMES"
+  run bash "$SCRIPT" --review-outcomes "$OUTCOMES" --baseline-file "$BASE" --min-samples 20 --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "hold" and .reason == "review_unavailable"' >/dev/null
+  jq -e '.active == ["impl-haiku","retry"]' "$AUTOSPEC_ADVISOR_STATE_DIR/active-gates.json" >/dev/null
 }

@@ -208,6 +208,9 @@ Pipeline:
    Feed the resulting attributed sample count and escaped rates to
    `advisor-govern.sh tick`; high-severity escapes strengthen immediately,
    while clean relaxation remains sample-floor and cost guarded.
+   The end-of-run integration calls
+   `advisor-sweep-tick.sh --review-outcomes .autospec/review-outcomes.jsonl`;
+   an effective `review_unavailable` row freezes the current active gate set.
 
 6. Run the shared read-only repo quality audit and link its artifacts from the
    review report:
