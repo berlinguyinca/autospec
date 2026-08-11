@@ -33,7 +33,7 @@ fn autonomous_executor_bridge_pending_and_interrupted_phases_round_trip_nontermi
 
 #[test]
 fn autonomous_executor_bridge_spawn_state_failure_cleans_owned_child() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("supervise-state-failure");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -47,7 +47,7 @@ fn autonomous_executor_bridge_spawn_state_failure_cleans_owned_child() {
         ),
     );
 
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::PersistAfterSpawn);
+    environment.launch(bridge::LaunchFailpoint::PersistAfterSpawn);
     let error = supervise_harness(
         &fixture.root.join("state/invocation.json"),
         &fixture.root.join("log/executor.jsonl"),
@@ -57,7 +57,7 @@ fn autonomous_executor_bridge_spawn_state_failure_cleans_owned_child() {
         supervision_config(2_000),
     )
     .expect_err("injected state persistence failure");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
 
     assert!(error.contains("injected"));
     assert!(
@@ -68,7 +68,7 @@ fn autonomous_executor_bridge_spawn_state_failure_cleans_owned_child() {
 
 #[test]
 fn autonomous_executor_bridge_spawn_log_failure_cleans_without_releasing_child() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("supervise-log-failure");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -82,7 +82,7 @@ fn autonomous_executor_bridge_spawn_log_failure_cleans_without_releasing_child()
         ),
     );
 
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::LogAfterSpawn);
+    environment.launch(bridge::LaunchFailpoint::LogAfterSpawn);
     let error = supervise_harness(
         &fixture.root.join("state/invocation.json"),
         &fixture.root.join("log/executor.jsonl"),
@@ -92,7 +92,7 @@ fn autonomous_executor_bridge_spawn_log_failure_cleans_without_releasing_child()
         supervision_config(2_000),
     )
     .expect_err("injected log failure");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
 
     assert!(error.contains("injected"));
     assert!(!child_pid.exists(), "barrier released after log failure");
@@ -109,7 +109,7 @@ fn autonomous_executor_bridge_spawn_log_failure_cleans_without_releasing_child()
 
 #[test]
 fn autonomous_executor_bridge_never_ready_handshake_times_out_and_reaps() {
-    let _environment = test_environment();
+    let environment = test_environment();
     // Break caught: a post-fork child hanging before readiness blocks the conductor forever.
     let fixture = GitFixture::new("supervise-never-ready");
     let mut state = supervision_state(&fixture);
@@ -117,7 +117,7 @@ fn autonomous_executor_bridge_never_ready_handshake_times_out_and_reaps() {
         MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
     let started = Instant::now();
 
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::NeverReady);
+    environment.launch(bridge::LaunchFailpoint::NeverReady);
     let error = supervise_harness(
         &fixture.root.join("state/invocation.json"),
         &fixture.root.join("log/executor.jsonl"),
@@ -127,7 +127,7 @@ fn autonomous_executor_bridge_never_ready_handshake_times_out_and_reaps() {
         supervision_config(2_000),
     )
     .expect_err("never-ready child must time out");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
 
     assert!(
         error.contains("readiness timeout"),
@@ -141,7 +141,7 @@ fn autonomous_executor_bridge_never_ready_handshake_times_out_and_reaps() {
 
 #[test]
 fn autonomous_executor_bridge_never_close_exec_status_times_out_and_reaps() {
-    let _environment = test_environment();
+    let environment = test_environment();
     // Break caught: a post-barrier child retaining the exec-status descriptor blocks forever.
     let fixture = GitFixture::new("supervise-never-exec");
     let mut state = supervision_state(&fixture);
@@ -150,7 +150,7 @@ fn autonomous_executor_bridge_never_close_exec_status_times_out_and_reaps() {
     let state_path = fixture.root.join("state/invocation.json");
     let started = Instant::now();
 
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::NeverCloseExecStatus);
+    environment.launch(bridge::LaunchFailpoint::NeverCloseExecStatus);
     let error = supervise_harness(
         &state_path,
         &fixture.root.join("log/executor.jsonl"),
@@ -160,7 +160,7 @@ fn autonomous_executor_bridge_never_close_exec_status_times_out_and_reaps() {
         supervision_config(2_000),
     )
     .expect_err("never-closing exec status must time out");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
 
     assert!(
         error.contains("exec-status timeout"),
@@ -420,7 +420,7 @@ fn autonomous_executor_bridge_failing_leader_cleans_background_descendant() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_freeze_captures_descendant_forked_in_cleanup_window() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("cleanup-fork-race");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -431,7 +431,7 @@ fn autonomous_executor_bridge_freeze_captures_descendant_forked_in_cleanup_windo
         late_pid.display()
     );
 
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::CleanupFreezeWindow);
+    environment.cleanup(bridge::LaunchFailpoint::CleanupFreezeWindow);
     let outcome = supervise_harness(
         &fixture.root.join("state/invocation.json"),
         &fixture.root.join("log/executor.jsonl"),
@@ -441,7 +441,7 @@ fn autonomous_executor_bridge_freeze_captures_descendant_forked_in_cleanup_windo
         supervision_config(100),
     )
     .expect("stalled harness cleanup");
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::None);
+    environment.cleanup(bridge::LaunchFailpoint::None);
 
     assert_eq!(outcome, SupervisionOutcome::Stalled);
     assert!(

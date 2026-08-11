@@ -17,7 +17,7 @@ use std::time::Duration;
 fn autonomous_executor_bridge_partial_publication_allocates_fresh_generation() {
     // Break caught: observed/QA/security/seal create-once files in an incomplete generation
     // poisoning every restart instead of becoming an immutable diagnostic attempt.
-    let _environment = test_environment();
+    let environment = test_environment();
     let previous_claim_override = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
     std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
     for poisoned in ["observed.json", "qa.json", "security.json", "seal.json"] {
@@ -37,10 +37,10 @@ fn autonomous_executor_bridge_partial_publication_allocates_fresh_generation() {
         git(&fixture.repo, &["commit", "-m", "ignore evidence"]);
         let execution_count = fixture.root.join("execution-count");
         let scanner_root = fixture.root.join("scanner-binaries");
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::BeforeEvidenceBundle);
+        environment.launch(bridge::LaunchFailpoint::BeforeEvidenceBundle);
         run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root)
             .expect_err("pre-bundle failure creates incomplete attempt");
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
         let lane_root = fs::read_dir(fixture.repo.join(".autospec/evidence/premerge"))
             .expect("premerge root")
             .flatten()
@@ -99,7 +99,7 @@ fn autonomous_executor_bridge_partial_publication_allocates_fresh_generation() {
 fn autonomous_executor_bridge_partial_generation_rotation_resumes_crash_boundaries() {
     // Break caught: moving a poisoned generation before durably switching active.json leaves
     // restart free to recreate the old run identity or lose the diagnostic generation.
-    let _environment = test_environment();
+    let environment = test_environment();
     let previous_claim_override = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
     std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
     for boundary in [
@@ -122,10 +122,10 @@ fn autonomous_executor_bridge_partial_generation_rotation_resumes_crash_boundari
         git(&fixture.repo, &["commit", "-m", "ignore evidence"]);
         let execution_count = fixture.root.join("execution-count");
         let scanner_root = fixture.root.join("scanner-binaries");
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::BeforeEvidenceBundle);
+        environment.launch(bridge::LaunchFailpoint::BeforeEvidenceBundle);
         run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root)
             .expect_err("pre-bundle failure creates incomplete attempt");
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
         let lane_root = fs::read_dir(fixture.repo.join(".autospec/evidence/premerge"))
             .expect("premerge root")
             .flatten()
@@ -153,10 +153,10 @@ fn autonomous_executor_bridge_partial_generation_rotation_resumes_crash_boundari
         )
         .expect("private poison");
 
-        bridge::set_launch_failpoint(boundary);
+        environment.launch(boundary);
         run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root)
             .expect_err("rotation boundary interrupts transaction");
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
         assert!(
             lane_root.join("rotation.pending.json").is_file(),
             "rotation intent must survive {boundary:?}"
@@ -213,7 +213,7 @@ fn autonomous_executor_bridge_partial_generation_rotation_resumes_crash_boundari
 
 #[test]
 fn autonomous_executor_bridge_rotation_rebases_changed_input_after_crash() {
-    let _environment = test_environment();
+    let environment = test_environment();
     // Break caught: a transparently reprovisioned runtime reusing the stale replacement
     // generation reserved by a rotation that began under the previous runtime input.
     for boundary in [
@@ -252,10 +252,10 @@ fn autonomous_executor_bridge_rotation_rebases_changed_input_after_crash() {
         )
         .expect("old active");
 
-        bridge::set_launch_failpoint(boundary);
+        environment.launch(boundary);
         bridge::select_evidence_generation(&lane_root, &old_base)
             .expect_err("rotation crash boundary");
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
         let pending: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(lane_root.join("rotation.pending.json")).expect("pending rotation"),
         )
@@ -265,10 +265,10 @@ fn autonomous_executor_bridge_rotation_rebases_changed_input_after_crash() {
             .expect("stale replacement digest")
             .to_string();
 
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::EvidenceAfterGenerationSelect);
+        environment.launch(bridge::LaunchFailpoint::EvidenceAfterGenerationSelect);
         bridge::select_evidence_generation(&lane_root, &current_base)
             .expect_err("crash after pending removal before attempt intent");
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
         assert!(!lane_root.join("rotation.pending.json").exists());
         let handoff_active: serde_json::Value = serde_json::from_str(
             &fs::read_to_string(lane_root.join("active.json")).expect("handoff active"),
