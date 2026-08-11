@@ -94,3 +94,44 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"Usage:"* ]]
 }
+
+# --- a golden the gate compares must be refreshed, marker or not ---
+#
+# check_block_expansion compares every golden it finds, whether or not the member
+# carries an autospec-block marker. Refreshing only markered members left goldens
+# the gate still checks and this tool would never update: stale, silent, and
+# surfacing later as a failure on an unrelated change. Found while fixing #2982,
+# where the autospec-secaudit mirrors had already drifted exactly that way.
+@test "an existing mirror golden is refreshed even when the mirror is unmarkered" {
+    mirror=""
+    for candidate in "$REPO_ROOT"/skills/*/codex/prompt.md; do
+        [ -f "$candidate" ] || continue
+        if ! grep -q '<!-- autospec-block:' "$candidate"; then
+            mirror="$candidate"
+            break
+        fi
+    done
+    [ -n "$mirror" ] || skip "no unmarkered codex mirror to exercise"
+
+    name="$(basename "$(dirname "$(dirname "$mirror")")")"
+    target="$GOLDEN_DIR/$name.codex.prompt.md.sha256"
+    had_golden=0
+    if [ -f "$target" ]; then
+        had_golden=1
+        cp "$target" "$BATS_TEST_TMPDIR/mirror.backup"
+    fi
+
+    expected="$(bash "$EXPANDER" "$mirror" | shasum -a 256 | cut -d' ' -f1)"
+    printf 'deadbeef\n' > "$target"
+
+    run bash "$SCRIPT" "$name"
+    [ "$status" -eq 0 ]
+
+    got="$(tr -d '[:space:]' < "$target")"
+    if [ "$had_golden" -eq 1 ]; then
+        cp "$BATS_TEST_TMPDIR/mirror.backup" "$target"
+    else
+        rm -f "$target"
+    fi
+    [ "$got" = "$expected" ]
+}
