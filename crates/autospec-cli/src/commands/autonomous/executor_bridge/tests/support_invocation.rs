@@ -113,6 +113,7 @@ pub(super) fn reviewer_request(
         issue: state.identity.issue,
         issue_title: "Review configured harness".to_string(),
         issue_body: "## Goal\n\nReview the configured harness.".to_string(),
+        serialization_reasons: Vec::new(),
         worker_id: state.identity.worker_id.clone(),
         claim_id: state.identity.claim_id.clone(),
         invocation_id: state.identity.invocation_id.clone(),
