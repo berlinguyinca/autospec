@@ -115,6 +115,11 @@ Dimensions reviewed (all five, not just spec-coverage):
 Pipeline:
 
 1. Dispatch the broad review subagent(s) at Tier A. Collect candidate findings, each tagged with `dimension`, `severity`, `file`, `line`, `title`, `body`, and a stable `dedupe_key`.
+   Bind each finding to the reviewed PR's native receipt when available by
+   copying `originating_pr`, `originating_commit`, `review_receipt_digest`,
+   `reviewer_harness`, `reviewer_reasoning`, `provider_diversified`, and
+   `review_risk`. Do not infer missing identity: normalization records it as
+   `attribution_status: unavailable`, and such a row cannot count as clean.
 2. **False-positive filter (required before emit):** pipe candidate findings through an evaluate-findings/critic pass. Mark each finding `verdict: keep` or `verdict: false_positive`. When uncertain, drop it (`false_positive`) — never ship a false positive into the auto-implement queue.
 3. **Reasoning trial (optional, high-uncertainty gate):** when `--reasoning-trial` is passed, or when the review is autonomous and the finding is `reasoning:deep`/`priority:high`, require each kept finding to carry a falsifier:
 
@@ -144,7 +149,10 @@ Pipeline:
    ```bash
    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/emit-gaps.sh" \
      --findings /tmp/autospec-review/remediation-findings.json \
-     --out "${EMIT_GAPS_PATH:-$HOME/.autospec/gaps-${RUN_ID}.json}"
+     --out "${EMIT_GAPS_PATH:-$HOME/.autospec/gaps-${RUN_ID}.json}" \
+     --review-metadata "/tmp/autospec-review/review-metadata-${RUN_ID}.json" \
+     --outcomes ".autospec/review-outcomes.jsonl" \
+     --phase55-run "$RUN_ID"
    ```
 
    The emitted gap JSON is an array of objects matching the contract:
@@ -154,10 +162,42 @@ Pipeline:
      "file":"skills/autospec-shared/scripts/cross-repo-search.sh","line":77,
      "title":"trailing pipe matches every line on BSD grep",
      "body":"<remediation issue body>",
-     "dedupe_key":"cross-repo-search-trailing-pipe"}]
+     "dedupe_key":"cross-repo-search-trailing-pipe",
+     "attribution_status":"attributed","originating_pr":123,
+     "originating_commit":"<40-hex commit>",
+     "review_receipt_digest":"sha256:<digest>","reviewer_harness":"codex",
+     "reviewer_reasoning":"high","provider_diversified":true,
+     "review_risk":"integration"}]
    ```
 
-5. When `--emit-gaps PATH` is given, write to PATH; otherwise default to `~/.autospec/gaps-<run_id>.json`. The driver (`gap-remediation-loop.sh`) reads this file. On review-subagent failure, write an empty array (`[]`) so the driver converges cleanly, and log a warning — never block run completion.
+5. When `--emit-gaps PATH` is given, write to PATH; otherwise default to
+   `~/.autospec/gaps-<run_id>.json`. The driver (`gap-remediation-loop.sh`)
+   reads this file. `emit-gaps.sh` also appends exactly one immutable observation
+   per reviewed PR to `.autospec/review-outcomes.jsonl`. Each row binds the PR,
+   commit, receipt digest, reviewer identity/reasoning, diversity, risk,
+   first-pass diagnostic, escaped high/total counts, review cost, and run id.
+   Corrections append a new row with `supersedes_outcome_digest`; never edit or
+   delete a prior observation.
+
+   On broad-review failure or unavailable receipt evidence, do not write an
+   empty clean result. Emit the typed gap and outcome instead:
+
+   ```bash
+   bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/emit-gaps.sh" \
+     --findings /tmp/autospec-review/missing.json \
+     --out "${EMIT_GAPS_PATH:-$HOME/.autospec/gaps-${RUN_ID}.json}" \
+     --outcomes ".autospec/review-outcomes.jsonl" \
+     --review-unavailable --phase55-run "$RUN_ID"
+   ```
+
+   Advisor governance uses `escaped_high_rate` as the primary signal,
+   `escaped_total_rate` as the secondary signal, and
+   `cost_per_reviewed_pr` as the relaxation guard, all divided by
+   `attributed_reviewed_prs`. `first_pass_lgtm` is diagnostic only. Any
+   attributed high-severity escape may strengthen immediately; relaxation
+   requires at least `${AUTOSPEC_ADVISOR_MIN_SAMPLES:-20}` clean attributed
+   samples, no total-rate regression, and no cost regression. A
+   `review_unavailable` observation freezes relaxation.
 
 6. Run the shared read-only repo quality audit and link its artifacts from the
    review report:
