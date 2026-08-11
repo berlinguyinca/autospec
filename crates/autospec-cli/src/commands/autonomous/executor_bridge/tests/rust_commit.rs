@@ -73,13 +73,13 @@ fn autonomous_executor_bridge_direct_crash_guard_cleans_before_launch_journal_ex
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_ring_sync_failure_never_advances_durable_cursor() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("ring-sync-order");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
     let snapshot =
         MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::RingBeforeSync);
+    environment.launch(bridge::LaunchFailpoint::RingBeforeSync);
     let error = supervise_harness(
         &state_path,
         &fixture.root.join("log/executor.jsonl"),
@@ -89,7 +89,7 @@ fn autonomous_executor_bridge_ring_sync_failure_never_advances_durable_cursor() 
         supervision_config(500),
     )
     .expect_err("ring sync boundary failure");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
     assert!(error.contains("supervisor exited"), "{error}");
     let sinks =
         bridge::output_sink_paths(&state_path, &state.identity.invocation_id).expect("sinks");
@@ -183,7 +183,7 @@ fn autonomous_executor_bridge_waits_for_delayed_descendant_stderr_before_success
 
 #[test]
 fn autonomous_executor_bridge_retries_interrupted_hup_read_before_closing_tail() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("supervise-eintr-hup-tail");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -191,7 +191,7 @@ fn autonomous_executor_bridge_retries_interrupted_hup_read_before_closing_tail()
     let state_path = fixture.root.join("state/invocation.json");
     let event_log = fixture.root.join("log/executor.jsonl");
 
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::RingReadInterrupted);
+    environment.launch(bridge::LaunchFailpoint::RingReadInterrupted);
     let outcome = supervise_harness(
         &state_path,
         &event_log,
@@ -203,7 +203,7 @@ fn autonomous_executor_bridge_retries_interrupted_hup_read_before_closing_tail()
         &snapshot,
         supervision_config(2_000),
     );
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
     let outcome = outcome.expect("EINTR must retry the buffered HUP tail");
     let events = fs::read_to_string(event_log).expect("EINTR tail events");
 

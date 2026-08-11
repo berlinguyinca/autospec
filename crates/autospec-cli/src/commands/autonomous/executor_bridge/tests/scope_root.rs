@@ -248,7 +248,7 @@ fn assert_private_scope(scope_root: &Path) {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_recreates_absent_exact_scope_after_durable_marker() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let (_fixture, state, state_path, _) =
         zero_effect_classifier_fixture("zero-effect-missing-scope", false, true);
     let scope_root = state.identity.worktree.parent().expect("scope root");
@@ -267,12 +267,12 @@ fn autonomous_executor_bridge_recreates_absent_exact_scope_after_durable_marker(
         "read-only classification must not persist the recovery marker"
     );
 
-    bridge::set_zero_effect_recovery_failpoint(
+    environment.zero_effect_recovery(
         bridge::ZeroEffectRecoveryFailpoint::AfterScopeCreate,
     );
     let interrupted = bridge::prepare_zero_effect_recovery(&state_path, &state)
         .expect_err("interrupt after exact scope recreation");
-    bridge::set_zero_effect_recovery_failpoint(bridge::ZeroEffectRecoveryFailpoint::None);
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
     assert!(
         interrupted.contains("after scope recreation"),
         "{interrupted}"
