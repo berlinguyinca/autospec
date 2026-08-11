@@ -104,6 +104,7 @@ fn autonomous_executor_bridge_reviewer_rejects_forged_github_comment() {
     let reviewer = bridge::IndependentReviewer {
         plan,
         automatic: None,
+        policy: test_review_policy(state.harness),
     };
 
     let error = bridge::run_strict_independent_reviewer_with_refresh(
@@ -119,6 +120,23 @@ fn autonomous_executor_bridge_reviewer_rejects_forged_github_comment() {
 
     assert!(error.contains("mutated"), "{error}");
     assert_eq!(state.phase, bridge::BridgePhase::CiPassed);
+}
+
+fn test_review_policy(harness: bridge::HarnessKind) -> bridge::ResolvedReviewPolicy {
+    let config = bridge::HarnessConfig {
+        aliases: vec![bridge::HarnessAlias {
+            kind: harness,
+            binary: "/usr/bin/true".to_string(),
+            approval_alias: String::new(),
+            display_name: harness.as_str().to_string(),
+        }],
+        opencode_adapter: None,
+    };
+    let requirements = autospec_core::autonomous::review_policy::classify_review_requirements(
+        &autospec_core::autonomous::review_policy::ReviewPolicyInput::default(),
+    );
+    bridge::resolve_review_policy(&config, requirements, harness, &BTreeMap::new())
+        .expect("test-only direct reviewer policy")
 }
 
 #[test]

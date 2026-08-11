@@ -423,8 +423,8 @@ fn autonomous_executor_bridge_bounds_automatic_reviewer_output_while_running() {
 }
 
 #[test]
-fn autonomous_executor_bridge_explicit_reviewer_command_bypasses_alias_resolution() {
-    // Break caught: an installed-alias failure overriding the operator's explicit command.
+fn autonomous_executor_bridge_unstructured_reviewer_command_fails_closed() {
+    // Break caught: an operator command forging reviewer approval without structured evidence.
     let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("explicit-reviewer");
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some("a".repeat(40));
@@ -439,19 +439,16 @@ fn autonomous_executor_bridge_explicit_reviewer_command_bypasses_alias_resolutio
         OsString::from("/usr/bin/printf LGTM"),
     );
 
-    let reviewer = bridge::resolve_independent_reviewer(
+    let error = bridge::resolve_independent_reviewer(
         &request,
         &state,
         &env,
         &fixture.root.join("review-artifacts"),
     )
-    .expect("explicit review command");
+    .expect_err("unstructured review command must fail closed");
 
-    assert_eq!(
-        reviewer.plan.commands[0].argv,
-        vec!["/usr/bin/printf", "LGTM"]
-    );
-    assert!(reviewer.automatic.is_none());
+    assert!(error.contains("unstructured"), "{error}");
+    assert!(error.contains("cannot authorize"), "{error}");
 }
 
 #[test]

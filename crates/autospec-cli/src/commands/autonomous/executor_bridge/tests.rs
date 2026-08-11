@@ -48,6 +48,7 @@ mod remote_base;
 mod repair_implementation;
 mod restart_direct;
 mod result_reviewer;
+mod review_provider;
 mod reviewer_automatic;
 mod reviewer_runtime;
 mod runtime_close;
