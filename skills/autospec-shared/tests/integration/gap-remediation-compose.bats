@@ -54,7 +54,10 @@ EOF
     cat > "$TEST_TMP/findings.json" <<'EOF'
 [
   {"dimension":"correctness","severity":"high","file":"cross-repo-search.sh","line":77,
-   "title":"trailing pipe matches every line on BSD grep","body":"build pattern drops trailing \\|","verdict":"keep","dedupe_key":"cross-repo-search-trailing-pipe"},
+   "title":"trailing pipe matches every line on BSD grep","body":"build pattern drops trailing \\|","verdict":"keep","dedupe_key":"cross-repo-search-trailing-pipe",
+   "originating_pr":123,"originating_commit":"0123456789abcdef0123456789abcdef01234567",
+   "review_receipt_digest":"sha256:receipt","reviewer_harness":"codex","reviewer_reasoning":"high",
+   "provider_diversified":true,"review_risk":"integration"},
   {"dimension":"test-quality","severity":"low","file":"x.sh","line":1,
    "title":"phantom defect","body":"reviewer hallucinated","verdict":"false_positive","dedupe_key":"phantom"}
 ]
@@ -90,6 +93,13 @@ teardown() {
     grep -q "issue create" "$GH_CREATE_LOG"
     grep -q "auto-implement" "$GH_CREATE_LOG"
     grep -q "gap-remediation" "$GH_CREATE_LOG"
+    grep -q "originating_pr: 123" "$GH_CREATE_LOG"
+    grep -q "originating_commit: 0123456789abcdef0123456789abcdef01234567" "$GH_CREATE_LOG"
+    grep -q "review_receipt_digest: sha256:receipt" "$GH_CREATE_LOG"
+    grep -q "reviewer_harness: codex" "$GH_CREATE_LOG"
+    grep -q "reviewer_reasoning: high" "$GH_CREATE_LOG"
+    grep -q "provider_diversified: true" "$GH_CREATE_LOG"
+    grep -q "review_risk: integration" "$GH_CREATE_LOG"
 
     # Round state advanced exactly once.
     [[ "$(cat "$TEST_TMP/gap-round-state.json")" == *'"round": 1'* ]] || \

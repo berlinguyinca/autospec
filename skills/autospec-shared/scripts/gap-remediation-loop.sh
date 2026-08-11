@@ -231,6 +231,15 @@ while [ "$_i" -lt "$_gap_count" ]; do
   _line="$(printf '%s' "$_gap" | jq -r '.line')"
   _dim="$(printf '%s' "$_gap" | jq -r '.dimension')"
   _sev="$(printf '%s' "$_gap" | jq -r '.severity')"
+  _attribution="$(printf '%s' "$_gap" | jq -r '
+    "- attribution_status: \(.attribution_status // "unavailable")\n" +
+    "- originating_pr: \(.originating_pr // "unavailable")\n" +
+    "- originating_commit: \(.originating_commit // "unavailable")\n" +
+    "- review_receipt_digest: \(.review_receipt_digest // "unavailable")\n" +
+    "- reviewer_harness: \(.reviewer_harness // "unavailable")\n" +
+    "- reviewer_reasoning: \(.reviewer_reasoning // "unavailable")\n" +
+    "- provider_diversified: \(if .provider_diversified == null then "unavailable" else .provider_diversified end)\n" +
+    "- review_risk: \(.review_risk // "unavailable")"')"
 
   if _is_dup "$_dk" "$_title" || _seen_in_run "$_dk" "$_title"; then
     continue
@@ -242,8 +251,8 @@ while [ "$_i" -lt "$_gap_count" ]; do
   [ "$DO_FILE" -eq 1 ] || continue
 
   # Compose the issue body with the dedupe_key embedded so future rounds match it.
-  _issue_body="$(printf '%s\n\n---\n- dimension: %s\n- severity: %s\n- file: %s:%s\n- dedupe_key: %s\n' \
-    "$_body" "$_dim" "$_sev" "$_file" "$_line" "$_dk")"
+  _issue_body="$(printf '%s\n\n---\n- dimension: %s\n- severity: %s\n- file: %s:%s\n- dedupe_key: %s\n%s\n' \
+    "$_body" "$_dim" "$_sev" "$_file" "$_line" "$_dk" "$_attribution")"
 
   # Ensure labels exist (idempotent, mirror classify idiom).
   _gh_label_create gap-remediation --color d4c5f9 --force >/dev/null 2>&1 || true
