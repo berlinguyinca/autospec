@@ -57,6 +57,7 @@ mod scope_root;
 mod sidecar_launch;
 mod snapshot_identity;
 mod support_base;
+mod support_harness_env;
 mod support_invocation;
 mod support_launch;
 mod sync_integration;

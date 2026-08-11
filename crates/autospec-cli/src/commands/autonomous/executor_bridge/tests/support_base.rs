@@ -69,6 +69,7 @@ fn reset_failpoints() {
 /// runs on unwind, so the fault cannot outlive the test that asked for it (#2981).
 pub(super) struct TestEnvironment {
     _guard: std::sync::MutexGuard<'static, ()>,
+    restore_harness_env: super::support_harness_env::HarnessEnvRestore,
 }
 
 /// Arming lives here and nowhere else.
@@ -102,12 +103,17 @@ impl TestEnvironment {
 impl Drop for TestEnvironment {
     fn drop(&mut self) {
         reset_failpoints();
+        super::support_harness_env::restore(&mut self.restore_harness_env);
     }
 }
 
 pub(super) fn test_environment() -> TestEnvironment {
+    let guard = TEST_ENVIRONMENT.lock().unwrap_or_else(|poison| poison.into_inner());
+    // Scrub inside the guard: these are process-wide, so the same lock that orders failpoint
+    // arming has to order this too, and Drop restores them on unwind like the failpoints.
     TestEnvironment {
-        _guard: TEST_ENVIRONMENT.lock().unwrap_or_else(|poison| poison.into_inner()),
+        _guard: guard,
+        restore_harness_env: super::support_harness_env::scrub(),
     }
 }
 
