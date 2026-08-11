@@ -277,4 +277,3 @@ Commit subject: fix: close review governance verification gaps
 - [ ] **Step 5: Write the closeout report**
 
 Record result, labeled claims, proof type, before/after, exact artifacts and rerunnable commands, scoped git status, and one likely hidden failure. Do not claim completion without fresh output.
-
