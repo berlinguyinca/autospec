@@ -75,6 +75,37 @@ JSON
     [[ "$output" == *"qa-noisy-sweep.sh findings=1 expected=1 status=PASS"* ]]
 }
 
+@test "allowlist row naming a pre-split path is reported as missing, and re-pointing it restores PASS" {
+    # Regression for #2946. Splitting a module moves the flagged content to a new path.
+    # The allowlist is keyed by path, so the old row stops matching and the new file is
+    # unclassified — the driver must surface BOTH halves, because the count alone
+    # ("21 vs 15") does not say that this is one move rather than several new defects.
+    write_detector_emits_one
+    cat > "$TMP/tests/dogfood/allowlist/qa-noisy-sweep.json" <<'JSON'
+[
+  {"file":"src/pre_split.py","function":"detect","rule_id":"STRING_MATCH_DOMAIN_LOGIC","justification":"row still naming the pre-split path"}
+]
+JSON
+    cd "$TMP"
+    run bash scripts/dogfood-detectors.sh
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"qa-noisy-sweep.sh findings=1 expected=1 status=FAIL"* ]]
+    [[ "$output" == *"unexpected findings"* ]]
+    [[ "$output" == *"src/foo.py"* ]]
+    [[ "$output" == *"missing allowlisted entries"* ]]
+    [[ "$output" == *"src/pre_split.py"* ]]
+
+    # Re-pointing the row at the file that now holds the content is the whole fix.
+    cat > "$TMP/tests/dogfood/allowlist/qa-noisy-sweep.json" <<'JSON'
+[
+  {"file":"src/foo.py","function":"detect","rule_id":"STRING_MATCH_DOMAIN_LOGIC","justification":"re-pointed at the post-split path"}
+]
+JSON
+    run bash scripts/dogfood-detectors.sh
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"qa-noisy-sweep.sh findings=1 expected=1 status=PASS"* ]]
+}
+
 @test "findings under local agent worktrees are ignored" {
     cat > "$TMP/scripts/qa-worktree-sweep.sh" <<'SH'
 #!/usr/bin/env bash

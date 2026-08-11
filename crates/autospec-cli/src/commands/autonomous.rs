@@ -27,7 +27,7 @@ use autospec_core::coordination::{
     parse_dependency_issue_json, ConductorEvent, ConductorOutcome, ConductorPhase, ConductorScope,
     ConductorState,
 };
-use autospec_core::execution::{OneShotIssueSelector, QueueStatus};
+use autospec_core::execution::QueueStatus;
 use autospec_core::validation::{StructuralCheck, StructuralValidator};
 #[cfg(unix)]
 use nix::errno::Errno;
@@ -47,6 +47,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
+mod one_shot_selector;
+use one_shot_selector::{
+    load_one_shot_selector, one_shot_selector_consumed, persist_one_shot_selector,
+};
 #[allow(dead_code)]
 mod executor_bridge;
 pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
@@ -5006,38 +5010,6 @@ fn foreground_scope(options: &Options, layout: &RunLayout) -> ConductorScope {
     }
 }
 
-fn one_shot_selector_path(layout: &RunLayout) -> PathBuf {
-    layout.state_dir.join("one-shot-selector.json")
-}
-
-fn load_one_shot_selector(layout: &RunLayout, issue: u64) -> Result<OneShotIssueSelector, String> {
-    let mut selector = OneShotIssueSelector::new(issue)?;
-    if fs::read_to_string(one_shot_selector_path(layout))
-        .map(|contents| contents.contains("\"consumed\":true"))
-        .unwrap_or(false)
-    {
-        let _ = selector.observe_status(issue, &QueueStatus::Passed)?;
-    }
-    Ok(selector)
-}
-
-fn persist_one_shot_selector(
-    layout: &RunLayout,
-    selector: &OneShotIssueSelector,
-) -> Result<(), String> {
-    fs::create_dir_all(&layout.state_dir)
-        .map_err(|error| format!("cannot create {}: {error}", layout.state_dir.display()))?;
-    atomic_write(
-        &one_shot_selector_path(layout),
-        &format!("{}\n", selector.status_json()),
-    )
-}
-
-fn one_shot_selector_consumed(layout: &RunLayout) -> bool {
-    fs::read_to_string(one_shot_selector_path(layout))
-        .map(|contents| contents.contains("\"consumed\":true"))
-        .unwrap_or(false)
-}
 
 fn command_error(error: super::CommandFailure) -> String {
     error.message
