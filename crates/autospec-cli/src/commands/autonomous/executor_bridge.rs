@@ -100,6 +100,8 @@ static INVOCATION_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 mod review_evidence;
 use review_evidence::*;
+mod review_provider;
+use review_provider::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ImplementationLintRepairOutcome {
@@ -2148,6 +2150,7 @@ pub(crate) struct DirectCommandPlan {
 struct IndependentReviewer {
     plan: DirectCommandPlan,
     automatic: Option<AutomaticReviewerArtifacts>,
+    policy: ResolvedReviewPolicy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7566,53 +7569,6 @@ fn resolve_direct_executable(
     Ok(ResolvedDirectExecutable {
         program: canonical,
         argv_zero,
-    })
-}
-
-fn resolve_independent_reviewer(
-    request: &ExecutorBridgeRequest,
-    state: &PersistedInvocation,
-    environment: &BTreeMap<String, OsString>,
-    artifact_root: &Path,
-) -> Result<IndependentReviewer, String> {
-    if let Some(command) = environment.get("AUTOSPEC_EXECUTOR_REVIEW_COMMAND") {
-        let command = command
-            .to_str()
-            .ok_or_else(|| "AUTOSPEC_EXECUTOR_REVIEW_COMMAND must be valid UTF-8".to_string())?;
-        return Ok(IndependentReviewer {
-            plan: parse_direct_command_plan(command)?,
-            automatic: None,
-        });
-    }
-
-    let resolved =
-        HarnessConfig::load(&state.identity.repository_path, environment)?.resolve(environment)?;
-    validate_external_reviewer_executable(state, &resolved.executable)?;
-    ensure_private_directory(artifact_root)?;
-    let artifact_root = fs::canonicalize(artifact_root)
-        .map_err(|error| format!("canonicalize reviewer artifact root: {error}"))?;
-    validate_external_reviewer_artifact_root(state, &artifact_root)?;
-    let harness_artifact = artifact_root.join("harness-result.txt");
-    if resolved.kind == HarnessKind::Codex {
-        prepare_private_reviewer_result(&harness_artifact)?;
-    }
-    let prompt = independent_reviewer_prompt(request, state)?;
-    let invocation =
-        resolved.review_invocation(&state.identity.worktree, &harness_artifact, &prompt)?;
-    let mut validated = validate_invocation(&invocation, &state.identity.worktree)?;
-    validated.environment_overrides =
-        sanitized_reviewer_environment(resolved.kind, environment, state, &artifact_root)?;
-    let automatic =
-        prepare_automatic_reviewer_normalizer(resolved.kind, &validated, &artifact_root)?;
-    validate_external_reviewer_executable(state, &automatic.normalizer)?;
-    Ok(IndependentReviewer {
-        plan: DirectCommandPlan {
-            commands: vec![DirectCommand::automatic_reviewer(
-                vec![automatic.normalizer.display().to_string()],
-                &automatic,
-            )?],
-        },
-        automatic: Some(automatic),
     })
 }
 
