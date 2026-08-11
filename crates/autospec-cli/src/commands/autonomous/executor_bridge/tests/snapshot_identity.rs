@@ -6,9 +6,7 @@ use super::super as bridge;
 use super::super::{
     supervise_harness, BridgePhase, MutationSnapshot, PersistedInvocation, SupervisionOutcome,
 };
-use super::support_base::{
-    git, git_stdout, observe_spawned_identity, DetachedForkedCleanup, GitFixture,
-};
+use super::support_base::{DetachedForkedCleanup, GitFixture, git, git_stdout, observe_spawned_identity, test_environment};
 use super::support_invocation::{shell_invocation, supervision_config, supervision_state};
 #[cfg(target_os = "linux")]
 use nix::sys::signal::Signal;
@@ -420,6 +418,7 @@ fn autonomous_executor_bridge_mutation_failure_persists_only_interrupted() {
 
 #[test]
 fn autonomous_executor_bridge_preverification_crash_never_publishes_complete() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("snapshot-preverify-crash");
     let mut state = supervision_state(&fixture);
     let snapshot =

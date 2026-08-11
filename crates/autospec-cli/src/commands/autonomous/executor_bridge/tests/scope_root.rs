@@ -4,9 +4,7 @@
 
 use super::super as bridge;
 use super::super::resolve_base;
-use super::support_base::{
-    git, git_stdout, zero_effect_classifier_fixture, GitFixture, TEST_SEQUENCE,
-};
+use super::support_base::{GitFixture, TEST_SEQUENCE, git, git_stdout, test_environment, zero_effect_classifier_fixture};
 use std::collections::BTreeMap;
 use std::fs;
 #[cfg(unix)]
@@ -250,6 +248,7 @@ fn assert_private_scope(scope_root: &Path) {
 #[cfg(unix)]
 #[test]
 fn autonomous_executor_bridge_recreates_absent_exact_scope_after_durable_marker() {
+    let _environment = test_environment();
     let (_fixture, state, state_path, _) =
         zero_effect_classifier_fixture("zero-effect-missing-scope", false, true);
     let scope_root = state.identity.worktree.parent().expect("scope root");

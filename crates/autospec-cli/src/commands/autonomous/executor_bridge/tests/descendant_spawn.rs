@@ -109,6 +109,7 @@ fn autonomous_executor_bridge_spawn_log_failure_cleans_without_releasing_child()
 
 #[test]
 fn autonomous_executor_bridge_never_ready_handshake_times_out_and_reaps() {
+    let _environment = test_environment();
     // Break caught: a post-fork child hanging before readiness blocks the conductor forever.
     let fixture = GitFixture::new("supervise-never-ready");
     let mut state = supervision_state(&fixture);

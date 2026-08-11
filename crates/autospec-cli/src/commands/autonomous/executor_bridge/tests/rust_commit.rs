@@ -183,6 +183,7 @@ fn autonomous_executor_bridge_waits_for_delayed_descendant_stderr_before_success
 
 #[test]
 fn autonomous_executor_bridge_retries_interrupted_hup_read_before_closing_tail() {
+    let _environment = test_environment();
     let fixture = GitFixture::new("supervise-eintr-hup-tail");
     let mut state = supervision_state(&fixture);
     let snapshot =

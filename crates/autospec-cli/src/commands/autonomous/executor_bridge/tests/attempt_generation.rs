@@ -287,6 +287,7 @@ fn autonomous_executor_bridge_attempt_lock_serializes_root_pointer_publication()
 
 #[test]
 fn autonomous_executor_bridge_post_complete_process_crash_reruns_real_producer() {
+    let _environment = test_environment();
     if let Some(repo) = std::env::var_os("AUTOSPEC_TEST_GENERATION_REPO") {
         let repo = PathBuf::from(repo);
         let count = PathBuf::from(
