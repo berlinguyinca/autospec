@@ -58,9 +58,14 @@ fn autonomous_executor_bridge_automatic_reviewer_normalizer_rejects_each_artifac
             current_dir: root.clone(),
             environment_overrides: Vec::new(),
         };
-        let automatic =
-            bridge::prepare_automatic_reviewer_normalizer(kind, &invocation, &artifact_root)
-                .expect("automatic reviewer normalizer");
+        let automatic = bridge::prepare_automatic_reviewer_normalizer(
+            kind,
+            &invocation,
+            &artifact_root,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            false,
+        )
+        .expect("automatic reviewer normalizer");
         let output = Command::new("/bin/sh")
             .arg(&automatic.normalizer)
             .current_dir(&root)
@@ -95,6 +100,8 @@ fn autonomous_executor_bridge_opencode_reviewer_executes_with_inline_read_only_p
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
     let state_path = fixture.root.join("state/invocation.json");
     let request = reviewer_request(&state, state_path.clone());
+    let review =
+        super::support_review::valid_review_json(state.head_oid.as_deref().expect("review commit"));
     let safe_root = PathBuf::from(std::env::var_os("HOME").expect("HOME for reviewer fixture"))
         .join(format!(".autospec-opencode-review-{}", std::process::id()));
     fs::create_dir_all(&safe_root).expect("safe reviewer root");
@@ -123,8 +130,9 @@ fn autonomous_executor_bridge_opencode_reviewer_executes_with_inline_read_only_p
          [ \"$2\" = run ]\n\
          [ \"$3\" = --agent ]\n\
          [ \"$4\" = autospec-reviewer ]\n\
-         printf '%s\\n' LGTM\n",
-            hostile_config_home.display()
+         printf '%s\\n' '{}'\n",
+            hostile_config_home.display(),
+            review
         ),
     );
     let table = write_alias_table(
@@ -300,12 +308,17 @@ fn autonomous_executor_bridge_automatic_reviewer_does_not_inherit_untrusted_envi
         .join(format!(".autospec-claude-review-{}", std::process::id()));
     fs::create_dir_all(&safe_root).expect("safe reviewer root");
     let harness = safe_root.join("claude-reviewer");
+    let review =
+        super::support_review::valid_review_json(state.head_oid.as_deref().expect("review commit"));
     write_executable(
         &harness,
-        "#!/bin/sh\n\
+        &format!(
+            "#!/bin/sh\n\
          set -eu\n\
-         if [ -n \"${MUTATION_TARGET:-}\" ]; then : > \"$MUTATION_TARGET\"; fi\n\
-         printf '%s\\n' LGTM\n",
+         if [ -n \"${{MUTATION_TARGET:-}}\" ]; then : > \"$MUTATION_TARGET\"; fi\n\
+         printf '%s\\n' '{}'\n",
+            review
+        ),
     );
     let table = write_alias_table(
         &fixture.root,
@@ -386,10 +399,12 @@ fn autonomous_executor_bridge_bounds_automatic_reviewer_output_while_running() {
         bridge::HarnessKind::Claude,
         &invocation,
         &artifact_root,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        false,
     )
     .expect("automatic reviewer normalizer");
     let normalizer = fs::read_to_string(&automatic.normalizer).expect("normalizer");
-    for utility in ["env", "wc", "cat", "truncate"] {
+    for utility in ["env", "wc", "python3", "truncate"] {
         let trusted = bridge::trusted_reviewer_utility(utility).expect("trusted utility");
         assert!(
             normalizer.contains(&format!("'{}'", trusted.display())),
