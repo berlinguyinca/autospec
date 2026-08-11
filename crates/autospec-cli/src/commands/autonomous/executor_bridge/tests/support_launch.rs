@@ -358,6 +358,7 @@ pub(super) fn completed_generation_bundle(
         &qa,
         &scanner_executables,
         &scanners,
+        None,
     )
     .expect("observed bundle");
     bundle
@@ -420,6 +421,9 @@ pub(super) fn run_process_generation_producer(
     bridge::produce_deterministic_premerge_evidence(bridge::DeterministicEvidenceRequest {
         state: &state,
         proof: &proof,
+        review_requirements: autospec_core::autonomous::review_policy::classify_review_requirements(
+            &autospec_core::autonomous::review_policy::ReviewPolicyInput::default(),
+        ),
         issue_body: &issue_body,
         spec_documents: &[],
         env: &BTreeMap::new(),
