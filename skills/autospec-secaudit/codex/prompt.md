@@ -70,6 +70,10 @@ Security triage runs on `TIER_A`. Hold `TIER_A` and `TIER_B` for the entire skil
    (best-effort; a failed install degrades that concern to LLM-only with a loud
    WARN — never silently skipped).
 2. **Scan** — run `security-scan.sh --tree` (sweep) or `--diff <base>` (branch).
+   Both modes scan a git-gitignore-aware file list (tracked +
+   untracked-not-ignored), so `--tree` never rescans its own prior
+   `.autospec/security/*.jsonl` output or other ignored trees (`target/`,
+   `node_modules/`) as fabricated findings.
    Findings are emitted as gap JSON objects:
    `{gap_id,dimension,severity,file,line,title,body,dedupe_key}`.
 3. **LLM triage (Tier A)** — for each finding: confirm real vs false-positive;

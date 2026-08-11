@@ -47,21 +47,29 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# In --diff mode, narrow ROOT to a temp tree of only the changed files so
-# tree-walking scanners (semgrep/license/trivy/gitleaks) see just the diff.
-if [ "$MODE" = "diff" ]; then
+# Narrow ROOT to a temp tree of only the files the scanners should see, so
+# tree-walking scanners (semgrep/license/trivy/gitleaks) never re-scan our own
+# gitignored output (.autospec/security/*.jsonl) or other ignored trees
+# (target/, node_modules/). --diff scopes to the changed files; --tree scopes
+# to git's own gitignore-aware file list (tracked + untracked-not-ignored) —
+# both share the same copy-into-quarantine mechanism below.
+if [ "$MODE" = "diff" ] || [ "$MODE" = "tree" ]; then
   if ! command -v git >/dev/null 2>&1; then
-    echo "security-scan: WARN git missing — cannot scope --diff, scanning full tree" >&2
+    echo "security-scan: WARN git missing — scanning the raw tree, .gitignore not honoured" >&2
+  elif ! git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "security-scan: WARN '$ROOT' is not a git work tree — scanning the raw tree, .gitignore not honoured" >&2
+  elif [ "$MODE" = "diff" ] && { [ -z "$BASE" ] || ! git -C "$ROOT" rev-parse --verify "$BASE" >/dev/null 2>&1; }; then
+    echo "security-scan: WARN --diff base '$BASE' is empty or not a valid ref; results may be incomplete" >&2
   else
-    if [ -z "$BASE" ] || ! git -C "$ROOT" rev-parse --verify "$BASE" >/dev/null 2>&1; then
-      echo "security-scan: WARN --diff base '$BASE' is empty or not a valid ref; results may be incomplete" >&2
-    fi
     _scan_tmp="$(mktemp -d)"
     trap 'rm -rf "$_scan_tmp"' EXIT
-    { git -C "$ROOT" diff --name-only \
-        "$(git -C "$ROOT" merge-base "$BASE" HEAD 2>/dev/null || echo "$BASE")" 2>/dev/null; \
-      git -C "$ROOT" ls-files --others --exclude-standard 2>/dev/null; } \
-      | sort -u | while IFS= read -r rel; do
+    if [ "$MODE" = "diff" ]; then
+      { git -C "$ROOT" diff --name-only \
+          "$(git -C "$ROOT" merge-base "$BASE" HEAD 2>/dev/null || echo "$BASE")" 2>/dev/null; \
+        git -C "$ROOT" ls-files --others --exclude-standard 2>/dev/null; }
+    else
+      git -C "$ROOT" ls-files --cached --others --exclude-standard 2>/dev/null
+    fi | sort -u | while IFS= read -r rel; do
         [ -n "$rel" ] || continue
         [ -f "$ROOT/$rel" ] || continue
         mkdir -p "$_scan_tmp/$(dirname "$rel")"
