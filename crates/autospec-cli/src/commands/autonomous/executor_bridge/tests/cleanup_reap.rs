@@ -6,7 +6,7 @@ use super::super as bridge;
 use super::super::{
     supervise_harness, BridgePhase, MutationSnapshot, PersistedInvocation, SupervisionOutcome,
 };
-use super::support_base::{DetachedForkedCleanup, GitFixture, observe_spawned_identity, test_environment};
+use super::support_base::{DetachedForkedCleanup, GitFixture, observe_spawned_identity, reap_fixture_child_within, test_environment};
 use super::support_invocation::{
     detach_harness_for_adoption, shell_invocation, supervision_config, supervision_state,
 };
@@ -297,7 +297,10 @@ fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine(
 
     bridge::set_parent_capture_failpoint(false);
     bridge::set_parent_reap_failpoint(bridge::ParentReapFailpoint::None);
-    let _ = nix::sys::wait::waitpid(nix::unistd::Pid::from_raw(supervisor as i32), None);
+    // Bounded: see reap_fixture_child_within. An unbounded wait here is what turned a wrong
+    // PID into a suite-wide hang (#2981), and this was the only reap in the tree without a
+    // bound. The result is deliberately ignored — the assertions below are the real check.
+    let _ = reap_fixture_child_within(supervisor, Duration::from_secs(10));
     nix::sys::prctl::set_child_subreaper(false).expect("restore fixture subreaper");
 
     assert!(error.contains("quarantin"), "{error}");
