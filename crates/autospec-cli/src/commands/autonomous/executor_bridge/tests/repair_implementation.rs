@@ -4,10 +4,7 @@
 
 use super::super as bridge;
 use super::super::{BridgePhase, HarnessConfig, HarnessKind, PersistedInvocation};
-use super::support_base::{
-    environment, git, git_stdout, installed_aliases, test_root, write_alias_table, GitFixture,
-    TEST_SEQUENCE,
-};
+use super::support_base::{GitFixture, TEST_SEQUENCE, environment, git, git_stdout, installed_aliases, test_environment, test_root, write_alias_table};
 use super::support_invocation::{
     implementation_proof_fixture, persisted_invocation, supervision_state,
 };
@@ -422,6 +419,7 @@ fn implementation_lint_repair_exhaustion_persists_final_once_without_attempt_fou
 
 #[test]
 fn implementation_lint_repair_exhaustion_replays_needs_human_cleanup() {
+    let _environment = test_environment();
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("implementation-lint-exhausted-cleanup");
     state.phase = bridge::BridgePhase::ImplementationComplete;
