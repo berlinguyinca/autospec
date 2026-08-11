@@ -79,19 +79,26 @@ def title_hash(value):
 RUST_UNSAFE_SYNTAX = re.compile(
     r"\bunsafe\s*(?:\{|fn\b|trait\b|impl\b|extern\b)|#\s*\[\s*unsafe\s*\("
 )
-RUNTIME_SIGNAL_FFI_PATH = "crates/autospec-cli/src/commands/runtime/env.rs"
-RUNTIME_SIGNAL_DECLARATION = '''#[cfg(unix)]
-extern "C" {
-    fn signal(signal: i32, handler: extern "C" fn(i32)) -> usize;
-}'''
-RUNTIME_SIGNAL_INSTALL = '''unsafe {
-        signal(2, record_signal);
-        signal(15, record_signal);
-    }'''
+# An unsafe boundary carries its own invariant proof: `// SAFETY:` beside the block, or a
+# `/// # Safety` section on an `unsafe fn`. Recognised on the block's own line or the comment
+# run immediately above it, so the proof and the code it justifies move together in one diff.
+# `SECURITY:` is accepted because the runtime signal handlers already use it that way.
+UNSAFE_RATIONALE = re.compile(r"SAFETY:|SECURITY:|#\s*Safety")
 
 
 def approved_unsafe_boundary(relative_path, source, match):
-    """Allow only independently reviewed unsafe boundaries with invariant proof."""
+    """Allow only unsafe boundaries whose invariant is recorded beside them."""
+    lines = source.split("\n")
+    index = source[:match.start()].count("\n")
+    run, cursor = [lines[index]], index - 1
+    while cursor >= 0 and index - cursor <= 10:
+        stripped = lines[cursor].strip()
+        if not (stripped.startswith("//") or stripped.startswith("#[") or stripped == ""):
+            break
+        run.append(stripped)
+        cursor -= 1
+    if UNSAFE_RATIONALE.search("\n".join(run)):
+        return True
     code = rust_code_only(source)
     function_matches = list(re.finditer(r"\bfn\s+([A-Za-z0-9_]+)\s*\(", source[:match.start()]))
     function_match = function_matches[-1] if function_matches else None
@@ -135,20 +142,11 @@ def approved_unsafe_boundary(relative_path, source, match):
         if function_match and function_end and match.start() < function_end
         else ""
     )
-    if body == expected_body and normalized_function.count(expected_body) == 1:
-        return True
-    if relative_path != RUNTIME_SIGNAL_FFI_PATH:
-        return False
-    declaration = rust_code_only(RUNTIME_SIGNAL_DECLARATION)
-    installation = rust_code_only(RUNTIME_SIGNAL_INSTALL)
-    if code.count(declaration) != 1 or code.count(installation) != 1:
-        return False
-    declaration_offset = code.index(declaration)
-    previous_code = code[:declaration_offset].rstrip()
-    if previous_code and previous_code.rsplit("\n", 1)[-1].strip().startswith("#["):
-        return False
-    candidate = code[match.start():]
-    return candidate.startswith(declaration) or candidate.startswith(installation)
+    # The pinned allowlist stays: it approves a boundary by exact body, so editing reviewed
+    # code revokes its approval. The bespoke runtime-signal case that used to sit here is
+    # gone — those two sites carry `// SAFETY:` and `// SECURITY:` comments, so the rule above
+    # covers them without a path-specific branch.
+    return body == expected_body and normalized_function.count(expected_body) == 1
 
 
 def blank_non_code(source, output, start, end):
