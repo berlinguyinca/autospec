@@ -179,7 +179,7 @@ This workflow assumes five capabilities. Map each one to your harness's actual t
 | Capability                  | Claude Code                          | OpenCode                                 | Codex CLI                                | Fallback if missing                                |
 |-----------------------------|--------------------------------------|------------------------------------------|------------------------------------------|----------------------------------------------------|
 | Read-only codebase research | `Agent` (subagent_type=Explore)      | `task` agent in read-only mode           | `apply_patch` read-only / shell `grep`   | Do the search in-thread with `rg`/`grep`           |
-| Foreground delegation       | `Agent` (subagent_type=general-purpose) | nested `task` agent, await output     | spawn nested CLI session                 | Do the work in-thread (more context cost)          |
+| Foreground delegation       | `Agent` (subagent_type=general-purpose) | nested `task` agent, await output     | spawn nested CLI session                 | Non-review work may run in-thread; required independent review requeues and never self-approves |
 | Background delegation       | `Agent` with `run_in_background: true` | detached `task` agent                  | nohup'd CLI session writing to a logfile | Run the monitor in a separate terminal/tmux pane   |
 | Ask the user a question     | `AskUserQuestion`                    | inline prompt                            | inline prompt                            | Ask in the response and wait for the next turn     |
 | Self-paced future wakeup    | `ScheduleWakeup` inside a `/loop`    | a recurring `task` or local `cron`       | local `cron`/`launchd` calling the CLI   | The user runs a status-update prompt manually      |
@@ -280,11 +280,11 @@ same session id (a fresh session gets a new id), and `--force` overrides it.
 
 ## Phase 4 — Background autonomous monitor
 
-**Fresh-subagent-per-issue (canonical Phase 4 path, formerly single-agent absorbed-discipline).** Each issue is processed by a FRESH top-level subagent dispatched by the orchestrator — expand → implement → finalize → peer-review → evaluate-findings → PR → merge — in that subagent's own context. The orchestrator NEVER implements in its own context; it only claims, dispatches, and waits. Each subagent receives full tool access because it is a top-level `Agent` call launched directly by the main session orchestrator. **Constraint:** Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so nested monitors cannot dispatch inner implementers. Phase 4 implementers must be top-level agents launched directly by the main session orchestrator, not nested inside a monitor. The `process(ISSUE)` notation below is shorthand for "dispatch a fresh top-level subagent to do this work", NOT in-context implementation by the orchestrator. Batch>1 is an explicit operator opt-in via `AUTOSPEC_BATCH_SIZE=N`; the default is 1 (one issue per subagent). The `reasoning:deep` force-to-1 rule is retained: deep issues stay batch=1 even under an operator `AUTOSPEC_BATCH_SIZE=N` override.
+**Fresh-subagent-per-issue (canonical Phase 4 path, formerly single-agent absorbed-discipline).** Each issue is processed by a FRESH top-level implementer dispatched by the orchestrator — expand → implement → finalize → evaluate-findings → PR → merge — while admission review comes from the separate foreground reviewer gate below. The orchestrator NEVER implements in its own context and NEVER reviews its own diff; it only claims, dispatches, and waits. Each implementer receives full tool access because it is a top-level `Agent` call launched directly by the main session orchestrator. **Constraint:** Subagents spawned by background `Agent` calls do NOT inherit the `Agent` tool, so nested monitors cannot dispatch inner implementers. Phase 4 implementers must be top-level agents launched directly by the main session orchestrator, not nested inside a monitor. The `process(ISSUE)` notation below is shorthand for "dispatch a fresh top-level implementer to do this work", NOT in-context implementation by the orchestrator. Batch>1 is an explicit operator opt-in via `AUTOSPEC_BATCH_SIZE=N`; the default is 1 (one issue per subagent). The `reasoning:deep` force-to-1 rule is retained: deep issues stay batch=1 even under an operator `AUTOSPEC_BATCH_SIZE=N` override.
 
 Record this durable preference in `AGENTS.md` (idempotent — skip if already present):
 
-> **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) the full target-repo validation/test suite has passed locally after the branch is current with `main`, (b) all **non-advisory** required CI checks pass — checks matching `AUTOSPEC_PR_ADVISORY_CHECKS` (default `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`; e.g. self-hosted TeamCity) are advisory and may be pending **or failing** once the full local suite is green, (c) the self-review subagent returned `LGTM`, (d) PR closes an `auto-implement` issue from a `feat/*` branch.
+> **Auto-merge authority for auto-implement PRs.** Admin-merge auto-implement PRs (`gh pr merge <#> --admin --squash --delete-branch`) when (a) the full target-repo validation/test suite has passed locally after the branch is current with `main`, (b) all **non-advisory** required CI checks pass — checks matching `AUTOSPEC_PR_ADVISORY_CHECKS` (default `AUTOSPEC_MAIN_HEALTH_IGNORE_CHECKS`; e.g. self-hosted TeamCity) are advisory and may be pending **or failing** once the full local suite is green, (c) the independent-review adapter validated the exact-head structured verdict and returned exact `LGTM`, (d) PR closes an `auto-implement` issue from a `feat/*` branch.
 
 **Off-peak tip:** For queues of 10+ issues (8+ hour runs), consider launching at night or on weekends. Usage limits are shared across all sessions — running long batches off-peak preserves daytime tokens for interactive work.
 
@@ -780,7 +780,7 @@ do not fall back to an inline label-swap path.
 > labels=$(gh issue view <ISSUE> --json labels --jq '[.labels[].name] | join(",")')
 > ```
 >
-> - **If `labels` contains `autospec:v2-flow`** — load the prompt template from `skills/autospec-run/prompts/phase4-implementer.md` (relative to this skill's install location, or via `AUTOSPEC_SKILLS_DIR`/the harness's skill mount). That prompt embeds the absorbed-discipline path: expand → implement → finalize → peer-review (via `codex exec`) → evaluate-findings. **Wire the D3 cached prefix (spec Phase 2 child C):** do NOT send the `phase4-implementer.md` body alone — prepend the `gen-implementer-prompt.sh` static cached prefix so the default v2 path stops re-reading SKILL.md + AGENTS.md + the RULE_ID table uncached. Assemble the combined v2 prompt by passing the `phase4-implementer.md` body as the dynamic body that rides BELOW the cached prefix:
+> - **If `labels` contains `autospec:v2-flow`** — load the prompt template from `skills/autospec-run/prompts/phase4-implementer.md` (relative to this skill's install location, or via `AUTOSPEC_SKILLS_DIR`/the harness's skill mount). That prompt embeds the absorbed-discipline implementation path: expand → implement → finalize → evaluate-findings, followed by the mandatory external independent-review adapter gate. **Wire the D3 cached prefix (spec Phase 2 child C):** do NOT send the `phase4-implementer.md` body alone — prepend the `gen-implementer-prompt.sh` static cached prefix so the default v2 path stops re-reading SKILL.md + AGENTS.md + the RULE_ID table uncached. Assemble the combined v2 prompt by passing the `phase4-implementer.md` body as the dynamic body that rides BELOW the cached prefix:
 >   ```bash
 >   # Reuse the single body fetch written at process(ISSUE) start (D5).
 >   v2_combined_prompt=$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/gen-implementer-prompt.sh" \
@@ -862,7 +862,7 @@ do not fall back to an inline label-swap path.
 > ```
 > **Model tier:** `TIER_B` (implementation work) — cheaper model with medium thinking; resolved at startup. Silently fall back to `TIER_A` if unavailable.
 >
-> **Hard limits.** Max 40 tool calls per issue. Max 3 self-review iterations. If you rewrite the same file twice with no test progress, abort: comment the blocker on the issue, release the lock label, exit. No wall-clock cap.
+> **Hard limits.** Max 40 tool calls per issue. Max 3 implementation-correction iterations. If you rewrite the same file twice with no test progress, abort: comment the blocker on the issue, release the lock label, exit. No wall-clock cap.
 >
 > Implement GitHub issue #<ISSUE>: "<TITLE>" on {repo}. Spec is the issue body below.
 >
@@ -1236,6 +1236,7 @@ do not fall back to an inline label-swap path.
 >        --repo "<REPO>" \
 >        ${_reuse_flags_file:+--reuse-flags "$_reuse_flags_file"})
 >      ```
+>      <!-- autospec-block:independent-review-gate -->
 >      Pass `combined_reviewer_prompt` as the reviewer subagent prompt. The static cached prefix is framed by `<!-- CACHE BOUNDARY -->` markers; pass it with `cache_control: { type: "ephemeral" }` so Anthropic's prompt cache can reuse it across inner-loop iterations.
 >
 >      Dispatch ONE **foreground subagent** with this brief:
@@ -1268,7 +1269,7 @@ do not fall back to an inline label-swap path.
 >        >
 >        > **Simplicity axis is ADVISE-only (anti-gold-plating):** the reuse / build-vs-buy / "how could this be better?" axis may argue only toward *less* code — reuse a named existing util (`scripts/lib/`, repo source), adopt a named library, or delete an unneeded abstraction — and only when tied to a named acceptance criterion. It may NEVER emit a `BLOCK` that demands *more* code, a new abstraction, or speculative generality; such suggestions are at most `ADVISE` and never halt the commit. Every reuse verdict must name the matched util or library (evidence-bound), never assert a match from belief.
 >        >
->        > **Verdict:** If Part 1 has ZERO blocking findings (INFO lines OK) AND Part 2 has no findings: return ONLY the token: `LGTM`. Otherwise return a numbered findings list — RULE_ID findings first, then LGTM findings. A reuse `BLOCK` is provisional until it survives the refute pass below.
+>        > **Verdict:** Return exactly one JSON object matching the adapter request. Use `verdict: "lgtm"` with empty `blocking_findings` only when Part 1 has ZERO blocking findings (INFO lines OK) and Part 2 has no findings. Otherwise use `verdict: "blocked"` and put concrete RULE_ID/correctness findings in `blocking_findings`. Bind `commit` to the exact requested head and list the examined surfaces, tests, and required integration paths. No Markdown, prose, or bare `LGTM`.
 >
 >      **Reuse-BLOCK refute pass (before consuming the verdict):** If the findings list contains a build-vs-buy / reuse `BLOCK`, do NOT halt on it yet. Dispatch a **cheap refute pass** — one short `TIER_B` second voter (≤5 tool calls) whose only job is to *kill* the BLOCK: `rg`-search the repo for the named util/library and confirm the claimed reuse target actually exists, is reachable, and fits this call site. **Majority rules:** keep the BLOCK only if the refuter also upholds it; if the refuter refutes it (the named target is absent, unreachable, or ill-fitting), demote that BLOCK to `ADVISE`, drop it from the blocking findings, and continue. If demotion leaves no remaining blocking findings, treat the verdict as `LGTM`. This keeps a hallucinated "library exists" from stalling the merge (`feedback_llm_validator_adaptive_retry`). **Record the outcome of this reuse `BLOCK` decision to the reuse-lens ledger HERE** (issue #1442) — at the decision point, so precision = upheld ÷ total is computed only over real reuse BLOCKs and never from phantom rows on clean passes. Set `_reuse_block_raised=1`, `_reuse_trigger` to the flagged RULE_ID, and `_reuse_upheld=true` when the refuter upheld the BLOCK or `_reuse_upheld=false` when it was refuted/demoted-to-ADVISE, then:
 >      **Draw the refuter from a different vendor than the proposer.** Two dispatches to the same model family share failure modes and tend to be wrong together, which is the one case this second vote exists to catch — so resolve the refuter's vendor before dispatching it, passing the harness you detected in step 1 of Phase 0 as `--proposer`:
@@ -1287,7 +1288,7 @@ do not fall back to an inline label-swap path.
 >        fi
 >        ```
 >
->      If `LGTM` && det_exit == 0:
+>      If the trusted adapter validates the structured verdict to exact `LGTM` && det_exit == 0:
 >        gh pr comment <PR> --body "<!-- guardian-block --> Review: clean. <!-- /-->"
 >        run **Full test suite gate** and record the exact full-suite command and passing output summary
 >        bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/ci-wait.sh" <PR>  # fire-and-forget sentinel
@@ -1302,9 +1303,9 @@ do not fall back to an inline label-swap path.
 >        # monitor exits to parking state HERE — orchestrator relaunches when ~/.autospec/ci-state/<PR>.signal settles
 >        # On relaunch: run ci-wait-poll.sh <PR>; break SUCCESS if exit 0 (pass)
 >        break SUCCESS only if the full suite passed and required checks pass.
->      If `LGTM` but det_exit != 0:
+>      If the trusted adapter validates the structured verdict to exact `LGTM` but det_exit != 0:
 >        Treat deterministic findings as blocking. Comment, fix, recommit, push. Continue inner loop.
->      If findings list:
+>      If the structured verdict is blocked or fails validation:
 >        gh pr comment <PR> --edit-last --body "<!-- guardian-block:begin -->\n## Review findings (iter <K>/3)\n<findings>\n<!-- guardian-block:end -->"
 >        Append findings to implementer retry context. Continue inner loop (counts toward 3-iter cap).
 >      On 3-iter exhaustion with non-LGTM:
