@@ -186,6 +186,12 @@ The native executor’s existing invariant becomes universal:
 no provably independent reviewer -> no autonomous merge
 ```
 
+The shell-facing admission boundary is `independent-review-adapter.sh`: `prepare`
+writes a commit-bound request or returns typed requeue exit `75`, and `validate`
+is the only path that normalizes a closed-schema clean verdict to `LGTM`. The
+Claude, Codex, and OpenCode adapters share this behavior; none may substitute
+the author context when foreground delegation is unavailable.
+
 - Production `AUTOSPEC_EXECUTOR_REVIEW_COMMAND` either passes through the same structured adapter and identity checks or is removed; unstructured commands cannot authorize merge.
 - Skill adapters may not fall back to reviewing in the author/implementer context.
 - When independent delegation is unavailable, the issue is visibly requeued or blocked with a typed reason and no PR merge.
