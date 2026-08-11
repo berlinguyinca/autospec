@@ -2,7 +2,10 @@
 # gap-json-lib.sh — shared helpers for the gap JSON contract.
 #
 # Gap object schema (emitted by `/autospec-review --remediation --emit-gaps`):
-#   {gap_id, dimension, severity, file, line, title, body, dedupe_key}
+#   {gap_id, dimension, severity, file, line, title, body, dedupe_key,
+#    attribution_status?, originating_pr?, originating_commit?,
+#    review_receipt_digest?, reviewer_harness?, reviewer_reasoning?,
+#    provider_diversified?, review_risk?}
 #
 # Sourceable OR runnable:
 #   bash gap-json-lib.sh --validate-file <path>   # exit 0 if file holds a valid gap object
@@ -35,7 +38,37 @@ gap_validate_object() {
   for key in $GAP_REQUIRED_KEYS; do
     printf '%s' "$obj" | jq -e --arg k "$key" 'has($k) and (.[$k] != null)' >/dev/null 2>&1 || return 1
   done
+  # Historical gaps without attribution remain valid. New normalized gaps carry
+  # an explicit status: attributed rows must have the complete typed identity;
+  # unavailable rows must not invent partial origin data.
+  if printf '%s' "$obj" | jq -e 'has("attribution_status")' >/dev/null 2>&1; then
+    printf '%s' "$obj" | jq -e '
+      if .attribution_status == "attributed" then
+        (.originating_pr | type == "number") and
+        (.originating_commit | type == "string" and length > 0) and
+        (.review_receipt_digest | type == "string" and length > 0) and
+        (.reviewer_harness | type == "string" and length > 0) and
+        (.reviewer_reasoning | type == "string" and length > 0) and
+        (.provider_diversified | type == "boolean") and
+        (.review_risk | type == "string" and length > 0)
+      elif .attribution_status == "unavailable" then
+        (.originating_pr == null) and (.originating_commit == null) and
+        (.review_receipt_digest == null) and (.reviewer_harness == null) and
+        (.reviewer_reasoning == null) and (.provider_diversified == null) and
+        (.review_risk == null)
+      else false end' >/dev/null 2>&1 || return 1
+  fi
   return 0
+}
+
+gap_sha256() {
+  local value="$1" sum
+  if command -v shasum >/dev/null 2>&1; then
+    sum="$(printf '%s' "$value" | shasum -a 256 | awk '{print $1}')"
+  else
+    sum="$(printf '%s' "$value" | sha256sum | awk '{print $1}')"
+  fi
+  printf 'sha256:%s' "$sum"
 }
 
 # gap_title_hash <title> — deterministic 10-char hex for dedupe fallback.
