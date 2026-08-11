@@ -205,6 +205,9 @@ Pipeline:
    `advisor-observe.sh --outcomes .autospec/review-outcomes.jsonl --json`;
    cache-token fields are operational telemetry only and never enter either
    escaped-defect rate.
+   Feed the resulting attributed sample count and escaped rates to
+   `advisor-govern.sh tick`; high-severity escapes strengthen immediately,
+   while clean relaxation remains sample-floor and cost guarded.
 
 6. Run the shared read-only repo quality audit and link its artifacts from the
    review report:

@@ -27,6 +27,8 @@ CMD="${1:-}"; [ $# -gt 0 ] && shift || true
 
 TELEMETRY="" MIN_SAMPLES=20
 BL_LGTM="" OB_LGTM="" BL_COST="" OB_COST=""
+ATTRIBUTED_SAMPLES="" ESCAPED_HIGH_RATE="" BL_TOTAL_RATE="" ESCAPED_TOTAL_RATE=""
+REVIEW_UNAVAILABLE="false"
 while [ $# -gt 0 ]; do
   case "$1" in
     --telemetry) TELEMETRY="${2:-}"; shift 2 ;;
@@ -35,6 +37,11 @@ while [ $# -gt 0 ]; do
     --observed-lgtm) OB_LGTM="${2:-}"; shift 2 ;;
     --baseline-cost) BL_COST="${2:-}"; shift 2 ;;
     --observed-cost) OB_COST="${2:-}"; shift 2 ;;
+    --attributed-samples) ATTRIBUTED_SAMPLES="${2:-}"; shift 2 ;;
+    --escaped-high-rate) ESCAPED_HIGH_RATE="${2:-}"; shift 2 ;;
+    --baseline-total-rate) BL_TOTAL_RATE="${2:-}"; shift 2 ;;
+    --escaped-total-rate) ESCAPED_TOTAL_RATE="${2:-}"; shift 2 ;;
+    --review-unavailable) REVIEW_UNAVAILABLE="${2:-}"; shift 2 ;;
     --json) shift ;;   # JSON is the only output form; accepted for symmetry
     --help|-h) printf 'Usage: advisor-govern.sh show|tick ...\n'; exit 0 ;;
     *) printf 'advisor-govern.sh: unknown option: %s\n' "$1" >&2; exit 1 ;;
@@ -81,12 +88,49 @@ next_gate() {
   done
 }
 
+quality_tick() {
+  local v active action reason ng last
+  for v in "$ATTRIBUTED_SAMPLES" "$ESCAPED_HIGH_RATE" "$BL_TOTAL_RATE" "$ESCAPED_TOTAL_RATE" "$BL_COST" "$OB_COST"; do
+    case "$v" in
+      ''|*[!0-9.]*|*.*.*|.*|*.) printf 'advisor-govern.sh: quality metrics must be numeric: %s\n' "$v" >&2; return 1 ;;
+    esac
+  done
+  case "$REVIEW_UNAVAILABLE" in true|false) ;; *) printf 'advisor-govern.sh: review-unavailable must be true or false\n' >&2; return 1 ;; esac
+  active="$(read_active)"
+  action="hold"
+  reason=""
+  if [ "$REVIEW_UNAVAILABLE" = true ]; then
+    reason="review_unavailable"
+  elif jq -en --argjson high "$ESCAPED_HIGH_RATE" '$high > 0' >/dev/null; then
+    ng="$(next_gate "$active")"
+    if [ -n "$ng" ]; then active="$active $ng"; action="strengthen"; else reason="maximum_strength"; fi
+  elif [ "$ATTRIBUTED_SAMPLES" -lt "$MIN_SAMPLES" ]; then
+    reason="sample_floor"
+  elif jq -en --argjson bt "$BL_TOTAL_RATE" --argjson ot "$ESCAPED_TOTAL_RATE" \
+                   --argjson bc "$BL_COST" --argjson oc "$OB_COST" \
+                   '($ot <= $bt) and ($oc <= $bc)' >/dev/null; then
+    last="$(printf '%s' "$active" | awk '{print $NF}')"
+    if [ "$last" != "$SEED" ]; then active="$(printf '%s' "$active" | sed "s/ ${last}\$//")"; action="relax"; else reason="minimum_strength"; fi
+  else
+    reason="quality_or_cost_guard"
+  fi
+  write_active "$active"
+  jq -cn --argjson a "$(active_json "$active")" --arg act "$action" \
+    --arg reason "$reason" --argjson s "$ATTRIBUTED_SAMPLES" \
+    '{active:$a,action:$act,samples:$s} + (if $reason == "" then {} else {reason:$reason} end)'
+}
+
 case "$CMD" in
   show)
     jq -cn --argjson a "$(active_json "$(read_active)")" '{active:$a}'
     exit 0
     ;;
   tick)
+    if [ -n "$ATTRIBUTED_SAMPLES" ]; then
+      quality_tick
+      exit $?
+    fi
+
     # Require a well-formed non-negative number (reject '', lone '.', '1.', '.5',
     # multi-dot) — an invalid --argjson would otherwise abort under set -e.
     for v in "$BL_LGTM" "$OB_LGTM" "$BL_COST" "$OB_COST"; do

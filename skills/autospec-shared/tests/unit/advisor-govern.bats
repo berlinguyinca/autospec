@@ -24,6 +24,14 @@ setup() {
 
 teardown() { rm -rf "$TMP"; }
 
+quality_tick() {
+  bash "$SCRIPT" tick --telemetry "$TMP/t.jsonl" --min-samples "${1}" \
+    --attributed-samples "${2}" --escaped-high-rate "${3}" \
+    --baseline-total-rate "${4}" --escaped-total-rate "${5}" \
+    --baseline-cost "${6}" --observed-cost "${7}" \
+    --review-unavailable "${8}" --json
+}
+
 @test "seed active set is impl-haiku when no state exists" {
   run bash "$SCRIPT" show --json
   [ "$status" -eq 0 ]
@@ -121,4 +129,38 @@ teardown() { rm -rf "$TMP"; }
   run bash "$SCRIPT" tick --telemetry "$TMP/t.jsonl" --min-samples 20 \
     --baseline-lgtm 1. --observed-lgtm 0.8 --baseline-cost 1000 --observed-cost 800 --json
   [ "$status" -eq 1 ]
+}
+
+@test "an attributed high-severity escape strengthens immediately below the relaxation floor" {
+  : > "$TMP/t.jsonl"
+  run quality_tick 20 4 0.25 0.25 0.25 100 100 false
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "strengthen" and .active == ["impl-haiku","retry"]' >/dev/null
+}
+
+@test "fewer than twenty clean attributed samples holds relaxation" {
+  mkdir -p "$AUTOSPEC_ADVISOR_STATE_DIR"
+  printf '{"active":["impl-haiku","retry"]}' > "$STATE"
+  : > "$TMP/t.jsonl"
+  run quality_tick 20 19 0 0.1 0 200 100 false
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "hold" and .active == ["impl-haiku","retry"]' >/dev/null
+}
+
+@test "twenty clean attributed samples may relax when total escapes and cost do not regress" {
+  mkdir -p "$AUTOSPEC_ADVISOR_STATE_DIR"
+  printf '{"active":["impl-haiku","retry"]}' > "$STATE"
+  : > "$TMP/t.jsonl"
+  run quality_tick 20 20 0 0.1 0 200 100 false
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "relax" and .active == ["impl-haiku"]' >/dev/null
+}
+
+@test "review unavailable freezes policy relaxation" {
+  mkdir -p "$AUTOSPEC_ADVISOR_STATE_DIR"
+  printf '{"active":["impl-haiku","retry"]}' > "$STATE"
+  : > "$TMP/t.jsonl"
+  run quality_tick 20 20 0 0.1 0 200 100 true
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.action == "hold" and .reason == "review_unavailable" and .active == ["impl-haiku","retry"]' >/dev/null
 }
