@@ -20,7 +20,7 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_partial_adoption_cleanup_failure_retains_identities() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("adopt-partial-quarantine");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -41,7 +41,7 @@ fn autonomous_executor_bridge_partial_adoption_cleanup_failure_retains_identitie
     bridge::write_invocation_atomic(&state_path, &state).expect("persist mismatched identity");
     let snapshot =
         MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::CleanupSignal);
+    environment.cleanup(bridge::LaunchFailpoint::CleanupSignal);
     let error = bridge::supervise_validated_harness(
         &state_path,
         &event_log,
@@ -55,7 +55,7 @@ fn autonomous_executor_bridge_partial_adoption_cleanup_failure_retains_identitie
         &fs::read_to_string(&state_path).expect("durable partial quarantine"),
     )
     .expect("strict partial quarantine");
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::None);
+    environment.cleanup(bridge::LaunchFailpoint::None);
     if bridge::observe_process_identity(supervisor.pid, &supervisor.argv_digest)
         .expect("observe quarantined supervisor")
         .is_some()
@@ -207,7 +207,7 @@ fn autonomous_executor_bridge_event_log_rotation_has_a_hard_disk_cap() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_adopted_errors_are_structured_and_cleaned() {
-    let _environment = test_environment();
+    let environment = test_environment();
     for (name, failpoint) in [
         ("poll", bridge::LaunchFailpoint::AdoptedPoll),
         ("flush", bridge::LaunchFailpoint::AdoptedFlush),
@@ -241,7 +241,7 @@ fn autonomous_executor_bridge_adopted_errors_are_structured_and_cleaned() {
         let snapshot =
             MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
 
-        bridge::set_launch_failpoint(failpoint);
+        environment.launch(failpoint);
         let error = bridge::supervise_validated_harness(
             &state_path,
             &event_log,
@@ -251,7 +251,7 @@ fn autonomous_executor_bridge_adopted_errors_are_structured_and_cleaned() {
             supervision_config(2_000),
         )
         .expect_err("injected adopted supervision error");
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
 
         assert!(error.contains("injected"), "{error}");
         assert!(state.supervisor.is_none());

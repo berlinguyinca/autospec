@@ -49,12 +49,12 @@ fn autonomous_executor_bridge_runtime_infrastructure_error_is_terminal_evidence(
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_retries_repaired_supervisor_resolution_failure() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("direct-repaired-supervisor-resolution");
     let artifact_root = fixture.root.join("evidence");
     let plan = bridge::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
 
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::ParentReadiness);
+    environment.launch(bridge::LaunchFailpoint::ParentReadiness);
     bridge::execute_direct_plan(
         &fixture.repo,
         &plan,
@@ -63,7 +63,7 @@ fn autonomous_executor_bridge_retries_repaired_supervisor_resolution_failure() {
         Duration::from_secs(5),
     )
     .expect_err("first attempt records cleanup-proven infrastructure failure");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
     let record_path = artifact_root.join("command-000.json");
     let observed = bridge::read_observed_command_record(&fixture.repo, &record_path)
         .expect("read infrastructure record");
@@ -105,12 +105,12 @@ fn autonomous_executor_bridge_retries_repaired_supervisor_resolution_failure() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_failure_retains_identity_until_restart_reconciles() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("direct-cleanup-quarantine");
     let artifact_root = fixture.root.join("evidence");
     let plan = bridge::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
 
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::CleanupSignal);
+    environment.cleanup(bridge::LaunchFailpoint::CleanupSignal);
     let first = bridge::execute_direct_plan(
         &fixture.repo,
         &plan,
@@ -118,7 +118,7 @@ fn autonomous_executor_bridge_cleanup_failure_retains_identity_until_restart_rec
         None,
         Duration::from_secs(5),
     );
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::None);
+    environment.cleanup(bridge::LaunchFailpoint::None);
     let first = first.expect_err("failed cleanup must be typed and quarantined");
     let launch = artifact_root.join("command-000.launch.json");
     let supervisor = direct_launch_supervisor_pid(&launch);
@@ -154,7 +154,7 @@ fn autonomous_executor_bridge_cleanup_failure_retains_identity_until_restart_rec
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_resumes_failure_archive_before_one_fresh_attempt() {
-    let _environment = test_environment();
+    let environment = test_environment();
     for boundary in [
         bridge::LaunchFailpoint::ArchiveAfterManifest,
         bridge::LaunchFailpoint::ArchiveMidMove,
@@ -163,7 +163,7 @@ fn autonomous_executor_bridge_resumes_failure_archive_before_one_fresh_attempt()
         let fixture = GitFixture::new(&format!("direct-archive-{boundary:?}"));
         let artifact_root = fixture.root.join("evidence");
         let plan = bridge::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
-        bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::CleanupSignal);
+        environment.cleanup(bridge::LaunchFailpoint::CleanupSignal);
         let first = bridge::execute_direct_plan(
             &fixture.repo,
             &plan,
@@ -171,10 +171,10 @@ fn autonomous_executor_bridge_resumes_failure_archive_before_one_fresh_attempt()
             None,
             Duration::from_secs(5),
         );
-        bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::None);
+        environment.cleanup(bridge::LaunchFailpoint::None);
         first.expect_err("first attempt leaves cleanup quarantine");
 
-        bridge::set_launch_failpoint(boundary);
+        environment.launch(boundary);
         let interrupted = bridge::execute_direct_plan(
             &fixture.repo,
             &plan,
@@ -182,7 +182,7 @@ fn autonomous_executor_bridge_resumes_failure_archive_before_one_fresh_attempt()
             None,
             Duration::from_secs(5),
         );
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
         interrupted.expect_err("archive transaction failpoint interrupts rollover");
 
         let recovered = bridge::execute_direct_plan(
@@ -212,7 +212,7 @@ fn autonomous_executor_bridge_resumes_failure_archive_before_one_fresh_attempt()
 
 #[test]
 fn autonomous_executor_bridge_retirement_resumes_every_delete_boundary() {
-    let _environment = test_environment();
+    let environment = test_environment();
     // Break caught: a crash after cleanup proof deleting launch ownership without leaving a
     // durable transaction that restart can finish.
     for boundary in [
@@ -242,10 +242,10 @@ fn autonomous_executor_bridge_retirement_resumes_every_delete_boundary() {
                 .expect("private retirement artifact");
         }
 
-        bridge::set_launch_failpoint(boundary);
+        environment.launch(boundary);
         let attempt_id = bridge::new_direct_attempt_id_candidate().expect("attempt id");
         let interrupted = bridge::retire_direct_launch(&paths, &attempt_id);
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
         interrupted.expect_err("retirement failpoint must interrupt transaction");
         bridge::retire_direct_launch(&paths, &attempt_id).expect("restart resumes retirement");
 
@@ -261,13 +261,13 @@ fn autonomous_executor_bridge_retirement_resumes_every_delete_boundary() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_complete_retirement_recovers_without_pending_pointer() {
-    let _environment = test_environment();
+    let environment = test_environment();
     // Break caught: pending removal followed by parent-sync failure losing the only
     // cleanup-proven locator and preventing the typed failure archive/fresh retry.
     let fixture = GitFixture::new("direct-retire-pointer-cleanup");
     let artifact_root = fixture.root.join("evidence");
     let plan = bridge::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::CleanupSignal);
+    environment.cleanup(bridge::LaunchFailpoint::CleanupSignal);
     let first = bridge::execute_direct_plan(
         &fixture.repo,
         &plan,
@@ -275,10 +275,10 @@ fn autonomous_executor_bridge_complete_retirement_recovers_without_pending_point
         None,
         Duration::from_secs(5),
     );
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::None);
+    environment.cleanup(bridge::LaunchFailpoint::None);
     first.expect_err("first attempt leaves cleanup quarantine");
 
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::RetireAfterPendingRemoval);
+    environment.launch(bridge::LaunchFailpoint::RetireAfterPendingRemoval);
     let interrupted = bridge::execute_direct_plan(
         &fixture.repo,
         &plan,
@@ -286,7 +286,7 @@ fn autonomous_executor_bridge_complete_retirement_recovers_without_pending_point
         None,
         Duration::from_secs(5),
     );
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
     interrupted.expect_err("retirement loses pending before final parent sync");
     let failed_record: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(artifact_root.join("command-000.json"))
