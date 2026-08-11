@@ -1,27 +1,75 @@
 [
   {
+    "file": "crates/autospec-cli/src/commands/autonomous.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Subcommand dispatch matches on CLI verb strings supplied by the operator; these are the command surface, not a domain representation."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This parser validates shell operators, owned artifact suffixes, and Closeout labels; serde is unrelated to those protocol strings."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/attempt_generation.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/attempt_retirement.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/codex_sandbox.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/identity_reviewer.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/json_identity.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/proxy_direct.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/pull_mutation.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/snapshot_identity.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/worktree_post.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "Test-only module split out of executor_bridge/tests.rs; it holds command-output and event-log assertion strings, not domain representation logic. The allowlist row that covered this content named the pre-split tests.rs path."
+  },
+  {
     "file": "crates/autospec-cli/src/commands/queue.rs",
     "function": "read_issue",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
     "justification": "The GitHub query is one fixed argument vector; the heuristic counts its JSON projection punctuation as repeated branches despite no repeated control flow."
-  },
-  {
-    "file": "crates/autospec-cli/tests/claim_commands.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This test-only command factory and its assertion fixtures contain command-output strings, not domain representation logic."
-  },
-  {
-    "file": "crates/autospec-cli/tests/cli_commands.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "The test helper asserts command output, not a domain representation; this inherited file-scoped heuristic result remains intentionally allowlisted."
-  },
-  {
-    "file": "crates/autospec-cli/tests/cli_commands.rs",
-    "function": "status_json_reports_persisted_lifecycle_counts",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "This CLI integration test repeats JSON-field assertions over one response fixture; the assertion rows are test data, not production branching."
   },
   {
     "file": "crates/autospec-cli/tests/autonomous_conductor_commands.rs",
@@ -42,51 +90,39 @@
     "justification": "This integration test reads Rust source and asserts command output; std::time plus substring assertions trigger the file-scoped heuristic without encoding domain logic."
   },
   {
-    "file": "crates/autospec-cli/tests/autonomous_resilience_commands.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This helper parses a labeled CLI help section; its string operations inspect presentation structure rather than encode domain logic."
-  },
-  {
-    "file": "crates/autospec-core/src/validation/structural.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "The structural validator scans static skill text for required contract vocabulary; it does not encode runtime domain meaning from free-form names."
-  },
-  {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This parser validates shell operators, owned artifact suffixes, and Closeout labels; serde is unrelated to those protocol strings."
-  },
-  {
     "file": "crates/autospec-cli/tests/autonomous_premerge_commands.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
     "justification": "This integration test asserts diagnostic text; its substring checks do not encode runtime domain meaning."
   },
   {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests.rs",
-    "function": "autonomous_executor_bridge_quarantine_rejects_marker_corruption_before_signal",
+    "file": "crates/autospec-cli/tests/autonomous_resilience_commands.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This helper parses a labeled CLI help section; its string operations inspect presentation structure rather than encode domain logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/claim_commands.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test-only command factory and its assertion fixtures contain command-output strings, not domain representation logic."
+  },
+  {
+    "file": "crates/autospec-cli/tests/cli_commands.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "The test helper asserts command output, not a domain representation; this inherited file-scoped heuristic result remains intentionally allowlisted."
+  },
+  {
+    "file": "crates/autospec-cli/tests/cli_commands.rs",
+    "function": "status_json_reports_persisted_lifecycle_counts",
     "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "This test repeats corrupt quarantine-marker fixtures; the cases are adversarial data, not production branching."
+    "justification": "This CLI integration test repeats JSON-field assertions over one response fixture; the assertion rows are test data, not production branching."
   },
   {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests.rs",
+    "file": "crates/autospec-core/src/validation/structural.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module: the strings are executor marker and quarantine fixtures asserted verbatim, not domain representation logic."
-  },
-  {
-    "file": "crates/autospec-cli/src/commands/claim/tests.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This code distinguishes Git remote syntax for credential routing; serde is unrelated and Git also permits non-URL scp syntax."
-  },
-  {
-    "file": "crates/autospec-cli/src/commands/autonomous.rs",
-    "function": "<file>",
-    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Subcommand dispatch matches on CLI verb strings supplied by the operator; these are the command surface, not a domain representation."
+    "justification": "The structural validator scans static skill text for required contract vocabulary; it does not encode runtime domain meaning from free-form names."
   }
 ]
