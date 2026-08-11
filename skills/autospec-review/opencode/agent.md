@@ -199,6 +199,11 @@ Pipeline:
    samples, no total-rate regression, and no cost regression. A
    `review_unavailable` observation freezes relaxation.
 
+   Observe these quality metrics with
+   `advisor-observe.sh --outcomes .autospec/review-outcomes.jsonl --json`;
+   cache-token fields are operational telemetry only and never enter either
+   escaped-defect rate.
+
 6. Run the shared read-only repo quality audit and link its artifacts from the
    review report:
 
