@@ -10,14 +10,14 @@ use std::path::PathBuf;
 
 #[test]
 fn autonomous_executor_bridge_zero_effect_marker_survives_repair_and_transfer_crashes() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let (_fixture, state, state_path, _) =
         zero_effect_classifier_fixture("zero-effect-crash-windows", false, true);
 
-    bridge::set_zero_effect_recovery_failpoint(bridge::ZeroEffectRecoveryFailpoint::AfterRepair);
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::AfterRepair);
     let repair_crash = bridge::prepare_zero_effect_recovery(&state_path, &state)
         .expect_err("interrupt after repaired worktree");
-    bridge::set_zero_effect_recovery_failpoint(bridge::ZeroEffectRecoveryFailpoint::None);
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
     assert!(repair_crash.contains("after repair"), "{repair_crash}");
     assert!(state.identity.worktree.is_dir());
     assert!(
@@ -27,10 +27,10 @@ fn autonomous_executor_bridge_zero_effect_marker_survives_repair_and_transfer_cr
     assert!(bridge::prepare_zero_effect_recovery(&state_path, &state)
         .expect("resume after repair crash"));
 
-    bridge::set_zero_effect_recovery_failpoint(bridge::ZeroEffectRecoveryFailpoint::AfterTransfer);
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::AfterTransfer);
     let transfer_crash = bridge::prepare_zero_effect_retry(&state_path, &state, None)
         .expect_err("interrupt after available transfer");
-    bridge::set_zero_effect_recovery_failpoint(bridge::ZeroEffectRecoveryFailpoint::None);
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
     assert!(
         transfer_crash.contains("after transfer"),
         "{transfer_crash}"
@@ -69,13 +69,13 @@ fn autonomous_executor_bridge_zero_effect_marker_survives_repair_and_transfer_cr
         !bridge::recovery_needs_runtime(&runtime_state, true),
         "marked zero-effect recovery must not reattach a released runtime"
     );
-    bridge::set_zero_effect_recovery_failpoint(
+    environment.zero_effect_recovery(
         bridge::ZeroEffectRecoveryFailpoint::AfterRuntimeClose,
     );
     let runtime_crash =
         bridge::prepare_zero_effect_retry(&runtime_state_path, &runtime_state, None)
             .expect_err("interrupt after durable runtime close");
-    bridge::set_zero_effect_recovery_failpoint(bridge::ZeroEffectRecoveryFailpoint::None);
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
     assert!(
         runtime_crash.contains("after runtime close"),
         "{runtime_crash}"
@@ -440,7 +440,7 @@ fn autonomous_executor_bridge_terminal_phases_bypass_zero_effect_recovery() {
 
 #[test]
 fn autonomous_executor_bridge_resumes_failure_after_terminal_claim_transition_crash() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("terminal-failure-crash");
     state.phase = bridge::BridgePhase::ImplementationComplete;
     state.identity.runtime_environment_dir = None;
@@ -465,7 +465,7 @@ fn autonomous_executor_bridge_resumes_failure_after_terminal_claim_transition_cr
     )
     .expect("seed active worktree ownership");
 
-    bridge::set_zero_effect_recovery_failpoint(
+    environment.zero_effect_recovery(
         bridge::ZeroEffectRecoveryFailpoint::AfterClaimTransition,
     );
     let interrupted = bridge::finalize_failed_executor_with_transition(
@@ -491,7 +491,7 @@ fn autonomous_executor_bridge_resumes_failure_after_terminal_claim_transition_cr
         },
     )
     .expect_err("interrupt after terminal claim transition");
-    bridge::set_zero_effect_recovery_failpoint(bridge::ZeroEffectRecoveryFailpoint::None);
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
     assert!(
         interrupted.to_string().contains("after claim transition"),
         "{interrupted}"

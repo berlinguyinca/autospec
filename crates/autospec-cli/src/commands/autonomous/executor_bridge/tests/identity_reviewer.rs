@@ -329,13 +329,13 @@ fn automatic_reviewer_identity_change_recovers_ci_passed_review() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_spawn_cleanup_failure_persists_quarantine_identity() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("direct-spawn-quarantine");
     let artifact_root = fixture.root.join("evidence");
     let plan = bridge::parse_direct_command_plan("/usr/bin/true").expect("direct plan");
 
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::NeverReady);
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::CleanupSignal);
+    environment.launch(bridge::LaunchFailpoint::NeverReady);
+    environment.cleanup(bridge::LaunchFailpoint::CleanupSignal);
     let first = bridge::execute_direct_plan(
         &fixture.repo,
         &plan,
@@ -343,8 +343,8 @@ fn autonomous_executor_bridge_spawn_cleanup_failure_persists_quarantine_identity
         None,
         Duration::from_secs(5),
     );
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
+    environment.cleanup(bridge::LaunchFailpoint::None);
     let first = first.expect_err("spawn cleanup failure must be quarantined");
     let launch = artifact_root.join("command-000.launch.json");
     let supervisor = direct_launch_supervisor_pid(&launch);
@@ -368,7 +368,7 @@ fn autonomous_executor_bridge_spawn_cleanup_failure_persists_quarantine_identity
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_descendant_capture_failure_cannot_retire_identity() {
-    let _environment = test_environment();
+    let environment = test_environment();
     // Break caught: a terminal exact harness omitted from the live descendant map being
     // misclassified as foreign instead of retained for exact reaping during cleanup.
     let fixture = GitFixture::new("direct-descendant-capture-quarantine");
@@ -380,7 +380,7 @@ fn autonomous_executor_bridge_descendant_capture_failure_cannot_retire_identity(
     ))
     .expect("descendant plan");
 
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::DescendantCapture);
+    environment.cleanup(bridge::LaunchFailpoint::DescendantCapture);
     let first = bridge::execute_direct_plan(
         &fixture.repo,
         &plan,
@@ -388,7 +388,7 @@ fn autonomous_executor_bridge_descendant_capture_failure_cannot_retire_identity(
         None,
         Duration::from_secs(5),
     );
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::None);
+    environment.cleanup(bridge::LaunchFailpoint::None);
     let first = first.expect_err("uncaptured live descendant must fail cleanup closed");
     let launch = artifact_root.join("command-000.launch.json");
     let supervisor = direct_launch_supervisor_pid(&launch);

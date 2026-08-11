@@ -374,7 +374,7 @@ fn autonomous_executor_bridge_post_complete_process_crash_reruns_real_producer()
 fn autonomous_executor_bridge_prebundle_crash_reruns_every_diagnostic_record() {
     // Break caught: a crash after every command/scanner record but before bundle creation
     // allowing recovered disk bytes to originate Pass on restart.
-    let _environment = test_environment();
+    let environment = test_environment();
     let previous_claim_override = std::env::var_os("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM");
     std::env::set_var("AUTOSPEC_TEST_EXACT_EVIDENCE_CLAIM", "1");
     let fixture = GitFixture::new("producer-prebundle-crash");
@@ -393,10 +393,10 @@ fn autonomous_executor_bridge_prebundle_crash_reruns_every_diagnostic_record() {
     let execution_count = fixture.root.join("execution-count");
     let scanner_root = fixture.root.join("scanner-binaries");
 
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::BeforeEvidenceBundle);
+    environment.launch(bridge::LaunchFailpoint::BeforeEvidenceBundle);
     let interrupted =
         run_process_generation_producer(&fixture.repo, &execution_count, &scanner_root);
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
     let interrupted = interrupted.expect_err("pre-bundle failpoint interrupts production");
     assert!(
         interrupted.contains("evidence-before-bundle"),

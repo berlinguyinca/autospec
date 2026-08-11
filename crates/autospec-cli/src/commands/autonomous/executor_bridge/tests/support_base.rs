@@ -15,20 +15,100 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub(super) static TEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 pub(super) static TEST_ENVIRONMENT: Mutex<()> = Mutex::new(());
 
-/// Orders the tests that arm process-wide failpoints.
+/// Restore every injected-fault switch to the value it was declared with.
+///
+/// The defaults are read off the declarations rather than assumed to be zero:
+/// CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER starts at 2, so storing 0 into it would quietly
+/// change behaviour instead of restoring it. The two *_SEQUENCE counters are deliberately
+/// absent — they are not failpoints and tests do not own them.
+fn reset_failpoints() {
+    for switch in [
+        &bridge::BASE_DRIFT_FAILPOINT,
+        &bridge::EMPTY_RETRY_BASE_FAILPOINT,
+        &bridge::RUNTIME_CLOSE_FAILPOINT,
+        &bridge::METADATA_WIP_FAILPOINT,
+        &bridge::WORKTREE_REPAIR_FAILPOINT,
+        &bridge::POST_CI_RECREATE_FAILPOINT,
+        &bridge::PRUNABLE_RECLAIM_FAILPOINT,
+        &bridge::ZERO_EFFECT_RECOVERY_FAILPOINT,
+        &bridge::ZERO_EFFECT_SCOPE_PARENT_SYNC_FAILPOINT,
+        &bridge::EXECUTOR_ROOT_HARDEN_FAILPOINT,
+        &bridge::IMPLEMENTATION_COMMIT_FAILPOINT,
+        &bridge::NPM_MANIFEST_OPEN_FAILPOINT,
+        &bridge::PARENT_CAPTURE_FAILPOINT,
+        &bridge::PARENT_REAP_FAILPOINT,
+        &bridge::RAW_READ_INTERRUPTED_ONCE,
+    ] {
+        switch.store(0, Ordering::SeqCst);
+    }
+    let none = bridge::LaunchFailpoint::None as u8;
+    bridge::LAUNCH_FAILPOINT.store(none, Ordering::SeqCst);
+    bridge::CLEANUP_FAILPOINT.store(none, Ordering::SeqCst);
+    bridge::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
+    bridge::LAST_SPAWN_HARNESS.store(0, Ordering::SeqCst);
+    #[cfg(target_os = "linux")]
+    bridge::CLEANUP_FAILPOINT_PREVIOUS_SUBREAPER.store(2, Ordering::SeqCst);
+}
+
+/// Orders the tests that arm process-wide failpoints, and disarms them on the way out.
 ///
 /// Recovering a poisoned guard is right here: this mutex sequences tests and guards no data
 /// invariant, so a holder that panicked has left nothing corrupt for the next test to find.
 /// Without recovery a single genuine failure cascades into a run of spurious
 /// `test environment lock` panics that hide it.
-pub(super) fn test_environment() -> std::sync::MutexGuard<'static, ()> {
-    TEST_ENVIRONMENT.lock().unwrap_or_else(|poison| poison.into_inner())
+///
+/// Dropping the guard resets the failpoints. Arming is a bare store, and a test that panics
+/// between arming and disarming leaves an injected fault set for whatever launches next —
+/// which reads as that test's bug, in a different file, with nothing linking the two. Drop
+/// runs on unwind, so the fault cannot outlive the test that asked for it (#2981).
+pub(super) struct TestEnvironment {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+/// Arming lives here and nowhere else.
+///
+/// Reaching any of these requires a value that owns the mutex guard, so a test cannot arm a
+/// process-wide fault without first ordering itself against every other test that launches.
+/// That was previously a convention, and eight tests did not follow it (#2989) — one of them
+/// hung the whole suite. A convention that eight tests break is not a convention.
+impl TestEnvironment {
+    pub(super) fn launch(&self, failpoint: bridge::LaunchFailpoint) {
+        bridge::set_launch_failpoint(failpoint);
+    }
+
+    pub(super) fn cleanup(&self, failpoint: bridge::LaunchFailpoint) {
+        bridge::set_cleanup_failpoint(failpoint);
+    }
+
+    pub(super) fn parent_capture(&self, enabled: bool) {
+        bridge::set_parent_capture_failpoint(enabled);
+    }
+
+    pub(super) fn parent_reap(&self, failpoint: bridge::ParentReapFailpoint) {
+        bridge::set_parent_reap_failpoint(failpoint);
+    }
+
+    pub(super) fn zero_effect_recovery(&self, failpoint: bridge::ZeroEffectRecoveryFailpoint) {
+        bridge::set_zero_effect_recovery_failpoint(failpoint);
+    }
+}
+
+impl Drop for TestEnvironment {
+    fn drop(&mut self) {
+        reset_failpoints();
+    }
+}
+
+pub(super) fn test_environment() -> TestEnvironment {
+    TestEnvironment {
+        _guard: TEST_ENVIRONMENT.lock().unwrap_or_else(|poison| poison.into_inner()),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -137,6 +217,35 @@ impl Drop for DirectCrashFixtureCleanup {
         }
         if let Some(harness) = &self.harness {
             Self::terminate_birth_tree(harness);
+        }
+    }
+}
+
+/// Reap a fixture child, giving up after `limit` instead of blocking forever.
+///
+/// A bare `waitpid(pid, None)` waits without bound, and the PID reaching it comes from
+/// LAST_SPAWN_SUPERVISOR — a process-global that any spawning test overwrites. Wait on a PID
+/// that is not ours and the call never returns; do it while holding TEST_ENVIRONMENT and the
+/// whole suite queues behind it until the harness is killed. That is the shape of #2981.
+///
+/// Serialising the armers stops the wrong PID arriving. This stops a wrong PID being fatal:
+/// the test fails in seconds with something legible instead of hanging, which is the
+/// difference between a bug you diagnose over lunch and one that costs an hour a sample.
+/// Returns whether the child was actually reaped.
+#[cfg(target_os = "linux")]
+pub(super) fn reap_fixture_child_within(pid: u32, limit: Duration) -> bool {
+    let pid = nix::unistd::Pid::from_raw(i32::try_from(pid).expect("fixture PID range"));
+    let deadline = Instant::now() + limit;
+    loop {
+        match nix::sys::wait::waitpid(pid, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
+            Ok(nix::sys::wait::WaitStatus::StillAlive) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(nix::sys::wait::WaitStatus::StillAlive) => return false,
+            Err(nix::errno::Errno::EINTR) => continue,
+            Ok(_) => return true,
+            // ECHILD/ESRCH: not ours, or already reaped. Either way, nothing to wait for.
+            Err(_) => return false,
         }
     }
 }

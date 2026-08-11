@@ -418,7 +418,7 @@ fn autonomous_executor_bridge_mutation_failure_persists_only_interrupted() {
 
 #[test]
 fn autonomous_executor_bridge_preverification_crash_never_publishes_complete() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("snapshot-preverify-crash");
     let mut state = supervision_state(&fixture);
     let snapshot =
@@ -427,7 +427,7 @@ fn autonomous_executor_bridge_preverification_crash_never_publishes_complete() {
     let event_log = fixture.root.join("log/executor.jsonl");
     let invocation = shell_invocation(&fixture.repo, "exit 0");
 
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::BeforeSnapshotVerification);
+    environment.launch(bridge::LaunchFailpoint::BeforeSnapshotVerification);
     let error = supervise_harness(
         &state_path,
         &event_log,
@@ -437,7 +437,7 @@ fn autonomous_executor_bridge_preverification_crash_never_publishes_complete() {
         supervision_config(2_000),
     )
     .expect_err("injected crash before snapshot verification");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
 
     assert!(error.contains("pre-verify"), "{error}");
     let recovered = PersistedInvocation::from_json(

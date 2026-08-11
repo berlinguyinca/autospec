@@ -16,12 +16,12 @@ use std::time::Duration;
 fn autonomous_executor_bridge_quarantine_crash_before_marker_leaves_both_anchors_live() {
     // Break caught: non-descendant classification signaling S before its durable quarantine
     // exists, allowing a restart to promote unrelated H into cleanup authority.
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = NonDescendantDirectFixture::new("quarantine-before-marker");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::OwnershipBeforeMarker);
+    environment.launch(bridge::LaunchFailpoint::OwnershipBeforeMarker);
     let error = bridge::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))
         .expect_err("pre-marker failpoint");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
     assert!(error.contains("ownership-before-marker"), "{error}");
     assert!(!fixture.marker_path().exists());
     fixture.assert_anchor_liveness(true, true);
@@ -32,12 +32,12 @@ fn autonomous_executor_bridge_quarantine_crash_before_marker_leaves_both_anchors
 fn autonomous_executor_bridge_quarantine_crash_after_marker_retries_supervisor_only() {
     // Break caught: a crash after marker durability stranding S so a retry either kills H or
     // skips exact supervisor cleanup.
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = NonDescendantDirectFixture::new("quarantine-after-marker");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::OwnershipAfterMarker);
+    environment.launch(bridge::LaunchFailpoint::OwnershipAfterMarker);
     let error = bridge::reconcile_direct_launch(&fixture.paths, Some(&fixture.intent))
         .expect_err("post-marker failpoint");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
     assert!(error.contains("ownership-after-marker"), "{error}");
     assert!(fixture.marker_path().is_file());
     fixture.assert_anchor_liveness(true, true);

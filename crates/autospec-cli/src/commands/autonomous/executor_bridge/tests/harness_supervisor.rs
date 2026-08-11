@@ -396,7 +396,7 @@ fn autonomous_executor_bridge_dead_supervisor_recovers_synced_exit_and_output() 
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_restart_finalizes_done_after_anchor_clear_crashes() {
-    let _environment = test_environment();
+    let environment = test_environment();
     // Break caught: clearing durable anchors before drain/snapshot, then treating the dead
     // sidecar as unproven on restart even though strict whole-tree DONE is durable.
     for boundary in [
@@ -438,7 +438,7 @@ fn autonomous_executor_bridge_restart_finalizes_done_after_anchor_clear_crashes(
         let snapshot =
             MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
 
-        bridge::set_launch_failpoint(boundary);
+        environment.launch(boundary);
         let interrupted = bridge::supervise_validated_harness(
             &state_path,
             &event_log,
@@ -447,7 +447,7 @@ fn autonomous_executor_bridge_restart_finalizes_done_after_anchor_clear_crashes(
             &snapshot,
             supervision_config(500),
         );
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
         interrupted.expect_err("recovery failpoint interrupts finalization");
         assert!(state.supervisor.is_none());
         assert!(state.process.is_none());
