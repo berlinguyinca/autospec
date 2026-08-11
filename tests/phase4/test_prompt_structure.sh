@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Verifies the Phase 4 implementer prompt has all required sections, documents
-# the codex-absent graceful-skip path, and does not delegate to Skill calls.
+# Verifies the Phase 4 implementer prompt has all required sections, treats
+# independent review as a blocking gate, and does not delegate to Skill calls.
 set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 prompt="$SCRIPT_DIR/skills/autospec-run/prompts/phase4-implementer.md"
@@ -10,18 +10,20 @@ if [ ! -f "$prompt" ]; then
     exit 1
 fi
 
-for section in "## Expand" "## Implement" "## Finalize" "## Peer-review" "## Evaluate findings" "## Lock-step compliance"; do
+for section in "## Expand" "## Implement" "## Finalize" "## Independent review (blocking)" "## Evaluate findings" "## Lock-step compliance"; do
     if ! grep -qF "$section" "$prompt"; then
         echo "FAIL: required section missing: $section"
         exit 1
     fi
 done
 
-# Must reference graceful Codex skip.
-if ! grep -qi "codex not on PATH\|codex.*skip\|graceful" "$prompt"; then
-    echo "FAIL: graceful Codex skip not documented"
-    exit 1
-fi
+# Missing foreground review must fail closed and return the issue to the queue.
+for required in "independent-review-adapter.sh" 'Exit `75`' "never skip review" "do not merge the PR"; do
+    if ! grep -qiF "$required" "$prompt"; then
+        echo "FAIL: independent-review fail-closed contract missing: $required"
+        exit 1
+    fi
+done
 
 # Must NOT invoke Skill tool inside (the prompt is self-contained by design).
 if grep -qE 'Skill tool|invoke the .* skill|/turboplan|/draft-spec|/peer-review' "$prompt"; then
