@@ -74,7 +74,7 @@ fn autonomous_executor_bridge_missing_adopted_journal_fails_without_truncation()
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_cleanup_failure_keeps_durable_ownership() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("cleanup-quarantine");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
@@ -87,8 +87,8 @@ fn autonomous_executor_bridge_cleanup_failure_keeps_durable_ownership() {
     );
     let snapshot =
         MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::AdoptedPoll);
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::CleanupSignal);
+    environment.launch(bridge::LaunchFailpoint::AdoptedPoll);
+    environment.cleanup(bridge::LaunchFailpoint::CleanupSignal);
     let error = bridge::supervise_validated_harness(
         &state_path,
         &event_log,
@@ -98,8 +98,8 @@ fn autonomous_executor_bridge_cleanup_failure_keeps_durable_ownership() {
         supervision_config(500),
     )
     .expect_err("cleanup failure must quarantine");
-    bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
-    bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::None);
+    environment.launch(bridge::LaunchFailpoint::None);
+    environment.cleanup(bridge::LaunchFailpoint::None);
 
     assert!(error.contains("cleanup"), "{error}");
     let durable = PersistedInvocation::from_json(
@@ -125,7 +125,7 @@ fn autonomous_executor_bridge_cleanup_failure_keeps_durable_ownership() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_direct_poll_error_is_structured_and_cleared() {
-    let _environment = test_environment();
+    let environment = test_environment();
     for failpoint in [
         bridge::LaunchFailpoint::PostReturnIdentity,
         bridge::LaunchFailpoint::DirectSetup,
@@ -137,7 +137,7 @@ fn autonomous_executor_bridge_direct_poll_error_is_structured_and_cleared() {
         let event_log = fixture.root.join("log/executor.jsonl");
         let snapshot =
             MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
-        bridge::set_launch_failpoint(failpoint);
+        environment.launch(failpoint);
         let error = supervise_harness(
             &state_path,
             &event_log,
@@ -147,7 +147,7 @@ fn autonomous_executor_bridge_direct_poll_error_is_structured_and_cleared() {
             supervision_config(500),
         )
         .expect_err("direct supervision failure");
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
 
         assert!(error.contains("direct-"), "{error}");
         assert!(state.supervisor.is_none());
@@ -161,7 +161,7 @@ fn autonomous_executor_bridge_direct_poll_error_is_structured_and_cleared() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_parent_setup_failures_reap_supervisor_and_harness() {
-    let _environment = test_environment();
+    let environment = test_environment();
     for failpoint in [
         bridge::LaunchFailpoint::ParentAfterPidfd,
         bridge::LaunchFailpoint::ParentHarnessCapture,
@@ -173,7 +173,7 @@ fn autonomous_executor_bridge_parent_setup_failures_reap_supervisor_and_harness(
             MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
         bridge::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
         bridge::LAST_SPAWN_HARNESS.store(0, Ordering::SeqCst);
-        bridge::set_launch_failpoint(failpoint);
+        environment.launch(failpoint);
         let error = supervise_harness(
             &fixture.root.join("state/invocation.json"),
             &fixture.root.join("log/executor.jsonl"),
@@ -183,7 +183,7 @@ fn autonomous_executor_bridge_parent_setup_failures_reap_supervisor_and_harness(
             supervision_config(500),
         )
         .expect_err("parent setup failpoint");
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
+        environment.launch(bridge::LaunchFailpoint::None);
         assert!(error.contains("parent-"), "{error}");
 
         for pid in [
@@ -215,15 +215,15 @@ fn autonomous_executor_bridge_parent_setup_failures_reap_supervisor_and_harness(
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_capture_failure_retries_interrupted_exact_reap() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let fixture = GitFixture::new("capture-reap-interrupted");
     let mut state = supervision_state(&fixture);
     let state_path = fixture.root.join("state/invocation.json");
     let snapshot =
         MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
     bridge::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
-    bridge::set_parent_capture_failpoint(true);
-    bridge::set_parent_reap_failpoint(bridge::ParentReapFailpoint::InterruptedOnce);
+    environment.parent_capture(true);
+    environment.parent_reap(bridge::ParentReapFailpoint::InterruptedOnce);
 
     let error = supervise_harness(
         &state_path,
@@ -234,8 +234,8 @@ fn autonomous_executor_bridge_capture_failure_retries_interrupted_exact_reap() {
         supervision_config(100),
     )
     .expect_err("capture failure after fork");
-    bridge::set_parent_capture_failpoint(false);
-    bridge::set_parent_reap_failpoint(bridge::ParentReapFailpoint::None);
+    environment.parent_capture(false);
+    environment.parent_reap(bridge::ParentReapFailpoint::None);
 
     let supervisor = bridge::LAST_SPAWN_SUPERVISOR.load(Ordering::SeqCst);
     assert!(error.contains("capture"), "{error}");
@@ -253,7 +253,7 @@ fn autonomous_executor_bridge_capture_failure_retries_interrupted_exact_reap() {
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine() {
-    let _environment = test_environment();
+    let environment = test_environment();
     nix::sys::prctl::set_child_subreaper(false).expect("clear fixture subreaper");
     let fixture = GitFixture::new("capture-reap-quarantine");
     let mut state = supervision_state(&fixture);
@@ -262,8 +262,8 @@ fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine(
     let snapshot =
         MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
     bridge::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
-    bridge::set_parent_capture_failpoint(true);
-    bridge::set_parent_reap_failpoint(bridge::ParentReapFailpoint::Failure);
+    environment.parent_capture(true);
+    environment.parent_reap(bridge::ParentReapFailpoint::Failure);
 
     let error = supervise_harness(
         &state_path,
@@ -295,8 +295,8 @@ fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine(
         )
     };
 
-    bridge::set_parent_capture_failpoint(false);
-    bridge::set_parent_reap_failpoint(bridge::ParentReapFailpoint::None);
+    environment.parent_capture(false);
+    environment.parent_reap(bridge::ParentReapFailpoint::None);
     // Bounded: see reap_fixture_child_within. An unbounded wait here is what turned a wrong
     // PID into a suite-wide hang (#2981), and this was the only reap in the tree without a
     // bound. The result is deliberately ignored — the assertions below are the real check.
@@ -331,7 +331,7 @@ fn autonomous_executor_bridge_capture_and_reap_failure_retains_exact_quarantine(
 #[cfg(target_os = "linux")]
 #[test]
 fn autonomous_executor_bridge_parent_cleanup_failure_persists_quarantine() {
-    let _environment = test_environment();
+    let environment = test_environment();
     for (parent_failpoint, harness_identity_expected) in [
         (bridge::LaunchFailpoint::ParentHarnessPidRead, false),
         (bridge::LaunchFailpoint::ParentHarnessBirth, false),
@@ -356,8 +356,8 @@ fn autonomous_executor_bridge_parent_cleanup_failure_persists_quarantine() {
             let snapshot =
                 MutationSnapshot::capture(&fixture.repo, &state.identity.branch).expect("snapshot");
             bridge::LAST_SPAWN_SUPERVISOR.store(0, Ordering::SeqCst);
-            bridge::set_launch_failpoint(parent_failpoint);
-            bridge::set_cleanup_failpoint(cleanup_failpoint);
+            environment.launch(parent_failpoint);
+            environment.cleanup(cleanup_failpoint);
             let error = supervise_harness(
                 &state_path,
                 &event_log,
@@ -371,8 +371,8 @@ fn autonomous_executor_bridge_parent_cleanup_failure_persists_quarantine() {
                 &fs::read_to_string(&state_path).expect("durable parent quarantine"),
             )
             .expect("strict parent quarantine");
-            bridge::set_launch_failpoint(bridge::LaunchFailpoint::None);
-            bridge::set_cleanup_failpoint(bridge::LaunchFailpoint::None);
+            environment.launch(bridge::LaunchFailpoint::None);
+            environment.cleanup(bridge::LaunchFailpoint::None);
 
             let supervisor_pid = bridge::LAST_SPAWN_SUPERVISOR.load(Ordering::SeqCst);
             if supervisor_pid != 0
@@ -451,8 +451,8 @@ fn autonomous_executor_bridge_environment_guard_disarms_after_a_panic() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(|_| {}));
     let outcome = std::panic::catch_unwind(|| {
-        let _environment = test_environment();
-        bridge::set_launch_failpoint(bridge::LaunchFailpoint::ParentAfterPidfd);
+        let environment = test_environment();
+        environment.launch(bridge::LaunchFailpoint::ParentAfterPidfd);
         panic!("deliberate: dies between arming and disarming");
     });
     std::panic::set_hook(previous);
@@ -463,5 +463,34 @@ fn autonomous_executor_bridge_environment_guard_disarms_after_a_panic() {
         bridge::LAUNCH_FAILPOINT.load(Ordering::SeqCst),
         none,
         "a panicking armer left its failpoint set"
+    );
+}
+
+/// Arming must go through the guard, and that has to be checked rather than trusted.
+///
+/// The methods on TestEnvironment cannot be reached without holding the mutex, but the free
+/// `set_*_failpoint` functions are still visible to every test module — a descendant can name
+/// an ancestor's private items. Eight tests already called them directly (#2989) and one hung
+/// the whole suite. This fails the moment a ninth does.
+#[test]
+fn autonomous_executor_bridge_failpoints_are_armed_only_through_the_guard() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/commands/autonomous/executor_bridge/tests");
+    let mut offenders = Vec::new();
+    for entry in fs::read_dir(&root).expect("read test modules") {
+        let path = entry.expect("test module entry").path();
+        if path.file_name().is_some_and(|name| name == "support_base.rs") {
+            continue; // the guard methods themselves live here
+        }
+        let body = fs::read_to_string(&path).expect("read test module");
+        for (number, line) in body.lines().enumerate() {
+            if line.contains(concat!("bridge::", "set_")) && line.contains("failpoint(") {
+                offenders.push(format!("{}:{}", path.display(), number + 1));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "arm through the environment guard, not the free setter: {offenders:?}"
     );
 }

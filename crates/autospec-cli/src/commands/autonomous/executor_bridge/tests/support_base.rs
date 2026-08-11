@@ -71,6 +71,34 @@ pub(super) struct TestEnvironment {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
+/// Arming lives here and nowhere else.
+///
+/// Reaching any of these requires a value that owns the mutex guard, so a test cannot arm a
+/// process-wide fault without first ordering itself against every other test that launches.
+/// That was previously a convention, and eight tests did not follow it (#2989) — one of them
+/// hung the whole suite. A convention that eight tests break is not a convention.
+impl TestEnvironment {
+    pub(super) fn launch(&self, failpoint: bridge::LaunchFailpoint) {
+        bridge::set_launch_failpoint(failpoint);
+    }
+
+    pub(super) fn cleanup(&self, failpoint: bridge::LaunchFailpoint) {
+        bridge::set_cleanup_failpoint(failpoint);
+    }
+
+    pub(super) fn parent_capture(&self, enabled: bool) {
+        bridge::set_parent_capture_failpoint(enabled);
+    }
+
+    pub(super) fn parent_reap(&self, failpoint: bridge::ParentReapFailpoint) {
+        bridge::set_parent_reap_failpoint(failpoint);
+    }
+
+    pub(super) fn zero_effect_recovery(&self, failpoint: bridge::ZeroEffectRecoveryFailpoint) {
+        bridge::set_zero_effect_recovery_failpoint(failpoint);
+    }
+}
+
 impl Drop for TestEnvironment {
     fn drop(&mut self) {
         reset_failpoints();
