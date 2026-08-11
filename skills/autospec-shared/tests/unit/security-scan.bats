@@ -193,3 +193,42 @@ EOF
     [ "$status" -eq 0 ]
     ! printf '%s' "$output" | grep -q 'concat-benign.py'
 }
+
+@test "--tree mode ignores its own leftover gitignored output while still catching real secrets" {
+    git -C "$TMP" init -q
+    printf '.autospec/\n' > "$TMP/.gitignore"
+    printf 'ok = 1\n' > "$TMP/clean.py"
+    git -C "$TMP" add .gitignore clean.py
+    git -C "$TMP" -c user.email=t@t -c user.name=t commit -qm base
+    mkdir -p "$TMP/.autospec/security"
+    printf '{"dedupe_key":"sec-deadbeefdeadbeef"}\n' > "$TMP/.autospec/security/leftover.jsonl"
+    mkdir -p "$TMP/bin"
+    SCANNED="$TMP/scanned-files.txt"
+    cat > "$TMP/bin/gitleaks" <<EOF
+#!/usr/bin/env bash
+case "\$1" in dir) [ "\$2" = "--help" ] && exit 0 ;; esac
+root="\${@: -1}"
+find "\$root" -type f | sort > "$SCANNED"
+prev=""; for a in "\$@"; do [ "\$prev" = "--report-path" ] && echo "[]" > "\$a"; prev="\$a"; done
+exit 0
+EOF
+    chmod +x "$TMP/bin/gitleaks"
+    export PATH="$TMP/bin:$PATH"
+    run bash "$SCAN" --tree --root "$TMP" --only secrets
+    [ "$status" -eq 0 ]
+    # Each check must be its own `run`: a bare `! cmd` that is not the final
+    # statement is exempt from errexit and cannot fail the test on its own.
+    run grep -q "leftover.jsonl" "$SCANNED"
+    [ "$status" -ne 0 ]
+    run grep -q "clean.py" "$SCANNED"
+    [ "$status" -eq 0 ]
+}
+
+@test "--tree mode falls back to a raw scan and warns when root is not a git repo" {
+    mkdir -p "$TMP/plainroot"
+    cp "$FIX/gpl-header.c" "$TMP/plainroot/gpl-header.c"
+    run bash "$SCAN" --tree --root "$TMP/plainroot" --only license
+    [ "$status" -eq 0 ]
+    printf '%s' "$output" | grep -q "not a git work tree"
+    printf '%s' "$output" | grep -q "gpl-header.c"
+}
