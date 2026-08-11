@@ -419,7 +419,7 @@ fn implementation_lint_repair_exhaustion_persists_final_once_without_attempt_fou
 
 #[test]
 fn implementation_lint_repair_exhaustion_replays_needs_human_cleanup() {
-    let _environment = test_environment();
+    let environment = test_environment();
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("implementation-lint-exhausted-cleanup");
     state.phase = bridge::BridgePhase::ImplementationComplete;
@@ -428,7 +428,7 @@ fn implementation_lint_repair_exhaustion_replays_needs_human_cleanup() {
     let state_path = fixture.root.join("state/exhausted-lint.json");
     bridge::write_invocation_atomic(&state_path, &state).expect("persist failure state");
 
-    bridge::set_zero_effect_recovery_failpoint(
+    environment.zero_effect_recovery(
         bridge::ZeroEffectRecoveryFailpoint::AfterClaimTransition,
     );
     let interrupted = bridge::finalize_failed_executor_with_transition(
@@ -445,7 +445,7 @@ fn implementation_lint_repair_exhaustion_replays_needs_human_cleanup() {
         },
     )
     .expect_err("interrupt after needs-human transition");
-    bridge::set_zero_effect_recovery_failpoint(bridge::ZeroEffectRecoveryFailpoint::None);
+    environment.zero_effect_recovery(bridge::ZeroEffectRecoveryFailpoint::None);
     assert!(interrupted.to_string().contains("after claim transition"));
     let durable = bridge::PersistedInvocation::from_json(
         &fs::read_to_string(&state_path).expect("read interrupted state"),
