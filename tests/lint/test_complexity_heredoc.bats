@@ -5,6 +5,11 @@
 # from physical indentation. Lines inside heredocs (`<<EOF`, `<<'EOF'`,
 # `<<-EOF`, etc.) are string literals, not code — but the legacy detector
 # counted their indentation as code nesting. This suite locks in the fix.
+#
+# Every assertion accepts an optional INFO: prefix, because this suite is about whether
+# the detector SEES the nesting, not about whether seeing it blocks a commit — COMPLEXITY
+# is advisory unless AUTOSPEC_COMPLEXITY_ENFORCE=1. Anchoring on the blocking prefix would
+# make the four "emits no COMPLEXITY" cases pass on any output at all.
 
 setup() {
     REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
@@ -48,7 +53,7 @@ PAYLOAD
     diff="$TMPDIR_BATS/d.diff"
     make_diff "scripts/heredoc_single.sh" "$src" "$diff"
     run bash "$LINT" --diff-file "$diff"
-    [ "$(printf '%s\n' "$output" | grep -c '^COMPLEXITY:')" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^(INFO:)?COMPLEXITY:')" -eq 0 ]
 }
 
 @test "heredoc with unquoted marker (variable-expanding) is also skipped" {
@@ -67,7 +72,7 @@ PAYLOAD
     diff="$TMPDIR_BATS/d.diff"
     make_diff "scripts/heredoc_unq.sh" "$src" "$diff"
     run bash "$LINT" --diff-file "$diff"
-    [ "$(printf '%s\n' "$output" | grep -c '^COMPLEXITY:')" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^(INFO:)?COMPLEXITY:')" -eq 0 ]
 }
 
 @test "heredoc with tab-stripped form (<<-EOF) closes on tab-indented marker" {
@@ -89,7 +94,7 @@ PAYLOAD
     diff="$TMPDIR_BATS/d.diff"
     make_diff "scripts/heredoc_dash.sh" "$src" "$diff"
     run bash "$LINT" --diff-file "$diff"
-    [ "$(printf '%s\n' "$output" | grep -c '^COMPLEXITY:')" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^(INFO:)?COMPLEXITY:')" -eq 0 ]
 }
 
 @test "real bash control flow nested 5+ levels still emits COMPLEXITY" {
@@ -115,7 +120,7 @@ PAYLOAD
     diff="$TMPDIR_BATS/d.diff"
     make_diff "scripts/real_nest.sh" "$src" "$diff"
     run bash "$LINT" --diff-file "$diff"
-    [ "$(printf '%s\n' "$output" | grep -c '^COMPLEXITY:.*nesting depth')" -ge 1 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^(INFO:)?COMPLEXITY:.*nesting depth')" -ge 1 ]
 }
 
 @test "heredoc inside function with only shallow real control flow emits no COMPLEXITY" {
@@ -136,7 +141,7 @@ PAYLOAD
     diff="$TMPDIR_BATS/d.diff"
     make_diff "scripts/shallow_heredoc.sh" "$src" "$diff"
     run bash "$LINT" --diff-file "$diff"
-    [ "$(printf '%s\n' "$output" | grep -c '^COMPLEXITY:')" -eq 0 ]
+    [ "$(printf '%s\n' "$output" | grep -cE '^(INFO:)?COMPLEXITY:')" -eq 0 ]
 }
 
 @test "real qa-finding-filter.sh and qa-verify-finding.sh produce zero COMPLEXITY findings" {
@@ -156,7 +161,7 @@ PAYLOAD
         } >> "$diff"
     done
     run bash "$LINT" --diff-file "$diff"
-    complexity_lines="$(printf '%s\n' "$output" | grep '^COMPLEXITY:' || true)"
+    complexity_lines="$(printf '%s\n' "$output" | grep -E '^(INFO:)?COMPLEXITY:' || true)"
     [ -z "$complexity_lines" ] || {
         printf 'unexpected COMPLEXITY findings:\n%s\n' "$complexity_lines" >&2
         return 1
