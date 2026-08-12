@@ -958,7 +958,7 @@ EOF
 
   [ "$status" -eq 0 ]
   [ -f "$self_log" ]
-  grep -q 'apply' "$self_log"
+  grep -q 'advance' "$self_log" && grep -q 'review-outcomes' "$self_log" && grep -q 'gaps.json' "$self_log" && grep -q 'apply' "$self_log"
   grep -q -- '--apply' "$self_log"
   [[ "$output" == *"Tier 3 architecture result: dry=false filed=1"* ]]
 }
