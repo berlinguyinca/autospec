@@ -7,11 +7,11 @@ use super::super::{
     recover_invocation, runtime_session_adapter, BridgePhase, HarnessConfig, HarnessKind,
 };
 use super::support_base::{
-    environment, git_stdout, installed_aliases, test_environment, test_root, write_alias_table,
-    write_executable, DetachedForkedCleanup, GitFixture,
+    environment, git, git_stdout, installed_aliases, test_environment, test_root,
+    write_alias_table, write_executable, DetachedForkedCleanup, GitFixture,
 };
 use super::support_invocation::{
-    commit_implementation, implementation_proof_fixture, persisted_invocation, reviewer_request,
+    implementation_proof_fixture, persisted_invocation, reviewer_request,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -22,6 +22,19 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+fn commit_normal_risk_reviewer_fixture(state: &bridge::PersistedInvocation) {
+    fs::write(
+        state.identity.worktree.join("implementation.txt"),
+        "implemented\n",
+    )
+    .expect("write implementation");
+    git(&state.identity.worktree, &["add", "implementation.txt"]);
+    git(
+        &state.identity.worktree,
+        &["commit", "-m", "feat: implement reviewer fixture"],
+    );
+}
 
 #[cfg(unix)]
 #[test]
@@ -102,7 +115,7 @@ fn autonomous_executor_bridge_explicit_override_precedes_runtime_marker() {
 fn autonomous_executor_bridge_resolves_private_external_reviewer_when_override_is_unset() {
     // Break caught: CI completion still requiring a hand-written reviewer command.
     let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("automatic-reviewer");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
     state.harness = HarnessKind::Claude;
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
@@ -170,7 +183,7 @@ fn autonomous_executor_bridge_resolves_private_external_reviewer_when_override_i
 fn automatic_reviewer_identity_change_preserves_superseded_normalizer() {
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("automatic-reviewer-upgrade");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
     state.harness = HarnessKind::Claude;
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
@@ -219,7 +232,7 @@ fn autonomous_executor_bridge_codex_reviewer_ignores_host_policy_but_keeps_auth(
     // Break caught: retained CODEX_HOME loading host MCP, hook, or execpolicy mutation authority.
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("automatic-codex-host-policy");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
     state.harness = HarnessKind::Claude;
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
@@ -319,7 +332,7 @@ fn autonomous_executor_bridge_normalizes_claude_and_opencode_stdout_verdicts() {
     for kind in ["claude", "opencode"] {
         let (fixture, mut state, _snapshot, _) =
             implementation_proof_fixture(&format!("automatic-{kind}-reviewer"));
-        commit_implementation(&state);
+        commit_normal_risk_reviewer_fixture(&state);
         state.phase = BridgePhase::CiPassed;
         state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
         let state_path = fixture.root.join("state/invocation.json");
@@ -449,9 +462,7 @@ fn autonomous_executor_bridge_automatic_reviewer_normalizer_reaps_setsid_descend
          /usr/bin/sleep 0.1\n\
          printf '%s\\n' '{}' > \"$1\"\n",
             setsid.display(),
-            super::support_review::valid_review_json(
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            )
+            super::support_review::valid_review_json("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         ),
     );
     let invocation = bridge::ValidatedInvocation {

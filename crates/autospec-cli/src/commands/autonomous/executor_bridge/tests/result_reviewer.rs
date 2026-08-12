@@ -101,10 +101,11 @@ fn autonomous_executor_bridge_reviewer_rejects_forged_github_comment() {
         environment: BTreeMap::from([("API_CALLS".into(), api_calls.clone().into_os_string())]),
     };
     let plan = bridge::parse_direct_command_plan("/usr/bin/printf LGTM").expect("review plan");
+    let policy = test_review_policy(state.harness);
     let reviewer = bridge::IndependentReviewer {
         plan,
         automatic: None,
-        policy: test_review_policy(state.harness),
+        policy,
     };
 
     let error = bridge::run_strict_independent_reviewer_with_refresh(
@@ -220,7 +221,7 @@ fn autonomous_executor_bridge_merge_revalidates_result_ci_and_review() {
     bridge::persist_patch_size_admission(&state_path, &admission).unwrap();
     bridge::persist_accepted_executor_result(&state_path, &mut state, &evidence)
         .expect("accepted result");
-    super::support_review::write_valid_schema4_review_receipt(&state_path, &state, &fixture.root);
+    super::support_review::write_valid_schema5_review_receipt(&state_path, &state, &fixture.root);
     let pr_state = fixture.root.join("merge-pr.json");
     let comments = fixture.root.join("merge-comments.json");
     let checks = fixture.root.join("merge-checks.json");

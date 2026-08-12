@@ -69,8 +69,9 @@ diagnostics without treating transport traces as findings. Codex uses its final
 message artifact as the verdict; Claude and OpenCode use their captured text
 output. Every harness must return exactly one closed-schema JSON object with
 schema `1`, the exact reviewed commit, a verdict, nonempty examined surfaces and
-tests, checked integration paths, and blocking findings. Integration paths are
-mandatory when the resolved policy requires an integration smoke. Only an
+tests, exact policy-bound integration citations, and blocking findings. The
+integration citation array must exactly match the sealed requirements digest,
+evidence digest, and command-record paths supplied to the reviewer. Only an
 exact-commit `lgtm` with zero blocking findings authorizes the review.
 
 The trusted normalizer validates that structured JSON before emitting the
@@ -82,11 +83,12 @@ the Codex result fails review rather than accepting truncated evidence. The
 verdict file is cleared before every launch so an interrupted attempt cannot
 authorize its retry.
 
-Schema-4 receipts bind the exact commit, the full resolved review requirements,
-provider selection, policy digest, structured semantic verdict and digest,
-normalizer, transport diagnostics, and raw result artifacts. Recovery rereads
-and revalidates each bound artifact before restoring `ReviewPassed`. Legacy
-schema-2 or schema-3 receipts are archived, the invocation returns to
+Schema-5 receipts bind the exact commit, the full resolved review requirements,
+provider selection, policy digest, changed-path component and producer/consumer
+inventory, immutable integration-record citations, structured semantic verdict
+and digest, normalizer, transport diagnostics, and raw result artifacts.
+Recovery rereads and revalidates each bound artifact before restoring
+`ReviewPassed`. Legacy schema-2 through schema-4 receipts are archived, the invocation returns to
 `CiPassed`, and review runs again under the current policy. Local, git, GitHub,
 or other remote mutation during review fails the gate.
 
@@ -98,4 +100,4 @@ If no configured alias is usable, the executor reports
 `AUTOSPEC_EXECUTOR_REVIEW_COMMAND` cannot authorize production autonomous
 review. When it is present, the executor fails closed and requires a configured
 structured harness alias so a free-form command cannot bypass semantic evidence
-or schema-4 receipt binding.
+or schema-5 receipt binding.
