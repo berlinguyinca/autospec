@@ -184,6 +184,16 @@ mod requeue {
     }
 
     #[test]
+    fn stale_heartbeat_publication_stays_owned_until_recovery_quarantines_it() {
+        let record = owner_record("2026-07-29T00:49:45Z", 1, "heartbeat-pending:none");
+
+        assert!(
+            owner_still_holds("owner/repo", 42, &record).expect("pending owner classification"),
+            "direct acquisition must not replace a heartbeat generation that recovery did not quarantine"
+        );
+    }
+
+    #[test]
     fn a_merged_claim_is_left_alone() {
         assert!(
             !claim_is_abandoned(Some(&record("merged", "2026-07-29T00:49:45Z")), false),

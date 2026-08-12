@@ -140,11 +140,11 @@ pub(super) fn owner_still_holds(
     issue: u64,
     record: &RunStateRecord,
 ) -> Result<bool, super::CommandFailure> {
-    if !conductor_claim_owner_holds_lease(record) {
-        return Ok(false);
-    }
     if heartbeat_publication_in_flight(&record.step) {
         return Ok(true);
+    }
+    if !conductor_claim_owner_holds_lease(record) {
+        return Ok(false);
     }
     current_owner_heartbeat_holds(repo, issue, record)
 }
