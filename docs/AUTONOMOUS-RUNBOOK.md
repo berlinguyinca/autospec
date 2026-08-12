@@ -59,8 +59,8 @@ authentication remain available. OpenCode's separate
 work, but automatic review does not use it. `install.sh` ships a default
 adapter (`~/.autospec/scripts/lib/opencode-containment-adapter.sh`) and the
 executor bridge auto-discovers it (explicit env override, then
-`AUTOSPEC_SCRIPTS_DIR`, `~/.autospec/scripts`, then the checkout) when no
-adapter is set; it applies the implementer permission profile
+`AUTOSPEC_SCRIPTS_DIR`, then `~/.autospec/scripts`) when no adapter is set;
+it applies the implementer permission profile
 (deny-by-default, workspace-scoped edit/bash only). Operators wanting OS-level
 isolation may replace it with a bwrap/firejail wrapper honoring the same argv
 contract.
