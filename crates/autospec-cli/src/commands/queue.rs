@@ -12,8 +12,9 @@ use autospec_core::coordination::{
 };
 
 use super::claim::{
+    lease::requeue_abandoned_active_issue,
     active_issue_counts_toward_worker_capacity, reconcile_authoritative_active_issue,
-    recover_active_issue, requeue_abandoned_active_issue,
+    recover_active_issue,
 };
 use super::lint::{
     confirm_issue_safety_for_queue, load_issue_safety_policy, review_issue_safety_for_queue,
@@ -484,14 +485,7 @@ pub(crate) fn ready_plan_for(
     let mut active = list_issues(repo, "in-progress-by-bot")?;
     for issue in &active {
         let _ = reconcile_authoritative_active_issue(repo, issue.number);
-    }
-    for issue in &active {
         let _ = recover_active_issue(repo, issue.number, 300);
-    }
-    // A worker that died without releasing leaves its issue labelled out of the
-    // candidate pool. Put it back before the pool is read, so the repair lands in
-    // this cycle rather than the next one.
-    for issue in &active {
         let _ = requeue_abandoned_active_issue(repo, issue.number);
     }
     let candidates = list_issues(repo, "auto-implement")?;
