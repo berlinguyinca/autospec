@@ -101,6 +101,24 @@ shipped during this run, emits surviving gaps as JSON (`emit-gaps.sh`), and file
 `auto-implement,gap-remediation,priority:high` issues (`gap-remediation-loop.sh`), capped at
 `AUTOSPEC_GAP_MAX_ROUNDS` rounds (default 2) to bound the feedback loop.
 
+Attributed high-severity escapes also enter the bounded Tier-3 review-policy
+learning loop. Autospec asks eight fixed questions about the failed invariant,
+producer/consumer boundary, falsifier, reviewer correlation, smallest change,
+false-block risk, promotion sample, and rollback. It emits one deduplicated
+hypothesis with bounded files and measurable before/after criteria; repeated
+evidence increases frequency instead of creating duplicate work.
+
+Strengthening and behavior-neutral hypotheses follow the ordinary
+`needs-classify` + `origin:self` issue path. Weakening proposals are visible but
+report-only. Experiments append `candidate`, `shadow`, `canary`, and terminal
+`promoted`, `held`, or `rolled_back` events to
+`.autospec/review-policy-lifecycle.jsonl`. Promotion is fail-closed until the
+sample floor, escape-rate, cost, provider-diversity, and rollback-digest gates
+all pass; a canary regression appends a rollback event referencing the prior
+policy rather than rewriting history.
+Correction rows supersede earlier observations by digest, and unattributed
+outcomes remain visible evidence but cannot satisfy a promotion sample floor.
+
 ### `/autospec-fleet`
 
 <!-- autospec-doc-scope:
