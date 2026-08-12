@@ -95,3 +95,18 @@ EOF
     [ -n "$cfg_dir" ]
     [ "$cfg_dir" != "$HOME/.config/opencode" ]
 }
+
+@test "bwrap adapter isolates the filesystem: worktree writable, host read-only" {
+    if ! command -v bwrap >/dev/null 2>&1; then
+        skip "bubblewrap not installed"
+    fi
+    local bwrap_adapter
+    bwrap_adapter="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)/scripts/lib/opencode-containment-bwrap.sh"
+
+    local wt="$TMP/worktree"
+    mkdir -p "$wt"
+    run bash -c "cd '$wt' && '$bwrap_adapter' /bin/sh -c 'touch proof-writable && (touch /etc/autospec-should-fail 2>/dev/null && echo HOST_WRITABLE || echo HOST_READ_ONLY)'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"HOST_READ_ONLY"* ]]
+    [ -f "$wt/proof-writable" ]
+}

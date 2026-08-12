@@ -253,6 +253,9 @@ promotion samples.
 | `AUTOSPEC_HANDOFF_DISPATCHER_KIND` | initiating session | Select the native autonomous executor (`claude`, `codex`, or `opencode`); overrides Codex, Claude, and OpenCode runtime markers. Without a marker, executors are PATH-probed in alias-table order. |
 | `AUTOSPEC_HARNESS_RUNTIME_ALIASES` | `$AUTOSPEC_CONFIG_DIR/harness-runtime-aliases.tsv`, otherwise `~/.autospec/config/harness-runtime-aliases.tsv` | Override the installed four-column TSV mapping harness kind, executable alias, approval alias, and display name. |
 | `AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER` | auto-discovered (`~/.autospec/scripts/lib/opencode-containment-adapter.sh`) | Absolute containment adapter required before the native executor may launch mutating OpenCode work; auto-discovered from `AUTOSPEC_SCRIPTS_DIR`/`~/.autospec/scripts` when unset, and fails closed with `executor_harness_uncontained` when absent. |
+| `AUTOSPEC_OPENCODE_MODEL` | (unset) | OpenCode implementer/reviewer model in `provider/model` form (`--model`); unset keeps the harness default. Drives the AGENTS.md two-tier OpenCode selection. |
+| `AUTOSPEC_OPENCODE_VARIANT` | (unset) | OpenCode reasoning-effort variant (`--variant`, e.g. `high`/`max`/`minimal`); pairs with `AUTOSPEC_OPENCODE_MODEL`. |
+| `AUTOSPEC_USAGE_PROBE_OPENCODE` | auto-discovered (`~/.autospec/scripts/lib/opencode-usage-probe.sh`) | Executable that prints a live usage percent (0-100); the shipped probe reads the OpenCode SQLite DB (`OPENCODE_DB_PATH`) for a trailing-window token tally. |
 | `AUTOSPEC_NO_GUARDIAN` | (unset) | Disable the guardian RULE_ID pass (not recommended). |
 
 ## Local model supply discovery

@@ -116,6 +116,21 @@ probe_harness() {
     # bash 3.2 indirect expansion; empty when the override is unset.
     cmd="${!var:-}"
 
+    # Auto-discover the shipped OpenCode probe (reads the OpenCode SQLite DB for
+    # a trailing-window token tally) when the operator has not set an explicit
+    # probe. Other harnesses keep the honest observable=false default.
+    if [ -z "$cmd" ] && [ "$harness" = "opencode" ]; then
+        script_dir="$(CDPATH= cd -- "$(dirname "$0")" 2>/dev/null && pwd)"
+        for candidate in \
+            "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lib/opencode-usage-probe.sh" \
+            "$script_dir/lib/opencode-usage-probe.sh"; do
+            if [ -x "$candidate" ]; then
+                cmd="$candidate"
+                break
+            fi
+        done
+    fi
+
     if [ -n "$cmd" ]; then
         probe_raw=""
         probe_rc=0

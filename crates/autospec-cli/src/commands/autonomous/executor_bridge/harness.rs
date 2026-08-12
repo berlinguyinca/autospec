@@ -56,6 +56,8 @@ pub(crate) struct ResolvedHarness {
     pub(crate) executable: PathBuf,
     pub(super) opencode_adapter: Option<PathBuf>,
     pub(super) codex_sandbox: CodexSandboxPolicy,
+    pub(super) opencode_model: Option<String>,
+    pub(super) opencode_variant: Option<String>,
 }
 
 
@@ -154,11 +156,35 @@ impl HarnessConfig {
             executable: safe_executable(Path::new(&alias.binary), env)?,
             opencode_adapter: self.opencode_adapter.clone(),
             codex_sandbox: CodexSandboxPolicy::Default,
+            opencode_model: env
+                .get("AUTOSPEC_OPENCODE_MODEL")
+                .and_then(|value| value.to_str())
+                .map(str::to_string),
+            opencode_variant: env
+                .get("AUTOSPEC_OPENCODE_VARIANT")
+                .and_then(|value| value.to_str())
+                .map(str::to_string),
         })
     }
 }
 
 impl ResolvedHarness {
+    /// Append `--model` / `--variant` for OpenCode when the operator's routing
+    /// layer has selected a tier. Maps directly onto the AGENTS.md two-tier model
+    /// selection: Tier A (top model + high reasoning) vs Tier B (smaller model +
+    /// medium reasoning). Absent env vars leave the harness default untouched.
+    fn opencode_model_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if let Some(model) = &self.opencode_model {
+            args.push("--model".into());
+            args.push(model.clone());
+        }
+        if let Some(variant) = &self.opencode_variant {
+            args.push("--variant".into());
+            args.push(variant.clone());
+        }
+        args
+    }
     pub(super) fn review_invocation(
         &self,
         worktree: &Path,
@@ -207,16 +233,17 @@ impl ResolvedHarness {
                     prompt.into(),
                 ],
             ),
-            HarnessKind::OpenCode => (
-                self.executable.clone(),
-                vec![
+            HarnessKind::OpenCode => {
+                let mut args = vec![
                     "--pure".into(),
                     "run".into(),
                     "--agent".into(),
                     OPENCODE_REVIEWER_AGENT.into(),
-                    prompt.into(),
-                ],
-            ),
+                ];
+                args.extend(self.opencode_model_args());
+                args.push(prompt.into());
+                (self.executable.clone(), args)
+            }
         };
         Ok(HarnessInvocation {
             program,
@@ -282,16 +309,14 @@ impl ResolvedHarness {
                     .opencode_adapter
                     .clone()
                     .ok_or_else(|| "executor_harness_uncontained: OpenCode requires AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER".to_string())?;
-                (
-                    adapter,
-                    vec![
-                        self.executable.display().to_string(),
-                        "--pure".into(),
-                        "run".into(),
-                        prompt.into(),
-                    ],
-                    false,
-                )
+                let mut args = vec![
+                    self.executable.display().to_string(),
+                    "--pure".into(),
+                    "run".into(),
+                ];
+                args.extend(self.opencode_model_args());
+                args.push(prompt.into());
+                (adapter, args, false)
             }
         };
         Ok(HarnessInvocation {

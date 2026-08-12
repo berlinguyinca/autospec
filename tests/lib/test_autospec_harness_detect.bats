@@ -85,3 +85,26 @@ _source() {
     [[ "$output" == *"code_health:loop_handoff_no_dispatcher_for_harness"* ]]
     [[ "$output" == *"harness=codex"* ]]
 }
+
+@test "opencode invoke — autonomous mode dispatches opencode /autospec --autonomous" {
+    # Mock the opencode binary so the full detect → resolve → invoke chain can
+    # run end-to-end without a real model call; record argv.
+    local rec="$PROBE_ROOT/opencode.argv"
+    printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" > "%s"\n' "$rec" > "$BIN_DIR/opencode"
+    chmod +x "$BIN_DIR/opencode"
+    mkdir -p "$PROBE_ROOT/.config/opencode/agent"
+
+    export AUTOSPEC_HARNESS_PROBE_ROOT="$PROBE_ROOT"
+    export AUTOSPEC_HARNESS_RUNTIME_ALIASES="$REPO_ROOT/config/harness-runtime-aliases.tsv"
+    # Resolve dispatcher from BIN_DIR (mock opencode).
+    run env PATH="$BIN_DIR:$PATH" AUTOSPEC_HARNESS_PROBE_ROOT="$PROBE_ROOT" \
+        AUTOSPEC_HANDOFF_DISPATCHER=1 \
+        bash -c ". '$HELPER'; autospec_harness_resolve_dispatcher && autospec_harness_invoke autonomous 'ship a fix'"
+    [ "$status" -eq 0 ]
+    # The mock received exactly: /autospec --autonomous ship a fix
+    run cat "$rec"
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | sed -n 1p)" = "/autospec" ]
+    [ "$(printf '%s' "$output" | sed -n 2p)" = "--autonomous" ]
+    [ "$(printf '%s' "$output" | sed -n 3p)" = "ship a fix" ]
+}

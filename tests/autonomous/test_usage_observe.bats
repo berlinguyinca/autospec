@@ -18,6 +18,10 @@ setup() {
     export TEST_DIR
     # Drop any inherited probe overrides so the default path is deterministic.
     unset AUTOSPEC_USAGE_PROBE_CLAUDE AUTOSPEC_USAGE_PROBE_CODEX AUTOSPEC_USAGE_PROBE_OPENCODE
+    # Point the auto-discovered OpenCode probe at a non-existent DB so the
+    # default opencode finding stays deterministic (observable:false) here; the
+    # auto-discovery success path is covered by its own test with a fixture DB.
+    export OPENCODE_DB_PATH="$TEST_DIR/nonexistent-opencode.db"
 }
 
 teardown() {
@@ -161,4 +165,46 @@ make_probe() {
     run bash "$SCRIPT" codex
     [ "$status" -eq 0 ]
     [ "$(printf '%s' "$output" | jq -r '.observable')" = "false" ]
+}
+
+# ── OpenCode SQLite auto-discovery ───────────────────────────────────────────
+
+@test "opencode: auto-discovers the shipped SQLite probe and reports a live percent" {
+    command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+    local db="$TEST_DIR/opencode.db"
+    python3 - "$db" <<'PY'
+import sqlite3, sys, time
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("CREATE TABLE session (time_updated INTEGER, tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER)")
+conn.execute("INSERT INTO session VALUES (?, 200, 200, 100)", (int(time.time() * 1000),))
+conn.commit()
+PY
+    export OPENCODE_DB_PATH="$db"
+    export OPENCODE_USAGE_WINDOW_HOURS=24
+    export AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS=1000
+
+    run bash "$SCRIPT" opencode
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.observable')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.percent')" = "50.0" ]
+    [ "$(printf '%s' "$output" | jq -r '.source')" = "probe:AUTOSPEC_USAGE_PROBE_OPENCODE" ]
+}
+
+@test "opencode: SQLite probe caps the percent at 100" {
+    command -v python3 >/dev/null 2>&1 || skip "python3 not installed"
+    local db="$TEST_DIR/opencode-over.db"
+    python3 - "$db" <<'PY'
+import sqlite3, sys, time
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("CREATE TABLE session (time_updated INTEGER, tokens_input INTEGER, tokens_output INTEGER, tokens_reasoning INTEGER)")
+conn.execute("INSERT INTO session VALUES (?, 5000, 5000, 0)", (int(time.time() * 1000),))
+conn.commit()
+PY
+    export OPENCODE_DB_PATH="$db"
+    export AUTOSPEC_AUTONOMOUS_LIFETIME_TOKENS=1000
+
+    run bash "$SCRIPT" opencode
+    [ "$status" -eq 0 ]
+    [ "$(printf '%s' "$output" | jq -r '.observable')" = "true" ]
+    [ "$(printf '%s' "$output" | jq -r '.percent')" = "100.0" ]
 }
