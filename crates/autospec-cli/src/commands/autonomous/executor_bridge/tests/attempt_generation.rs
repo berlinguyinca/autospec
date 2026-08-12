@@ -53,6 +53,9 @@ fn autonomous_executor_bridge_runtime_session_selects_stable_disjoint_attempt_ge
     let first_request = bridge::DeterministicEvidenceRequest {
         state: &state,
         proof: &proof,
+        review_requirements: autospec_core::autonomous::review_policy::classify_review_requirements(
+            &autospec_core::autonomous::review_policy::ReviewPolicyInput::default(),
+        ),
         issue_body: "issue",
         spec_documents: &[],
         env: &evidence_env,
@@ -122,6 +125,9 @@ fn autonomous_executor_bridge_scanner_policy_digest_rotates_failed_evidence_once
     let request = bridge::DeterministicEvidenceRequest {
         state: &state,
         proof: &proof,
+        review_requirements: autospec_core::autonomous::review_policy::classify_review_requirements(
+            &autospec_core::autonomous::review_policy::ReviewPolicyInput::default(),
+        ),
         issue_body: "issue",
         spec_documents: &[],
         env: &evidence_env,
