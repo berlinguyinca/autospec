@@ -11,3 +11,5 @@ the evidence contract used before an autonomous merge.
 
 The adapter is invoked by `skills/autospec-run/scripts/invoke-review.sh`; operators
 normally do not call it directly.
+
+The wrapper records unavailable-review outcomes through `--outcomes PATH`.

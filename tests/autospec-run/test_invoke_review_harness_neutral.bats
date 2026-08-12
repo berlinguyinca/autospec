@@ -169,6 +169,38 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "backend absence emits a review_unavailable governance outcome" {
+    env PATH="${SAFE_PATH}" \
+        AUTOSPEC_HANDOFF_DISPATCHER_KIND=claude \
+        AUTOSPEC_HARNESS_PROBE_ROOT="${TEST_TMP}" \
+        bash "$SCRIPT" --remediation --since "2026-01-01T00:00:00Z" \
+        --emit-gaps "$GAPS_FILE" --outcomes "$OUTCOMES_FILE" \
+        >/dev/null 2>&1
+
+    [ -s "$OUTCOMES_FILE" ]
+    run jq -e -s '
+        length == 1 and
+        .[0].outcome == "review_unavailable" and
+        (.[0].outcome_digest | startswith("sha256:"))
+    ' "$OUTCOMES_FILE"
+    [ "$status" -eq 0 ]
+}
+
+@test "reviewer invocation failure emits a review_unavailable governance outcome" {
+    mkdir -p "${TEST_TMP}/bin"
+    printf '#!/usr/bin/env bash\nexit 9\n' > "${TEST_TMP}/bin/claude"
+    chmod +x "${TEST_TMP}/bin/claude"
+
+    run env PATH="${TEST_TMP}/bin:${SAFE_PATH}" \
+        AUTOSPEC_HANDOFF_DISPATCHER_KIND=claude \
+        AUTOSPEC_HANDOFF_DISPATCHER=1 \
+        bash "$SCRIPT" --remediation --since "2026-01-01T00:00:00Z" \
+        --emit-gaps "$GAPS_FILE" --outcomes "$OUTCOMES_FILE"
+
+    [ "$status" -eq 0 ]
+    jq -e -s 'any(.[]; .outcome == "review_unavailable")' "$OUTCOMES_FILE"
+}
+
 @test "premerge adapter requeues without merge when foreground independent review is unavailable" {
     mkdir -p "${TEST_TMP}/bin"
     GH_LOG="${TEST_TMP}/gh.log"
