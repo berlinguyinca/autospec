@@ -54,7 +54,7 @@ write_experiment_proof() {
   local candidate_digest
   candidate_digest="sha256:$(jq -cS . "$candidate_file" | tr -d '\n' | sha256sum | awk '{print $1}')"
   cat > "$TMP/experiment-proof.json" <<JSON
-{"schema":1,"dedupe_key":"$(jq -r .dedupe_key "$candidate_file")","candidate_digest":"$candidate_digest","change_commit":"$CHANGE_COMMIT","targeted_validation":{"status":"pass","commit":"$CHANGE_COMMIT","argv":["git","diff","--check","$CHANGE_COMMIT^","$CHANGE_COMMIT"]},"full_validation":{"status":"pass","commit":"$CHANGE_COMMIT","argv":["git","diff","--check","$CHANGE_COMMIT^","$CHANGE_COMMIT"]},"protected_boundaries":{"status":"pass","commit":"$CHANGE_COMMIT","changed":false},"rollback":{"status":"ready","commit":"$CHANGE_COMMIT","prior_policy_digest":"$(jq -r .rollback.prior_policy_digest "$candidate_file")","command":"git revert --no-edit $CHANGE_COMMIT"}}
+{"schema":1,"dedupe_key":"$(jq -r .dedupe_key "$candidate_file")","candidate_digest":"$candidate_digest","change_commit":"$CHANGE_COMMIT","targeted_validation":{"status":"pass","commit":"$CHANGE_COMMIT","recipe":"git-diff-check"},"full_validation":{"status":"pass","commit":"$CHANGE_COMMIT","recipe":"git-diff-check"},"protected_boundaries":{"status":"pass","commit":"$CHANGE_COMMIT","changed":false},"rollback":{"status":"ready","commit":"$CHANGE_COMMIT","prior_policy_digest":"$(jq -r .rollback.prior_policy_digest "$candidate_file")","command":"git revert --no-edit $CHANGE_COMMIT"}}
 JSON
 }
 
@@ -236,13 +236,62 @@ JSON
   key="$(printf '%s' "$candidate" | jq -r '.dedupe_key')"
   printf '%s' "$candidate" > "$TMP/candidate.json"
   write_experiment_proof "$TMP/candidate.json"
-  jq '.targeted_validation.argv = ["git","diff","--check","not-a-commit"]' \
+  jq '.targeted_validation.recipe = "unknown-recipe"' \
     "$TMP/experiment-proof.json" > "$TMP/bad-proof.json"
   write_clean_outcomes 20 "$key" 100 true
 
   run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
     --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" \
     --experiment-proof "$TMP/bad-proof.json" \
+    --rollback-digest "$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.state == "held" and .reason == "experiment_proof_required"' >/dev/null
+}
+
+@test "proof-supplied commands are rejected without execution" {
+  seed_high_escape
+  run_candidates
+  candidate="$(printf '%s\n' "$output" | jq -c 'select(.workstream == "review-policy")')"
+  key="$(printf '%s' "$candidate" | jq -r '.dedupe_key')"
+  printf '%s' "$candidate" > "$TMP/candidate.json"
+  write_experiment_proof "$TMP/candidate.json"
+  cat > "$TMP/bin/cargo" <<'SH'
+#!/usr/bin/env bash
+touch "$COMMAND_EXECUTED"
+exit 0
+SH
+  chmod +x "$TMP/bin/cargo"
+  export PATH="$TMP/bin:$PATH" COMMAND_EXECUTED="$TMP/command-executed"
+  jq '.targeted_validation = {status:"pass", commit:.change_commit, argv:["cargo","publish"]}' \
+    "$TMP/experiment-proof.json" > "$TMP/command-proof.json"
+  write_clean_outcomes 20 "$key" 100 true
+
+  run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
+    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" \
+    --experiment-proof "$TMP/command-proof.json" \
+    --rollback-digest "$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.state == "held" and .reason == "experiment_proof_required"' >/dev/null
+  [ ! -e "$COMMAND_EXECUTED" ]
+}
+
+@test "generic files cannot conceal protected authority changes" {
+  seed_high_escape
+  run_candidates
+  candidate="$(printf '%s\n' "$output" | jq -c 'select(.workstream == "review-policy")')"
+  key="$(printf '%s' "$candidate" | jq -r '.dedupe_key')"
+  mkdir -p "$WORK/crates/autospec-cli/src/commands"
+  printf 'const AUTO_MERGE: bool = true;\n' > "$WORK/crates/autospec-cli/src/commands/autonomous.rs"
+  git -C "$WORK" add crates/autospec-cli/src/commands/autonomous.rs
+  git -C "$WORK" commit -qm 'change merge authority in a generic file'
+  CHANGE_COMMIT="$(git -C "$WORK" rev-parse HEAD)"
+  printf '%s' "$candidate" > "$TMP/candidate.json"
+  write_experiment_proof "$TMP/candidate.json"
+  write_clean_outcomes 20 "$key" 100 true
+
+  run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
+    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" \
+    --experiment-proof "$TMP/experiment-proof.json" \
     --rollback-digest "$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.state == "held" and .reason == "experiment_proof_required"' >/dev/null

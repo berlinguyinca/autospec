@@ -231,7 +231,11 @@ isolated runners and tests:
 `evaluate --candidate FILE --rollback-digest DIGEST` advances one experiment.
 Promotion requires the declared sample floor, zero high-severity escapes,
 non-regressing total escapes and cost, provider-diverse review, and the exact
-prior-policy rollback digest. `AUTOSPEC_SELF_IMPROVEMENT_APPLY=1` still requires
+prior-policy rollback digest. Validation evidence selects the closed
+`git-diff-check` recipe; proof JSON never supplies executable argv. The evaluator
+reproduces that recipe against the named commit, derives protected-boundary
+changes from the commit diff, and tests the rollback patch against an archive of
+that exact commit. `AUTOSPEC_SELF_IMPROVEMENT_APPLY=1` still requires
 the explicit `apply --apply` pair before strengthening or neutral candidates
 are filed with `needs-classify` and `origin:self`; weakening stays report-only.
 Superseded outcomes and rows missing complete PR, commit, receipt, reviewer,
