@@ -174,6 +174,37 @@ Separately, route `check_file_loc`, `check_function_loc`, `check_cyclomatic`, an
 the tautology detector through the same `linter:allow` consultation every other
 rule uses, so the documented escape hatch is real for them.
 
+### Fix 5 — `COMPLEXITY` is advisory unless enforcement is asked for
+
+Fixes 1-4 left one case standing, and #2961 is it:
+`skills/autospec-fleet/scripts/fleet-gui-server.py` could not accept a three-line
+correction to a stale profile name. The ratchet waives **file**-LOC for a file that
+does not grow, but the two findings blocking that file were a 126-LOC function and a
+file-level cyclomatic score — neither of which the ratchet covers, and the
+file-level one carries `line: -`, so `linter:allow-COMPLEXITY` cannot reach it
+either. Net effect: no change to the file could land, however small.
+
+So `COMPLEXITY` emits `INFO:` by default and blocks only under
+`AUTOSPEC_COMPLEXITY_ENFORCE=1`. The findings still print on every run, so the
+signal survives; what goes away is the veto. The decision is made once inside
+`emit_capped`, next to the existing skip-directive branch, rather than at the
+twelve call sites — a rule added later cannot forget the policy.
+
+Two things stay blocking, and they are the reason this does not reopen §1.3:
+
+- **`PR_SIZE`** governs commit *shape*, which is a review contract rather than a
+  style heuristic.
+- **`.github/workflows/file-size-ratchet.yml`** is a separate implementation that
+  never invokes this script. It still rejects a new file over 600 lines and any
+  growth of an already-oversized file, measured against the merge base — which is
+  the path where 49,482 lines actually escaped. Local advisory, CI ratchet: the
+  veto moves to where merges cannot skip it.
+
+What loses enforcement everywhere is function-LOC, nesting depth, cyclomatic score,
+and duplicate function names. That is accepted: they are heuristics whose cost as a
+veto — extracting code mid-bugfix, or an out-of-band override — exceeded the
+tidiness they bought.
+
 ## 3. Bootstrap order — no bypass required
 
 The fixes live in `scripts/lint-implementation.sh` (1,796 LOC) and
