@@ -765,7 +765,7 @@ pub(crate) fn recover_for_conductor(
         || record.issue != issue
         || !matches!(
             record.state.as_str(),
-            "claimed" | "merged" | "released" | "failed" | "retryable" | "needs-human"
+            "claimed" | "merged" | "released" | "failed" | "retryable" | "needs-human" | "available"
         )
     {
         return Err(CommandFailure::diagnostic(
