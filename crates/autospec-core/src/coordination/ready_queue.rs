@@ -10,7 +10,11 @@ const SERIAL_LABELS: &[&str] = &[
     "audit",
     "release",
 ];
-
+const BLOCKING_LABELS: &[(&str, &str)] = &[
+    ("needs-classify", "needs_classify"),
+    ("groom:proposed", "groom_proposed"),
+    ("autospec:needs-human", "autospec_needs_human"),
+];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteIssue {
     pub number: u64,
@@ -444,26 +448,16 @@ pub fn plan_ready_queue_with_trusted_actors(
             reviewed_count += 1;
         }
         let mut view = QueueIssueView::plain(issue);
-        if view.issue.has_label("needs-classify") {
-            view.reason = Some("needs_classify".to_string());
-            view.blocked_label = Some("needs-classify".to_string());
+        if let Some((label, reason)) =
+            BLOCKING_LABELS.iter().find(|(label, _)| view.issue.has_label(label))
+        {
+            view.reason = Some(reason.to_string());
+            view.blocked_label = Some(label.to_string());
             blocked.push(view);
             continue;
         }
         if !view.issue.has_label("auto-implement") {
             view.reason = Some("missing_auto_implement".to_string());
-            blocked.push(view);
-            continue;
-        }
-        if view.issue.has_label("groom:proposed") {
-            view.reason = Some("groom_proposed".to_string());
-            view.blocked_label = Some("groom:proposed".to_string());
-            blocked.push(view);
-            continue;
-        }
-        if view.issue.has_label("autospec:needs-human") {
-            view.reason = Some("autospec_needs_human".to_string());
-            view.blocked_label = Some("autospec:needs-human".to_string());
             blocked.push(view);
             continue;
         }
