@@ -53,7 +53,7 @@ If the feature-request argument matches the regex `^\s*stop(\s+--\w+)*\s*$` (cas
    ```bash
    autospec-autonomous stop "$@"
    ```
-2. Honor `--graceful` and `--immediate` by writing the shell-compatible stop sentinel at `${AUTOSPEC_STOP_FLAG_FILE:-~/.autospec/autonomous-operator/<repo-scope>/stop.flag}`. Graceful stop leaves the conductor to finish the current issue/cycle boundary while stopping the companion monitor/supervisor; immediate stop also terminates the recorded conductor PID.
+2. Honor `--graceful` and `--immediate` by writing the shell-compatible stop sentinel at `${AUTOSPEC_STOP_FLAG_FILE:-~/.autospec/autonomous-operator/<repo-scope>/stop.flag}`. Graceful stop leaves the conductor to finish the current issue/cycle boundary while stopping the companion monitor/supervisor; immediate stop differs only through the persisted mode the conductor consumes at that boundary. **Neither mode kills the conductor process.** It owns durable direct-command supervisors, and terminating it can strand a completed child before the EXIT/DONE fence is published, which makes safe recovery impossible — so both modes drain it at its next observed boundary. An operator who needs the process gone right now must wait for the boundary or kill it deliberately, accepting that risk.
 3. Print the stop summary and exit. Do not enter the autonomous pipeline.
 
 ## Direct interactive session launch
