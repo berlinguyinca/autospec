@@ -123,7 +123,8 @@ pub(super) fn acquisition_blocking_owner(record: &RunStateRecord) -> Option<&str
     (!matches!(
         record.state.as_str(),
         "available" | "released" | "retryable" | "failed"
-    ) && conductor_claim_owner_holds_lease(record))
+    ) && (heartbeat_publication_in_flight(&record.step)
+        || conductor_claim_owner_holds_lease(record)))
     .then_some(record.worker_id.as_str())
 }
 

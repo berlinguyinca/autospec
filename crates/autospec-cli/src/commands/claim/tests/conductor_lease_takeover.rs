@@ -191,6 +191,11 @@ mod requeue {
             owner_still_holds("owner/repo", 42, &record).expect("pending owner classification"),
             "direct acquisition must not replace a heartbeat generation that recovery did not quarantine"
         );
+        assert_eq!(
+            acquisition_blocking_owner(&record),
+            Some(record.worker_id.as_str()),
+            "the public acquisition gate must preserve the same pending generation"
+        );
     }
 
     #[test]
