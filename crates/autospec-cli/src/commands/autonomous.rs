@@ -46,11 +46,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{claim, queue, CommandFailure};
 
-pub(crate) mod drain;
 mod blocked_cycle;
+pub(crate) mod drain;
 pub(crate) mod gh_read;
-mod program;
+mod main_health_output;
 mod one_shot_selector;
+mod program;
 use one_shot_selector::{
     load_one_shot_selector, one_shot_selector_consumed, persist_one_shot_selector,
 };
@@ -94,6 +95,9 @@ mod tier3;
 mod tier3_receipts;
 // Tier 4 participates in foreground traversal but remains disabled by checked-in policy.
 #[cfg(test)]
+#[path = "autonomous/review_governance_tests.rs"]
+mod review_governance_tests;
+#[cfg(test)]
 mod tier3_receipts_failure_prefix_tests;
 #[cfg(test)]
 mod tier3_receipts_recovery_tests;
@@ -118,9 +122,6 @@ mod waterfall_policy;
 mod waterfall_policy_tests;
 #[cfg(test)]
 mod waterfall_tests;
-#[cfg(test)]
-#[path = "autonomous/review_governance_tests.rs"]
-mod review_governance_tests;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const TERMINAL_RETIREMENT_PAUSE: &str = "executor_terminal_retirement";
@@ -2095,7 +2096,7 @@ fn main_health(options: Options) -> Result<(), String> {
     let layout = RunLayout::new(&options)?;
     let health = load_main_health(&layout, &options, &config)?;
     let policy_digest = effective_main_health_policy_digest(&config, &health)?;
-    persist_main_health(&layout, &health, &policy_digest)?;
+    main_health_output::persist(&layout, &health, &policy_digest)?;
     print_main_health(&layout.repo, &health, options.json);
     if health.outcome == MainlineHealthOutcome::Halt {
         return Err(format!(
@@ -2274,32 +2275,6 @@ fn gh_api(endpoint: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn persist_main_health(
-    layout: &RunLayout,
-    health: &MainlineHealth,
-    policy_digest: &str,
-) -> Result<(), String> {
-    let dir = env_path(
-        "AUTOSPEC_AUTONOMOUS_STATE_DIR",
-        &[".autospec", "autonomous"],
-    )
-    .join(&layout.scope);
-    fs::create_dir_all(&dir)
-        .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
-    let path = dir.join("main-health-observations.jsonl");
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| format!("cannot open {}: {error}", path.display()))?;
-    writeln!(
-        file,
-        "{}",
-        health.to_json_with_policy_digest(&layout.repo, policy_digest)
-    )
-    .map_err(|error| format!("cannot write {}: {error}", path.display()))
-}
-
 fn print_main_health(repo: &str, health: &MainlineHealth, json: bool) {
     if json {
         println!("{}", health.to_json(repo));
@@ -2417,8 +2392,8 @@ fn run_foreground_cycles(
             completion = blocked_cycle::continue_after_blocked_cycle(layout, options, completion)
                 .map_err(CommandFailure::diagnostic)?;
         }
-        let loopable_state =
-            blocked_cycle::foreground_cycle_is_loopable(&completion).map_err(CommandFailure::diagnostic)?;
+        let loopable_state = blocked_cycle::foreground_cycle_is_loopable(&completion)
+            .map_err(CommandFailure::diagnostic)?;
         let keep_running = continuous
             && cycle_limit.is_none_or(|limit| completed_cycles < limit)
             && loopable_state;
@@ -2563,7 +2538,11 @@ fn run_foreground_with_lease(
     let health = load_main_health(layout, options, config).map_err(CommandFailure::diagnostic)?;
     let policy_digest =
         effective_main_health_policy_digest(config, &health).map_err(CommandFailure::diagnostic)?;
-    persist_main_health(layout, &health, &policy_digest).map_err(CommandFailure::diagnostic)?;
+    main_health_output::persist(layout, &health, &policy_digest)
+        .map_err(CommandFailure::diagnostic)?;
+    if let Some(receipt) = main_health_output::blocking_receipt(&layout.repo, &health) {
+        eprintln!("{receipt}");
+    }
     input = input.with_health(lifecycle_health(health.outcome.clone()));
     let mut lifecycle = decide_lifecycle(&input);
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {
@@ -4999,7 +4978,6 @@ fn foreground_scope(options: &Options, layout: &RunLayout) -> ConductorScope {
         ConductorScope::Repository
     }
 }
-
 
 fn command_error(error: super::CommandFailure) -> String {
     error.message
