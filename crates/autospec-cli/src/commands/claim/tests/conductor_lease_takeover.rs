@@ -68,7 +68,10 @@ fn an_unparseable_timestamp_keeps_the_lease() {
 }
 
 mod requeue {
-    use super::super::super::lease::claim_is_abandoned;
+    use super::super::super::lease::{
+        claim_is_abandoned, quarantine_abandoned_claim_generation_with,
+    };
+    use super::super::super::{ClaimRefAdvance, ClaimRefHead};
     use super::owner_record;
     use crate::commands::claim::utc_now_iso;
 
@@ -76,6 +79,18 @@ mod requeue {
         let mut record = owner_record(updated_at, 10800, "verification");
         record.state = state.to_string();
         record
+    }
+
+    fn lose_generation(
+        expected: Option<&ClaimRefHead>,
+        successor: &autospec_core::claim::RunStateRecord,
+    ) -> Result<ClaimRefAdvance, crate::commands::CommandFailure> {
+        assert_eq!(
+            expected.map(|head| head.oid.as_str()),
+            Some("expired-generation")
+        );
+        assert_eq!(successor.state, "available");
+        Ok(ClaimRefAdvance::Lost)
     }
 
     #[test]
@@ -117,6 +132,27 @@ mod requeue {
         assert!(
             !claim_is_abandoned(Some(&record("merged", "2026-07-29T00:49:45Z"))),
             "merged work is finished, not abandoned"
+        );
+    }
+
+    #[test]
+    fn a_concurrent_lease_renewal_prevents_label_requeue() {
+        let selected = ClaimRefHead {
+            oid: "expired-generation".to_string(),
+            generation: "generation-1".to_string(),
+            record: record("claimed", "2026-07-29T00:49:45Z"),
+        };
+        let quarantined = quarantine_abandoned_claim_generation_with(
+            "owner/repo",
+            42,
+            Some(selected),
+            &mut lose_generation,
+        )
+        .expect("a lost compare-and-swap is not an error");
+
+        assert!(
+            quarantined.is_none(),
+            "the renewing worker won, so the caller has no authority to mutate labels"
         );
     }
 }
