@@ -19,6 +19,25 @@ require_value() {
     [ -n "$2" ] || die "missing $1"
 }
 
+json_has_unique_keys() {
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$1" <<'PY' >/dev/null 2>&1
+import json
+import sys
+
+def reject_duplicates(pairs):
+    obj = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError(f"duplicate key: {key}")
+        obj[key] = value
+    return obj
+
+with open(sys.argv[1], encoding="utf-8") as handle:
+    json.load(handle, object_pairs_hook=reject_duplicates)
+PY
+}
+
 requeue_review() {
     blocker="$1"
     reason="code_health:${blocker} risk=${RISK} pr=${PR}"
@@ -143,6 +162,10 @@ validate_review() {
     require_value verdict "$verdict"
     [ -f "$request" ] || die 'review request does not exist'
     [ -f "$verdict" ] || die 'review verdict does not exist'
+    if ! json_has_unique_keys "$request" || ! json_has_unique_keys "$verdict"; then
+        jq -nc '{schema:1,outcome:"block",blocker:{code:"structured_review_invalid"}}'
+        return 1
+    fi
     if jq -e --slurpfile request "$request" '
         def nonempty_strings:
             type == "array" and length > 0 and

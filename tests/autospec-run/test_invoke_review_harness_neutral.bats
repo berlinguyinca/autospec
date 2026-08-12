@@ -18,12 +18,13 @@ REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
 setup() {
     TEST_TMP="$(mktemp -d)"
     GAPS_FILE="${TEST_TMP}/gaps.json"
+    OUTCOMES_FILE="${TEST_TMP}/review-outcomes.jsonl"
     # Stub PATH: jq available, but no harness binaries unless the test adds them.
     SAFE_PATH="/usr/bin:/bin"
     if command -v jq >/dev/null 2>&1; then
         SAFE_PATH="$(dirname "$(command -v jq)"):${SAFE_PATH}"
     fi
-    export TEST_TMP GAPS_FILE SAFE_PATH
+    export TEST_TMP GAPS_FILE OUTCOMES_FILE SAFE_PATH
 }
 
 teardown() {
@@ -168,6 +169,23 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
+@test "backend absence emits a review_unavailable governance outcome" {
+    env PATH="${SAFE_PATH}" \
+        AUTOSPEC_HANDOFF_DISPATCHER_KIND=claude \
+        AUTOSPEC_HARNESS_PROBE_ROOT="${TEST_TMP}" \
+        bash "$SCRIPT" --remediation --since "2026-01-01T00:00:00Z" \
+        --emit-gaps "$GAPS_FILE" --outcomes "$OUTCOMES_FILE" \
+        >/dev/null 2>&1
+
+    [ -s "$OUTCOMES_FILE" ]
+    run jq -e -s '
+        length == 1 and
+        .[0].outcome == "review_unavailable" and
+        (.[0].outcome_digest | startswith("sha256:"))
+    ' "$OUTCOMES_FILE"
+    [ "$status" -eq 0 ]
+}
+
 @test "premerge adapter requeues without merge when foreground independent review is unavailable" {
     mkdir -p "${TEST_TMP}/bin"
     GH_LOG="${TEST_TMP}/gh.log"
@@ -242,6 +260,25 @@ JSON
     cat > "$verdict" <<JSON
 {"schema":1,"commit":"$commit","verdict":"lgtm","surfaces_examined":["review adapter"],"tests_examined":["adapter bats"],"integration_paths_checked":[],"blocking_findings":[]}
 JSON
+
+    run bash "$PREMERGE_REVIEW_ADAPTER" validate --request "$request" --verdict "$verdict"
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | jq -e \
+        '.outcome == "block" and .blocker.code == "structured_review_invalid"'
+}
+
+@test "premerge adapter rejects duplicate verdict keys before jq normalization" {
+    request="${TEST_TMP}/duplicate-request.json"
+    verdict="${TEST_TMP}/duplicate-verdict.json"
+    commit="0123456789abcdef0123456789abcdef01234567"
+    bash "$PREMERGE_REVIEW_ADAPTER" prepare \
+        --repo owner/repo --issue 42 --pr 84 --commit "$commit" \
+        --risk normal --implementer-provider codex \
+        --reviewer-provider codex --reviewer-reasoning standard \
+        --foreground-available true --request-out "$request" >/dev/null
+    printf '%s\n' \
+        "{\"schema\":1,\"commit\":\"$commit\",\"verdict\":\"blocked\",\"verdict\":\"lgtm\",\"surfaces_examined\":[\"review adapter\"],\"tests_examined\":[\"adapter bats\"],\"integration_paths_checked\":[],\"blocking_findings\":[]}" \
+        > "$verdict"
 
     run bash "$PREMERGE_REVIEW_ADAPTER" validate --request "$request" --verdict "$verdict"
     [ "$status" -eq 1 ]
