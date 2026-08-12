@@ -7029,10 +7029,54 @@ fn observe_local_startup_pid(
 
 fn startup_heartbeat_exists(repo: &str, issue: u64) -> bool {
     heartbeat_root().is_ok_and(|root| {
-        root.join(super::autonomous::drain::repository_progress_key(repo))
-            .join(format!("{issue}.json"))
-            .is_file()
+        let path = root
+            .join(super::autonomous::drain::repository_progress_key(repo))
+            .join(format!("{issue}.json"));
+        path.is_file() && !startup_heartbeat_owner_is_gone(&path)
     })
+}
+
+/// True only when the heartbeat's owning process is *provably* gone.
+///
+/// This guard used to be a bare `is_file()`, so a heartbeat left behind by a worker that died
+/// without cleaning up made its claim look active forever:
+/// `active_record_counts_toward_worker_capacity` short-circuits on it, so the claim never became
+/// recoverable and only the 3h TTL freed it. Observed on berlinguyinca/autotrade#1426, where a
+/// dead conductor's heartbeat blocked every successor -- each exiting in ~1s with `claim_lost`
+/// while the supervisor restarted it 1017 times.
+///
+/// Proof, not inference, on two axes:
+///
+/// * `boot_id` must match this boot before a PID means anything, since PIDs are recycled across
+///   reboots and a stale record could otherwise name a live unrelated process.
+/// * within this boot, the live process's start identity must still match the one recorded, or
+///   the PID has been reused and the original owner is equally gone.
+///
+/// Anything we cannot establish -- an unreadable or unparseable record, a foreign boot, or a
+/// `/proc` read failure -- keeps the previous behaviour. So this can release a claim it should
+/// not have held, but never steals one that is still live.
+fn startup_heartbeat_owner_is_gone(path: &Path) -> bool {
+    let Ok(document) = fs::read(path) else {
+        return false;
+    };
+    let Some(evidence) = parse_startup_heartbeat(&document) else {
+        return false;
+    };
+    let Ok(boot_id) = super::autonomous::current_boot_identity() else {
+        return false;
+    };
+    if evidence.boot_id != boot_id {
+        return false;
+    }
+    match super::autonomous::process_birth_identity(evidence.pid) {
+        // No such process: the owner is gone.
+        Ok(None) => true,
+        // The PID exists but belongs to a process born at a different moment, so the recorded
+        // owner exited and the number was recycled.
+        Ok(Some((_, start_identity))) => start_identity != evidence.process_start,
+        // Could not observe: fail closed.
+        Err(_) => false,
+    }
 }
 
 fn branch_ref_exists(branch: &str) -> bool {

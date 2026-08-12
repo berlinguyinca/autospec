@@ -1,5 +1,6 @@
 mod support;
 mod heartbeat_startup;
+mod heartbeat_liveness;
 mod heartbeat_prior;
 mod heartbeat_classify;
 mod heartbeat_quarantine;
