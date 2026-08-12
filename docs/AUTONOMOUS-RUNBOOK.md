@@ -56,11 +56,14 @@ is a private executor artifact directory, host and Claude-compatible config
 loading is disabled, and the external home/data roots used for provider
 authentication remain available. OpenCode's separate
 `AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER` remains required for implementation
-work, but automatic review does not use it. `install.sh` ships and sources a
-default adapter (`~/.autospec/scripts/lib/opencode-containment-adapter.sh`) that
-applies the implementer permission profile (deny-by-default, workspace-scoped
-edit/bash only); operators wanting OS-level isolation may replace it with a
-bwrap/firejail wrapper honoring the same argv contract.
+work, but automatic review does not use it. `install.sh` ships a default
+adapter (`~/.autospec/scripts/lib/opencode-containment-adapter.sh`) and the
+executor bridge auto-discovers it (explicit env override, then
+`AUTOSPEC_SCRIPTS_DIR`, `~/.autospec/scripts`, then the checkout) when no
+adapter is set; it applies the implementer permission profile
+(deny-by-default, workspace-scoped edit/bash only). Operators wanting OS-level
+isolation may replace it with a bwrap/firejail wrapper honoring the same argv
+contract.
 
 Inherited `PATH`, XDG roots, `CODEX_HOME`, and `CLAUDE_CONFIG_DIR` are
 canonicalized before launch and fail closed if they resolve inside either

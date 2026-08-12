@@ -157,14 +157,6 @@ if [ -f "$_autospec_telemetry_cfg" ]; then
     export AUTOSPEC_DB_SPOOL_MAX_BYTES="$(bash "$_autospec_telemetry_cfg" --key spool_max_bytes 2>/dev/null || printf '10485760')"
 fi
 unset _autospec_telemetry_cfg
-
-# OpenCode implementer containment adapter. The executor bridge refuses to run
-# mutating OpenCode work without it (executor_harness_uncontained). Guarded so a
-# missing adapter is a no-op; the bridge then fails closed rather than running
-# the implementer uncontained.
-if [ -x "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lib/opencode-containment-adapter.sh" ]; then
-    export AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lib/opencode-containment-adapter.sh"
-fi
 EOF
 
     if [ -t 0 ] && [ "${AUTOSPEC_NO_SHELL_RC_PROMPT:-}" != "1" ]; then
