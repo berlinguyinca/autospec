@@ -306,6 +306,15 @@ Without routine operator input, Autospec may promote a review-policy change only
 - cost remains within the candidate’s declared bound;
 - a tested rollback handle exists.
 
+The implementation records those gates in a repo-scoped experiment proof under
+`.autospec/self-improvement-evidence/`. The proof binds the canonical candidate
+digest, exact change commit, targeted validation, full validation, protected-boundary
+check, and a `git revert --no-edit <commit>` handle. Canary outcomes count only when
+their `experiment_commit` matches that proof. The conductor's Tier-3 pass advances
+available proofs before generating more candidates. A regression first becomes
+`rollback_required`; it becomes `rolled_back` only after a rollback proof names a
+repository commit whose inverse patch matches the experimental change.
+
 Otherwise Autospec holds or rolls back. Protected-boundary changes remain visible proposals rather than autonomous merges.
 
 ## Failure Handling

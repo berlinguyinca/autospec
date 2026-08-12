@@ -7,6 +7,15 @@ setup() {
   WORK="$TMP/repo"
   mkdir -p "$WORK/.autospec" "$WORK/scripts" "$TMP/bin"
   : > "$WORK/scripts/autospec-run-events.sh"
+  git -C "$WORK" init -q
+  git -C "$WORK" config user.email test@example.com
+  git -C "$WORK" config user.name Test
+  git -C "$WORK" add scripts/autospec-run-events.sh
+  git -C "$WORK" commit -qm base
+  printf 'policy-v2\n' > "$WORK/scripts/policy.txt"
+  git -C "$WORK" add scripts/policy.txt
+  git -C "$WORK" commit -qm 'policy change'
+  CHANGE_COMMIT="$(git -C "$WORK" rev-parse HEAD)"
   OUTCOMES="$WORK/.autospec/review-outcomes.jsonl"
   GAPS="$WORK/.autospec/gaps.json"
   LEARNING="$WORK/.autospec/review-learning.jsonl"
@@ -34,10 +43,19 @@ write_clean_outcomes() {
   : > "$OUTCOMES"
   local i=1
   while [ "$i" -le "$count" ]; do
-    printf '{"schema":1,"outcome_digest":"sha256:clean-%d","experiment_dedupe_key":"%s","pr":%d,"commit":"%040d","review_receipt_digest":"sha256:r%d","reviewer_harness":"codex","reviewer_reasoning":"high","provider_diversified":%s,"review_risk":"integration","first_pass_lgtm":true,"escaped_high_severity":0,"escaped_total":0,"review_cost":%d,"phase55_run":"canary"}\n' \
-      "$i" "$key" "$i" "$i" "$i" "$diversified" "$cost" >> "$OUTCOMES"
+    printf '{"schema":1,"outcome_digest":"sha256:clean-%d","experiment_dedupe_key":"%s","experiment_commit":"%s","pr":%d,"commit":"%s","review_receipt_digest":"sha256:r%d","reviewer_harness":"codex","reviewer_reasoning":"high","provider_diversified":%s,"review_risk":"integration","first_pass_lgtm":true,"escaped_high_severity":0,"escaped_total":0,"review_cost":%d,"phase55_run":"canary"}\n' \
+      "$i" "$key" "$CHANGE_COMMIT" "$i" "$CHANGE_COMMIT" "$i" "$diversified" "$cost" >> "$OUTCOMES"
     i=$((i + 1))
   done
+}
+
+write_experiment_proof() {
+  local candidate_file="$1"
+  local candidate_digest
+  candidate_digest="sha256:$(jq -cS . "$candidate_file" | tr -d '\n' | sha256sum | awk '{print $1}')"
+  cat > "$TMP/experiment-proof.json" <<JSON
+{"schema":1,"dedupe_key":"$(jq -r .dedupe_key "$candidate_file")","candidate_digest":"$candidate_digest","change_commit":"$CHANGE_COMMIT","targeted_validation":{"status":"pass","commit":"$CHANGE_COMMIT","command":"bats targeted"},"full_validation":{"status":"pass","commit":"$CHANGE_COMMIT","command":"autospec validate"},"protected_boundaries":{"status":"pass","commit":"$CHANGE_COMMIT","changed":false},"rollback":{"status":"ready","commit":"$CHANGE_COMMIT","prior_policy_digest":"$(jq -r .rollback.prior_policy_digest "$candidate_file")","command":"git revert --no-edit $CHANGE_COMMIT"}}
+JSON
 }
 
 @test "high attributed escape creates exactly one strengthening candidate with eight questions and the hypothesis contract" {
@@ -120,10 +138,12 @@ SH
   candidate="$(printf '%s\n' "$output" | jq -c 'select(.workstream == "review-policy")')"
   key="$(printf '%s' "$candidate" | jq -r '.dedupe_key')"
   printf '%s' "$candidate" > "$TMP/candidate.json"
+  write_experiment_proof "$TMP/candidate.json"
   write_clean_outcomes 19 "$key"
   run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
     --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" \
-    --rollback-digest "$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')"
+    --rollback-digest "$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')" \
+    --experiment-proof "$TMP/experiment-proof.json"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.state == "held" and .reason == "sample_floor"' >/dev/null
   jq -s -e 'map(.state) | index("candidate") != null and index("shadow") != null and
@@ -136,15 +156,26 @@ SH
   candidate="$(printf '%s\n' "$output" | jq -c 'select(.workstream == "review-policy")')"
   key="$(printf '%s' "$candidate" | jq -r '.dedupe_key')"
   printf '%s' "$candidate" > "$TMP/candidate.json"
+  write_experiment_proof "$TMP/candidate.json"
   write_clean_outcomes 3 "$key"
   jq -c '.escaped_high_severity = 1 | .escaped_total = 1' "$OUTCOMES" > "$OUTCOMES.tmp"
   mv "$OUTCOMES.tmp" "$OUTCOMES"
   rollback="$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')"
   run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
-    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" --rollback-digest "$rollback"
+    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" --rollback-digest "$rollback" \
+    --experiment-proof "$TMP/experiment-proof.json"
   [ "$status" -eq 0 ]
-  echo "$output" | jq -e --arg rollback "$rollback" '.state == "rolled_back" and
-    .rollback.prior_policy_digest == $rollback' >/dev/null
+  echo "$output" | jq -e '.state == "rollback_required"' >/dev/null
+  git -C "$WORK" revert --no-edit "$CHANGE_COMMIT" >/dev/null
+  rollback_commit="$(git -C "$WORK" rev-parse HEAD)"
+  cat > "$TMP/rollback-proof.json" <<JSON
+{"schema":1,"status":"executed","change_commit":"$CHANGE_COMMIT","rollback_commit":"$rollback_commit","prior_policy_digest":"$rollback"}
+JSON
+  run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
+    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" --rollback-digest "$rollback" \
+    --experiment-proof "$TMP/experiment-proof.json" --rollback-proof "$TMP/rollback-proof.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e --arg rollback "$rollback" '.state == "rolled_back" and .rollback.prior_policy_digest == $rollback' >/dev/null
   jq -s -e '.[-1].state == "rolled_back"' "$LIFECYCLE" >/dev/null
 }
 
@@ -154,10 +185,12 @@ SH
   candidate="$(printf '%s\n' "$output" | jq -c 'select(.workstream == "review-policy")')"
   key="$(printf '%s' "$candidate" | jq -r '.dedupe_key')"
   printf '%s' "$candidate" > "$TMP/candidate.json"
+  write_experiment_proof "$TMP/candidate.json"
   write_clean_outcomes 20 "$key" 100 true
   rollback="$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')"
   run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
-    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" --rollback-digest "$rollback"
+    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" --rollback-digest "$rollback" \
+    --experiment-proof "$TMP/experiment-proof.json"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.state == "promoted" and
     .successful_outcome_digest == "sha256:clean-20" and .provider_diverse_review == true' >/dev/null
@@ -170,12 +203,46 @@ SH
   candidate="$(printf '%s\n' "$output" | jq -c 'select(.workstream == "review-policy")')"
   key="$(printf '%s' "$candidate" | jq -r '.dedupe_key')"
   printf '%s' "$candidate" > "$TMP/candidate.json"
+  write_experiment_proof "$TMP/candidate.json"
   write_clean_outcomes 20 "$key" 100 true
   jq -c 'del(.review_receipt_digest)' "$OUTCOMES" > "$OUTCOMES.tmp"
   mv "$OUTCOMES.tmp" "$OUTCOMES"
   rollback="$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')"
   run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
-    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" --rollback-digest "$rollback"
+    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" --rollback-digest "$rollback" \
+    --experiment-proof "$TMP/experiment-proof.json"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.state == "held" and .reason == "sample_floor" and .samples == 0' >/dev/null
+}
+
+@test "promotion is held when exact-commit validation proof is absent" {
+  seed_high_escape
+  run_candidates
+  candidate="$(printf '%s\n' "$output" | jq -c 'select(.workstream == "review-policy")')"
+  key="$(printf '%s' "$candidate" | jq -r '.dedupe_key')"
+  printf '%s' "$candidate" > "$TMP/candidate.json"
+  write_clean_outcomes 20 "$key" 100 true
+  run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
+    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" \
+    --rollback-digest "$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.state == "held" and .reason == "experiment_proof_required"' >/dev/null
+}
+
+@test "advance consumes repo-scoped evidence and promotes without operator input" {
+  seed_high_escape
+  run_candidates
+  candidate="$(printf '%s\n' "$output" | jq -c 'select(.workstream == "review-policy")')"
+  key="$(printf '%s' "$candidate" | jq -r '.dedupe_key')"
+  printf '%s' "$candidate" > "$TMP/candidate.json"
+  write_experiment_proof "$TMP/candidate.json"
+  mkdir -p "$WORK/.autospec/self-improvement-evidence"
+  cp "$TMP/experiment-proof.json" "$WORK/.autospec/self-improvement-evidence/experiment.json"
+  write_clean_outcomes 20 "$key" 100 true
+
+  run bash "$SCRIPT" advance --repo-root "$WORK" --review-outcomes "$OUTCOMES" \
+    --lifecycle-ledger "$LIFECYCLE"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.advanced == 1 and .promoted == 1 and .held == 0' >/dev/null
+  jq -s -e '.[-1].state == "promoted" and .[-1].falsifier_passed == true' "$LIFECYCLE" >/dev/null
 }
