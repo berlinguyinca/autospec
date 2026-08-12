@@ -221,7 +221,11 @@ mod guard {
     }
 
     fn is_conductor_source(path: &Path) -> bool {
-        path.ends_with("queue.rs")
+        // autonomous.rs is a file, not a directory, so the component check below never
+        // matched it -- the largest conductor source went unscanned, and two unretried
+        // health-gate reads survived there and halted the conductor on a TLS blip.
+        path.ends_with("autonomous.rs")
+            || path.ends_with("queue.rs")
             || path.ends_with("claim.rs")
             || path
                 .components()

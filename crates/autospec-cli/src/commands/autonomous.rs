@@ -2233,8 +2233,9 @@ fn check_run_evidence_for(repo: &str, branch: &str) -> Result<Vec<CheckEvidence>
 }
 
 fn gh_default_branch(repo: &str) -> Result<Option<String>, String> {
-    let output = Command::new("gh")
-        .args([
+    // A failed read answering "none" becomes DefaultBranchMissing, a permanent halt.
+    let output = gh_read::run_gh_read_with_retry(
+        &[
             "repo",
             "view",
             repo,
@@ -2242,12 +2243,10 @@ fn gh_default_branch(repo: &str) -> Result<Option<String>, String> {
             "defaultBranchRef",
             "--jq",
             ".defaultBranchRef.name",
-        ])
-        .output()
-        .map_err(|error| format!("cannot resolve default branch with gh: {error}"))?;
-    if !output.status.success() {
-        return Ok(None);
-    }
+        ],
+        "resolve the default branch",
+    )
+    .map_err(|error| format!("cannot resolve default branch: {error:?}"))?;
     let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if branch.is_empty() {
         Ok(None)
@@ -2257,12 +2256,12 @@ fn gh_default_branch(repo: &str) -> Result<Option<String>, String> {
 }
 
 fn gh_branch_exists(repo: &str, branch: &str) -> bool {
-    Command::new("gh")
-        .args(["api", &format!("repos/{repo}/branches/{branch}")])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
+    // A failed read answering "missing" becomes BranchNotFound, a permanent halt.
+    gh_read::run_gh_read_with_retry(
+        &["api", &format!("repos/{repo}/branches/{branch}")],
+        "check the mainline branch",
+    )
+    .map(|output| output.status.success())
         .unwrap_or(false)
 }
 
