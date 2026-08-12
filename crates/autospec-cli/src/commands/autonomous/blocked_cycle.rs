@@ -8,10 +8,76 @@ use autospec_core::coordination::{
 };
 
 use super::{
-    foreground_scope, foreground_state_path, persist_foreground_state, ForegroundCompletion,
-    Options, RunLayout, NO_READY_ISSUE_PAUSE, OWNERSHIP_RETIREMENT_PAUSE,
-    TERMINAL_RETIREMENT_PAUSE,
+    foreground_scope, foreground_state_path, load_foreground_state, persist_foreground_state,
+    CommandFailure, ForegroundCompletion, ForegroundFailure, Options, RunLayout,
+    NO_READY_ISSUE_PAUSE, OWNERSHIP_RETIREMENT_PAUSE, TERMINAL_RETIREMENT_PAUSE,
 };
+
+/// The governor key a lost claim is charged to.
+///
+/// Deliberately coarse. The deferral JSON names the observed owner, which changes
+/// with every competing generation; keying on that would never repeat, so the
+/// backlog would count to one forever and never seal.
+const DEFERRED_CANDIDATE_REASON: &str = "claim_deferred";
+
+/// Turn a claim the conductor did not win into a finished cycle it can loop past.
+///
+/// Losing a claim race is one candidate's problem. It used to exit the process with
+/// code 2, and a supervisor restarted straight into the same race: 139 restarts in
+/// under two hours, no work done, while the issue was re-wedged on every pass.
+///
+/// Only `CandidateDeferred` is contained, and only in a continuous run. `Deferred`
+/// still ends the run, which matters because that is how a lifecycle lease reject
+/// arrives -- containing it would leave two conductors mutating one repository.
+pub(super) fn deferred_candidate_cycle(
+    layout: &RunLayout,
+    options: &Options,
+    failure: ForegroundFailure,
+    continuous: bool,
+) -> Result<ForegroundCompletion, ForegroundFailure> {
+    let ForegroundFailure::CandidateDeferred { json, exit_code } = failure else {
+        return Err(failure);
+    };
+    if !continuous {
+        return Err(ForegroundFailure::CandidateDeferred { json, exit_code });
+    }
+    println!("{json}");
+    let scope = foreground_scope(options, layout);
+    let path = foreground_state_path(layout, scope);
+    let state = load_foreground_state(&path, layout, scope).map_err(diagnostic)?;
+    let Some(issue) = state.selected_issue() else {
+        return Ok(ForegroundCompletion::State(Box::new(state)));
+    };
+    let state = state
+        .record_blocked_backlog_cycle(DEFERRED_CANDIDATE_REASON, vec![issue])
+        .map_err(diagnostic)?;
+    let state = if state.phase() == ConductorPhase::AllBlocked {
+        state
+    } else {
+        retire_deferred_selection(state).map_err(diagnostic)?
+    };
+    persist_foreground_state(&path, &state).map_err(diagnostic)?;
+    Ok(ForegroundCompletion::State(Box::new(state)))
+}
+
+/// Drop the selection so the next scan moves on.
+///
+/// A claim is lost from `Claim`, which cannot retire directly, so pause first and
+/// then retire -- `RetireObsoleteSelection` admits any paused selection.
+fn retire_deferred_selection(state: ConductorState) -> Result<ConductorState, String> {
+    let state = if state.phase() == ConductorPhase::Paused {
+        state
+    } else {
+        state.transition(ConductorEvent::Pause {
+            reason: DEFERRED_CANDIDATE_REASON.to_string(),
+        })?
+    };
+    state.transition(ConductorEvent::RetireObsoleteSelection)
+}
+
+fn diagnostic(reason: String) -> ForegroundFailure {
+    ForegroundFailure::Diagnostic(CommandFailure::diagnostic(reason))
+}
 
 /// Whether a pause is the benign "nothing was ready after review" one, which the
 /// continuous loop resumes from rather than treating as a stop.
@@ -473,6 +539,22 @@ mod tests {
 
         assert!(reason.contains("verifier_offline"), "reason was: {reason}");
         assert!(reason.contains("51"), "reason was: {reason}");
+    }
+
+    /// A claim is lost while the state sits in `Claim`, which cannot retire directly.
+    #[test]
+    fn a_lost_claim_retires_its_selection_from_the_claim_phase() {
+        let state = claimed_foreground_state(51);
+        assert_ne!(state.phase(), ConductorPhase::Paused);
+
+        let state = retire_deferred_selection(state).expect("retire a lost claim");
+
+        assert_eq!(state.phase(), ConductorPhase::Scan);
+        assert_eq!(
+            state.selected_issue(),
+            None,
+            "the next scan must be free to pick something else"
+        );
     }
 
     #[test]
