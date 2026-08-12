@@ -39,6 +39,27 @@ MD
     printf '%s\n' "$output" | jq -e 'select(.workstream=="report-risk")' >/dev/null
 }
 
+@test "every emitted candidate carries the bounded falsifiable hypothesis contract" {
+    seed_repo_gaps
+    run bash "$SCRIPT" candidates --repo-root "$TMP/repo"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | jq -s -e 'all(.[ ];
+      (.evidence | length > 0) and (.failed_invariant | length > 0) and
+      (.named_consumer | length > 0) and (.falsifier.command | length > 0) and
+      (.files | length > 0 and length <= 3) and (.dedupe_key | length > 0) and
+      (.before_after | type == "object") and (.sample_floor >= 1) and
+      (.max_cost_regression >= 0) and (.rollback | type == "object") and
+      (.change_class == "strengthening" or .change_class == "neutral" or .change_class == "weakening") and
+      (.questions | length == 8))' >/dev/null
+}
+
+@test "self-improvement evaluator is available to advance the lifecycle" {
+    run python3 "$REPO_ROOT/scripts/autonomous-self-improvement-evaluate" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"evaluate"* ]]
+    [[ "$output" == *"advance"* ]]
+}
+
 @test "apply is report-only unless both --apply and env opt-in are present" {
     seed_repo_gaps
     cat > "$TMP/bin/gh" <<'SH'
