@@ -59,6 +59,7 @@ mod scope_root;
 mod sidecar_launch;
 mod snapshot_identity;
 mod structured_review;
+mod structured_review_receipt;
 mod support_base;
 mod support_invocation;
 mod support_launch;
