@@ -5502,6 +5502,7 @@ enum StartupPidLiveness {
 enum StartupHeartbeatClassification {
     Absent,
     Blocking,
+    /// Owner proven dead. Expiry is not required: liveness alone decides.
     ExpiredDead(Box<StartupHeartbeatSnapshot>),
 }
 #[cfg(unix)]
@@ -5663,7 +5664,7 @@ fn classify_startup_heartbeat_at(
 fn classify_startup_heartbeat_snapshot(
     file: RegularFileSnapshot,
     expected: StartupHeartbeatExpectation<'_>,
-    now: u64,
+    _now: u64,
     observe_pid: impl FnOnce(&str, u32, &str, &str, &str) -> StartupPidLiveness,
 ) -> StartupHeartbeatClassification {
     let Some(evidence) = parse_startup_heartbeat(&file.document) else {
@@ -5689,8 +5690,10 @@ fn classify_startup_heartbeat_snapshot(
             .ok()
             .filter(|start| *start > 0)
             .is_some_and(|start| start.to_string() == evidence.process_start);
-    let expired = now.saturating_sub(evidence.ts) > evidence.ttl_seconds && now >= evidence.ts;
-    if !exact || !expired || !cfg!(unix) {
+    // Liveness decides this, not the clock: a crash loop rewrites the heartbeat and
+    // pushes expiry out forever. `exact` plus observe_pid's host/boot/start match is
+    // what keeps the takeover safe.
+    if !exact || !cfg!(unix) {
         return StartupHeartbeatClassification::Blocking;
     }
     if observe_pid(
@@ -5703,10 +5706,7 @@ fn classify_startup_heartbeat_snapshot(
     {
         return StartupHeartbeatClassification::Blocking;
     }
-    StartupHeartbeatClassification::ExpiredDead(Box::new(StartupHeartbeatSnapshot {
-        file,
-        evidence,
-    }))
+    StartupHeartbeatClassification::ExpiredDead(Box::new(StartupHeartbeatSnapshot { file, evidence }))
 }
 
 // These descriptor-only primitives remain inert until guarded recovery integrates them.

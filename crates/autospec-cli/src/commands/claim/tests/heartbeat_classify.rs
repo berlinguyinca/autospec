@@ -2,11 +2,14 @@
 //
 // Split out of tests.rs; see the note in that file.
 
+use super::super as claim;
+use super::support::{
+    assert_fifo_reader_nonblocking, expected_startup_heartbeat, startup_heartbeat_document,
+    startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
+};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use super::super as claim;
-use super::support::{STARTUP_HEARTBEAT_ENV, assert_fifo_reader_nonblocking, expected_startup_heartbeat, startup_heartbeat_document, startup_heartbeat_fixture};
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -26,9 +29,7 @@ fn startup_heartbeat_remote_process_identity() {
     )
     .unwrap();
     let path = root
-        .join(super::super::super::autonomous::drain::repository_progress_key(
-            "owner/repo",
-        ))
+        .join(super::super::super::autonomous::drain::repository_progress_key("owner/repo"))
         .join("42.json");
     let document = std::fs::read(&path).unwrap();
     let value: serde_json::Value = serde_json::from_slice(&document).unwrap();
@@ -90,9 +91,7 @@ fn stale_heartbeat_receipt_transaction() {
     use std::time::{Duration, Instant};
     let expected = expected_startup_heartbeat("host:user:rust:4242:nonce-a");
     let open_parent = |path: &Path| {
-        std::fs::File::from(
-            open(path, OFlag::O_PATH | OFlag::O_DIRECTORY, Mode::empty()).unwrap(),
-        )
+        std::fs::File::from(open(path, OFlag::O_PATH | OFlag::O_DIRECTORY, Mode::empty()).unwrap())
     };
     let (parent_path, _) = startup_heartbeat_fixture("receipt-red");
     let repo_path = parent_path.join("repo");
@@ -124,8 +123,7 @@ fn stale_heartbeat_receipt_transaction() {
     std::fs::remove_file(&completed_path).unwrap();
     claim::begin_heartbeat_receipt_with_hook(&repo, expected, || {
         std::fs::write(&completed_path, b"").unwrap();
-        std::fs::set_permissions(&completed_path, std::fs::Permissions::from_mode(0o600))
-            .unwrap();
+        std::fs::set_permissions(&completed_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     })
     .err()
     .expect("completed wins");
@@ -135,19 +133,16 @@ fn stale_heartbeat_receipt_transaction() {
     std::fs::remove_file(&completed_path).unwrap();
     let mut transaction = claim::begin_heartbeat_receipt(&repo, expected).unwrap();
     transaction.pending.push_str("-missing");
-    claim::retire_heartbeat_receipt_with_sync(transaction, |_| Ok(()))
-        .expect_err("rename failure");
+    claim::retire_heartbeat_receipt_with_sync(transaction, |_| Ok(())).expect_err("rename failure");
     assert_eq!(decision(), Pending);
     let (pending, completed) = claim::heartbeat_receipt_names(expected);
     let handoff_fd = std::fs::File::open(&handoff).unwrap();
     let socket_root = PathBuf::from(format!("/proc/self/fd/{}", handoff_fd.as_raw_fd()));
-    let drift =
-        claim::heartbeat_receipt_retry_decision_with_hook(&repo, expected, |boundary| {
-            if boundary == "handoff" {
-                std::fs::set_permissions(&handoff, std::fs::Permissions::from_mode(0o755))
-                    .unwrap();
-            }
-        });
+    let drift = claim::heartbeat_receipt_retry_decision_with_hook(&repo, expected, |boundary| {
+        if boundary == "handoff" {
+            std::fs::set_permissions(&handoff, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    });
     assert_eq!(drift, Blocking);
     std::fs::set_permissions(&handoff, std::fs::Permissions::from_mode(0o700)).unwrap();
     let pending_path = handoff.join(&pending);
@@ -159,9 +154,7 @@ fn stale_heartbeat_receipt_transaction() {
     for unsafe_kind in ["fifo", "symlink", "socket", "size", "mode"] {
         std::fs::remove_file(&pending_path).unwrap();
         match unsafe_kind {
-            "fifo" => {
-                nix::unistd::mkfifo(&pending_path, Mode::from_bits_truncate(0o600)).unwrap()
-            }
+            "fifo" => nix::unistd::mkfifo(&pending_path, Mode::from_bits_truncate(0o600)).unwrap(),
             "symlink" => symlink("/dev/null", &pending_path).unwrap(),
             "socket" => {
                 drop(UnixListener::bind(socket_root.join(&pending)).unwrap());
@@ -203,8 +196,10 @@ fn stale_heartbeat_receipt_transaction() {
         std::fs::create_dir(path).unwrap();
     };
     let decision =
-        claim::heartbeat_receipt_retry_decision_with_hook(&repo, expected, |boundary| {
-            match boundary {
+        claim::heartbeat_receipt_retry_decision_with_hook(
+            &repo,
+            expected,
+            |boundary| match boundary {
                 "repo" => replace(&repo_path, &parent_path.join("repo-old")),
                 "quarantine" => {
                     let old = parent_path.join("repo-old");
@@ -218,8 +213,8 @@ fn stale_heartbeat_receipt_transaction() {
                     );
                 }
                 _ => unreachable!(),
-            }
-        });
+            },
+        );
     assert_eq!(decision, Pending);
     std::fs::remove_dir_all(parent_path).expect("remove rename fixture");
 }
@@ -228,9 +223,7 @@ fn stale_heartbeat_receipt_transaction() {
 fn unsupported_platform_stale_recovery_is_fail_closed() {
     let source = include_str!("../../claim.rs");
     let fallback = source
-        .split(
-            "#[cfg(not(target_os = \"linux\"))]\nfn quarantine_authoritative_stale_heartbeat",
-        )
+        .split("#[cfg(not(target_os = \"linux\"))]\nfn quarantine_authoritative_stale_heartbeat")
         .nth(1)
         .expect("unsupported-platform recovery fallback");
     let fallback = fallback
@@ -248,10 +241,9 @@ fn classify_startup_heartbeat_blocks_fresh_live_malformed_mismatched_and_remote_
     let worker = "host:user:rust:4242:nonce-a";
     let exact = startup_heartbeat_document(worker, 4242);
     let changed = |from, to| exact.replace(from, to);
-    let mut cases = vec![
-        ("fresh", exact.clone(), 105, Dead, false),
-        ("live", exact.clone(), 200, Live, true),
-    ];
+    // A fresh heartbeat whose owner is dead is no longer blocking; it is a takeover,
+    // covered by `a_fresh_heartbeat_whose_owner_is_dead_is_taken_over`.
+    let mut cases = vec![("live", exact.clone(), 200, Live, true)];
     let mutations = r#"malformed|not-json
 owner/repo|other/repo
 "42"|"43"
@@ -291,6 +283,41 @@ claimed|review
         );
         assert_eq!(observed, should_observe, "{label} liveness call");
     }
+    std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
+}
+
+/// A dead owner does not hold its claim, whatever the clock says.
+///
+/// The TTL used to gate this probe, so a worker that died seconds ago kept its lease
+/// for the full three hours. Worse, every crashed successor rewrote the heartbeat and
+/// pushed the expiry another TTL out, so a crash loop could hold an issue hostage
+/// indefinitely. Identity, not elapsed time, is what makes the takeover safe.
+#[cfg(unix)]
+#[test]
+fn a_fresh_heartbeat_whose_owner_is_dead_is_taken_over() {
+    let (directory, path) = startup_heartbeat_fixture("fresh-dead");
+    let worker = "host:user:rust:4242:nonce-a";
+    std::fs::write(&path, startup_heartbeat_document(worker, 4242)).expect("write fixture");
+    let mut observed = false;
+
+    let classified = claim::classify_startup_heartbeat(
+        &path,
+        expected_startup_heartbeat(worker),
+        105,
+        |_, _, _, _, _| {
+            observed = true;
+            claim::StartupPidLiveness::Dead
+        },
+    );
+
+    assert!(
+        matches!(classified, claim::StartupHeartbeatClassification::ExpiredDead(_)),
+        "a dead owner inside its TTL must still yield the claim: {classified:?}"
+    );
+    assert!(
+        observed,
+        "liveness must be probed without waiting for expiry"
+    );
     std::fs::remove_dir_all(directory).expect("remove heartbeat fixture");
 }
 
