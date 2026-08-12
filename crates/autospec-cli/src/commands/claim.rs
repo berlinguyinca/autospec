@@ -7459,7 +7459,7 @@ fn print_state_help() {
     );
 }
 
-mod lease;
+pub(crate) mod lease;
 use lease::{
     claim_retry_attempts, claim_retry_sleep_ms, conductor_claim_owner_holds_lease,
     read_gh_with_retry, server_lease_is_fresh, server_lease_is_stale,

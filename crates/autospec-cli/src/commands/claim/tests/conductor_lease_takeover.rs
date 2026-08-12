@@ -6,7 +6,7 @@
 use super::super::lease::conductor_claim_owner_holds_lease;
 use autospec_core::claim::RunStateRecord;
 
-fn owner_record(updated_at: &str, ttl_seconds: u64, step: &str) -> RunStateRecord {
+pub(super) fn owner_record(updated_at: &str, ttl_seconds: u64, step: &str) -> RunStateRecord {
     RunStateRecord::new(
         "owner/repo",
         42,
@@ -65,4 +65,58 @@ fn an_unparseable_timestamp_keeps_the_lease() {
         conductor_claim_owner_holds_lease(&record),
         "an unreadable record must fail closed and keep the owner"
     );
+}
+
+mod requeue {
+    use super::super::super::lease::claim_is_abandoned;
+    use super::owner_record;
+    use crate::commands::claim::utc_now_iso;
+
+    fn record(state: &str, updated_at: &str) -> autospec_core::claim::RunStateRecord {
+        let mut record = owner_record(updated_at, 10800, "verification");
+        record.state = state.to_string();
+        record
+    }
+
+    #[test]
+    fn a_missing_claim_record_is_abandoned() {
+        assert!(claim_is_abandoned(None), "nothing owns the issue");
+    }
+
+    #[test]
+    fn a_released_claim_is_abandoned() {
+        let live = utc_now_iso().expect("timestamp");
+        for state in ["available", "released", "retryable", "failed"] {
+            assert!(
+                claim_is_abandoned(Some(&record(state, &live))),
+                "{state} leaves the issue unowned even with a fresh timestamp"
+            );
+        }
+    }
+
+    #[test]
+    fn an_expired_lease_is_abandoned() {
+        assert!(claim_is_abandoned(Some(&record(
+            "claimed",
+            "2026-07-29T00:49:45Z"
+        ))));
+    }
+
+    #[test]
+    fn a_live_claim_is_left_alone() {
+        let live = utc_now_iso().expect("timestamp");
+
+        assert!(
+            !claim_is_abandoned(Some(&record("claimed", &live))),
+            "a worker inside its lease must keep the issue"
+        );
+    }
+
+    #[test]
+    fn a_merged_claim_is_left_alone() {
+        assert!(
+            !claim_is_abandoned(Some(&record("merged", "2026-07-29T00:49:45Z"))),
+            "merged work is finished, not abandoned"
+        );
+    }
 }
