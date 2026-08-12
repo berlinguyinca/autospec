@@ -17,6 +17,18 @@ pub(super) fn conductor_claim_owner_holds_lease(record: &RunStateRecord) -> bool
         || !server_lease_is_stale(&record.updated_at, record.ttl_seconds)
 }
 
+pub(super) fn active_contesting_owner(
+    record: Option<RunStateRecord>,
+    worker_id: &str,
+    branch: &str,
+) -> Option<String> {
+    let record = record?;
+    (record.state == "claimed"
+        && (record.worker_id != worker_id || record.branch != branch)
+        && conductor_claim_owner_holds_lease(&record))
+    .then_some(record.worker_id)
+}
+
 /// Whether a server-recorded lease is still inside its TTL.
 pub(super) fn server_lease_is_fresh(server_timestamp: &str, ttl_seconds: u64) -> bool {
     let Some(updated_at) = parse_iso_timestamp(server_timestamp) else {
