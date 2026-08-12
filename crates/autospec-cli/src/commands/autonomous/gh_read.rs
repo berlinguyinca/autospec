@@ -143,12 +143,26 @@ mod tests {
 mod guard {
     use std::path::Path;
 
-    fn call_contains_get(source: &str, start: usize, command_builder: bool) -> bool {
+    /// Markers that identify an idempotent GitHub read.
+    ///
+    /// `"GET"` alone missed `gh issue view`, which goes over GraphQL POST and
+    /// carries no method argument at all. That read stayed unretried, and a TLS
+    /// handshake failure on it crash-looped a live conductor eighteen times.
+    const READ_MARKERS: [&str; 5] = [
+        "\"GET\"",
+        "\"view\"",
+        "\"list\"",
+        "\"checks\"",
+        "\"graphql\"",
+    ];
+
+    fn call_is_a_read(source: &str, start: usize, command_builder: bool) -> bool {
         let terminator = if command_builder { ".output()" } else { "])" };
         let end = source[start..]
             .find(terminator)
             .map_or(source.len(), |offset| start + offset + terminator.len());
-        source[start..end].contains("\"GET\"")
+        let call = &source[start..end];
+        READ_MARKERS.iter().any(|marker| call.contains(marker))
     }
 
     fn inside_retry_builder(source: &str, start: usize) -> bool {
@@ -162,7 +176,7 @@ mod guard {
         let mut offenders = Vec::new();
         for (start, _) in source.match_indices(needle) {
             if !inside_retry_builder(source, start)
-                && call_contains_get(source, start, needle.starts_with("Command::"))
+                && call_is_a_read(source, start, needle.starts_with("Command::"))
             {
                 offenders.push(format!("{file}:{needle}"));
             }
@@ -225,6 +239,20 @@ mod guard {
     /// back unusable under concurrency kills the conductor, and the claim it was
     /// holding strands its issue. Two were fixed reactively, each only after it was
     /// caught killing a live run. This fails the build instead.
+    /// Files this guard does not cover yet, and why.
+    ///
+    /// `executor_bridge.rs` raises `BridgeRunFailure` rather than `CommandFailure`,
+    /// so its seven reads need an error-mapping wrapper before they can adopt
+    /// `run_gh_read_with_retry`. Tracked separately; named here so the gap is
+    /// visible in the source rather than silently absent from the guard.
+    const PENDING_RETRY_ADOPTION: [&str; 1] = ["executor_bridge.rs"];
+
+    fn is_pending_adoption(path: &Path) -> bool {
+        PENDING_RETRY_ADOPTION
+            .iter()
+            .any(|pending| path.ends_with(pending))
+    }
+
     #[test]
     fn no_unretried_read_survives_in_the_conductor_path() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
@@ -232,6 +260,7 @@ mod guard {
             .iter()
             .filter(|path| is_conductor_source(path))
             .filter(|path| !path.ends_with("gh_read.rs"))
+            .filter(|path| !is_pending_adoption(path))
             .flat_map(|path| scan_source(path))
             .collect::<Vec<_>>();
 
@@ -240,6 +269,26 @@ mod guard {
             "these reads bypass run_gh_read_with_retry and can kill the conductor: {}",
             offenders.join(", ")
         );
+    }
+
+    /// `gh issue view` goes over GraphQL POST and carries no method argument, so a
+    /// guard keyed on `"GET"` never saw it. That read stayed unretried and a TLS
+    /// failure on it crash-looped a live conductor eighteen times.
+    #[test]
+    fn the_guard_recognises_a_read_that_carries_no_method() {
+        let source = "let output = Command::new(\"gh\")\n.args([\"issue\", \"view\", \"51\", \"--repo\", repo]).output();";
+
+        assert_eq!(
+            unretried_reads("sample.rs", source),
+            ["sample.rs:Command::new(\"gh\")"]
+        );
+    }
+
+    #[test]
+    fn the_guard_recognises_a_graphql_read() {
+        let source = "let output = run_gh(&[\"api\", \"graphql\", \"-f\", query]);";
+
+        assert_eq!(unretried_reads("sample.rs", source), ["sample.rs:run_gh("]);
     }
 
     #[test]

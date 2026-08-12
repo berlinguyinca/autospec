@@ -3898,24 +3898,21 @@ fn set_once<T>(slot: &mut Option<T>, value: T, message: &str) -> Result<(), Comm
 }
 
 fn infer_repo() -> Result<String, CommandFailure> {
-    let output = Command::new("gh")
-        .args([
+    let Ok(output) = lease::read_gh_with_retry(
+        &[
             "repo",
             "view",
             "--json",
             "nameWithOwner",
             "--jq",
             ".nameWithOwner",
-        ])
-        .output()
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not run gh repo view: {error}"))
-        })?;
-    if !output.status.success() {
+        ],
+        "infer the repository",
+    ) else {
         return Err(CommandFailure::diagnostic(
             "--repo is required when gh cannot infer it",
         ));
-    }
+    };
     let repo = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if repo.is_empty() {
         Err(CommandFailure::diagnostic(
@@ -3931,18 +3928,10 @@ fn list_comments(
     issue: u64,
 ) -> Result<Vec<autospec_core::claim::RemoteComment>, CommandFailure> {
     let endpoint = format!("repos/{repo}/issues/{issue}/comments");
-    let output = Command::new("gh")
-        .args(["api", endpoint.as_str(), "--paginate", "--slurp"])
-        .output()
-        .map_err(|error| {
-            CommandFailure::transient(format!("could not run gh api issue comments: {error}"))
-        })?;
-    if !output.status.success() {
-        return Err(CommandFailure::transient(format!(
-            "gh api issue comments failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
+    let output = lease::read_gh_with_retry(
+        &["api", endpoint.as_str(), "--paginate", "--slurp"],
+        "read issue comments",
+    )?;
     parse_paginated_comments_json(&String::from_utf8_lossy(&output.stdout)).map_err(|error| {
         CommandFailure::diagnostic(format!("could not parse GitHub issue comments: {error}"))
     })
@@ -4001,26 +3990,21 @@ fn load_claim_issue(
     repo: &str,
     issue: u64,
 ) -> Result<autospec_core::claim::ClaimIssueSnapshot, CommandFailure> {
-    let output = Command::new("gh")
-        .args([
+    let issue = issue.to_string();
+    let output = lease::read_gh_with_retry(
+        &[
             "issue",
             "view",
-            &issue.to_string(),
+            issue.as_str(),
             "--repo",
             repo,
             "--json",
             "labels,body,title,author",
             "--jq",
             "{labels:[.labels[].name],body:(.body // \"\"),title:(.title // \"\"),author:(.author.login // \"\")}",
-        ])
-        .output()
-        .map_err(|error| CommandFailure::transient(format!("could not run gh issue view: {error}")))?;
-    if !output.status.success() {
-        return Err(CommandFailure::transient(format!(
-            "gh issue view failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
+        ],
+        "read a claim issue",
+    )?;
     parse_claim_issue_json(&String::from_utf8_lossy(&output.stdout)).map_err(|error| {
         CommandFailure::diagnostic(format!("could not parse GitHub claim issue: {error}"))
     })
@@ -4029,8 +4013,8 @@ fn load_claim_issue(
 fn list_open_pull_requests(
     repo: &str,
 ) -> Result<Vec<autospec_core::claim::OpenPullRequest>, CommandFailure> {
-    let output = Command::new("gh")
-        .args([
+    let output = lease::read_gh_with_retry(
+        &[
             "pr",
             "list",
             "--repo",
@@ -4041,15 +4025,9 @@ fn list_open_pull_requests(
             "100",
             "--json",
             "number,body,headRefName,headRefOid,isDraft,baseRefName",
-        ])
-        .output()
-        .map_err(|error| CommandFailure::transient(format!("could not run gh pr list: {error}")))?;
-    if !output.status.success() {
-        return Err(CommandFailure::transient(format!(
-            "gh pr list failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
+        ],
+        "list open pull requests",
+    )?;
     parse_open_pull_requests_json(&String::from_utf8_lossy(&output.stdout)).map_err(|error| {
         CommandFailure::diagnostic(format!(
             "could not parse GitHub open pull requests: {error}"
@@ -4061,21 +4039,20 @@ fn list_required_checks(
     repo: &str,
     pull_request: u64,
 ) -> Result<Vec<autospec_core::claim::RequiredCheck>, CommandFailure> {
-    let output = Command::new("gh")
-        .args([
+    let pull_request = pull_request.to_string();
+    let output = lease::read_gh_with_retry(
+        &[
             "pr",
             "checks",
-            &pull_request.to_string(),
+            pull_request.as_str(),
             "--repo",
             repo,
             "--required",
             "--json",
             "name,state",
-        ])
-        .output()
-        .map_err(|error| {
-            CommandFailure::transient(format!("could not run gh pr checks: {error}"))
-        })?;
+        ],
+        "read required checks",
+    )?;
     if output.stdout.is_empty() {
         return Err(CommandFailure::transient(format!(
             "gh pr checks returned no required-check evidence: {}",
@@ -7452,8 +7429,8 @@ fn print_state_help() {
 
 pub(crate) mod lease;
 use lease::{
-    claim_retry_attempts, claim_retry_sleep_ms,
-    read_gh_with_retry, server_lease_is_fresh, server_lease_is_stale,
+    claim_retry_attempts, claim_retry_sleep_ms, read_gh_with_retry, server_lease_is_fresh,
+    server_lease_is_stale,
 };
 #[cfg(test)]
 mod tests;

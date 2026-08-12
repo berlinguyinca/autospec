@@ -598,24 +598,21 @@ fn next_value(args: &[String], index: &mut usize, option: &str) -> Result<String
 }
 
 fn infer_repo() -> Result<String, CommandFailure> {
-    let output = Command::new("gh")
-        .args([
+    let Ok(output) = run_gh_read_with_retry(
+        &[
             "repo",
             "view",
             "--json",
             "nameWithOwner",
             "--jq",
             ".nameWithOwner",
-        ])
-        .output()
-        .map_err(|error| {
-            CommandFailure::diagnostic(format!("could not run gh repo view: {error}"))
-        })?;
-    if !output.status.success() {
+        ],
+        "infer the repository",
+    ) else {
         return Err(CommandFailure::diagnostic(
             "--repo is required when gh cannot infer it",
         ));
-    }
+    };
     let repo = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if repo.is_empty() {
         Err(CommandFailure::diagnostic(
@@ -707,21 +704,22 @@ fn load_dependencies(repo: &str, candidates: &[RemoteIssue]) -> BTreeMap<u64, Re
 }
 
 fn load_dependency(repo: &str, number: u64) -> Option<RemoteIssue> {
-    let output = run_gh(&[
-        "issue",
-        "view",
-        &number.to_string(),
-        "--repo",
-        repo,
-        "--json",
-        "state,body,labels",
-        "--jq",
-        "{state:(.state // \"OPEN\"), body:(.body // \"\"), labels:[.labels[].name]}",
-    ])
+    let issue = number.to_string();
+    let output = run_gh_read_with_retry(
+        &[
+            "issue",
+            "view",
+            issue.as_str(),
+            "--repo",
+            repo,
+            "--json",
+            "state,body,labels",
+            "--jq",
+            "{state:(.state // \"OPEN\"), body:(.body // \"\"), labels:[.labels[].name]}",
+        ],
+        "read a dependency issue",
+    )
     .ok()?;
-    if !output.status.success() {
-        return None;
-    }
     parse_dependency_issue_json(&String::from_utf8_lossy(&output.stdout), number).ok()
 }
 
@@ -760,16 +758,10 @@ fn list_pull_requests(repo: &str) -> PullRequestEvidence {
             arguments.push(format!("endCursor={cursor}"));
         }
         let argument_refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
-        let output = match run_gh(&argument_refs) {
+        let output = match run_gh_read_with_retry(&argument_refs, "read pull request page") {
             Ok(output) => output,
             Err(error) => return PullRequestEvidence::Unavailable(error.message),
         };
-        if !output.status.success() {
-            return PullRequestEvidence::Unavailable(format!(
-                "gh pull request page failed: {}",
-                command_error(&output)
-            ));
-        }
         let pull_request_page =
             match parse_remote_pull_request_page_json(&String::from_utf8_lossy(&output.stdout)) {
                 Ok(page) => page,
