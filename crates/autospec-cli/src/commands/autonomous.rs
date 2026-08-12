@@ -47,6 +47,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::{claim, queue, CommandFailure};
 
 mod blocked_cycle;
+mod foreground_failure;
+use foreground_failure::ForegroundFailure;
 pub(crate) mod drain;
 pub(crate) mod gh_read;
 mod main_health_output;
@@ -2382,7 +2384,12 @@ fn run_foreground_cycles(
         let cycle =
             run_foreground_with_lease(layout, options, config, scope.clone(), lease, admission);
         let heartbeat_result = heartbeat.finish().map_err(resilience_lease_error);
-        let mut completion = cycle?;
+        let mut completion = match cycle {
+            Ok(completion) => completion,
+            Err(failure) => {
+                blocked_cycle::deferred_candidate_cycle(layout, options, failure, continuous)?
+            }
+        };
         heartbeat_result?;
         completed_cycles = completed_cycles.saturating_add(1);
         // A blocked issue must cost its own selection, never the whole conductor.
@@ -3071,28 +3078,6 @@ struct ForegroundSelection {
 enum ForegroundCompletion {
     State(Box<ConductorState>),
     Lifecycle(LifecycleDecision),
-}
-
-enum ForegroundFailure {
-    Diagnostic(CommandFailure),
-    Deferred { json: String, exit_code: i32 },
-}
-
-impl From<CommandFailure> for ForegroundFailure {
-    fn from(error: CommandFailure) -> Self {
-        Self::Diagnostic(error)
-    }
-}
-
-impl From<claim::ConductorClaimError> for ForegroundFailure {
-    fn from(error: claim::ConductorClaimError) -> Self {
-        match error {
-            claim::ConductorClaimError::Diagnostic(error) => Self::Diagnostic(error),
-            claim::ConductorClaimError::Deferred { json, exit_code } => {
-                Self::Deferred { json, exit_code }
-            }
-        }
-    }
 }
 
 enum ForegroundSelectionResult {
@@ -4856,7 +4841,8 @@ fn finish_foreground_with_lease(
         }
         Ok(ForegroundCompletion::Lifecycle(lifecycle)) => emit_lifecycle_decision(lifecycle),
         Err(ForegroundFailure::Diagnostic(error)) => Err(error),
-        Err(ForegroundFailure::Deferred { json, exit_code }) => {
+        Err(ForegroundFailure::Deferred { json, exit_code })
+        | Err(ForegroundFailure::CandidateDeferred { json, exit_code }) => {
             println!("{json}");
             Err(CommandFailure::status(String::new(), exit_code))
         }
