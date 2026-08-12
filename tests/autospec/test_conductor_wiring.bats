@@ -929,6 +929,7 @@ EOF
   [[ "$output" == *"Tier 3 architecture result: dry=false filed=1"* ]]
 }
 
+# linter:allow-MISSING_TEST existing Bats suite is the repository's conductor integration harness
 @test "conductor: Tier 3 defaults to deterministic self-improvement when explore script is absent" {
   _install_stub "autonomous-control-channel.sh" 'exit 0'
   _install_stub "autonomous-waterfall.sh" \
@@ -958,8 +959,11 @@ EOF
 
   [ "$status" -eq 0 ]
   [ -f "$self_log" ]
+  grep -q 'advance' "$self_log"
   grep -q 'apply' "$self_log"
   grep -q -- '--apply' "$self_log"
+  grep -q -- '.autospec/review-outcomes.jsonl' "$self_log"
+  grep -q -- '.autospec/gaps.json' "$self_log"
   [[ "$output" == *"Tier 3 architecture result: dry=false filed=1"* ]]
 }
 
