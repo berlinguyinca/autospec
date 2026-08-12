@@ -5,16 +5,27 @@
 use super::super as bridge;
 use super::super::BridgePhase;
 use super::support_base::{
-    environment, git_stdout, test_root, write_alias_table, write_executable,
+    environment, git, git_stdout, test_root, write_alias_table, write_executable,
 };
-use super::support_invocation::{
-    commit_implementation, implementation_proof_fixture, reviewer_request,
-};
+use super::support_invocation::{implementation_proof_fixture, reviewer_request};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+
+fn commit_normal_risk_reviewer_fixture(state: &bridge::PersistedInvocation) {
+    fs::write(
+        state.identity.worktree.join("implementation.txt"),
+        "implemented\n",
+    )
+    .expect("write implementation");
+    git(&state.identity.worktree, &["add", "implementation.txt"]);
+    git(
+        &state.identity.worktree,
+        &["commit", "-m", "feat: implement reviewer fixture"],
+    );
+}
 
 #[cfg(unix)]
 #[test]
@@ -58,9 +69,14 @@ fn autonomous_executor_bridge_automatic_reviewer_normalizer_rejects_each_artifac
             current_dir: root.clone(),
             environment_overrides: Vec::new(),
         };
-        let automatic =
-            bridge::prepare_automatic_reviewer_normalizer(kind, &invocation, &artifact_root)
-                .expect("automatic reviewer normalizer");
+        let automatic = bridge::prepare_automatic_reviewer_normalizer(
+            kind,
+            &invocation,
+            &artifact_root,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            false,
+        )
+        .expect("automatic reviewer normalizer");
         let output = Command::new("/bin/sh")
             .arg(&automatic.normalizer)
             .current_dir(&root)
@@ -90,11 +106,13 @@ fn autonomous_executor_bridge_opencode_reviewer_executes_with_inline_read_only_p
     // Break caught: a hostile host OpenCode config replacing the built-in plan agent's policy.
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("automatic-opencode-read-only");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
     let state_path = fixture.root.join("state/invocation.json");
     let request = reviewer_request(&state, state_path.clone());
+    let review =
+        super::support_review::valid_review_json(state.head_oid.as_deref().expect("review commit"));
     let safe_root = PathBuf::from(std::env::var_os("HOME").expect("HOME for reviewer fixture"))
         .join(format!(".autospec-opencode-review-{}", std::process::id()));
     fs::create_dir_all(&safe_root).expect("safe reviewer root");
@@ -123,8 +141,9 @@ fn autonomous_executor_bridge_opencode_reviewer_executes_with_inline_read_only_p
          [ \"$2\" = run ]\n\
          [ \"$3\" = --agent ]\n\
          [ \"$4\" = autospec-reviewer ]\n\
-         printf '%s\\n' LGTM\n",
-            hostile_config_home.display()
+         printf '%s\\n' '{}'\n",
+            hostile_config_home.display(),
+            review
         ),
     );
     let table = write_alias_table(
@@ -178,7 +197,7 @@ fn autonomous_executor_bridge_rejects_reviewer_path_from_reviewed_worktree() {
     // Break caught: a reviewed branch shadowing normalizer utilities through ambient PATH.
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("automatic-reviewer-poisoned-path");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
     let state_path = fixture.root.join("state/invocation.json");
@@ -240,7 +259,7 @@ fn autonomous_executor_bridge_rejects_reviewer_config_roots_from_reviewed_code()
     ] {
         let (fixture, mut state, _snapshot, _) =
             implementation_proof_fixture(&format!("automatic-reviewer-{key}"));
-        commit_implementation(&state);
+        commit_normal_risk_reviewer_fixture(&state);
         state.phase = BridgePhase::CiPassed;
         state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
         let state_path = fixture.root.join("state/invocation.json");
@@ -290,7 +309,7 @@ fn autonomous_executor_bridge_automatic_reviewer_does_not_inherit_untrusted_envi
     // Break caught: a review harness exposing ambient credentials or mutation controls to tools.
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("automatic-reviewer-sanitized-environment");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
     let state_path = fixture.root.join("state/invocation.json");
@@ -300,12 +319,17 @@ fn autonomous_executor_bridge_automatic_reviewer_does_not_inherit_untrusted_envi
         .join(format!(".autospec-claude-review-{}", std::process::id()));
     fs::create_dir_all(&safe_root).expect("safe reviewer root");
     let harness = safe_root.join("claude-reviewer");
+    let review =
+        super::support_review::valid_review_json(state.head_oid.as_deref().expect("review commit"));
     write_executable(
         &harness,
-        "#!/bin/sh\n\
+        &format!(
+            "#!/bin/sh\n\
          set -eu\n\
-         if [ -n \"${MUTATION_TARGET:-}\" ]; then : > \"$MUTATION_TARGET\"; fi\n\
-         printf '%s\\n' LGTM\n",
+         if [ -n \"${{MUTATION_TARGET:-}}\" ]; then : > \"$MUTATION_TARGET\"; fi\n\
+         printf '%s\\n' '{}'\n",
+            review
+        ),
     );
     let table = write_alias_table(
         &fixture.root,
@@ -386,10 +410,12 @@ fn autonomous_executor_bridge_bounds_automatic_reviewer_output_while_running() {
         bridge::HarnessKind::Claude,
         &invocation,
         &artifact_root,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        false,
     )
     .expect("automatic reviewer normalizer");
     let normalizer = fs::read_to_string(&automatic.normalizer).expect("normalizer");
-    for utility in ["env", "wc", "cat", "truncate"] {
+    for utility in ["env", "wc", "python3", "truncate"] {
         let trusted = bridge::trusted_reviewer_utility(utility).expect("trusted utility");
         assert!(
             normalizer.contains(&format!("'{}'", trusted.display())),
@@ -423,8 +449,8 @@ fn autonomous_executor_bridge_bounds_automatic_reviewer_output_while_running() {
 }
 
 #[test]
-fn autonomous_executor_bridge_explicit_reviewer_command_bypasses_alias_resolution() {
-    // Break caught: an installed-alias failure overriding the operator's explicit command.
+fn autonomous_executor_bridge_unstructured_reviewer_command_fails_closed() {
+    // Break caught: an operator command forging reviewer approval without structured evidence.
     let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("explicit-reviewer");
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some("a".repeat(40));
@@ -439,19 +465,16 @@ fn autonomous_executor_bridge_explicit_reviewer_command_bypasses_alias_resolutio
         OsString::from("/usr/bin/printf LGTM"),
     );
 
-    let reviewer = bridge::resolve_independent_reviewer(
+    let error = bridge::resolve_independent_reviewer(
         &request,
         &state,
         &env,
         &fixture.root.join("review-artifacts"),
     )
-    .expect("explicit review command");
+    .expect_err("unstructured review command must fail closed");
 
-    assert_eq!(
-        reviewer.plan.commands[0].argv,
-        vec!["/usr/bin/printf", "LGTM"]
-    );
-    assert!(reviewer.automatic.is_none());
+    assert!(error.contains("unstructured"), "{error}");
+    assert!(error.contains("cannot authorize"), "{error}");
 }
 
 #[test]
