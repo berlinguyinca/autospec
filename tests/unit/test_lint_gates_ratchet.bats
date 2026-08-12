@@ -171,6 +171,48 @@ open('big.py', 'w').writelines(lines)
     printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 139'
 }
 
+@test "delegate rc: a delegate reporting fewer findings than it printed is still trusted" {
+    write_lines small.py 20
+    git add small.py
+    # The delegate undercounts itself: check_function_loc and the nesting-depth rule emit
+    # inside a `... | while read` pipeline, so those FINDINGS_COUNT increments happen in a
+    # subshell and never reach the exit code. A crash can only truncate output, never add
+    # finding lines, so "printed more than it claimed" is the one direction that cannot mean
+    # a crash — and an equality test refused those runs outright.
+    printf '#!/usr/bin/env bash\nprintf "TODO_LEFT:a.py:1: first\\nTODO_LEFT:a.py:2: second\\n"\nexit 1\n' \
+        > fake-delegate.sh
+    chmod +x fake-delegate.sh
+    mkdir -p fakescripts
+    cp fake-delegate.sh fakescripts/lint-implementation.sh
+    cp "$GATES" fakescripts/lint-implementation-gates.sh
+    run bash fakescripts/lint-implementation-gates.sh --staged
+    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
+    # Still blocking — the findings are real, they are simply miscounted.
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q '^TODO_LEFT:a.py:2: second'
+}
+
+@test "delegate rc: enforcing complexity on a long file with a long function is not a crash" {
+    # End to end against the real delegate, which is where this was found: the file is both
+    # over the limit and holds one long function, so it prints two blocking COMPLEXITY
+    # findings and exits 1.
+    python3 -c "
+open('big.py', 'w').write('def f():\n' + '    x = 1\n' * 700)
+"
+    git add big.py
+    git commit -q -m "pre-existing oversized file"
+    python3 -c "
+lines = open('big.py').read().splitlines()
+lines[10] = '    x = 2'
+open('big.py', 'w').write('\n'.join(lines) + '\n')
+"
+    git add big.py
+    run env AUTOSPEC_COMPLEXITY_ENFORCE=1 bash "$GATES" --staged
+    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "^COMPLEXITY:big.py:.*AUTOSPEC_MAX_FUNC_LOC"
+}
+
 @test "policy: a low delegate error code without findings is not reported as clean" {
     write_lines small.py 20
     git add small.py
