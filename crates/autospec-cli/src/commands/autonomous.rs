@@ -126,7 +126,7 @@ const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const TERMINAL_RETIREMENT_PAUSE: &str = "executor_terminal_retirement";
 const OWNERSHIP_RETIREMENT_PAUSE: &str = "executor_ownership_retirement";
 const EXECUTOR_PENDING_REASON: &str = "implementation_executor_pending";
-const NO_READY_ISSUE_PAUSE: &str = "no_ready_issue_after_review";
+pub(crate) const NO_READY_ISSUE_PAUSE: &str = "no_ready_issue_after_review";
 const DEFAULT_SUPERVISOR_REPAIR_INTERVAL_SECS: u64 = 5;
 static ATOMIC_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -2423,6 +2423,10 @@ fn run_foreground_cycles(
             && cycle_limit.is_none_or(|limit| completed_cycles < limit)
             && loopable_state;
         if !keep_running {
+            // A continuous run that stops on a state it cannot loop is a defect. Report
+            // it instead of returning Ok, so it is never read as a deliberate stop.
+            blocked_cycle::reject_unplanned_exit(continuous, loopable_state, &completion)
+                .map_err(CommandFailure::diagnostic)?;
             return Ok(completion);
         }
 
@@ -2599,7 +2603,7 @@ fn run_foreground_with_lease(
     let state_path = foreground_state_path(layout, scope);
     let mut state =
         load_foreground_state(&state_path, layout, scope).map_err(CommandFailure::diagnostic)?;
-    if no_ready_selection_pause(&state).map_err(CommandFailure::diagnostic)? {
+    if blocked_cycle::no_ready_selection_pause(&state).map_err(CommandFailure::diagnostic)? {
         let ready = initial_plan.as_ref().map_err(|reason| {
             CommandFailure::diagnostic(format!("cannot recheck paused foreground queue: {reason}"))
         })?;
@@ -3075,23 +3079,6 @@ fn issue_is_open_for_autonomous_work(repo: &str, issue: u64) -> Result<bool, Com
             .labels
             .iter()
             .any(|label| matches!(label.as_str(), "auto-implement" | "in-progress-by-bot")))
-}
-
-fn no_ready_selection_pause(state: &ConductorState) -> Result<bool, String> {
-    if state.pause_reason() != Some(NO_READY_ISSUE_PAUSE) {
-        return Ok(false);
-    }
-    if state.phase() != ConductorPhase::Paused || state.selected_issue().is_some() {
-        return Err("no-ready foreground pause has incompatible state".to_string());
-    }
-    let resumed = state
-        .clone()
-        .transition(ConductorEvent::Resume)
-        .map_err(|error| format!("cannot inspect no-ready foreground pause: {error}"))?;
-    if resumed.phase() != ConductorPhase::Select {
-        return Err("no-ready foreground pause must resume from Select".to_string());
-    }
-    Ok(true)
 }
 
 #[derive(Debug, Clone)]
