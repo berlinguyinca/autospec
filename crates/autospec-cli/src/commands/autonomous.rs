@@ -49,6 +49,7 @@ use super::{claim, queue, CommandFailure};
 pub(crate) mod drain;
 mod blocked_cycle;
 mod gh_read;
+mod program;
 mod one_shot_selector;
 use one_shot_selector::{
     load_one_shot_selector, one_shot_selector_consumed, persist_one_shot_selector,
@@ -5270,8 +5271,7 @@ fn companion_command(options: &Options, subcommand: &str) -> Result<ForegroundCo
         }
     }
     Ok(ForegroundCommand {
-        program: std::env::current_exe()
-            .map_err(|error| format!("cannot resolve autonomous executable: {error}"))?,
+        program: program::autonomous_program("autonomous executable")?,
         args,
     })
 }
@@ -5287,8 +5287,7 @@ fn foreground_command(options: &Options) -> Result<ForegroundCommand, String> {
     ];
     args.extend(conductor_passthrough_args(options));
     Ok(ForegroundCommand {
-        program: std::env::current_exe()
-            .map_err(|error| format!("cannot resolve foreground conductor program: {error}"))?,
+        program: program::autonomous_program("foreground conductor program")?,
         args,
     })
 }
