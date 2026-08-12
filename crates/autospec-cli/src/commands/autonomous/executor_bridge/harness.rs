@@ -73,11 +73,10 @@ impl HarnessConfig {
         let body = fs::read_to_string(&table)
             .map_err(|error| format!("read harness alias table: {error}"))?;
         let aliases = Self::parse_alias_table(&body)?;
-        let opencode_adapter = env
-            .get("AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER")
-            .map(PathBuf::from)
-            .map(|path| safe_executable(&path, env))
-            .transpose()?;
+        let opencode_adapter = match env.get("AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER") {
+            Some(path) => Some(safe_executable(Path::new(path), env)?),
+            None => default_opencode_adapter(repo, env).transpose()?,
+        };
         Ok(Self {
             aliases,
             opencode_adapter,
@@ -379,6 +378,35 @@ pub(super) fn temporary_path(path: &Path, env: &BTreeMap<String, OsString>) -> b
             .get("TMPDIR")
             .filter(|root| !root.is_empty())
             .is_some_and(|root| path.starts_with(Path::new(root)))
+}
+
+/// Resolve the OpenCode containment adapter when the operator has not set
+/// `AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER` explicitly. Falls back to the shipped
+/// `scripts/lib/opencode-containment-adapter.sh` in (in priority order) the
+/// `AUTOSPEC_SCRIPTS_DIR` install tree, the `~/.autospec/scripts` install tree,
+/// and the repository checkout. Returns `None` when none exists — the mutating
+/// OpenCode implementer then fails closed with `executor_harness_uncontained`.
+#[cfg(target_os = "linux")]
+fn default_opencode_adapter(
+    repo: &Path,
+    env: &BTreeMap<String, OsString>,
+) -> Option<Result<PathBuf, String>> {
+    let mut candidates = Vec::new();
+    if let Some(scripts_dir) = env.get("AUTOSPEC_SCRIPTS_DIR") {
+        candidates.push(PathBuf::from(scripts_dir).join("lib/opencode-containment-adapter.sh"));
+    }
+    if let Some(home) = env.get("HOME") {
+        candidates.push(
+            PathBuf::from(home).join(".autospec/scripts/lib/opencode-containment-adapter.sh"),
+        );
+    }
+    candidates.push(repo.join("scripts/lib/opencode-containment-adapter.sh"));
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Some(safe_executable(&candidate, env));
+        }
+    }
+    None
 }
 
 fn alias_table_path(repo: &Path, env: &BTreeMap<String, OsString>) -> Result<PathBuf, String> {
