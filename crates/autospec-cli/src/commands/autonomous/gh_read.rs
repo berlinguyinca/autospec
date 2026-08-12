@@ -23,7 +23,7 @@ fn env_u64(name: &str, fallback: u64) -> u64 {
 /// Shares `AUTOSPEC_GH_API_RETRIES` and `AUTOSPEC_CLAIM_RETRY_SLEEP_MS` with the
 /// claim path's `run_gh_with_retry`, and returns the captured output that helper
 /// discards. Only use this for reads: a retried mutation would not be safe.
-pub(super) fn run_gh_read_with_retry(
+pub(crate) fn run_gh_read_with_retry(
     arguments: &[&str],
     action: &str,
 ) -> Result<Output, CommandFailure> {
@@ -70,5 +70,52 @@ mod tests {
             std::env::remove_var("AUTOSPEC_TEST_ZERO_RETRY_KNOB");
             std::env::remove_var("AUTOSPEC_TEST_JUNK_RETRY_KNOB");
         }
+    }
+}
+
+#[cfg(test)]
+mod guard {
+    use std::path::Path;
+
+    const CONDUCTOR_PATH_FILES: [&str; 3] = ["queue.rs", "autonomous.rs", "claim.rs"];
+
+    fn unretried_reads(file: &str, source: &str) -> Vec<String> {
+        source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.contains("run_gh(") && line.contains("\"GET\""))
+            .map(|(index, _)| format!("{file}:{}", index + 1))
+            .collect()
+    }
+
+    /// Every idempotent GitHub read in the conductor path must retry.
+    ///
+    /// Each un-retried read is a single point of failure: one handshake that comes
+    /// back unusable under concurrency kills the conductor, and the claim it was
+    /// holding strands its issue. Two were fixed reactively, each only after it was
+    /// caught killing a live run. This fails the build instead.
+    #[test]
+    fn no_unretried_read_survives_in_the_conductor_path() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
+        let offenders = CONDUCTOR_PATH_FILES
+            .iter()
+            .flat_map(|file| {
+                let source = std::fs::read_to_string(root.join(file)).expect("read source");
+                unretried_reads(file, &source)
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            offenders.is_empty(),
+            "these reads bypass run_gh_read_with_retry and can kill the conductor: {}",
+            offenders.join(", ")
+        );
+    }
+
+    #[test]
+    fn the_guard_recognises_an_unretried_read() {
+        let source = "let output = run_gh(&[\"api\", \"--method\", \"GET\", &endpoint])?;";
+
+        assert_eq!(unretried_reads("sample.rs", source), ["sample.rs:1"]);
     }
 }

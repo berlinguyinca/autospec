@@ -48,7 +48,7 @@ use super::{claim, queue, CommandFailure};
 
 pub(crate) mod drain;
 mod blocked_cycle;
-mod gh_read;
+pub(crate) mod gh_read;
 mod program;
 mod one_shot_selector;
 use one_shot_selector::{
