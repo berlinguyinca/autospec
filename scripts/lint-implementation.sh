@@ -1463,15 +1463,15 @@ check_duplicate_names() {
     # own setUp/tearDown). Flagging these is a false positive; a real accidental
     # dup of a domain function name still flags.
     local _DUP_NAME_EXEMPT=" setUp tearDown setUpClass tearDownClass asyncSetUp asyncTearDown __init__ __enter__ __exit__ main "
-    if [ -n "$dupes" ]; then
-        echo "$dupes" | while IFS= read -r dupe_name; do
-            [ -z "$dupe_name" ] && continue
-            case "$_DUP_NAME_EXEMPT" in
-                *" $dupe_name "*) continue ;;
-            esac
-            emit_capped "COMPLEXITY" "-" "-" "duplicate function name '${dupe_name}' across changed files — reuse or rename to avoid confusion"
-        done
-    fi
+    while IFS= read -r dupe_name; do  # here-document below, not a pipe — see Fix 7
+        [ -z "$dupe_name" ] && continue
+        case "$_DUP_NAME_EXEMPT" in
+            *" $dupe_name "*) continue ;;
+        esac
+        emit_capped "COMPLEXITY" "-" "-" "duplicate function name '${dupe_name}' across changed files — reuse or rename to avoid confusion"
+    done <<EOF
+$dupes
+EOF
 }
 
 

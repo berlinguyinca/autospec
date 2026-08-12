@@ -199,9 +199,27 @@ open('big.py', 'w').writelines(lines)
     cp fake-delegate.sh fakescripts/lint-implementation.sh
     cp "$GATES" fakescripts/lint-implementation-gates.sh
     run bash fakescripts/lint-implementation-gates.sh --staged
-    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
     [ "$status" -eq 1 ]
     printf '%s\n' "$output" | grep -q '^TODO_LEFT:a.py:2: second'
+    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
+}
+
+@test "delegate rc: a duplicate-name finding alongside another is counted, not disbelieved" {
+    # check_duplicate_names emitted from inside a pipeline too, and it was the last rule that
+    # did. Under strict equality that made any commit pairing a duplicate name with a second
+    # finding look like a crashed delegate — the #3080 shape, on a different rule.
+    printf 'def shared():\n    return 1\n' > one.py
+    printf 'def shared():\n    return 2\n' > two.py
+    printf 'x = 1  # TODO tracked\n' > three.py
+    git add one.py two.py three.py
+    run env AUTOSPEC_COMPLEXITY_ENFORCE=1 bash "$GATES" --staged
+    # Asserted on the status, not with a mid-body `! … | grep`: bash ignores a failing
+    # negated command under `set -e`, so such an assertion is silently skipped unless it is
+    # the test's last line. 2 is the LINT_DELEGATE_FAILED path; 1 is findings, as wanted.
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "duplicate function name 'shared'"
+    printf '%s\n' "$output" | grep -q '^TODO_LEFT:three.py'
+    ! printf '%s\n' "$output" | grep -q 'LINT_DELEGATE_FAILED'
 }
 
 @test "delegate rc: enforcing complexity on a long file with a long function is not a crash" {
