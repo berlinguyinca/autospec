@@ -88,3 +88,52 @@ pub(super) fn claim_retry_attempts() -> u64 {
 pub(super) fn claim_retry_sleep_ms() -> u64 {
     env_u64("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", 1_000)
 }
+
+/// Return an issue whose worker died to the candidate pool.
+///
+/// Claiming swaps `auto-implement` off and `in-progress-by-bot` on, and the ready
+/// queue builds its candidates from `auto-implement` alone. A worker that dies
+/// without a clean release therefore strands its issue outside the pool forever:
+/// the claim record says nobody owns it, the label says it is in flight, and the
+/// conductor idles beside work it can never see.
+///
+/// Requeue only when the claim is genuinely abandoned — no record, a released
+/// state, or an expired lease. A `merged` record is finished, and an owner still
+/// holding its lease is working.
+pub(super) fn claim_is_abandoned(record: Option<&RunStateRecord>) -> bool {
+    match record {
+        None => true,
+        Some(record) if record.state == "merged" => false,
+        Some(record) => {
+            matches!(
+                record.state.as_str(),
+                "available" | "released" | "retryable" | "failed"
+            ) || !conductor_claim_owner_holds_lease(record)
+        }
+    }
+}
+
+pub(crate) fn requeue_abandoned_active_issue(
+    repo: &str,
+    issue: u64,
+) -> Result<bool, super::CommandFailure> {
+    let head = super::read_claim_ref(repo, issue)?;
+    if !claim_is_abandoned(head.as_ref().map(|head| &head.record)) {
+        return Ok(false);
+    }
+    super::run_gh_with_retry(
+        &[
+            "issue".to_string(),
+            "edit".to_string(),
+            issue.to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--remove-label".to_string(),
+            "in-progress-by-bot".to_string(),
+            "--add-label".to_string(),
+            "auto-implement".to_string(),
+        ],
+        "requeue an abandoned active issue",
+    )?;
+    Ok(true)
+}
