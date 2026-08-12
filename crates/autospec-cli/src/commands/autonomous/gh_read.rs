@@ -6,6 +6,9 @@
 //! and the dead worker's claim then stranded the issue: `claim release` validates the
 //! caller's identity, so nothing could ever release it.
 
+use std::collections::BTreeMap;
+use std::ffi::OsString;
+use std::path::Path;
 use std::process::{Command, Output};
 
 use super::CommandFailure;
@@ -59,6 +62,22 @@ pub(crate) fn run_command_read_with_retry(
     Err(CommandFailure::diagnostic(format!(
         "{action} failed after {attempts} attempts: {last_error}"
     )))
+}
+
+pub(crate) fn run_gh_read_with_retry_in(
+    program: &Path,
+    arguments: &[&str],
+    environment: &BTreeMap<OsString, OsString>,
+    action: &str,
+) -> Result<Output, CommandFailure> {
+    run_command_read_with_retry(
+        || {
+            let mut command = Command::new(program);
+            command.args(arguments).envs(environment);
+            command
+        },
+        action,
+    )
 }
 
 #[cfg(test)]
