@@ -1,5 +1,7 @@
 //! Deterministic implementation-policy lint rules, independent of processes and I/O.
 
+mod severity;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::diff::{DiffFile, UnifiedDiff};
@@ -196,6 +198,7 @@ pub struct ImplementationLintOptions {
     pub max_file_loc: usize,
     pub max_function_loc: usize,
     pub max_cyclomatic: usize,
+    pub complexity_enforced: bool,
 }
 
 impl Default for ImplementationLintOptions {
@@ -210,6 +213,7 @@ impl Default for ImplementationLintOptions {
             max_file_loc: 400,
             max_function_loc: 50,
             max_cyclomatic: 10,
+            complexity_enforced: severity::complexity_enforced_from_env(),
         }
     }
 }
@@ -226,11 +230,7 @@ pub fn lint_implementation(
     diff: &UnifiedDiff,
     context: ImplementationLintContext<'_>,
 ) -> ImplementationLintResult {
-    let mut skipped_rules = context
-        .issue_body
-        .map(parse_guardian_skips)
-        .unwrap_or_default();
-    skipped_rules.remove(ImplementationLintRule::PrSize.id());
+    let skipped_rules = severity::advisory_skip_set(&context.options, context.issue_body);
     let mut collector = FindingCollector::new(skipped_rules, context.options.aggregate_hard_cap);
 
     detect_pr_size(
