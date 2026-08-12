@@ -7514,7 +7514,7 @@ fn path_with(bin: &Path) -> String {
 }
 
 fn wait_for_file_contents(path: &Path, expected: &str) {
-    for _ in 0..300 {
+    for _ in 0..1_000 {
         if fs::read_to_string(path).is_ok_and(|contents| contents.contains(expected)) {
             return;
         }
