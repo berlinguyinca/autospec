@@ -2140,7 +2140,7 @@ fn quarantine_authoritative_stale_heartbeat(
                     )? {
                         StartupHeartbeatClassification::ExpiredDead(snapshot) => Some(snapshot),
                         StartupHeartbeatClassification::Absent
-                            if heartbeat_lifecycle_step(&record.step) =>
+                            if lease::heartbeat_publication_in_flight(&record.step) =>
                         {
                             return Ok(false)
                         }

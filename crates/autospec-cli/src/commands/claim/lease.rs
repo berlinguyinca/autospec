@@ -127,6 +127,10 @@ pub(super) fn acquisition_blocking_owner(record: &RunStateRecord) -> Option<&str
     .then_some(record.worker_id.as_str())
 }
 
+pub(super) fn heartbeat_publication_in_flight(step: &str) -> bool {
+    step.starts_with("heartbeat-pending:") || step.starts_with("heartbeat-publishing:")
+}
+
 /// Whether the recorded owner still holds its claim.
 ///
 /// Both the TTL and the owner's liveness must agree. The clock alone is not enough:
@@ -139,9 +143,7 @@ pub(super) fn owner_still_holds(
     if !conductor_claim_owner_holds_lease(record) {
         return Ok(false);
     }
-    if record.step.starts_with("heartbeat-pending:")
-        || record.step.starts_with("heartbeat-publishing:")
-    {
+    if heartbeat_publication_in_flight(&record.step) {
         return Ok(true);
     }
     current_owner_heartbeat_holds(repo, issue, record)

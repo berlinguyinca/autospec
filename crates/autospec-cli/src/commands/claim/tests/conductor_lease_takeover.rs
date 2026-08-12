@@ -2,7 +2,6 @@
 //!
 //! A dead worker cannot release its own claim, and `claim release` validates the
 //! caller's identity, so an unconditional refusal wedged the issue permanently.
-
 use super::super::lease::conductor_claim_owner_holds_lease;
 use autospec_core::claim::RunStateRecord;
 
@@ -141,6 +140,15 @@ mod requeue {
         })))
     }
 
+    #[cfg(target_os = "linux")]
+    fn restore_environment(previous: Option<std::ffi::OsString>, sandbox: &std::path::Path) {
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+        }
+        std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
+    }
+
     #[test]
     fn a_missing_claim_record_is_abandoned() {
         assert!(claim_is_abandoned(None, false), "nothing owns the issue");
@@ -204,13 +212,6 @@ mod requeue {
         );
     }
 
-    /// The requeue path and the acquisition path must agree about ownership.
-    ///
-    /// They diverged once: requeue asked only the TTL clock while acquisition also
-    /// asked whether the owner was alive. A dead owner's fresh lease then read as
-    /// "owned" to requeue and "takeable" to acquisition, so the conductor was
-    /// willing to take the issue but never saw it — the label kept it out of the
-    /// candidate pool and it idled for hours beside work it could have done.
     #[test]
     fn an_owner_that_no_longer_holds_the_claim_is_always_abandoned() {
         let live = utc_now_iso().expect("timestamp");
@@ -260,11 +261,7 @@ mod requeue {
             None,
             "the requeued generation must pass acquire_record's ownership gate"
         );
-        match previous {
-            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
-            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
-        }
-        std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
+        restore_environment(previous, &sandbox);
     }
 
     #[cfg(target_os = "linux")]
@@ -273,9 +270,14 @@ mod requeue {
         let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
         let (sandbox, _) = startup_heartbeat_fixture("missing-current-owner");
         let root = sandbox.join("heartbeats");
-        let parent = root.parent().expect("heartbeat parent");
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .expect("private heartbeat parent");
+        let repo = root.join(crate::commands::autonomous::drain::repository_progress_key(
+            "owner/repo",
+        ));
+        std::fs::create_dir_all(&repo).expect("empty heartbeat repository");
+        for directory in [root.as_path(), repo.as_path()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                .expect("private heartbeat directory");
+        }
         let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
         std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
         let owner_holds = owner_still_holds(
@@ -288,11 +290,22 @@ mod requeue {
             !owner_holds,
             "missing owner evidence must not wedge the issue"
         );
-        match previous {
-            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
-            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
-        }
-        std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
+        let selected = ClaimRefHead {
+            oid: "missing-generation".to_string(),
+            generation: "generation-1".to_string(),
+            record: ready_record(&utc_now_iso().expect("timestamp")),
+        };
+        let requeued = quarantine_abandoned_claim_generation_with(
+            "owner/repo",
+            42,
+            Some(selected),
+            &mut win_generation,
+        )
+        .expect("missing heartbeat quarantine")
+        .expect("missing owner requeued");
+        assert_eq!(requeued.record.state, "available");
+        assert_eq!(acquisition_blocking_owner(&requeued.record), None);
+        restore_environment(previous, &sandbox);
     }
 
     #[cfg(target_os = "linux")]
@@ -321,11 +334,7 @@ mod requeue {
             .expect("live current owner classification"),
             "a live heartbeat-ready owner must not be displaced"
         );
-        match previous {
-            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
-            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
-        }
-        std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
+        restore_environment(previous, &sandbox);
     }
 
     #[cfg(target_os = "linux")]
@@ -359,11 +368,7 @@ mod requeue {
             .expect("retained predecessor classification"),
             "dead predecessor evidence must fail closed for the current owner"
         );
-        match previous {
-            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
-            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
-        }
-        std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
+        restore_environment(previous, &sandbox);
     }
 
     #[cfg(target_os = "linux")]
