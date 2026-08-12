@@ -34,9 +34,11 @@ normal operation:
 2. Autospec classifies the review from changed paths, issue labels, logical
    component count, producer/consumer boundaries, and critical authority
    boundaries. Non-normal work uses high reviewer reasoning and requires an
-   integration smoke path. High and integration work prefer a provider other
-   than the implementer's, while critical work fails closed unless an alternate
-   provider is configured and available.
+   integration smoke that invokes a repository test under `tests/integration`,
+   `tests/smoke`, or `tests/e2e`. High and integration work prefer a provider
+   other than the implementer's, while critical work fails closed unless an
+   alternate provider is known and available. OpenCode is a harness, not proof
+   of a distinct provider, so it never establishes diversity by itself.
 3. Normal work retains the implementer's provider when it is available. A
    permitted same-provider fallback is recorded explicitly rather than being
    reported as provider diversity.

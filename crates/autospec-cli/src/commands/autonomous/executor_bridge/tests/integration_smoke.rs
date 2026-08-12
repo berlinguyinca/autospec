@@ -179,8 +179,18 @@ fn duplicate_integration_smoke_headings_fail_as_ambiguous() {
 }
 
 #[test]
-fn integration_primary_smoke_accepts_a_repository_integration_test() {
+fn integration_primary_smoke_rejects_a_noop_with_a_test_shaped_argument() {
     let body = "### Primary smoke test (inner loop)\n\n```bash\n/usr/bin/true tests/integration/review-policy.rs\n```\n";
+
+    let error = bridge::parse_required_integration_smoke(body, &integration_requirements())
+        .expect_err("a successful no-op does not exercise integration behavior");
+
+    assert!(error.contains("integration smoke"), "{error}");
+}
+
+#[test]
+fn integration_primary_smoke_accepts_a_repository_integration_test() {
+    let body = "### Primary smoke test (inner loop)\n\n```bash\nbash tests/integration/review-policy.sh\n```\n";
 
     let plan = bridge::parse_required_integration_smoke(body, &integration_requirements())
         .expect("qualifying primary compatibility smoke")
@@ -188,7 +198,7 @@ fn integration_primary_smoke_accepts_a_repository_integration_test() {
 
     assert_eq!(
         plan.commands[0].argv,
-        vec!["/usr/bin/true", "tests/integration/review-policy.rs"]
+        vec!["bash", "tests/integration/review-policy.sh"]
     );
 }
 
@@ -197,7 +207,12 @@ fn failing_integration_smoke_blocks_ci_passed_transition() {
     let fixture = GitFixture::new("integration-smoke-failure");
     let mut state = supervision_state(&fixture);
     state.phase = bridge::BridgePhase::DraftCreated;
-    let body = "### Integration smoke test (pre-merge)\n\n```bash\n/usr/bin/false\n```\n";
+    let script = fixture.repo.join("tests/integration/fail.sh");
+    fs::create_dir_all(script.parent().expect("integration directory"))
+        .expect("integration directory");
+    fs::write(&script, "#!/usr/bin/env bash\nexit 1\n").expect("failing integration test");
+    let body =
+        "### Integration smoke test (pre-merge)\n\n```bash\nbash tests/integration/fail.sh\n```\n";
     let plan = bridge::parse_required_integration_smoke(body, &integration_requirements())
         .expect("strict integration smoke")
         .expect("required plan");
@@ -221,8 +236,12 @@ fn passing_integration_smoke_is_bound_into_premerge_evidence() {
     let mut state = supervision_state(&fixture);
     state.phase = bridge::BridgePhase::DraftCreated;
     let requirements = integration_requirements();
+    let script = fixture.repo.join("tests/integration/pass.sh");
+    fs::create_dir_all(script.parent().expect("integration directory"))
+        .expect("integration directory");
+    fs::write(&script, "#!/usr/bin/env bash\nexit 0\n").expect("passing integration test");
     let body =
-        "### Integration smoke test (pre-merge)\n\n```bash\n/usr/bin/printf integration-ok\n```\n";
+        "### Integration smoke test (pre-merge)\n\n```bash\nbash tests/integration/pass.sh\n```\n";
     let plan = bridge::parse_required_integration_smoke(body, &requirements)
         .expect("strict integration smoke")
         .expect("required plan");

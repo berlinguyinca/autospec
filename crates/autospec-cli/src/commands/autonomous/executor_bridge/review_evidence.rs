@@ -159,6 +159,12 @@ fn parse_explicit_integration_smoke(issue_body: &str) -> Result<DirectCommandPla
                 .to_string(),
         );
     }
+    if !is_integration_test_command(&plan.commands[0]) {
+        return Err(
+            "executor integration smoke must invoke a repository integration, smoke, or e2e test"
+                .to_string(),
+        );
+    }
     Ok(plan)
 }
 
@@ -166,16 +172,29 @@ fn compatible_primary_integration_smoke(
     issue_body: &str,
 ) -> Result<Option<DirectCommandPlan>, String> {
     let primary = parse_primary_smoke(issue_body)?;
-    if primary.commands.iter().any(|command| {
-        command
-            .argv
-            .iter()
-            .any(|argument| repository_integration_test_path(argument))
-    }) {
+    if primary.commands.iter().any(is_integration_test_command) {
         Ok(Some(primary))
     } else {
         Err("executor integration smoke is required before independent review".to_string())
     }
+}
+
+fn is_integration_test_command(command: &DirectCommand) -> bool {
+    let program = Path::new(&command.argv[0])
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let recognized_runner = matches!(
+        program,
+        "bash" | "sh" | "bats" | "pytest" | "python" | "python3"
+    );
+    let repository_test = command
+        .argv
+        .iter()
+        .skip(1)
+        .any(|argument| repository_integration_test_path(argument));
+    let direct_repository_test = repository_integration_test_path(&command.argv[0]);
+    (recognized_runner && repository_test) || direct_repository_test
 }
 
 fn repository_integration_test_path(argument: &str) -> bool {
