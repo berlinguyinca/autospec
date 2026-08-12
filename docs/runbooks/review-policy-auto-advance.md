@@ -7,3 +7,4 @@ promotion, hold, or rollback in the append-only lifecycle ledger.
 
 The subsequent `apply --apply` command can file strengthening or neutral work
 through the normal `needs-classify` path. Weakening proposals remain report-only.
+The conductor passes explicit `--review-outcomes` and `--gaps` paths.

@@ -2764,11 +2764,7 @@ EOF_PROV_BATCH
                 elif command -v autospec-explore >/dev/null 2>&1; then
                     _arch_cmd="autospec-explore --once --research-sources architecture,test-coverage,technical-debt"
                 elif [ -f "${_sdir}/autonomous-self-improvement.sh" ]; then
-                    printf -v _arch_cmd 'bash %q advance --repo-root %q --review-outcomes %q --gaps %q >/dev/null; bash %q apply --repo-root %q --review-outcomes %q --gaps %q' \
-                        "${_sdir}/autonomous-self-improvement.sh" "$_repo_root" \
-                        "$_repo_root/.autospec/review-outcomes.jsonl" "$_repo_root/.autospec/gaps.json" \
-                        "${_sdir}/autonomous-self-improvement.sh" "$_repo_root" \
-                        "$_repo_root/.autospec/review-outcomes.jsonl" "$_repo_root/.autospec/gaps.json"
+                    printf -v _arch_cmd 'bash %q advance --repo-root %q --review-outcomes %q --gaps %q >/dev/null; bash %q apply --repo-root %q --review-outcomes %q --gaps %q' "${_sdir}/autonomous-self-improvement.sh" "$_repo_root" "$_repo_root/.autospec/review-outcomes.jsonl" "$_repo_root/.autospec/gaps.json" "${_sdir}/autonomous-self-improvement.sh" "$_repo_root" "$_repo_root/.autospec/review-outcomes.jsonl" "$_repo_root/.autospec/gaps.json"
                     if [ -n "$_repo" ]; then
                         printf -v _arch_cmd '%s --repo %q' "$_arch_cmd" "$_repo"
                     fi
