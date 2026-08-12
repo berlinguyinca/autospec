@@ -9,6 +9,113 @@ use autospec_core::autonomous::review_policy::{
 use std::fs;
 use std::time::Duration;
 
+fn sealed_integration_review_fixture(
+    name: &str,
+) -> (
+    GitFixture,
+    bridge::PersistedInvocation,
+    ReviewRequirements,
+    bridge::ExecutorReviewInventory,
+    std::path::PathBuf,
+) {
+    let fixture = GitFixture::new(name);
+    let mut state = supervision_state(&fixture);
+    let commit = super::support_base::git_stdout(&fixture.repo, &["rev-parse", "HEAD"]);
+    state.head_oid = Some(commit.clone());
+    let requirements = integration_requirements();
+    let inventory = bridge::ExecutorReviewInventory {
+        changed_paths: vec!["crates/example/src/event_producer.rs".to_string()],
+        logical_components: vec!["crates/example".to_string()],
+        producer_surfaces: vec!["crates/example/src/event_producer.rs".to_string()],
+        consumer_surfaces: vec!["crates/example/src/event_consumer.rs".to_string()],
+    };
+    let lane = bridge::PremergeLaneIdentity::new(
+        state.identity.repository.clone(),
+        state.identity.issue,
+        state.identity.worker_id.clone(),
+        state.identity.claim_id.clone(),
+        state.identity.branch.clone(),
+        commit,
+    )
+    .expect("review lane");
+    let lane_root = state
+        .identity
+        .worktree
+        .join(".autospec/evidence/premerge")
+        .join(lane.lane_digest());
+    let attempt_relative = "attempts/aaaaaaaaaaaaaaaaaaaaaaaa";
+    let attempt_root = lane_root.join(attempt_relative);
+    let record_relative = "qa/integration/command-000.json";
+    let record_path = attempt_root.join(record_relative);
+    bridge::ensure_private_directory(record_path.parent().expect("record parent"))
+        .expect("private record directory");
+    let record_body = b"{\"schema\":1,\"terminal\":\"exited:0\"}";
+    bridge::write_private_create_once(&record_path, record_body, "integration record")
+        .expect("integration record");
+    let requirements_digest = bridge::canonical_review_requirements_digest(&requirements);
+    let evidence_digest = autospec_core::autonomous::waterfall::sha256_hex(
+        format!(
+            "{}\0{}",
+            requirements_digest,
+            autospec_core::autonomous::waterfall::sha256_hex(record_body)
+        )
+        .as_bytes(),
+    );
+    let intent_digest = autospec_core::autonomous::waterfall::sha256_hex(b"intent");
+    let observed = serde_json::json!({
+        "schema": 2,
+        "lane_digest": lane.lane_digest(),
+        "base_oid": state.identity.base_oid,
+        "intent_digest": intent_digest,
+        "qa_run_id": "qa",
+        "security_run_id": "security",
+        "review_requirements_digest": requirements_digest,
+        "integration_evidence_digest": evidence_digest,
+        "integration_records": [record_relative],
+        "qa_records": [],
+        "scanners": [],
+        "artifacts": [],
+    })
+    .to_string();
+    bridge::write_private_create_once(
+        &attempt_root.join("observed.json"),
+        observed.as_bytes(),
+        "observed integration evidence",
+    )
+    .expect("observed integration evidence");
+    let seal = serde_json::json!({
+        "schema": 1,
+        "lane_digest": lane.lane_digest(),
+        "intent_digest": intent_digest,
+        "manifest_digest": autospec_core::autonomous::waterfall::sha256_hex(observed.as_bytes()),
+        "cleanup_digest": autospec_core::autonomous::waterfall::sha256_hex(b"cleanup"),
+        "qa_digest": autospec_core::autonomous::waterfall::sha256_hex(b"qa"),
+        "security_digest": autospec_core::autonomous::waterfall::sha256_hex(b"security"),
+    })
+    .to_string();
+    bridge::write_private_create_once(
+        &attempt_root.join("seal.json"),
+        seal.as_bytes(),
+        "integration evidence seal",
+    )
+    .expect("integration evidence seal");
+    let complete = serde_json::json!({
+        "schema": 2,
+        "lane_digest": lane.lane_digest(),
+        "attempt_path": attempt_relative,
+        "generation": "aaaaaaaaaaaaaaaaaaaaaaaa",
+        "seal_digest": autospec_core::autonomous::waterfall::sha256_hex(seal.as_bytes()),
+    })
+    .to_string();
+    bridge::write_private_create_once(
+        &lane_root.join("complete.json"),
+        complete.as_bytes(),
+        "completed integration evidence",
+    )
+    .expect("completed integration evidence");
+    (fixture, state, requirements, inventory, record_path)
+}
+
 fn integration_requirements() -> ReviewRequirements {
     classify_review_requirements(&ReviewPolicyInput {
         serialization_reasons: vec!["priority:high".to_string()],
@@ -137,4 +244,40 @@ fn passing_integration_smoke_is_bound_into_premerge_evidence() {
     assert!(bridge::canonical_sha256(&binding.evidence_digest));
     assert_eq!(binding.command_records.len(), 1);
     assert!(binding.command_records[0].ends_with("command-000.json"));
+}
+
+#[test]
+fn sealed_integration_evidence_loads_exact_review_citations() {
+    // Break caught: reviewer context dropping the immutable premerge evidence identity.
+    let (_fixture, state, requirements, inventory, _) =
+        sealed_integration_review_fixture("sealed-integration-review");
+
+    let evidence = bridge::load_bound_review_evidence(&state, &requirements, inventory)
+        .expect("sealed review evidence");
+
+    assert_eq!(evidence.commit, state.head_oid.expect("review head"));
+    assert_eq!(evidence.integration_command_records.len(), 1);
+    let citations = evidence.integration_citations();
+    assert_eq!(citations.len(), 3);
+    assert!(citations[0].starts_with("requirements-digest:"));
+    assert!(citations[1].starts_with("integration-evidence-digest:"));
+    assert!(citations[2].starts_with("integration-record:.autospec/evidence/premerge/"));
+    assert!(citations[2].ends_with("qa/integration/command-000.json"));
+}
+
+#[test]
+fn sealed_integration_evidence_rejects_record_tampering() {
+    // Break caught: review admission trusting a sealed manifest after its command record changed.
+    let (_fixture, state, requirements, inventory, record_path) =
+        sealed_integration_review_fixture("tampered-integration-review");
+    fs::write(record_path, b"{\"schema\":1,\"terminal\":\"exited:1\"}")
+        .expect("tamper integration record");
+
+    let error = bridge::load_bound_review_evidence(&state, &requirements, inventory)
+        .expect_err("tampered integration record must fail closed");
+
+    assert!(
+        error.contains("integration evidence digest mismatch"),
+        "{error}"
+    );
 }
