@@ -40,6 +40,16 @@ stage_complexity_violation() {
     git -C "$WORKTREE" add scripts/lint-implementation.sh
 }
 
+# Every case below asks for AUTOSPEC_COMPLEXITY_ENFORCE=1. This suite's subject is whether
+# the installed hook FORWARDS --issue so the per-issue opt-out can apply, and observing that
+# needs a violation that actually blocks: COMPLEXITY is advisory by default (design doc
+# Fix 5), so without enforcement every assertion here holds whether or not the issue
+# argument ever reached the linter. Exported rather than prefixed onto `run`, because the
+# hook is a subprocess of `git commit` and only exported variables reach it.
+enforce_complexity() {
+    export AUTOSPEC_COMPLEXITY_ENFORCE=1
+}
+
 @test "integration suite does not replace gh or lint-implementation" {
     run grep -nE '^make_(recording_linter|issue_gh)\(\)' "$BATS_TEST_FILENAME"
     [ "$status" -eq 1 ]
@@ -55,6 +65,7 @@ stage_complexity_violation() {
 
 @test "installed hook passes the numeric branch issue to staged lint" {
     export AUTOSPEC_SCRIPTS_DIR="$REPO_ROOT/scripts"
+    enforce_complexity
     bash "$INSTALL_SCRIPT" "$WORKTREE"
     stage_complexity_violation
 
@@ -64,6 +75,7 @@ stage_complexity_violation() {
 
 @test "installed hook passes the autonomous branch issue to staged lint" {
     export AUTOSPEC_SCRIPTS_DIR="$REPO_ROOT/scripts"
+    enforce_complexity
     git -C "$WORKTREE" checkout -q -b feat/autonomous-issue-2371
     bash "$INSTALL_SCRIPT" "$WORKTREE"
     stage_complexity_violation
@@ -74,6 +86,7 @@ stage_complexity_violation() {
 
 @test "installed hook rejects a noncanonical autonomous lookalike branch" {
     export AUTOSPEC_SCRIPTS_DIR="$REPO_ROOT/scripts"
+    enforce_complexity
     git -C "$WORKTREE" checkout -q -b fix/autonomous-issue-2371
     bash "$INSTALL_SCRIPT" "$WORKTREE"
     stage_complexity_violation
@@ -85,6 +98,7 @@ stage_complexity_violation() {
 
 @test "installed hook omits issue arguments on a branch without a numeric issue segment" {
     export AUTOSPEC_SCRIPTS_DIR="$REPO_ROOT/scripts"
+    enforce_complexity
     git -C "$WORKTREE" checkout -q -b fix/hook-without-issue
     bash "$INSTALL_SCRIPT" "$WORKTREE"
     stage_complexity_violation
@@ -98,7 +112,7 @@ stage_complexity_violation() {
     stage_complexity_violation
     git -C "$WORKTREE" diff --cached --output="$TEST_ROOT/complexity.diff"
 
-    run bash -c "cd '$WORKTREE' && bash '$LINT_SCRIPT' --diff-file '$TEST_ROOT/complexity.diff' --issue 2371"
+    run bash -c "cd '$WORKTREE' && AUTOSPEC_COMPLEXITY_ENFORCE=1 bash '$LINT_SCRIPT' --diff-file '$TEST_ROOT/complexity.diff' --issue 2371"
     [ "$status" -eq 0 ]
     echo "$output" | grep -q 'INFO:COMPLEXITY:scripts/lint-implementation.sh:'
 }
@@ -106,7 +120,7 @@ stage_complexity_violation() {
 @test "staged mode loads issue skip directives before detectors run" {
     stage_complexity_violation
 
-    run bash -c "cd '$WORKTREE' && bash '$LINT_SCRIPT' --staged --issue 2371"
+    run bash -c "cd '$WORKTREE' && AUTOSPEC_COMPLEXITY_ENFORCE=1 bash '$LINT_SCRIPT' --staged --issue 2371"
     [ "$status" -eq 0 ]
     echo "$output" | grep -q 'INFO:COMPLEXITY:scripts/lint-implementation.sh:'
 }
@@ -114,7 +128,7 @@ stage_complexity_violation() {
 @test "failed issue lookup leaves a staged violation blocking" {
     stage_complexity_violation
 
-    run bash -c "cd '$WORKTREE' && bash '$LINT_SCRIPT' --staged --issue 999999999"
+    run bash -c "cd '$WORKTREE' && AUTOSPEC_COMPLEXITY_ENFORCE=1 bash '$LINT_SCRIPT' --staged --issue 999999999"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q '^COMPLEXITY:scripts/lint-implementation.sh:'
 }
