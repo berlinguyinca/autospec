@@ -16,7 +16,7 @@ pub(crate) struct ReviewVerdict {
 pub(crate) fn parse_review_verdict(
     body: &str,
     expected_commit: &str,
-    require_integration_paths: bool,
+    expected_integration_citations: &[String],
 ) -> Result<ReviewVerdict, String> {
     let value: serde_json::Value = serde_json::from_str(body)
         .map_err(|error| format!("parse executor structured review verdict: {error}"))?;
@@ -42,7 +42,7 @@ pub(crate) fn parse_review_verdict(
         integration_paths_checked: string_array(&object, "integration_paths_checked")?,
         blocking_findings: string_array(&object, "blocking_findings")?,
     };
-    validate_review_verdict(&verdict, expected_commit, require_integration_paths)?;
+    validate_review_verdict(&verdict, expected_commit, expected_integration_citations)?;
     Ok(verdict)
 }
 
@@ -64,7 +64,7 @@ fn string_array(object: &JsonObject, field: &str) -> Result<Vec<String>, String>
 pub(super) fn validate_review_verdict(
     verdict: &ReviewVerdict,
     expected_commit: &str,
-    require_integration_paths: bool,
+    expected_integration_citations: &[String],
 ) -> Result<(), String> {
     if verdict.schema != REVIEW_VERDICT_SCHEMA {
         return Err("executor structured review verdict schema is unsupported".to_string());
@@ -81,9 +81,9 @@ pub(super) fn validate_review_verdict(
     if verdict.tests_examined.is_empty() {
         return Err("executor structured review tests_examined must be nonempty".to_string());
     }
-    if require_integration_paths && verdict.integration_paths_checked.is_empty() {
+    if verdict.integration_paths_checked != expected_integration_citations {
         return Err(
-            "executor structured review integration_paths_checked must be nonempty".to_string(),
+            "executor structured review integration evidence citations mismatch".to_string(),
         );
     }
     if !verdict.blocking_findings.is_empty() {
@@ -124,9 +124,10 @@ pub(super) fn read_structured_review_verdict(
         .head_oid
         .as_deref()
         .ok_or_else(|| "executor structured review requires a stable head".to_string())?;
-    parse_review_verdict(
-        &body,
-        head,
-        reviewer.policy.requirements.require_integration_smoke,
-    )
+    let evidence = load_bound_review_evidence(
+        state,
+        &reviewer.policy.requirements,
+        executor_review_inventory(state)?,
+    )?;
+    parse_review_verdict(&body, head, &evidence.integration_citations())
 }
