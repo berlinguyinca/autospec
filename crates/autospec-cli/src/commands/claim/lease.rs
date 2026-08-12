@@ -199,29 +199,3 @@ where
     };
     Ok(Some(head))
 }
-
-/// The owner a fresh worker must yield to, if any.
-///
-/// An owner yields when its lease has aged past its TTL, and also when its startup
-/// heartbeat is expired-dead. The TTL alone is not enough: a worker that died
-/// seconds ago holds a valid lease for the full three hours, so every successor
-/// lost the claim to a dead process and exited, over and over.
-pub(super) fn contesting_claim_owner(
-    repo: &str,
-    issue: u64,
-    worker_id: &str,
-    branch: &str,
-) -> Result<Option<String>, super::CommandFailure> {
-    let Some(head) = super::read_claim_ref(repo, issue)? else {
-        return Ok(None);
-    };
-    let contested = head.record.state == "claimed"
-        && (head.record.worker_id != worker_id || head.record.branch != branch);
-    if !contested || !conductor_claim_owner_holds_lease(&head.record) {
-        return Ok(None);
-    }
-    if super::expired_prior_generation_heartbeat(repo, issue, &head.record)?.is_some() {
-        return Ok(None);
-    }
-    Ok(Some(head.record.worker_id))
-}
