@@ -5,7 +5,7 @@
 # supported harness (Claude Code / Codex CLI / OpenCode) without hardcoding omx.
 #
 # Usage:
-#   bash invoke-review.sh --remediation --since <ISO-DATE> --emit-gaps <FILE>
+#   bash invoke-review.sh --remediation --since <ISO-DATE> --emit-gaps <FILE> [--outcomes <FILE>]
 #
 # Exit codes: 0 always (non-blocking per Phase 5.5 semantics).
 #   Review ran     — gap file written by the skill.
@@ -23,12 +23,14 @@ set -eu
 REMEDIATION=0
 SINCE=""
 GAPS_FILE=""
+OUTCOMES_FILE="${AUTOSPEC_REVIEW_OUTCOMES:-.autospec/review-outcomes.jsonl}"
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --remediation) REMEDIATION=1;           shift ;;
         --since)       SINCE="${2:?}";          shift 2 ;;
         --emit-gaps)   GAPS_FILE="${2:?}";      shift 2 ;;
-        --help) printf 'Usage: invoke-review.sh --remediation --since <DATE> --emit-gaps <FILE>\n'; exit 0 ;;
+        --outcomes)    OUTCOMES_FILE="${2:?}";  shift 2 ;;
+        --help) printf 'Usage: invoke-review.sh --remediation --since <DATE> --emit-gaps <FILE> [--outcomes <FILE>]\n'; exit 0 ;;
         *) printf 'invoke-review: unknown argument: %s\n' "$1" >&2; exit 1 ;;
     esac
 done
@@ -72,6 +74,24 @@ _emit_unavailable() {
             || printf '[%s]\n' "$new_gap" >> "$GAPS_FILE"
     else
         printf '[%s]\n' "$new_gap" > "$GAPS_FILE"
+    fi
+
+    local payload canonical digest row
+    payload="$(jq -cn --arg run "$SINCE" --arg harness "$kind" \
+        '{schema:1,outcome:"review_unavailable",pr:null,phase55_run:$run,reviewer_harness:$harness}')"
+    canonical="$(printf '%s' "$payload" | jq -cS '.')"
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest="$(printf '%s' "$canonical" | sha256sum | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        digest="$(printf '%s' "$canonical" | shasum -a 256 | awk '{print $1}')"
+    else
+        printf 'invoke-review: WARN: cannot hash review_unavailable outcome\n' >&2
+        return 0
+    fi
+    row="$(printf '%s' "$payload" | jq -c --arg digest "sha256:${digest}" '. + {outcome_digest:$digest}')"
+    mkdir -p "$(dirname "$OUTCOMES_FILE")" 2>/dev/null || true
+    if [ ! -f "$OUTCOMES_FILE" ] || ! grep -Fq "\"outcome_digest\":\"sha256:${digest}\"" "$OUTCOMES_FILE"; then
+        printf '%s\n' "$row" >> "$OUTCOMES_FILE"
     fi
 }
 
@@ -140,4 +160,5 @@ fi
 # Non-zero exit from harness: log a warning, never block the run.
 printf 'invoke-review: WARN: /autospec-review exited non-zero on harness=%s\n' "$_KIND" >&2
 printf 'code_health:phase55_broad_review_invocation_failed harness=%s\n' "$_KIND" >&2
+_emit_unavailable "${_KIND}-invocation-failed"
 exit 0
