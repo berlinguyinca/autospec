@@ -148,7 +148,13 @@ mod guard {
     /// `"GET"` alone missed `gh issue view`, which goes over GraphQL POST and
     /// carries no method argument at all. That read stayed unretried, and a TLS
     /// handshake failure on it crash-looped a live conductor eighteen times.
-    const READ_MARKERS: [&str; 4] = ["\"GET\"", "\"view\"", "\"list\"", "\"checks\""];
+    const READ_MARKERS: [&str; 5] = [
+        "\"GET\"",
+        "\"view\"",
+        "\"list\"",
+        "\"checks\"",
+        "\"graphql\"",
+    ];
 
     fn call_is_a_read(source: &str, start: usize, command_builder: bool) -> bool {
         let terminator = if command_builder { ".output()" } else { "])" };
@@ -276,6 +282,13 @@ mod guard {
             unretried_reads("sample.rs", source),
             ["sample.rs:Command::new(\"gh\")"]
         );
+    }
+
+    #[test]
+    fn the_guard_recognises_a_graphql_read() {
+        let source = "let output = run_gh(&[\"api\", \"graphql\", \"-f\", query]);";
+
+        assert_eq!(unretried_reads("sample.rs", source), ["sample.rs:run_gh("]);
     }
 
     #[test]

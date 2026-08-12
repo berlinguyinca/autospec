@@ -758,16 +758,10 @@ fn list_pull_requests(repo: &str) -> PullRequestEvidence {
             arguments.push(format!("endCursor={cursor}"));
         }
         let argument_refs = arguments.iter().map(String::as_str).collect::<Vec<_>>();
-        let output = match run_gh(&argument_refs) {
+        let output = match run_gh_read_with_retry(&argument_refs, "read pull request page") {
             Ok(output) => output,
             Err(error) => return PullRequestEvidence::Unavailable(error.message),
         };
-        if !output.status.success() {
-            return PullRequestEvidence::Unavailable(format!(
-                "gh pull request page failed: {}",
-                command_error(&output)
-            ));
-        }
         let pull_request_page =
             match parse_remote_pull_request_page_json(&String::from_utf8_lossy(&output.stdout)) {
                 Ok(page) => page,
