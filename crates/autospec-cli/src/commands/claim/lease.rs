@@ -139,7 +139,9 @@ pub(super) fn owner_still_holds(
     if !conductor_claim_owner_holds_lease(record) {
         return Ok(false);
     }
-    if super::heartbeat_lifecycle_step(&record.step) {
+    if record.step.starts_with("heartbeat-pending:")
+        || record.step.starts_with("heartbeat-publishing:")
+    {
         return Ok(true);
     }
     current_owner_heartbeat_holds(repo, issue, record)
