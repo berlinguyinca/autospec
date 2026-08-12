@@ -117,10 +117,22 @@ pub(crate) fn requeue_abandoned_active_issue(
     repo: &str,
     issue: u64,
 ) -> Result<bool, super::CommandFailure> {
-    let head = super::read_claim_ref(repo, issue)?;
-    if !claim_is_abandoned(head.as_ref().map(|head| &head.record)) {
+    let selected = super::read_claim_ref(repo, issue)?;
+    let Some(head) = quarantine_abandoned_claim_generation_with(
+        repo,
+        issue,
+        selected,
+        &mut |expected, successor| super::advance_claim_ref(repo, issue, expected, successor),
+    )?
+    else {
         return Ok(false);
-    }
+    };
+    super::project_claim_ref_to_comments(repo, &head);
+    relabel_abandoned_active_issue(repo, issue)?;
+    Ok(true)
+}
+
+fn relabel_abandoned_active_issue(repo: &str, issue: u64) -> Result<(), super::CommandFailure> {
     super::run_gh_with_retry(
         &[
             "issue".to_string(),
@@ -134,6 +146,56 @@ pub(crate) fn requeue_abandoned_active_issue(
             "auto-implement".to_string(),
         ],
         "requeue an abandoned active issue",
-    )?;
-    Ok(true)
+    )
+}
+
+pub(super) fn quarantine_abandoned_claim_generation_with<Advance>(
+    repo: &str,
+    issue: u64,
+    selected: Option<super::ClaimRefHead>,
+    advance: &mut Advance,
+) -> Result<Option<Box<super::ClaimRefHead>>, super::CommandFailure>
+where
+    Advance: FnMut(
+        Option<&super::ClaimRefHead>,
+        &RunStateRecord,
+    ) -> Result<super::ClaimRefAdvance, super::CommandFailure>,
+{
+    if !claim_is_abandoned(selected.as_ref().map(|head| &head.record)) {
+        return Ok(None);
+    }
+    let selected = match selected {
+        Some(selected) => selected,
+        None => {
+            let now = super::utc_now_iso()?;
+            let identity = super::unique_operation_id("abandoned-requeue")?;
+            let quarantine = RunStateRecord::new(
+                repo,
+                issue,
+                format!("autospec-{identity}"),
+                "claimed",
+                "autospec/requeue-abandoned",
+                "",
+                "abandoned_requeue_quarantine",
+                Vec::new(),
+                &now,
+                &now,
+                1,
+            )
+            .with_claim_id(identity);
+            match advance(None, &quarantine)? {
+                super::ClaimRefAdvance::Won(head) => *head,
+                super::ClaimRefAdvance::Lost => return Ok(None),
+            }
+        }
+    };
+    let mut available = selected.record.clone();
+    available.state = "available".to_string();
+    available.step = "abandoned_requeued".to_string();
+    available.updated_at = super::utc_now_iso()?;
+    let head = match advance(Some(&selected), &available)? {
+        super::ClaimRefAdvance::Won(head) => head,
+        super::ClaimRefAdvance::Lost => return Ok(None),
+    };
+    Ok(Some(head))
 }
