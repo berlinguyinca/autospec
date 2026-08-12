@@ -315,3 +315,56 @@ blocking_lines() {
     [ "$(printf '%s\n' "$output" | grep -c 'more (truncated)')" -eq 1 ]
     [ "$status" -eq 11 ]
 }
+
+# ── directive tiers ───────────────────────────────────────────────────────────
+# `--directives` is the re-prompt path: the hook's own failure message points at it, and the
+# Phase 4 guardian flow feeds its output to the agent. It used to drop INFO findings entirely,
+# so an advisory rule reached the agent neither as a block nor as guidance (#3079). Blocking
+# findings render as "Fix", advisory ones as "Consider", one line per rule and tier.
+
+directives_for_touch() {
+    run bash -c "cd '$WORK/repo' && $1 bash '$LINT_SH' --diff-file '$WORK/touch.diff' --directives"
+}
+
+@test "directives: an advisory finding is offered as guidance, not as a fix" {
+    write_long_functions solo 1 60
+    write_touch_diff solo
+    directives_for_touch ""
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q '^Consider COMPLEXITY: '
+    ! printf '%s\n' "$output" | grep -q '^Fix COMPLEXITY:'
+}
+
+@test "directives: repeated findings of one rule collapse to a single line" {
+    # The directive text is per-rule, so three long functions used to mean three identical
+    # sentences in the prompt. Deduplication is what makes the advisory tier affordable.
+    write_long_functions solo 3 60
+    write_touch_diff solo
+    directives_for_touch ""
+    [ "$(printf '%s\n' "$output" | grep -c '^Consider COMPLEXITY: ')" -eq 1 ]
+}
+
+@test "directives: enforcement moves the same finding into the Fix tier" {
+    # The tier tracks severity, not rule id — the one property that keeps "Consider" honest.
+    write_long_functions solo 1 60
+    write_touch_diff solo
+    directives_for_touch "AUTOSPEC_COMPLEXITY_ENFORCE=1"
+    [ "$status" -ge 1 ]
+    printf '%s\n' "$output" | grep -q '^Fix COMPLEXITY: '
+    ! printf '%s\n' "$output" | grep -q '^Consider COMPLEXITY:'
+}
+
+@test "directives: a blocking and an advisory finding both reach the agent" {
+    write_long_functions solo 1 60
+    printf 'x = 1  # TODO tracked\n' > "$WORK/repo/src/todo.py"
+    write_touch_diff solo
+    {
+        printf 'diff --git a/src/todo.py b/src/todo.py\n'
+        printf 'new file mode 100644\n--- /dev/null\n+++ b/src/todo.py\n@@ -0,0 +1 @@\n'
+        printf '+x = 1  # TODO tracked\n'
+    } >> "$WORK/touch.diff"
+    directives_for_touch ""
+    [ "$status" -ge 1 ]
+    printf '%s\n' "$output" | grep -q '^Fix TODO_LEFT: '
+    printf '%s\n' "$output" | grep -q '^Consider COMPLEXITY: '
+}

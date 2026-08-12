@@ -455,7 +455,7 @@ implementation and still blocks new oversized files and any growth of an existin
 
 | Var | Default | Effect |
 |---|---|---|
-| `AUTOSPEC_COMPLEXITY_ENFORCE` | `0` | `1` makes `COMPLEXITY` findings blocking again — every threshold below, plus nesting depth and duplicate function names. The thresholds themselves apply either way; this decides whether exceeding one is a veto or a note. Read by **both** linters: `scripts/lint-implementation.sh` and the Rust `autospec lint implementation`, which the Phase 4 executor uses to admit a diff. They disagreed for one release, so the autonomous path still vetoed while the pre-commit path did not (#3056). |
+| `AUTOSPEC_COMPLEXITY_ENFORCE` | `0` | `1` makes `COMPLEXITY` findings blocking again — every threshold below, plus nesting depth and duplicate function names. The thresholds themselves apply either way; this decides whether exceeding one is a veto or a note. Read by **both** linters: `scripts/lint-implementation.sh` and the Rust `autospec lint implementation`, which the Phase 4 executor uses to admit a diff. They disagreed for one release, so the autonomous path still vetoed while the pre-commit path did not (#3056). Advisory does not mean silent: `--directives` renders an advisory finding as `Consider <RULE>: …` alongside the blocking `Fix <RULE>: …` lines, so the agent writing the code still hears it (#3079). |
 | `AUTOSPEC_MAX_FILE_LOC` | `600` | File-length limit the ratchet enforces. Rough guidance meant to stop multi-thousand-line files, not to police a modest overage. Keep in step with `MAX_LOC` in the CI workflow. |
 | `AUTOSPEC_MAX_CYCLOMATIC` | `10` | Cyclomatic-complexity limit, measured per function. |
 | `AUTOSPEC_MAX_FUNC_LOC` | `50` | Per-function length limit. |
