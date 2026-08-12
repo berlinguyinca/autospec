@@ -85,7 +85,7 @@ fn spec_state_rejects_invalid_transitions() {
         .transition_to(SpecRunState::Passed)
         .expect_err("planned -> passed should fail");
 
-    assert!(error.contains("invalid transition"));
+    assert!(error.to_string().contains("invalid transition"));
     assert_eq!(lifecycle.state, SpecRunState::Planned);
 }
 

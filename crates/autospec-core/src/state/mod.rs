@@ -3,12 +3,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
+use crate::error::AutospecError;
 use crate::spec::is_valid_spec_id;
-use json::{JsonParser, JsonValue};
 use storage::{FileState, StatePaths};
 
 pub mod json;
 mod storage;
+mod parse;
+use parse::*;
 
 const STATE_SCHEMA_VERSION: u64 = 1;
 const STATE_FILE: &str = "specs.json";
@@ -40,7 +42,7 @@ impl SpecRunState {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, String> {
+    pub fn parse(value: &str) -> Result<Self, AutospecError> {
         match value {
             "planned" => Ok(Self::Planned),
             "ready" => Ok(Self::Ready),
@@ -50,7 +52,10 @@ impl SpecRunState {
             "blocked" => Ok(Self::Blocked),
             "deferred" => Ok(Self::Deferred),
             "superseded" => Ok(Self::Superseded),
-            _ => Err(format!("unknown spec run state: {value}")),
+            _ => Err(AutospecError::parse(
+                "spec run state",
+                format!("unknown spec run state: {value}"),
+            )),
         }
     }
 }
@@ -73,33 +78,38 @@ impl SpecLifecycle {
         }
     }
 
-    pub fn transition_to(&mut self, next: SpecRunState) -> Result<(), String> {
+    pub fn transition_to(&mut self, next: SpecRunState) -> Result<(), AutospecError> {
         if is_allowed_transition(&self.state, &next) {
             self.state = next;
             Ok(())
         } else {
-            Err(format!(
-                "invalid transition from {} to {}",
-                self.state.as_str(),
-                next.as_str()
+            Err(AutospecError::state(
+                &self.spec_id,
+                format!(
+                    "invalid transition from {} to {}",
+                    self.state.as_str(),
+                    next.as_str()
+                ),
             ))
         }
     }
 
-    pub fn deferred(mut self, reason: impl Into<String>) -> Result<Self, String> {
+    pub fn deferred(mut self, reason: impl Into<String>) -> Result<Self, AutospecError> {
         let reason = reason.into();
         if reason.trim().is_empty() {
-            return Err("deferred reason is required".to_string());
+            return Err(AutospecError::invariant("deferred reason is required"));
         }
         self.transition_to(SpecRunState::Deferred)?;
         self.deferred_reason = Some(reason);
         Ok(self)
     }
 
-    pub fn superseded_by(mut self, replacement: impl Into<String>) -> Result<Self, String> {
+    pub fn superseded_by(mut self, replacement: impl Into<String>) -> Result<Self, AutospecError> {
         let replacement = replacement.into();
         if !is_valid_spec_id(&replacement) {
-            return Err(format!("invalid replacement spec id: {replacement}"));
+            return Err(AutospecError::validation(format!(
+                "invalid replacement spec id: {replacement}"
+            )));
         }
         self.transition_to(SpecRunState::Superseded)?;
         self.superseded_by = Some(replacement);
@@ -240,10 +250,13 @@ impl SpecStateStore {
         Self::default()
     }
 
-    pub fn insert(&mut self, lifecycle: SpecLifecycle) -> Result<(), String> {
+    pub fn insert(&mut self, lifecycle: SpecLifecycle) -> Result<(), AutospecError> {
         let mut candidate = self.records.clone();
         if candidate.contains_key(&lifecycle.spec_id) {
-            return Err(format!("duplicate spec id: {}", lifecycle.spec_id));
+            return Err(AutospecError::state(
+                &lifecycle.spec_id,
+                format!("duplicate spec id: {}", lifecycle.spec_id),
+            ));
         }
         candidate.insert(lifecycle.spec_id.clone(), lifecycle);
         validate_records(&candidate)?;
@@ -264,16 +277,19 @@ impl SpecStateStore {
         parent_issue: u64,
         child_issues: Vec<u64>,
         quarantined_parent: bool,
-    ) -> Result<ParentIssueUpdate, String> {
+    ) -> Result<ParentIssueUpdate, AutospecError> {
         if parent_issue == 0 {
-            return Err("parent issue number must be positive".to_string());
+        return Err(AutospecError::other("parent issue number must be positive".to_string()));
         }
         if child_issues.is_empty() {
-            return Err("parent issue decomposition requires at least one child issue".to_string());
+            return Err(AutospecError::other("parent issue decomposition requires at least one child issue".to_string()));
         }
         if self.parent_issues.contains_key(&parent_issue) {
-            return Err(format!(
-                "parent issue #{parent_issue} is already decomposed"
+            return Err(AutospecError::state(
+                "parent",
+                format!(
+                    "parent issue #{parent_issue} is already decomposed"
+                ),
             ));
         }
 
@@ -281,15 +297,15 @@ impl SpecStateStore {
         let mut children = Vec::new();
         for issue in child_issues {
             if issue == 0 {
-                return Err("child issue number must be positive".to_string());
+                return Err(AutospecError::other("child issue number must be positive".to_string()));
             }
             if issue == parent_issue {
-                return Err(format!(
+                return Err(AutospecError::invariant(format!(
                     "parent issue #{parent_issue} cannot be its own child"
-                ));
+                )));
             }
             if !seen.insert(issue) {
-                return Err(format!("duplicate child issue #{issue}"));
+                return Err(AutospecError::other(format!("duplicate child issue #{issue}")));
             }
             children.push(ChildIssueRecord {
                 issue,
@@ -326,7 +342,7 @@ impl SpecStateStore {
         parent_issue: u64,
         child_issues: Vec<u64>,
         quarantined_parent: bool,
-    ) -> Result<ParentIssueUpdate, String> {
+    ) -> Result<ParentIssueUpdate, AutospecError> {
         let previous = self.parent_issues.remove(&parent_issue);
         match self.record_parent_decomposition(parent_issue, child_issues, quarantined_parent) {
             Ok(update) => Ok(update),
@@ -343,29 +359,32 @@ impl SpecStateStore {
         &mut self,
         parent_issue: u64,
         child_issues: Vec<u64>,
-    ) -> Result<ParentDecompositionExtension, String> {
+    ) -> Result<ParentDecompositionExtension, AutospecError> {
         let record = self
             .parent_issues
             .get(&parent_issue)
             .ok_or_else(|| format!("parent issue #{parent_issue} is not tracked"))?;
         let existing = record.child_numbers();
         if child_issues.len() < existing.len() || !child_issues.starts_with(&existing) {
-            return Err(format!(
-                "parent issue #{parent_issue} extension must preserve the ordered child prefix"
+            return Err(AutospecError::state(
+                "parent",
+                format!(
+                    "parent issue #{parent_issue} extension must preserve the ordered child prefix"
+                ),
             ));
         }
         let mut seen = BTreeSet::new();
         for issue in &child_issues {
             if *issue == 0 {
-                return Err("child issue number must be positive".to_string());
+                return Err(AutospecError::other("child issue number must be positive".to_string()));
             }
             if *issue == parent_issue {
-                return Err(format!(
+                return Err(AutospecError::invariant(format!(
                     "parent issue #{parent_issue} cannot be its own child"
-                ));
+                )));
             }
             if !seen.insert(*issue) {
-                return Err(format!("duplicate child issue #{issue}"));
+                return Err(AutospecError::other(format!("duplicate child issue #{issue}")));
             }
         }
         let added_children = child_issues[existing.len()..].to_vec();
@@ -377,9 +396,12 @@ impl SpecStateStore {
                         .iter()
                         .any(|child| child.issue == *issue)
             }) {
-                return Err(format!(
-                    "child issue #{issue} is already linked to parent #{}",
-                    owner.parent_issue
+                return Err(AutospecError::state(
+                    "child",
+                    format!(
+                        "child issue #{issue} is already linked to parent #{}",
+                        owner.parent_issue
+                    ),
                 ));
             }
         }
@@ -415,9 +437,9 @@ impl SpecStateStore {
     pub fn record_child_terminal(
         &mut self,
         child_issue: u64,
-    ) -> Result<Vec<ParentIssueTerminalAction>, String> {
+    ) -> Result<Vec<ParentIssueTerminalAction>, AutospecError> {
         if child_issue == 0 {
-            return Err("child issue number must be positive".to_string());
+            return Err(AutospecError::other("child issue number must be positive".to_string()));
         }
 
         let mut matched = false;
@@ -431,26 +453,30 @@ impl SpecStateStore {
             validate_parent_record(record)?;
         }
         if !matched {
-            return Err(format!(
-                "child issue #{child_issue} is not linked to a parent issue"
+            return Err(AutospecError::state(
+                "child",
+                format!("child issue #{child_issue} is not linked to a parent issue"),
             ));
         }
 
         Ok(self.parent_issue_terminal_actions())
     }
 
-    pub fn record_parent_closed(&mut self, parent_issue: u64) -> Result<(), String> {
+    pub fn record_parent_closed(&mut self, parent_issue: u64) -> Result<(), AutospecError> {
         let record = self
             .parent_issues
             .get_mut(&parent_issue)
             .ok_or_else(|| format!("parent issue #{parent_issue} is not tracked"))?;
         if !record.child_issues.iter().all(|child| child.terminal) {
-            return Err(format!(
-                "parent issue #{parent_issue} cannot close while child issues are pending"
+            return Err(AutospecError::state(
+                "parent",
+                format!(
+                    "parent issue #{parent_issue} cannot close while child issues are pending"
+                ),
             ));
         }
         record.parent_closed = true;
-        validate_parent_record(record)
+        validate_parent_record(record).map_err(AutospecError::from)
     }
 
     pub fn parent_issue_status(&self, parent_issue: u64) -> Option<ParentIssueStatus> {
@@ -542,7 +568,7 @@ impl SpecStateStore {
             .collect()
     }
 
-    pub fn to_json(&self) -> Result<String, String> {
+    pub fn to_json(&self) -> Result<String, AutospecError> {
         validate_records(&self.records)?;
         validate_parent_records(&self.parent_issues)?;
         let records = self
@@ -562,7 +588,7 @@ impl SpecStateStore {
         ))
     }
 
-    pub fn load_or_default(root: impl AsRef<Path>) -> Result<Self, String> {
+    pub fn load_or_default(root: impl AsRef<Path>) -> Result<Self, AutospecError> {
         let paths = StatePaths::new(root.as_ref());
         let primary = storage::load_state_file(&paths.primary);
 
@@ -577,19 +603,21 @@ impl SpecStateStore {
                     temporary_state @ (FileState::Missing | FileState::Invalid(_)) => {
                         match (primary_state, temporary_state) {
                             (FileState::Missing, FileState::Missing) => Ok(Self::new()),
-                            (FileState::Invalid(error), FileState::Missing) => Err(format!(
-                                "invalid spec state file {}: {error}",
-                                paths.primary.display()
+                            (FileState::Invalid(error), FileState::Missing) => Err(AutospecError::io(
+                                "read",
+                                paths.primary.display().to_string(),
+                                error,
                             )),
-                            (FileState::Missing, FileState::Invalid(error)) => Err(format!(
-                                "invalid temporary spec state file {}: {error}",
-                                paths.temporary.display()
+                            (FileState::Missing, FileState::Invalid(error)) => Err(AutospecError::io(
+                                "read",
+                                paths.temporary.display().to_string(),
+                                error,
                             )),
                             (FileState::Invalid(primary_error), FileState::Invalid(temporary_error)) => {
-                                Err(format!(
-                                    "invalid spec state files: {}: {primary_error}; {}: {temporary_error}",
-                                    paths.primary.display(),
-                                    paths.temporary.display()
+                                Err(AutospecError::io(
+                                    "read",
+                                    paths.primary.display().to_string(),
+                                    format!("{primary_error}; also {temporary_error}"),
                                 ))
                             }
                             (FileState::Valid(_), _) | (_, FileState::Valid(_)) => {
@@ -605,7 +633,7 @@ impl SpecStateStore {
     pub fn initialize_if_absent(
         root: impl AsRef<Path>,
         records: impl IntoIterator<Item = SpecLifecycle>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, AutospecError> {
         let mut store = Self::new();
         for lifecycle in records {
             store.insert(lifecycle)?;
@@ -613,7 +641,7 @@ impl SpecStateStore {
         let rendered = store.to_json()?;
         let paths = StatePaths::new(root.as_ref());
         if paths.primary.exists() || paths.temporary.exists() {
-            return Err("autospec init refuses to overwrite existing spec state".to_string());
+            return Err(AutospecError::other("autospec init refuses to overwrite existing spec state".to_string()));
         }
 
         let autospec_was_missing = !paths.autospec_directory.exists();
@@ -633,12 +661,13 @@ impl SpecStateStore {
         {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err("autospec init refuses to overwrite existing spec state".to_string())
+                return Err(AutospecError::other("autospec init refuses to overwrite existing spec state".to_string()))
             }
             Err(error) => {
-                return Err(format!(
-                    "failed to create initialization state file {}: {error}",
-                    paths.temporary.display()
+                return Err(AutospecError::io(
+                    "create",
+                    paths.temporary.display().to_string(),
+                    error,
                 ))
             }
         };
@@ -660,13 +689,14 @@ impl SpecStateStore {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                 let _ = fs::remove_file(&paths.temporary);
-                return Err("autospec init refuses to overwrite existing spec state".to_string());
+                return Err(AutospecError::other("autospec init refuses to overwrite existing spec state".to_string()));
             }
             Err(error) => {
-                return Err(format!(
-                    "failed to atomically initialize spec state {}: {error}",
-                    paths.primary.display()
-                ))
+                return Err(AutospecError::io(
+                    "atomically initialize",
+                    paths.primary.display().to_string(),
+                    error,
+                ));
             }
         }
         storage::sync_directory(&paths.directory)?;
@@ -680,7 +710,7 @@ impl SpecStateStore {
         Ok(store)
     }
 
-    pub fn save(&self, root: impl AsRef<Path>) -> Result<(), String> {
+    pub fn save(&self, root: impl AsRef<Path>) -> Result<(), AutospecError> {
         let rendered = self.to_json()?;
         let paths = StatePaths::new(root.as_ref());
         let autospec_was_missing = !paths.autospec_directory.exists();
@@ -714,318 +744,10 @@ impl SpecStateStore {
         storage::sync_directory(&paths.directory)?;
         drop(temporary);
 
-        storage::promote_temporary(&paths)
+        storage::promote_temporary(&paths).map_err(AutospecError::from)
     }
 }
 
-fn parse_store(document: &str) -> Result<SpecStateStore, String> {
-    let value = JsonParser::new(document).parse()?;
-    let mut root = value.into_object("spec state document")?;
-    require_only_keys(
-        &root,
-        &["schema", "specs", "parent_issues"],
-        "spec state document",
-    )?;
-
-    let schema =
-        take_required(&mut root, "schema", "spec state document")?.into_number("schema")?;
-    if schema != STATE_SCHEMA_VERSION {
-        return Err(format!("unsupported spec state schema: {schema}"));
-    }
-
-    let records = take_required(&mut root, "specs", "spec state document")?.into_array("specs")?;
-    let parent_records = root
-        .remove("parent_issues")
-        .map(|value| value.into_array("parent_issues"))
-        .transpose()?
-        .unwrap_or_default();
-    let mut store = SpecStateStore::new();
-    for record in records {
-        let lifecycle = parse_lifecycle(record)?;
-        if store.records.contains_key(&lifecycle.spec_id) {
-            return Err(format!("duplicate spec id: {}", lifecycle.spec_id));
-        }
-        store.records.insert(lifecycle.spec_id.clone(), lifecycle);
-    }
-    for record in parent_records {
-        let parent = parse_parent_issue_record(record)?;
-        if store.parent_issues.contains_key(&parent.parent_issue) {
-            return Err(format!("duplicate parent issue: #{}", parent.parent_issue));
-        }
-        store.parent_issues.insert(parent.parent_issue, parent);
-    }
-    validate_records(&store.records)?;
-    validate_parent_records(&store.parent_issues)?;
-    Ok(store)
-}
-
-fn parse_lifecycle(value: JsonValue) -> Result<SpecLifecycle, String> {
-    let mut record = value.into_object("spec lifecycle record")?;
-    require_only_keys(
-        &record,
-        &["spec_id", "state", "deferred_reason", "superseded_by"],
-        "spec lifecycle record",
-    )?;
-    let spec_id =
-        take_required(&mut record, "spec_id", "spec lifecycle record")?.into_string("spec_id")?;
-    let state = SpecRunState::parse(
-        &take_required(&mut record, "state", "spec lifecycle record")?.into_string("state")?,
-    )?;
-    let deferred_reason = take_required(&mut record, "deferred_reason", "spec lifecycle record")?
-        .into_optional_string("deferred_reason")?;
-    let superseded_by = take_required(&mut record, "superseded_by", "spec lifecycle record")?
-        .into_optional_string("superseded_by")?;
-
-    Ok(SpecLifecycle {
-        spec_id,
-        state,
-        deferred_reason,
-        superseded_by,
-    })
-}
-
-fn parse_parent_issue_record(value: JsonValue) -> Result<ParentIssueRecord, String> {
-    let mut record = value.into_object("parent issue record")?;
-    require_only_keys(
-        &record,
-        &[
-            "parent_issue",
-            "child_issues",
-            "quarantined_parent",
-            "decomposition_comment_posted",
-            "parent_closed",
-        ],
-        "parent issue record",
-    )?;
-    let parent_issue = take_required(&mut record, "parent_issue", "parent issue record")?
-        .into_number("parent_issue")?;
-    let child_values = take_required(&mut record, "child_issues", "parent issue record")?
-        .into_array("child_issues")?;
-    let mut child_issues = Vec::new();
-    for child in child_values {
-        child_issues.push(parse_child_issue_record(child)?);
-    }
-    let quarantined_parent =
-        take_required(&mut record, "quarantined_parent", "parent issue record")?
-            .into_bool("quarantined_parent")?;
-    let decomposition_comment_posted = take_required(
-        &mut record,
-        "decomposition_comment_posted",
-        "parent issue record",
-    )?
-    .into_bool("decomposition_comment_posted")?;
-    let parent_closed = take_required(&mut record, "parent_closed", "parent issue record")?
-        .into_bool("parent_closed")?;
-    Ok(ParentIssueRecord {
-        parent_issue,
-        child_issues,
-        quarantined_parent,
-        decomposition_comment_posted,
-        parent_closed,
-    })
-}
-
-fn parse_child_issue_record(value: JsonValue) -> Result<ChildIssueRecord, String> {
-    let mut record = value.into_object("child issue record")?;
-    require_only_keys(&record, &["issue", "terminal"], "child issue record")?;
-    let issue = take_required(&mut record, "issue", "child issue record")?.into_number("issue")?;
-    let terminal =
-        take_required(&mut record, "terminal", "child issue record")?.into_bool("terminal")?;
-    Ok(ChildIssueRecord { issue, terminal })
-}
-
-fn take_required(
-    object: &mut BTreeMap<String, JsonValue>,
-    key: &str,
-    context: &str,
-) -> Result<JsonValue, String> {
-    object
-        .remove(key)
-        .ok_or_else(|| format!("missing {key} in {context}"))
-}
-
-fn require_only_keys(
-    object: &BTreeMap<String, JsonValue>,
-    expected: &[&str],
-    context: &str,
-) -> Result<(), String> {
-    for key in object.keys() {
-        if !expected.contains(&key.as_str()) {
-            return Err(format!("unknown key {key} in {context}"));
-        }
-    }
-    Ok(())
-}
-
-fn validate_parent_records(records: &BTreeMap<u64, ParentIssueRecord>) -> Result<(), String> {
-    for (parent_issue, record) in records {
-        if parent_issue != &record.parent_issue {
-            return Err(format!(
-                "parent issue record key does not match issue number: #{parent_issue}"
-            ));
-        }
-        validate_parent_record(record)?;
-    }
-    Ok(())
-}
-
-fn validate_parent_record(record: &ParentIssueRecord) -> Result<(), String> {
-    if record.parent_issue == 0 {
-        return Err("parent issue number must be positive".to_string());
-    }
-    if record.child_issues.is_empty() {
-        return Err(format!(
-            "parent issue #{} requires at least one child issue",
-            record.parent_issue
-        ));
-    }
-    let mut seen = BTreeSet::new();
-    for child in &record.child_issues {
-        if child.issue == 0 {
-            return Err(format!(
-                "parent issue #{} has a non-positive child issue",
-                record.parent_issue
-            ));
-        }
-        if child.issue == record.parent_issue {
-            return Err(format!(
-                "parent issue #{} cannot be its own child",
-                record.parent_issue
-            ));
-        }
-        if !seen.insert(child.issue) {
-            return Err(format!(
-                "parent issue #{} has duplicate child issue #{}",
-                record.parent_issue, child.issue
-            ));
-        }
-    }
-    if record.parent_closed && !record.child_issues.iter().all(|child| child.terminal) {
-        return Err(format!(
-            "parent issue #{} is closed before all child issues are terminal",
-            record.parent_issue
-        ));
-    }
-    Ok(())
-}
-
-fn decomposition_comment(
-    parent_issue: u64,
-    child_issues: &[u64],
-    quarantined_parent: bool,
-) -> String {
-    let children = format_bullet_issue_list(child_issues);
-    let state = if quarantined_parent {
-        "\nState: `quarantined-parent-decomposed`."
-    } else {
-        ""
-    };
-    format!(
-        "<!-- autospec-parent-decomposition:begin -->
-Parent issue #{parent_issue} was decomposed into child implementation issues:
-{children}{state}
-<!-- autospec-parent-decomposition:end -->"
-    )
-}
-
-fn extension_decomposition_comment(
-    parent_issue: u64,
-    child_issues: &[u64],
-    quarantined_parent: bool,
-) -> String {
-    decomposition_comment(parent_issue, child_issues, quarantined_parent).replace(
-        "\n<!-- autospec-parent-decomposition:end -->",
-        "\nState: `append-only-parent-extension`.\n<!-- autospec-parent-decomposition:end -->",
-    )
-}
-
-fn completion_summary(parent_issue: u64, child_issues: &[u64]) -> String {
-    let children = format_bullet_issue_list(child_issues);
-    format!(
-        "<!-- autospec-parent-complete:begin -->
-All child implementation issues for parent #{parent_issue} reached a terminal state:
-{children}
-
-Closing parent issue automatically.
-<!-- autospec-parent-complete:end -->"
-    )
-}
-
-fn format_bullet_issue_list(child_issues: &[u64]) -> String {
-    format!("- {}", issue_list(child_issues, "\n- "))
-}
-
-fn issue_list(child_issues: &[u64], separator: &str) -> String {
-    child_issues
-        .iter()
-        .map(|issue| format!("#{issue}"))
-        .collect::<Vec<_>>()
-        .join(separator)
-}
-
-fn validate_records(records: &BTreeMap<String, SpecLifecycle>) -> Result<(), String> {
-    for (spec_id, lifecycle) in records {
-        if spec_id != &lifecycle.spec_id {
-            return Err(format!(
-                "state record key does not match spec id: {spec_id}"
-            ));
-        }
-        if !is_valid_spec_id(spec_id) {
-            return Err(format!("invalid spec id: {spec_id}"));
-        }
-
-        match lifecycle.state {
-            SpecRunState::Deferred => {
-                if lifecycle
-                    .deferred_reason
-                    .as_deref()
-                    .is_none_or(|reason| reason.trim().is_empty())
-                {
-                    return Err(format!(
-                        "deferred spec {spec_id} requires a deferred reason"
-                    ));
-                }
-                if lifecycle.superseded_by.is_some() {
-                    return Err(format!(
-                        "deferred spec {spec_id} cannot include a superseded-by reference"
-                    ));
-                }
-            }
-            SpecRunState::Superseded => {
-                let replacement = lifecycle.superseded_by.as_deref().ok_or_else(|| {
-                    format!("superseded spec {spec_id} requires a replacement spec id")
-                })?;
-                if !is_valid_spec_id(replacement) {
-                    return Err(format!(
-                        "superseded spec {spec_id} has invalid replacement spec id: {replacement}"
-                    ));
-                }
-                if replacement == spec_id {
-                    return Err(format!("superseded spec {spec_id} cannot replace itself"));
-                }
-                if !records.contains_key(replacement) {
-                    return Err(format!(
-                        "superseded spec {spec_id} references missing replacement: {replacement}"
-                    ));
-                }
-                if lifecycle.deferred_reason.is_some() {
-                    return Err(format!(
-                        "superseded spec {spec_id} cannot include a deferred reason"
-                    ));
-                }
-            }
-            _ => {
-                if lifecycle.deferred_reason.is_some() || lifecycle.superseded_by.is_some() {
-                    return Err(format!(
-                        "{} spec {spec_id} cannot include deferred or superseded metadata",
-                        lifecycle.state.as_str()
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
 
 fn is_allowed_transition(current: &SpecRunState, next: &SpecRunState) -> bool {
     matches!(
@@ -1131,7 +853,7 @@ mod tests {
         assert!(store
             .extend_parent_decomposition(10, vec![11, 12, 21])
             .expect_err("child owned by another parent")
-            .contains("parent #20"));
+            .to_string().contains("parent #20"));
         assert_eq!(store.parent_issue_children(10), Some(vec![11, 12]));
     }
 }

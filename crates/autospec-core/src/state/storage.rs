@@ -39,7 +39,7 @@ pub(super) fn load_state_file(path: &Path) -> FileState {
         Err(error) => return FileState::Invalid(format!("failed to read: {error}")),
     };
 
-    match super::parse_store(&document) {
+    match super::parse::parse_store(&document) {
         Ok(store) => FileState::Valid(store),
         Err(error) => FileState::Invalid(error),
     }

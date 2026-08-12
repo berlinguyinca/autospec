@@ -1,0 +1,58 @@
+name: rust-suites
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: rust-suites-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Clippy (lint)
+        run: cargo clippy --workspace --all-targets
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        run: cargo test -p autospec-core --lib
+        # Deterministic inline unit tests only. Integration tests under
+        # tests/*.rs and the executor_bridge inline suite invoke shell
+        # scripts / external tools (bash, bats, codex, gitleaks, semgrep,
+        # bubblewrap) that are absent or flaky on a bare GitHub runner; the
+        # full suite runs in the local target-repo validation gate.
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependencies
+        run: cargo audit
