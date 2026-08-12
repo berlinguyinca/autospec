@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -80,6 +81,35 @@ def rollback_commit_verified(repo: Path, change_commit: str, rollback_commit: st
     return bool(patch_id(repo, forward.stdout)) and patch_id(repo, forward.stdout) == patch_id(repo, inverse.stdout)
 
 
+def validation_reproduces(repo: Path, item: dict, commit: str) -> bool:
+    argv = item.get("argv")
+    if item.get("status") != "pass" or item.get("commit") != commit:
+        return False
+    if not isinstance(argv, list) or not argv or not all(isinstance(part, str) and part for part in argv):
+        return False
+    allowed = {"cargo", "bats", "autospec", "git"}
+    if argv[0] not in allowed:
+        return False
+    if argv[0] == "git" and (len(argv) < 2 or argv[1] not in {"diff", "show", "status", "rev-parse"}):
+        return False
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(repo)}
+    result = subprocess.run(argv, cwd=repo, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    return result.returncode == 0
+
+
+def protected_boundaries_clear(repo: Path, proof: dict, commit: str) -> bool:
+    if proof.get("status") != "pass" or proof.get("commit") != commit or proof.get("changed") is not False:
+        return False
+    parent = git(repo, "rev-parse", f"{commit}^")
+    if parent.returncode != 0:
+        return False
+    changed = git(repo, "diff", "--name-only", parent.stdout.decode().strip(), commit)
+    if changed.returncode != 0:
+        return False
+    protected = ("autonomy-gate", "premerge", "credential", "secret", "merge-authority")
+    return not any(token in path.lower() for path in changed.stdout.decode().splitlines() for token in protected)
+
+
 def candidate_digest(candidate: dict) -> str:
     canonical = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
@@ -91,9 +121,11 @@ def proof_is_valid(repo: Path, candidate: dict, proof: dict | None, rollback_pro
     valid = bool(proof) and proof.get("schema") == 1 and proof.get("dedupe_key") == key
     valid = valid and proof.get("candidate_digest") == candidate_digest(candidate)
     valid = valid and commit_exists(repo, change_commit)
-    for field in ("targeted_validation", "full_validation", "protected_boundaries"):
-        item = proof.get(field, {}) if proof else {}
-        valid = valid and item.get("status") == "pass" and item.get("commit") == change_commit
+    for field in ("targeted_validation", "full_validation"):
+        valid = valid and validation_reproduces(repo, proof.get(field, {}) if proof else {}, change_commit)
+    valid = valid and protected_boundaries_clear(
+        repo, proof.get("protected_boundaries", {}) if proof else {}, change_commit
+    )
     expected = candidate.get("rollback", {}).get("prior_policy_digest", "")
     handle = proof.get("rollback", {}) if proof else {}
     valid = valid and handle.get("status") == "ready" and handle.get("commit") == change_commit

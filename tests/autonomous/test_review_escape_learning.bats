@@ -54,7 +54,7 @@ write_experiment_proof() {
   local candidate_digest
   candidate_digest="sha256:$(jq -cS . "$candidate_file" | tr -d '\n' | sha256sum | awk '{print $1}')"
   cat > "$TMP/experiment-proof.json" <<JSON
-{"schema":1,"dedupe_key":"$(jq -r .dedupe_key "$candidate_file")","candidate_digest":"$candidate_digest","change_commit":"$CHANGE_COMMIT","targeted_validation":{"status":"pass","commit":"$CHANGE_COMMIT","command":"bats targeted"},"full_validation":{"status":"pass","commit":"$CHANGE_COMMIT","command":"autospec validate"},"protected_boundaries":{"status":"pass","commit":"$CHANGE_COMMIT","changed":false},"rollback":{"status":"ready","commit":"$CHANGE_COMMIT","prior_policy_digest":"$(jq -r .rollback.prior_policy_digest "$candidate_file")","command":"git revert --no-edit $CHANGE_COMMIT"}}
+{"schema":1,"dedupe_key":"$(jq -r .dedupe_key "$candidate_file")","candidate_digest":"$candidate_digest","change_commit":"$CHANGE_COMMIT","targeted_validation":{"status":"pass","commit":"$CHANGE_COMMIT","argv":["git","diff","--check","$CHANGE_COMMIT^","$CHANGE_COMMIT"]},"full_validation":{"status":"pass","commit":"$CHANGE_COMMIT","argv":["git","diff","--check","$CHANGE_COMMIT^","$CHANGE_COMMIT"]},"protected_boundaries":{"status":"pass","commit":"$CHANGE_COMMIT","changed":false},"rollback":{"status":"ready","commit":"$CHANGE_COMMIT","prior_policy_digest":"$(jq -r .rollback.prior_policy_digest "$candidate_file")","command":"git revert --no-edit $CHANGE_COMMIT"}}
 JSON
 }
 
@@ -224,6 +224,25 @@ JSON
   write_clean_outcomes 20 "$key" 100 true
   run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
     --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" \
+    --rollback-digest "$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')"
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.state == "held" and .reason == "experiment_proof_required"' >/dev/null
+}
+
+@test "self-asserted passing validation cannot promote when reproduction fails" {
+  seed_high_escape
+  run_candidates
+  candidate="$(printf '%s\n' "$output" | jq -c 'select(.workstream == "review-policy")')"
+  key="$(printf '%s' "$candidate" | jq -r '.dedupe_key')"
+  printf '%s' "$candidate" > "$TMP/candidate.json"
+  write_experiment_proof "$TMP/candidate.json"
+  jq '.targeted_validation.argv = ["git","diff","--check","not-a-commit"]' \
+    "$TMP/experiment-proof.json" > "$TMP/bad-proof.json"
+  write_clean_outcomes 20 "$key" 100 true
+
+  run bash "$SCRIPT" evaluate --repo-root "$WORK" --candidate "$TMP/candidate.json" \
+    --review-outcomes "$OUTCOMES" --lifecycle-ledger "$LIFECYCLE" \
+    --experiment-proof "$TMP/bad-proof.json" \
     --rollback-digest "$(printf '%s' "$candidate" | jq -r '.rollback.prior_policy_digest')"
   [ "$status" -eq 0 ]
   echo "$output" | jq -e '.state == "held" and .reason == "experiment_proof_required"' >/dev/null
