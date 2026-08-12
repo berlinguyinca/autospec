@@ -247,7 +247,7 @@ fn native_executor_bridge_source_owns_child_supervision_contract() {
     for required in [
         "build_implementer_prompt",
         "supervise_harness",
-        "process_group(0)",
+        "setpgid(0, 0)",
         "observe_process_identity",
         "terminate_exact_process_group",
         "MutationSnapshot",
@@ -801,7 +801,7 @@ fn foreground_executes_and_merges_selected_issue_through_native_bridge_once() {
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
         .output()
         .expect("replay completed foreground");
     assert!(
@@ -865,7 +865,7 @@ fn foreground_accepts_fast_forwarded_explore_head() {
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
         .output()
         .expect("execute from fast-forwarded explore head");
 
@@ -907,7 +907,7 @@ fn foreground_recovers_complete_bridge_after_transient_terminal_observation_fail
             .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
             .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
             .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
             .env("AUTOSPEC_FOREGROUND_FAIL_TERMINAL_ONCE", &fail_once);
     };
     let mut first_command = fixture.command();
@@ -1223,7 +1223,7 @@ fn foreground_legacy_executor_pending_resumes_exact_local_acquisition_receipt() 
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
         .output()
         .expect("run exact recovery");
 
@@ -1583,7 +1583,7 @@ fn foreground_recovers_released_executor_receipt_failure_and_other_claim_crash_w
             .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
             .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
             .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
             .output()
             .unwrap_or_else(|error| panic!("{name}: run recovered foreground: {error}"));
         assert!(
@@ -1705,7 +1705,7 @@ fn foreground_missing_failure_intent_requires_exact_retryable_release() {
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
         .output()
         .expect("reject non-retryable terminal recovery");
 
@@ -1885,7 +1885,7 @@ fn run_missing_cleanup_recovery(mismatch: Option<&str>) -> MissingCleanupRecover
             .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
             .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
             .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND");
     };
     let mut command = fixture.command();
     configure(&mut command);
@@ -2011,7 +2011,7 @@ fn foreground_recovers_active_claim_without_executor_invocation() {
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
         .output()
         .expect("recover claimed pre-invocation dispatch");
 
@@ -2048,7 +2048,7 @@ fn foreground_repeated_restart_observes_one_live_harness_until_merge() {
             .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
             .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
             .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
             .env("AUTOSPEC_HOST", "bridge-e2e-host")
             .env("AUTOSPEC_CLAIM_LEASE_SECONDS", "1")
             .env("AUTOSPEC_BRIDGE_SLOW_HARNESS_MARKER", &started)
@@ -2199,7 +2199,7 @@ fn assert_released_heartbeat_generation_handoff() {
             .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
             .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
             .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
             .env("AUTOSPEC_BRIDGE_ZERO_EFFECT_ONCE", &zero_effect_once)
             .env(
                 "AUTOSPEC_TEST_FAILURE_TRANSITION_FAIL_ONCE",
@@ -2445,7 +2445,7 @@ fn immediate_stop_after_claim_prevents_retry_claim_and_executor() {
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
         .env("AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE", &fail_once)
         .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches)
         .env(
@@ -2499,7 +2499,7 @@ fn graceful_stop_after_claim_allows_retry_to_finish_issue() {
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
         .env("AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE", &fail_once)
         .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches)
         .env(
@@ -2550,7 +2550,7 @@ fn foreground_retry_preserves_dirty_wip_and_merges_on_a_fresh_claim_generation()
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
         .env("AUTOSPEC_BRIDGE_FAIL_HARNESS_ONCE", &fail_once)
         .env("AUTOSPEC_BRIDGE_ADVANCE_MAIN_ON_FAIL", "1")
         .output()
@@ -2630,7 +2630,7 @@ fn foreground_retry_preserves_dirty_wip_and_merges_on_a_fresh_claim_generation()
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
         .output()
         .expect("replay exact merged generation");
     assert!(
@@ -2668,7 +2668,7 @@ fn foreground_post_harness_gh_read_outage_resumes_the_exact_claim() {
         .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
         .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
         .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-        .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+        .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
         .env("AUTOSPEC_BRIDGE_FAIL_GH_READ_ONCE", &fail_once)
         .env("AUTOSPEC_BRIDGE_HARNESS_DONE", &harness_done)
         .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches)
@@ -2721,7 +2721,7 @@ fn foreground_resumes_nonzero_draft_created_receipt_failure_without_second_harne
             .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
             .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
             .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
             .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches);
     };
 
@@ -2845,7 +2845,7 @@ fn foreground_retires_exact_merged_draft_when_worktree_is_missing() {
             .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
             .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
             .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
             .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches);
     };
 
@@ -3079,7 +3079,7 @@ fn foreground_persistent_post_create_outage_stays_on_the_exact_claim() {
             .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
             .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
             .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM")
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND")
             .env("AUTOSPEC_BRIDGE_HARNESS_LAUNCHES", &harness_launches);
     };
     let mut first_command = fixture.command();
@@ -3171,7 +3171,7 @@ fn foreground_receipt_retirement_crash_windows_resume_without_replay() {
                 .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
                 .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
                 .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-                .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+                .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND");
         };
         let mut first_command = fixture.command();
         configure(&mut first_command);
@@ -3328,7 +3328,7 @@ fn foreground_exhausted_retry_recovers_after_receipt_retirement_crash() {
             .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
             .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
             .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-            .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+            .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND");
     };
     let mut first_command = fixture.command();
     configure(&mut first_command);
@@ -3393,7 +3393,7 @@ fn foreground_ownership_retirement_recovers_across_receipt_clear_crashes() {
                 .env("AUTOSPEC_CLAIM_GIT_REMOTE", &bridge.remote)
                 .env("AUTOSPEC_HARNESS_RUNTIME_ALIASES", &bridge.aliases)
                 .env("AUTOSPEC_HANDOFF_DISPATCHER_KIND", "codex")
-                .env("AUTOSPEC_EXECUTOR_REVIEW_COMMAND", "/usr/bin/printf LGTM");
+                .env_remove("AUTOSPEC_EXECUTOR_REVIEW_COMMAND");
         };
         let mut first_command = fixture.command();
         configure(&mut first_command);
@@ -6528,9 +6528,8 @@ for value in "$@"; do
 done
 test -n "$artifact"
 case "$prompt" in
-  *"Return exactly LGTM"*)
-    printf '%s\n' 'LGTM'
-    printf '%s\n' 'LGTM' > "$artifact"
+  *"Return exactly one JSON object"*)
+    /usr/bin/python3 -c 'import json,sys;p,a=sys.argv[1:];c,_=json.JSONDecoder().raw_decode(p.split("Commit-bound review context (inspect every cited immutable record before approval):\n",1)[1]);b=json.dumps({"schema":1,"commit":c["commit"],"verdict":"lgtm","surfaces_examined":c["changed_paths"],"tests_examined":["tests/smoke/generation.sh"],"integration_paths_checked":c["required_integration_citations"],"blocking_findings":[]},separators=(",",":"));print(b);open(a,"w",encoding="utf-8").write(b+"\n")' "$prompt" "$artifact"
     chmod 600 "$artifact"
     i=0
     while [ "$i" -lt 64 ]; do
@@ -7523,7 +7522,7 @@ fn path_with(bin: &Path) -> String {
 }
 
 fn wait_for_file_contents(path: &Path, expected: &str) {
-    for _ in 0..300 {
+    for _ in 0..1_000 {
         if fs::read_to_string(path).is_ok_and(|contents| contents.contains(expected)) {
             return;
         }

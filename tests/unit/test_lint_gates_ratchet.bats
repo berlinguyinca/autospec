@@ -122,16 +122,62 @@ open('big.py', 'w').writelines(lines)
     printf '%s\n' "$output" | grep -q 'PR_SIZE'
 }
 
+# The next three tests are about WHICH file the ratchet reports, not about whether a
+# report blocks. COMPLEXITY is advisory unless AUTOSPEC_COMPLEXITY_ENFORCE=1 (design
+# doc Fix 5), so they ask for enforcement rather than assuming it — otherwise a
+# passing assertion would only be recording the default policy, and the ratchet's file
+# selection would go untested. The default policy has its own tests below.
 @test "ratchet: growing an oversized file is rejected with both line counts" {
     write_lines big.py 900
     git add big.py
     git commit -q -m "pre-existing oversized file"
     write_lines big.py 901
     git add big.py
-    run bash "$GATES" --staged
+    # `run env VAR=1 …` rather than `VAR=1 run …`: the latter sets the variable for a
+    # shell function without exporting it, so the linter subprocess never sees it.
+    run env AUTOSPEC_COMPLEXITY_ENFORCE=1 bash "$GATES" --staged
     [ "$status" -ne 0 ]
-    printf '%s\n' "$output" | grep -q 'COMPLEXITY:big.py'
+    printf '%s\n' "$output" | grep -q '^COMPLEXITY:big.py'
     printf '%s\n' "$output" | grep -q 'file is 901 LOC'
+}
+
+@test "policy: by default a grown oversized file is reported without blocking" {
+    write_lines big.py 900
+    git add big.py
+    git commit -q -m "pre-existing oversized file"
+    write_lines big.py 901
+    git add big.py
+    run bash "$GATES" --staged
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q '^INFO:COMPLEXITY:big.py.*file is 901 LOC'
+    # Growth still blocks where merges cannot skip it: .github/workflows/file-size-ratchet.yml
+    # runs the same comparison against the merge base on every pull request.
+    ! printf '%s\n' "$output" | grep -qE '^COMPLEXITY:'
+}
+
+@test "policy: a delegate that crashes is not reported as a clean gate" {
+    write_lines small.py 20
+    git add small.py
+    # A delegate that exits outside its 0..64/200 contract has produced no findings, which
+    # is not the same as having found none. Judging the run by stdout alone turned every
+    # gate off at once when an earlier draft of the advisory routing recursed.
+    printf '#!/usr/bin/env bash\nexit 139\n' > fake-delegate.sh
+    chmod +x fake-delegate.sh
+    mkdir -p fakescripts
+    cp fake-delegate.sh fakescripts/lint-implementation.sh
+    cp "$GATES" fakescripts/lint-implementation-gates.sh
+    run bash fakescripts/lint-implementation-gates.sh --staged
+    [ "$status" -eq 2 ]
+    printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 139'
+}
+
+@test "policy: a low delegate error code without findings is not reported as clean" {
+    write_lines small.py 20
+    git add small.py
+    run bash "$GATES" --staged --staged-base definitely-not-a-commit
+    [ "$status" -eq 2 ]
+    printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 1'
+    printf '%s\n' "$output" | grep -q 'invalid staged base commit'
 }
 
 @test "ratchet: an oversized file held at the same length is allowed" {
@@ -351,7 +397,7 @@ open(path, 'w').write('\n'.join(out) + '\n')
     git commit -q -m "parent with deep indentation"
     write_deep_lines feature.py 200
     git add feature.py
-    run bash "$GATES" --staged
+    run env AUTOSPEC_COMPLEXITY_ENFORCE=1 bash "$GATES" --staged
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -qE '^COMPLEXITY:feature.py:[0-9]+: nesting depth'
 }
@@ -363,9 +409,12 @@ open(path, 'w').write('\n'.join(out) + '\n')
     write_lines big.py 890
     write_lines feature.py 700
     git add big.py feature.py
-    run bash "$GATES" --staged
+    # Anchored and enforced: unanchored, this passed on the INFO line the advisory
+    # default emits while PR_SIZE supplied the nonzero status, so it stopped testing the
+    # rule it names.
+    run env AUTOSPEC_COMPLEXITY_ENFORCE=1 bash "$GATES" --staged
     [ "$status" -ne 0 ]
-    printf '%s\n' "$output" | grep -q 'COMPLEXITY:feature.py'
+    printf '%s\n' "$output" | grep -q '^COMPLEXITY:feature.py'
     printf '%s\n' "$output" | grep -q 'file is 700 LOC'
 }
 
@@ -376,7 +425,7 @@ open(path, 'w').write('\n'.join(out) + '\n')
     write_lines big.py 901
     write_lines extracted.py 10
     git add big.py extracted.py
-    run bash "$GATES" --staged
+    run env AUTOSPEC_COMPLEXITY_ENFORCE=1 bash "$GATES" --staged
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q 'file is 901 LOC'
 }

@@ -119,17 +119,124 @@ pub(super) fn claim_is_abandoned(record: Option<&RunStateRecord>, owner_holds: b
     }
 }
 
+pub(super) fn acquisition_blocking_owner(record: &RunStateRecord) -> Option<&str> {
+    (!matches!(
+        record.state.as_str(),
+        "available" | "released" | "retryable" | "failed"
+    ) && (heartbeat_publication_in_flight(&record.step)
+        || conductor_claim_owner_holds_lease(record)))
+    .then_some(record.worker_id.as_str())
+}
+
+pub(super) fn heartbeat_publication_in_flight(step: &str) -> bool {
+    step.starts_with("heartbeat-pending:") || step.starts_with("heartbeat-publishing:")
+}
+
 /// Whether the recorded owner still holds its claim.
 ///
 /// Both the TTL and the owner's liveness must agree. The clock alone is not enough:
 /// a worker that died seconds ago keeps a valid lease for its full TTL.
-fn owner_still_holds(
+pub(super) fn owner_still_holds(
     repo: &str,
     issue: u64,
     record: &RunStateRecord,
 ) -> Result<bool, super::CommandFailure> {
-    Ok(conductor_claim_owner_holds_lease(record)
-        && super::expired_prior_generation_heartbeat(repo, issue, record)?.is_none())
+    if heartbeat_publication_in_flight(&record.step) {
+        return Ok(true);
+    }
+    if !conductor_claim_owner_holds_lease(record) {
+        return Ok(false);
+    }
+    current_owner_heartbeat_holds(repo, issue, record)
+}
+
+#[cfg(target_os = "linux")]
+fn open_current_owner_repo(
+    repo_name: &str,
+) -> Result<Option<std::fs::File>, super::CommandFailure> {
+    use nix::fcntl::{open, OFlag};
+    use nix::sys::stat::Mode;
+
+    let root_path = super::heartbeat_root()?;
+    let root = match open(
+        &root_path,
+        OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+        Mode::empty(),
+    ) {
+        Err(nix::errno::Errno::ENOENT) => return Ok(None),
+        Err(error) => {
+            return Err(super::CommandFailure::diagnostic(format!(
+                "heartbeat root inspection failed: {error}"
+            )))
+        }
+        Ok(root) => std::fs::File::from(root),
+    };
+    super::private_heartbeat_directory_identity(&root, "current-owner root")?;
+    let repo_key = super::super::autonomous::drain::repository_progress_key(repo_name);
+    super::open_optional_heartbeat_directory(&root, std::path::Path::new(&repo_key))
+}
+
+#[cfg(target_os = "linux")]
+fn current_owner_heartbeat_holds(
+    repo_name: &str,
+    issue: u64,
+    record: &RunStateRecord,
+) -> Result<bool, super::CommandFailure> {
+    let Some(claim_id) = record.claim_id.as_deref() else {
+        return Ok(true);
+    };
+    let Some(repo) = open_current_owner_repo(repo_name)? else {
+        return Ok(false);
+    };
+    let expected = super::StartupHeartbeatExpectation {
+        repo: repo_name,
+        issue,
+        worker_id: &record.worker_id,
+        branch: &record.branch,
+        pull_request: "",
+        claim_id,
+        step: "claimed",
+    };
+    let issue_name = format!("{issue}.json");
+    match super::classify_startup_heartbeat_at(
+        &repo,
+        issue_name.as_ref(),
+        expected,
+        super::unix_now()?,
+        super::observe_local_startup_pid,
+    ) {
+        super::StartupHeartbeatClassification::ExpiredDead(_) => Ok(false),
+        super::StartupHeartbeatClassification::Blocking => Ok(true),
+        super::StartupHeartbeatClassification::Absent => {
+            let no_receipt = matches!(
+                super::heartbeat_receipt_retry_decision(&repo, expected),
+                super::HeartbeatReceiptDecision::Absent
+            );
+            if !no_receipt {
+                return Ok(true);
+            }
+            let retained = super::classify_retained_prior_generation(
+                &repo,
+                repo_name,
+                issue,
+                record,
+                super::unix_now()?,
+            )?;
+            Ok(!matches!(
+                retained,
+                super::StartupHeartbeatClassification::Absent
+            ))
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn current_owner_heartbeat_holds(
+    _repo: &str,
+    _issue: u64,
+    _record: &RunStateRecord,
+) -> Result<bool, super::CommandFailure> {
+    Ok(true)
 }
 
 pub(crate) fn requeue_abandoned_active_issue(
@@ -180,12 +287,24 @@ where
         &RunStateRecord,
     ) -> Result<super::ClaimRefAdvance, super::CommandFailure>,
 {
-    let owner_holds = match selected.as_ref() {
-        Some(head) => owner_still_holds(repo, issue, &head.record)?,
+    let owner_holds = match selected.as_ref().map(|head| &head.record) {
+        Some(record) if record.state == "claimed" => owner_still_holds(repo, issue, record)?,
         None => false,
+        Some(_) => false,
     };
     if !claim_is_abandoned(selected.as_ref().map(|head| &head.record), owner_holds) {
         return Ok(None);
+    }
+    if let Some(record) = selected
+        .as_ref()
+        .map(|head| &head.record)
+        .filter(|record| record.state == "claimed")
+    {
+        if !super::quarantine_authoritative_stale_heartbeat(repo, issue, record, None, &mut || {
+            Ok(())
+        })? {
+            return Ok(None);
+        }
     }
     let selected = match selected {
         Some(selected) => selected,
