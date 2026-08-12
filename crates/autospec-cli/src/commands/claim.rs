@@ -739,7 +739,7 @@ pub(crate) fn acquire_for_conductor(
 ) -> Result<ClaimLease, ConductorClaimError> {
     let recovered = recover_active_issue_against(repo, issue, 300, Some(base_branch))?;
     if !recovered {
-        if let Some(owner) = lease::contesting_claim_owner(repo, issue, worker_id, branch)? {
+        if let Some(owner) = lease::active_contesting_owner(repo, issue, worker_id, branch)? {
             return unavailable_claim_with_observed_owner(issue, repo, worker_id, &owner);
         }
     }
