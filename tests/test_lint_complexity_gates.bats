@@ -252,3 +252,66 @@ open(sys.argv[1], 'w').write('def f():\n' + '    x = 1\n' * 700)
     [ "$status" -ge 1 ]
     printf '%s\n' "$output" | grep -q '^COMPLEXITY:src/big.py:-: file is 701 LOC'
 }
+
+# ── the documented exit-code contract ─────────────────────────────────────────
+# "Exit code = number of blocking findings." Two rules emitted from the right-hand side of a
+# pipe, which bash runs in a subshell, so their FINDINGS_COUNT and RULE_EMIT_COUNT increments
+# were discarded and the exit code undercounted what had just been printed (#3081). The
+# wrapper's cross-check had to be loosened to tolerate it, and `qa-phase4.sh` reports the
+# number to operators.
+
+# Writes $2 Python functions of $3 lines each into $WORK/repo/src/$1.py.
+write_long_functions() {
+    mkdir -p "$WORK/repo/src"
+    python3 - "$WORK/repo/src/$1.py" "$2" "$3" <<'PY'
+import sys
+path, count, length = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+with open(path, "w") as handle:
+    for index in range(count):
+        handle.write("def f%d():\n" % index)
+        for _ in range(length):
+            handle.write("    x = 1\n")
+PY
+}
+
+# A one-line modification hunk per named file, so PR_SIZE stays out of the way.
+write_touch_diff() {
+    : > "$WORK/touch.diff"
+    for name in "$@"; do
+        {
+            printf 'diff --git a/src/%s.py b/src/%s.py\n' "$name" "$name"
+            printf -- '--- a/src/%s.py\n' "$name"
+            printf '+++ b/src/%s.py\n' "$name"
+            printf '@@ -1,2 +1,2 @@\n'
+            printf -- '-    x = 0\n'
+            printf '+    x = 1\n'
+        } >> "$WORK/touch.diff"
+    done
+}
+
+blocking_lines() {
+    printf '%s\n' "$output" | grep -c '^COMPLEXITY:'
+}
+
+@test "exit code: equals the number of blocking findings printed" {
+    write_long_functions solo 2 60
+    write_touch_diff solo
+    run bash -c "cd '$WORK/repo' && AUTOSPEC_COMPLEXITY_ENFORCE=1 bash '$LINT_SH' --diff-file '$WORK/touch.diff'"
+    # Was 1 whatever the count, because the function-LOC findings came from a subshell.
+    [ "$status" -eq "$(blocking_lines)" ]
+    [ "$status" -gt 1 ]
+}
+
+@test "emit cap: holds across files, not per file" {
+    # Each file's findings used to be counted in their own subshell, so the cap restarted for
+    # every file: 24 long functions across three files printed 35 blocking lines and four
+    # truncation markers, where the cap intends ten plus one marker.
+    write_long_functions a 8 60
+    write_long_functions b 8 60
+    write_long_functions c 8 60
+    write_touch_diff a b c
+    run bash -c "cd '$WORK/repo' && AUTOSPEC_COMPLEXITY_ENFORCE=1 bash '$LINT_SH' --diff-file '$WORK/touch.diff'"
+    [ "$(blocking_lines)" -eq 11 ]
+    [ "$(printf '%s\n' "$output" | grep -c 'more (truncated)')" -eq 1 ]
+    [ "$status" -eq 11 ]
+}

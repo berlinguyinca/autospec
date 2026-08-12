@@ -862,13 +862,13 @@ for lineno in sorted(findings):
     local rc=$?
     [ "$rc" -eq 0 ] || return 1
 
-    # Emit one finding per offending function.
-    if [ -n "$out" ]; then
-        printf '%s\n' "$out" | while IFS="$(printf '\t')" read -r fline fdepth; do
-            [ -z "$fline" ] && continue
-            emit_capped "COMPLEXITY" "$diff_file" "$fline" "nesting depth ${fdepth} (threshold: 4) at line ${fline}"
-        done
-    fi
+    # One finding per offending function. Here-document, not pipe — see Fix 7 (#3081).
+    while IFS="$(printf '\t')" read -r fline fdepth; do
+        [ -z "$fline" ] && continue
+        emit_capped "COMPLEXITY" "$diff_file" "$fline" "nesting depth ${fdepth} (threshold: 4) at line ${fline}"
+    done <<EOF
+$out
+EOF
     return 0
 }
 
@@ -1379,21 +1379,22 @@ $(get_diff_files)
 EOF
 }
 
-# check_function_loc — emit COMPLEXITY finding for functions exceeding max LOC.
-# Shell (.sh/.bash) functions are already checked by detect_complexity (diff-based);
-# this check covers Python, TypeScript, JavaScript, and Go using full-file analysis.
+# check_function_loc — emit COMPLEXITY finding for functions exceeding max LOC, by full-file
+# analysis. Shell functions are covered by detect_complexity instead, from the diff. Python
+# ONLY: .ts/.js/.go were admitted by the extension filter and then fell through the
+# Python-only body, so they were never analysed — the filter now says what the code does.
 check_function_loc() {
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
         [ -f "$diff_file" ] || continue
-        case "$diff_file" in
-            *.py|*.ts|*.js|*.go) ;;
-            *) continue ;;
-        esac
-        local func_name func_start func_loc
-        # Python: def <name>( — count lines until next def/class at same indent
-        if printf '%s' "$diff_file" | grep -qE '\.py$'; then
-            awk '
+        case "$diff_file" in *.py) ;; *) continue ;; esac
+        # def <name>( — lines until the next def/class. Here-document, not pipe, so the
+        # counters survive (Fix 7); func_name below is awk's, not the shell's.
+        while IFS=: read -r fname fstart floc; do
+            [ -z "$fname" ] && continue
+            emit_capped "COMPLEXITY" "$diff_file" "$fstart" "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
+        done <<EOF
+$(awk '
                 /^[[:space:]]*(def |class )[A-Za-z_]/ {
                     if (func_name && NR - func_start > max_loc) {
                         print func_name ":" func_start ":" (NR - func_start)
@@ -1405,10 +1406,8 @@ check_function_loc() {
                         print func_name ":" func_start ":" (NR - func_start)
                     }
                 }
-            ' max_loc="$_COMPLEXITY_MAX_FUNC_LOC" "$diff_file" | while IFS=: read -r fname fstart floc; do
-                emit_capped "COMPLEXITY" "$diff_file" "$fstart" "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
-            done
-        fi
+            ' max_loc="$_COMPLEXITY_MAX_FUNC_LOC" "$diff_file")
+EOF
     done <<EOF
 $(get_diff_files)
 EOF
