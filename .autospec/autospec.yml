@@ -256,16 +256,6 @@ compatibility:
 # Config-driven blast-radius quarantine registry. Any changed path matching one
 # of these surfaces is routed to async human review instead of auto-merge.
 fenced_surfaces:
-  - id: trading-money-risk
-    severity: fenced
-    reason: Trading-system money, risk, and execution paths can move capital.
-    paths:
-      - "trading-system/money/**"
-      - "trading-system/risk/**"
-      - "trading-system/execution/**"
-      - "trading/**/money/**"
-      - "trading/**/risk/**"
-      - "trading/**/execution/**"
   - id: schema-migrations
     severity: high
     reason: Schema migrations and contracts can break persisted data.

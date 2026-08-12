@@ -6,7 +6,7 @@ on:
       - main
     paths:
       - 'docs/site/**'
-      - 'docs/QUICKSTART.md'
+      - 'docs/quickstart.md'
       - 'docs/quickstart.cast'
   workflow_dispatch:
 

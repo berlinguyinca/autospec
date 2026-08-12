@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Generic dispatcher for autospec versioned commands.
+# Replaces the 447 single-line shell wrappers with a single script.
+#
+# Usage (explicit):
+#   autospec-versioned v26 preflight  [args...]
+#   autospec-versioned v70 status     [args...]
+#
+# Backward-compatible filename-based invocation via symlink:
+#   ln -s autospec-versioned autospec-autonomous-v26-preflight
+#   ./autospec-autonomous-v26-preflight [args...]
+#
+# Dispatching rules:
+#   v25-v61  → scripts/autospec-baseline-v25.py --repo-root . --command v<V>-<T>
+#   v62-v70  → scripts/autospec-v61-v70.py   --repo-root . --version <V> --action <T>
+set -euo pipefail
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)"
+BASENAME="${0##*/}"
+BASENAME="${BASENAME%.sh}"
+
+# Try to extract v<VERSION>-<TYPE> from invocation basename
+# Matches: autospec-autonomous-v26-preflight → v26-preflight
+#          autospec-v60-status               → v60-status
+#          autospec-v62-multirepo-handoff    → v62-multirepo-handoff
+VERSION=""
+TYPE=""
+if [[ "$BASENAME" =~ ^.*[^0-9]v([0-9]+)-(.+)$ ]]; then
+  VERSION="${BASH_REMATCH[1]}"
+  TYPE="${BASH_REMATCH[2]}"
+elif [ $# -ge 2 ]; then
+  # Fallback: explicit version and type args
+  VERSION="$1"
+  TYPE="$2"
+  shift 2
+else
+  printf 'Usage: %s <version> <type> [args...]\n' "${0##*/}" >&2
+  printf '  version:  v26, v27, ..., v70\n' >&2
+  printf '  type:     preflight, gate, verifier, audit, recovery, contract, artifact-build, status, supervisor\n' >&2
+  exit 2
+fi
+
+# Route to the correct Python backend
+if [ "$VERSION" -ge 62 ] 2>/dev/null; then
+  exec python3 "$ROOT/scripts/autospec-v61-v70.py" --repo-root "$ROOT" --version "$VERSION" --action "$TYPE" "$@"
+else
+  exec python3 "$ROOT/scripts/autospec-baseline-v25.py" --repo-root "$ROOT" --command "v${VERSION}-${TYPE}" "$@"
+fi

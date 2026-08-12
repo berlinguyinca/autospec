@@ -28,6 +28,7 @@
 #   AUTOSPEC_SKIP_SYSTEM_TOOLS=1  skip CLI dependency install attempts (verification still runs).
 #   AUTOSPEC_SKIP_ECOSYSTEM_BOOTSTRAP=1  skip peer ecosystem bootstrap.
 #   AUTOSPEC_SKIP_AGENT_ENV_ALIASES=1  skip claude/codex/opencode runtime aliases.
+#   AUTOSPEC_NO_SHELL_RC_PROMPT=1  skip the shell config modification prompt.
 #
 # Exits non-zero on any sub-installer failure; reports per-pair status.
 
@@ -157,6 +158,15 @@ fi
 unset _autospec_telemetry_cfg
 EOF
 
+    if [ -t 0 ] && [ "${AUTOSPEC_NO_SHELL_RC_PROMPT:-}" != "1" ]; then
+        printf '\n%s\n' "autospec will add a source line to ~/.zshrc, ~/.bashrc, and ~/.profile."
+        printf '%s' "Proceed? [Y/n] "
+        read -r reply
+        case "$reply" in
+            ""|[yY]|[yY][eE][sS]) ;;
+            *) info "Skipped shell config modification."; return 0 ;;
+        esac
+    fi
     ensure_line_in_file "$HOME/.zshrc" "$autospec_env_line"
     ensure_line_in_file "$HOME/.bashrc" "$autospec_env_line"
     ensure_line_in_file "$HOME/.profile" "$autospec_env_line"

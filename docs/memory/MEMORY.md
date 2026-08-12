@@ -56,10 +56,13 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [Trio derivation tooling (use it)](reference_trio_derivation_tooling.md) — edit SKILL.md then `derive-trio.sh --in-place` + `gen-skill-goldens.sh`; stop hand-maintaining codex/opencode + goldens; validate's check_derive_trio_consistency enforces it; decomposer now treats trio+goldens as one unit
 - [jq test() regex metachar injection](feedback_jq_test_regex_metachar_injection.md) — interpolating host/user-derived values into jq test() is regex injection; dotted hostnames made claim self-clean delete the wrong worker's lock comment; use capture()+==
 - [Self-consistent test fixtures mask bugs](feedback_self_consistent_test_fixtures_mask_bugs.md) — tests that build fixtures with the SUT's own derivation expression can't catch a bug in it; the Claude transcript-slug `lstrip` bug shipped green for months. Pin against the real convention / live values; reproduce end-to-end
+- [Test-module splits break string module paths](feedback_test_module_path_string_literals.md) — `--exact "a::b::tests::name"` in a string literal is invisible to the compiler and to name-equality checks; grep the path before splitting
+- [Mutex poison cascade masks failures](feedback_mutex_poison_cascade_masks_failures.md) — `.expect()` on a test-ordering mutex made 1 real failure look like 31; recover the guard, then re-measure before concluding anything
 
 # Infrastructure gotchas
 
 - [Background pipeline exit masking](feedback_background_pipeline_exit_masking.md) — `cmd | tail; echo` background tasks report exit 0 even when the gate failed; parse the gate's own final status line, and zsh uses lowercase `pipestatus`
+- [pkill -f kills its own shell](feedback_pkill_f_self_kill.md) — the pattern matches the running command line; cleanup chained ahead of work silently ends the job
 - [No tree mutation during background validate](feedback_no_tree_mutation_during_bg_validate.md) — switching/deleting branches while a background validate.sh runs corrupts its checkout mid-run → false "required file missing"; run it in a dedicated detached worktree and confirm the gate's OK line, not just the (echo-masked) exit code
 - [Validate baseline diffing](feedback_validate_baseline_diff.md) — validate is red on main, so compare failure SETS against a clean origin/main worktree; per-suite spot checks gave a false all-clear and let 2 regressions through CI
 
