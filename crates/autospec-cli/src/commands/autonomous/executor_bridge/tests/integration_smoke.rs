@@ -1,11 +1,12 @@
 // executor_bridge tests: integration-smoke review evidence.
 
 use super::super as bridge;
-use super::support_base::GitFixture;
+use super::support_base::{git, GitFixture};
 use super::support_invocation::supervision_state;
 use autospec_core::autonomous::review_policy::{
-    classify_review_requirements, ReviewPolicyInput, ReviewRequirements,
+    classify_review_requirements, ReviewPolicyInput, ReviewRequirements, ReviewRisk,
 };
+use std::fs;
 use std::time::Duration;
 
 fn integration_requirements() -> ReviewRequirements {
@@ -13,6 +14,37 @@ fn integration_requirements() -> ReviewRequirements {
         serialization_reasons: vec!["priority:high".to_string()],
         ..ReviewPolicyInput::default()
     })
+}
+
+#[test]
+fn executor_review_classifies_a_producer_consumer_boundary_without_other_risk_signals() {
+    // Break caught: executor classification permanently disabling the producer/consumer rule.
+    let fixture = GitFixture::new("producer-consumer-review-risk");
+    let producer = fixture.repo.join("crates/example/src/event_producer.rs");
+    let consumer = fixture.repo.join("crates/example/src/event_consumer.rs");
+    fs::create_dir_all(producer.parent().expect("producer parent")).expect("component directory");
+    fs::write(&producer, "pub fn publish() {}\n").expect("producer source");
+    fs::write(&consumer, "pub fn consume() {}\n").expect("consumer source");
+    git(&fixture.repo, &["add", "."]);
+    git(
+        &fixture.repo,
+        &["commit", "-m", "feat: connect example boundary"],
+    );
+    let state = supervision_state(&fixture);
+    let request = super::support_invocation::reviewer_request(
+        &state,
+        fixture.root.join("state/invocation.json"),
+    );
+
+    let requirements = bridge::classify_executor_review_requirements(&request, &state)
+        .expect("executor review requirements");
+
+    assert_eq!(requirements.risk, ReviewRisk::Integration);
+    assert_eq!(
+        requirements.reasons,
+        ["boundary:producer-consumer".to_string()]
+    );
+    assert!(requirements.require_integration_smoke);
 }
 
 #[test]

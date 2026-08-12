@@ -18,25 +18,98 @@ pub(super) struct IntegrationSmokeEvidenceOutcome {
     pub(super) binding: Option<IntegrationSmokeEvidenceBinding>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ExecutorReviewInventory {
+    pub(super) changed_paths: Vec<String>,
+    pub(super) logical_components: Vec<String>,
+    pub(super) producer_surfaces: Vec<String>,
+    pub(super) consumer_surfaces: Vec<String>,
+}
+
 pub(super) fn classify_executor_review_requirements(
     request: &ExecutorBridgeRequest,
     state: &PersistedInvocation,
 ) -> Result<ReviewRequirements, String> {
+    let inventory = executor_review_inventory(state)?;
+    Ok(review_requirements_for_inventory(request, &inventory))
+}
+
+pub(super) fn review_requirements_for_inventory(
+    request: &ExecutorBridgeRequest,
+    inventory: &ExecutorReviewInventory,
+) -> ReviewRequirements {
+    let blast = classify_paths(&inventory.changed_paths, &default_legacy_registry());
+    classify_review_requirements(&ReviewPolicyInput {
+        changed_paths: inventory.changed_paths.clone(),
+        serialization_reasons: request.serialization_reasons.clone(),
+        logical_component_count: inventory.logical_components.len(),
+        has_producer_surface: !inventory.producer_surfaces.is_empty(),
+        has_consumer_surface: !inventory.consumer_surfaces.is_empty(),
+        critical_boundary: blast.label == "blast:fenced",
+    })
+}
+
+pub(super) fn executor_review_inventory(
+    state: &PersistedInvocation,
+) -> Result<ExecutorReviewInventory, String> {
     let changed = changed_paths_since_base(&state.identity.worktree, &state.identity.base_oid)?;
-    let components = changed
-        .all
+    let changed_paths = changed.all.into_iter().collect::<Vec<_>>();
+    let logical_components = changed_paths
         .iter()
         .filter_map(|path| logical_review_component(path))
-        .collect::<BTreeSet<_>>();
-    let blast = classify_paths(&changed.all, &default_legacy_registry());
-    Ok(classify_review_requirements(&ReviewPolicyInput {
-        changed_paths: changed.all.into_iter().collect(),
-        serialization_reasons: request.serialization_reasons.clone(),
-        logical_component_count: components.len(),
-        has_producer_surface: false,
-        has_consumer_surface: false,
-        critical_boundary: blast.label == "blast:fenced",
-    }))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let producer_surfaces = changed_paths
+        .iter()
+        .filter(|path| review_surface_matches(path, PRODUCER_SURFACE_TOKENS))
+        .cloned()
+        .collect();
+    let consumer_surfaces = changed_paths
+        .iter()
+        .filter(|path| review_surface_matches(path, CONSUMER_SURFACE_TOKENS))
+        .cloned()
+        .collect();
+    Ok(ExecutorReviewInventory {
+        changed_paths,
+        logical_components,
+        producer_surfaces,
+        consumer_surfaces,
+    })
+}
+
+const PRODUCER_SURFACE_TOKENS: &[&str] = &[
+    "producer",
+    "publisher",
+    "publish",
+    "emitter",
+    "emit",
+    "writer",
+    "encoder",
+    "serialize",
+    "serializer",
+];
+const CONSUMER_SURFACE_TOKENS: &[&str] = &[
+    "consumer",
+    "consume",
+    "subscriber",
+    "reader",
+    "parser",
+    "parse",
+    "loader",
+    "decoder",
+    "deserialize",
+    "deserializer",
+];
+
+fn review_surface_matches(path: &str, role_tokens: &[&str]) -> bool {
+    path.split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .any(|token| {
+            role_tokens
+                .iter()
+                .any(|role| token.eq_ignore_ascii_case(role))
+        })
 }
 
 fn logical_review_component(path: &str) -> Option<String> {
