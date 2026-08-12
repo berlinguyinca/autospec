@@ -1014,18 +1014,17 @@ EOF
 # ── §3.1 SECURITY detector ────────────────────────────────────────────────────
 # Dangerous patterns in any diff hunk.
 
-# scan_security_pattern PAT DESC — scan added lines of every diff file for PAT.
-# Single awk pass per file (get_added_lines_with_lineno) plus an in-process
-# bash regex test per line — no per-line grep/sed subprocess.
+# scan_security_pattern PAT DESC — scan added lines of every diff file for PAT. One awk
+# pass per file plus an in-process bash regex test: no per-line grep/sed subprocess.
 scan_security_pattern() {
     local pat="$1"
     local desc="$2"
     while IFS= read -r diff_file; do
         [ -z "$diff_file" ] && continue
         while IFS=: read -r lineno content; do
-            if [[ "$content" =~ $pat ]]; then
-                # +1 preserves this detector's pre-existing (off-by-one) line
-                # numbering exactly, so existing findings/tests are unaffected.
+            # +1 keeps the pre-existing (off-by-one) numbering, and is the line
+            # is_line_allowed reads — annotate the offending line itself (#3057).
+            if [[ "$content" =~ $pat ]] && ! is_line_allowed SECURITY "$diff_file" "$((lineno + 1))"; then
                 emit_capped "SECURITY" "$diff_file" "$((lineno + 1))" "$desc"
             fi
         done <<EOF
@@ -1037,7 +1036,8 @@ EOF
 }
 
 detect_security() {
-    scan_security_pattern 'eval\(' "eval() usage — potential code injection"
+    # Boundary-anchored: ast.literal_eval is not the builtin, but builtins.eval is (Fix 6).
+    scan_security_pattern '(^|[^A-Za-z0-9_])eval\(' "eval() usage — potential code injection"  # linter:allow-SECURITY the rule's own pattern and message
     scan_security_pattern 'exec\(' "exec() usage — potential code injection"
     scan_security_pattern '\-\-no\-verify' "--no-verify flag — bypasses git hooks"
     scan_security_pattern 'git reset --hard' "git reset --hard — destructive operation"
