@@ -157,6 +157,14 @@ if [ -f "$_autospec_telemetry_cfg" ]; then
     export AUTOSPEC_DB_SPOOL_MAX_BYTES="$(bash "$_autospec_telemetry_cfg" --key spool_max_bytes 2>/dev/null || printf '10485760')"
 fi
 unset _autospec_telemetry_cfg
+
+# OpenCode implementer containment adapter. The executor bridge refuses to run
+# mutating OpenCode work without it (executor_harness_uncontained). Guarded so a
+# missing adapter is a no-op; the bridge then fails closed rather than running
+# the implementer uncontained.
+if [ -x "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lib/opencode-containment-adapter.sh" ]; then
+    export AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/lib/opencode-containment-adapter.sh"
+fi
 EOF
 
     if [ -t 0 ] && [ "${AUTOSPEC_NO_SHELL_RC_PROMPT:-}" != "1" ]; then
@@ -1720,7 +1728,7 @@ copy_runtime_subdirs() {
     autospec_scripts_dir="${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}"
 
     # Runtime libs sourced/exec'd by installed scripts at $SCRIPT_DIR/lib/<name>.
-    runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh lint-reuse-lens.sh model-supply-probe.sh"
+    runtime_libs="autospec-loop.sh autospec-harness-detect.sh explore-internet-safety.sh extract-matchers.sh lint-reuse-lens.sh model-supply-probe.sh opencode-containment-adapter.sh"
 
     if [ "$DRY_RUN" -eq 1 ]; then
         info "[dry-run] copy_runtime_subdirs: would copy runtime libs + harness table + scripts/explore-research/ to $autospec_scripts_dir/"
