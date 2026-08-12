@@ -98,9 +98,15 @@ pub(super) fn claim_retry_sleep_ms() -> u64 {
 /// conductor idles beside work it can never see.
 ///
 /// Requeue only when the claim is genuinely abandoned — no record, a released
-/// state, or an expired lease. A `merged` record is finished, and an owner still
-/// holding its lease is working.
-pub(super) fn claim_is_abandoned(record: Option<&RunStateRecord>) -> bool {
+/// state, or an owner that no longer holds it. A `merged` record is finished, and
+/// an owner still holding its claim is working.
+///
+/// `owner_holds` comes from [`owner_still_holds`] so this agrees with the claim
+/// acquisition path by construction. When the two disagreed, a dead owner's fresh
+/// lease made this say "owned" while acquisition said "takeable": the conductor was
+/// willing to take the issue but never saw it, because the label kept it out of the
+/// candidate pool.
+pub(super) fn claim_is_abandoned(record: Option<&RunStateRecord>, owner_holds: bool) -> bool {
     match record {
         None => true,
         Some(record) if record.state == "merged" => false,
@@ -108,9 +114,22 @@ pub(super) fn claim_is_abandoned(record: Option<&RunStateRecord>) -> bool {
             matches!(
                 record.state.as_str(),
                 "available" | "released" | "retryable" | "failed"
-            ) || !conductor_claim_owner_holds_lease(record)
+            ) || !owner_holds
         }
     }
+}
+
+/// Whether the recorded owner still holds its claim.
+///
+/// Both the TTL and the owner's liveness must agree. The clock alone is not enough:
+/// a worker that died seconds ago keeps a valid lease for its full TTL.
+fn owner_still_holds(
+    repo: &str,
+    issue: u64,
+    record: &RunStateRecord,
+) -> Result<bool, super::CommandFailure> {
+    Ok(conductor_claim_owner_holds_lease(record)
+        && super::expired_prior_generation_heartbeat(repo, issue, record)?.is_none())
 }
 
 pub(crate) fn requeue_abandoned_active_issue(
@@ -161,7 +180,11 @@ where
         &RunStateRecord,
     ) -> Result<super::ClaimRefAdvance, super::CommandFailure>,
 {
-    if !claim_is_abandoned(selected.as_ref().map(|head| &head.record)) {
+    let owner_holds = match selected.as_ref() {
+        Some(head) => owner_still_holds(repo, issue, &head.record)?,
+        None => false,
+    };
+    if !claim_is_abandoned(selected.as_ref().map(|head| &head.record), owner_holds) {
         return Ok(None);
     }
     let selected = match selected {
@@ -217,10 +240,7 @@ pub(super) fn contesting_claim_owner(
     };
     let contested = head.record.state == "claimed"
         && (head.record.worker_id != worker_id || head.record.branch != branch);
-    if !contested || !conductor_claim_owner_holds_lease(&head.record) {
-        return Ok(None);
-    }
-    if super::expired_prior_generation_heartbeat(repo, issue, &head.record)?.is_some() {
+    if !contested || !owner_still_holds(repo, issue, &head.record)? {
         return Ok(None);
     }
     Ok(Some(head.record.worker_id))

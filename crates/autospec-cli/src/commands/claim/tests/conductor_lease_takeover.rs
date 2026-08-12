@@ -95,7 +95,7 @@ mod requeue {
 
     #[test]
     fn a_missing_claim_record_is_abandoned() {
-        assert!(claim_is_abandoned(None), "nothing owns the issue");
+        assert!(claim_is_abandoned(None, false), "nothing owns the issue");
     }
 
     #[test]
@@ -103,7 +103,7 @@ mod requeue {
         let live = utc_now_iso().expect("timestamp");
         for state in ["available", "released", "retryable", "failed"] {
             assert!(
-                claim_is_abandoned(Some(&record(state, &live))),
+                claim_is_abandoned(Some(&record(state, &live)), true),
                 "{state} leaves the issue unowned even with a fresh timestamp"
             );
         }
@@ -111,10 +111,10 @@ mod requeue {
 
     #[test]
     fn an_expired_lease_is_abandoned() {
-        assert!(claim_is_abandoned(Some(&record(
-            "claimed",
-            "2026-07-29T00:49:45Z"
-        ))));
+        assert!(claim_is_abandoned(
+            Some(&record("claimed", "2026-07-29T00:49:45Z")),
+            false
+        ));
     }
 
     #[test]
@@ -122,7 +122,7 @@ mod requeue {
         let live = utc_now_iso().expect("timestamp");
 
         assert!(
-            !claim_is_abandoned(Some(&record("claimed", &live))),
+            !claim_is_abandoned(Some(&record("claimed", &live)), true),
             "a worker inside its lease must keep the issue"
         );
     }
@@ -130,7 +130,7 @@ mod requeue {
     #[test]
     fn a_merged_claim_is_left_alone() {
         assert!(
-            !claim_is_abandoned(Some(&record("merged", "2026-07-29T00:49:45Z"))),
+            !claim_is_abandoned(Some(&record("merged", "2026-07-29T00:49:45Z")), false),
             "merged work is finished, not abandoned"
         );
     }
@@ -154,5 +154,29 @@ mod requeue {
             quarantined.is_none(),
             "the renewing worker won, so the caller has no authority to mutate labels"
         );
+    }
+
+    /// The requeue path and the acquisition path must agree about ownership.
+    ///
+    /// They diverged once: requeue asked only the TTL clock while acquisition also
+    /// asked whether the owner was alive. A dead owner's fresh lease then read as
+    /// "owned" to requeue and "takeable" to acquisition, so the conductor was
+    /// willing to take the issue but never saw it — the label kept it out of the
+    /// candidate pool and it idled for hours beside work it could have done.
+    #[test]
+    fn an_owner_that_no_longer_holds_the_claim_is_always_abandoned() {
+        let live = utc_now_iso().expect("timestamp");
+        for (state, owner_holds, expected) in [
+            ("claimed", true, false),
+            ("claimed", false, true),
+            ("merged", false, false),
+            ("released", true, true),
+        ] {
+            assert_eq!(
+                claim_is_abandoned(Some(&record(state, &live)), owner_holds),
+                expected,
+                "state={state} owner_holds={owner_holds} must match what acquisition decides"
+            );
+        }
     }
 }
