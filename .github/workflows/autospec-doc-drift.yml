@@ -10,11 +10,14 @@ name: autospec-doc-drift
 # Runs check-doc-drift.sh --pr <N> against the PR diff. The gate exits non-zero
 # when source changes are not covered by a doc scope (drift), failing the job.
 #
-# The doc-drift job runs in ALL repos. On autospec's own repo it is
-# non-blocking (continue-on-error) since internal tooling paths
-# (scripts/, skills/*/tests/, *.bats) are not comprehensively annotated
-# with `<!-- autospec-doc-scope -->` (issue #1362). Consumer repos get
-# full gate enforcement.
+# The doc-drift job is SKIPPED on autospec's own repository (see the job-level
+# `if:` below). This template is meant for downstream consumer apps; autospec's
+# own repo does not comprehensively annotate its internal tooling
+# (scripts/, skills/*/tests/, *.bats) with `<!-- autospec-doc-scope -->`, so the
+# gate would report `missing_scope` on nearly every source PR — pure noise that
+# masks genuine drift findings (issue #1362). The guard only ever matches
+# `berlinguyinca/autospec`; a consumer's copy keeps running because its
+# repository name differs. (Issue #1362 option 1.)
 #
 # Part of epic #1280 / #1287.
 
@@ -32,9 +35,9 @@ permissions:
 
 jobs:
   doc-drift:
-    # On autospec's own repo, run non-blocking (report-only).
-    # Consumer repos run with full gate enforcement.
-    continue-on-error: ${{ github.repository == 'berlinguyinca/autospec' }}
+    # Skip in autospec's own repo (issue #1362): the doc-scope discipline is for
+    # downstream consumer repos. Consumer copies still run (their repo name differs).
+    if: ${{ github.repository != 'berlinguyinca/autospec' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
