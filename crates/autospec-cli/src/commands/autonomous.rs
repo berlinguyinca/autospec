@@ -2560,6 +2560,18 @@ fn run_foreground_with_lease(
     let policy_digest =
         effective_main_health_policy_digest(config, &health).map_err(CommandFailure::diagnostic)?;
     persist_main_health(layout, &health, &policy_digest).map_err(CommandFailure::diagnostic)?;
+    // A non-continue health collapses into a bare {"decision":"park","reason":"health_wait"},
+    // which is reached from RequiredCheckPending (CI genuinely running), GhApiFailed, and
+    // CheckRunsApiFailed (cannot reach GitHub at all). Those need very different operator
+    // responses, so echo the receipt into the conductor log instead of leaving it only in
+    // main-health-observations.jsonl.
+    //
+    // stderr, not stdout: the decision line on stdout is a machine-readable contract asserted
+    // byte-for-byte by the foreground tests, and callers parse it. The conductor log captures
+    // 2>&1, so the operator still sees this alongside the park.
+    if !matches!(health.outcome, MainlineHealthOutcome::Continue) {
+        eprintln!("{}", health.to_json(&layout.repo));
+    }
     input = input.with_health(lifecycle_health(health.outcome.clone()));
     let mut lifecycle = decide_lifecycle(&input);
     if !matches!(lifecycle, LifecycleDecision::Run { .. }) {

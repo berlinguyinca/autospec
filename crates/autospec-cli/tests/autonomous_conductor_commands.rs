@@ -4783,6 +4783,14 @@ fn foreground_stops_before_executor_when_main_health_blocks() {
         String::from_utf8_lossy(&output.stdout),
         "{\"decision\":\"park\",\"reason\":\"health_halt\"}\n"
     );
+    // The park reason alone cannot distinguish "CI is still running" from "GitHub is
+    // unreachable", so the receipt is echoed to stderr. It must stay off stdout, which is a
+    // byte-exact machine-readable contract (asserted above).
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("\"diagnostic\":\"branch-not-found\""),
+        "the blocking diagnostic must reach the conductor log, got stderr: {stderr}"
+    );
     assert!(!fixture.state_path().exists());
     assert!(fixture.operator.join("test_repo/lifecycle.json").exists());
     assert!(!fs::read_to_string(&fixture.calls)

@@ -263,3 +263,53 @@ fn health_receipt_can_bind_the_effective_policy_digest() {
         "the receipt must carry exactly one policy binding"
     );
 }
+
+#[test]
+fn a_wait_receipt_distinguishes_unreachable_github_from_a_pending_check() {
+    // Both outcomes are Wait and both surface to the operator as the same bare
+    // {"decision":"park","reason":"health_wait"}. The receipt is what tells them apart:
+    // "keep waiting, CI is running" versus "I cannot reach GitHub at all".
+    let unreachable = autospec_core::autonomous::mainline_health::MainlineHealth::diagnostic(
+        "main",
+        autospec_core::autonomous::mainline_health::MainlineHealthOutcome::Wait,
+        autospec_core::autonomous::mainline_health::MainlineHealthDiagnostic::GhApiFailed,
+    );
+    let pending = autospec_core::autonomous::mainline_health::evaluate_health(
+        "main",
+        true,
+        vec![CheckEvidence::required("ci", "in_progress", None)],
+    );
+
+    let unreachable_receipt = unreachable.to_json("owner/repo");
+    let pending_receipt = pending.to_json("owner/repo");
+
+    assert!(unreachable_receipt.contains("\"outcome\":\"wait\""));
+    assert!(pending_receipt.contains("\"outcome\":\"wait\""));
+    assert!(
+        unreachable_receipt.contains("\"diagnostic\":\"gh-api-failed\""),
+        "unreachable GitHub must be attributable, got: {unreachable_receipt}"
+    );
+    assert!(
+        pending_receipt.contains("\"diagnostic\":\"required-check-pending\""),
+        "a genuinely pending check must stay distinguishable, got: {pending_receipt}"
+    );
+    assert_ne!(
+        unreachable_receipt, pending_receipt,
+        "the two wait causes must not be indistinguishable"
+    );
+}
+
+#[test]
+fn a_repo_with_no_ci_at_all_continues_rather_than_waiting() {
+    // A repo that deliberately runs no CI reports state=pending/total_count=0 on the legacy
+    // endpoint forever, and zero check-runs. That must not be read as "CI is pending".
+    let health = autospec_core::autonomous::mainline_health::evaluate_health("main", true, vec![]);
+
+    assert_eq!(
+        health.outcome,
+        autospec_core::autonomous::mainline_health::MainlineHealthOutcome::Continue
+    );
+    assert!(health
+        .to_json("owner/repo")
+        .contains("\"diagnostic\":\"no-required-checks\""));
+}
