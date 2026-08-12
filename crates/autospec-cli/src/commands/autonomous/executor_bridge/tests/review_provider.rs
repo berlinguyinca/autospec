@@ -89,6 +89,22 @@ fn review_provider_integration_records_same_provider_high_reasoning_fallback() {
 }
 
 #[test]
+fn review_provider_does_not_mistake_opencode_for_a_distinct_provider() {
+    let error = bridge::resolve_review_policy(
+        &harness_config(&[bridge::HarnessKind::Codex, bridge::HarnessKind::OpenCode]),
+        requirements(ReviewPolicyInput {
+            critical_boundary: true,
+            ..ReviewPolicyInput::default()
+        }),
+        bridge::HarnessKind::Codex,
+        &BTreeMap::new(),
+    )
+    .expect_err("a harness name cannot prove provider independence");
+
+    assert!(error.contains("alternate provider"), "{error}");
+}
+
+#[test]
 fn review_provider_critical_without_an_alternate_fails_closed() {
     // Break caught: critical work silently degrading to same-provider self-review.
     let error = bridge::resolve_review_policy(

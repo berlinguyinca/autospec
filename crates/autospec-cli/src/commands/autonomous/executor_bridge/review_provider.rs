@@ -52,7 +52,7 @@ pub(crate) fn resolve_review_policy(
     Ok(ResolvedReviewPolicy {
         requirements,
         reviewer_harness,
-        provider_diversified: reviewer_harness != implementer_harness,
+        provider_diversified: providers_are_diverse(reviewer_harness, implementer_harness),
         selection_reason: selection_reason.to_string(),
     })
 }
@@ -66,7 +66,7 @@ fn risk_review_selection(
     if !requirements.prefer_provider_diversity {
         return Ok(None);
     }
-    if let Some(alternate) = alternate_harness(available, implementer) {
+    if let Some(alternate) = alternate_provider_harness(available, implementer) {
         return Ok(Some((alternate, true, "risk:provider-diversified")));
     }
     if requirements.require_provider_diversity {
@@ -85,8 +85,32 @@ fn risk_review_selection(
     Ok(None)
 }
 
-fn alternate_harness(available: &[HarnessKind], implementer: HarnessKind) -> Option<HarnessKind> {
-    available.iter().copied().find(|kind| *kind != implementer)
+fn alternate_provider_harness(
+    available: &[HarnessKind],
+    implementer: HarnessKind,
+) -> Option<HarnessKind> {
+    available
+        .iter()
+        .copied()
+        .find(|kind| providers_are_diverse(*kind, implementer))
+}
+
+fn providers_are_diverse(left: HarnessKind, right: HarnessKind) -> bool {
+    match (known_provider(left), known_provider(right)) {
+        (Some(left), Some(right)) => left != right,
+        _ => false,
+    }
+}
+
+fn known_provider(kind: HarnessKind) -> Option<&'static str> {
+    match kind {
+        HarnessKind::Claude => Some("anthropic"),
+        HarnessKind::Codex => Some("openai"),
+        // OpenCode is a harness, not a provider. Its configured model can be
+        // backed by either provider, so treating it as independent would invent
+        // evidence the runtime does not possess.
+        HarnessKind::OpenCode => None,
+    }
 }
 
 fn available_review_harnesses(
