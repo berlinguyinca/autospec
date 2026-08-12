@@ -6,9 +6,12 @@ use super::super as bridge;
 use super::super::{
     recover_invocation, runtime_session_adapter, BridgePhase, HarnessConfig, HarnessKind,
 };
-use super::support_base::{DetachedForkedCleanup, GitFixture, environment, git_stdout, installed_aliases, test_environment, test_root, write_alias_table, write_executable};
+use super::support_base::{
+    environment, git, git_stdout, installed_aliases, test_environment, test_root,
+    write_alias_table, write_executable, DetachedForkedCleanup, GitFixture,
+};
 use super::support_invocation::{
-    commit_implementation, implementation_proof_fixture, persisted_invocation, reviewer_request,
+    implementation_proof_fixture, persisted_invocation, reviewer_request,
 };
 use std::ffi::OsString;
 use std::fs;
@@ -19,6 +22,19 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
+
+fn commit_normal_risk_reviewer_fixture(state: &bridge::PersistedInvocation) {
+    fs::write(
+        state.identity.worktree.join("implementation.txt"),
+        "implemented\n",
+    )
+    .expect("write implementation");
+    git(&state.identity.worktree, &["add", "implementation.txt"]);
+    git(
+        &state.identity.worktree,
+        &["commit", "-m", "feat: implement reviewer fixture"],
+    );
+}
 
 #[cfg(unix)]
 #[test]
@@ -99,7 +115,8 @@ fn autonomous_executor_bridge_explicit_override_precedes_runtime_marker() {
 fn autonomous_executor_bridge_resolves_private_external_reviewer_when_override_is_unset() {
     // Break caught: CI completion still requiring a hand-written reviewer command.
     let (fixture, mut state, _snapshot, _) = implementation_proof_fixture("automatic-reviewer");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
+    state.harness = HarnessKind::Claude;
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
     let state_path = fixture.root.join("state/invocation.json");
@@ -151,7 +168,7 @@ fn autonomous_executor_bridge_resolves_private_external_reviewer_when_override_i
         0o700
     );
     let normalizer = fs::read_to_string(&automatic.normalizer).expect("normalizer");
-    assert!(normalizer.contains("Return exactly LGTM"));
+    assert!(normalizer.contains("Return exactly one JSON object"));
     assert!(normalizer.contains("harness.stdout"));
     assert!(normalizer.contains("harness.stderr"));
     assert!(
@@ -166,7 +183,8 @@ fn autonomous_executor_bridge_resolves_private_external_reviewer_when_override_i
 fn automatic_reviewer_identity_change_preserves_superseded_normalizer() {
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("automatic-reviewer-upgrade");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
+    state.harness = HarnessKind::Claude;
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
     let state_path = fixture.root.join("state/invocation.json");
@@ -214,7 +232,8 @@ fn autonomous_executor_bridge_codex_reviewer_ignores_host_policy_but_keeps_auth(
     // Break caught: retained CODEX_HOME loading host MCP, hook, or execpolicy mutation authority.
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("automatic-codex-host-policy");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
+    state.harness = HarnessKind::Claude;
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
     let state_path = fixture.root.join("state/invocation.json");
@@ -240,9 +259,12 @@ fn autonomous_executor_bridge_codex_reviewer_ignores_host_policy_but_keeps_auth(
     )
     .expect("hostile Codex rules");
     let harness = safe_root.join("codex-reviewer");
+    let review =
+        super::support_review::valid_review_json(state.head_oid.as_deref().expect("review commit"));
     write_executable(
         &harness,
-        "#!/bin/sh\n\
+        &format!(
+            "#!/bin/sh\n\
          set -eu\n\
          ignore_config=0\n\
          ignore_rules=0\n\
@@ -263,7 +285,9 @@ fn autonomous_executor_bridge_codex_reviewer_ignores_host_policy_but_keeps_auth(
          \texit 72\n\
          fi\n\
          /usr/bin/test -n \"$result\"\n\
-         printf '%s\\n' LGTM > \"$result\"\n",
+         printf '%s\\n' '{}' > \"$result\"\n",
+            review
+        ),
     );
     let table = write_alias_table(
         &fixture.root,
@@ -308,7 +332,7 @@ fn autonomous_executor_bridge_normalizes_claude_and_opencode_stdout_verdicts() {
     for kind in ["claude", "opencode"] {
         let (fixture, mut state, _snapshot, _) =
             implementation_proof_fixture(&format!("automatic-{kind}-reviewer"));
-        commit_implementation(&state);
+        commit_normal_risk_reviewer_fixture(&state);
         state.phase = BridgePhase::CiPassed;
         state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
         let state_path = fixture.root.join("state/invocation.json");
@@ -384,6 +408,8 @@ fn autonomous_executor_bridge_clears_stale_codex_verdict_before_retry() {
         bridge::HarnessKind::Codex,
         &invocation,
         &artifact_root,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        false,
     )
     .expect("automatic reviewer normalizer");
 
@@ -434,8 +460,9 @@ fn autonomous_executor_bridge_automatic_reviewer_normalizer_reaps_setsid_descend
          '{}' -f /bin/sh -c 'trap \"\" HUP INT TERM; sid=$(/usr/bin/ps -o sid= -p \"$$\"); printf \"%s %s\\n\" \"$$\" \"$sid\" > \"$1\"; while :; do /usr/bin/sleep 1; done' descendant \"$2\" &\n\
          while [ ! -s \"$2\" ]; do /usr/bin/sleep 0.01; done\n\
          /usr/bin/sleep 0.1\n\
-         printf '%s\\n' LGTM > \"$1\"\n",
-            setsid.display()
+         printf '%s\\n' '{}' > \"$1\"\n",
+            setsid.display(),
+            super::support_review::valid_review_json("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         ),
     );
     let invocation = bridge::ValidatedInvocation {
@@ -453,6 +480,8 @@ fn autonomous_executor_bridge_automatic_reviewer_normalizer_reaps_setsid_descend
         bridge::HarnessKind::Codex,
         &invocation,
         &artifact_root,
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        false,
     )
     .expect("automatic reviewer normalizer");
     let mut unrelated = Command::new("/usr/bin/sleep")
