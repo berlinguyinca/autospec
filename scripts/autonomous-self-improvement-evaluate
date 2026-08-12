@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""Proof-gated evaluator for autonomous review-policy experiments."""
+
+import argparse
+import hashlib
+import io
+import json
+import re
+import subprocess
+import tarfile
+import tempfile
+from pathlib import Path
+
+
+def parse_rows(path: Path) -> list[dict]:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows = []
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
+
+
+def load_object(path: Path | None) -> dict | None:
+    if path is None:
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def append_row(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def git(repo: Path, *args: str, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args], input=input_bytes,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+
+
+def commit_exists(repo: Path, commit: str) -> bool:
+    return bool(re.fullmatch(r"[0-9a-f]{40}", commit or "")) and git(
+        repo, "cat-file", "-e", f"{commit}^{{commit}}"
+    ).returncode == 0
+
+
+def patch_id(repo: Path, diff_bytes: bytes) -> bytes:
+    result = git(repo, "patch-id", "--stable", input_bytes=diff_bytes)
+    return result.stdout.split(maxsplit=1)[0] if result.returncode == 0 and result.stdout else b""
+
+
+def rollback_handle_ready(repo: Path, commit: str) -> bool:
+    parent = git(repo, "rev-parse", f"{commit}^")
+    if parent.returncode != 0:
+        return False
+    diff = git(repo, "diff", parent.stdout.decode().strip(), commit)
+    archive = git(repo, "archive", commit)
+    if diff.returncode != 0 or archive.returncode != 0:
+        return False
+    try:
+        with tempfile.TemporaryDirectory(prefix="autospec-rollback-check.") as directory:
+            with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as bundle:
+                bundle.extractall(directory, filter="data")
+            check = subprocess.run(
+                ["git", "apply", "--check", "--reverse"],
+                cwd=directory,
+                input=diff.stdout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+    except (OSError, tarfile.TarError):
+        return False
+    return check.returncode == 0
+
+
+def rollback_commit_verified(repo: Path, change_commit: str, rollback_commit: str) -> bool:
+    if not commit_exists(repo, rollback_commit):
+        return False
+    change_parent = git(repo, "rev-parse", f"{change_commit}^")
+    rollback_parent = git(repo, "rev-parse", f"{rollback_commit}^")
+    if change_parent.returncode != 0 or rollback_parent.returncode != 0:
+        return False
+    forward = git(repo, "diff", change_parent.stdout.decode().strip(), change_commit)
+    inverse = git(repo, "diff", rollback_commit, rollback_parent.stdout.decode().strip())
+    return bool(patch_id(repo, forward.stdout)) and patch_id(repo, forward.stdout) == patch_id(repo, inverse.stdout)
+
+
+def validation_reproduces(repo: Path, item: dict, commit: str) -> bool:
+    if item.get("status") != "pass" or item.get("commit") != commit:
+        return False
+    # Proof files select a closed, declarative recipe. They never supply argv:
+    # the evaluator runs no repository-controlled program and gives the proof no
+    # way to turn conductor credentials into command authority.
+    if item.get("recipe") != "git-diff-check" or "argv" in item:
+        return False
+    parent = git(repo, "rev-parse", f"{commit}^")
+    if parent.returncode != 0:
+        return False
+    result = git(repo, "diff", "--check", parent.stdout.decode().strip(), commit)
+    return result.returncode == 0
+
+
+def protected_boundaries_clear(repo: Path, proof: dict, commit: str) -> bool:
+    if proof.get("status") != "pass" or proof.get("commit") != commit or proof.get("changed") is not False:
+        return False
+    parent = git(repo, "rev-parse", f"{commit}^")
+    if parent.returncode != 0:
+        return False
+    base = parent.stdout.decode().strip()
+    changed = git(repo, "diff", "--name-only", base, commit)
+    patch = git(repo, "diff", "--unified=0", base, commit)
+    if changed.returncode != 0 or patch.returncode != 0:
+        return False
+    protected_paths = re.compile(
+        r"(^|/)(AGENTS\.md|SAFETY\.md|autospec-autonomy-gate\.sh|"
+        r"autospec-promote-pr\.sh|autospec-verify-worker-pr\.sh|"
+        r"autospec-supervisor-cycle\.sh)$|"
+        r"(premerge|credential|secret|merge[-_]authority)",
+        re.IGNORECASE,
+    )
+    protected_change = re.compile(
+        r"(auto[-_ ]?merge|gh\s+pr\s+merge|credential|secret|access[-_ ]?token|"
+        r"self[-_ ]?approval|no[-_ ]?self[-_ ]?approval|destructive[-_ ]?action|"
+        r"force[-_ ]?push|reset\s+--hard|rm\s+-rf|protected[-_ ]?branch|"
+        r"approval[-_ ]?authority)",
+        re.IGNORECASE,
+    )
+    paths_clear = not any(protected_paths.search(path) for path in changed.stdout.decode().splitlines())
+    changed_lines = "\n".join(
+        line[1:] for line in patch.stdout.decode(errors="replace").splitlines()
+        if line.startswith(("+", "-")) and not line.startswith(("+++", "---"))
+    )
+    return paths_clear and protected_change.search(changed_lines) is None
+
+
+def candidate_digest(candidate: dict) -> str:
+    canonical = json.dumps(candidate, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def proof_is_valid(repo: Path, candidate: dict, proof: dict | None, rollback_proof: Path | None) -> tuple[bool, str]:
+    key = candidate["dedupe_key"]
+    change_commit = proof.get("change_commit", "") if proof else ""
+    valid = bool(proof) and proof.get("schema") == 1 and proof.get("dedupe_key") == key
+    valid = valid and proof.get("candidate_digest") == candidate_digest(candidate)
+    valid = valid and commit_exists(repo, change_commit)
+    for field in ("targeted_validation", "full_validation"):
+        valid = valid and validation_reproduces(repo, proof.get(field, {}) if proof else {}, change_commit)
+    valid = valid and protected_boundaries_clear(
+        repo, proof.get("protected_boundaries", {}) if proof else {}, change_commit
+    )
+    expected = candidate.get("rollback", {}).get("prior_policy_digest", "")
+    handle = proof.get("rollback", {}) if proof else {}
+    valid = valid and handle.get("status") == "ready" and handle.get("commit") == change_commit
+    valid = valid and handle.get("prior_policy_digest") == expected
+    valid = valid and handle.get("command") == f"git revert --no-edit {change_commit}"
+    valid = valid and rollback_handle_ready(repo, change_commit)
+    return valid, change_commit
+
+
+def effective_outcomes(path: Path, key: str, commit: str) -> list[dict]:
+    rows = parse_rows(path)
+    superseded = {row.get("supersedes_outcome_digest") for row in rows if row.get("supersedes_outcome_digest")}
+    required = ("pr", "commit", "review_receipt_digest", "reviewer_harness",
+                "reviewer_reasoning", "provider_diversified", "review_risk")
+    by_pr = {}
+    for row in rows:
+        attributed = all(row.get(field) is not None for field in required)
+        matches = row.get("outcome_digest") not in superseded and row.get("experiment_dedupe_key") == key
+        if matches and row.get("experiment_commit") == commit and attributed:
+            by_pr[row["pr"]] = row
+    return list(by_pr.values())
+
+
+def evaluate(candidate: dict, proof_path: Path, rollback_path: Path | None, args) -> dict:
+    key = candidate["dedupe_key"]
+    proof = load_object(proof_path)
+    valid, change_commit = proof_is_valid(args.repo_root, candidate, proof, rollback_path)
+    if not valid:
+        event = {"dedupe_key": key, "state": "held", "reason": "experiment_proof_required"}
+        append_row(args.lifecycle_ledger, event)
+        return event
+    lifecycle = parse_rows(args.lifecycle_ledger)
+    for state in ("shadow", "canary"):
+        if not any(row.get("dedupe_key") == key and row.get("state") == state for row in lifecycle):
+            append_row(args.lifecycle_ledger, {"dedupe_key": key, "state": state})
+    outcomes = effective_outcomes(args.review_outcomes, key, change_commit)
+    samples = len(outcomes)
+    high = sum(int(row.get("escaped_high_severity", 0) or 0) for row in outcomes)
+    total_rate = sum(int(row.get("escaped_total", 0) or 0) for row in outcomes) / samples if samples else 0
+    cost = sum(float(row.get("review_cost", 0) or 0) for row in outcomes) / samples if samples else 0
+    provider_diverse = bool(outcomes) and all(row.get("provider_diversified") is True for row in outcomes)
+    before = candidate.get("before_after", {}).get("before", {})
+    total_limit = float(before.get("escaped_total_rate", 0) or 0)
+    cost_limit = float(before.get("cost_per_reviewed_pr", 0) or 0) * (1 + float(candidate.get("max_cost_regression", 0) or 0))
+    expected = candidate.get("rollback", {}).get("prior_policy_digest", "")
+    event = {"dedupe_key": key, "samples": samples, "change_commit": change_commit,
+             "experiment_proof_digest": "sha256:" + hashlib.sha256(proof_path.read_bytes()).hexdigest()}
+    if candidate.get("change_class") == "weakening":
+        event.update(state="held", reason="weakening_report_only")
+    elif high > 0 or total_rate > total_limit or (samples and cost > cost_limit):
+        rollback = load_object(rollback_path)
+        rollback_valid = bool(rollback) and rollback.get("schema") == 1 and rollback.get("status") == "executed"
+        rollback_valid = rollback_valid and rollback.get("change_commit") == change_commit
+        rollback_valid = rollback_valid and rollback.get("prior_policy_digest") == expected
+        rollback_valid = rollback_valid and rollback_commit_verified(args.repo_root, change_commit, rollback.get("rollback_commit", ""))
+        event.update(state="rolled_back" if rollback_valid else "rollback_required", reason="canary_regression", rollback=candidate.get("rollback", {}))
+        if rollback_valid:
+            event["rollback_commit"] = rollback["rollback_commit"]
+    elif samples < int(candidate.get("sample_floor", 20)):
+        event.update(state="held", reason="sample_floor", falsifier_passed=False)
+    elif not provider_diverse:
+        event.update(state="held", reason="provider_diverse_review_required")
+    elif not expected or args.rollback_digest != expected:
+        event.update(state="held", reason="rollback_digest_required")
+    else:
+        event.update(state="promoted", provider_diverse_review=True, falsifier_passed=True, successful_outcome_digest=outcomes[-1].get("outcome_digest"))
+    append_row(args.lifecycle_ledger, event)
+    return event
+
+
+def run_evaluate(args) -> dict:
+    candidate = load_object(args.candidate)
+    if not candidate:
+        raise SystemExit("candidate must be a JSON object")
+    return evaluate(candidate, args.experiment_proof, args.rollback_proof, args)
+
+
+def run_advance(args) -> dict:
+    if not args.evidence_dir.is_dir():
+        return {"advanced": 0, "reason": "no experiment evidence"}
+    lifecycle = parse_rows(args.lifecycle_ledger)
+    candidates = {row.get("dedupe_key"): {k: v for k, v in row.items() if k != "state"}
+                  for row in lifecycle if row.get("state") == "candidate"}
+    latest = {row.get("dedupe_key"): row.get("state") for row in lifecycle}
+    counts = {"advanced": 0, "held": 0, "promoted": 0, "rolled_back": 0}
+    for proof_path in sorted(args.evidence_dir.glob("*.json")):
+        if proof_path.name.endswith(".rollback.json"):
+            continue
+        proof = load_object(proof_path) or {}
+        key = proof.get("dedupe_key")
+        if key not in candidates or latest.get(key) in ("promoted", "rolled_back"):
+            continue
+        args.rollback_digest = candidates[key].get("rollback", {}).get("prior_policy_digest", "")
+        rollback_path = proof_path.with_suffix(".rollback.json")
+        result = evaluate(candidates[key], proof_path, rollback_path if rollback_path.is_file() else None, args)
+        counts["advanced"] += 1
+        state = result.get("state")
+        counts[state if state in ("promoted", "rolled_back") else "held"] += 1
+    return counts
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("command", choices=("evaluate", "advance"))
+    parser.add_argument("--repo-root", type=Path, required=True)
+    parser.add_argument("--review-outcomes", type=Path, required=True)
+    parser.add_argument("--lifecycle-ledger", type=Path, required=True)
+    parser.add_argument("--candidate", type=Path)
+    parser.add_argument("--experiment-proof", type=Path)
+    parser.add_argument("--rollback-proof", type=Path)
+    parser.add_argument("--rollback-digest", default="")
+    parser.add_argument("--evidence-dir", type=Path)
+    args = parser.parse_args()
+    if args.command == "evaluate" and (args.candidate is None or args.experiment_proof is None):
+        print(json.dumps({"state": "held", "reason": "experiment_proof_required"}, sort_keys=True))
+        return
+    result = run_evaluate(args) if args.command == "evaluate" else run_advance(args)
+    print(json.dumps(result, sort_keys=True))
+
+
+if __name__ == "__main__":
+    main()
