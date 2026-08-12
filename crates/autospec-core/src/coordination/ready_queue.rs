@@ -455,6 +455,12 @@ pub fn plan_ready_queue_with_trusted_actors(
             blocked.push(view);
             continue;
         }
+        if view.issue.has_label("groom:proposed") {
+            view.reason = Some("groom_proposed".to_string());
+            view.blocked_label = Some("groom:proposed".to_string());
+            blocked.push(view);
+            continue;
+        }
         if view.issue.has_label("autospec:needs-human") {
             view.reason = Some("autospec_needs_human".to_string());
             view.blocked_label = Some("autospec:needs-human".to_string());
