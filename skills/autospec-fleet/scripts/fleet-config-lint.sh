@@ -85,12 +85,16 @@ validate_fleet_profiles() {
     local profile
 
     [ -n "$known" ] || return 0
+    # `[.repos[]?.profile]`, not `(.repos[]?.profile // [] | [.])`: the alternative
+    # operator replaced a missing per-repo override with an empty ARRAY, which then
+    # survived `select(. != null)` and was reported as `unknown profile '[]'`. A repo
+    # entry without an override is the common case, so every such config failed.
     while IFS= read -r profile; do
         [ -z "$profile" ] && continue
         profile_known "$known" "$profile" \
             || fail "unknown profile '$profile' in $file"
     done <<EOF
-$(yq -r '[.default_profile] + (.repos[]?.profile // [] | [.] ) | .[] | select(. != null)' "$file")
+$(yq -r '[.default_profile] + [.repos[]?.profile] | .[] | select(. != null)' "$file")
 EOF
 }
 
