@@ -66,22 +66,58 @@
     "justification": "This integration test asserts diagnostic text; its substring checks do not encode runtime domain meaning."
   },
   {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests.rs",
-    "function": "autonomous_executor_bridge_quarantine_rejects_marker_corruption_before_signal",
-    "rule_id": "REPEATED_STRUCTURE_AS_CODE",
-    "justification": "This test repeats corrupt quarantine-marker fixtures; the cases are adversarial data, not production branching."
-  },
-  {
-    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests.rs",
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/attempt_generation.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "Test-only module: the strings are executor marker and quarantine fixtures asserted verbatim, not domain representation logic."
+    "justification": "This test-only module asserts executor attempt and marker protocol strings; serde is unrelated to those fixture comparisons."
   },
   {
-    "file": "crates/autospec-cli/src/commands/claim/tests.rs",
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/attempt_retirement.rs",
     "function": "<file>",
     "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
-    "justification": "This code distinguishes Git remote syntax for credential routing; serde is unrelated and Git also permits non-URL scp syntax."
+    "justification": "This test-only module asserts executor attempt-retirement protocol strings; serde is unrelated to those fixture comparisons."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/codex_sandbox.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test-only module asserts Codex sandbox command and error strings; serde is unrelated to those fixture comparisons."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/identity_reviewer.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test-only module asserts reviewer identity and request strings; serde is unrelated to those fixture comparisons."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/json_identity.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test-only module asserts JSON identity evidence strings; serde is the fixture format, not a missing domain parser."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/proxy_direct.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test-only module asserts direct and proxy execution protocol strings; serde is unrelated to those comparisons."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/pull_mutation.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test-only module asserts pull-mutation guard strings; serde is unrelated to those fixture comparisons."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/snapshot_identity.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test-only module asserts snapshot identity and evidence strings; serde is the fixture format, not domain logic."
+  },
+  {
+    "file": "crates/autospec-cli/src/commands/autonomous/executor_bridge/tests/worktree_post.rs",
+    "function": "<file>",
+    "rule_id": "STRING_MATCH_DOMAIN_LOGIC",
+    "justification": "This test-only module asserts worktree postcondition protocol strings; serde is unrelated to those fixture comparisons."
   },
   {
     "file": "crates/autospec-cli/src/commands/autonomous.rs",
