@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::commands::autonomous::gh_read::run_gh_read_with_retry_in;
 use crate::commands::claim::{
     authoritative_executor_result, observe_terminal_bridge_claim,
     record_executor_result_with_receipt, recover_released_bridge_claim, refresh_claim_generation,
@@ -10991,25 +10992,17 @@ fn github_authority_digest(
     ];
     let mut inventory = Vec::with_capacity(requests.len());
     for (endpoint, paginated) in requests {
-        let mut command = Command::new(&adapter.gh);
-        command
-            .args(["api", "--method", "GET"])
-            .arg(&endpoint)
-            .envs(&adapter.environment);
+        let mut arguments = vec!["api", "--method", "GET", endpoint.as_str()];
         if paginated {
-            command.args(["--paginate", "--slurp"]);
+            arguments.extend(["--paginate", "--slurp"]);
         }
-        let output = command.output().map_err(|error| {
-            BridgeRunFailure::transient(format!(
-                "capture executor reviewer GitHub authority: {error}"
-            ))
-        })?;
-        if !output.status.success() {
-            return Err(BridgeRunFailure::transient(format!(
-                "capture executor reviewer GitHub authority failed for {endpoint}: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            )));
-        }
+        let output = run_gh_read_with_retry_in(
+            &adapter.gh,
+            &arguments,
+            &adapter.environment,
+            &format!("capture executor reviewer GitHub authority for {endpoint}"),
+        )
+        .map_err(|error| BridgeRunFailure::transient(error.to_string()))?;
         if output.stdout.len() > 16 * 1024 * 1024 {
             return Err(BridgeRunFailure::invariant(format!(
                 "executor reviewer GitHub authority exceeded 16 MiB for {endpoint}"
@@ -11198,7 +11191,8 @@ fn validate_private_directory(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        unsafe extern "C" { // SAFETY: declaration only; geteuid takes no arguments.
+        unsafe extern "C" {
+            // SAFETY: declaration only; geteuid takes no arguments.
             fn geteuid() -> u32;
         }
         // SAFETY: geteuid has no arguments or memory-safety preconditions.
@@ -11379,7 +11373,8 @@ fn validate_private_state_file(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        unsafe extern "C" { // SAFETY: declaration only; geteuid takes no arguments.
+        unsafe extern "C" {
+            // SAFETY: declaration only; geteuid takes no arguments.
             fn geteuid() -> u32;
         }
         // SAFETY: geteuid has no arguments or memory-safety preconditions.
@@ -15185,7 +15180,8 @@ where
     let child = match unsafe { fork() }
         .map_err(|error| format!("fork executor draft pull request: {error}"))?
     {
-        ForkResult::Child => unsafe { // SAFETY: async-signal-safe calls only.
+        ForkResult::Child => unsafe {
+            // SAFETY: async-signal-safe calls only.
             nix::libc::close(release_write_fd);
             nix::libc::close(digest_write_fd);
             nix::libc::close(cleanup_status_read_fd);
@@ -18218,7 +18214,8 @@ fn read_pipe_until_deadline(
     // SAFETY: fcntl is called with a valid descriptor and integer commands.
     let flags = unsafe { nix::libc::fcntl(descriptor, nix::libc::F_GETFL) };
     if flags < 0
-        || unsafe { // SAFETY: descriptor is owned; F_SETFL alters only its own flags.
+        || unsafe {
+            // SAFETY: descriptor is owned; F_SETFL alters only its own flags.
             nix::libc::fcntl(
                 descriptor,
                 nix::libc::F_SETFL,
@@ -22374,7 +22371,8 @@ impl WorktreeLease {
         }
         #[cfg(unix)]
         {
-            unsafe extern "C" { // SAFETY: declaration only; flock takes an owned fd.
+            unsafe extern "C" {
+                // SAFETY: declaration only; flock takes an owned fd.
                 fn flock(fd: i32, operation: i32) -> i32;
             }
             const LOCK_EX: i32 = 2;
@@ -22803,7 +22801,8 @@ fn validate_worktree_creation_identity(
 
 #[cfg(unix)]
 fn validate_executor_ownership(repo: &Path, candidates: &[&Path]) -> Result<(), String> {
-    unsafe extern "C" { // SAFETY: declaration only; geteuid takes no arguments.
+    unsafe extern "C" {
+        // SAFETY: declaration only; geteuid takes no arguments.
         fn geteuid() -> u32;
     }
 
