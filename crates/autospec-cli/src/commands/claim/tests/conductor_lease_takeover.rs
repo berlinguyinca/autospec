@@ -12,7 +12,7 @@ pub(super) fn owner_record(updated_at: &str, ttl_seconds: u64, step: &str) -> Ru
         42,
         "rust-foreground-conductor-dead-1785286182924880200",
         "claimed",
-        "feat/autonomous-issue-42".to_string(),
+        "feat/worker".to_string(),
         "",
         step,
         Vec::new(),
@@ -20,6 +20,7 @@ pub(super) fn owner_record(updated_at: &str, ttl_seconds: u64, step: &str) -> Ru
         updated_at,
         ttl_seconds,
     )
+    .with_claim_id("claim-a")
 }
 
 #[test]
@@ -69,11 +70,43 @@ fn an_unparseable_timestamp_keeps_the_lease() {
 
 mod requeue {
     use super::super::super::lease::{
-        claim_is_abandoned, quarantine_abandoned_claim_generation_with,
+        acquisition_blocking_owner, claim_is_abandoned, owner_still_holds,
+        quarantine_abandoned_claim_generation_with,
     };
     use super::super::super::{ClaimRefAdvance, ClaimRefHead};
     use super::owner_record;
+    #[cfg(target_os = "linux")]
+    use crate::commands::claim::tests::support::{
+        startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
+    };
     use crate::commands::claim::utc_now_iso;
+    #[cfg(target_os = "linux")]
+    use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(target_os = "linux")]
+    fn install_current_heartbeat(root: &std::path::Path) {
+        let repo = root.join(crate::commands::autonomous::drain::repository_progress_key(
+            "owner/repo",
+        ));
+        std::fs::create_dir_all(&repo).expect("heartbeat repository");
+        for directory in [root, repo.as_path()] {
+            std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+                .expect("private heartbeat directory");
+        }
+        let host = std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .expect("hostname")
+            .trim()
+            .to_string();
+        let boot_id = crate::commands::autonomous::current_boot_identity().expect("boot identity");
+        let nonce = super::super::super::startup_heartbeat_nonce("owner/repo", 42, "claim-a");
+        let document = format!(
+            r#"{{"repo":"owner/repo","issue":"42","worker_id":"rust-foreground-conductor-dead-1785286182924880200","branch":"feat/worker","pr":"","claim_id":"claim-a","step":"claimed","ts":1,"ttl_seconds":1,"pid":2147483647,"nonce":"{nonce}","host":"{host}","boot_id":"{boot_id}","process_start":"1"}}"#
+        );
+        let heartbeat = repo.join("42.json");
+        std::fs::write(&heartbeat, document).expect("dead current heartbeat");
+        std::fs::set_permissions(heartbeat, std::fs::Permissions::from_mode(0o600))
+            .expect("private heartbeat file");
+    }
 
     fn record(state: &str, updated_at: &str) -> autospec_core::claim::RunStateRecord {
         let mut record = owner_record(updated_at, 10800, "verification");
@@ -91,6 +124,17 @@ mod requeue {
         );
         assert_eq!(successor.state, "available");
         Ok(ClaimRefAdvance::Lost)
+    }
+
+    fn win_generation(
+        _expected: Option<&ClaimRefHead>,
+        successor: &autospec_core::claim::RunStateRecord,
+    ) -> Result<ClaimRefAdvance, crate::commands::CommandFailure> {
+        Ok(ClaimRefAdvance::Won(Box::new(ClaimRefHead {
+            oid: "available-generation".to_string(),
+            generation: "generation-2".to_string(),
+            record: successor.clone(),
+        })))
     }
 
     #[test]
@@ -177,6 +221,96 @@ mod requeue {
                 expected,
                 "state={state} owner_holds={owner_holds} must match what acquisition decides"
             );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dead_current_owner_is_requeued_and_no_longer_blocks_acquisition() {
+        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let (sandbox, _) = startup_heartbeat_fixture("current-owner-takeover");
+        let root = sandbox.join("heartbeats");
+        install_current_heartbeat(&root);
+        let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
+        let selected = ClaimRefHead {
+            oid: "dead-generation".to_string(),
+            generation: "generation-1".to_string(),
+            record: record("claimed", &utc_now_iso().expect("timestamp")),
+        };
+        let requeued = quarantine_abandoned_claim_generation_with(
+            "owner/repo",
+            42,
+            Some(selected),
+            &mut win_generation,
+        )
+        .expect("dead owner classification")
+        .expect("dead owner requeued");
+        assert_eq!(requeued.record.state, "available");
+        assert_eq!(
+            acquisition_blocking_owner(&requeued.record),
+            None,
+            "the requeued generation must pass acquire_record's ownership gate"
+        );
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+        }
+        std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_current_heartbeat_does_not_preserve_a_fresh_claim() {
+        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let (sandbox, _) = startup_heartbeat_fixture("missing-current-owner");
+        let root = sandbox.join("heartbeats");
+        let parent = root.parent().expect("heartbeat parent");
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .expect("private heartbeat parent");
+        let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", &root);
+        let owner_holds = owner_still_holds(
+            "owner/repo",
+            42,
+            &record("claimed", &utc_now_iso().expect("timestamp")),
+        )
+        .expect("missing heartbeat classification");
+        assert!(
+            !owner_holds,
+            "missing owner evidence must not wedge the issue"
+        );
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
+        }
+        std::fs::remove_dir_all(sandbox).expect("remove heartbeat fixture");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn terminal_records_do_not_inspect_heartbeat_storage() {
+        let _guard = STARTUP_HEARTBEAT_ENV.lock().expect("heartbeat env");
+        let previous = std::env::var_os("AUTOSPEC_HEARTBEAT_DIR");
+        std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", "/");
+        for state in ["available", "released", "retryable", "failed", "merged"] {
+            let selected = ClaimRefHead {
+                oid: "terminal-generation".to_string(),
+                generation: "generation-1".to_string(),
+                record: record(state, "not-a-timestamp"),
+            };
+            let result = quarantine_abandoned_claim_generation_with(
+                "owner/repo",
+                42,
+                Some(selected),
+                &mut |_, _| Ok(ClaimRefAdvance::Lost),
+            )
+            .expect("terminal state must bypass heartbeat IO");
+            assert!(result.is_none(), "state={state}");
+        }
+        match previous {
+            Some(value) => std::env::set_var("AUTOSPEC_HEARTBEAT_DIR", value),
+            None => std::env::remove_var("AUTOSPEC_HEARTBEAT_DIR"),
         }
     }
 }

@@ -1059,14 +1059,10 @@ fn acquire_record(options: AcquireOptions) -> Result<ClaimLease, ConductorClaimE
         return unavailable_claim(options.issue, &repo, Some(&worker_id), "already_merged");
     }
     if resume.is_none() {
-        if let Some(owner) = prior.as_ref().and_then(|head| {
-            (!matches!(
-                head.record.state.as_str(),
-                "available" | "released" | "retryable"
-            ) && (head.record.step.starts_with("heartbeat-publishing:")
-                || !server_lease_is_stale(&head.record.updated_at, head.record.ttl_seconds)))
-            .then_some(head.record.worker_id.as_str())
-        }) {
+        if let Some(owner) = prior
+            .as_ref()
+            .and_then(|head| lease::acquisition_blocking_owner(&head.record))
+        {
             return unavailable_claim_with_observed_owner(options.issue, &repo, &worker_id, owner);
         }
         retire_released_predecessor_heartbeat(&repo, options.issue, prior.as_ref())?;
