@@ -445,17 +445,8 @@ waiver laundering a feature through a refactor.
 merge base, which is where growth actually enters: the rule previously ran only as a
 local hook, so files grew freely through the merge path.
 
-`COMPLEXITY` findings are **advisory by default**: they print as `INFO:` and do not block.
-As a veto the limits froze oversized files against even a one-line safe edit — the ratchet
-waives file-LOC for a file that does not grow, but a long function or a file-level
-cyclomatic score is neither waived nor suppressible (`line: -` defeats
-`linter:allow-COMPLEXITY`), so `fleet-gui-server.py` could not accept a three-line fix at
-all (#2961). Enforcement in CI is unaffected: the file-size ratchet workflow is a separate
-implementation and still blocks new oversized files and any growth of an existing one.
-
 | Var | Default | Effect |
 |---|---|---|
-| `AUTOSPEC_COMPLEXITY_ENFORCE` | `0` | `1` makes `COMPLEXITY` findings blocking again — every threshold below, plus nesting depth and duplicate function names. The thresholds themselves apply either way; this decides whether exceeding one is a veto or a note. |
 | `AUTOSPEC_MAX_FILE_LOC` | `600` | File-length limit the ratchet enforces. Rough guidance meant to stop multi-thousand-line files, not to police a modest overage. Keep in step with `MAX_LOC` in the CI workflow. |
 | `AUTOSPEC_MAX_CYCLOMATIC` | `10` | Cyclomatic-complexity limit, measured per function. |
 | `AUTOSPEC_MAX_FUNC_LOC` | `50` | Per-function length limit. |

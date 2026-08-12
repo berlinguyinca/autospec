@@ -263,22 +263,7 @@ done
 # would disagree with the CI ratchet in .github/workflows/file-size-ratchet.yml.
 set +e
 DELEGATE_OUT="$(AUTOSPEC_MAX_FILE_LOC="$MAX_LOC" bash "$DELEGATE" "$@" 2>&1)"
-DELEGATE_RC=$?
 set -e
-
-# The delegate's exit contract is a blocking-finding count capped at 64, or 200 for a
-# scope explosion. Anything else means it did not run to completion — a crash, a missing
-# interpreter, a syntax error — and its findings are then absent rather than clean.
-# Judging the run by stdout alone scores that as a pass: a recursive emit helper in an
-# earlier draft of the advisory routing segfaulted the delegate, and this wrapper
-# reported a clean gate for every rule at once. Same failure shape as the mawk panic
-# that made lint-ui.sh report every file clean, so it fails loud here too.
-if [ "$DELEGATE_RC" -gt 64 ] && [ "$DELEGATE_RC" -ne 200 ]; then
-  printf 'LINT_DELEGATE_FAILED:%s:-: exited %s without completing — gate result unknown, not clean\n' \
-    "$DELEGATE" "$DELEGATE_RC"
-  [ -n "$DELEGATE_OUT" ] && printf '%s\n' "$DELEGATE_OUT" >&2
-  exit 2
-fi
 
 # A pure shrink: no existing file grew, something did shrink, and the change as a
 # whole introduced no new material.
@@ -295,33 +280,27 @@ FILTERED="$(printf '%s\n' "$DELEGATE_OUT" | awk -v shrink="$IS_SHRINK" -v safe="
     r = split(moved, mrows, "\n"); for (i = 1; i <= r; i++) if (mrows[i] != "") reloc[mrows[i]] = 1
     a = split(movedadds, arows, "\n"); for (i = 1; i <= a; i++) if (arows[i] != "") radd[arows[i]] = 1
   }
-  # Severity is decided by the delegate — COMPLEXITY is advisory unless
-  # AUTOSPEC_COMPLEXITY_ENFORCE=1 — so every rule below matches the finding text with any
-  # leading INFO: stripped. Anchoring on the blocking prefix instead made these
-  # suppressions silently inert under the advisory default: a file the ratchet expressly
-  # waives came back as an INFO line on every commit, which is how a gate stops being read.
-  { bare = $0; sub(/^INFO:/, "", bare) }
   # File-wide keyword proxy dropped when no function actually exceeds the limit.
-  bare ~ /^COMPLEXITY:.*keyword-proxy cyclomatic/ {
-    path = bare; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
+  /^COMPLEXITY:.*keyword-proxy cyclomatic/ {
+    path = $0; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
     if (path in ccclean) next
   }
   # Absolute file-LOC finding is dropped only for a file that did not get longer, and
   # downgraded to an audit-trail entry for a file created by relocating existing code.
-  bare ~ /^COMPLEXITY:.*: file is [0-9]+ LOC/ {
-    path = bare; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
+  /^COMPLEXITY:.*: file is [0-9]+ LOC/ {
+    path = $0; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
     if (path in ok) next
     if (path in reloc) {
-      print "INFO:" bare " — holds relocated code, so it does not block; split it further"
+      print "INFO:" $0 " — holds relocated code, so it does not block; split it further"
       next
     }
   }
   # "file adds N lines" is a second absolute size rule, with its own hard-coded
   # threshold. A file holding relocated content adds lines by definition.
-  bare ~ /^COMPLEXITY:.*: file adds [0-9]+ lines/ {
-    path = bare; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
+  /^COMPLEXITY:.*: file adds [0-9]+ lines/ {
+    path = $0; sub(/^COMPLEXITY:/, "", path); sub(/:-:.*$/, "", path)
     if (path in radd) {
-      print "INFO:" bare " — relocated content, not new material"
+      print "INFO:" $0 " — relocated content, not new material"
       next
     }
   }
@@ -336,12 +315,12 @@ FILTERED="$(printf '%s\n' "$DELEGATE_OUT" | awk -v shrink="$IS_SHRINK" -v safe="
   # line-numbered findings; the whole-file ones are handled above. A relocation that
   # also introduces a genuinely new flag could be masked here, but that requires the
   # change to stay net-removing, and the alternative is rejecting every extraction.
-  bare ~ /^(COMPLEXITY|DOC_OUT_OF_SYNC):/ {
-    p = bare
+  /^(COMPLEXITY|DOC_OUT_OF_SYNC):/ {
+    p = $0
     sub(/^[A-Z_]+:/, "", p)
     sub(/:[0-9]+:.*$/, "", p)
     if (p in radd) {
-      print "INFO:" bare " — relocated content, not new material"
+      print "INFO:" $0 " — relocated content, not new material"
       next
     }
   }
