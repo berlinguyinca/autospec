@@ -11,10 +11,10 @@ use autospec_core::coordination::{
     QueueIssueView, QueuePolicy, ReadyQueueInput, ReadyQueuePlan, RemoteIssue, RemoteIssuePage,
 };
 
+use super::autonomous::gh_read::run_gh_read_with_retry;
 use super::claim::{
-    lease::requeue_abandoned_active_issue,
-    active_issue_counts_toward_worker_capacity, reconcile_authoritative_active_issue,
-    recover_active_issue,
+    active_issue_counts_toward_worker_capacity, lease::requeue_abandoned_active_issue,
+    reconcile_authoritative_active_issue, recover_active_issue,
 };
 use super::lint::{
     confirm_issue_safety_for_queue, load_issue_safety_policy, review_issue_safety_for_queue,
@@ -270,13 +270,10 @@ fn issue_safety_input(issue: &RemoteIssue) -> ClaimSafetyInput {
 fn read_issue(repo: &str, number: u64) -> Result<RemoteIssue, CommandFailure> {
     const ISSUE_FIELDS: &str = "{number, title:(.title // \"\"), body:(.body // \"\"), labels:[.labels[].name], author:{login:(.user.login // \"\")}, state:(.state // \"OPEN\")}";
     let endpoint = format!("repos/{repo}/issues/{number}");
-    let output = run_gh(&["api", "--method", "GET", &endpoint, "--jq", ISSUE_FIELDS])?;
-    if !output.status.success() {
-        return Err(CommandFailure::diagnostic(format!(
-            "gh issue reread {number} failed: {}",
-            command_error(&output)
-        )));
-    }
+    let output = run_gh_read_with_retry(
+        &["api", "--method", "GET", &endpoint, "--jq", ISSUE_FIELDS],
+        &format!("gh issue reread {number}"),
+    )?;
     parse_dependency_issue_json(&String::from_utf8_lossy(&output.stdout), number).map_err(|error| {
         CommandFailure::diagnostic(format!(
             "could not parse GitHub issue reread {number}: {error}"
@@ -359,13 +356,10 @@ fn has_safety_decision_comment(
             "{{raw_count:length,items:[.[] | select((.body // \"\") | contains({})) | {{number:0,title:\"\",body:(.body // \"\"),labels:[],author:{{login:\"\"}},state:\"OPEN\"}}]}}",
             json_string(BEGIN_MARKER),
         );
-        let output = run_gh(&["api", "--method", "GET", &endpoint, "--jq", &fields])?;
-        if !output.status.success() {
-            return Err(CommandFailure::diagnostic(format!(
-                "gh safety decision comment page {page} for issue {number} failed: {}",
-                command_error(&output)
-            )));
-        }
+        let output = run_gh_read_with_retry(
+            &["api", "--method", "GET", &endpoint, "--jq", &fields],
+            &format!("gh safety decision comment page {page} for issue {number}"),
+        )?;
         let comment_page = parse_safety_decision_comment_page(&output.stdout, page, number)?;
         if comment_page
             .issues
@@ -644,11 +638,11 @@ fn list_issues(repo: &str, label: &str) -> Result<Vec<RemoteIssue>, CommandFailu
             "repos/{repo}/issues?state=open&labels={label}&per_page={PAGE_SIZE}&page={page}"
         );
         let issue_page = fetch_issue_page_with_retries(PAGE_RETRIES, || {
-            let output = run_gh(&["api", "--method", "GET", &endpoint, "--jq", ISSUE_FIELDS])
-                .map_err(|error| error.message)?;
-            if !output.status.success() {
-                return Err(command_error(&output));
-            }
+            let output = run_gh_read_with_retry(
+                &["api", "--method", "GET", &endpoint, "--jq", ISSUE_FIELDS],
+                "gh issue page read",
+            )
+            .map_err(|error| error.message)?;
             let body = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if body.is_empty() {
                 return Err("empty GitHub issue page response".to_string());
