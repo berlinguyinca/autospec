@@ -1697,7 +1697,10 @@ Then continue the bounded Phase 5.5 loop:
 ```bash
 BATCH_START_DATE="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-batch-start.sh" --read)"
 RUN_ID="$(date -u +%Y%m%dT%H%MZ)-$(git rev-parse --short HEAD)"
-GAPS_FILE="$HOME/.autospec/gaps-${RUN_ID}.json"
+mkdir -p .autospec
+GAPS_FILE="$PWD/.autospec/gaps-${RUN_ID}.json"
+CANONICAL_GAPS_FILE="$PWD/.autospec/gaps.json"
+REVIEW_OUTCOMES_FILE="$PWD/.autospec/review-outcomes.jsonl"
 MAX="${AUTOSPEC_GAP_MAX_ROUNDS:-2}"
 rm -f "$HOME/.autospec/gap-round-state.json"   # fresh window per run
 ```
@@ -1713,7 +1716,8 @@ Loop (`round = 1 … MAX`):
      REVIEW_SINCE="${BATCH_START_DATE}"  # round 1: full batch window
    fi
    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/invoke-review.sh" \
-     --remediation --since "${REVIEW_SINCE}" --emit-gaps "${GAPS_FILE}"
+     --remediation --since "${REVIEW_SINCE}" --emit-gaps "${GAPS_FILE}" \
+     --outcomes "${REVIEW_OUTCOMES_FILE}"
    ```
 
    **Harness-neutral invocation:** `invoke-review.sh` detects the active harness (Claude Code / Codex CLI / OpenCode) via `autospec-harness-detect.sh` and dispatches `/autospec-review` using the correct per-harness argv form. If the review backend is unavailable it emits `code_health:phase55_broad_review_backend_unavailable` to stderr and appends a visible diagnostic gap to `GAPS_FILE` — it never silently produces an empty gap file that would look like a clean pass. **Round 1** keeps the full `BATCH_START_DATE` batch window — this preserves the per-PR-LGTM-misses-integration value (the broad pass catches cross-PR integration gaps the per-PR LGTMs missed). **Round ≥2** scopes `--since` to ONLY the newly-filed gap PRs from the prior round (`GAP_ROUND_SINCE`, the timestamp captured just before the prior round's gap PRs began merging — see step 4), so the re-review doesn't re-scan the entire already-reviewed batch, only the freshly-shipped gap remediations. On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
@@ -1777,6 +1781,12 @@ Loop (`round = 1 … MAX`):
    ```
 
    The emitted gaps carry `dimension: "fab-completeness"`; the gap-remediation loop labels them `gap-remediation` like every other survivor, so a later round does not re-flag freshly-fixed work. A non-fab run (no `.autospec/fab.yml`), a missing helper, or a `jq` error only logs to `/tmp/fab-completeness.err` and emits nothing — this dimension NEVER blocks run completion (same failure semantics as the docs dimension above).
+   After all dimensions are merged, copy `${GAPS_FILE}` to `${CANONICAL_GAPS_FILE}` atomically. This gives the autonomous self-improvement tier one repo-scoped, current evidence path without losing the immutable per-run snapshot:
+
+   ```bash
+   cp "${GAPS_FILE}" "${CANONICAL_GAPS_FILE}.tmp" \
+     && mv "${CANONICAL_GAPS_FILE}.tmp" "${CANONICAL_GAPS_FILE}"
+   ```
 2. **File survivors:**
 
    ```bash
@@ -1832,7 +1842,7 @@ Configured by the `advisor:` block in `.autospec/autospec.yml` — a single `pol
 
 **Self-governance (`policy: auto`, the default).** Autospec decides which gates are active, like an architect adjusting a standing order from results. The active set is seeded at the low-risk `impl-haiku` gate and self-tuned by `advisor-govern.sh`: it promotes the next gate in a fixed safety order (`impl-haiku → retry → reviewer → impl-decision`) only when the run's quality ≥ baseline AND cost ≤ baseline over a minimum-sample floor, and retracts the last-added gate on regression (never below the seed). `policy: on` activates every gate within budget; `policy: off` is inert.
 
-**Governance tick (run once during the end-of-run sweep, `policy: auto` only).** Call `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/advisor-sweep-tick.sh --main-telemetry <the run's telemetry jsonl> --json`. It observes the batch's LGTM-first-pass rate + cost/issue from telemetry (`advisor-observe.sh`), freezes a pre-advisor **baseline snapshot** the first time the advisor is active, and thereafter promotes/retracts the active gate set against that baseline via `advisor-govern.sh` — so the set self-adjusts before the next run without any operator input. It is fully fail-safe: not-`auto`, no telemetry, or no reviewer signal → a logged no-op. Inspect the telemetry behind a decision with `advisor-report.sh`.
+**Governance tick (run once during the end-of-run sweep, `policy: auto` only).** Call `${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/advisor-sweep-tick.sh --review-outcomes "$PWD/.autospec/review-outcomes.jsonl" --json`. It observes one effective, fully attributed outcome per reviewed PR (`advisor-observe.sh`), freezes a pre-advisor **baseline snapshot** the first time the advisor is active, and thereafter promotes/retracts the active gate set against escaped-high rate, escaped-total rate, and cost per reviewed PR — so the set self-adjusts before the next run without any operator input. Duplicate retries and superseded outcomes do not inflate the sample floor. It is fully fail-safe: not-`auto`, no outcomes, an unavailable review, insufficient attributable samples, or no reviewer signal → a logged hold/no-op. Inspect the outcomes behind a decision with `advisor-report.sh`.
 
 **Protocol (every gate):**
 
