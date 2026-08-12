@@ -60,22 +60,38 @@ stdout + exit codes and 30+ versioned schemas under `schemas/`.
 
 ```mermaid
 flowchart TD
-    A[Issue body or feature request] --> B{1. Explicit?}
-    B -- language named in body/spec --> Z[lang:X · deterministic]
+    A[Issue body or feature request] --> B{1. Explicit-with-path?}
+    B -- names a language AND a target path/new file --> Z[lang:X · deterministic]
     B -- no --> C{2. Inherited?}
-    C -- Files touched resolve to one language --> Z
-    C -- no / spans 2+ --> D{3. Repo-dominant?}
-    D -- marker file + tracked line count --> Z
-    D -- no markers / greenfield --> E[4. Chosen: scoring table]
-    E -- single winning row --> Z
-    E -- tie --> F[Tier-B tie-break, single call]
-    F --> Z
-    C -- spans 2+ languages --> M[lang:mixed → boundary block required]
+    C -- Files touched all resolve to one language --> Z
+    C -- spans 2+ and cannot be split --> M[lang:mixed · boundary block required]
+    C -- no resolvable paths --> D{3. Explicit-prose?}
+    D -- language named, no path --> Z
+    D -- no --> E{4. Repo-dominant?}
+    E -- marker file + tracked line share --> Z
+    E -- no markers / greenfield --> F[5. Chosen: scoring table]
+    F -- single winning row --> Z
+    F -- tie --> G[Tier-B tie-break, single call]
+    G --> Z
 ```
 
-Precedence **short-circuits in order**. Inheritance must win before any scoring:
-choosing a language for a change under `crates/autospec-cli/` is a bug, not a
-feature, and inheritance is ~90% of real issues.
+Precedence **short-circuits in order**.
+
+**The explicit/inherited discriminator.** A language named in prose is often
+discussion, not a decision; touched paths are ground truth. So *explicit* is
+split across two ranks by whether it is actionable:
+
+- **Explicit-with-path (rank 1)** — the body names a language **and** a target
+  path or a file to create ("add `scripts/foo.py` in Python"). This is a
+  directive about the code being written, so it outranks inheritance.
+- **Explicit-prose (rank 3)** — a language is named with no path ("we should
+  probably use Python here"). It is demoted **below** inheritance, so an issue
+  mentioning Python while touching only `crates/**/*.rs` resolves to
+  `lang:rust`.
+
+Inheritance must win over bare prose: choosing a language for a change under
+`crates/autospec-cli/` is a bug, not a feature, and inheritance is ~90% of real
+issues.
 
 ### Components
 
@@ -119,9 +135,19 @@ JSON contract:
 `lang:mixed` `lang:unknown`
 
 Exactly one `lang:*` per issue. `lang:markdown` is first-class — skill prose is
-the most common change class in this repo. `lang:mixed` is not a fallback: it is
-a positive signal that Phase 3.75 must emit a boundary block. `lang:unknown`
-means the classifier abstained and no gate may treat it as confident.
+the most common change class in this repo. `lang:unknown` means the classifier
+abstained and no gate may treat it as confident.
+
+**When a single issue gets `lang:mixed`.** The default is to **split**: an issue
+whose `Files touched` span two languages should become two issues joined by a
+`Depends on` edge. `lang:mixed` applies only when the sizing caps forbid that —
+i.e. the spanning files are **one logical unit** that cannot be split without
+breaking a lockstep rule (e.g. a skill trio plus the Rust helper it shells out
+to, which must land in one commit). `lang:mixed` is therefore not a fallback but
+a positive assertion that an irreducible boundary lives inside one issue.
+
+Phase 3.75 emits a boundary block when **either** the sibling set spans ≥2
+distinct `lang:*` **or** any single child carries `lang:mixed`.
 
 ### Chosen-language scoring table (step 4 only)
 
@@ -150,6 +176,17 @@ its false-positive path.
 Confidence is capped: when the winning marker's tracked-source line share is
 below 50%, confidence is clamped to `0.5` — below the scaffold gate, which is
 the fail-closed direction.
+
+**Markers and line share are counted separately, and only markers are
+fixture-filtered.** A *marker* (`Cargo.toml`, `package.json`, `pyproject.toml`,
+`go.mod`, `playwright.config.*`, …) decides which languages are *candidates*; it
+counts **only** at the repo root or in a declared workspace member. A marker
+nested inside a fixture or evidence tree never counts — that is precisely the
+`tests/fixtures/evidence/react-vite-with-playwright/playwright.config.ts` defect.
+*Line share* decides how strong a candidate is and is counted over all tracked
+source files, so a legitimate `.rs` or `.sh` file under `tests/` still counts
+normally. Excluding all of `tests/**` would be over-broad and is explicitly not
+what this spec asks for.
 
 **Cross-language boundary block**, appended by Phase 3.75 between
 `<!-- autospec-shared-contracts:begin -->` markers when children span ≥2
@@ -201,10 +238,11 @@ TDD per AGENTS.md. Real files, no mocked filesystem, no DB mocks.
 - **Confidence clamp.** A repo whose winning marker covers <50% of tracked lines
   yields confidence ≤0.5, and `stack_confidence()` therefore **closes** the
   scaffold gate.
-- **Classifier precedence.** One test per step, plus the ordering property: an
-  issue naming Python in prose but touching only `crates/**/*.rs` resolves to
-  `lang:rust` via inheritance beating explicit-prose-without-paths — and the
-  reverse case where an explicit declaration does win.
+- **Classifier precedence.** One test per rank, plus the two discriminator cases:
+  an issue naming Python in prose while touching only `crates/**/*.rs` resolves to
+  `lang:rust` (inheritance beats explicit-prose); an issue saying "add
+  `scripts/foo.py` in Python" while touching `*.rs` resolves to `lang:python`
+  (explicit-with-path beats inheritance).
 - **Classifier abstention.** No resolvable signal → `lang:unknown`, never a guess.
 - **Quality gate table.** A fixture repo with Cargo.toml *and* package.json *and*
   `*.sh` runs all three linters, not the first; a marker-present/linter-absent repo
@@ -222,7 +260,8 @@ the remaining work is tabular, and tables already carry it.
 ## Acceptance criteria
 
 - [ ] `_detect_profiles()` on this repo returns a language as `primary_profile.id`, not `playwright`
-- [ ] Paths under `tests/fixtures/**` contribute zero votes to detection
+- [ ] A marker file nested under `tests/fixtures/**` contributes zero candidate votes
+- [ ] A tracked `.rs`/`.sh` source file under `tests/` still contributes to line share
 - [ ] `target/`, `dist/`, `build/`, `.next/`, `coverage/`, `.claude/worktrees/` are excluded from the source walk
 - [ ] Both stack walkers share one exclusion list defined in exactly one file
 - [ ] Detection confidence is ≤0.5 when the winning marker covers <50% of tracked source lines
