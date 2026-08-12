@@ -48,7 +48,7 @@ RULE_IDs enforced (deterministic detectors):
   PR_SIZE           Patch exceeds 400 changed lines, 8 files, 3 logical units,
                     or contains binary diff evidence.
   MISSING_TEST      Required test type from ## Tests required absent in diff.
-  COMPLEXITY        Function >50 LOC, file >500 LOC, or nesting depth >4.
+  COMPLEXITY        Function >50 LOC, file over AUTOSPEC_MAX_FILE_LOC, or nesting depth >4. Advisory (INFO) unless AUTOSPEC_COMPLEXITY_ENFORCE=1.
   SECURITY          eval(, exec(, --no-verify, git reset --hard, rm -rf /,
                     hardcoded AWS key (AKIA...), GitHub token, private key marker.
   TODO_LEFT         TODO, XXX, or FIXME found in non-test diff hunks.
@@ -368,7 +368,13 @@ emit_capped() {
     cur=$((cur + 1))
     eval "RULE_EMIT_COUNT_${rule_id}=${cur}"
 
-    if is_skipped "$rule_id"; then
+    # COMPLEXITY is advisory unless enforcement is asked for: the limits are a rough
+    # heuristic, and as a veto they froze oversized files against even a one-line safe
+    # edit (#2961). Deciding it here rather than at the 12 call sites means a rule added
+    # later cannot forget the policy. PR_SIZE and the CI file-size ratchet stay blocking
+    # — docs/superpowers/specs/2026-08-05-lint-gate-satisfiability-design.md Fix 5.
+    if is_skipped "$rule_id" ||
+       { [ "$rule_id" = COMPLEXITY ] && [ "${AUTOSPEC_COMPLEXITY_ENFORCE:-0}" != 1 ]; }; then
         emit_info "$rule_id" "$path" "$line" "$desc"
         return
     fi
@@ -860,8 +866,7 @@ for lineno in sorted(findings):
     if [ -n "$out" ]; then
         printf '%s\n' "$out" | while IFS="$(printf '\t')" read -r fline fdepth; do
             [ -z "$fline" ] && continue
-            emit_capped "COMPLEXITY" "$diff_file" "$fline" \
-                "nesting depth ${fdepth} (threshold: 4) at line ${fline}"
+            emit_capped "COMPLEXITY" "$diff_file" "$fline" "nesting depth ${fdepth} (threshold: 4) at line ${fline}"
         done
     fi
     return 0
@@ -1367,8 +1372,7 @@ check_file_loc() {
         local loc
         loc="$(wc -l < "$diff_file" | tr -d ' ')"
         if [ "$loc" -gt "$_COMPLEXITY_MAX_FILE_LOC" ]; then
-            emit_capped "COMPLEXITY" "$diff_file" "-" \
-                "file is ${loc} LOC (AUTOSPEC_MAX_FILE_LOC=${_COMPLEXITY_MAX_FILE_LOC}); split into smaller modules"
+            emit_capped "COMPLEXITY" "$diff_file" "-" "file is ${loc} LOC (AUTOSPEC_MAX_FILE_LOC=${_COMPLEXITY_MAX_FILE_LOC}); split into smaller modules"
         fi
     done <<EOF
 $(get_diff_files)
@@ -1402,8 +1406,7 @@ check_function_loc() {
                     }
                 }
             ' max_loc="$_COMPLEXITY_MAX_FUNC_LOC" "$diff_file" | while IFS=: read -r fname fstart floc; do
-                emit_capped "COMPLEXITY" "$diff_file" "$fstart" \
-                    "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
+                emit_capped "COMPLEXITY" "$diff_file" "$fstart" "function '${fname}' is ${floc} LOC (AUTOSPEC_MAX_FUNC_LOC=${_COMPLEXITY_MAX_FUNC_LOC})"
             done
         fi
     done <<EOF
@@ -1428,16 +1431,14 @@ check_cyclomatic() {
             while read -r _ _ _ _ score rest; do
                 score_num="${score//[^0-9]/}"
                 [ -n "$score_num" ] && [ "$score_num" -gt "$_COMPLEXITY_MAX_CYCLOMATIC" ] 2>/dev/null && \
-                    emit_capped "COMPLEXITY" "$diff_file" "-" \
-                        "cyclomatic complexity ${score_num} (AUTOSPEC_MAX_CYCLOMATIC=${_COMPLEXITY_MAX_CYCLOMATIC}) — ${rest}"
+                    emit_capped "COMPLEXITY" "$diff_file" "-" "cyclomatic complexity ${score_num} (AUTOSPEC_MAX_CYCLOMATIC=${_COMPLEXITY_MAX_CYCLOMATIC}) — ${rest}"
             done
         else
             # Keyword-count proxy: count decision points per function
             local count
             count="$(grep -cE '^\s+(if |elif |else:|for |while |case |except |catch )' "$diff_file" 2>/dev/null || true)"
             if [ -n "$count" ] && [ "$count" -gt "$_COMPLEXITY_MAX_CYCLOMATIC" ] 2>/dev/null; then
-                emit_capped "COMPLEXITY" "$diff_file" "-" \
-                    "keyword-proxy cyclomatic ~${count} (AUTOSPEC_MAX_CYCLOMATIC=${_COMPLEXITY_MAX_CYCLOMATIC}); install radon for accurate analysis"
+                emit_capped "COMPLEXITY" "$diff_file" "-" "keyword-proxy cyclomatic ~${count} (AUTOSPEC_MAX_CYCLOMATIC=${_COMPLEXITY_MAX_CYCLOMATIC}); install radon for accurate analysis"
             fi
         fi
     done <<EOF
@@ -1469,8 +1470,7 @@ check_duplicate_names() {
             case "$_DUP_NAME_EXEMPT" in
                 *" $dupe_name "*) continue ;;
             esac
-            emit_capped "COMPLEXITY" "-" "-" \
-                "duplicate function name '${dupe_name}' across changed files — reuse or rename to avoid confusion"
+            emit_capped "COMPLEXITY" "-" "-" "duplicate function name '${dupe_name}' across changed files — reuse or rename to avoid confusion"
         done
     fi
 }
