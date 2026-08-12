@@ -205,6 +205,30 @@ and duplicate function names. That is accepted: they are heuristics whose cost a
 veto — extracting code mid-bugfix, or an out-of-band override — exceeded the
 tidiness they bought.
 
+### Fix 6 — `SECURITY`'s eval pattern is boundary-anchored, and annotatable
+
+The same defect as §1.6, in a second rule: the pattern is an unanchored substring, so it
+reports `ast.literal_eval` — the stdlib parser that accepts literals and rejects every
+expression form, i.e. the recommended *safe* alternative to the builtin the rule exists to
+catch. Fix 4 anchored `xit(` and left this one.
+
+Anchored as `(^|[^A-Za-z0-9_])eval\(`. The dot is deliberately **outside** the class, unlike
+Fix 4's `xit(`: that fix had to exclude the dot to stop matching `sys.exit(`, whereas here
+the dotted `builtins.eval` form is the dangerous call itself and must still report.
+Measured on a probe file: `ast.literal_eval` and `lead_eval` are clean, while a bare and a
+dotted eval call both still report.
+
+`detect_security` also never consulted `is_line_allowed`, so `# linter:allow-SECURITY <reason>`
+could not clear it — and because prose is scanned as code, a comment written to explain an
+exemption became a second finding. The only routes left were a blanket
+`Guardian: skip-SECURITY`, the last rule anyone should blanket-skip, or rewriting working code
+to dodge a substring. The scan now consults `is_line_allowed` on the line it reports, so the
+documented hatch is real for it.
+
+Comments are **not** stripped before this scan, the way `lint-ui.sh` learned to strip them: a
+secret sitting in a comment is still a leaked secret. Prose naming a pattern therefore still
+reports, and the escape hatch is how you clear it.
+
 ## 3. Bootstrap order — no bypass required
 
 The fixes live in `scripts/lint-implementation.sh` (1,796 LOC) and
