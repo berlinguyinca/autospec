@@ -112,10 +112,10 @@ fn pause_governor_reason(state: &ConductorState) -> Option<String> {
 /// the identical failure. One issue that cannot clear its gate then costs the
 /// whole conductor instead of costing its own selection.
 ///
-/// Every route into `Paused` is covered, not just a `Blocked` outcome: retry-limit
-/// exhaustion, verifier-unavailable, terminal and ownership retirement, and any
-/// free-form `pause` reason. Pause reasons are open-ended `String`s, so matching a
-/// known set here would leave each new reason silently fatal.
+/// Every disposable route into `Paused` is covered, not just a `Blocked` outcome:
+/// retry-limit exhaustion, verifier-unavailable, and free-form `pause` reasons.
+/// Ownership and terminal retirement pauses are intentionally retained because
+/// their selected issue and acquisition receipt are durable recovery identity.
 ///
 /// Count the cycle through the persisted blocked-backlog governor, abandon the
 /// selection so the next scan moves on, and report that the loop may continue.
