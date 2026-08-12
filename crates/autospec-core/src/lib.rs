@@ -8,6 +8,7 @@ pub mod autonomous {
     pub mod mainline_health;
     pub mod no_work;
     pub mod premerge;
+    pub mod review_policy;
     pub mod tier15;
     pub mod tier2;
     pub mod tier3;
