@@ -12,17 +12,19 @@
 #   AC5: gap file is NEVER empty when backend absent (no silent skip)
 
 SCRIPT="${BATS_TEST_DIRNAME}/../../skills/autospec-run/scripts/invoke-review.sh"
+PREMERGE_REVIEW_ADAPTER="${BATS_TEST_DIRNAME}/../../skills/autospec-run/scripts/independent-review-adapter.sh"
 REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/../.." && pwd)"
 
 setup() {
     TEST_TMP="$(mktemp -d)"
     GAPS_FILE="${TEST_TMP}/gaps.json"
+    OUTCOMES_FILE="${TEST_TMP}/review-outcomes.jsonl"
     # Stub PATH: jq available, but no harness binaries unless the test adds them.
     SAFE_PATH="/usr/bin:/bin"
     if command -v jq >/dev/null 2>&1; then
         SAFE_PATH="$(dirname "$(command -v jq)"):${SAFE_PATH}"
     fi
-    export TEST_TMP GAPS_FILE SAFE_PATH
+    export TEST_TMP GAPS_FILE OUTCOMES_FILE SAFE_PATH
 }
 
 teardown() {
@@ -165,4 +167,128 @@ teardown() {
     [ "$status" -eq 0 ]
     run jq -e 'any(.[]; .dimension == "tooling")' "$GAPS_FILE"
     [ "$status" -eq 0 ]
+}
+
+@test "premerge adapter requeues without merge when foreground independent review is unavailable" {
+    mkdir -p "${TEST_TMP}/bin"
+    GH_LOG="${TEST_TMP}/gh.log"
+    export GH_LOG
+    cat > "${TEST_TMP}/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf 'gh %s\n' "$*" >> "$GH_LOG"
+STUB
+    chmod +x "${TEST_TMP}/bin/gh"
+    request="${TEST_TMP}/review-request.json"
+    commit="0123456789abcdef0123456789abcdef01234567"
+
+    run env PATH="${TEST_TMP}/bin:${SAFE_PATH}" \
+        bash "$PREMERGE_REVIEW_ADAPTER" prepare \
+        --repo owner/repo --issue 42 --pr 84 --commit "$commit" \
+        --risk integration --implementer-provider codex \
+        --reviewer-provider claude --reviewer-reasoning high \
+        --foreground-available false --request-out "$request"
+
+    [ "$status" -eq 75 ]
+    printf '%s\n' "$output" | jq -e \
+        '.schema == 1 and .outcome == "requeue" and .blocker.code == "independent_review_unavailable"'
+    jq -e --arg commit "$commit" '
+        .schema == 1 and
+        .commit == $commit and
+        .reviewer.independent == true and
+        .reviewer.read_only == true and
+        .verdict_contract == {
+            "schema": 1,
+            "commit": $commit,
+            "verdict": ["lgtm", "blocked"],
+            "surfaces_examined": "nonempty-string-array",
+            "tests_examined": "nonempty-string-array",
+            "integration_paths_checked": "required-nonempty-string-array",
+            "blocking_findings": "string-array"
+        }
+    ' "$request"
+    grep -q 'issue comment 42 --repo owner/repo' "$GH_LOG"
+    grep -q 'issue edit 42 --repo owner/repo --remove-label in-progress-by-bot --add-label auto-implement' "$GH_LOG"
+    ! grep -q 'pr merge' "$GH_LOG"
+}
+
+@test "premerge adapter accepts one normal independent reviewer with a structured verdict" {
+    request="${TEST_TMP}/normal-request.json"
+    verdict="${TEST_TMP}/normal-verdict.json"
+    commit="0123456789abcdef0123456789abcdef01234567"
+    run bash "$PREMERGE_REVIEW_ADAPTER" prepare \
+        --repo owner/repo --issue 42 --pr 84 --commit "$commit" \
+        --risk normal --implementer-provider codex \
+        --reviewer-provider codex --reviewer-reasoning standard \
+        --foreground-available true --request-out "$request"
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | jq -e '.outcome == "prepared"'
+
+    cat > "$verdict" <<JSON
+{"schema":1,"commit":"$commit","verdict":"lgtm","surfaces_examined":["review adapter"],"tests_examined":["adapter bats"],"integration_paths_checked":[],"blocking_findings":[]}
+JSON
+    run bash "$PREMERGE_REVIEW_ADAPTER" validate --request "$request" --verdict "$verdict"
+    [ "$status" -eq 0 ]
+    [ "$output" = "LGTM" ]
+}
+
+@test "premerge adapter rejects integration verdict without an integration path" {
+    request="${TEST_TMP}/integration-request.json"
+    verdict="${TEST_TMP}/integration-verdict.json"
+    commit="0123456789abcdef0123456789abcdef01234567"
+    bash "$PREMERGE_REVIEW_ADAPTER" prepare \
+        --repo owner/repo --issue 42 --pr 84 --commit "$commit" \
+        --risk integration --implementer-provider codex \
+        --reviewer-provider claude --reviewer-reasoning high \
+        --foreground-available true --request-out "$request" >/dev/null
+    cat > "$verdict" <<JSON
+{"schema":1,"commit":"$commit","verdict":"lgtm","surfaces_examined":["review adapter"],"tests_examined":["adapter bats"],"integration_paths_checked":[],"blocking_findings":[]}
+JSON
+
+    run bash "$PREMERGE_REVIEW_ADAPTER" validate --request "$request" --verdict "$verdict"
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | jq -e \
+        '.outcome == "block" and .blocker.code == "structured_review_invalid"'
+}
+
+@test "premerge adapter rejects duplicate verdict keys before jq normalization" {
+    request="${TEST_TMP}/duplicate-request.json"
+    verdict="${TEST_TMP}/duplicate-verdict.json"
+    commit="0123456789abcdef0123456789abcdef01234567"
+    bash "$PREMERGE_REVIEW_ADAPTER" prepare \
+        --repo owner/repo --issue 42 --pr 84 --commit "$commit" \
+        --risk normal --implementer-provider codex \
+        --reviewer-provider codex --reviewer-reasoning standard \
+        --foreground-available true --request-out "$request" >/dev/null
+    printf '%s\n' \
+        "{\"schema\":1,\"commit\":\"$commit\",\"verdict\":\"blocked\",\"verdict\":\"lgtm\",\"surfaces_examined\":[\"review adapter\"],\"tests_examined\":[\"adapter bats\"],\"integration_paths_checked\":[],\"blocking_findings\":[]}" \
+        > "$verdict"
+
+    run bash "$PREMERGE_REVIEW_ADAPTER" validate --request "$request" --verdict "$verdict"
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | jq -e \
+        '.outcome == "block" and .blocker.code == "structured_review_invalid"'
+}
+
+@test "premerge adapter requeues critical review without provider diversity" {
+    mkdir -p "${TEST_TMP}/bin"
+    GH_LOG="${TEST_TMP}/critical-gh.log"
+    export GH_LOG
+    cat > "${TEST_TMP}/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf 'gh %s\n' "$*" >> "$GH_LOG"
+STUB
+    chmod +x "${TEST_TMP}/bin/gh"
+
+    run env PATH="${TEST_TMP}/bin:${SAFE_PATH}" \
+        bash "$PREMERGE_REVIEW_ADAPTER" prepare \
+        --repo owner/repo --issue 42 --pr 84 \
+        --commit 0123456789abcdef0123456789abcdef01234567 \
+        --risk critical --implementer-provider codex \
+        --reviewer-provider codex --reviewer-reasoning high \
+        --foreground-available true --request-out "${TEST_TMP}/critical-request.json"
+
+    [ "$status" -eq 75 ]
+    printf '%s\n' "$output" | jq -e \
+        '.outcome == "requeue" and .blocker.code == "provider_diversity_required"'
+    ! grep -q 'pr merge' "$GH_LOG"
 }
