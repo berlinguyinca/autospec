@@ -20370,6 +20370,16 @@ fn configured_base_branch(repo: &Path) -> Result<Option<String>, String> {
     Ok(Some(branch))
 }
 
+/// Does this git failure mean the ref simply is not there?
+///
+/// Distinguishing this from a network or auth failure is what keeps a permanent condition from
+/// being retried forever. Matched on git's own wording, lowercased so a future capitalisation
+/// change does not silently reclassify it back to transient.
+fn missing_remote_ref(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("couldn't find remote ref") || error.contains("no such ref was fetched")
+}
+
 fn fetch_and_resolve_base(
     repo: &Path,
     branch: &str,
@@ -20378,8 +20388,24 @@ fn fetch_and_resolve_base(
     validate_branch(branch)?;
     let remote_ref = format!("refs/remotes/origin/{branch}");
     let fetch_refspec = format!("refs/heads/{branch}:{remote_ref}");
-    git(repo, &["fetch", "--quiet", "origin", &fetch_refspec])
-        .map_err(|error| format!("TRANSIENT: fetch executor base: {error}"))?;
+    git(repo, &["fetch", "--quiet", "origin", &fetch_refspec]).map_err(|error| {
+        if !missing_remote_ref(&error) {
+            return format!("TRANSIENT: fetch executor base: {error}");
+        }
+        // A branch that is not on the remote will not appear by retrying. Marking it TRANSIENT
+        // made the bridge retry a permanent condition every cycle forever: a stale explore pin
+        // wedged berlinguyinca/autotrade for hours, and because the failure never became
+        // terminal it produced no actionable signal either. See autospec#2997.
+        if explore_mode {
+            format!(
+                "executor explore branch {branch} is not on the remote. \
+                 .autospec/explore-mode.json pins a sandbox branch that no longer exists; \
+                 remove or repoint that file to unwedge this repository. Underlying: {error}"
+            )
+        } else {
+            format!("executor base branch {branch} is not on the remote: {error}")
+        }
+    })?;
     let base_oid = git_stdout(
         repo,
         &["rev-parse", "--verify", &format!("{remote_ref}^{{commit}}")],
