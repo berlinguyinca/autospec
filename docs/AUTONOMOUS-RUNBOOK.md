@@ -63,7 +63,17 @@ executor bridge auto-discovers it (explicit env override, then
 it applies the implementer permission profile
 (deny-by-default, workspace-scoped edit/bash only). Operators wanting OS-level
 isolation may replace it with a bwrap/firejail wrapper honoring the same argv
-contract.
+contract; a shipped `~/.autospec/scripts/lib/opencode-containment-bwrap.sh`
+variant mounts the host read-only with only the worktree and a private config
+dir writable (PID/IPC/UTS unshared, network retained for the model API).
+
+OpenCode model selection maps onto the two-tier AGENTS.md routing through
+`AUTOSPEC_OPENCODE_MODEL` (`provider/model`) and `AUTOSPEC_OPENCODE_VARIANT`
+(reasoning effort), passed as `--model`/`--variant` on both the implementer and
+reviewer invocations. Live usage observability comes from the shipped
+`opencode-usage-probe.sh`, which reads the OpenCode SQLite DB for a
+trailing-window token tally and feeds `usage-observe.sh` a live percent for the
+quota governor.
 
 Inherited `PATH`, XDG roots, `CODEX_HOME`, and `CLAUDE_CONFIG_DIR` are
 canonicalized before launch and fail closed if they resolve inside either

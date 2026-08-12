@@ -173,6 +173,90 @@ fn autonomous_executor_bridge_opencode_requires_and_uses_safe_adapter() {
 }
 
 #[test]
+fn autonomous_executor_bridge_opencode_honors_tier_model_and_variant() {
+    // Break caught: AGENTS.md defines OpenCode Tier A/B model selection but the
+    // executor never passed --model/--variant, so the two-tier routing silently
+    // did nothing for OpenCode.
+    let root = test_root("opencode-model-variant");
+    let table = write_alias_table(&root, installed_aliases());
+    let mut env = environment(&table);
+    env.insert(
+        "AUTOSPEC_HANDOFF_DISPATCHER_KIND".to_string(),
+        OsString::from("opencode"),
+    );
+    env.insert(
+        "AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER".to_string(),
+        OsString::from("/bin/true"),
+    );
+    env.insert(
+        "AUTOSPEC_OPENCODE_MODEL".to_string(),
+        OsString::from("anthropic/claude-opus-5"),
+    );
+    env.insert(
+        "AUTOSPEC_OPENCODE_VARIANT".to_string(),
+        OsString::from("high"),
+    );
+
+    let resolved = HarnessConfig::load(&root, &env)
+        .expect("load harness config")
+        .resolve(&env)
+        .expect("recognize OpenCode");
+
+    let invocation = resolved
+        .invocation(
+            Path::new("/safe/worktree"),
+            Path::new("/safe/state/unused.txt"),
+            "implement issue 42",
+        )
+        .expect("build OpenCode invocation");
+
+    assert_eq!(
+        invocation.args,
+        vec![
+            resolved.executable.display().to_string(),
+            "--pure".to_string(),
+            "run".to_string(),
+            "--model".to_string(),
+            "anthropic/claude-opus-5".to_string(),
+            "--variant".to_string(),
+            "high".to_string(),
+            "implement issue 42".to_string(),
+        ]
+    );
+
+    // Without the env vars, the invocation keeps the harness default (no flags).
+    let mut default_env = environment(&table);
+    default_env.insert(
+        "AUTOSPEC_HANDOFF_DISPATCHER_KIND".to_string(),
+        OsString::from("opencode"),
+    );
+    default_env.insert(
+        "AUTOSPEC_OPENCODE_CONTAINMENT_ADAPTER".to_string(),
+        OsString::from("/bin/true"),
+    );
+    let defaulted = HarnessConfig::load(&root, &default_env)
+        .expect("load harness config")
+        .resolve(&default_env)
+        .expect("recognize OpenCode")
+        .invocation(
+            Path::new("/safe/worktree"),
+            Path::new("/safe/state/unused.txt"),
+            "implement issue 42",
+        )
+        .expect("build default OpenCode invocation");
+    assert_eq!(
+        defaulted.args,
+        vec![
+            defaulted.args[0].clone(),
+            "--pure".to_string(),
+            "run".to_string(),
+            "implement issue 42".to_string(),
+        ]
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn autonomous_executor_bridge_persisted_json_round_trips_strictly() {
     // Break caught: recovery accepting missing, mistyped, or silently defaulted identity data.
     let expected = persisted_invocation();
