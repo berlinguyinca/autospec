@@ -322,9 +322,18 @@ fn a_persisted_retry_exhausted_pause_is_retired_instead_of_blocking_startup() {
         std::process::id()
     ));
 
+    // Charge the governor to one below its threshold first, so the retirement seals.
+    // Without that the charge stays far from the boundary and a reserved key looks
+    // harmless -- which is exactly how the reserved key shipped twice.
+    for _ in 0..BLOCKED_BACKLOG_THRESHOLD - 1 {
+        state = state
+            .record_blocked_backlog_cycle(RETRY_EXHAUSTION_GOVERNOR_KEY, vec![51])
+            .expect("charge the governor");
+    }
+
     let state = abandon_exhausted_retries(&path, state).expect("retire the exhausted pause");
 
-    assert_eq!(state.phase(), ConductorPhase::Scan);
+    assert_eq!(state.phase(), ConductorPhase::AllBlocked);
     // The governor key must differ from the pause reason: the core reserves
     // `retry_limit_exhausted` for dispatch outcomes and rejects it as an outcome
     // reason, so sealing under that name yields an invalid AllBlocked outcome.

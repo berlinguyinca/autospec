@@ -49,7 +49,7 @@ pub(super) fn abandon_exhausted_retries(
     }
     let state = match state.selected_issue() {
         Some(issue) => {
-            state.record_blocked_backlog_cycle(RETRY_LIMIT_EXHAUSTED_PAUSE, vec![issue])?
+            state.record_blocked_backlog_cycle(RETRY_EXHAUSTION_GOVERNOR_KEY, vec![issue])?
         }
         None => state,
     };
