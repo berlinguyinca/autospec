@@ -1,5 +1,10 @@
 use super::*;
 
+mod review_binding;
+pub(super) use review_binding::*;
+mod review_dispatch;
+pub(super) use review_dispatch::*;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedReviewPolicy {
     pub(crate) requirements: ReviewRequirements,
@@ -127,12 +132,14 @@ pub(super) fn resolve_independent_reviewer(
     }
 
     let config = HarnessConfig::load(&state.identity.repository_path, environment)?;
+    let inventory = executor_review_inventory(state)?;
     let policy = resolve_review_policy(
         &config,
-        classify_executor_review_requirements(request, state)?,
+        review_requirements_for_inventory(request, &inventory),
         state.harness,
         environment,
     )?;
+    let evidence = load_bound_review_evidence(state, &policy.requirements, inventory)?;
     let resolved = resolve_review_harness(&config, policy.reviewer_harness, environment)?;
     validate_external_reviewer_executable(state, &resolved.executable)?;
     ensure_private_directory(artifact_root)?;
@@ -143,7 +150,7 @@ pub(super) fn resolve_independent_reviewer(
     if resolved.kind == HarnessKind::Codex {
         prepare_private_reviewer_result(&harness_artifact)?;
     }
-    let prompt = independent_reviewer_prompt(request, state)?;
+    let prompt = bound_independent_reviewer_prompt(request, state, &policy, &evidence)?;
     let invocation =
         resolved.review_invocation(&state.identity.worktree, &harness_artifact, &prompt)?;
     let mut validated = validate_invocation(&invocation, &state.identity.worktree)?;
@@ -153,12 +160,12 @@ pub(super) fn resolve_independent_reviewer(
         .head_oid
         .as_deref()
         .ok_or_else(|| "executor structured review requires a stable head".to_string())?;
-    let automatic = prepare_automatic_reviewer_normalizer(
+    let automatic = prepare_bound_reviewer_normalizer(
         resolved.kind,
         &validated,
         &artifact_root,
         head,
-        policy.requirements.require_integration_smoke,
+        &evidence.integration_citations(),
     )?;
     validate_external_reviewer_executable(state, &automatic.normalizer)?;
     Ok(IndependentReviewer {

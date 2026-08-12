@@ -5,11 +5,11 @@ use std::path::Path;
 
 pub(super) fn valid_review_json(commit: &str) -> String {
     format!(
-        r#"{{"schema":1,"commit":"{commit}","verdict":"lgtm","surfaces_examined":["src/auth.rs"],"tests_examined":["tests/auth.rs"],"integration_paths_checked":["login -> session"],"blocking_findings":[]}}"#
+        r#"{{"schema":1,"commit":"{commit}","verdict":"lgtm","surfaces_examined":["src/auth.rs"],"tests_examined":["tests/auth.rs"],"integration_paths_checked":[],"blocking_findings":[]}}"#
     )
 }
 
-pub(super) fn write_valid_schema4_review_receipt(
+pub(super) fn write_valid_schema5_review_receipt(
     state_path: &Path,
     state: &bridge::PersistedInvocation,
     root: &Path,
@@ -41,10 +41,16 @@ pub(super) fn write_valid_schema4_review_receipt(
         provider_diversified: false,
         selection_reason: "normal:implementer-provider".to_string(),
     };
-    let verdict = bridge::parse_review_verdict(&verdict_body, commit, false).expect("verdict");
+    let verdict = bridge::parse_review_verdict(&verdict_body, commit, &[]).expect("verdict");
+    let evidence = bridge::load_bound_review_evidence(
+        state,
+        &requirements,
+        bridge::executor_review_inventory(state).expect("review inventory"),
+    )
+    .expect("bound review evidence");
     let digest = |path: &Path| bridge::private_reviewer_artifact_digest(path).unwrap();
     let receipt = serde_json::json!({
-        "schema": 4, "binding": bridge::review_binding(state).unwrap(),
+        "schema": 5, "binding": bridge::review_binding(state).unwrap(),
         "stdout_path": stdout, "stdout_digest": digest(&stdout),
         "stderr_path": stderr, "stderr_digest": digest(&stderr),
         "normalizer_path": normalizer, "normalizer_digest": digest(&normalizer),
@@ -58,6 +64,13 @@ pub(super) fn write_valid_schema4_review_receipt(
         "provider_diversified": false, "selection_reason": policy.selection_reason,
         "requirements_digest": bridge::canonical_review_requirements_digest(&requirements),
         "policy_digest": bridge::canonical_review_policy_digest(&policy),
+        "changed_paths": evidence.inventory.changed_paths,
+        "logical_components": evidence.inventory.logical_components,
+        "producer_surfaces": evidence.inventory.producer_surfaces,
+        "consumer_surfaces": evidence.inventory.consumer_surfaces,
+        "integration_evidence_digest": evidence.integration_evidence_digest,
+        "integration_command_records": evidence.integration_command_records,
+        "review_context_digest": bridge::canonical_review_context_digest(&policy, &evidence),
         "verdict_schema": verdict.schema, "verdict": verdict.verdict,
         "surfaces_examined": verdict.surfaces_examined, "tests_examined": verdict.tests_examined,
         "integration_paths_checked": verdict.integration_paths_checked,
@@ -68,7 +81,7 @@ pub(super) fn write_valid_schema4_review_receipt(
     bridge::write_private_create_once(
         &receipt_path,
         format!("{receipt}\n").as_bytes(),
-        "schema-4 review receipt",
+        "schema-5 review receipt",
     )
     .expect("review receipt");
 }
