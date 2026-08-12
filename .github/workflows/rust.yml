@@ -38,14 +38,12 @@ jobs:
         run: cargo build --workspace
 
       - name: Test
-        run: |
-          cargo test -p autospec-core
-          cargo test -p autospec-cli --test status_commands --test parent_commands
-        # Deterministic, environment-independent subset. The full inline suite
-        # (executor_bridge process-supervision, claim heartbeat) requires
-        # external tools (codex CLI, gitleaks, semgrep, bubblewrap) and
-        # process-shared state that is flaky on a bare GitHub runner; it runs
-        # in the local target-repo validation gate instead.
+        run: cargo test -p autospec-core --lib
+        # Deterministic inline unit tests only. Integration tests under
+        # tests/*.rs and the executor_bridge inline suite invoke shell
+        # scripts / external tools (bash, bats, codex, gitleaks, semgrep,
+        # bubblewrap) that are absent or flaky on a bare GitHub runner; the
+        # full suite runs in the local target-repo validation gate.
 
   audit:
     runs-on: ubuntu-latest
