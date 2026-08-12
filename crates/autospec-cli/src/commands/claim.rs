@@ -739,12 +739,7 @@ pub(crate) fn acquire_for_conductor(
 ) -> Result<ClaimLease, ConductorClaimError> {
     let recovered = recover_active_issue_against(repo, issue, 300, Some(base_branch))?;
     if !recovered {
-        if let Some(owner) = read_claim_ref(repo, issue)?.and_then(|head| {
-            (head.record.state == "claimed"
-                && (head.record.worker_id != worker_id || head.record.branch != branch)
-                && conductor_claim_owner_holds_lease(&head.record))
-            .then_some(head.record.worker_id)
-        }) {
+        if let Some(owner) = lease::contesting_claim_owner(repo, issue, worker_id, branch)? {
             return unavailable_claim_with_observed_owner(issue, repo, worker_id, &owner);
         }
     }
@@ -7461,7 +7456,7 @@ fn print_state_help() {
 
 pub(crate) mod lease;
 use lease::{
-    claim_retry_attempts, claim_retry_sleep_ms, conductor_claim_owner_holds_lease,
+    claim_retry_attempts, claim_retry_sleep_ms,
     read_gh_with_retry, server_lease_is_fresh, server_lease_is_stale,
 };
 #[cfg(test)]
