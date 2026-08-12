@@ -12,6 +12,7 @@ use autospec_core::lint::{
 };
 use serde_json::Value;
 
+use super::gh_read::run_gh_read_with_retry;
 use super::resilience::{with_current_lifecycle_lease, ConductorLease};
 use super::tier15;
 use super::tier2_receipts::{
@@ -413,8 +414,7 @@ fn required_labels(drafts: &[PublicationDraft]) -> BTreeSet<&'static str> {
 
 fn ensure_label(repo: &str, label: &str) -> Result<(), String> {
     let endpoint = format!("repos/{repo}/labels/{label}");
-    let read = run_gh(&["api", "--method", "GET", &endpoint])?;
-    if read.status.success() {
+    if run_gh_read_with_retry(&["api", "--method", "GET", &endpoint], "read label").is_ok() {
         return Ok(());
     }
     let (color, description) = label_metadata(label);
@@ -437,13 +437,13 @@ fn ensure_label(repo: &str, label: &str) -> Result<(), String> {
     if create.status.success() {
         return Ok(());
     }
-    let confirm = run_gh(&[
-        "api",
-        "--method",
-        "GET",
-        &format!("repos/{repo}/labels/{label}"),
-    ])?;
-    if confirm.status.success() {
+    let confirm_endpoint = format!("repos/{repo}/labels/{label}");
+    if run_gh_read_with_retry(
+        &["api", "--method", "GET", &confirm_endpoint],
+        "confirm label creation",
+    )
+    .is_ok()
+    {
         return Ok(());
     }
     require_success(&create, &format!("create label {label}"))
