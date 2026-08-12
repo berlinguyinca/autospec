@@ -1,7 +1,7 @@
 use super::*;
 use autospec_core::autonomous::review_policy::{ReviewReasoning, ReviewRisk};
 
-const REVIEW_RECEIPT_SCHEMA: u32 = 4;
+const REVIEW_RECEIPT_SCHEMA: u32 = 5;
 const REVIEW_RECEIPT_FIELDS: &[&str] = &[
     "schema",
     "binding",
@@ -30,6 +30,13 @@ const REVIEW_RECEIPT_FIELDS: &[&str] = &[
     "selection_reason",
     "requirements_digest",
     "policy_digest",
+    "changed_paths",
+    "logical_components",
+    "producer_surfaces",
+    "consumer_surfaces",
+    "integration_evidence_digest",
+    "integration_command_records",
+    "review_context_digest",
     "verdict_schema",
     "verdict",
     "surfaces_examined",
@@ -134,6 +141,30 @@ pub(super) fn canonical_review_policy_digest(policy: &ResolvedReviewPolicy) -> S
     )
 }
 
+pub(super) fn canonical_review_context_digest(
+    policy: &ResolvedReviewPolicy,
+    evidence: &BoundReviewEvidence,
+) -> String {
+    sha256_hex(
+        format!(
+            "review-context-v1\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}\0{}",
+            canonical_review_policy_digest(policy),
+            evidence.commit,
+            evidence.requirements_digest,
+            evidence.inventory.changed_paths.join("\0"),
+            evidence.inventory.logical_components.join("\0"),
+            evidence.inventory.producer_surfaces.join("\0"),
+            evidence.inventory.consumer_surfaces.join("\0"),
+            evidence
+                .integration_evidence_digest
+                .as_deref()
+                .unwrap_or(""),
+            evidence.integration_command_records.join("\0"),
+        )
+        .as_bytes(),
+    )
+}
+
 pub(super) fn write_review_receipt(
     state_path: &Path,
     state: &PersistedInvocation,
@@ -145,6 +176,8 @@ pub(super) fn write_review_receipt(
         "executor production review receipt requires structured automatic evidence".to_string()
     })?;
     let requirements = &reviewer.policy.requirements;
+    let evidence =
+        load_bound_review_evidence(state, requirements, executor_review_inventory(state)?)?;
     let body = serde_json::json!({
         "schema": REVIEW_RECEIPT_SCHEMA, "binding": review_binding(state)?,
         "stdout_path": observation.stdout_path, "stdout_digest": observation.stdout_digest,
@@ -169,6 +202,13 @@ pub(super) fn write_review_receipt(
         "selection_reason": reviewer.policy.selection_reason,
         "requirements_digest": canonical_review_requirements_digest(requirements),
         "policy_digest": canonical_review_policy_digest(&reviewer.policy),
+        "changed_paths": evidence.inventory.changed_paths,
+        "logical_components": evidence.inventory.logical_components,
+        "producer_surfaces": evidence.inventory.producer_surfaces,
+        "consumer_surfaces": evidence.inventory.consumer_surfaces,
+        "integration_evidence_digest": evidence.integration_evidence_digest,
+        "integration_command_records": evidence.integration_command_records,
+        "review_context_digest": canonical_review_context_digest(&reviewer.policy, &evidence),
         "verdict_schema": verdict.schema, "verdict": verdict.verdict,
         "surfaces_examined": verdict.surfaces_examined, "tests_examined": verdict.tests_examined,
         "integration_paths_checked": verdict.integration_paths_checked,
@@ -219,26 +259,63 @@ pub(super) fn validate_review_receipt(
     if canonical_review_policy_digest(&policy) != text(&object, "policy_digest")? {
         return Err("executor independent review policy digest mismatch".to_string());
     }
+    let receipt_evidence = receipt_review_evidence(&object)?;
+    if receipt_evidence.commit != review_head(state)?
+        || receipt_evidence.requirements_digest != requirements_digest
+        || canonical_review_context_digest(&policy, &receipt_evidence)
+            != text(&object, "review_context_digest")?
+    {
+        return Err("executor independent review context digest mismatch".to_string());
+    }
+    let live_evidence = load_bound_review_evidence(
+        state,
+        &policy.requirements,
+        executor_review_inventory(state)?,
+    )?;
+    if live_evidence != receipt_evidence {
+        return Err("executor independent review context changed after admission".to_string());
+    }
+    let expected_integration_citations = receipt_evidence.integration_citations();
     let verdict = receipt_verdict(&object)?;
     validate_review_verdict(
         &verdict,
         review_head(state)?,
-        policy.requirements.require_integration_smoke,
+        &expected_integration_citations,
     )?;
     if canonical_review_verdict_digest(&verdict) != text(&object, "verdict_digest")? {
         return Err("executor independent review verdict digest mismatch".to_string());
     }
     let raw = fs::read_to_string(PathBuf::from(text(&object, "result_path")?))
         .map_err(|error| format!("read executor structured reviewer result: {error}"))?;
-    if parse_review_verdict(
-        &raw,
-        review_head(state)?,
-        policy.requirements.require_integration_smoke,
-    )? != verdict
+    if parse_review_verdict(&raw, review_head(state)?, &expected_integration_citations)? != verdict
     {
         return Err("executor independent review semantic result mismatch".to_string());
     }
     Ok(())
+}
+
+fn receipt_review_evidence(object: &JsonObject) -> Result<BoundReviewEvidence, String> {
+    let integration_evidence_digest = match required(object, "integration_evidence_digest")? {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(value) if !value.trim().is_empty() => Some(value.clone()),
+        _ => {
+            return Err(
+                "executor independent review integration evidence digest is invalid".to_string(),
+            );
+        }
+    };
+    Ok(BoundReviewEvidence {
+        commit: text(object, "review_commit")?,
+        inventory: ExecutorReviewInventory {
+            changed_paths: receipt_strings(object, "changed_paths")?,
+            logical_components: receipt_strings(object, "logical_components")?,
+            producer_surfaces: receipt_strings(object, "producer_surfaces")?,
+            consumer_surfaces: receipt_strings(object, "consumer_surfaces")?,
+        },
+        requirements_digest: text(object, "requirements_digest")?,
+        integration_evidence_digest,
+        integration_command_records: receipt_strings(object, "integration_command_records")?,
+    })
 }
 
 fn validate_receipt_artifacts(object: &JsonObject) -> Result<(), String> {

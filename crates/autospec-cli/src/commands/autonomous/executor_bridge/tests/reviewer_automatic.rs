@@ -5,16 +5,27 @@
 use super::super as bridge;
 use super::super::BridgePhase;
 use super::support_base::{
-    environment, git_stdout, test_root, write_alias_table, write_executable,
+    environment, git, git_stdout, test_root, write_alias_table, write_executable,
 };
-use super::support_invocation::{
-    commit_implementation, implementation_proof_fixture, reviewer_request,
-};
+use super::support_invocation::{implementation_proof_fixture, reviewer_request};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+
+fn commit_normal_risk_reviewer_fixture(state: &bridge::PersistedInvocation) {
+    fs::write(
+        state.identity.worktree.join("implementation.txt"),
+        "implemented\n",
+    )
+    .expect("write implementation");
+    git(&state.identity.worktree, &["add", "implementation.txt"]);
+    git(
+        &state.identity.worktree,
+        &["commit", "-m", "feat: implement reviewer fixture"],
+    );
+}
 
 #[cfg(unix)]
 #[test]
@@ -95,7 +106,7 @@ fn autonomous_executor_bridge_opencode_reviewer_executes_with_inline_read_only_p
     // Break caught: a hostile host OpenCode config replacing the built-in plan agent's policy.
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("automatic-opencode-read-only");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
     let state_path = fixture.root.join("state/invocation.json");
@@ -186,7 +197,7 @@ fn autonomous_executor_bridge_rejects_reviewer_path_from_reviewed_worktree() {
     // Break caught: a reviewed branch shadowing normalizer utilities through ambient PATH.
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("automatic-reviewer-poisoned-path");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
     let state_path = fixture.root.join("state/invocation.json");
@@ -248,7 +259,7 @@ fn autonomous_executor_bridge_rejects_reviewer_config_roots_from_reviewed_code()
     ] {
         let (fixture, mut state, _snapshot, _) =
             implementation_proof_fixture(&format!("automatic-reviewer-{key}"));
-        commit_implementation(&state);
+        commit_normal_risk_reviewer_fixture(&state);
         state.phase = BridgePhase::CiPassed;
         state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
         let state_path = fixture.root.join("state/invocation.json");
@@ -298,7 +309,7 @@ fn autonomous_executor_bridge_automatic_reviewer_does_not_inherit_untrusted_envi
     // Break caught: a review harness exposing ambient credentials or mutation controls to tools.
     let (fixture, mut state, _snapshot, _) =
         implementation_proof_fixture("automatic-reviewer-sanitized-environment");
-    commit_implementation(&state);
+    commit_normal_risk_reviewer_fixture(&state);
     state.phase = BridgePhase::CiPassed;
     state.head_oid = Some(git_stdout(&state.identity.worktree, &["rev-parse", "HEAD"]));
     let state_path = fixture.root.join("state/invocation.json");
