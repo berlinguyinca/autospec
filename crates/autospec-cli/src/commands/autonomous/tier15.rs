@@ -1,6 +1,8 @@
 use std::collections::BTreeSet;
 use std::process::Command;
 
+use super::gh_read::run_command_read_with_retry;
+
 use autospec_core::autonomous::tier15::{observe_tier15, Tier15Input, Tier15Observation};
 use autospec_core::coordination::{RemoteIssue, RemoteIssuePage};
 
@@ -146,18 +148,15 @@ where
 fn fetch_page(repo: &str, state: IssueState, page: usize) -> Result<RemoteIssuePage, String> {
     validate_repo(repo)?;
     let arguments = gh_api_arguments(repo, state, page);
-    let output = Command::new("gh")
-        .args(&arguments)
-        .output()
-        .map_err(|error| format!("could not run gh: {error}"))?;
-    if !output.status.success() {
-        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if error.is_empty() {
-            format!("gh exited with {}", output.status)
-        } else {
-            error
-        });
-    }
+    let output = run_command_read_with_retry(
+        || {
+            let mut command = Command::new("gh");
+            command.args(&arguments);
+            command
+        },
+        "read Tier 1.5 issue page",
+    )
+    .map_err(|error| error.to_string())?;
     parse_projected_page_bytes(&output.stdout)
 }
 

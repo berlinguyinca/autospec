@@ -27,12 +27,25 @@ pub(crate) fn run_gh_read_with_retry(
     arguments: &[&str],
     action: &str,
 ) -> Result<Output, CommandFailure> {
+    run_command_read_with_retry(
+        || {
+            let mut command = Command::new("gh");
+            command.args(arguments);
+            command
+        },
+        action,
+    )
+}
+
+pub(crate) fn run_command_read_with_retry(
+    mut command: impl FnMut() -> Command,
+    action: &str,
+) -> Result<Output, CommandFailure> {
     let attempts = env_u64("AUTOSPEC_GH_API_RETRIES", 3);
     let sleep_ms = env_u64("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", 1_000);
     let mut last_error = String::new();
     for attempt in 0..attempts {
-        let output = Command::new("gh")
-            .args(arguments)
+        let output = command()
             .output()
             .map_err(|error| CommandFailure::diagnostic(format!("cannot run {action}: {error}")))?;
         if output.status.success() {
@@ -50,7 +63,8 @@ pub(crate) fn run_gh_read_with_retry(
 
 #[cfg(test)]
 mod tests {
-    use super::env_u64;
+    use super::{env_u64, run_command_read_with_retry};
+    use std::process::Command;
 
     #[test]
     fn an_unset_variable_falls_back() {
@@ -71,21 +85,119 @@ mod tests {
             std::env::remove_var("AUTOSPEC_TEST_JUNK_RETRY_KNOB");
         }
     }
+
+    #[test]
+    fn retries_a_transient_read_until_it_succeeds() {
+        let root =
+            std::env::temp_dir().join(format!("autospec-gh-read-retry-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("create temp directory");
+        let counter = root.join("counter");
+        let script = format!(
+            "n=$(cat '{}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{}'; [ $n -ge 2 ]",
+            counter.display(),
+            counter.display()
+        );
+        unsafe {
+            std::env::set_var("AUTOSPEC_GH_API_RETRIES", "2");
+            std::env::set_var("AUTOSPEC_CLAIM_RETRY_SLEEP_MS", "1");
+        }
+        let output = run_command_read_with_retry(
+            || {
+                let mut command = Command::new("sh");
+                command.args(["-c", &script]);
+                command
+            },
+            "test read",
+        )
+        .expect("second attempt succeeds");
+        assert!(output.status.success());
+        assert_eq!(std::fs::read_to_string(counter).expect("counter"), "2\n");
+        let _ = std::fs::remove_dir_all(root);
+        unsafe {
+            std::env::remove_var("AUTOSPEC_GH_API_RETRIES");
+            std::env::remove_var("AUTOSPEC_CLAIM_RETRY_SLEEP_MS");
+        }
+    }
 }
 
 #[cfg(test)]
 mod guard {
     use std::path::Path;
 
-    const CONDUCTOR_PATH_FILES: [&str; 3] = ["queue.rs", "autonomous.rs", "claim.rs"];
+    fn call_contains_get(source: &str, start: usize, command_builder: bool) -> bool {
+        let terminator = if command_builder { ".output()" } else { "])" };
+        let end = source[start..]
+            .find(terminator)
+            .map_or(source.len(), |offset| start + offset + terminator.len());
+        source[start..end].contains("\"GET\"")
+    }
+
+    fn inside_retry_builder(source: &str, start: usize) -> bool {
+        let prefix = &source[..start];
+        prefix
+            .rfind("run_command_read_with_retry(")
+            .is_some_and(|retry| prefix.rfind("},").is_none_or(|end| retry > end))
+    }
+
+    fn unretried_pattern(file: &str, source: &str, needle: &str) -> Vec<String> {
+        let mut offenders = Vec::new();
+        for (start, _) in source.match_indices(needle) {
+            if !inside_retry_builder(source, start)
+                && call_contains_get(source, start, needle.starts_with("Command::"))
+            {
+                offenders.push(format!("{file}:{needle}"));
+            }
+        }
+        offenders
+    }
 
     fn unretried_reads(file: &str, source: &str) -> Vec<String> {
-        source
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| line.contains("run_gh(") && line.contains("\"GET\""))
-            .map(|(index, _)| format!("{file}:{}", index + 1))
+        let compact = source.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut offenders = Vec::new();
+        for needle in [
+            "run_gh(",
+            "Command::new(\"gh\")",
+            "Command::new(&adapter.gh)",
+        ] {
+            offenders.extend(unretried_pattern(file, &compact, needle));
+        }
+        offenders
+    }
+
+    fn rust_files(root: &Path) -> Vec<std::path::PathBuf> {
+        let mut files = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(path) = pending.pop() {
+            if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                files.push(path);
+                continue;
+            }
+            if !path.is_dir() {
+                continue;
+            }
+            pending.extend(directory_entries(&path));
+        }
+        files
+    }
+
+    fn directory_entries(path: &Path) -> Vec<std::path::PathBuf> {
+        std::fs::read_dir(path)
+            .expect("read source directory")
+            .map(|entry| entry.expect("read source entry").path())
             .collect()
+    }
+
+    fn is_conductor_source(path: &Path) -> bool {
+        path.ends_with("queue.rs")
+            || path.ends_with("claim.rs")
+            || path
+                .components()
+                .any(|part| part.as_os_str() == "autonomous")
+    }
+
+    fn scan_source(path: &Path) -> Vec<String> {
+        let source = std::fs::read_to_string(path).expect("read source");
+        unretried_reads(&path.display().to_string(), &source)
     }
 
     /// Every idempotent GitHub read in the conductor path must retry.
@@ -97,12 +209,11 @@ mod guard {
     #[test]
     fn no_unretried_read_survives_in_the_conductor_path() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
-        let offenders = CONDUCTOR_PATH_FILES
+        let offenders = rust_files(&root)
             .iter()
-            .flat_map(|file| {
-                let source = std::fs::read_to_string(root.join(file)).expect("read source");
-                unretried_reads(file, &source)
-            })
+            .filter(|path| is_conductor_source(path))
+            .filter(|path| !path.ends_with("gh_read.rs"))
+            .flat_map(|path| scan_source(path))
             .collect::<Vec<_>>();
 
         assert!(
@@ -114,8 +225,11 @@ mod guard {
 
     #[test]
     fn the_guard_recognises_an_unretried_read() {
-        let source = "let output = run_gh(&[\"api\", \"--method\", \"GET\", &endpoint])?;";
+        let source = "let mut command = Command::new(&adapter.gh);\ncommand.args([\"api\", \"--method\", \"GET\"]);";
 
-        assert_eq!(unretried_reads("sample.rs", source), ["sample.rs:1"]);
+        assert_eq!(
+            unretried_reads("sample.rs", source),
+            ["sample.rs:Command::new(&adapter.gh)"]
+        );
     }
 }
