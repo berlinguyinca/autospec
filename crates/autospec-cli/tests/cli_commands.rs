@@ -2142,6 +2142,56 @@ fn autonomous_immediate_stop_drains_only_the_target_repo_conductor() {
 }
 
 #[test]
+fn autonomous_start_names_the_stop_sentinel_that_blocks_it() {
+    // berlinguyinca/autospec#2997. Refusing to launch while a stop is pending is correct, but the
+    // bare {"decision":"stop","mode":"..."} on stdout reads like a normal result -- so an operator
+    // who runs stop then start believes they relaunched while the old conductor is still draining.
+    // stdout is a machine-readable contract, so the explanation goes to stderr.
+    let temp = temp_dir("autospec-autonomous-start-blocked-by-stop");
+    let operator_dir = temp.join("operator");
+    let repo_dir = temp.join("repo");
+    make_git_repo(&repo_dir, None);
+    let scope = operator_dir.join("berlinguyinca_autospec");
+    std::fs::create_dir_all(&scope).expect("scope");
+    std::fs::write(scope.join("stop.flag"), "immediate\n").expect("stop sentinel");
+
+    let start = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+            "--json",
+        ])
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", temp.join("logs"))
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .env("PATH", hermetic_autonomous_path(&temp))
+        .output()
+        .expect("autospec autonomous start runs");
+
+    let stdout = String::from_utf8_lossy(&start.stdout);
+    let stderr = String::from_utf8_lossy(&start.stderr);
+    assert!(
+        stdout.contains("\"decision\":\"stop\""),
+        "the machine-readable decision is unchanged; stdout={stdout}"
+    );
+    assert!(
+        stderr.contains("stop.flag"),
+        "the operator must be told which sentinel blocked them; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("restart"),
+        "the operator must be told how to clear it; stderr={stderr}"
+    );
+    cleanup_pids(&scope);
+}
+
+#[test]
 fn autonomous_stop_graceful_writes_sentinel_and_leaves_conductor_running() {
     let temp = temp_dir("autospec-autonomous-graceful-stop");
     let operator_dir = temp.join("operator");
