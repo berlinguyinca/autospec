@@ -9,7 +9,8 @@ use autospec_core::coordination::{
 
 use super::{
     foreground_scope, foreground_state_path, persist_foreground_state, ForegroundCompletion,
-    Options, RunLayout, NO_READY_ISSUE_PAUSE,
+    Options, RunLayout, NO_READY_ISSUE_PAUSE, OWNERSHIP_RETIREMENT_PAUSE,
+    TERMINAL_RETIREMENT_PAUSE,
 };
 
 /// Whether a pause is the benign "nothing was ready after review" one, which the
@@ -125,7 +126,13 @@ fn pause_governor_reason(state: &ConductorState) -> Option<String> {
 /// because the latter admits only a blocked outcome, terminal retirement, or retry
 /// exhaustion; both raise the identical `abandon_exhausted`.
 fn blocked_cycle_continuation(state: ConductorState) -> Result<(ConductorState, bool), String> {
-    if state.phase() != ConductorPhase::Paused || deliberate_stop(&state) {
+    if state.phase() != ConductorPhase::Paused
+        || deliberate_stop(&state)
+        || matches!(
+            state.pause_reason(),
+            Some(OWNERSHIP_RETIREMENT_PAUSE) | Some(TERMINAL_RETIREMENT_PAUSE)
+        )
+    {
         return Ok((state, false));
     }
     let (Some(issue), Some(reason)) = (state.selected_issue(), pause_governor_reason(&state))
@@ -429,6 +436,26 @@ mod tests {
             );
             assert_eq!(state.phase(), ConductorPhase::Paused);
             assert!(unplanned_exit_reason(&ForegroundCompletion::State(Box::new(state))).is_none());
+        }
+    }
+
+    #[test]
+    fn a_pending_retirement_keeps_its_exact_selection_for_recovery() {
+        let ownership = claimed_foreground_state(51)
+            .transition(ConductorEvent::BeginOwnershipRetirement)
+            .expect("ownership retirement pause");
+        let terminal = dispatched(51, ConductorOutcome::Succeeded)
+            .transition(ConductorEvent::BeginTerminalRetirement {
+                outcome: ConductorOutcome::Succeeded,
+            })
+            .expect("terminal retirement pause");
+        for state in [ownership, terminal] {
+            let (retained, keep_looping) =
+                blocked_cycle_continuation(state.clone()).expect("preserve recovery state");
+
+            assert!(!keep_looping);
+            assert_eq!(retained, state);
+            assert_eq!(retained.selected_issue(), Some(51));
         }
     }
 
