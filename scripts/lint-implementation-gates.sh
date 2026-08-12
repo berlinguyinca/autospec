@@ -277,22 +277,25 @@ delegate_blocking="$(printf '%s\n' "$DELEGATE_OUT" \
   | grep -E '^(ERROR:)?[A-Z][A-Z_]+:' \
   | grep -cv '^INFO:' || true)"
 #
-# Compared as `rc <= printed`, not `rc == printed`, and the asymmetry is the whole point.
-# A crash can only TRUNCATE output, never manufacture extra finding lines, so a delegate
-# reporting fewer findings than it printed cannot be a crash. It is instead the delegate
-# undercounting itself: `check_function_loc` and the nesting-depth rule emit inside a
-# `... | while read` pipeline, so those FINDINGS_COUNT increments happen in a subshell and
-# are lost. Under AUTOSPEC_COMPLEXITY_ENFORCE=1 a file that is both too long and holds one
-# long function prints two blocking findings and exits 1 — an equality test called that a
-# crashed gate and refused every such commit. Tracked separately; this wrapper must not
-# refuse a run whose findings it is holding.
+# Compared for EQUALITY below the exit cap. This was briefly loosened to `rc <= printed`,
+# because two rules emitted from inside a pipeline and their counter increments were lost to
+# the subshell, so the delegate undercounted itself and a working commit was refused as a
+# crashed gate (#3080). #3081 restored the contract, so the exact comparison is back: a
+# delegate that prints three findings and claims one is now itself a defect, and saying so
+# is the point of checking at all.
+#
+# The two inexact arms are inexact for real reasons. At the 64 cap the true count is
+# unknowable from the code alone, and a scope explosion exits 200 after printing its own
+# uncounted sentinel line, so both assert a floor rather than a value.
 delegate_rc_matches=0
 if [ "$DELEGATE_RC" -eq 0 ] && [ "$delegate_blocking" -eq 0 ]; then
   delegate_rc_matches=1
 elif [ "$DELEGATE_RC" -eq 200 ] && [ "$delegate_blocking" -ge 1 ]; then
   delegate_rc_matches=1
-elif [ "$DELEGATE_RC" -ge 1 ] && [ "$DELEGATE_RC" -le 64 ] \
-    && [ "$delegate_blocking" -ge "$DELEGATE_RC" ]; then
+elif [ "$DELEGATE_RC" -eq 64 ] && [ "$delegate_blocking" -ge 64 ]; then
+  delegate_rc_matches=1
+elif [ "$DELEGATE_RC" -ge 1 ] && [ "$DELEGATE_RC" -lt 64 ] \
+    && [ "$delegate_blocking" -eq "$DELEGATE_RC" ]; then
   delegate_rc_matches=1
 fi
 if [ "$delegate_rc_matches" -ne 1 ]; then
