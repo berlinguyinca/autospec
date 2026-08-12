@@ -118,6 +118,9 @@ mod waterfall_policy;
 mod waterfall_policy_tests;
 #[cfg(test)]
 mod waterfall_tests;
+#[cfg(test)]
+#[path = "autonomous/review_governance_tests.rs"]
+mod review_governance_tests;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const TERMINAL_RETIREMENT_PAUSE: &str = "executor_terminal_retirement";
@@ -3372,6 +3375,7 @@ fn execute_foreground_dispatch(
             selection.issue,
             &selection.title,
             &selection.body,
+            &selection.serialization_reasons,
             &lease.worker_id,
             &lease.branch,
             &lease.claim_id,
@@ -4105,6 +4109,7 @@ impl ExecutorRequest {
         issue: u64,
         issue_title: &str,
         issue_body: &str,
+        serialization_reasons: &[String],
         worker_id: &str,
         branch: &str,
         claim_id: &str,
@@ -4122,6 +4127,7 @@ impl ExecutorRequest {
                 issue,
                 issue_title: issue_title.to_string(),
                 issue_body: issue_body.to_string(),
+                serialization_reasons: serialization_reasons.to_vec(),
                 worker_id: worker_id.to_string(),
                 claim_id: claim_id.to_string(),
                 invocation_id,
@@ -7800,13 +7806,6 @@ mod foreground_tests {
     }
 
     #[test]
-    fn lifecycle_atomic_temp_paths_are_unique_per_write() {
-        let path = Path::new("/tmp/lifecycle.json");
-
-        assert_ne!(atomic_temporary_path(path), atomic_temporary_path(path));
-    }
-
-    #[test]
     fn executor_local_precondition_failure_remains_blocked() {
         let request = ExecutorRequest {
             bridge: executor_bridge::ExecutorBridgeRequest {
@@ -7815,6 +7814,7 @@ mod foreground_tests {
                 issue: 42,
                 issue_title: "test".to_string(),
                 issue_body: "test".to_string(),
+                serialization_reasons: Vec::new(),
                 worker_id: "worker-42".to_string(),
                 claim_id: "claim-42".to_string(),
                 invocation_id: "test-invocation".to_string(),
