@@ -314,6 +314,9 @@ their `experiment_commit` matches that proof. The conductor's Tier-3 pass advanc
 available proofs before generating more candidates. A regression first becomes
 `rollback_required`; it becomes `rolled_back` only after a rollback proof names a
 repository commit whose inverse patch matches the experimental change.
+`autonomous-self-improvement.sh evaluate` accepts `--experiment-proof` and
+optional `--rollback-proof`; `advance` discovers those artifacts through
+`--evidence-dir` (default `.autospec/self-improvement-evidence`).
 
 Otherwise Autospec holds or rolls back. Protected-boundary changes remain visible proposals rather than autonomous merges.
 

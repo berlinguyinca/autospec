@@ -1,27 +1,23 @@
 #!/usr/bin/env bash
 # autonomous-self-improvement.sh — deterministic low-hanging-fruit candidate source.
 set -eu
-
 usage() {
     cat <<'EOF'
 Usage:
   autonomous-self-improvement.sh candidates [--repo-root DIR] [review evidence options]
   autonomous-self-improvement.sh apply [--repo-root DIR] [--repo OWNER/REPO] [--apply] [--limit N] [review evidence options]
-  autonomous-self-improvement.sh evaluate --candidate FILE [review evidence options] --rollback-digest DIGEST
-
+  autonomous-self-improvement.sh evaluate --candidate FILE --experiment-proof FILE [--rollback-proof FILE] [review evidence options] --rollback-digest DIGEST
+  autonomous-self-improvement.sh advance [--repo-root DIR] [review evidence options]
 GitHub writes require both --apply and AUTOSPEC_SELF_IMPROVEMENT_APPLY=1.
 EOF
 }
-
 die() {
     printf 'autonomous-self-improvement: %s\n' "$*" >&2
     exit 2
 }
-
 cmd="${1:-}"
 [ -n "$cmd" ] || { usage; exit 2; }
 shift
-
 repo_root="."
 repo=""
 apply_flag=0
@@ -32,6 +28,9 @@ learning_ledger=""
 lifecycle_ledger=""
 candidate=""
 rollback_digest=""
+experiment_proof=""
+rollback_proof=""
+evidence_dir=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --repo-root) repo_root="${2:-}"; shift 2 ;;
@@ -44,11 +43,13 @@ while [ "$#" -gt 0 ]; do
         --lifecycle-ledger) lifecycle_ledger="${2:-}"; shift 2 ;;
         --candidate) candidate="${2:-}"; shift 2 ;;
         --rollback-digest) rollback_digest="${2:-}"; shift 2 ;;
+        --experiment-proof) experiment_proof="${2:-}"; shift 2 ;;
+        --rollback-proof) rollback_proof="${2:-}"; shift 2 ;;
+        --evidence-dir) evidence_dir="${2:-}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown arg: $1" ;;
     esac
 done
-
 [ -d "$repo_root" ] || die "--repo-root does not exist: $repo_root"
 case "$limit" in *[!0-9]*|'') limit=5 ;; esac
 [ "$limit" -gt 0 ] || limit=5
@@ -56,11 +57,10 @@ review_outcomes="${review_outcomes:-$repo_root/.autospec/review-outcomes.jsonl}"
 gaps="${gaps:-$repo_root/.autospec/gaps.json}"
 learning_ledger="${learning_ledger:-$repo_root/.autospec/review-learning.jsonl}"
 lifecycle_ledger="${lifecycle_ledger:-$repo_root/.autospec/review-policy-lifecycle.jsonl}"
-
+evidence_dir="${evidence_dir:-$repo_root/.autospec/self-improvement-evidence}"
 candidate_file() {
     mktemp -t autospec-self-improvement.XXXXXX
 }
-
 emit_candidates() {
     python3 - "$repo_root" "$review_outcomes" "$gaps" "$learning_ledger" "$lifecycle_ledger" <<'PY'
 import hashlib
@@ -69,13 +69,11 @@ import re
 import shlex
 import sys
 from pathlib import Path
-
 root = Path(sys.argv[1]).resolve()
 outcomes_path = Path(sys.argv[2])
 gaps_path = Path(sys.argv[3])
 learning_path = Path(sys.argv[4])
 lifecycle_path = Path(sys.argv[5])
-
 QUESTION_TEXTS = [
     "Which invariant failed after review admission?",
     "Which producer/consumer boundary was omitted?",
@@ -86,20 +84,14 @@ QUESTION_TEXTS = [
     "What sample and metric would justify promotion?",
     "What exact rollback restores the prior policy?",
 ]
-
-
 def digest(value):
     payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(payload).hexdigest()
-
-
 def read_json(path, default):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
-
-
 def read_jsonl(path):
     rows = []
     try:
@@ -114,14 +106,10 @@ def read_jsonl(path):
         except json.JSONDecodeError:
             continue
     return rows
-
-
 def append_jsonl(path, row):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, sort_keys=True) + "\n")
-
-
 def decorate(row):
     files = list(dict.fromkeys(row.get("files") or ["scripts/autonomous-self-improvement.sh"]))[:3]
     evidence = row.get("evidence") or "repository-local deterministic signal"
@@ -153,16 +141,10 @@ def decorate(row):
         "questions": [{"question": q, "answer": a} for q, a in zip(QUESTION_TEXTS, answers)],
     })
     return row
-
-
 def emit(row):
     print(json.dumps(decorate(row), sort_keys=True))
-
-
 def rel(path):
     return path.relative_to(root).as_posix()
-
-
 commands_dir = root / "crates" / "autospec-cli" / "src" / "commands"
 if commands_dir.is_dir():
     for path in sorted(commands_dir.glob("*.rs")):
@@ -184,7 +166,6 @@ if commands_dir.is_dir():
                 "files": [rel(path), "docs/cli-reference.md"],
                 "evidence": f"{rel(path)} calls not_implemented",
             })
-
 reports = sorted((root / "docs" / "reports").glob("*.md")) if (root / "docs" / "reports").is_dir() else []
 for report in reports:
     text = report.read_text(encoding="utf-8")
@@ -210,7 +191,6 @@ for report in reports:
                 "files": [rel(report)],
                 "evidence": f"{rel(report)} risk bullet",
             })
-
 if not (root / "scripts" / "autospec-run-events.sh").exists():
     emit({
         "id": "missing-run-events",
@@ -225,7 +205,6 @@ if not (root / "scripts" / "autospec-run-events.sh").exists():
         "files": ["scripts/autospec-run-events.sh", "tests/autonomous/test_run_events.bats"],
         "evidence": "run black-box helper absent",
     })
-
 all_outcomes = read_jsonl(outcomes_path)
 superseded = {row.get("supersedes_outcome_digest") for row in all_outcomes
               if row.get("supersedes_outcome_digest")}
@@ -306,84 +285,29 @@ for outcome in outcomes:
         print(json.dumps(candidate, sort_keys=True))
 PY
 }
-
-EVALUATE_PY="$(cat <<'PY'
-import json
-import sys
-from pathlib import Path
-candidate_path, outcomes_path, ledger_path = map(Path, sys.argv[1:4])
-rollback_digest = sys.argv[4]
-candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
-def parse(line):
-    try:
-        row = json.loads(line)
-        return row if isinstance(row, dict) else None
-    except json.JSONDecodeError:
-        return None
-def rows(path):
-    try:
-        return [row for line in path.read_text(encoding="utf-8").splitlines()
-                if (row := parse(line)) is not None]
-    except OSError:
-        return []
-def append(row):
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    with ledger_path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(row, sort_keys=True) + "\n")
-key = candidate["dedupe_key"]
-lifecycle = rows(ledger_path)
-for state in ("shadow", "canary"):
-    if not any(row.get("dedupe_key") == key and row.get("state") == state for row in lifecycle):
-        append({"dedupe_key": key, "state": state})
-all_outcomes = rows(outcomes_path)
-superseded = {row.get("supersedes_outcome_digest") for row in all_outcomes
-              if row.get("supersedes_outcome_digest")}
-required = ("pr", "commit", "review_receipt_digest", "reviewer_harness",
-            "reviewer_reasoning", "provider_diversified", "review_risk")
-outcomes = [row for row in all_outcomes
-            if row.get("outcome_digest") not in superseded and
-            row.get("experiment_dedupe_key") == key and
-            all(row.get(field) is not None for field in required)]
-samples = len(outcomes)
-high = sum(int(row.get("escaped_high_severity", 0) or 0) for row in outcomes)
-total_rate = (sum(int(row.get("escaped_total", 0) or 0) for row in outcomes) / samples) if samples else 0
-cost = (sum(float(row.get("review_cost", 0) or 0) for row in outcomes) / samples) if samples else 0
-provider_diverse = bool(outcomes) and all(row.get("provider_diversified") is True for row in outcomes)
-before = candidate.get("before_after", {}).get("before", {})
-total_limit = float(before.get("escaped_total_rate", 0) or 0)
-cost_limit = float(before.get("cost_per_reviewed_pr", 0) or 0) * (1 + float(candidate.get("max_cost_regression", 0) or 0))
-expected_rollback = candidate.get("rollback", {}).get("prior_policy_digest", "")
-event = {"dedupe_key": key, "samples": samples}
-if candidate.get("change_class") == "weakening":
-    event.update(state="held", reason="weakening_report_only")
-elif high > 0 or total_rate > total_limit or (samples and cost > cost_limit):
-    event.update(state="rolled_back", reason="canary_regression",
-                 rollback=candidate.get("rollback", {}))
-elif samples < int(candidate.get("sample_floor", 20)):
-    event.update(state="held", reason="sample_floor")
-elif not provider_diverse:
-    event.update(state="held", reason="provider_diverse_review_required")
-elif not expected_rollback or rollback_digest != expected_rollback:
-    event.update(state="held", reason="rollback_digest_required")
-else:
-    event.update(state="promoted", provider_diverse_review=True,
-                 successful_outcome_digest=outcomes[-1].get("outcome_digest"))
-append(event)
-print(json.dumps(event, sort_keys=True))
-PY
-)"
-
 evaluate_candidate() {
     [ -f "$candidate" ] || die "--candidate file is required for evaluate"
-    python3 -c "$EVALUATE_PY" "$candidate" "$review_outcomes" "$lifecycle_ledger" "$rollback_digest"
+    args=(evaluate --repo-root "$repo_root" --candidate "$candidate" \
+        --review-outcomes "$review_outcomes" --lifecycle-ledger "$lifecycle_ledger" \
+        --rollback-digest "$rollback_digest")
+    [ -n "$experiment_proof" ] && args+=(--experiment-proof "$experiment_proof")
+    [ -n "$rollback_proof" ] && args+=(--rollback-proof "$rollback_proof")
+    python3 "$(dirname "${BASH_SOURCE[0]}")/autonomous-self-improvement-evaluate" "${args[@]}"
 }
-
+advance_candidates() {
+    python3 "$(dirname "${BASH_SOURCE[0]}")/autonomous-self-improvement-evaluate" advance \
+        --repo-root "$repo_root" --review-outcomes "$review_outcomes" \
+        --lifecycle-ledger "$lifecycle_ledger" --evidence-dir "$evidence_dir"
+}
 case "$cmd" in
     candidates)
         emit_candidates
         ;;
     evaluate)
         evaluate_candidate
+        ;;
+    advance)
+        advance_candidates
         ;;
     apply)
         tmp="$(candidate_file)"

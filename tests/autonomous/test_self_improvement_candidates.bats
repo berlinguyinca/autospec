@@ -53,6 +53,13 @@ MD
       (.questions | length == 8))' >/dev/null
 }
 
+@test "self-improvement evaluator is available to advance the lifecycle" {
+    run python3 "$REPO_ROOT/scripts/autonomous-self-improvement-evaluate" --help
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"evaluate"* ]]
+    [[ "$output" == *"advance"* ]]
+}
+
 @test "apply is report-only unless both --apply and env opt-in are present" {
     seed_repo_gaps
     cat > "$TMP/bin/gh" <<'SH'
