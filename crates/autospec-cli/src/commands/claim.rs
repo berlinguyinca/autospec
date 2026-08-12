@@ -364,18 +364,13 @@ fn resolve_claim_remote(repo: &str) -> Result<String, CommandFailure> {
             ));
         }
     }
-    let output = Command::new("gh")
-        .args(["repo", "view", repo, "--json", "url", "--jq", ".url"])
-        .output()
-        .map_err(|error| {
-            CommandFailure::transient(format!("resolve authenticated claim repository: {error}"))
-        })?;
-    if !output.status.success() {
-        return Err(CommandFailure::transient(format!(
-            "resolve authenticated claim repository {repo}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        )));
-    }
+    // Idempotent read: retry it. A single failed handshake here used to kill the
+    // conductor before it could claim anything, and the dead worker's claim then
+    // wedged the issue.
+    let output = read_gh_with_retry(
+        &["repo", "view", repo, "--json", "url", "--jq", ".url"],
+        &format!("resolve authenticated claim repository {repo}"),
+    )?;
     validated_claim_remote(repo, String::from_utf8_lossy(&output.stdout).trim())
 }
 
@@ -4143,15 +4138,8 @@ fn create_comment(repo: &str, issue: u64, body: &str) -> Result<(), CommandFailu
 }
 
 fn run_gh_with_retry(arguments: &[String], action: &str) -> Result<(), CommandFailure> {
-    let attempts = std::env::var("AUTOSPEC_GH_API_RETRIES")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(3);
-    let sleep_ms = std::env::var("AUTOSPEC_CLAIM_RETRY_SLEEP_MS")
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(1_000);
+    let attempts = claim_retry_attempts();
+    let sleep_ms = claim_retry_sleep_ms();
     for attempt in 0..attempts {
         let output = Command::new("gh")
             .args(arguments)
@@ -7472,6 +7460,9 @@ fn print_state_help() {
 }
 
 mod lease;
-use lease::{conductor_claim_owner_holds_lease, server_lease_is_fresh, server_lease_is_stale};
+use lease::{
+    claim_retry_attempts, claim_retry_sleep_ms, conductor_claim_owner_holds_lease,
+    read_gh_with_retry, server_lease_is_fresh, server_lease_is_stale,
+};
 #[cfg(test)]
 mod tests;
