@@ -93,6 +93,14 @@ EOF
   echo "$output" | jq -e '.attributed_reviewed_prs == 4 and .escaped_high_rate == 0 and .escaped_total_rate == 0.25' >/dev/null
 }
 
+@test "duplicate retries for one PR contribute one effective observation" {
+  write_outcomes
+  head -n 1 "$TMP/outcomes.jsonl" >> "$TMP/outcomes.jsonl"
+  run bash "$SCRIPT" --outcomes "$TMP/outcomes.jsonl" --json
+  [ "$status" -eq 0 ]
+  echo "$output" | jq -e '.attributed_reviewed_prs == 4 and .escaped_high_rate == 0.25 and .cost_per_reviewed_pr == 100' >/dev/null
+}
+
 @test "unattributed rows remain explicit and never count as clean reviewed samples" {
   printf '%s\n' '{"schema":1,"outcome_digest":"sha256:u1","outcome":"unattributed","pr":null,"escaped_high_severity":0,"escaped_total":0,"phase55_run":"run-u"}' > "$TMP/outcomes.jsonl"
   run bash "$SCRIPT" --outcomes "$TMP/outcomes.jsonl" --json

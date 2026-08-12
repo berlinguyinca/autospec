@@ -225,6 +225,7 @@ is inert. **Rollback** is one line: `policy: off`.
 The sweep calls one orchestrator, `advisor-sweep-tick.sh`, which:
 
 1. **Observes** — `advisor-observe.sh` derives the batch's LGTM-first-pass rate
+   from legacy telemetry or one effective, supersession-aware outcome per reviewed PR
    and mean cost/issue from autospec's main telemetry JSONL, using the *same*
    formulas as `gen-telemetry-dashboard.sh` (LGTM-first-pass = reviewer issues
    whose first dispatch had `cache_read > 0`; cost/issue = mean input+output

@@ -51,7 +51,7 @@ if [ -n "$OUTCOMES" ]; then
         (.reviewer_reasoning | type == "string" and length > 0) and
         (.provider_diversified | type == "boolean") and
         (.review_risk | type == "string" and length > 0)
-      ))) as $attributed
+      )) | group_by(.pr) | map(last)) as $attributed
     | ($attributed | length) as $n
     | {
         escaped_high_rate: (if $n > 0 then (($attributed | map(.escaped_high_severity // 0) | add // 0) / $n) else 0 end),
