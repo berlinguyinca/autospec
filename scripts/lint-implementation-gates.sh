@@ -276,15 +276,23 @@ set -e
 delegate_blocking="$(printf '%s\n' "$DELEGATE_OUT" \
   | grep -E '^(ERROR:)?[A-Z][A-Z_]+:' \
   | grep -cv '^INFO:' || true)"
+#
+# Compared as `rc <= printed`, not `rc == printed`, and the asymmetry is the whole point.
+# A crash can only TRUNCATE output, never manufacture extra finding lines, so a delegate
+# reporting fewer findings than it printed cannot be a crash. It is instead the delegate
+# undercounting itself: `check_function_loc` and the nesting-depth rule emit inside a
+# `... | while read` pipeline, so those FINDINGS_COUNT increments happen in a subshell and
+# are lost. Under AUTOSPEC_COMPLEXITY_ENFORCE=1 a file that is both too long and holds one
+# long function prints two blocking findings and exits 1 — an equality test called that a
+# crashed gate and refused every such commit. Tracked separately; this wrapper must not
+# refuse a run whose findings it is holding.
 delegate_rc_matches=0
 if [ "$DELEGATE_RC" -eq 0 ] && [ "$delegate_blocking" -eq 0 ]; then
   delegate_rc_matches=1
-elif [ "$DELEGATE_RC" -eq 64 ] && [ "$delegate_blocking" -ge 64 ]; then
+elif [ "$DELEGATE_RC" -eq 200 ] && [ "$delegate_blocking" -ge 1 ]; then
   delegate_rc_matches=1
-elif [ "$DELEGATE_RC" -gt 0 ] && [ "$DELEGATE_RC" -lt 64 ] \
-    && [ "$DELEGATE_RC" -eq "$delegate_blocking" ]; then
-  delegate_rc_matches=1
-elif [ "$DELEGATE_RC" -eq 200 ] && [ "$delegate_blocking" -ge 200 ]; then
+elif [ "$DELEGATE_RC" -ge 1 ] && [ "$DELEGATE_RC" -le 64 ] \
+    && [ "$delegate_blocking" -ge "$DELEGATE_RC" ]; then
   delegate_rc_matches=1
 fi
 if [ "$delegate_rc_matches" -ne 1 ]; then
