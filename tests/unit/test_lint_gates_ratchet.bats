@@ -171,6 +171,15 @@ open('big.py', 'w').writelines(lines)
     printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 139'
 }
 
+@test "policy: a low delegate error code without findings is not reported as clean" {
+    write_lines small.py 20
+    git add small.py
+    run bash "$GATES" --staged --staged-base definitely-not-a-commit
+    [ "$status" -eq 2 ]
+    printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 1'
+    printf '%s\n' "$output" | grep -q 'invalid staged base commit'
+}
+
 @test "ratchet: an oversized file held at the same length is allowed" {
     write_lines big.py 900
     git add big.py

@@ -273,7 +273,21 @@ set -e
 # earlier draft of the advisory routing segfaulted the delegate, and this wrapper
 # reported a clean gate for every rule at once. Same failure shape as the mawk panic
 # that made lint-ui.sh report every file clean, so it fails loud here too.
-if [ "$DELEGATE_RC" -gt 64 ] && [ "$DELEGATE_RC" -ne 200 ]; then
+delegate_blocking="$(printf '%s\n' "$DELEGATE_OUT" \
+  | grep -E '^(ERROR:)?[A-Z][A-Z_]+:' \
+  | grep -cv '^INFO:' || true)"
+delegate_rc_matches=0
+if [ "$DELEGATE_RC" -eq 0 ] && [ "$delegate_blocking" -eq 0 ]; then
+  delegate_rc_matches=1
+elif [ "$DELEGATE_RC" -eq 64 ] && [ "$delegate_blocking" -ge 64 ]; then
+  delegate_rc_matches=1
+elif [ "$DELEGATE_RC" -gt 0 ] && [ "$DELEGATE_RC" -lt 64 ] \
+    && [ "$DELEGATE_RC" -eq "$delegate_blocking" ]; then
+  delegate_rc_matches=1
+elif [ "$DELEGATE_RC" -eq 200 ] && [ "$delegate_blocking" -ge 200 ]; then
+  delegate_rc_matches=1
+fi
+if [ "$delegate_rc_matches" -ne 1 ]; then
   printf 'LINT_DELEGATE_FAILED:%s:-: exited %s without completing — gate result unknown, not clean\n' \
     "$DELEGATE" "$DELEGATE_RC"
   [ -n "$DELEGATE_OUT" ] && printf '%s\n' "$DELEGATE_OUT" >&2
