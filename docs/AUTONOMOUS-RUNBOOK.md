@@ -31,10 +31,18 @@ normal operation:
 1. Autospec loads the installed four-column harness alias table from
    `AUTOSPEC_HARNESS_RUNTIME_ALIASES`, `AUTOSPEC_CONFIG_DIR`, the user Autospec
    config directory, or the repository fallback.
-2. `AUTOSPEC_HANDOFF_DISPATCHER_KIND` and the active Codex, Claude, or OpenCode
-   session marker select the reviewer. With no marker, Autospec chooses the
-   first installed alias whose executable is available on `PATH`.
-3. The reviewer receives the issue contract and exact commit to review.
+2. Autospec classifies the review from changed paths, issue labels, logical
+   component count, producer/consumer boundaries, and critical authority
+   boundaries. Non-normal work uses high reviewer reasoning and requires an
+   integration smoke that invokes a repository test under `tests/integration`,
+   `tests/smoke`, or `tests/e2e`. High and integration work prefer a provider
+   other than the implementer's, while critical work fails closed unless an
+   alternate provider is known and available. OpenCode is a harness, not proof
+   of a distinct provider, so it never establishes diversity by itself.
+3. Normal work retains the implementer's provider when it is available. A
+   permitted same-provider fallback is recorded explicitly rather than being
+   reported as provider diversity.
+4. The reviewer receives the issue contract and exact commit to review.
 
 The resolved reviewer executable must be external to both the source repository
 and its issue worktree. Automatic reviewers run with a sanitized allowlist
@@ -52,34 +60,46 @@ work, but automatic review does not use it.
 
 Inherited `PATH`, XDG roots, `CODEX_HOME`, and `CLAUDE_CONFIG_DIR` are
 canonicalized before launch and fail closed if they resolve inside either
-reviewed repository. The external normalizer invokes `env`, `wc`, and `cat`
-through canonical absolute system paths, so worktree or host `PATH` shadowing
-cannot change its verdict checks.
+reviewed repository. The external normalizer invokes `env`, `wc`, `truncate`,
+and `python3` through canonical absolute system paths, so worktree or host
+`PATH` shadowing cannot change its verdict checks.
 
 Review command output, error output, and any
 harness-specific result are stored under the private executor state tree,
 outside reviewed source. An external private normalizer captures normal harness
 diagnostics without treating transport traces as findings. Codex uses its final
 message artifact as the verdict; Claude and OpenCode use their captured text
-output. The normalizer succeeds only when that harness-specific verdict is
-exactly `LGTM`, then emits only `LGTM` on stdout and nothing on stderr to the
-strict review gate. The receipt binds the normalizer, captured diagnostics, and
-verdict so crash recovery cannot substitute any of them. The harness inherits a
-1 MiB file-size limit, and reaching that limit in stdout, stderr, or the Codex
-result fails review rather than accepting truncated evidence. The verdict file
-is cleared before every launch so an interrupted attempt cannot authorize its
-retry. A durable receipt is validated before a restarted executor resolves or
-launches another harness. Local, git, GitHub, or other remote mutation during
-review fails the gate.
+output. Every harness must return exactly one closed-schema JSON object with
+schema `1`, the exact reviewed commit, a verdict, nonempty examined surfaces and
+tests, exact policy-bound integration citations, and blocking findings. The
+integration citation array must exactly match the sealed requirements digest,
+evidence digest, and command-record paths supplied to the reviewer. Only an
+exact-commit `lgtm` with zero blocking findings authorizes the review.
+
+The trusted normalizer validates that structured JSON before emitting the
+legacy exact `LGTM` stdout consumed by the state machine. Invalid JSON, unknown
+fields, commit drift, missing required evidence, blocking findings, stderr,
+nonzero exit, artifact replacement, or truncation all fail closed. The harness
+inherits a 1 MiB file-size limit, and reaching that limit in stdout, stderr, or
+the Codex result fails review rather than accepting truncated evidence. The
+verdict file is cleared before every launch so an interrupted attempt cannot
+authorize its retry.
+
+Schema-5 receipts bind the exact commit, the full resolved review requirements,
+provider selection, policy digest, changed-path component and producer/consumer
+inventory, immutable integration-record citations, structured semantic verdict
+and digest, normalizer, transport diagnostics, and raw result artifacts.
+Recovery rereads and revalidates each bound artifact before restoring
+`ReviewPassed`. Legacy schema-2 through schema-4 receipts are archived, the invocation returns to
+`CiPassed`, and review runs again under the current policy. Local, git, GitHub,
+or other remote mutation during review fails the gate.
 
 If no configured alias is usable, the executor reports
 `executor_harness_unknown` before review can mutate the pull request.
 
 ### Explicit override
 
-`AUTOSPEC_EXECUTOR_REVIEW_COMMAND` remains the highest-priority operator
-override. When set, Autospec validates and runs that single bounded direct
-command instead of reading or resolving the harness alias table. The same exit,
-mutation, and result-receipt checks still apply. Because an explicit command is
-already the operator-defined trust boundary, its stdout must be exactly `LGTM`
-and its stderr must remain empty; it does not receive automatic normalization.
+`AUTOSPEC_EXECUTOR_REVIEW_COMMAND` cannot authorize production autonomous
+review. When it is present, the executor fails closed and requires a configured
+structured harness alias so a free-form command cannot bypass semantic evidence
+or schema-5 receipt binding.
