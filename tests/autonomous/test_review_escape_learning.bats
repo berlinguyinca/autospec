@@ -66,9 +66,9 @@ write_clean_outcomes() {
   seed_high_escape
   run_candidates
   [ "$status" -eq 0 ]
-  printf '%s\n' "$output" | grep -q '"frequency": 2'
   run_candidates
   [ "$status" -eq 0 ]
+  printf '%s\n' "$output" | grep -q '"frequency": 2'
   [ "$(printf '%s\n' "$output" | jq -s 'map(select(.workstream == "review-policy")) | length')" -eq 1 ]
   printf '%s\n' "$output" | jq -e 'select(.workstream == "review-policy" and .frequency == 2)' >/dev/null
   jq -s -e 'map(select(.state == "candidate")) | length == 1 and .[0].frequency == 1' "$LIFECYCLE" >/dev/null
