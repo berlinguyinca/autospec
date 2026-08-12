@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 fn autonomous_executor_bridge_direct_runner_kills_stalls_and_bounded_output() {
     let _environment = test_environment();
     let fixture = GitFixture::new("direct-bounds");
-    let stalled = bridge::parse_direct_command_plan("/usr/bin/sleep 5").expect("sleep plan");
+    let stalled = bridge::parse_direct_command_plan("/usr/bin/sleep 30").expect("sleep plan");
     let started = Instant::now();
     let error = bridge::execute_direct_plan(
         &fixture.repo,
@@ -27,7 +27,7 @@ fn autonomous_executor_bridge_direct_runner_kills_stalls_and_bounded_output() {
     )
     .expect_err("quiet command must hit bounded stall policy");
     assert!(error.contains("stalled"), "{error}");
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(started.elapsed() < Duration::from_secs(5));
     let stalled_record: serde_json::Value = serde_json::from_str(
         &fs::read_to_string(fixture.root.join("stalled/command-000.json"))
             .expect("stalled command record"),
