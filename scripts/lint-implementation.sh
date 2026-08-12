@@ -1645,19 +1645,19 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         fi
     } > "$TMP_FINDINGS" 2>&1
 
-    # Reformat each finding as a directive line
+    # Two tiers: blocking is a "Fix", advisory INFO a "Consider" — dropping INFO left the agent
+    # neither blocked nor told (Fix 8, #3079). One line per rule and tier: the directive text is
+    # per-rule, so eleven long functions would otherwise repeat one sentence eleven times.
+    _seen_directives=""
     while IFS= read -r finding; do
-        # Extract RULE_ID from "RULE_ID:path:line: desc" format
-        rule_id="$(printf '%s' "$finding" | cut -d: -f1)"
-        # Skip INFO lines
-        if [ "$rule_id" = "INFO" ]; then
-            continue
-        fi
-        if [ "$rule_id" = "ERROR" ]; then
-            rule_id="$(printf '%s' "$finding" | cut -d: -f2)"
-        fi
-        directive="$(rule_directive "$rule_id")"
-        printf 'Fix %s: %s\n' "$rule_id" "$directive"
+        rule_id="${finding%%:*}"; verb="Fix"       # "RULE:path:line: desc", INFO:/ERROR: first
+        case "$rule_id" in
+            INFO)  verb="Consider"; _rest="${finding#*:}"; rule_id="${_rest%%:*}" ;;
+            ERROR) _rest="${finding#*:}"; rule_id="${_rest%%:*}" ;;
+        esac
+        case "$_seen_directives" in *" ${verb}:${rule_id} "*) continue ;; esac
+        _seen_directives="${_seen_directives} ${verb}:${rule_id} "
+        printf '%s %s: %s\n' "$verb" "$rule_id" "$(rule_directive "$rule_id")"
     done < "$TMP_FINDINGS"
 else
     detect_pr_size
