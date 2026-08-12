@@ -217,6 +217,34 @@ they have a skill/shared canonical source.
 | `AUTOSPEC_HEAL_MAX_ROUNDS` | (skill default) | autospec-qa self-heal round cap. |
 | `AUTOSPEC_RESUME_MAX_ATTEMPTS` | `3` | Consecutive crash-resume attempts before giving up. |
 
+## Autonomous review-policy learning
+
+`scripts/autonomous-self-improvement.sh candidates` reads attributed review
+outcomes and Phase 5.5 gaps from `.autospec/review-outcomes.jsonl` and
+`.autospec/gaps.json` by default. The following CLI overrides are intended for
+isolated runners and tests:
+
+| Option | Default | Effect |
+|---|---|---|
+| `--review-outcomes PATH` | `.autospec/review-outcomes.jsonl` | Append-only attributed review observations and canary outcomes. |
+| `--gaps PATH` | `.autospec/gaps.json` | Attributed escaped-defect evidence clustered into candidates. |
+| `--learning-ledger PATH` | `.autospec/review-learning.jsonl` | Append-only repetition/frequency observations. |
+| `--lifecycle-ledger PATH` | `.autospec/review-policy-lifecycle.jsonl` | Candidate, shadow, canary, promoted, held, and rolled-back events. |
+
+`evaluate --candidate FILE --rollback-digest DIGEST` advances one experiment.
+Promotion requires the declared sample floor, zero high-severity escapes,
+non-regressing total escapes and cost, provider-diverse review, and the exact
+prior-policy rollback digest. Validation evidence selects the closed
+`git-diff-check` recipe; proof JSON never supplies executable argv. The evaluator
+reproduces that recipe against the named commit, derives protected-boundary
+changes from the commit diff, and tests the rollback patch against an archive of
+that exact commit. `AUTOSPEC_SELF_IMPROVEMENT_APPLY=1` still requires
+the explicit `apply --apply` pair before strengthening or neutral candidates
+are filed with `needs-classify` and `origin:self`; weakening stays report-only.
+Superseded outcomes and rows missing complete PR, commit, receipt, reviewer,
+reasoning, diversity, or risk attribution are excluded from both discovery and
+promotion samples.
+
 ## Model tiers & dispatch
 | Var | Default | Effect |
 |---|---|---|
