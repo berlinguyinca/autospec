@@ -317,6 +317,8 @@ repository commit whose inverse patch matches the experimental change.
 `autonomous-self-improvement.sh evaluate` accepts `--experiment-proof` and
 optional `--rollback-proof`; `advance` discovers those artifacts through
 `--evidence-dir` (default `.autospec/self-improvement-evidence`).
+Tier 3 passes the canonical repo-scoped gaps and outcomes paths to both `advance`
+and `apply`, so evaluation precedes new candidate generation on every dry-queue cycle.
 
 Otherwise Autospec holds or rolls back. Protected-boundary changes remain visible proposals rather than autonomous merges.
 
