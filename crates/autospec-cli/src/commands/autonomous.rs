@@ -4543,7 +4543,7 @@ fn load_foreground_state(
                     path.display()
                 ));
             }
-            Ok(state)
+            blocked_cycle::abandon_exhausted_retries(path, state)
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             ConductorState::new(layout.repo.clone(), scope, 3)

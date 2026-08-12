@@ -13,6 +13,55 @@ use super::{
     NO_READY_ISSUE_PAUSE, OWNERSHIP_RETIREMENT_PAUSE, TERMINAL_RETIREMENT_PAUSE,
 };
 
+/// The pause a conductor cannot resume from, and the only one that poisons startup.
+const RETRY_LIMIT_EXHAUSTED_PAUSE: &str = "retry_limit_exhausted";
+
+/// The governor key that pause is charged under.
+///
+/// It must differ from the pause reason: the core reserves `retry_limit_exhausted`
+/// to dispatch outcomes, and `validate_named_outcome_reason` rejects it, so sealing
+/// the backlog under that name produces an invalid `AllBlocked` outcome.
+const RETRY_EXHAUSTION_GOVERNOR_KEY: &str = "retry_exhaustion_recovered";
+
+/// Retire a persisted pause the conductor can never resume.
+///
+/// `record_retryable_dispatch` clears `resume_phase` when the retry limit is
+/// exhausted, so `resume()` fails with "paused conductor state requires explicit
+/// recovery". Persisted to disk, that state poisons every subsequent start: the
+/// process loads it, dies, and a supervisor restarts it into the identical failure.
+/// Observed live at 158 restarts, unrecoverable without deleting the file by hand.
+///
+/// `AbandonExhausted` exists for exactly this state -- `can_abandon_exhausted`
+/// admits it and it needs no resume phase. Charging the governor first keeps the
+/// retries bounded, so a genuinely stuck issue still seals rather than cycling.
+///
+/// Only this pause reason is touched. Terminal and ownership retirement also clear
+/// `resume_phase`, but they have their own recovery that settles claim receipts,
+/// and preempting it would strand those receipts.
+pub(super) fn abandon_exhausted_retries(
+    path: &std::path::Path,
+    state: ConductorState,
+) -> Result<ConductorState, String> {
+    if state.phase() != ConductorPhase::Paused
+        || state.pause_reason() != Some(RETRY_LIMIT_EXHAUSTED_PAUSE)
+    {
+        return Ok(state);
+    }
+    let state = match state.selected_issue() {
+        Some(issue) => {
+            state.record_blocked_backlog_cycle(RETRY_LIMIT_EXHAUSTED_PAUSE, vec![issue])?
+        }
+        None => state,
+    };
+    let state = if state.phase() == ConductorPhase::AllBlocked {
+        state
+    } else {
+        state.transition(ConductorEvent::AbandonExhausted)?
+    };
+    persist_foreground_state(path, &state)?;
+    Ok(state)
+}
+
 /// The governor key a lost claim is charged to.
 ///
 /// Deliberately coarse. The deferral JSON names the observed owner, which changes
@@ -169,6 +218,21 @@ fn pause_governor_reason(state: &ConductorState) -> Option<String> {
         .map(str::to_string)
         .or(outcome_reason)
         .filter(|reason| !reason.trim().is_empty())
+        .map(governor_safe_reason)
+}
+
+/// Keep a governor key out of the reason space the core reserves.
+///
+/// `validate_named_outcome_reason` rejects `retry_limit_exhausted`, which is
+/// recorded only from a dispatch outcome. Charging the backlog under that name
+/// looks harmless until the count reaches `BLOCKED_BACKLOG_THRESHOLD`: sealing
+/// then builds an `AllBlocked` outcome with that reason, validation fails, and
+/// the persisted state seals and dies identically on every later start.
+fn governor_safe_reason(reason: String) -> String {
+    if reason == RETRY_LIMIT_EXHAUSTED_PAUSE {
+        return RETRY_EXHAUSTION_GOVERNOR_KEY.to_string();
+    }
+    reason
 }
 
 /// Keep a continuous conductor alive across any pause that is not a deliberate stop.

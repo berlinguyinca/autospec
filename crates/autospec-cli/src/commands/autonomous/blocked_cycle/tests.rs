@@ -1,6 +1,6 @@
 // Tests for the blocked-cycle rules.
 //
-// Split out of blocked_cycle.rs so that file stays inside the size ratchet.
+// Split out of blocked_cycle.rs to keep that file inside the size ratchet.
 
 use super::*;
 
@@ -282,6 +282,57 @@ fn an_unloopable_stop_is_reported_rather_than_read_as_a_finish() {
 
     assert!(reason.contains("verifier_offline"), "reason was: {reason}");
     assert!(reason.contains("51"), "reason was: {reason}");
+}
+
+/// Sealing the backlog under a reserved reason builds an invalid outcome, which
+/// poisons the persisted state: every later start seals again and dies the same way.
+#[test]
+fn a_retry_exhausted_backlog_seals_without_an_invalid_outcome() {
+    let mut state = claimed_foreground_state(51);
+    for _ in 0..4 {
+        state = retried_once(state);
+    }
+    let reason = pause_governor_reason(&state).expect("a governor key");
+    assert_ne!(reason, RETRY_LIMIT_EXHAUSTED_PAUSE);
+
+    let mut sealing = state;
+    for _ in 0..BLOCKED_BACKLOG_THRESHOLD {
+        sealing = sealing
+            .record_blocked_backlog_cycle(reason.clone(), vec![51])
+            .expect("the governor must seal without an invalid outcome");
+    }
+
+    assert_eq!(sealing.phase(), ConductorPhase::AllBlocked);
+}
+
+/// A retry-exhausted pause has no resume phase, so it used to poison every start.
+#[test]
+fn a_persisted_retry_exhausted_pause_is_retired_instead_of_blocking_startup() {
+    let mut state = claimed_foreground_state(51);
+    for _ in 0..4 {
+        state = retried_once(state);
+    }
+    assert_eq!(state.pause_reason(), Some("retry_limit_exhausted"));
+    assert!(
+        state.clone().transition(ConductorEvent::Resume).is_err(),
+        "this state is precisely the one resume() cannot recover"
+    );
+    let path = std::env::temp_dir().join(format!(
+        "autospec-exhausted-pause-{}.json",
+        std::process::id()
+    ));
+
+    let state = abandon_exhausted_retries(&path, state).expect("retire the exhausted pause");
+
+    assert_eq!(state.phase(), ConductorPhase::Scan);
+    // The governor key must differ from the pause reason: the core reserves
+    // `retry_limit_exhausted` for dispatch outcomes and rejects it as an outcome
+    // reason, so sealing under that name yields an invalid AllBlocked outcome.
+    assert_ne!(RETRY_EXHAUSTION_GOVERNOR_KEY, RETRY_LIMIT_EXHAUSTED_PAUSE);
+    assert_eq!(state.selected_issue(), None);
+    assert_eq!(state.blocked_backlog_issues(), [51]);
+    assert!(path.exists(), "the retired state must be persisted");
+    let _ = std::fs::remove_file(path);
 }
 
 /// A claim is lost while the state sits in `Claim`, which cannot retire directly.
