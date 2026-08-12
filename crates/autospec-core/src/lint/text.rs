@@ -127,3 +127,63 @@ pub(super) fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
 fn is_word_character(character: char) -> bool {
     character.is_alphanumeric() || character == '_'
 }
+
+/// Does `text` call the dangerous builtin, as opposed to merely containing its name?
+///
+/// The SECURITY rule matched a bare substring, so it reported `ast.literal_eval` — the stdlib
+/// parser that accepts literals and rejects every expression form, i.e. the safe alternative
+/// the rule's own directive recommends (#3057). An identifier character immediately before the
+/// name means some other function; anything else, including a dot, means this one, because the
+/// dotted `builtins` form is the dangerous call itself. That is the one way this differs from
+/// the `xit` fix in §1.6 of the gate design doc, which had to exclude the dot to stop reporting
+/// the stdlib exit call.
+///
+/// The needle is assembled rather than written out, so this file does not contain the token it
+/// searches for — SECURITY scans this repo's own sources, and `detect_todo_left` splits its
+/// marker for the same reason.
+pub(super) fn contains_dangerous_eval_call(text: &str) -> bool {
+    const NEEDLE: &str = concat!("eval", "(");
+    text.match_indices(NEEDLE).any(|(index, _)| {
+        !text[..index]
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_')
+    })
+}
+
+#[cfg(test)]
+mod eval_call_tests {
+    use super::contains_dangerous_eval_call as dangerous;
+
+    // Assembled for the same reason the predicate assembles its needle.
+    fn call(prefix: &str) -> String {
+        format!("value = {prefix}{}text)", concat!("eval", "("))
+    }
+
+    #[test]
+    fn a_bare_or_dotted_call_is_dangerous() {
+        assert!(dangerous(&call("")));
+        assert!(dangerous(&call("builtins.")));
+        assert!(dangerous(&call("self.")));
+    }
+
+    #[test]
+    fn an_identifier_ending_in_the_name_is_not() {
+        assert!(!dangerous(&call("literal_")));
+        assert!(!dangerous(&call("ast.literal_")));
+        assert!(!dangerous(&call("my")));
+        assert!(!dangerous(&call("lead_")));
+    }
+
+    #[test]
+    fn the_name_without_a_call_is_not() {
+        assert!(!dangerous("value = eval"));
+        assert!(!dangerous("evaluate(text)"));
+        assert!(!dangerous(""));
+    }
+
+    #[test]
+    fn a_call_at_the_start_of_the_line_is_dangerous() {
+        assert!(dangerous(concat!("eval", "(text)")));
+    }
+}

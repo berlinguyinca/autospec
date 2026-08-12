@@ -1597,7 +1597,7 @@ fn contains_aws_key(text: &str) -> bool {
     })
 }
 fn security_eval(text: &str) -> bool {
-    text.contains("eval(")
+    super::text::contains_dangerous_eval_call(text)
 }
 fn security_exec(text: &str) -> bool {
     text.contains("exec(")
