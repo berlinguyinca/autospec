@@ -141,6 +141,45 @@ open('big.py', 'w').writelines(lines)
     printf '%s\n' "$output" | grep -q 'file is 901 LOC'
 }
 
+@test "policy: by default a grown oversized file is reported without blocking" {
+    write_lines big.py 900
+    git add big.py
+    git commit -q -m "pre-existing oversized file"
+    write_lines big.py 901
+    git add big.py
+    run bash "$GATES" --staged
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q '^INFO:COMPLEXITY:big.py.*file is 901 LOC'
+    # Growth still blocks where merges cannot skip it: .github/workflows/file-size-ratchet.yml
+    # runs the same comparison against the merge base on every pull request.
+    ! printf '%s\n' "$output" | grep -qE '^COMPLEXITY:'
+}
+
+@test "policy: a delegate that crashes is not reported as a clean gate" {
+    write_lines small.py 20
+    git add small.py
+    # A delegate that exits outside its 0..64/200 contract has produced no findings, which
+    # is not the same as having found none. Judging the run by stdout alone turned every
+    # gate off at once when an earlier draft of the advisory routing recursed.
+    printf '#!/usr/bin/env bash\nexit 139\n' > fake-delegate.sh
+    chmod +x fake-delegate.sh
+    mkdir -p fakescripts
+    cp fake-delegate.sh fakescripts/lint-implementation.sh
+    cp "$GATES" fakescripts/lint-implementation-gates.sh
+    run bash fakescripts/lint-implementation-gates.sh --staged
+    [ "$status" -eq 2 ]
+    printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 139'
+}
+
+@test "policy: a low delegate error code without findings is not reported as clean" {
+    write_lines small.py 20
+    git add small.py
+    run bash "$GATES" --staged --staged-base definitely-not-a-commit
+    [ "$status" -eq 2 ]
+    printf '%s\n' "$output" | grep -q '^LINT_DELEGATE_FAILED:.*exited 1'
+    printf '%s\n' "$output" | grep -q 'invalid staged base commit'
+}
+
 @test "ratchet: an oversized file held at the same length is allowed" {
     write_lines big.py 900
     git add big.py
