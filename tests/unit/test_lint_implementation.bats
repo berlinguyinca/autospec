@@ -452,10 +452,10 @@ EOF
 
 # ── COMPLEXITY detector ───────────────────────────────────────────────────────
 
-@test "lint-implementation: bad-complexity.diff exits >=1 and reports COMPLEXITY" {
+@test "lint-implementation: bad-complexity.diff reports COMPLEXITY, advisory by default" {
     run bash "$LINT" --diff-file "$FIX/bad-complexity.diff"
-    [ "$status" -ge 1 ]
-    echo "$output" | grep -q "COMPLEXITY"
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q "^INFO:COMPLEXITY:"
 }
 
 # ── per-RULE_ID emit cap ──────────────────────────────────────────────────────
