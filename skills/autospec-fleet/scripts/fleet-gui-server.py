@@ -30,7 +30,11 @@ MANAGED_KEYS = {"version", "workspace", "default_profile", "parallel_repos", "re
 DEFAULT_SKELETON = {
     "version": 1,
     "workspace": ".autospec-fleet/repos",
-    "default_profile": "qwen3-32b-laptop",
+    # Must name a key that exists in the catalog fleet-config-lint.sh resolves, which
+    # prefers examples/model-profiles.yml over ~/.autospec/model-profiles.yml. #2955
+    # renamed this local profile and every other consumer was updated; this one could
+    # not be, because the gate rejected the file on pre-existing findings (#2961).
+    "default_profile": "qwen3-6-35b-a3b-laptop",
     "parallel_repos": 2,
     "repos": [],
 }
