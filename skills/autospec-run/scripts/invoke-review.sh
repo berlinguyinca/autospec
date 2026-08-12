@@ -160,4 +160,5 @@ fi
 # Non-zero exit from harness: log a warning, never block the run.
 printf 'invoke-review: WARN: /autospec-review exited non-zero on harness=%s\n' "$_KIND" >&2
 printf 'code_health:phase55_broad_review_invocation_failed harness=%s\n' "$_KIND" >&2
+_emit_unavailable "${_KIND}-invocation-failed"
 exit 0
