@@ -13,6 +13,8 @@ SCHEMA = "autospec.security_database.v1"
 REQUIRED_LISTS = (
     "required_sections",
     "evidence",
+    "facts",
+    "assumptions",
     "priority_order",
     "threats",
     "blocking_prerequisites",
@@ -103,6 +105,10 @@ def validate(data: Any) -> Findings:
             findings.add("PROFILE_SCHEMA_INVALID", f"{name} must be a list")
 
     sections = [value for value in data.get("required_sections", []) if isinstance(value, str)]
+    if not data.get("priority_order") or any(
+        not isinstance(value, str) or not value for value in data.get("priority_order", [])
+    ):
+        findings.add("PROFILE_SCHEMA_INVALID", "priority_order must contain non-empty strings")
     evidence_rows = mapping_rows(data, "evidence", findings)
     prerequisite_rows = mapping_rows(data, "blocking_prerequisites", findings)
     control_rows = mapping_rows(data, "controls", findings)
@@ -156,12 +162,18 @@ def validate(data: Any) -> Findings:
         if threat_id not in threats:
             findings.add("PROFILE_SCHEMA_INVALID", f"control {control_id} references unknown threat {threat_id}")
 
+    for index, risk in enumerate(mapping_rows(data, "residual_risks", findings)):
+        if risk.get("status") != "accepted" or not isinstance(risk.get("summary"), str) or not risk.get("summary"):
+            findings.add("PROFILE_SCHEMA_INVALID", f"residual_risks[{index}] must be accepted with a summary")
+
     issue_sections: set[str] = set()
     owned_tests: set[str] = set()
     atomic_owners: dict[str, list[str]] = {}
     graph: dict[str, list[str]] = {}
     for issue_key, row in issues.items():
         consumed_evidence = string_list(row, "evidence", f"issue {issue_key}", findings)
+        produces = string_list(row, "produces", f"issue {issue_key}", findings)
+        consumes = string_list(row, "consumes", f"issue {issue_key}", findings)
         consumed_prerequisites = string_list(row, "prerequisites", f"issue {issue_key}", findings)
         consumed_controls = string_list(row, "controls", f"issue {issue_key}", findings)
         issue_tests = string_list(row, "negative_tests", f"issue {issue_key}", findings)
@@ -170,6 +182,10 @@ def validate(data: Any) -> Findings:
         labels = string_list(row, "labels", f"issue {issue_key}", findings)
         groups = string_list(row, "atomic_groups", f"issue {issue_key}", findings)
         graph[issue_key] = dependencies
+        if not produces:
+            findings.add("PROFILE_SCHEMA_INVALID", f"issue {issue_key} must declare at least one produced contract")
+        if not consumes:
+            findings.add("PROFILE_SCHEMA_INVALID", f"issue {issue_key} must declare at least one consumed input")
         issue_sections.update(covers)
         owned_tests.update(issue_tests)
 

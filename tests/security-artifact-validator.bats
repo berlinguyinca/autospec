@@ -60,6 +60,10 @@ assert_rejected_with() {
   assert_rejected_with "atomic-split.yml" "ATOMIC_CONTRACT_SPLIT"
 }
 
+@test "requires produces and consumes issue mappings" {
+  assert_rejected_with "missing-issue-mapping.yml" "PROFILE_SCHEMA_INVALID"
+}
+
 @test "reports malformed YAML without a traceback" {
   run python3 "$VALIDATOR" "$FIXTURES/malformed.yml"
   [ "$status" -ne 0 ]
@@ -70,7 +74,7 @@ assert_rejected_with() {
 @test "emits stable JSON findings" {
   run python3 "$VALIDATOR" --json "$FIXTURES/missing-authority.yml"
   [ "$status" -ne 0 ]
-  run python3 -c 'import json,sys; data=json.loads(sys.argv[1]); assert data[0]["rule_id"] == "AUTHORITATIVE_CONTROL_MISSING"' "$output"
+  run python3 -c 'import json,sys; data=json.loads(sys.argv[1]); assert "AUTHORITATIVE_CONTROL_MISSING" in {item["rule_id"] for item in data}' "$output"
   [ "$status" -eq 0 ]
 }
 
