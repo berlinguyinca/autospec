@@ -68,20 +68,22 @@ fn the_failure_names_the_file_and_the_remedy() {
 fn a_genuine_transient_fetch_failure_is_still_retryable() {
     // Only "the ref is not there" is permanent. Network and auth failures must stay TRANSIENT or
     // a blip would become a hard stop.
-    assert!(!bridge::missing_remote_ref(
+    assert!(!bridge::base_fetch::missing_remote_ref(
         "git [\"fetch\"] failed: fatal: unable to access 'https://...': Could not resolve host"
     ));
-    assert!(!bridge::missing_remote_ref(
+    assert!(!bridge::base_fetch::missing_remote_ref(
         "git [\"fetch\"] failed: fatal: Authentication failed"
     ));
 }
 
 #[test]
 fn the_missing_ref_classifier_matches_git_wording() {
-    assert!(bridge::missing_remote_ref(
+    assert!(bridge::base_fetch::missing_remote_ref(
         "git [\"fetch\", \"--quiet\", \"origin\", \"refs/heads/x:refs/remotes/origin/x\"] failed: \
          fatal: couldn't find remote ref refs/heads/x"
     ));
     // Case-insensitive, so a future capitalisation change cannot silently reclassify it.
-    assert!(bridge::missing_remote_ref("FATAL: Couldn't Find Remote Ref refs/heads/x"));
+    assert!(bridge::base_fetch::missing_remote_ref(
+        "FATAL: Couldn't Find Remote Ref refs/heads/x"
+    ));
 }
