@@ -20,8 +20,11 @@ The matrix was evaluated against `origin/main` at `060440db` after a fresh fetch
 | Exact-commit receipt binding | integrated | #3022 `ff1640c1`, #3024 `012451f4`, #3026 `0a48a0e4` | `review_receipt.rs`; `review_receipt/parse.rs`; `structured_review_receipt.rs` |
 | Structured verdict validation | integrated | #3025 `d53c61e1`, #3042 `74c639c4` | `structured_review.rs`; `tests/structured_review.rs`; active executor bridge wiring |
 | Executable integration smoke evidence | integrated | #3027 `ad17914b` | `tests/integration_smoke.rs` |
-| Experiment validation and rollback proof | integrated | #3028 `df014117`, #3029 `4298d0ee`, #3030 `ece9d964` | `autonomous-self-improvement-evaluate`; `test_review_escape_learning.bats` |
-| Review fixture migration and registration | integrated | #3037–#3040 | executor-bridge reviewer fixtures and module registration |
+| Experiment governance | integrated | #3028 `df014117`, #3029 `4298d0ee` | `scripts/autonomous-self-improvement-evaluate`; `scripts/autonomous-self-improvement.sh`; `test_self_improvement_candidates.bats` |
+| Rollback reproduction and lifecycle proof | integrated | #3030 `ece9d964` | `tests/autonomous/test_review_escape_learning.bats` exercises promotion, rejection, and rollback lifecycle |
+| Review fixture migration | integrated | #3037 `bfe9384b` | `tests/result_reviewer.rs`; `tests/reviewer_automatic.rs`; `tests/reviewer_runtime.rs` |
+| Review coverage registration | integrated | #3038 `341c06fc`, #3039 `fc1e1626` | `tests.rs`; `tests/attempt_generation.rs`; `tests/codex_sandbox.rs`; `tests/support_invocation.rs`; `tests/support_launch.rs`; `tests/terminal_label.rs` |
+| Legacy reviewer fixture retirement | integrated | #3040 `35468c03` | `tests/base_merge.rs`; `tests/merged_reconciliation.rs`; removal of `tests/ready_harness.rs` |
 | Runtime selection context | integrated | #3041 `4e96791a`, #3042 `74c639c4` | `autonomous.rs`; `executor_bridge.rs` |
 | Gap attribution | integrated | #3043 `14477ff6`, #3044 `51c93757` | `emit-gaps.sh`; `gap-json-lib.sh`; attribution tests |
 | Autonomous policy advancement | integrated | #3046 `5905d961` | `scripts/lib/autospec-loop.sh`; conductor-wiring test |
