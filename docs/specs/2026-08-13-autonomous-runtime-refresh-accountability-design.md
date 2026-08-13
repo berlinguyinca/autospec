@@ -14,7 +14,7 @@ The counter-team is **Security and product comprehension**: a security reviewer 
 
 ## Architecture
 
-The feature has two independent durable boundaries joined at `start`:
+The feature has two independent durable boundaries joined at `start`. Accountability is a core invariant of autonomous mode: there is no environment flag, CLI flag, or degraded launch path that disables epic creation or the private journal.
 
 1. A shell compatibility preflight runs before Rust argument parsing. It compares the requested checkout with a private installed runtime receipt. A stale start drains the existing scoped conductor gracefully, publishes one immutable binary/receipt generation, then executes that exact generation path with the original arguments. A narrow runtime-only installer performs this operation without reinstalling skills, harnesses, or peer tooling.
 2. The launcher creates or recovers one run-accountability record after acquiring the lifecycle lease and before spawning the conductor. Local private state is authoritative for recovery. A marker-bounded GitHub epic is the human-readable projection and may optionally be added to a configured GitHub Project.
@@ -75,7 +75,7 @@ stateDiagram-v2
 
 ## Run epic contract
 
-Each conductor generation has a stable `run_id` derived from repository identity and the launcher generation. Its private state directory contains:
+Each conductor generation has a stable `run_id = sha256(repo_scope || run_nonce || lifecycle_lease_generation)`. `run_nonce` is a cryptographically random 128-bit value written to the launch intent before remote mutation. `start --follow` and supervisor recovery inherit all three identity fields. Explicit restart and start after terminal stop allocate a new nonce only after predecessor units stop; they therefore create a new run. Its private state directory contains:
 
 - `accountability.json`: schema, repository, run ID, epic number/URL, state, timestamps, counts, and last successful projection;
 - `accountability-events.jsonl`: append-only typed events;
@@ -87,25 +87,37 @@ The first start writes a private launch intent, then searches open and closed is
 <!-- autospec:run-epic repo=OWNER/REPO run_id=RUN_ID -->
 ```
 
-After issue creation it re-queries and verifies the marker before persisting the binding. Zero matches creates once, one match adopts, and multiple matches fail closed. This recovers a lost create response without duplicating issues. The marker, lifecycle lease, and atomic metadata write make creation idempotent across retries and restarts. `start --follow` and supervisor repair adopt the live generation and its epic. An explicit restart or a start after terminal stop creates a new generation and epic labeled `epic`, `type:tracker`, `no-auto`, and `autospec:run-accountability`.
+Issue reconciliation paginates both open and closed `autospec:run-accountability` issues. Zero matches permits one create attempt, one match adopts, and multiple matches fail closed. After a successful response it re-queries and verifies the marker before persisting the binding. An ambiguous/timeout response enters `create_unknown`: it never creates again automatically, renews the lifecycle lease while retrying paginated reconciliation with bounded backoff, and fails closed if visibility remains unresolved. Lease loss aborts startup and leaves the intent recoverable. A crash after verified binding but before spawn is recovered from the intent without creating a successor. The marker, lifecycle lease, and atomic metadata write make creation idempotent across retries and restarts.
+
+| Trigger | Run identity | Epic action |
+|---|---|---|
+| `start --follow` with live scope | inherit | verify and adopt |
+| supervisor repair | inherit | verify and adopt |
+| crash after binding, before spawn | inherit | resume spawn from verified intent |
+| explicit restart after units stop | replace nonce/generation | close predecessor, create successor |
+| start after terminal stop | replace nonce/generation | create successor |
+| dry-run | preview only | no GitHub mutation |
 
 The epic body preserves human-authored text outside Autospec markers and renders these bounded sections:
 
 - **Overview**: requested outcome, current state, and a short explanation of why this run exists.
-- **Build flow**: Mermaid flowchart of queued, active, merged, failed, and blocked work.
+- **Build flow**: Mermaid dependency graph linking the run goal to child issues, PRs, verification, and outcomes; after 25 work nodes it uses one aggregate node.
+- **Run state**: Mermaid state diagram showing initialization, active, degraded projection, parked, blocked, failed, and completed transitions.
 - **Decision timeline**: short chronological paragraphs, each containing **What**, **Why**, and **Evidence**.
 - **Deliverables**: linked child issues and PRs with their outcomes.
 - **Verification and remaining risk**: commands/evidence and the most likely hidden failure.
 
 Events are projected at run creation, issue claim, implementation completion/failure, PR open, review outcome, merge, blocked transition, and run close. An opened PR is never described as implemented; only target-branch merges enter completed outcomes. Repeated low-level polling is not projected. The renderer caps the managed body at 48 KiB, displays at most 25 work nodes, and summarizes older events without deleting the local journal.
 
-GitHub Project assignment is optional. When `~/.autospec/project-map.yml` maps `autospec:run-accountability` to a project number, the epic is added idempotently. Missing project permissions warn and do not block the epic.
+GitHub Project assignment is optional. When `~/.autospec/project-map.yml` maps `autospec:run-accountability` to a project number, the epic is added idempotently. Missing project permissions warn and do not block the epic. Only the Project projection is optional; the issue epic and local journal are mandatory.
 
 ## Data flow and failure handling
 
-Every accountability mutation is local-first: append and sync the event, update private metadata atomically, render the desired projection, then call GitHub. Creation/adoption failure is startup-blocking. A failed later edit remains in the outbox and retries with bounded backoff and `Retry-After` support. A local journal failure blocks the next work mutation because the run would otherwise become unauditable. A closed active epic, removed marker, or ambiguous duplicate pauses before the next mutation rather than silently replacing the epic. Later projection failures are visible in `status`/`list` and do not stop already-accountable implementation.
+Every accountability mutation is local-first. Events use a monotonic sequence plus `event_id = sha256(run_id || seq || canonical_payload)`. Append writes one bounded JSON line, flushes and syncs the file; recovery discards only an unterminated partial tail. Metadata and outbox snapshots use private temp-file, file sync, atomic rename, then parent-directory sync. Each projection records a monotonic revision, rendered-content digest, desired high watermark, acknowledged high watermark, and next retry time. GitHub acknowledgment advances the high watermark only after the returned issue still carries the exact run marker. Crash tests cover every boundary between event sync, metadata rename, remote response, and acknowledgment.
 
-All GitHub text is derived from typed fields and escaped before Mermaid rendering. Logs, prompts, environment variables, credentials, and raw tool output are never copied wholesale. Evidence is limited to public issue/PR/check links, commands, paths, and concise outcomes.
+Creation/adoption failure is startup-blocking. A failed later edit remains in the outbox and retries with bounded backoff and `Retry-After` support. A local journal failure blocks the next work mutation because the run would otherwise become unauditable. A closed active epic, removed marker, or ambiguous duplicate pauses before the next mutation rather than silently replacing the epic. Later projection failures are visible in `status`/`list` and do not stop already-accountable implementation.
+
+All GitHub text is derived from typed fields and escaped before Markdown/Mermaid rendering. Paths must be repository-relative. Commands use an allowlist of executable names and redact unrecognized arguments. URLs must be GitHub HTTPS URLs with userinfo, query, and fragment removed. Control characters, HTML comment terminators, Mermaid delimiters, backticks, and link-breaking characters are removed or escaped. Logs, prompts, environment variables, credentials, absolute paths, and raw tool output are never copied wholesale. Evidence is limited to sanitized issue/PR/check links, allowlisted command summaries, repository-relative paths, and concise outcomes.
 
 `autospec autonomous status --json` and `list --json` expose `run_id`, `epic_number`, `epic_url`, `accountability_state`, `event_count`, `pending_projection_count`, and `last_projected_at` from local state without making a network request.
 
@@ -116,10 +128,11 @@ TDD covers each behavior before production changes:
 1. Receipt identity: deterministic digests, relevant dirty/untracked changes, strict schema/calendar/path validation, unsafe targets, and binary tampering.
 2. Installer transaction: immutable-generation publication, cross-repository concurrent starts, signal and SIGKILL at every publication boundary, stale clean versus interrupted locks, malformed/reused PID metadata, pointer rollback, cleanup failure, and no-prior-generation recovery.
 3. Start refresh: current bypass, stale stopped rebuild, stale live graceful drain, argument preservation, concurrency, failed build retention, ambiguous metadata fail-closed, and read-only/stop bypass.
-4. Epic lifecycle: exactly-once creation, lost-response marker recovery, follow/supervisor adoption, explicit-restart succession, project assignment, queue exclusion, human-text preservation, local-first outbox retry, body-size compaction, Mermaid escaping, and pre-spawn gating.
-5. Event projection: claim, implementation, review, PR, merge, failure, blocked, and close events produce concise What/Why/Evidence paragraphs and correct links.
+4. Epic lifecycle: exactly-once creation, delayed/page-boundary lost-response recovery, lease renewal/loss, crash after verification before spawn, follow/supervisor adoption, explicit-restart succession, project assignment, queue exclusion, human-text preservation, local-first outbox retry, body-size compaction, Mermaid escaping, and pre-spawn gating.
+5. Event projection: claim, implementation, review, PR, merge, failure, blocked, and close events produce concise What/Why/Evidence paragraphs and correct links; crash injection covers append, sync, metadata, remote response, and acknowledgment boundaries.
 6. Status/list: accountability fields are local, accurate, and nonblocking.
 7. Platform gates: release build on macOS and Linux-specific ownership behavior in Linux CI.
+8. Human comprehension: a deterministic fixture with dependencies, one success, one failure, and one block renders two valid Mermaid diagrams and is understandable without the raw journal.
 
 Required verification is `cargo test --workspace`, `cargo clippy --workspace --all-targets`, `cargo build --release -p autospec-cli`, `autospec validate`, focused Bats suites, `bash -n` for changed shell, ShellCheck for changed shell, workflow validation, and `git diff --check`.
 
@@ -130,8 +143,9 @@ Required verification is `cargo test --workspace`, `cargo clippy --workspace --a
 - Concurrent repository starts execute the exact generation each preflight verified, even when another repository publishes a newer global `current` pointer.
 - Runtime freshness does not reinstall skills, harnesses, peer tools, or unrelated user-environment configuration.
 - Every conductor generation has exactly one verified GitHub run epic before its process is spawned.
+- No autonomous launch option or environment variable can bypass the mandatory epic and journal invariant.
 - The epic explains what is being built and why in short paragraphs, contains Mermaid flow/state visuals, and links issues, PRs, and evidence.
-- Restarts and adoption reuse the same epic; new generations create new epics.
+- Follow attachment and supervisor adoption reuse the epic; explicit restart and start after terminal stop create a successor epic.
 - GitHub edit failures remain visible and retryable without losing the local accountability journal.
 - `status --json` and `list --json` expose epic identity and projection health without network access.
 - Optional GitHub Project assignment never replaces or blocks the issue-based epic.
