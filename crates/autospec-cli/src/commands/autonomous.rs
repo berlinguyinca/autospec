@@ -66,6 +66,7 @@ mod premerge;
 mod foreground_waterfall;
 #[cfg(test)]
 mod foreground_waterfall_tests;
+mod lifecycle_stop_notice;
 mod resilience;
 // Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
 #[allow(dead_code)]
@@ -1830,24 +1831,10 @@ fn stop(options: Options) -> Result<(), String> {
             draining
         );
     } else {
-        // `stopped 2 draining=true` reads as "the conductor stopped, 2 things were involved",
-        // which is the opposite of what happened: the 2 are the companions, and the conductor is
-        // still running until its next boundary. Say which is which -- an operator who misreads
-        // this goes on to act as though the conductor were gone.
-        println!(
-            "autospec autonomous stop: mode={} stop_flag={} stopped {stopped} companion(s)",
-            options.stop_mode.as_str(),
-            stop_flag.display()
+        print!(
+            "{}",
+            lifecycle_stop_notice::render(options.stop_mode.as_str(), &stop_flag, stopped, draining)
         );
-        if draining {
-            println!(
-                "autospec autonomous stop: conductor is STILL RUNNING and will stop at its next \
-                 issue/cycle boundary; it is not killed, because terminating it can strand a \
-                 completed child before the EXIT/DONE fence. Watch `autospec-autonomous status`."
-            );
-        } else {
-            println!("autospec autonomous stop: conductor is not running");
-        }
     }
     Ok(())
 }
