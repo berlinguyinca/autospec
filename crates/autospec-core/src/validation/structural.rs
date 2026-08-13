@@ -2,9 +2,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-
 use super::catalog::StructuralCheck;
-
+mod startup_preflight_contract;
 pub struct StructuralValidator;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2226,6 +2225,7 @@ impl StructuralValidator {
         {
             return Err("startup preflight must not call a raw installer directly".to_string());
         }
+        startup_preflight_contract::validate_reliability(&canonical)?;
 
         let trio_dirs = skill_directories(root)?
             .into_iter()

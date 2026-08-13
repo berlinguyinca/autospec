@@ -3,7 +3,6 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-
 use autospec_core::autonomous::blast_radius::{
     classify_paths_with_registry_name, default_legacy_registry, parse_fenced_surfaces,
 };
@@ -43,9 +42,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::process::CommandExt;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
 use super::{claim, queue, CommandFailure};
-
 mod blocked_cycle;
 mod foreground_failure;
 mod lifecycle_stop_notice;
@@ -62,19 +59,16 @@ use one_shot_selector::{
 mod executor_bridge;
 pub(crate) use executor_bridge::{current_boot_identity, process_birth_identity};
 mod premerge;
-// Task 3 wires the closed dispatcher into the foreground cycle.
 #[allow(dead_code)]
 mod foreground_waterfall;
 #[cfg(test)]
 mod foreground_waterfall_tests;
 mod resilience;
-// Task 1 owns only the read-only adapter; Task 2 wires its sealed receipt path.
+mod toolchain_freshness;
 #[allow(dead_code)]
 mod tier15;
-// Tier 1.5 is read-only foreground discovery; retained receipts replay before collection.
 #[allow(dead_code)]
 mod tier15_receipts;
-// Tier 2 runs bounded evidence-only model children and persists sealed local receipts.
 #[allow(dead_code)]
 mod tier2;
 mod tier2_publisher;
@@ -85,7 +79,6 @@ mod tier2_receipts;
 mod tier2_runner;
 #[cfg(test)]
 mod tier2_runner_tests;
-// Tier 3 remains disabled in production until a typed metadata package exists.
 #[cfg(test)]
 mod tier2_receipts_failure_prefix_tests;
 #[cfg(test)]
@@ -96,7 +89,6 @@ mod tier2_receipts_tests;
 mod tier3;
 #[allow(dead_code)]
 mod tier3_receipts;
-// Tier 4 participates in foreground traversal but remains disabled by checked-in policy.
 #[cfg(test)]
 #[path = "autonomous/review_governance_tests.rs"]
 mod review_governance_tests;
@@ -1074,6 +1066,7 @@ fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure
         return Ok(());
     }
 
+    toolchain_freshness::ToolchainFreshness::load().warn_if_failed();
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
     let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
@@ -1684,9 +1677,10 @@ fn status(options: Options) -> Result<(), CommandFailure> {
         .unwrap_or_else(|| read_state_metadata(&layout));
     state.fill_normalized_state(&layout);
     let spend = resilience::spend_status(&layout.repo).map_err(resilience_admission_error)?;
+    let toolchain = toolchain_freshness::ToolchainFreshness::load();
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"no_progress_reason\":{},\"no_progress_cycles\":{},\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"status\",\"repo\":\"{}\",\"status\":\"ok\",\"state_outcome\":\"{}\",\"state_status\":{},\"heartbeat_at\":{},\"heartbeat_age_secs\":{},\"last_cycle\":\"{}\",\"current_cycle\":\"{}\",\"current_tier\":\"{}\",\"current_action\":\"{}\",\"normalized_state\":\"{}\",\"last_blocker\":\"{}\",\"no_progress_reason\":{},\"no_progress_cycles\":{},\"spend\":{{\"tokens\":{},\"issues\":{},\"filed_issues\":{},\"budget_issues\":{}}},\"toolchain\":{},\"conductor\":{},\"monitor\":{},\"supervisor\":{}}}",
             json_escape(&layout.repo),
             state.outcome.as_str(),
             state.status_json(),
@@ -1707,12 +1701,14 @@ fn status(options: Options) -> Result<(), CommandFailure> {
             spend.budget_issues,
             spend.filed_issues,
             spend.budget_issues,
+            toolchain.to_json(),
             unit_status_json(&conductor),
             unit_status_json(&monitor),
             unit_status_json(&supervisor)
         );
     } else {
         println!("autospec autonomous status: ok");
+        toolchain.print_human();
     }
     Ok(())
 }
@@ -1875,14 +1871,17 @@ fn list(options: Options) -> Result<(), String> {
         }
     }
     rows.sort();
+    let toolchain = toolchain_freshness::ToolchainFreshness::load();
     if options.json {
         println!(
-            "{{\"command\":\"autonomous\",\"subcommand\":\"list\",\"runs\":[{}],\"conductors\":[{}]}}",
+            "{{\"command\":\"autonomous\",\"subcommand\":\"list\",\"toolchain\":{},\"runs\":[{}],\"conductors\":[{}]}}",
+            toolchain.to_json(),
             rows.join(","),
             rows.join(",")
         );
     } else {
         println!("autospec autonomous runs");
+        toolchain.print_human();
         for row in rows {
             println!("{row}");
         }
@@ -2222,6 +2221,7 @@ fn print_main_health(repo: &str, health: &MainlineHealth, json: bool) {
 }
 
 fn run_foreground(options: Options) -> Result<(), CommandFailure> {
+    toolchain_freshness::ToolchainFreshness::load().warn_if_failed();
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
     let scope = RepositoryScope::try_from(layout.repo.as_str()).map_err(|reason| {
         CommandFailure::diagnostic(format!("autonomous lifecycle invalid repo: {reason}"))

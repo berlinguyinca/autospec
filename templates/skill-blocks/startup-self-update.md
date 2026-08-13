@@ -6,6 +6,7 @@
 set +e
 SKILL_NAME={{SKILL_NAME}}   # per-skill: autospec-define / autospec-run / autospec-listen / autospec-classify
 if [ "${AUTOSPEC_NO_SELF_UPDATE:-0}" = "1" ]; then exit 0; fi
+umask 077
 mkdir -p "$HOME/.autospec"
 write_autonomous_operator_wrapper() {
     target="$1"
@@ -76,6 +77,10 @@ heal_autonomous_operator_wrappers
 LOCKDIR="$HOME/.autospec/.update.lock.d"
 LAST="$HOME/.autospec/last-update-check"
 INSTALLED="$HOME/.autospec/installed-version"
+REMOTE_VERSION="$HOME/.autospec/remote-version"
+FAILURE_RECORD="$HOME/.autospec/last-update-failure.json"
+UPDATE_LOG="$HOME/.autospec/self-update.log"
+BOOTSTRAP_TMP="$HOME/.autospec/.self-update-bootstrap.$$"
 NOW=$(date -u +%s)
 if [ -f "$LAST" ]; then
     PREV=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$(cat "$LAST" 2>/dev/null)" +%s 2>/dev/null \
@@ -85,24 +90,88 @@ fi
 if ! mkdir "$LOCKDIR" 2>/dev/null; then
     echo "WARN: self-update skipped (concurrent update in progress)" >&2; exit 0
 fi
-trap 'rmdir "$LOCKDIR" 2>/dev/null' EXIT
-date -u +'%Y-%m-%dT%H:%M:%SZ' > "$LAST.tmp" && mv "$LAST.tmp" "$LAST"
+trap 'rm -f "$BOOTSTRAP_TMP" "${INSTALLED_BACKUP:-}"; rmdir "$LOCKDIR" 2>/dev/null' EXIT
 REMOTE=$(curl -fsSL --max-time 5 \
     "https://api.github.com/repos/berlinguyinca/autospec/commits/main" \
     2>/dev/null | jq -r '.sha // empty' 2>/dev/null | cut -c1-7)
 if [ -z "$REMOTE" ]; then
     echo "WARN: self-update skipped (network); continuing on installed version" >&2; exit 0
 fi
-LOCAL=$(cat "$INSTALLED" 2>/dev/null || true)
-if [ "$REMOTE" = "$LOCAL" ]; then exit 0; fi
-curl -fsSL --max-time 30 \
-    "https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh" \
-    | bash -s -- --skill all --harness all --update >/dev/null 2>&1
-RC=$?
-if [ "$RC" -ne 0 ]; then
-    echo "WARN: self-update skipped (install rc=$RC); continuing on installed version" >&2; exit 0
+if ! printf '%s\n' "$REMOTE" > "$REMOTE_VERSION.tmp" \
+    || ! mv "$REMOTE_VERSION.tmp" "$REMOTE_VERSION"; then
+    rm -f "$REMOTE_VERSION.tmp"
+    echo "WARN: self-update state publication failed ($REMOTE_VERSION); continuing on installed version" >&2
+    exit 0
 fi
-printf '%s\n' "$REMOTE" > "$INSTALLED.tmp" && mv "$INSTALLED.tmp" "$INSTALLED"
+LOCAL=$(cat "$INSTALLED" 2>/dev/null || true)
+if [ "$REMOTE" = "$LOCAL" ]; then
+    if ! date -u +'%Y-%m-%dT%H:%M:%SZ' > "$LAST.tmp" || ! mv "$LAST.tmp" "$LAST"; then
+        rm -f "$LAST.tmp"
+        echo "WARN: self-update state publication failed ($LAST); continuing on installed version" >&2
+        exit 0
+    fi
+    rm -f "$FAILURE_RECORD"
+    exit 0
+fi
+if ! curl -fsSL --max-time 30 \
+    "https://raw.githubusercontent.com/berlinguyinca/autospec/main/bootstrap.sh" \
+    > "$BOOTSTRAP_TMP"; then
+    echo "WARN: self-update skipped (bootstrap download); continuing on installed version" >&2
+    exit 0
+fi
+if [ -f "$UPDATE_LOG" ]; then mv "$UPDATE_LOG" "$UPDATE_LOG.1"; fi
+: > "$UPDATE_LOG"
+chmod 600 "$UPDATE_LOG" 2>/dev/null || true
+bash "$BOOTSTRAP_TMP" --skill all --harness all --update 2>&1 \
+    | tail -c 65536 > "$UPDATE_LOG"
+RC=${PIPESTATUS[0]}
+chmod 600 "$UPDATE_LOG" "$UPDATE_LOG.1" 2>/dev/null || true
+if [ "$RC" -ne 0 ]; then
+    FAILURE_AT=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+    OUTPUT_TAIL=$(tail -c 16384 "$UPDATE_LOG" 2>/dev/null || true)
+    jq -n \
+        --arg timestamp "$FAILURE_AT" \
+        --arg remote_sha "$REMOTE" \
+        --argjson installer_exit_code "$RC" \
+        --arg output_tail "$OUTPUT_TAIL" \
+        --arg log_path "$UPDATE_LOG" \
+        '{timestamp:$timestamp,remote_sha:$remote_sha,installer_exit_code:$installer_exit_code,output_tail:$output_tail,log_path:$log_path}' \
+        > "$FAILURE_RECORD.tmp" \
+        && chmod 600 "$FAILURE_RECORD.tmp" \
+        && mv "$FAILURE_RECORD.tmp" "$FAILURE_RECORD"
+    echo "WARN: self-update failed (install rc=$RC); continuing on installed version; diagnostics: $UPDATE_LOG; record: $FAILURE_RECORD" >&2
+    exit 0
+fi
+INSTALLED_BACKUP="$HOME/.autospec/.installed-version.backup.$$"
+HAD_INSTALLED=0
+if [ -f "$INSTALLED" ]; then
+    HAD_INSTALLED=1
+    if ! cp "$INSTALLED" "$INSTALLED_BACKUP"; then
+        echo "WARN: self-update state publication failed ($INSTALLED backup); continuing on installed version" >&2
+        exit 0
+    fi
+fi
+if ! printf '%s\n' "$REMOTE" > "$INSTALLED.tmp" || ! mv "$INSTALLED.tmp" "$INSTALLED"; then
+    rm -f "$INSTALLED.tmp"
+    rm -f "$INSTALLED_BACKUP"
+    echo "WARN: self-update state publication failed ($INSTALLED); continuing on installed version" >&2
+    exit 0
+fi
+if ! date -u +'%Y-%m-%dT%H:%M:%SZ' > "$LAST.tmp" || ! mv "$LAST.tmp" "$LAST"; then
+    rm -f "$LAST.tmp"
+    if [ "$HAD_INSTALLED" -eq 1 ]; then
+        if ! mv "$INSTALLED_BACKUP" "$INSTALLED"; then
+            echo "WARN: self-update state rollback failed ($INSTALLED); manual recovery required" >&2
+            exit 0
+        fi
+    else
+        rm -f "$INSTALLED"
+    fi
+    echo "WARN: self-update state publication failed ($LAST); continuing on installed version" >&2
+    exit 0
+fi
+rm -f "$INSTALLED_BACKUP"
+rm -f "$FAILURE_RECORD"
 # Auto-init cross-tool memory (idempotent, <50ms fast-path)
 bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/auto-init-memory.sh"
 echo "[autospec] updated ${LOCAL:-fresh} → $REMOTE"
