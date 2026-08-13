@@ -1497,9 +1497,8 @@ decision point. The following are NEVER bypassed:
    list extends outside the auto-detected scope (Goal + Implementation
    outline files), the gate surfaces a confirmation listing the unexpected
    files.
-3. **Cost gate** — if the generated spec exceeds
-   `AUTOSPEC_AUTONOMOUS_ISSUE_CAP` (default 10) or estimated total tokens
-   exceeds `AUTOSPEC_AUTONOMOUS_TOKEN_CAP` (default 500k), surface a
+3. **Cost gate** — if estimated total tokens exceed
+   `AUTOSPEC_AUTONOMOUS_TOKEN_CAP` (default 500k), surface a
    one-time go/no-go even in autonomous mode.
 4. **Existing rules in `feedback_autospec_autonomy_scope.md` remain in
    force.**
@@ -1509,7 +1508,7 @@ Invoke the gate before each gate-trigger point:
 ```bash
 bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/autospec-autonomy-gate.sh" \
   --check all \
-  --issues "$ISSUE_COUNT" --tokens "$TOKEN_ESTIMATE" \
+  --tokens "$TOKEN_ESTIMATE" \
   --files "$PLANNED_FILES" --scope "$SCOPE_PREFIXES" \
   --intent "$USER_REQUEST"
 ```

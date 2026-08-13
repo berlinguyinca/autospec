@@ -6,8 +6,7 @@
 #      release delete, mass label changes, prod DB writes).
 #   2. Out-of-scope file changes (planned files extend beyond Goal +
 #      Implementation outline scope).
-#   3. Cost gate (issues > AUTOSPEC_AUTONOMOUS_ISSUE_CAP or tokens >
-#      AUTOSPEC_AUTONOMOUS_TOKEN_CAP).
+#   3. Cost gate (tokens > AUTOSPEC_AUTONOMOUS_TOKEN_CAP).
 #   4. Existing autonomy-scope rules from
 #      feedback_autospec_autonomy_scope.md remain in force.
 #
@@ -18,19 +17,17 @@
 #
 # Usage:
 #   autospec-autonomy-gate.sh --check destructive|out-of-scope|cost|all \
-#     [--issues N] [--tokens N] [--files "<space-separated list>"] \
+#     [--tokens N] [--files "<space-separated list>"] \
 #     [--scope "<space-separated allowed prefixes>"] [--intent "<text>"]
 
 set -eu
 
 CHECK=""
-ISSUES=""
 TOKENS=""
 FILES=""
 SCOPE=""
 INTENT=""
 
-ISSUE_CAP="${AUTOSPEC_AUTONOMOUS_ISSUE_CAP:-10}"
 TOKEN_CAP="${AUTOSPEC_AUTONOMOUS_TOKEN_CAP:-500000}"
 
 usage() {
@@ -39,14 +36,12 @@ Usage: autospec-autonomy-gate.sh --check destructive|out-of-scope|cost|all [opts
 
 Options:
   --check WHICH      Which guardrail(s) to evaluate.
-  --issues N         Generated spec issue count (for --check cost|all).
   --tokens N         Estimated total tokens (for --check cost|all).
   --files "LIST"     Space-separated planned file paths.
   --scope  "LIST"    Space-separated allowed scope prefixes.
   --intent "TEXT"    Free-form intent text scanned for destructive verbs.
 
 Env:
-  AUTOSPEC_AUTONOMOUS_ISSUE_CAP  (default 10)
   AUTOSPEC_AUTONOMOUS_TOKEN_CAP  (default 500000)
 
 Exit 0 = autonomous OK; 1 = ask anyway; 2 = invocation error.
@@ -56,7 +51,7 @@ EOF
 while [ $# -gt 0 ]; do
     case "$1" in
         --check)   CHECK="${2:-}"; shift 2 ;;
-        --issues)  ISSUES="${2:-}"; shift 2 ;;
+        --issues)  shift 2 ;; # Backward-compatible no-op: issue counts are uncapped.
         --tokens)  TOKENS="${2:-}"; shift 2 ;;
         --files)   FILES="${2:-}"; shift 2 ;;
         --scope)   SCOPE="${2:-}"; shift 2 ;;
@@ -105,13 +100,6 @@ check_out_of_scope() {
 }
 
 check_cost() {
-    if [ -n "$ISSUES" ]; then
-        if [ "$ISSUES" -gt "$ISSUE_CAP" ] 2>/dev/null; then
-            ask=1
-            reason="issue count $ISSUES exceeds AUTOSPEC_AUTONOMOUS_ISSUE_CAP=$ISSUE_CAP"
-            return
-        fi
-    fi
     if [ -n "$TOKENS" ]; then
         if [ "$TOKENS" -gt "$TOKEN_CAP" ] 2>/dev/null; then
             ask=1

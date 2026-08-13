@@ -209,8 +209,8 @@ they have a skill/shared canonical source.
 ## Batch, caps & budgets
 | Var | Default | Effect |
 |---|---|---|
-| `AUTOSPEC_AUTONOMOUS_ISSUE_CAP` | (unset) | Max issues an autonomous run will process before stopping. |
 | `AUTOSPEC_AUTONOMOUS_TOKEN_CAP` | (unset) | Token ceiling for an autonomous run. |
+| `AUTOSPEC_AUTONOMOUS_LIFETIME_ISSUES` | `500` | Cumulative issue budget for the long-running autonomous conductor; distinct from the uncapped per-spec issue count. |
 | `AUTOSPEC_LOOP_TOKEN_CAP` | (unset) | Token ceiling for loop entrypoints (`--loop`, explore). |
 | `AUTOSPEC_LOOP_TIME_CAP` | (unset) | Wall-clock ceiling for loop entrypoints. |
 | `AUTOSPEC_GAP_MAX_ROUNDS` | `2` | Phase 5.5 gap-remediation round cap. |
