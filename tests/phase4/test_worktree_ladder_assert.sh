@@ -57,11 +57,16 @@ done
 
 # ── 2. Mandatory assert gate before any edit, stop-on-failure, in all 6 ──────
 
-for f in $ALL_SIX $PHASE4; do
+for f in $RUN_SKILL $RUN_CODEX $RUN_OPENCODE $PHASE4; do
     name="${f#"$SCRIPT_DIR"/}"
 
-    grep -q 'worktree-guard.sh assert' "$f" \
-        || fail "$name: missing worktree-guard.sh assert gate (step 2)"
+    grep -q "worktree-guard.sh assert --expected-branch <BRANCH> --branch-pattern 'feat/\*'" "$f" \
+        || fail "$name: missing exact feat/* branch identity gate (step 2)"
+
+done
+
+for f in $ALL_SIX $PHASE4; do
+    name="${f#"$SCRIPT_DIR"/}"
 
     grep -q 'MUST exit 0' "$f" \
         || fail "$name: assert gate must require exit 0 before any edit"
