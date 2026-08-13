@@ -2,7 +2,7 @@
 
 Add scripts/gen-issue-skeleton.sh to render structured YAML input into a team-lensed issue body.
 
-## Source spec section anchor
+## Source spec
 
 `docs/specs/2026-05-22-autospec-tooling-optimization-design.md` — https://github.com/berlinguyinca/autospec/blob/main/docs/specs/2026-05-22-autospec-tooling-optimization-design.md
 
@@ -19,10 +19,22 @@ Add scripts/gen-issue-skeleton.sh to render structured YAML input into a team-le
 ## Files to read first
 
 - docs/specs/2026-05-22-autospec-tooling-optimization-design.md
+- scripts/lint-issue.sh
 
-## Local-LLM notes
+## Files touched
 
-Pure implementation; keep files within 200 lines so a 60-120k context window holds the full source during edits.
+- scripts/gen-issue-skeleton.sh
+- tests/gen-issue-skeleton.bats
+
+## Local-LLM execution notes
+
+- Pure implementation; keep the renderer and its tests in context together.
+
+## Dependencies
+
+none
+
+
 
 ## Implementation scope
 
@@ -46,6 +58,8 @@ Pure implementation; keep files within 200 lines so a 60-120k context window hol
 ## Acceptance criteria
 
 - [ ] scripts/gen-issue-skeleton.sh --input minimal.yaml emits a team-lensed issue body
+- [ ] Output passes scripts/lint-issue.sh with exit 0
+- [ ] Missing required YAML field exits non-zero with `MISSING_FIELD:<name>` on stderr
 
 ## Verification
 

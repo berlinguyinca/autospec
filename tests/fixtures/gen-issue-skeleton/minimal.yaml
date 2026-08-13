@@ -11,6 +11,13 @@ review_counter_team:
 files_to_read:
   - docs/specs/2026-05-22-autospec-tooling-optimization-design.md
   - scripts/lint-issue.sh
+files_touched:
+  - scripts/gen-issue-skeleton.sh
+  - tests/gen-issue-skeleton.bats
+local_llm_notes:
+  - "Pure implementation; keep the renderer and its tests in context together."
+dependencies:
+  - none
 implementation_scope:
   - "scripts/gen-issue-skeleton.sh with --input <file> and stdin fallback"
 out_of_scope:
@@ -25,7 +32,7 @@ tests_required:
 acceptance_criteria:
   - "scripts/gen-issue-skeleton.sh --input minimal.yaml emits a team-lensed issue body"
   - "Output passes scripts/lint-issue.sh with exit 0"
-  - "Missing required YAML field exits non-zero with MISSING_FIELD:<name> on stderr"
+  - "Missing required YAML field exits non-zero with `MISSING_FIELD:<name>` on stderr"
 verification:
   primary_smoke: "bats tests/gen-issue-skeleton.bats"
   operator_full: "bash scripts/gen-issue-skeleton.sh --input tests/fixtures/gen-issue-skeleton/minimal.yaml | scripts/lint-issue.sh /dev/stdin"
