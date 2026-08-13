@@ -97,6 +97,12 @@ Issue reconciliation paginates both open and closed `autospec:run-accountability
 | explicit restart after units stop | replace nonce/generation | close predecessor, create successor |
 | start after terminal stop | replace nonce/generation | create successor |
 | dry-run | preview only | no GitHub mutation |
+| `start --epic N` with verified active epic | inherit marker identity | reconstruct/adopt and spawn |
+| `resume --epic N` with verified closed/parked epic | inherit marker identity | reopen, record resume reason, reconstruct/adopt and spawn |
+
+Normal autonomous start always generates its own epic when no live run exists. Operators may explicitly resume from a given epic with `--epic N`. Explicit adoption verifies that issue `N` belongs to the requested repository, carries `epic`, `type:tracker`, `no-auto`, and `autospec:run-accountability`, contains exactly one valid immutable marker, and has a managed recovery manifest whose run identity matches the marker. It never converts or attaches to an arbitrary issue.
+
+The managed recovery manifest contains schema, repository, run ID, run nonce, lifecycle generation, last projected event sequence, projection revision/digest, terminal/parked state, and sanitized linked issue/PR identifiers. It contains no secrets or local paths. When private local state is missing, `start --epic N` reconstructs the launch intent and acknowledged high watermark from this manifest, begins a new local journal segment chained to the remote digest, and appends a `resumed_from_epic` event before any work mutation. It does not claim that unprojected historical events were recovered. A malformed, ambiguous, wrong-repository, or active-elsewhere epic fails closed.
 
 The epic body preserves human-authored text outside Autospec markers and renders these bounded sections:
 
@@ -128,7 +134,7 @@ TDD covers each behavior before production changes:
 1. Receipt identity: deterministic digests, relevant dirty/untracked changes, strict schema/calendar/path validation, unsafe targets, and binary tampering.
 2. Installer transaction: immutable-generation publication, cross-repository concurrent starts, signal and SIGKILL at every publication boundary, stale clean versus interrupted locks, malformed/reused PID metadata, pointer rollback, cleanup failure, and no-prior-generation recovery.
 3. Start refresh: current bypass, stale stopped rebuild, stale live graceful drain, argument preservation, concurrency, failed build retention, ambiguous metadata fail-closed, and read-only/stop bypass.
-4. Epic lifecycle: exactly-once creation, delayed/page-boundary lost-response recovery, lease renewal/loss, crash after verification before spawn, follow/supervisor adoption, explicit-restart succession, project assignment, queue exclusion, human-text preservation, local-first outbox retry, body-size compaction, Mermaid escaping, and pre-spawn gating.
+4. Epic lifecycle: exactly-once creation, delayed/page-boundary lost-response recovery, lease renewal/loss, crash after verification before spawn, follow/supervisor adoption, explicit `--epic N` reconstruction, closed-epic resume/reopen, explicit-restart succession, project assignment, queue exclusion, human-text preservation, local-first outbox retry, body-size compaction, Mermaid escaping, and pre-spawn gating.
 5. Event projection: claim, implementation, review, PR, merge, failure, blocked, and close events produce concise What/Why/Evidence paragraphs and correct links; crash injection covers append, sync, metadata, remote response, and acknowledgment boundaries.
 6. Status/list: accountability fields are local, accurate, and nonblocking.
 7. Platform gates: release build on macOS and Linux-specific ownership behavior in Linux CI.
@@ -146,6 +152,7 @@ Required verification is `cargo test --workspace`, `cargo clippy --workspace --a
 - No autonomous launch option or environment variable can bypass the mandatory epic and journal invariant.
 - The epic explains what is being built and why in short paragraphs, contains Mermaid flow/state visuals, and links issues, PRs, and evidence.
 - Follow attachment and supervisor adoption reuse the epic; explicit restart and start after terminal stop create a successor epic.
+- `start --epic N` and `resume --epic N` reconstruct and resume only a verified accountability epic for the requested repository.
 - GitHub edit failures remain visible and retryable without losing the local accountability journal.
 - `status --json` and `list --json` expose epic identity and projection health without network access.
 - Optional GitHub Project assignment never replaces or blocks the issue-based epic.

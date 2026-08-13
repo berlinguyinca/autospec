@@ -93,7 +93,7 @@
 - Consumes: Task 3 launch intent/store/renderer.
 - Produces: paginated marker reconciliation, single create attempt, `create_unknown`, lease renewal/loss handling, verified binding, optional Project assignment, and epic closure/succession.
 
-- [ ] Write failing GH-stub tests for zero/one/multiple marker matches, delayed visibility/page boundary, ambiguous response, lease loss, crash after binding, follow/supervisor adoption, explicit restart succession, removed/closed epic, and optional Project failure.
+- [ ] Write failing GH-stub tests for zero/one/multiple marker matches, delayed visibility/page boundary, ambiguous response, lease loss, crash after binding, follow/supervisor adoption, explicit `--epic N` reconstruction, closed-epic resume/reopen, explicit restart succession, removed epic, wrong-repository/label/marker rejection, and optional Project failure.
 - [ ] Run tests and verify they fail before integration.
 - [ ] Implement GitHub adapter and launcher ordering: freshness → lease → verified epic → launch metadata → spawn.
 - [ ] Add mandatory labels and exclude `autospec:run-accountability` from every autonomous/grooming queue.
@@ -118,6 +118,7 @@
 - [ ] Write failing tests proving local-first event ordering, merged-only completion wording, projection retry/degradation, mandatory journal failure blocking, and local-only status/list fields.
 - [ ] Run tests and observe missing lifecycle wiring.
 - [ ] Wire typed events at stable lifecycle boundaries, coalesce projections, and preserve existing daily digest separately.
+- [ ] Add the managed recovery manifest, `start --epic N`, and `resume --epic N`; reconstruct a chained local journal segment and record `resumed_from_epic` before work.
 - [ ] Add status/list JSON fields and human summaries without network calls.
 - [ ] Run focused shell/Rust tests and `git diff --check`.
 - [ ] Commit with Lore trailers.
