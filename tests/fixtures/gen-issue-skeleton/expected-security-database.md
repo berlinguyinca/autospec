@@ -42,7 +42,7 @@ Depends on issue #41
 
 ## Prerequisites
 
-- P1 verified: read replica is available
+- verified: P1 read replica is available
 
 ## Implementation scope
 

@@ -22,7 +22,7 @@ evidence_consumed:
 controls_covered:
   - "T1: SELECT-only database role prevents data loss"
 prerequisites:
-  - "P1 verified: read replica is available"
+  - "verified: P1 read replica is available"
 implementation_scope:
   - "scripts/validate-query.sh and grant-level rejection tests"
 out_of_scope:
