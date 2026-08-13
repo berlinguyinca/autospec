@@ -22,6 +22,8 @@ runtime_install_setup_dir() {
         elif [ ! -d "$1" ] || [ -L "$1" ]; then
             return 2
         fi
+    elif [ "$(autospec_runtime_stat_owner "$1")" = "$(id -u)" ]; then
+        chmod 700 "$1" || return 2
     fi
     autospec_runtime_private_dir "$1" || { runtime_install_error unsafe-state-directory; return 2; }
 }
