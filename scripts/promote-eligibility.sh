@@ -11,8 +11,9 @@
 #
 # Output: JSON {"decision":"eligible|needs-template|epic|hold","reason":"..."}
 #
-#   eligible       — actionable body (>= MIN_BODY chars) AND a clear
-#                     fix:/feat: intent-or-repro AND bounded scope
+#   eligible       — actionable body (>= MIN_BODY chars) AND either a clear
+#                     fix:/feat: intent-or-repro or a lint-passing complete
+#                     issue-quality template, AND bounded scope
 #                     (<= MAX_FILES referenced file paths, no epic marker).
 #   epic           — has "epic" label or an epic marker in the body.
 #   needs-template — groomable but not eligible: multi-file/complex, OR clear
@@ -27,6 +28,9 @@
 #   1  — usage error or body file not found
 
 set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ISSUE_LINTER="${AUTOSPEC_ISSUE_LINTER:-$SCRIPT_DIR/lint-issue.sh}"
 
 MIN_BODY=40
 MAX_FILES=3
@@ -195,17 +199,35 @@ fi
 # 4. Clear fix:/feat: intent-or-repro check.
 # ---------------------------------------------------------------------------
 HAS_INTENT=0
+INTENT_REASON=""
 case "$BODY_LOWER" in
   fix:*|feat:*|*" fix:"*|*" feat:"*)
     HAS_INTENT=1
+    INTENT_REASON="clear fix/feat intent"
     ;;
 esac
 if [ "$HAS_INTENT" -eq 0 ]; then
   case "$BODY_LOWER" in
     *repro:*|*"steps to reproduce"*|*"expected:"*)
       HAS_INTENT=1
+      INTENT_REASON="clear reproduction evidence"
       ;;
   esac
+fi
+
+# A complete issue that passes the canonical quality gate is actionable without
+# relying on prose tokens such as fix:/feat:. This is stricter than the legacy
+# structured-intent heuristic below: all machine-read sections and their
+# content have already been validated by lint-issue.sh.
+if [ "$HAS_INTENT" -eq 0 ] \
+  && [ -f "$ISSUE_LINTER" ] \
+  && grep -q '^## Files to read first$' "$BODY_FILE" \
+  && grep -q '^## Implementation scope$' "$BODY_FILE" \
+  && grep -q '^## Implementation outline$' "$BODY_FILE" \
+  && grep -q '^## Tests required$' "$BODY_FILE" \
+  && bash "$ISSUE_LINTER" "$BODY_FILE" >/dev/null 2>&1; then
+  HAS_INTENT=1
+  INTENT_REASON="lint-passing complete issue-quality template"
 fi
 
 if [ "$HAS_INTENT" -eq 0 ]; then
@@ -248,7 +270,7 @@ if [ -z "$FILE_COUNT" ]; then
 fi
 
 if [ "$FILE_COUNT" -le "$MAX_FILES" ]; then
-  emit "eligible" "actionable body with clear fix/feat intent and bounded scope (${FILE_COUNT} file path(s) referenced)"
+  emit "eligible" "actionable body with ${INTENT_REASON} and bounded scope (${FILE_COUNT} file path(s) referenced)"
   exit 0
 fi
 

@@ -1672,7 +1672,7 @@ If `deferred[]` is empty, omit the section.
 
 ## Phase 5.5 — End-of-run gap remediation
 
-Runs after the last issue in the batch closes/merges (queue drains, `ALL_DONE`), before the final report. Replaces the old report-only post-batch audit: it broad-reviews the shipped work, files surviving gaps as `auto-implement` issues, and re-runs the monitor to close them — bounded by a round cap.
+Runs after the last issue in the batch closes/merges (queue drains, `ALL_DONE`), before the final report. It broad-reviews the shipped work and stages surviving gaps as `needs-classify` issues only after the deterministic driver renders the complete issue template and `lint-issue.sh` accepts it. This run does not promote or drain them. The existing autonomous Tier 1.5 promotion path owns classification and Rust-backed safety admission in a later cycle.
 
 **Skip the whole phase when:**
 
@@ -1697,25 +1697,20 @@ Then continue the bounded Phase 5.5 loop:
 BATCH_START_DATE="$(bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/run-batch-start.sh" --read)"
 RUN_ID="$(date -u +%Y%m%dT%H%MZ)-$(git rev-parse --short HEAD)"
 GAPS_FILE="$HOME/.autospec/gaps-${RUN_ID}.json"
-MAX="${AUTOSPEC_GAP_MAX_ROUNDS:-2}"
 rm -f "$HOME/.autospec/gap-round-state.json"   # fresh window per run
 ```
 
-Loop (`round = 1 … MAX`):
+Run one staging pass:
 
 1. **Broad review** (Tier A): run the broad-review pass with a round-scoped `--since` window (spec Phase 2 child E):
 
    ```bash
-   if [ "${round}" -ge 2 ] && [ -n "${GAP_ROUND_SINCE:-}" ]; then
-     REVIEW_SINCE="${GAP_ROUND_SINCE}"   # round ≥2: only the gap PRs filed by the prior round
-   else
-     REVIEW_SINCE="${BATCH_START_DATE}"  # round 1: full batch window
-   fi
+   REVIEW_SINCE="${BATCH_START_DATE}"
    bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/invoke-review.sh" \
      --remediation --since "${REVIEW_SINCE}" --emit-gaps "${GAPS_FILE}"
    ```
 
-   **Harness-neutral invocation:** `invoke-review.sh` detects the active harness (Claude Code / Codex CLI / OpenCode) via `autospec-harness-detect.sh` and dispatches `/autospec-review` using the correct per-harness argv form. If the review backend is unavailable it emits `code_health:phase55_broad_review_backend_unavailable` to stderr and appends a visible diagnostic gap to `GAPS_FILE` — it never silently produces an empty gap file that would look like a clean pass. **Round 1** keeps the full `BATCH_START_DATE` batch window — this preserves the per-PR-LGTM-misses-integration value (the broad pass catches cross-PR integration gaps the per-PR LGTMs missed). **Round ≥2** scopes `--since` to ONLY the newly-filed gap PRs from the prior round (`GAP_ROUND_SINCE`, the timestamp captured just before the prior round's gap PRs began merging — see step 4), so the re-review doesn't re-scan the entire already-reviewed batch, only the freshly-shipped gap remediations. On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
+   **Harness-neutral invocation:** `invoke-review.sh` detects the active harness (Claude Code / Codex CLI / OpenCode) via `autospec-harness-detect.sh` and dispatches `/autospec-review` using the correct per-harness argv form. If the review backend is unavailable it emits `code_health:phase55_broad_review_backend_unavailable` to stderr and appends a visible diagnostic gap to `GAPS_FILE` — it never silently produces an empty gap file that would look like a clean pass. The full `BATCH_START_DATE` window preserves the per-PR-LGTM-misses-integration value (the broad pass catches cross-PR integration gaps the per-PR LGTMs missed). On review failure, log a warning, treat as 0 survivors, and fall back to the final report (never block run completion).
 1b. **Docs-completeness dimension** (spec §D6 row 2 — runs only on round 1, after the broad review emits `${GAPS_FILE}`): the gap-remediation review also audits documentation completeness for the work shipped during this batch window. Every feature shipped in the window (scoped by `run-batch-start.sh --read`) must have a page for every configured audience (the `documentation.audiences` from #917's doc config), and there must be no outstanding `visual_stale` / `example_stale` drift signals (`check-doc-drift.sh`). Run the deterministic helper and **append** its gaps onto the existing `${GAPS_FILE}` so they file, dedupe, and converge through the SAME gap-remediation machinery used in step 2 (do NOT build a parallel loop):
 
    ```bash
@@ -1785,16 +1780,11 @@ Loop (`round = 1 … MAX`):
 
    The driver prints `gap-remediation: survivors=<N> filed=<N> round=<N>`. Capture `<N>` survivors.
 3. **Converge:** if `survivors == 0`, break — the run is clean.
-4. **Drain:** otherwise capture the gap-window watermark, then re-enter the Phase 4 background monitor (opus, `batch=1`) and run it until the freshly-filed `gap-remediation` issues drain (same monitor batch-exit discipline as the main run). `gap-remediation`-labelled issues are recognizable so a later round does not re-flag freshly-fixed work. Capture the watermark BEFORE the gap PRs merge so the next round's broad review (step 1) scopes `--since` to only these gap PRs (spec Phase 2 child E):
+4. **Stage for admission:** if `survivors > 0`, stop this Phase 5.5 loop and report the newly staged `needs-classify,gap-remediation` issues in Phase 6. Do not invoke the Phase 4 monitor for them and do not add `auto-implement` inline. The driver has already enforced the issue-quality contract; the autonomous Tier 1.5 promoter owns model-fit classification and delegates final admission to Rust. A later autospec run may review the resulting merged remediation work.
 
-   ```bash
-   GAP_ROUND_SINCE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"   # next round scopes --since to gap PRs filed here onward
-   ```
-5. Increment `round`. The driver also enforces `AUTOSPEC_GAP_MAX_ROUNDS` internally (it refuses to file once the round-state hits the cap), so the loop never spins.
+**Termination guarantees:** convergence (0 survivors) ends the loop immediately; any staged survivor ends this run's remediation loop without entering the implementation queue; the `dedupe_key` prevents a later run from re-filing the same open gap; and the driver retains its hard round-state cap as defense in depth.
 
-**Termination guarantees:** convergence (0 survivors) ends the loop immediately; the `dedupe_key` prevents re-filing the same gap across rounds; the hard cap `AUTOSPEC_GAP_MAX_ROUNDS` (default 2) stops the loop and surfaces any remainder to the operator.
-
-**Feed Phase 6:** report (a) gaps closed this phase, (b) findings the filter suppressed, and (c) gaps still open after the cap. Failures from `/autospec-review` or the driver log a warning but do NOT fail the overall run.
+**Feed Phase 6:** report (a) findings the filter suppressed, (b) gaps staged for classification, and (c) any driver/review failure. Do not report staged gaps as closed or admitted. Failures from `/autospec-review` or the driver log a warning but do NOT fail the overall run.
 
 ## Phase 5.6 — Repo quality audit
 

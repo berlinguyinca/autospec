@@ -6,14 +6,19 @@
 # Run: bats skills/autospec-shared/tests/unit/gap-remediation-loop.bats
 
 LOOP="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/gap-remediation-loop.sh"
+LINT_ISSUE="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../../.." && pwd)/scripts/lint-issue.sh"
+PROMOTE_ELIGIBILITY="$(cd "$(dirname "$BATS_TEST_FILENAME")/../../../.." && pwd)/scripts/promote-eligibility.sh"
 
 setup() {
     TEST_TMP="$(mktemp -d)"
     export AUTOSPEC_STATE_DIR="$TEST_TMP"
     export AUTOSPEC_GAP_REPO="testorg/testrepo"
+    export AUTOSPEC_ISSUE_LINTER="$LINT_ISSUE"
     # Stub gh: records `issue create` calls, serves a configurable open-issue list.
     mkdir -p "$TEST_TMP/bin"
     export GH_CREATE_LOG="$TEST_TMP/gh-create.log"
+    export GH_BODY_FILE="$TEST_TMP/created-body.md"
+    export CLASSIFY_LOG="$TEST_TMP/classify.log"
     export GH_ISSUE_LIST_JSON="$TEST_TMP/open-issues.json"
     printf '[]\n' > "$GH_ISSUE_LIST_JSON"
     cat > "$TEST_TMP/bin/gh" <<'EOF'
@@ -27,6 +32,13 @@ case "$*" in
   *"issue create"*)
     # Emit a fake URL ending in an issue number and log the invocation.
     printf '%s\n' "$*" >> "$GH_CREATE_LOG"
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = "--body" ]; then
+        printf '%s\n' "$2" > "$GH_BODY_FILE"
+        break
+      fi
+      shift
+    done
     echo "https://github.com/testorg/testrepo/issues/999"
     exit 0 ;;
   *"issue edit"*)
@@ -37,6 +49,14 @@ esac
 exit 0
 EOF
     chmod +x "$TEST_TMP/bin/gh"
+    cat > "$TEST_TMP/classify-model-fit.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'called\n' >> "$CLASSIFY_LOG"
+printf '{"ctx":"32k","reasoning":"shallow"}\n'
+EOF
+    chmod +x "$TEST_TMP/classify-model-fit.sh"
+    export AUTOSPEC_SCRIPTS_DIR="$TEST_TMP"
+    cp "$(dirname "$LOOP")/gap-json-lib.sh" "$TEST_TMP/gap-json-lib.sh"
     export PATH="$TEST_TMP/bin:$PATH"
 
     # A clean gap that has no dedupe collision.
@@ -64,9 +84,33 @@ teardown() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"survivors=1"* ]]
     grep -q "issue create" "$GH_CREATE_LOG"
-    grep -q "auto-implement" "$GH_CREATE_LOG"
+    ! grep -q "auto-implement" "$GH_CREATE_LOG"
+    grep -q "needs-classify" "$GH_CREATE_LOG"
     grep -q "gap-remediation" "$GH_CREATE_LOG"
     grep -q "priority:high" "$GH_CREATE_LOG"
+    grep -q "origin:self" "$GH_CREATE_LOG"
+    [ ! -f "$CLASSIFY_LOG" ]
+    run bash "$LINT_ISSUE" "$GH_BODY_FILE"
+    [ "$status" -eq 0 ]
+    run bash "$PROMOTE_ELIGIBILITY" "$GH_BODY_FILE" --labels "needs-classify,gap-remediation"
+    [ "$status" -eq 0 ]
+    echo "$output" | jq -e '.decision == "eligible"'
+}
+
+@test "refuses remote filing when the rendered issue fails the quality contract" {
+    jq '.[0].dedupe_key = "should"' "$TEST_TMP/gaps.json" > "$TEST_TMP/invalid-quality.json"
+    run bash "$LOOP" --gaps "$TEST_TMP/invalid-quality.json" --file
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"failed quality lint"* ]]
+    [ ! -f "$GH_CREATE_LOG" ]
+}
+
+@test "refuses remote filing when the configured issue linter is unavailable" {
+    export AUTOSPEC_ISSUE_LINTER="$TEST_TMP/missing-lint-issue.sh"
+    run bash "$LOOP" --gaps "$TEST_TMP/gaps.json" --file
+    [ "$status" -eq 3 ]
+    [[ "$output" == *"issue linter unavailable"* ]]
+    [ ! -f "$GH_CREATE_LOG" ]
 }
 
 @test "dedupes against an open issue carrying the same dedupe_key in its body" {

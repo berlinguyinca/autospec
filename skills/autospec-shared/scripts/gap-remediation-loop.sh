@@ -6,8 +6,9 @@
 # gap against (a) open issues whose body carries the same `dedupe_key` or whose title
 # matches, and (b) open issues carrying an active `docs:drift` self-heal label with a
 # matching title. Survivors are filed via `gh issue create --label
-# auto-implement,gap-remediation,priority:high`, then classified via
-# classify-model-fit backfill (best-effort). Round state is tracked in
+# needs-classify,gap-remediation,priority:high`, leaving Rust-backed admission to
+# the autonomous Tier 1.5 promoter, which owns the complete classification transition.
+# Round state is tracked in
 # ~/.autospec/gap-round-state.json and capped at AUTOSPEC_GAP_MAX_ROUNDS (default 2).
 #
 # Usage:
@@ -19,6 +20,7 @@
 #   AUTOSPEC_SCRIPTS_DIR      — sibling scripts dir (default: script dir)
 #   AUTOSPEC_GAP_REPO         — repo slug for gh (default: gh repo context)
 #   AUTOSPEC_GAP_MAX_ROUNDS   — hard round cap (default: 2)
+#   AUTOSPEC_ISSUE_LINTER     — lint-issue.sh path override
 #
 # Output (stdout, last line): "gap-remediation: survivors=<N> filed=<N> round=<N>"
 #   When gaps are dropped: "gap-remediation: survivors=<N> filed=<N> round=<N> dropped=<N>"
@@ -38,6 +40,13 @@ STATE_DIR="${AUTOSPEC_STATE_DIR:-$HOME/.autospec}"
 MAX_ROUNDS="${AUTOSPEC_GAP_MAX_ROUNDS:-2}"
 ROUND_STATE="$STATE_DIR/gap-round-state.json"
 SKIP_FLAG="$STATE_DIR/no-review.flag"
+if [ -n "${AUTOSPEC_ISSUE_LINTER:-}" ]; then
+  ISSUE_LINTER="$AUTOSPEC_ISSUE_LINTER"
+elif [ -f "$AUTOSPEC_SCRIPTS_DIR/lint-issue.sh" ]; then
+  ISSUE_LINTER="$AUTOSPEC_SCRIPTS_DIR/lint-issue.sh"
+else
+  ISSUE_LINTER="$SCRIPT_DIR/../../../scripts/lint-issue.sh"
+fi
 
 GAPS_FILE=""
 DO_FILE=0
@@ -163,14 +172,6 @@ _gh_issue_create() {
     gh issue create "$@"
   fi
 }
-_gh_issue_edit() {
-  if [ -n "${AUTOSPEC_GAP_REPO:-}" ]; then
-    gh issue edit "$1" --repo "$AUTOSPEC_GAP_REPO" "${@:2}"
-  else
-    gh issue edit "$@"
-  fi
-}
-
 # ── Snapshot open issues once (number, title, body, label names) ──────────────
 _open_issues="$(_gh_issue_list --state open --limit 500 \
   --json number,title,body,labels 2>/dev/null || echo '[]')"
@@ -241,13 +242,39 @@ while [ "$_i" -lt "$_gap_count" ]; do
 
   [ "$DO_FILE" -eq 1 ] || continue
 
-  # Compose the issue body with the dedupe_key embedded so future rounds match it.
-  _issue_body="$(printf '%s\n\n---\n- dimension: %s\n- severity: %s\n- file: %s:%s\n- dedupe_key: %s\n' \
-    "$_body" "$_dim" "$_sev" "$_file" "$_line" "$_dk")"
+  # Render a complete issue-quality skeleton before staging. The reviewer body
+  # is flattened and bounded so embedded Markdown headings cannot alter the
+  # machine-read sections and a verbose finding cannot exceed the body budget.
+  _body_excerpt="$(printf '%s' "$_body" | tr '\r\n' '  ' | awk '{
+    for (i = 1; i <= NF && i <= 80; i++) {
+      printf "%s%s", (i == 1 ? "" : " "), $i
+    }
+  }')"
+  _issue_body="$(printf '## Goal\n\nResolve gap `%s` in `%s` using the captured Phase 5.5 evidence.\n\n## Files to read first\n\n- `%s`\n\n## Implementation scope\n\n- Correct the reported behavior in `%s` at or near line `%s`.\n\n## Implementation outline\n\n1. Reproduce the reported `%s` behavior.\n2. Apply the smallest scoped correction in `%s`.\n3. Add regression coverage for the corrected behavior.\n\n## Tests required\n\n- Add or update a regression test for `%s`.\n\n## Dependencies\n\nnone\n\n## Files touched\n\n- `%s`\n\n## Acceptance criteria\n\n- [ ] A regression test covering the reported gap passes 1 time.\n- [ ] `git diff --check` exits 0 after the scoped fix.\n\n## Verification\n\n### Primary smoke test (inner loop)\n\n```bash\ngit diff --check\n```\n\n## Reviewer evidence\n\n- **dimension:** `%s`\n- **severity:** `%s`\n- **source:** `%s:%s`\n- **dedupe_key:** `%s`\n- **finding:** %s\n' \
+    "$_dk" "$_file" "$_file" "$_file" "$_line" "$_dk" "$_file" \
+    "$_dk" "$_file" "$_dim" "$_sev" "$_file" "$_line" "$_dk" "$_body_excerpt")"
+
+  # Fail closed before any remote write if the rendered issue does not satisfy
+  # the repository's machine-checkable quality contract.
+  if [ ! -f "$ISSUE_LINTER" ]; then
+    printf 'gap-remediation: WARN issue linter unavailable; not filing "%s"\n' "$_title" >&2
+    _dropped=$((_dropped + 1))
+    continue
+  fi
+  _lint_body="$(mktemp)"
+  printf '%s\n' "$_issue_body" > "$_lint_body"
+  if ! bash "$ISSUE_LINTER" "$_lint_body" >/dev/null 2>&1; then
+    rm -f "$_lint_body"
+    printf 'gap-remediation: WARN rendered issue failed quality lint; not filing "%s"\n' "$_title" >&2
+    _dropped=$((_dropped + 1))
+    continue
+  fi
+  rm -f "$_lint_body"
 
   # Ensure labels exist (idempotent, mirror classify idiom).
   _gh_label_create gap-remediation --color d4c5f9 --force >/dev/null 2>&1 || true
   _gh_label_create priority:high   --color e11d21 --force >/dev/null 2>&1 || true
+  _gh_label_create needs-classify  --color fbca04 --force >/dev/null 2>&1 || true
   # origin:self provenance (issue #1785): idempotent, best-effort label
   _gh_label_create origin:self      --color 8250df --force >/dev/null 2>&1 || true
 
@@ -259,7 +286,7 @@ while [ "$_i" -lt "$_gap_count" ]; do
     _url="$(_gh_issue_create \
       --title "$_title" \
       --body "$_issue_body" \
-      --label "auto-implement,gap-remediation,priority:high,origin:self" 2>/dev/null || true)"
+      --label "needs-classify,gap-remediation,priority:high,origin:self" 2>/dev/null || true)"
     [ -n "$_url" ] && break
   done
 
@@ -269,26 +296,11 @@ while [ "$_i" -lt "$_gap_count" ]; do
   fi
   _filed=$((_filed + 1))
 
-  # Backfill ctx:*/reasoning:* via classify (best-effort; non-fatal).
-  _num="$(printf '%s' "$_url" | grep -oE '[0-9]+$' || true)"
-  if [ -n "$_num" ] && [ -x "$AUTOSPEC_SCRIPTS_DIR/classify-model-fit.sh" ]; then
-    _tmp_body="$(mktemp)"
-    printf '%s' "$_issue_body" > "$_tmp_body"
-    _cls="$(bash "$AUTOSPEC_SCRIPTS_DIR/classify-model-fit.sh" "$_tmp_body" --json 2>/dev/null || true)"
-    rm -f "$_tmp_body"
-    if [ -n "$_cls" ]; then
-      _ctx="$(printf '%s' "$_cls" | jq -r '.ctx // empty' 2>/dev/null || true)"
-      _rsn="$(printf '%s' "$_cls" | jq -r '.reasoning // empty' 2>/dev/null || true)"
-      if [ -n "$_ctx" ] && [ -n "$_rsn" ]; then
-        _gh_issue_edit "$_num" --add-label "ctx:$_ctx,reasoning:$_rsn" >/dev/null 2>&1 || true
-      fi
-    fi
-  fi
 done
 
 # ── All-dropped exit-3: input non-empty but every gap failed schema ────────────
 if [ "$_gap_count" -gt 0 ] && [ "$_dropped" -eq "$_gap_count" ]; then
-  printf 'gap-remediation: ERROR all %s gaps failed schema; nothing filed — fix the producer (see emit-gaps.sh) and re-run\n' \
+  printf 'gap-remediation: ERROR all %s gaps failed schema or issue-quality validation; nothing filed — fix the producer (see emit-gaps.sh) or rendered template and re-run\n' \
     "$_gap_count" >&2
   _report 0 0 "$_current_round" "$_dropped"
   exit 3
