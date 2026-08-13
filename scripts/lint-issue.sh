@@ -32,23 +32,25 @@ Rules enforced (§3 quality contract):
   GOAL_VAGUE            Bare vague verb (improve|enhance|optimize|polish|simplify|refactor|harden)
                         without a concrete object (path, backtick-quoted term, number, UPPER_SNAKE).
   GOAL_HEDGE            Hedging word (should|might|could try|try to) found in Goal section.
-  GOAL_NOT_ONE_SENTENCE Goal section is empty/missing, has more than 2 sentences, or exceeds 30 words.
+  GOAL_NOT_ONE_SENTENCE Goal section is empty/missing, is not exactly 1 sentence, or exceeds 30 words.
   AC_PROSE              AC line is not a checkbox (must start with '- [ ]').
   AC_SUBJECTIVE         AC item contains subjective adjective (looks|feels|seems|nice|clean|elegant|appropriate).
   AC_TOO_LONG           AC item exceeds 120 characters (excluding '- [ ] ' prefix).
   AC_EMPTY              Acceptance criteria section has no checkbox items.
-  SMOKE_MULTI_LINE      Primary smoke test block has more than one non-blank/non-comment line.
+  AC_NOT_CHECKABLE      AC item lacks a path, backtick span, integer, or regex token.
+  SMOKE_MULTI_LINE      Primary smoke test block does not have exactly one executable line.
   SMOKE_PLACEHOLDER     Primary smoke test block contains ... <TODO> TBD or XXX.
   SMOKE_NOT_FENCED      No fenced code block found under Primary smoke test heading.
   MISSING_SECTION_FILES_TO_READ   Body has no '## Files to read first' heading.
   MISSING_SECTION_IMPL_OUTLINE    Body has no '## Implementation outline' heading.
   MISSING_SECTION_TESTS           Body has no '## Tests required' heading.
+  MISSING_SECTION_DEPENDENCIES    Body has no '## Dependencies' heading.
   DEPS_MALFORMED        A '## Dependencies' section exists but a content line is neither
                         'Depends on issue #N' nor exactly 'none'.
   TOO_MANY_FILES        A '## Files touched' section lists more than 3 file paths.
-  BODY_TOO_LONG         Whole body exceeds 400 words (the five ui-feature
-    sections — Design reference, Interaction states, UX flows, Motion &
-    feedback, Device & viewport — are excluded from this count when present).
+  BODY_TOO_LONG         Authored body exceeds 400 words (the five ui-feature
+    sections and marker-bounded generated classification/shared-contract
+    metadata are excluded from this count).
   OUTLINE_TOO_LONG      '## Implementation outline' section exceeds 30 non-blank lines.
   UI_SECTIONS_INCOMPLETE A UI feature (a '<!-- ui-feature -->' marker or any
     one of the five required sections present) is missing one or more of:
@@ -156,6 +158,22 @@ strip_ui_sections() {
     ' "$file"
 }
 
+# Strip marker-bounded metadata appended after the authored child body has
+# already passed its 400-word budget.
+strip_generated_metadata() {
+    awk '
+        /<!-- autospec-classify:begin -->/ { skip = 1; next }
+        /<!-- autospec-shared-contracts:begin -->/ { skip = 1; next }
+        /<!-- autospec-classify:end -->/ { skip = 0; next }
+        /<!-- autospec-shared-contracts:end -->/ { skip = 0; next }
+        !skip { print }
+    '
+}
+
+strip_non_authored_sections() {
+    strip_ui_sections "$1" | strip_generated_metadata
+}
+
 # ── findings accumulator ──────────────────────────────────────────────────────
 
 FINDINGS=""
@@ -195,8 +213,8 @@ check_goal() {
     local full_text
     full_text="$(printf '%s' "$goal_content" | tr '\n' ' ' | sed 's/  */ /g' | sed 's/^ //;s/ $//')"
 
-    # Relaxed sizing rule (review W4): a Goal may be up to 2 sentences and up to
-    # 30 words. Count sentence-terminal characters: ? or ! anywhere, or . that is
+    # A Goal is exactly one sentence and up to 30 words. Count terminal
+    # characters: ? or ! anywhere, or . that is
     # followed by whitespace/end-of-string (to skip dots inside .sh, .md, 3.1, etc.)
     local terminal_count
     terminal_count="$(printf '%s' "$full_text" | grep -oE '[?!]|\.[[:space:]]|\.$' | wc -l | tr -d ' ')"
@@ -204,8 +222,8 @@ check_goal() {
     local word_count
     word_count="$(printf '%s' "$full_text" | wc -w | tr -d ' ')"
 
-    if [ "$terminal_count" -gt 2 ] || [ "$word_count" -gt 30 ]; then
-        add_finding "GOAL_NOT_ONE_SENTENCE" "Goal must be at most 2 sentences and 30 words; found ${terminal_count} sentence(s) and ${word_count} word(s)"
+    if [ "$terminal_count" -ne 1 ] || [ "$word_count" -gt 30 ]; then
+        add_finding "GOAL_NOT_ONE_SENTENCE" "Goal must be exactly 1 sentence and at most 30 words; found ${terminal_count} sentence(s) and ${word_count} word(s)"
     fi
 
     # Check for concrete object: path token, backtick-quoted span, number, UPPER_SNAKE label/env-var
@@ -283,6 +301,9 @@ check_ac() {
         printf '%s' "$line" | grep -qE '`[^`]+`' && has_token=1
         printf '%s' "$line" | grep -qE '\b[0-9]+\b' && has_token=1
         printf '%s' "$line" | grep -qF '\' && has_token=1  # regex literal (backslash present)
+        if [ "$has_token" -eq 0 ]; then
+            add_finding "AC_NOT_CHECKABLE" "AC item ${line_num} lacks a path, backtick span, integer, or regex token"
+        fi
 
         # Subjective words check
         if printf '%s' "$line" | grep -qiE '\b(looks|feels|seems|nice|clean|elegant|appropriate)\b'; then
@@ -318,7 +339,7 @@ check_smoke() {
     fi
 
     if [ -z "$smoke_content" ]; then
-        # No smoke test section at all — not required to fail if missing
+        add_finding "SMOKE_NOT_FENCED" "No Primary smoke test section with a fenced code block"
         return
     fi
 
@@ -361,7 +382,7 @@ EOF
     local code_line_count
     code_line_count="$(printf '%s' "$fence_lines" | sed '/^[[:space:]]*$/d' | sed '/^[[:space:]]*#/d' | wc -l | tr -d ' ')"
 
-    if [ "$code_line_count" -gt 1 ]; then
+    if [ "$code_line_count" -ne 1 ]; then
         add_finding "SMOKE_MULTI_LINE" "Primary smoke test block has ${code_line_count} non-blank/non-comment lines (must be exactly 1; use '&&' to chain)"
     fi
 }
@@ -383,9 +404,11 @@ check_sections() {
         add_finding "MISSING_SECTION_TESTS" "Body has no '## Tests required' heading (implementer reads it)"
     fi
 
-    # Dependencies format: only validated when the section exists. Every non-blank
-    # content line must be 'Depends on issue #N' or exactly 'none'.
-    if grep -qE '^## Dependencies[[:space:]]*$' "$BODY_FILE"; then
+    # Dependencies are required. Every non-blank content line must be
+    # 'Depends on issue #N' or exactly 'none'.
+    if ! grep -qE '^## Dependencies[[:space:]]*$' "$BODY_FILE"; then
+        add_finding "MISSING_SECTION_DEPENDENCIES" "Body has no '## Dependencies' heading"
+    else
         local deps_content
         deps_content="$(extract_section '## Dependencies' "$BODY_FILE" | sed '/^[[:space:]]*$/d')"
         local bad_dep=""
@@ -458,7 +481,7 @@ EOF
 
 check_body_size() {
     local body_words
-    body_words="$(strip_ui_sections "$BODY_FILE" | wc -w | tr -d ' ')"
+    body_words="$(strip_non_authored_sections "$BODY_FILE" | wc -w | tr -d ' ')"
     if [ "$body_words" -gt 400 ]; then
         add_finding "BODY_TOO_LONG" "Body is ${body_words} words (max 400); a small-LLM implementer cannot hold an over-long issue"
     fi

@@ -96,6 +96,18 @@ MD
     echo "$output" | grep -q "MISSING_SECTION_TESTS"
 }
 
+@test "sections: missing Dependencies triggers MISSING_SECTION_DEPENDENCIES" {
+    write_good_body "$TMP/b.md"
+    awk '
+        /^## Dependencies$/ { skip=1; next }
+        skip && /^## / { skip=0 }
+        !skip { print }
+    ' "$TMP/b.md" > "$TMP/b2.md"
+    run bash -c "bash '$LINT' '$TMP/b2.md' 2>&1"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "MISSING_SECTION_DEPENDENCIES"
+}
+
 # ── DEPS_MALFORMED ────────────────────────────────────────────────────────────
 
 @test "deps: bad dependency line triggers DEPS_MALFORMED" {
@@ -153,6 +165,10 @@ Touch four files in `scripts/`.
 
 - bats tests/x.bats
 
+## Dependencies
+
+none
+
 ## Files touched
 
 - scripts/a.sh
@@ -194,6 +210,10 @@ Touch three files in `scripts/`.
 ## Tests required
 
 - bats tests/x.bats
+
+## Dependencies
+
+none
 
 ## Files touched
 
@@ -237,6 +257,10 @@ Edit one skill trio and regenerate its goldens in one commit.
 ## Tests required
 
 - bats tests/x.bats
+
+## Dependencies
+
+none
 
 ## Files touched
 
@@ -345,6 +369,10 @@ MD
         echo ""
         echo "- bats tests/x.bats"
         echo ""
+        echo "## Dependencies"
+        echo ""
+        echo "none"
+        echo ""
         echo "## Acceptance criteria"
         echo ""
         echo "- [ ] \`bash scripts/x.sh\` exits 0."
@@ -380,6 +408,10 @@ MD
         echo ""
         echo "- bats tests/x.bats"
         echo ""
+        echo "## Dependencies"
+        echo ""
+        echo "none"
+        echo ""
         echo "## Acceptance criteria"
         echo ""
         echo "- [ ] \`bash scripts/x.sh\` exits 0."
@@ -397,15 +429,15 @@ MD
     ! echo "$output" | grep -q "OUTLINE_TOO_LONG"
 }
 
-# ── relaxed GOAL_NOT_ONE_SENTENCE (review W4) ─────────────────────────────────
+# ── exact GOAL_NOT_ONE_SENTENCE ───────────────────────────────────────────────
 
-@test "goal: 2 sentences and <=30 words passes (no GOAL_NOT_ONE_SENTENCE)" {
+@test "goal: 2 sentences triggers GOAL_NOT_ONE_SENTENCE" {
     write_good_body "$TMP/b.md"
     sed 's|^Add a deterministic gate.*$|Add a gate to `scripts/lint-issue.sh`. It rejects bodies missing required sections.|' \
         "$TMP/b.md" > "$TMP/b2.md"
     run bash -c "bash '$LINT' '$TMP/b2.md' 2>&1"
-    [ "$status" -eq 0 ]
-    ! echo "$output" | grep -q "GOAL_NOT_ONE_SENTENCE"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "GOAL_NOT_ONE_SENTENCE"
 }
 
 @test "goal: 3 sentences triggers GOAL_NOT_ONE_SENTENCE" {
@@ -425,4 +457,3 @@ MD
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "GOAL_NOT_ONE_SENTENCE"
 }
-

@@ -36,6 +36,12 @@ setup() {
     echo "$output" | grep -q "GOAL_NOT_ONE_SENTENCE"
 }
 
+@test "lint-issue: a two-sentence Goal triggers GOAL_NOT_ONE_SENTENCE" {
+    run bash -c "bash '$LINT' '$FIX/bad-goal-two-sentences.md' 2>&1"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "GOAL_NOT_ONE_SENTENCE"
+}
+
 # ── AC rule cases ─────────────────────────────────────────────────────────────
 
 @test "lint-issue: bad-ac-prose triggers AC_PROSE" {
@@ -62,6 +68,12 @@ setup() {
     echo "$output" | grep -q "AC_EMPTY"
 }
 
+@test "lint-issue: tokenless AC triggers AC_NOT_CHECKABLE" {
+    run bash -c "bash '$LINT' '$FIX/bad-ac-no-token.md' 2>&1"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "AC_NOT_CHECKABLE"
+}
+
 # ── SMOKE rule cases ──────────────────────────────────────────────────────────
 
 @test "lint-issue: bad-smoke-multi-line.md exits >=1 and reports SMOKE_MULTI_LINE" {
@@ -80,6 +92,18 @@ setup() {
     run bash -c "bash '$LINT' '$FIX/bad-smoke-no-fence.md' 2>&1"
     [ "$status" -ge 1 ]
     echo "$output" | grep -q "SMOKE_NOT_FENCED"
+}
+
+@test "lint-issue: missing smoke section triggers SMOKE_NOT_FENCED" {
+    run bash -c "bash '$LINT' '$FIX/bad-smoke-missing.md' 2>&1"
+    [ "$status" -ge 1 ]
+    echo "$output" | grep -q "SMOKE_NOT_FENCED"
+}
+
+@test "lint-issue: generated metadata does not count against authored word budget" {
+    run bash "$LINT" "$FIX/good-generated-metadata.md"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 # ── multi-rule case ───────────────────────────────────────────────────────────
