@@ -125,6 +125,11 @@ mod waterfall_policy;
 mod waterfall_policy_tests;
 #[cfg(test)]
 mod waterfall_tests;
+mod supervisor;
+#[cfg(test)]
+mod restart_policy_tests;
+
+use supervisor::supervise;
 
 const FOREGROUND_WORKER_PREFIX: &str = "rust-foreground-conductor";
 const TERMINAL_RETIREMENT_PAUSE: &str = "executor_terminal_retirement";
@@ -1570,82 +1575,6 @@ fn empty_dash(value: &str) -> &str {
     } else {
         value
     }
-}
-
-fn supervise(options: Options) -> Result<(), String> {
-    let mut iteration = 0;
-    loop {
-        iteration += 1;
-        let layout = RunLayout::new(&options)?;
-        let recorded = read_unit("conductor", &layout);
-        let mut watched_pid = if options.pid.is_empty() {
-            recorded.pid.clone()
-        } else {
-            options.pid.clone()
-        };
-        let mut conductor_running = process_alive(&watched_pid);
-        let mut action = if options.pid.is_empty() && recorded.stale_pid {
-            "stale-metadata".to_string()
-        } else if !watched_pid.is_empty() && !conductor_running {
-            "conductor-not-running".to_string()
-        } else {
-            "none".to_string()
-        };
-        let repairable = options.pid.is_empty()
-            && !conductor_running
-            && layout.state_dir.join("launch.json").is_file();
-        if repairable {
-            if persisted_stop_mode(&layout)?.is_some() {
-                action = "stop-requested".to_string();
-            } else {
-                match repair_stopped_conductor(&layout, &options) {
-                    Ok(RepairOutcome::Restarted(replacement)) => {
-                        watched_pid = replacement.pid;
-                        conductor_running = true;
-                        action = "restarted-conductor".to_string();
-                    }
-                    Ok(RepairOutcome::AlreadyRunning(pid)) => {
-                        watched_pid = pid;
-                        conductor_running = true;
-                        action = "already-repaired".to_string();
-                    }
-                    Ok(RepairOutcome::StopRequested) => {
-                        action = "stop-requested".to_string();
-                    }
-                    Err(error) => {
-                        eprintln!("autospec-supervise: repair deferred: {error}");
-                        action = "repair-deferred".to_string();
-                    }
-                }
-            }
-        }
-        let conductor = if conductor_running {
-            "running"
-        } else {
-            "stopped"
-        };
-        if options.json {
-            println!(
-                "{{\"command\":\"autonomous\",\"subcommand\":\"supervise\",\"repo\":\"{}\",\"conductor\":\"{}\",\"pid\":\"{}\",\"action\":\"{}\"}}",
-                json_escape(&options.repo),
-                conductor,
-                json_escape(&watched_pid),
-                action
-            );
-        } else {
-            println!(
-                "autospec-supervise: ok repo={} conductor={} pid={} action={}",
-                options.repo, conductor, watched_pid, action
-            );
-        }
-        if options.once || (options.iterations > 0 && iteration >= options.iterations) {
-            break;
-        }
-        thread::sleep(Duration::from_secs(
-            options.repair_interval_sec.unwrap_or(options.interval_sec),
-        ));
-    }
-    Ok(())
 }
 
 enum RepairOutcome {
