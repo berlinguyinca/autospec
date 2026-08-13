@@ -308,6 +308,32 @@ fn blocks_classification_drafts_and_requires_the_implementation_label() {
 }
 
 #[test]
+fn blocks_groom_proposed_issues_until_admission() {
+    let input = ready_input(vec![
+        issue(
+            710,
+            "## Implementation outline\n\n- edit `src/proposed.rs`\n",
+            &["auto-implement", "groom:proposed", "safety:reviewed"],
+        ),
+        issue(
+            711,
+            "## Implementation outline\n\n- edit `src/admitted.rs`\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![711]);
+    assert_eq!(plan.batch_numbers(), vec![711]);
+    assert_eq!(plan.blocked[0].reason.as_deref(), Some("groom_proposed"));
+    assert_eq!(
+        plan.blocked[0].blocked_label.as_deref(),
+        Some("groom:proposed")
+    );
+}
+
+#[test]
 fn excludes_closed_auto_implement_issues_from_the_ready_queue() {
     let closed = RemoteIssue::closed(
         705,

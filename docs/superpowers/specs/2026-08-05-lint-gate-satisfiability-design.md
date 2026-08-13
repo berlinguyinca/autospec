@@ -229,6 +229,57 @@ Comments are **not** stripped before this scan, the way `lint-ui.sh` learned to 
 secret sitting in a comment is still a leaked secret. Prose naming a pattern therefore still
 reports, and the escape hatch is how you clear it.
 
+### Fix 7 — findings emitted inside a pipeline are counted
+
+Three rules — `check_function_loc`, the nesting-depth rule, and `check_duplicate_names` — emitted
+from the right-hand side of a pipe. Bash runs that in a subshell, so their `FINDINGS_COUNT` and
+`RULE_EMIT_COUNT` increments were discarded on exit, and the exit code contradicted what had just
+been printed. All three now read their producer through a here-document, the idiom every other
+loop in the file already uses.
+
+Two things were wrong, not one. Measured on 24 long functions across three files, enforcement on:
+
+| | exit code | blocking lines | truncation markers |
+|---|---|---|---|
+| before | 3 | 35 | 4 |
+| after | 11 | 11 | 1 |
+
+The exit code undercounted — which forced the local wrapper to loosen its cross-check for a
+release (#3080), and which `qa-phase4.sh` reports to operators. And the per-rule emit cap
+restarted for every file, because each file's findings were counted in a fresh subshell. Within a
+single file the cap held, which is why this survived so long: the obvious test passes.
+
+With the contract restored, `lint-implementation-gates.sh` compares `rc == printed` again below
+the exit cap. A delegate that prints three findings and claims one is a defect, and saying so is
+the point of cross-checking at all.
+
+### Fix 8 — advisory findings are offered as guidance, not dropped
+
+Making `COMPLEXITY` advisory (Fix 5) had a consequence nobody chose: `--directives` skips `INFO:`
+lines, and the Phase 4 repair loop derives its rule list from the pre-commit hook's *failure*
+text. An advisory finding therefore reached the implementing agent neither as a block nor as
+guidance, and the four heuristics that the CI file-size ratchet does not cover — function length,
+nesting depth, cyclomatic score, duplicate names — went unenforced and unmentioned on every path.
+
+The operator's instruction was about not being *blocked*, not about not being *told*, so
+`--directives` now renders two tiers:
+
+```
+Fix TODO_LEFT: Remove deferred-work markers from non-test code; …
+Consider COMPLEXITY: Split functions >50 LOC, files >500 LOC, or nesting >4 — …
+```
+
+One line per rule and tier. The directive text is per-rule, so eleven long functions previously
+meant eleven identical sentences; deduplicating is what makes the second tier affordable to add.
+The tier follows severity rather than rule id, so `AUTOSPEC_COMPLEXITY_ENFORCE=1` moves the same
+finding back into `Fix`.
+
+Two limits worth stating. A rule waived by `Guardian: skip-<RULE>` also arrives as `INFO:` and so
+is re-offered as a `Consider` line, which is mild noise against an explicit waiver — the two
+cases are indistinguishable downstream today. And the Rust repair prompt in `executor_bridge.rs`
+still renders only blocking rules, because its rule list is persisted per repair attempt and
+carrying a second tier means a state-schema change; that half is tracked separately.
+
 ## 3. Bootstrap order — no bypass required
 
 The fixes live in `scripts/lint-implementation.sh` (1,796 LOC) and

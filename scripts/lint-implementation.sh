@@ -1463,15 +1463,15 @@ check_duplicate_names() {
     # own setUp/tearDown). Flagging these is a false positive; a real accidental
     # dup of a domain function name still flags.
     local _DUP_NAME_EXEMPT=" setUp tearDown setUpClass tearDownClass asyncSetUp asyncTearDown __init__ __enter__ __exit__ main "
-    if [ -n "$dupes" ]; then
-        echo "$dupes" | while IFS= read -r dupe_name; do
-            [ -z "$dupe_name" ] && continue
-            case "$_DUP_NAME_EXEMPT" in
-                *" $dupe_name "*) continue ;;
-            esac
-            emit_capped "COMPLEXITY" "-" "-" "duplicate function name '${dupe_name}' across changed files — reuse or rename to avoid confusion"
-        done
-    fi
+    while IFS= read -r dupe_name; do  # here-document below, not a pipe — see Fix 7
+        [ -z "$dupe_name" ] && continue
+        case "$_DUP_NAME_EXEMPT" in
+            *" $dupe_name "*) continue ;;
+        esac
+        emit_capped "COMPLEXITY" "-" "-" "duplicate function name '${dupe_name}' across changed files — reuse or rename to avoid confusion"
+    done <<EOF
+$dupes
+EOF
 }
 
 
@@ -1645,19 +1645,19 @@ if [ "$DIRECTIVES" -eq 1 ]; then
         fi
     } > "$TMP_FINDINGS" 2>&1
 
-    # Reformat each finding as a directive line
+    # Two tiers: blocking is a "Fix", advisory INFO a "Consider" — dropping INFO left the agent
+    # neither blocked nor told (Fix 8, #3079). One line per rule and tier: the directive text is
+    # per-rule, so eleven long functions would otherwise repeat one sentence eleven times.
+    _seen_directives=""
     while IFS= read -r finding; do
-        # Extract RULE_ID from "RULE_ID:path:line: desc" format
-        rule_id="$(printf '%s' "$finding" | cut -d: -f1)"
-        # Skip INFO lines
-        if [ "$rule_id" = "INFO" ]; then
-            continue
-        fi
-        if [ "$rule_id" = "ERROR" ]; then
-            rule_id="$(printf '%s' "$finding" | cut -d: -f2)"
-        fi
-        directive="$(rule_directive "$rule_id")"
-        printf 'Fix %s: %s\n' "$rule_id" "$directive"
+        rule_id="${finding%%:*}"; verb="Fix"       # "RULE:path:line: desc", INFO:/ERROR: first
+        case "$rule_id" in
+            INFO)  verb="Consider"; _rest="${finding#*:}"; rule_id="${_rest%%:*}" ;;
+            ERROR) _rest="${finding#*:}"; rule_id="${_rest%%:*}" ;;
+        esac
+        case "$_seen_directives" in *" ${verb}:${rule_id} "*) continue ;; esac
+        _seen_directives="${_seen_directives} ${verb}:${rule_id} "
+        printf '%s %s: %s\n' "$verb" "$rule_id" "$(rule_directive "$rule_id")"
     done < "$TMP_FINDINGS"
 else
     detect_pr_size
