@@ -10,6 +10,7 @@
 #   4  dirty         — `git status --porcelain` non-empty (untracked included)
 #   5  stale_base    — HEAD != origin/main after fetch (warn-level by default,
 #                      fail under --strict-base)
+#   6  wrong_branch  — current branch does not match --branch-pattern
 #
 # `assert` runs against REAL git fixture repos (a bare "origin", a primary
 # checkout, and a linked worktree), so git-dir/git-common-dir detection is
@@ -136,6 +137,20 @@ mk_worktree() {
     link="$TEST_TMP/wt-link"
     ln -s "$wt" "$link"
     run bash -c "cd '$link' && bash '$GUARD' assert"
+    [ "$status" -eq 0 ]
+}
+
+@test "assert: --branch-pattern rejects main even from a linked worktree" {
+    git -C "$PRIMARY" checkout -q -b operator
+    git -C "$PRIMARY" worktree add -q "$TEST_TMP/main-wt" main >/dev/null 2>&1
+    run bash -c "cd '$TEST_TMP/main-wt' && bash '$GUARD' assert --branch-pattern 'feat/*'"
+    [ "$status" -eq 6 ]
+    [[ "$output" == *wrong_branch* ]]
+}
+
+@test "assert: --branch-pattern accepts a feature branch" {
+    wt="$(mk_worktree)"
+    run bash -c "cd '$wt' && bash '$GUARD' assert --branch-pattern 'feat/*'"
     [ "$status" -eq 0 ]
 }
 

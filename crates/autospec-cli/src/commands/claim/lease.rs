@@ -17,6 +17,29 @@ pub(super) fn conductor_claim_owner_holds_lease(record: &RunStateRecord) -> bool
         || !server_lease_is_stale(&record.updated_at, record.ttl_seconds)
 }
 
+/// The owner a fresh worker must yield to, if any.
+///
+/// A lease holder keeps its claim while the TTL clock says the lease is fresh;
+/// once it has aged past TTL the claim is fair game. This is deliberately the
+/// simple TTL-only rule — the heartbeat-liveness variant proved ineffective and
+/// wedged the drain on dead owners (reverted, issue #3048).
+pub(super) fn active_contesting_owner(
+    repo: &str,
+    issue: u64,
+    worker_id: &str,
+    branch: &str,
+) -> Result<Option<String>, super::CommandFailure> {
+    let Some(head) = super::read_claim_ref(repo, issue)? else {
+        return Ok(None);
+    };
+    let contested = head.record.state == "claimed"
+        && (head.record.worker_id != worker_id || head.record.branch != branch);
+    if !contested || !conductor_claim_owner_holds_lease(&head.record) {
+        return Ok(None);
+    }
+    Ok(Some(head.record.worker_id))
+}
+
 /// Whether a server-recorded lease is still inside its TTL.
 pub(super) fn server_lease_is_fresh(server_timestamp: &str, ttl_seconds: u64) -> bool {
     let Some(updated_at) = parse_iso_timestamp(server_timestamp) else {
@@ -340,27 +363,4 @@ where
         super::ClaimRefAdvance::Lost => return Ok(None),
     };
     Ok(Some(head))
-}
-
-/// The owner a fresh worker must yield to, if any.
-///
-/// An owner yields when its lease has aged past its TTL, and also when its startup
-/// heartbeat is expired-dead. The TTL alone is not enough: a worker that died
-/// seconds ago holds a valid lease for the full three hours, so every successor
-/// lost the claim to a dead process and exited, over and over.
-pub(super) fn contesting_claim_owner(
-    repo: &str,
-    issue: u64,
-    worker_id: &str,
-    branch: &str,
-) -> Result<Option<String>, super::CommandFailure> {
-    let Some(head) = super::read_claim_ref(repo, issue)? else {
-        return Ok(None);
-    };
-    let contested = head.record.state == "claimed"
-        && (head.record.worker_id != worker_id || head.record.branch != branch);
-    if !contested || !owner_still_holds(repo, issue, &head.record)? {
-        return Ok(None);
-    }
-    Ok(Some(head.record.worker_id))
 }
