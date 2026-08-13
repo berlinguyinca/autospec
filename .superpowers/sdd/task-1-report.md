@@ -207,3 +207,77 @@ so install, lock-step, and `bash -n` gates belong to later tasks and are not cla
 
 `cargo fmt --all -- --check` remains blocked by the repository-wide pre-existing formatting diff
 documented above. `git diff --check` is used for this review-fix diff.
+
+## Second review-fix report (2026-08-13)
+
+### Result
+
+- Restored the mixed `json_identity`, `heartbeat_prior`, and `heartbeat_classify` modules on
+  macOS. Linux-only helpers and test cases remain gated at their individual imports/functions.
+- The portable `startup_heartbeat_portable_unix` test uses a width-neutral device-number
+  comparison because Darwin's `stat.st_dev` and Rust's `MetadataExt::dev()` expose different
+  integer types.
+- The macOS `autospec` test binary now discovers 538 tests, up from 517 before this pass.
+
+### RED
+
+Before removing the three whole-module gates, each required filter returned the same exact result:
+
+```text
+cargo test -q -p autospec-cli --bin autospec startup_heartbeat_portable_unix
+cargo test -q -p autospec-cli --bin autospec unsupported_platform_stale_recovery_is_fail_closed
+cargo test -q -p autospec-cli --bin autospec json_identity
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 517 filtered out; finished in 0.00s
+```
+
+### GREEN focused tests
+
+The portable heartbeat, unsupported-platform classification, and three representative neutral
+JSON identity cases each produced:
+
+```text
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 537 filtered out; finished in 0.00s
+```
+
+The exact JSON identity filters were:
+
+```text
+autonomous_executor_bridge_persisted_json_rejects_unknown_fields
+autonomous_executor_bridge_persisted_json_requires_supported_schema
+autonomous_executor_bridge_process_identity_requires_every_component
+```
+
+Previously green regressions remained green:
+
+```text
+fresh_acquisition_without_predecessor_needs_no_linux_retirement: 1 passed
+released_predecessor_requires_linux_pidfd_retirement: 1 passed
+structured_review_receipt: 6 passed
+paginated_comments_parser_flattens_two_raw_pages: 1 passed
+```
+
+Test discovery:
+
+```text
+cargo test -q -p autospec-cli --bin autospec -- --list 2>/dev/null | rg ': test$' | wc -l
+538
+```
+
+### Required build verification
+
+```text
+cargo build --release -p autospec-cli
+Finished `release` profile [optimized] target(s) in 0.04s
+
+cargo test --workspace --no-run
+Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+```
+
+The known 113 broader macOS fixture/tool failures were not rerun or suppressed in this pass.
+Linux pidfd, `/proc`, fork, subreaper, direct-process ownership, and Linux executable semantics
+remain gated for Linux CI.

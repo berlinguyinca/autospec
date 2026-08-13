@@ -45,7 +45,6 @@ mod harness_supervisor;
 #[cfg(target_os = "linux")]
 mod identity_reviewer;
 mod integration_smoke;
-#[cfg(target_os = "linux")]
 mod json_identity;
 mod license_checker;
 #[cfg(target_os = "linux")]

@@ -2,12 +2,15 @@
 //
 // Split out of tests.rs; see the note in that file.
 
+#[cfg(target_os = "linux")]
 use autospec_core::claim::RunStateRecord;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use crate::commands::claim;
-use super::support::{STARTUP_HEARTBEAT_ENV, expected_startup_heartbeat, startup_heartbeat_fixture};
+#[cfg(target_os = "linux")]
+use super::support::STARTUP_HEARTBEAT_ENV;
+use super::support::{expected_startup_heartbeat, startup_heartbeat_fixture};
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -256,7 +259,7 @@ fn startup_heartbeat_portable_unix() {
     let expected = std::fs::metadata(&trusted_child).expect("descendant metadata");
     let observed = fstat(&opened).expect("opened metadata");
     assert_eq!(
-        (observed.st_dev, observed.st_ino),
+        (observed.st_dev as u64, observed.st_ino),
         (expected.dev(), expected.ino())
     );
 

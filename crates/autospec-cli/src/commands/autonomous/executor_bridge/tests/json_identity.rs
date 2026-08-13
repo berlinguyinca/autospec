@@ -3,18 +3,24 @@
 // Split out of tests.rs; see the note in that file.
 
 use crate::commands::autonomous::executor_bridge as bridge;
+#[cfg(target_os = "linux")]
+use super::super::{BridgePhase, MutationSnapshot, SupervisionOutcome};
 use super::super::{
-    build_implementer_prompt, write_invocation_atomic, BridgePhase, MutationSnapshot,
-    PersistedInvocation, ProcessIdentity, SupervisionOutcome,
+    build_implementer_prompt, write_invocation_atomic, PersistedInvocation, ProcessIdentity,
 };
-use super::support_base::{GitFixture, test_environment, test_root};
+#[cfg(target_os = "linux")]
+use super::support_base::test_environment;
+use super::support_base::{GitFixture, test_root};
+#[cfg(target_os = "linux")]
 use super::support_invocation::{
-    detach_harness_for_adoption, persisted_invocation, supervision_config, supervision_state,
+    detach_harness_for_adoption, supervision_config, supervision_state,
 };
+use super::support_invocation::persisted_invocation;
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 #[test]

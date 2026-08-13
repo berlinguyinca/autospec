@@ -5,10 +5,13 @@
 use crate::commands::claim;
 use super::support::{
     assert_fifo_reader_nonblocking, expected_startup_heartbeat, startup_heartbeat_document,
-    startup_heartbeat_fixture, STARTUP_HEARTBEAT_ENV,
+    startup_heartbeat_fixture,
 };
+#[cfg(target_os = "linux")]
+use super::support::STARTUP_HEARTBEAT_ENV;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(target_os = "linux")]
 use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "linux")]
