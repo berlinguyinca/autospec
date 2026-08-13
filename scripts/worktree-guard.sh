@@ -2,7 +2,8 @@
 # Deterministic linked-worktree preflight + creation guard.
 # Installed to ~/.autospec/scripts/ by install.sh's copy_repo_scripts glob.
 # Exit codes: 0 ok, 2 usage/non-git, 3 primary checkout, 4 dirty/reuse refusal,
-# 5 stale base. resolve-branch emits {"state":"open-pr"|"branch-only"|"fresh","pr":N|null}.
+# 5 stale base, 6 wrong branch. resolve-branch emits
+# {"state":"open-pr"|"branch-only"|"fresh","pr":N|null}.
 
 set -eu
 
@@ -11,14 +12,14 @@ PROG="worktree-guard.sh"
 usage() {
     cat <<'EOF'
 Usage:
-  worktree-guard.sh assert [--base <ref>] [--strict-base]
+  worktree-guard.sh assert [--base <ref>] [--strict-base] [--branch-pattern <glob>]
   worktree-guard.sh resolve-branch --branch <B> --repo <O/R>
   worktree-guard.sh resolve-base [--base <ref>] [--pr-base]
   worktree-guard.sh create --branch <B> [--base <ref>] [--path <P>] [--adopt]
 
 Subcommands:
   assert          Preflight the current directory. Exit 0 ok / 2 usage|non-git /
-                  3 in_primary_checkout / 4 dirty / 5 stale_base.
+                  3 in_primary_checkout / 4 dirty / 5 stale_base / 6 wrong_branch.
   resolve-branch  PR-aware ladder verdict as JSON on stdout (exit 0 always):
                   {"state":"open-pr"|"branch-only"|"fresh","pr":N|null}.
   resolve-base    Emit the base ref selected by --base / env / config / default.
@@ -31,7 +32,7 @@ Base selection:
   .autospec/autospec.yml git.base_branch wins. Otherwise origin/main is used,
   falling back to gh repo view's defaultBranchRef only when origin/main is absent.
 
-Exit codes: 0 ok, 2 usage/non-git, 3 in_primary_checkout, 4 dirty, 5 stale_base.
+Exit codes: 0 ok, 2 usage/non-git, 3 in_primary_checkout, 4 dirty, 5 stale_base, 6 wrong_branch.
 EOF
 }
 
@@ -157,11 +158,13 @@ cmd_assert() {
     local base=""
     local base_explicit=0
     local strict_base=0
+    local branch_pattern=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --base)        [ $# -ge 2 ] || die 2 "--base requires a value"; base="$2"; base_explicit=1; shift 2 ;;
             --strict-base) strict_base=1; shift ;;
+            --branch-pattern) [ $# -ge 2 ] || die 2 "--branch-pattern requires a value"; branch_pattern="$2"; shift 2 ;;
             -h|--help)     usage; exit 0 ;;
             *)             die 2 "assert: unknown arg: $1" ;;
         esac
@@ -195,6 +198,18 @@ cmd_assert() {
     if [ -n "$porcelain" ]; then
         emit "code_health:dirty"
         die 4 "assert: worktree is dirty (uncommitted or untracked changes present)"
+    fi
+
+    if [ -n "$branch_pattern" ]; then
+        local current_branch
+        current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+        case "$current_branch" in
+            $branch_pattern) : ;;
+            *)
+                emit "code_health:wrong_branch branch=$current_branch want=$branch_pattern"
+                die 6 "assert: current branch '$current_branch' does not match required pattern '$branch_pattern'"
+                ;;
+        esac
     fi
 
     # Stale base: fetch the base, then compare HEAD against the base tip.
