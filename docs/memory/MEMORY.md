@@ -40,6 +40,8 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [Admin-merge denial during autospec](feedback_admin_merge_denial.md) — `gh pr merge --admin` blocked by harness hook; needs settings.json permission rule for Phase 4 to flow
 - [/autospec autonomy scope](feedback_autospec_autonomy_scope.md) — auto-merge spec PRs, collapse low-stakes brainstorm to default-locks, surface only run/defer/refine + destructive-remote actions
 - [Skill per capability](feedback_autospec_skill_per_capability.md) — operator-facing capabilities ship as top-level /autospec-<verb> skills; inline sub-modes are convenience shortcuts only
+- [Perpetual capabilities extend the conductor](feedback_capabilities_are_conductor_tiers_not_new_conductors.md) — autonomous workstreams reuse autospec-autonomous tiers instead of duplicating conductor control planes
+- [One-shot tiers must clear trigger state](feedback_oneshot_to_tier_must_clear_trigger_state.md) — a conductor tier must retire the signal it consumes or it will re-fire and starve lower tiers
 - [Autospec mode-dispatch must not shell out user text](feedback_autospec_no_shell_user_text.md) — Self-update/Stop mode sections must be pure prose; no bash heredocs of `{FEATURE_DESCRIPTION}`
 - [Refine-then-run workflow shorthand](feedback_refine_then_run_workflow.md) — user's normal autospec flow is refine, review checkpoint, then run; route imperative shorthand through autospec-listen
 
@@ -54,6 +56,7 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [Skill golden + derivation workflow](feedback_skill_golden_derivation_workflow.md) — editing any trio skill (esp. with autospec-block markers) needs re-derive codex/opencode AND regenerate tests/fixtures/skill-goldens sha256, or validate.sh fails closed
 - [Decompose: trio prose + goldens must be one issue](feedback_decompose_trio_prose_goldens_atomic.md) — never split "edit trio prose" and "regen goldens" into separate auto-implement issues; the prose-only intermediate fails validate closed (bit 3x in one run); combine into one implementer that Closes both
 - [Trio derivation tooling (use it)](reference_trio_derivation_tooling.md) — edit SKILL.md then `derive-trio.sh --in-place` + `gen-skill-goldens.sh`; stop hand-maintaining codex/opencode + goldens; validate's check_derive_trio_consistency enforces it; decomposer now treats trio+goldens as one unit
+- [Golden generator takes a bare skill name](feedback_gen_skill_goldens_bare_name.md) — `derive-trio.sh` takes a skill path, but `gen-skill-goldens.sh` takes a bare name; exit 3 means regeneration did not happen
 - [jq test() regex metachar injection](feedback_jq_test_regex_metachar_injection.md) — interpolating host/user-derived values into jq test() is regex injection; dotted hostnames made claim self-clean delete the wrong worker's lock comment; use capture()+==
 - [Self-consistent test fixtures mask bugs](feedback_self_consistent_test_fixtures_mask_bugs.md) — tests that build fixtures with the SUT's own derivation expression can't catch a bug in it; the Claude transcript-slug `lstrip` bug shipped green for months. Pin against the real convention / live values; reproduce end-to-end
 
@@ -64,14 +67,17 @@ older than 7 days AND the lesson is no longer load-bearing, archive it.
 - [Validate baseline diffing](feedback_validate_baseline_diff.md) — validate is red on main, so compare failure SETS against a clean origin/main worktree; per-suite spot checks gave a false all-clear and let 2 regressions through CI
 
 - [Installer excludes runtime libs](feedback_installer_excludes_runtime_libs.md) — install.sh drops scripts/lib/ runtime libs; autospec-explore hard-crashes on a clean install; ship-completeness doesn't catch it
+- [Install shared-library helpers from their own source root](feedback_install_shared_lib_scripts_dir.md) — helpers under `skills/autospec-shared/scripts` belong in `SHARED_LIB_SCRIPT_FILES`, not the repo-root script group
+- [Codex exec needs the repository-check override](feedback_codex_exec_needs_skip_git_repo_check.md) — headless integrations must pass `--skip-git-repo-check`; argument-blind stubs hide the refusal
 - [Explore codebase-signals false positives](feedback_explore_codebase_signals_false_positives.md) — TODO/FIXME grep matches prose, assets, and its own source; noise dominates ranking; constitution gate drops 0/45
 - [Explore --once unverified ~0% precision](feedback_explore_once_unverified_near_zero_precision.md) — local discovery on autospec repo: 183 raw → 0 verified; even source-analysis was 4/4 false on direct check; never auto-file --once bare-subprocess output, verify evidence against files first
 
 - [Heartbeat cross-repo collision](feedback_heartbeat_cross_repo_collision.md) — ~/.autospec/process-heartbeats/ is shared across repos; use path-scoped slug subdirs
 - [Bash RETURN trap leaks](feedback_bash_return_trap_leak.md) — RETURN traps leak into caller frames under set -u; use inline cleanup
 - [Bash set -e short-circuit aborts](feedback_bash_set_e_short_circuit.md) — `[ test ] && action` aborts under set -e when test fails; use if/then/fi for one-sided conditionals
+- [Indirect environment lookup without eval](feedback_indirect_env_lookup_no_eval.md) — `${!name:-}` is Bash 3.2-safe and avoids command injection from config-derived variable names
 - [bash 3.2 process-sub + [ -f ] in tests](feedback_bash32_process_sub_test_file.md) — macOS bash 3.2 `[ -f <(...) ]` is false; bats tests must write to a real temp file before a --validate-file/[ -f ] helper
-- [Subagent cwd pinned to main checkout](feedback_subagent_cwd_pinned_to_main_checkout.md) — Agent subagents commit to the main checkout's branch, NOT the EnterWorktree worktree; do writes directly as the main agent, reserve subagents for read-only, or they contaminate parallel branches
+- [Subagent cwd pinned to main checkout](feedback_subagent_cwd_pinned_to_main_checkout.md) — subagents may write through absolute worktree paths, but the main agent must own git operations to avoid cross-branch contamination
 - [Per-session worktree isolation](feedback_per_session_worktree_isolation.md) — concurrent autospec/claude sessions stomp each other; start every edit in a fresh worktree off origin/main + pre-flight overlap scan + file/skill claim, never edit on a shared/in-flight branch
 - [Worktree resource isolation proof](feedback_worktree_resource_isolation.md) — use an isolated real Docker engine for scale evidence, measure label-scoped resources, fail cleanup loudly, and reject symlinked private state roots
 - [OMC autopilot magic-keyword misfire](feedback_omc_autopilot_misfire.md) — system reminders containing "AUTOPILOT" auto-activate OMC autopilot mid-session; recover via state_write(active=false) + state_clear(skill-active)

@@ -20,11 +20,14 @@ branch, the subagent's commit lands on THEIR branch (cross-contamination).
 intended worktree branch, on top of the user's uncommitted edits.
 
 **How to apply:**
-- For multi-track worktree work, do the file edits/commits **directly as the main
-  agent** (the main loop's cwd IS correctly pinned to the active worktree — a
-  `cd elsewhere` in Bash is auto-reset back to the worktree). Reserve subagents
-  for **read-only** tasks (reviewers/explorers never commit, so they're safe).
-- If you must use a writing subagent, have it `git rev-parse --abbrev-ref HEAD`
+- Proven multi-track pattern: implementer subagents may write only through
+  absolute paths beneath the intended worktree and run tests through those same
+  paths, but they must not run git. The main agent inspects, stages, and commits
+  with `git -C <worktree>`. Verify the first task with a canary status check in
+  both the worktree and primary checkout before scaling out.
+- For simpler work, do edits and commits directly as the main agent. Read-only
+  reviewer and explorer subagents remain safe.
+- If a subagent must run git, have it `git rev-parse --abbrev-ref HEAD`
   first and refuse if not on the expected branch.
 - Recovery when it lands on the wrong branch: `git cherry-pick <sha>` onto the
   intended branch, then in the contaminated checkout `git reset --soft HEAD~1` +
