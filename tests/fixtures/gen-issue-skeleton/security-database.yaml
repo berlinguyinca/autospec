@@ -1,0 +1,41 @@
+issue_id: security-query-001
+spec_path: docs/specs/read-only-query-design.md
+spec_url: https://example.com/read-only-query-design
+goal_sentence: "Add scripts/validate-query.sh to reject write-capable database statements."
+feature_profile: security_database
+team_personality:
+  - "Security delivery: database owner, application engineer, test engineer"
+review_counter_team:
+  - "Adversarial review: red team, SRE, data-governance reviewer"
+files_to_read:
+  - docs/specs/read-only-query-design.md
+  - scripts/validate-query.sh
+files_touched:
+  - scripts/validate-query.sh
+  - tests/security-query.bats
+local_llm_notes:
+  - "Treat the database grant as authoritative and preserve every listed control."
+dependencies:
+  - "Depends on issue #41"
+evidence_consumed:
+  - "E1 verified: replica availability from scripts/probe-replica.sh"
+controls_covered:
+  - "T1: SELECT-only database role prevents data loss"
+prerequisites:
+  - "verified: P1 read replica is available"
+implementation_scope:
+  - "scripts/validate-query.sh and grant-level rejection tests"
+out_of_scope:
+  - "Write access"
+implementation_outline_lines:
+  - "Add the statement validator"
+  - "Exercise grants without the validator"
+tests_required:
+  - "bats tests/security-query.bats against a real database fixture"
+acceptance_criteria:
+  - "scripts/validate-query.sh rejects `INSERT` with exit 1"
+  - "tests/security-query.bats proves 6 grant-level writes fail"
+verification:
+  primary_smoke: "bats tests/security-query.bats"
+  operator_full: "bash scripts/validate-query.sh --self-test"
+branch_name: feat/security-query-validator

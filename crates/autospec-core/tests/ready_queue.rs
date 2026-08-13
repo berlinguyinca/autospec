@@ -334,6 +334,38 @@ fn blocks_groom_proposed_issues_until_admission() {
 }
 
 #[test]
+fn blocks_security_prerequisites_even_when_auto_implement_is_stale() {
+    let input = ready_input(vec![
+        issue(
+            712,
+            "## Prerequisites\n\n- blocking: replica unavailable\n",
+            &[
+                "auto-implement",
+                "autospec:blocked-prerequisite",
+                "safety:reviewed",
+            ],
+        ),
+        issue(
+            713,
+            "## Prerequisites\n\n- verified: replica available\n",
+            &["auto-implement", "safety:reviewed"],
+        ),
+    ]);
+
+    let plan = plan_ready_queue(&input);
+
+    assert_eq!(plan.ready_numbers(), vec![713]);
+    assert_eq!(
+        plan.blocked[0].reason.as_deref(),
+        Some("security_prerequisite_blocked")
+    );
+    assert_eq!(
+        plan.blocked[0].blocked_label.as_deref(),
+        Some("autospec:blocked-prerequisite")
+    );
+}
+
+#[test]
 fn excludes_closed_auto_implement_issues_from_the_ready_queue() {
     let closed = RemoteIssue::closed(
         705,

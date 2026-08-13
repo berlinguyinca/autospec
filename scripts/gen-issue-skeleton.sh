@@ -9,10 +9,13 @@
 # Required YAML keys:
 #   issue_id, spec_path, spec_url, goal_sentence,
 #   team_personality (list), review_counter_team (list), files_to_read (list),
+#   files_touched (list), local_llm_notes (list), dependencies (list),
 #   implementation_scope (list), out_of_scope (list),
 #   implementation_outline_lines (list), tests_required (list),
 #   acceptance_criteria (list), verification.primary_smoke,
 #   verification.operator_full, branch_name
+# Optional profile: feature_profile: security_database additionally requires
+#   evidence_consumed, controls_covered, prerequisites (lists)
 #
 # Output: structured markdown issue body on stdout.
 # The output is piped through scripts/lint-issue.sh; non-zero exits propagate.
@@ -39,7 +42,8 @@ Usage:
 Required YAML keys:
   issue_id, spec_path, spec_url, goal_sentence,
   team_personality, review_counter_team,
-  files_to_read, implementation_scope, out_of_scope,
+  files_to_read, files_touched, local_llm_notes, dependencies,
+  implementation_scope, out_of_scope,
   implementation_outline_lines, tests_required, acceptance_criteria,
   verification.primary_smoke, verification.operator_full, branch_name
 EOF
@@ -118,6 +122,7 @@ yaml_get_list() {
           gsub(/^["'"'"']|["'"'"'],.*$/, "")
         }
         print
+        next
       }
       in_section && /^[a-z]/ { exit }
     '
@@ -152,6 +157,7 @@ SPEC_PATH="$(yaml_get spec_path)"
 SPEC_URL="$(yaml_get spec_url)"
 GOAL_SENTENCE="$(yaml_get goal_sentence)"
 BRANCH_NAME="$(yaml_get branch_name)"
+FEATURE_PROFILE="$(yaml_get feature_profile)"
 PRIMARY_SMOKE="$(yaml_get_nested verification primary_smoke)"
 OPERATOR_FULL="$(yaml_get_nested verification operator_full)"
 
@@ -164,6 +170,9 @@ OPERATOR_FULL="$(yaml_get_nested verification operator_full)"
 
 # Lists (rendered as bullet lists)
 FILES_TO_READ="$(yaml_get_list files_to_read)"
+FILES_TOUCHED="$(yaml_get_list files_touched)"
+LOCAL_LLM_NOTES="$(yaml_get_list local_llm_notes)"
+DEPENDENCIES="$(yaml_get_list dependencies)"
 TEAM_PERSONALITY="$(yaml_get_list team_personality)"
 REVIEW_COUNTER_TEAM="$(yaml_get_list review_counter_team)"
 IMPL_SCOPE="$(yaml_get_list implementation_scope)"
@@ -175,10 +184,23 @@ ACCEPTANCE_CRITERIA="$(yaml_get_list acceptance_criteria)"
 [ -n "$TEAM_PERSONALITY" ]   || missing_field "team_personality"
 [ -n "$REVIEW_COUNTER_TEAM" ] || missing_field "review_counter_team"
 [ -n "$FILES_TO_READ" ]       || missing_field "files_to_read"
+[ -n "$FILES_TOUCHED" ]       || missing_field "files_touched"
+[ -n "$LOCAL_LLM_NOTES" ]     || missing_field "local_llm_notes"
+[ -n "$DEPENDENCIES" ]        || missing_field "dependencies"
 [ -n "$IMPL_SCOPE" ]          || missing_field "implementation_scope"
 [ -n "$IMPL_OUTLINE" ]        || missing_field "implementation_outline_lines"
 [ -n "$TESTS_REQUIRED" ]      || missing_field "tests_required"
 [ -n "$ACCEPTANCE_CRITERIA" ] || missing_field "acceptance_criteria"
+
+SECURITY_CONTEXT=""
+if [ "$FEATURE_PROFILE" = "security_database" ]; then
+  EVIDENCE_CONSUMED="$(yaml_get_list evidence_consumed)"
+  CONTROLS_COVERED="$(yaml_get_list controls_covered)"
+  PREREQUISITES="$(yaml_get_list prerequisites)"
+  [ -n "$EVIDENCE_CONSUMED" ] || missing_field "evidence_consumed"
+  [ -n "$CONTROLS_COVERED" ]  || missing_field "controls_covered"
+  [ -n "$PREREQUISITES" ]     || missing_field "prerequisites"
+fi
 
 # Format bullet list from newline-separated items
 format_bullets() {
@@ -202,13 +224,36 @@ format_checkboxes() {
   done
 }
 
+format_lines() {
+  while IFS= read -r line; do
+    [ -n "$line" ] && printf '%s\n' "$line"
+  done
+}
+
+if [ "$FEATURE_PROFILE" = "security_database" ]; then
+  SECURITY_CONTEXT="$(cat <<MARKDOWN
+## Evidence consumed
+
+$(printf '%s\n' "$EVIDENCE_CONSUMED" | format_bullets)
+
+## Controls covered
+
+$(printf '%s\n' "$CONTROLS_COVERED" | format_bullets)
+
+## Prerequisites
+
+$(printf '%s\n' "$PREREQUISITES" | format_bullets)
+MARKDOWN
+)"
+fi
+
 # ── Render issue body template ────────────────────────────────────────────────
 RENDERED_BODY="$(cat <<MARKDOWN
 ## Goal
 
 ${GOAL_SENTENCE}
 
-## Source spec section anchor
+## Source spec
 
 \`${SPEC_PATH}\` — ${SPEC_URL}
 
@@ -224,9 +269,19 @@ $(printf '%s\n' "$REVIEW_COUNTER_TEAM" | format_bullets)
 
 $(printf '%s\n' "$FILES_TO_READ" | format_bullets)
 
-## Local-LLM notes
+## Files touched
 
-Pure implementation; keep files within 200 lines so a 60-120k context window holds the full source during edits.
+$(printf '%s\n' "$FILES_TOUCHED" | format_bullets)
+
+## Local-LLM execution notes
+
+$(printf '%s\n' "$LOCAL_LLM_NOTES" | format_bullets)
+
+## Dependencies
+
+$(printf '%s\n' "$DEPENDENCIES" | format_lines)
+
+${SECURITY_CONTEXT}
 
 ## Implementation scope
 

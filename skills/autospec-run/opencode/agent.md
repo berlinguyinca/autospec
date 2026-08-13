@@ -568,6 +568,8 @@ machines. If the Rust command is unavailable, fail the monitor start visibly;
 do not fall back to an inline label-swap path.
 
 >   all_open = [open auto-implement issues, sorted ascending by issue number]
+>   all_open excludes every issue carrying `autospec:blocked-prerequisite`, even
+>   if a stale or manual edit also left `auto-implement` attached.
 >   candidates = [all_open issues whose Depends-on deps are all CLOSED, sorted ascending]
 >   blocked = [all_open issues with unmet Depends-on deps]
 >
@@ -660,6 +662,31 @@ do not fall back to an inline label-swap path.
 >   fi
 >   echo "[monitor] effective_batch_size=$effective_batch_size (next issue reasoning: $_next_reasoning)"
 >   ISSUE = ready[0]
+>   # Security prerequisite pre-dispatch gate. Re-read the live body and labels
+>   # before claim/dispatch so a post-classification edit cannot bypass the
+>   # portfolio gate. A security child is one containing any of the generated
+>   # Evidence consumed / Controls covered / Prerequisites headings. Its
+>   # Prerequisites section must be absent, exactly `none`, or contain only
+>   # bullet lines whose content begins `verified:`. Anything else is removed
+>   # from the ready queue and marked visibly; never dispatch it.
+>   _security_body="$(gh issue view "$ISSUE" --repo {repo} --json body --jq .body)"
+>   if printf '%s\n' "$_security_body" | grep -qE '^## (Evidence consumed|Controls covered|Prerequisites)[[:space:]]*$'; then
+>     _prerequisites="$(printf '%s\n' "$_security_body" | awk '
+>       /^## Prerequisites[[:space:]]*$/ {inside=1; next}
+>       /^## / && inside {exit}
+>       inside && NF {sub(/^[[:space:]]*-[[:space:]]*/, ""); print}
+>     ')"
+>     if [ -n "$_prerequisites" ] && [ "$_prerequisites" != "none" ] \
+>       && printf '%s\n' "$_prerequisites" | grep -qv '^verified:'; then
+>       echo "code_health:security_prerequisite_blocked issue=$ISSUE" >&2
+>       gh issue comment "$ISSUE" --repo {repo} --body \
+>         "code_health:security_prerequisite_blocked — every security prerequisite must be verified before dispatch."
+>       gh issue edit "$ISSUE" --repo {repo} \
+>         --remove-label auto-implement --add-label autospec:blocked-prerequisite
+>       ready = ready without ISSUE
+>       continue
+>     fi
+>   fi
 >   # Atomic claim: autospec claim acquire is the SOLE claim path. It performs the
 >   # check-and-swap (auto-implement -> in-progress-by-bot) atomically with a
 >   # read-back verification, so the hot loop NEVER re-implements the inline
