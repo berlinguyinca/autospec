@@ -1,7 +1,7 @@
 # Security-Critical Spec and Issue Generation Design
 
-**Date:** 2026-08-13  
-**Status:** Approved direction; implementation planning pending written-spec review  
+**Date:** 2026-08-13
+**Status:** Approved direction; implementation planning pending written-spec review
 **Scope:** `/autospec` and `/autospec-define` investigation, design, decomposition, and pre-implementation validation
 
 ## Purpose
