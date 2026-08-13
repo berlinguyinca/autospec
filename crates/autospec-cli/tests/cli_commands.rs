@@ -2347,6 +2347,43 @@ fn autonomous_foreground_warns_about_persisted_update_failure_without_blocking_e
 }
 
 #[test]
+fn autonomous_start_warns_invoking_operator_about_persisted_update_failure() {
+    let temp = temp_dir("autospec-autonomous-start-toolchain-warning");
+    let home = temp.join("home");
+    let autospec_home = home.join(".autospec");
+    let repo_dir = temp.join("repo");
+    let operator_dir = temp.join("operator");
+    std::fs::create_dir_all(&autospec_home).expect("autospec home");
+    make_git_repo(&repo_dir, None);
+    let failure_record = autospec_home.join("last-update-failure.json");
+    std::fs::write(&failure_record, "{}\n").expect("failure record");
+
+    let output = autospec()
+        .args([
+            "autonomous",
+            "start",
+            "--repo",
+            "berlinguyinca/autospec",
+            "--repo-dir",
+            repo_dir.to_str().unwrap(),
+        ])
+        .env("HOME", &home)
+        .env("AUTOSPEC_AUTONOMOUS_OPERATOR_DIR", &operator_dir)
+        .env("AUTOSPEC_STATE_DIR", temp.join("state"))
+        .env("AUTOSPEC_AUTONOMOUS_SPEND_DIR", temp.join("spend"))
+        .env("AUTOSPEC_AUTONOMOUS_LOG_DIR", temp.join("logs"))
+        .env("AUTOSPEC_AUTONOMOUS_COMPANIONS", "0")
+        .output()
+        .expect("autospec autonomous start runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success());
+    assert!(stderr.contains("WARN: autospec self-update failed"));
+    assert!(stderr.contains(failure_record.to_str().unwrap()));
+    cleanup_pids(&operator_dir.join("berlinguyinca_autospec"));
+}
+
+#[test]
 fn autonomous_status_marks_stale_metadata_for_dead_pids() {
     let temp = temp_dir("autospec-autonomous-stale");
     let operator_dir = temp.join("operator");

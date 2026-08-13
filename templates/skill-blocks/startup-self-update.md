@@ -96,10 +96,19 @@ REMOTE=$(curl -fsSL --max-time 5 \
 if [ -z "$REMOTE" ]; then
     echo "WARN: self-update skipped (network); continuing on installed version" >&2; exit 0
 fi
-printf '%s\n' "$REMOTE" > "$REMOTE_VERSION.tmp" && mv "$REMOTE_VERSION.tmp" "$REMOTE_VERSION"
+if ! printf '%s\n' "$REMOTE" > "$REMOTE_VERSION.tmp" \
+    || ! mv "$REMOTE_VERSION.tmp" "$REMOTE_VERSION"; then
+    rm -f "$REMOTE_VERSION.tmp"
+    echo "WARN: self-update state publication failed ($REMOTE_VERSION); continuing on installed version" >&2
+    exit 0
+fi
 LOCAL=$(cat "$INSTALLED" 2>/dev/null || true)
 if [ "$REMOTE" = "$LOCAL" ]; then
-    date -u +'%Y-%m-%dT%H:%M:%SZ' > "$LAST.tmp" && mv "$LAST.tmp" "$LAST"
+    if ! date -u +'%Y-%m-%dT%H:%M:%SZ' > "$LAST.tmp" || ! mv "$LAST.tmp" "$LAST"; then
+        rm -f "$LAST.tmp"
+        echo "WARN: self-update state publication failed ($LAST); continuing on installed version" >&2
+        exit 0
+    fi
     rm -f "$FAILURE_RECORD"
     exit 0
 fi
@@ -130,8 +139,16 @@ if [ "$RC" -ne 0 ]; then
     echo "WARN: self-update failed (install rc=$RC); continuing on installed version; diagnostics: $UPDATE_LOG; record: $FAILURE_RECORD" >&2
     exit 0
 fi
-printf '%s\n' "$REMOTE" > "$INSTALLED.tmp" && mv "$INSTALLED.tmp" "$INSTALLED"
-date -u +'%Y-%m-%dT%H:%M:%SZ' > "$LAST.tmp" && mv "$LAST.tmp" "$LAST"
+if ! printf '%s\n' "$REMOTE" > "$INSTALLED.tmp" || ! mv "$INSTALLED.tmp" "$INSTALLED"; then
+    rm -f "$INSTALLED.tmp"
+    echo "WARN: self-update state publication failed ($INSTALLED); continuing on installed version" >&2
+    exit 0
+fi
+if ! date -u +'%Y-%m-%dT%H:%M:%SZ' > "$LAST.tmp" || ! mv "$LAST.tmp" "$LAST"; then
+    rm -f "$LAST.tmp"
+    echo "WARN: self-update state publication failed ($LAST); continuing on installed version" >&2
+    exit 0
+fi
 rm -f "$FAILURE_RECORD"
 # Auto-init cross-tool memory (idempotent, <50ms fast-path)
 bash "${AUTOSPEC_SCRIPTS_DIR:-$HOME/.autospec/scripts}/auto-init-memory.sh"

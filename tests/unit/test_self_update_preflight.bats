@@ -230,6 +230,36 @@ CURLSHIM
     [ "$(wc -c < "$HOME/.autospec/self-update.log.1" | tr -d ' ')" -le 65536 ]
 }
 
+@test "installed-version publication failure never advances or reports success" {
+    mkdir -p "$HOME/.autospec"
+    echo "oldsha1" > "$HOME/.autospec/installed-version"
+    cat > "$SHIMDIR/curl" << 'CURLSHIM'
+#!/usr/bin/env bash
+for arg in "$@"; do
+    case "$arg" in
+        *commits/main*) printf '{"sha":"newsha99"}\n'; exit 0 ;;
+    esac
+done
+printf '#!/usr/bin/env bash\nprintf "install complete\\n"\nexit 0\n'
+CURLSHIM
+    cat > "$SHIMDIR/mv" << 'MVSHIM'
+#!/usr/bin/env bash
+for arg in "$@"; do target="$arg"; done
+case "$target" in
+    */installed-version) exit 73 ;;
+    *) exec /bin/mv "$@" ;;
+esac
+MVSHIM
+    chmod +x "$SHIMDIR/curl" "$SHIMDIR/mv"
+
+    _run_block_shimmed
+    [ "$status" -eq 0 ]
+    [ "$(cat "$HOME/.autospec/installed-version")" = "oldsha1" ]
+    [ ! -e "$HOME/.autospec/last-update-check" ]
+    echo "$output" | grep -q "WARN: self-update state publication failed"
+    ! echo "$output" | grep -q "\[autospec\] updated"
+}
+
 # ---------------------------------------------------------------------------
 # Scenario 6b — Installer target: suite bootstrap refreshes every skill
 # ---------------------------------------------------------------------------

@@ -238,8 +238,9 @@ global spend file. Both `autonomous status --json` and `autonomous list --json` 
 top-level `toolchain` object with `installed_version`, `remote_version`,
 `installed_age_secs`, `last_update_failed`, and `last_update_failure_path`. The version and failure
 records are read from `~/.autospec/`; missing data is represented explicitly as JSON `null` or
-`false`. Foreground conductor entry warns without blocking when the failure record exists. I/O and
-transaction failures are diagnostics (`2`) with no decision JSON, while malformed/foreign records and token fencing are
+`false`. Both background `autonomous start` and direct foreground entry warn without blocking when
+the failure record exists. I/O and transaction failures are diagnostics (`2`) with no decision
+JSON, while malformed/foreign records and token fencing are
 JSON rejects (`3`). The local lease coordinates only the shared filesystem; GitHub claim ownership
 remains the remote mutation arbiter.
 

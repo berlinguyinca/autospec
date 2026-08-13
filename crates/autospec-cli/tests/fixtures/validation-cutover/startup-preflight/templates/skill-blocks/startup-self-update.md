@@ -10,4 +10,5 @@ bootstrap --skill all --harness all --update
 if [ "$REMOTE" = "$LOCAL" ]; then date > "$LAST.tmp"; fi
 tail -c 65536 > "$UPDATE_LOG"
 jq -n --argjson installer_exit_code "$RC" > "$FAILURE_RECORD"
+echo "state publication failed ($INSTALLED)"
 ```

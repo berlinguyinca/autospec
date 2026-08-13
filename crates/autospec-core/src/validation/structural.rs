@@ -2232,6 +2232,7 @@ impl StructuralValidator {
             "remote-version",
             "tail -c 65536",
             "installer_exit_code",
+            "state publication failed ($INSTALLED)",
         ] {
             if !canonical.contains(required) {
                 return Err(format!(

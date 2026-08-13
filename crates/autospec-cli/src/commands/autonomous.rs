@@ -1074,6 +1074,7 @@ fn start(options: Options, launch_mode: LaunchMode) -> Result<(), CommandFailure
         return Ok(());
     }
 
+    ToolchainFreshness::load().warn_if_failed();
     validate_repo_dir(&options).map_err(CommandFailure::diagnostic)?;
     let _config = load_autonomous_config(&options.repo_dir).map_err(CommandFailure::diagnostic)?;
     let layout = RunLayout::new(&options).map_err(CommandFailure::diagnostic)?;
